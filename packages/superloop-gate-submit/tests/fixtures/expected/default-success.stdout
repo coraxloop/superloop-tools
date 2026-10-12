@@ -1,0 +1,3 @@
+server evidence
+RUN-REPORT exit=0 wall=1s rootfs_tmp_left=1T workspace_left=2T
+RUN-REPORT lane=verify-worktree exit=0 wall=Ns verdict=ok ref=refs/lanes/verify-worktree

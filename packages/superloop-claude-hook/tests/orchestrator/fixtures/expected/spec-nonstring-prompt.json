@@ -1,0 +1,36 @@
+{
+  "authority": "spec",
+  "divergence": "A nonstring prompt identity does not enter deduplication state; Python copies it into its auxiliary dedupe_key field.",
+  "expected_effect": {
+    "dedupe_key": {
+      "event": "UserPromptSubmit"
+    }
+  },
+  "expected_stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"ORCHESTRATION_SCOPE_MARKER v1 sha256=6ac9f156a3b4475ed2731f61db1381590b153ce9897d108506c62dd5aa7707a5 mtime=1700000000123456789\\n# Fixture rules\\n\\nKeep evidence exact.\\nORCHESTRATION_SCOPE_MARKER_END v1 sha256=6ac9f156a3b4475ed2731f61db1381590b153ce9897d108506c62dd5aa7707a5\"}}",
+  "name": "spec-nonstring-prompt",
+  "payload": {
+    "cwd": "/fixture/project",
+    "hook_event_name": "UserPromptSubmit",
+    "prompt_id": {
+      "invalid": true
+    },
+    "session_id": "fixture/session"
+  },
+  "python_effect": {
+    "dedupe_key": {
+      "event": "UserPromptSubmit",
+      "prompt_id": {
+        "invalid": true
+      }
+    }
+  },
+  "spec_label": "proto:hooks:prompt-deduplication",
+  "state_precondition": {
+    "rulebook": {
+      "mtime_ns": 1700000000123456789,
+      "text": "# Fixture rules\n\nKeep evidence exact.\n"
+    },
+    "snapshots": "absent",
+    "state": "absent"
+  }
+}

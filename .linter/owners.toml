@@ -1,0 +1,420 @@
+namespace = "org.superloop-tools.linter.owners"
+version = [1, 0, 0]
+owners = ["SUPERLOOPCLAUDEDESKTOP", "SUPERLOOPNODESTATUS", "SUPERLOOPSTEWARD", "SUPERLOOPCORRESPONDENCE", "BUILDSYNC", "SUPERLOOPCHATEXPORT", "SUPERLOOPCLICOMMON", "SUPERLOOPEXECWRAP", "LANEGATEWAY", "LANELIFECYCLE", "SUPERLOOPGATESUBMIT", "SUPERLOOPLINT", "LOOPHOME", "SUPERLOOP", "ORCHESTRATION", "PERMISSIONTRIAGE", "SUPERLOOPPACK", "PULLDOWNCMARKTOCMARK", "SUPERLOOPINSTALL", "SUPERLOOPRUNREPORT", "SUPERLOOPRUNTIME", "RUNWORKER", "SUPERLOOPCLAUDEHOOK", "REQUESTCORE", "EXECUTECOMMAND", "SESSIONCORE", "STAFFPROVISION", "SUPERLOOPLANE", "TOOLS"]
+root_owner = "TOOLS"
+unpublished = "docs/public/unpublished-labels.toml"
+
+[[imports]]
+owner = "ORCHESTRATION"
+registry = ".linter/imports/orchestration.toml"
+
+[[may_cite]]
+owner = "SUPERLOOPLANE"
+target = "EXECUTECOMMAND"
+
+[[may_cite]]
+owner = "LANEGATEWAY"
+target = "EXECUTECOMMAND"
+
+[[may_cite]]
+owner = "PERMISSIONTRIAGE"
+target = "EXECUTECOMMAND"
+
+[[may_cite]]
+owner = "EXECUTECOMMAND"
+target = "TOOLS"
+
+[[may_cite]]
+owner = "SUPERLOOP"
+target = "LOOPHOME"
+
+[[may_cite]]
+owner = "SUPERLOOP"
+target = "EXECUTECOMMAND"
+
+[[may_cite]]
+owner = "SUPERLOOP"
+target = "REQUESTCORE"
+
+[[may_cite]]
+owner = "SUPERLOOP"
+target = "SESSIONCORE"
+
+[[may_cite]]
+owner = "SUPERLOOP"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPLANE"
+target = "ORCHESTRATION"
+
+[[may_cite]]
+owner = "SUPERLOOPCLAUDEHOOK"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPCLAUDEHOOK"
+target = "LOOPHOME"
+
+[[may_cite]]
+owner = "SUPERLOOPCLAUDEHOOK"
+target = "SESSIONCORE"
+
+[[may_cite]]
+owner = "BUILDSYNC"
+target = "TOOLS"
+
+[[may_cite]]
+owner = "SUPERLOOPCLAUDEHOOK"
+target = "TOOLS"
+
+[[may_cite]]
+owner = "SUPERLOOPGATESUBMIT"
+target = "TOOLS"
+
+[[may_cite]]
+owner = "SUPERLOOPLINT"
+target = "TOOLS"
+
+[[may_cite]]
+owner = "SUPERLOOPLANE"
+target = "TOOLS"
+
+[[may_cite]]
+owner = "TOOLS"
+target = "ORCHESTRATION"
+
+[[may_cite]]
+owner = "BUILDSYNC"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "BUILDSYNC"
+target = "ORCHESTRATION"
+
+[[may_cite]]
+owner = "SUPERLOOPCHATEXPORT"
+target = "ORCHESTRATION"
+
+[[may_cite]]
+owner = "SUPERLOOPCORRESPONDENCE"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPSTEWARD"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPNODESTATUS"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPCLAUDEDESKTOP"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPCLAUDEHOOK"
+target = "ORCHESTRATION"
+
+[[may_cite]]
+owner = "LANEGATEWAY"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "LANEGATEWAY"
+target = "REQUESTCORE"
+
+[[may_cite]]
+owner = "LANELIFECYCLE"
+target = "ORCHESTRATION"
+
+[[may_cite]]
+owner = "SUPERLOOPGATESUBMIT"
+target = "ORCHESTRATION"
+
+[[may_cite]]
+owner = "SUPERLOOPLINT"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPLINT"
+target = "ORCHESTRATION"
+
+[[may_cite]]
+owner = "SUPERLOOPLINT"
+target = "PULLDOWNCMARKTOCMARK"
+
+[[may_cite]]
+owner = "PERMISSIONTRIAGE"
+target = "LOOPHOME"
+
+[[may_cite]]
+owner = "PERMISSIONTRIAGE"
+target = "ORCHESTRATION"
+
+[[may_cite]]
+owner = "SUPERLOOPPACK"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPINSTALL"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPINSTALL"
+target = "LOOPHOME"
+
+[[may_cite]]
+owner = "SUPERLOOPRUNREPORT"
+target = "SUPERLOOPEXECWRAP"
+
+[[may_cite]]
+owner = "RUNWORKER"
+target = "LOOPHOME"
+
+[[may_cite]]
+owner = "RUNWORKER"
+target = "ORCHESTRATION"
+
+[[may_cite]]
+owner = "SUPERLOOPLANE"
+target = "LANELIFECYCLE"
+
+[[may_cite]]
+owner = "SUPERLOOPLANE"
+target = "LOOPHOME"
+
+[[may_cite]]
+owner = "SUPERLOOPGATESUBMIT"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "RUNWORKER"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "STAFFPROVISION"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "PERMISSIONTRIAGE"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "PERMISSIONTRIAGE"
+target = "REQUESTCORE"
+
+[[may_cite]]
+owner = "SUPERLOOPLANE"
+target = "REQUESTCORE"
+
+[[may_cite]]
+owner = "SUPERLOOPRUNREPORT"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPRUNTIME"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPLANE"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPCHATEXPORT"
+target = "SUPERLOOPCLICOMMON"
+
+[[partitions]]
+name = "execute-command-package"
+owner = "EXECUTECOMMAND"
+pattern = '%s"packages/execute-command" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "python-test-carrier"
+owner = "SUPERLOOPLINT"
+pattern = '%s"ci" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-package"
+owner = "SUPERLOOP"
+pattern = '%s"packages/superloop" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-claude-desktop-package"
+owner = "SUPERLOOPCLAUDEDESKTOP"
+pattern = '%s"packages/superloop-claude-desktop" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-node-status-package"
+owner = "SUPERLOOPNODESTATUS"
+pattern = '%s"packages/superloop-node-status" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-steward-package"
+owner = "SUPERLOOPSTEWARD"
+pattern = '%s"packages/superloop-steward" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-correspondence-package"
+owner = "SUPERLOOPCORRESPONDENCE"
+pattern = '%s"packages/superloop-correspondence" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "request-core-package"
+owner = "REQUESTCORE"
+pattern = '%s"packages/request-core" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-claude-hook-package"
+owner = "SUPERLOOPCLAUDEHOOK"
+pattern = '%s"packages/superloop-claude-hook" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "session-core-package"
+owner = "SESSIONCORE"
+pattern = '%s"packages/session-core" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "root-files"
+owner = "TOOLS"
+pattern = '( %s"CHANGELOG.md" / %s"LICENSE-CODE" / %s"LICENSE-DOCS" / %s"public-set.toml" / %s".gitignore" / %s"Cargo.lock" / %s"Cargo.toml" / %s"README.md" / %s"meson.build" / %s"meson.options" / %s"rust-toolchain.toml" )'
+
+[[partitions]]
+name = "package-register"
+owner = "TOOLS"
+pattern = '%s"packages/README.md"'
+
+[[partitions]]
+name = "shell-tools"
+owner = "TOOLS"
+pattern = '%s"bin" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "install-maps"
+owner = "TOOLS"
+pattern = '%s"maps" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "documents"
+owner = "TOOLS"
+pattern = '%s"docs" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "engineering-records"
+owner = "TOOLS"
+pattern = '%s"adr" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "units"
+owner = "TOOLS"
+pattern = '%s"units" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "harnesses"
+owner = "TOOLS"
+pattern = '%s"tests" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "server-kits"
+owner = "TOOLS"
+pattern = '%s"infra" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "hook-wrappers"
+owner = "TOOLS"
+pattern = '%s"hooks" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "declared-surface"
+owner = "TOOLS"
+pattern = '%s".linter" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "build-sync-package"
+owner = "BUILDSYNC"
+pattern = '%s"packages/build-sync" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-chat-export-package"
+owner = "SUPERLOOPCHATEXPORT"
+pattern = '%s"packages/superloop-chat-export" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "permission-triage-package"
+owner = "PERMISSIONTRIAGE"
+pattern = '%s"packages/permission-triage" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "cli-common-package"
+owner = "SUPERLOOPCLICOMMON"
+pattern = '%s"packages/superloop-cli-common" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-execwrap-package"
+owner = "SUPERLOOPEXECWRAP"
+pattern = '%s"packages/superloop-execwrap" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "lane-gateway-package"
+owner = "LANEGATEWAY"
+pattern = '%s"packages/lane-gateway" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "lane-lifecycle-package"
+owner = "LANELIFECYCLE"
+pattern = '%s"packages/lane-lifecycle" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-gate-submit-package"
+owner = "SUPERLOOPGATESUBMIT"
+pattern = '%s"packages/superloop-gate-submit" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "linter-package"
+owner = "SUPERLOOPLINT"
+pattern = '%s"packages/superloop-lint" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "loop-home-package"
+owner = "LOOPHOME"
+pattern = '%s"packages/loop-home" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "public-pack-package"
+owner = "SUPERLOOPPACK"
+pattern = '%s"packages/superloop-pack" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "pulldown-cmark-to-cmark-package"
+owner = "PULLDOWNCMARKTOCMARK"
+pattern = '%s"packages/pulldown-cmark-to-cmark" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "rulebook-install-package"
+owner = "SUPERLOOPINSTALL"
+pattern = '%s"packages/superloop-install" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-run-report-package"
+owner = "SUPERLOOPRUNREPORT"
+pattern = '%s"packages/superloop-run-report" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-runtime-package"
+owner = "SUPERLOOPRUNTIME"
+pattern = '%s"packages/superloop-runtime" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "run-worker-package"
+owner = "RUNWORKER"
+pattern = '%s"packages/run-worker" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "staff-provision-package"
+owner = "STAFFPROVISION"
+pattern = '%s"packages/staff-provision" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-lane-package"
+owner = "SUPERLOOPLANE"
+pattern = '%s"packages/superloop-lane" [ "/" *VCHAR ]'

@@ -1,0 +1,2 @@
+remote evidence
+RUN-REPORT lane=verify-worktree exit=7 wall=Ns verdict=FAILED ref=refs/lanes/verify-worktree

@@ -1,0 +1,42 @@
+[package]
+name = "permission-triage"
+description = "Strict request decoding and deterministic permission hygiene checks"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 3
+release-group = "requests"
+
+[[bin]]
+name = "requests-helper"
+path = "src/bin/requests-helper.rs"
+
+[[bin]]
+name = "permission-triage-hook"
+path = "src/bin/permission-triage-hook.rs"
+
+[[bin]]
+name = "permission-triage-topology"
+path = "src/bin/permission-triage-topology.rs"
+
+[[bin]]
+name = "permission-triage-assemble"
+path = "src/bin/permission-triage-assemble.rs"
+
+[dependencies]
+execute-command.workspace = true
+superloop-cli-common.workspace = true
+loop-home = { workspace = true }
+request-core.workspace = true
+serde = { workspace = true }
+nix.workspace = true
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

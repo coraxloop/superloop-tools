@@ -1,0 +1,532 @@
+namespace = "class.linter.unpublished-labels"
+version = [1, 0, 0]
+
+[[labels]]
+label = "cav:doors:remote-account"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "conv:isolation:registers"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/docs/plans/"
+
+[[labels]]
+label = "conv:layers:reach-relation"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "conv:layers:verdict-location"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "conv:migration:burn-family"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "conv:migration:burn-inventory-remainder"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "conv:migration:burn-one-recognizer"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "conv:migration:burn-surface-reading"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "conv:migration:burn-surfaces"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "conv:migration:tracking-columns"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:controlsurface:lexical-receipt"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:controlsurface:request-stream"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:envelope:computed-governance"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:envelope:source-shape"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:executecommand:adapters"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:executecommand:context-digest"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:executecommand:direct-roots"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:executecommand:initialization"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:executecommand:request-core"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:executecommand:status"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:kindregistry:runtime-authority"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:kindregistry:sync-seam"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:mesonlayer:cargo-sync"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:migration:superseded-forms"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:references:declarations"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:rows:owner-input"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:rows:repository-coordinates"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:rows:subtract-then-partition"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:snapshot:physical-membership"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "dec:toolnames:server-kit-authority"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:workspacemove:division"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "dec:workspacemove:instance-layer"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "def:capability:capability-door"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "def:capability:triage-agent"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "def:doors:driver-door"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "def:doors:worker"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "def:keycustody:loop-custody"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "def:laneboxbuild:make-home"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "gate:output:verification"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "gram:isolation:declaration"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/docs/plans/"
+
+[[labels]]
+label = "inv:executecommand:actionable-verdict"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "inv:lanebox:external-evidence"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "just:isolation:policy-data"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/docs/plans/"
+
+[[labels]]
+label = "lang:isolation:patterns"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/docs/plans/"
+
+[[labels]]
+label = "proposal:isolation:one-plan"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/docs/plans/"
+
+[[labels]]
+label = "proposal:isolation:staging"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/docs/plans/"
+
+[[labels]]
+label = "proto:laneboxbuild:pin-launch-pair"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "proto:toolnames:steward-migration"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "reg:isolation:owner-questions"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/docs/plans/"
+
+[[labels]]
+label = "rem:commandcontract:not-the-config-probe"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "req:capability:door-attribution"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "req:capability:rubric-text"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "req:capability:structural-parse"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "req:commandcontract:control-artifacts"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "req:commandcontract:dependency-contract"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "req:estatelayout:host-build-provenance"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "req:executecommand:escalation-acceptance"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "req:isolation:boundary"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/docs/plans/"
+
+[[labels]]
+label = "req:lanebox:mounts"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "req:laneboxbuild:launch-box-gate"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "req:laneboxbuild:resume-contract"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "req:laneboxbuild:shared-signin-probes"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "req:laneboxbuild:trusted-worker-settings"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "req:migration:burn-ratchet"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "req:onesignin:refresh-rotation"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:capability:adjudicated-data"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:capability:agent-failure-refers"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:capability:agent-home-isolation"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:capability:expiry-no-effect"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:capability:mode-moves"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:capability:preflight-refusals"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:capability:unknown-shape-judgement"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:commandcontract:configuration-verdicts"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "rule:commandcontract:findings-exit"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "rule:executecommand:agent-failure"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:lanebox:letter-exchange"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:lanebox:preserve-before-collection"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:lanebox:retention-and-rotation"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:laneboxbuild:authority-handoff"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:laneboxbuild:observed-vendor-hosts"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:laneboxbuild:settings-bounded-by-row"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "rule:lintercli:findings-exit"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:lintercli:informational-exit"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:output:agent-text"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:output:binary-modes"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:output:exit-codes"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:output:hook-json"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:output:machine-json"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:output:mode-declaration"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:output:panics"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:output:run-report"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:output:safety"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "rule:references:total-reach"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "rule:repositories:source-movement"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "sec:integration:claude-cli-lanes"
+owner = "TOOLS"
+path_class = "docs/integration.md"
+
+[[labels]]
+label = "sec:integration:live-worker-logs"
+owner = "TOOLS"
+path_class = "docs/integration.md"
+
+[[labels]]
+label = "sec:integration:verify-loop"
+owner = "TOOLS"
+path_class = "docs/integration.md"
+
+[[labels]]
+label = "spec:commandcontract:burn-modes"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "spec:commandcontract:configuration"
+owner = "SUPERLOOPLINT"
+path_class = "packages/superloop-lint/adr/"
+
+[[labels]]
+label = "spec:executecommand:process"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "tab:executecommand:caller-vocabulary"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "tab:executecommand:ladder"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "tab:executecommand:modules"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "tab:laneboxbuild:acceptance"
+owner = "TOOLS"
+path_class = "docs/arch/"
+
+[[labels]]
+label = "tab:mesonlayer:protocol-split"
+owner = "TOOLS"
+path_class = "adr/"
+
+[[labels]]
+label = "tab:toolsdeps:session-request-domains"
+owner = "TOOLS"
+path_class = "adr/"

@@ -1,0 +1,6 @@
+{
+  "fixture": "spec-list-feedback-turn-marker",
+  "spec": "sig:hooks:stop-input",
+  "python": {"behavior": "treat list-form guard feedback as a real user turn"},
+  "specified": {"behavior": "exclude string- and list-form guard feedback from the turn marker"}
+}

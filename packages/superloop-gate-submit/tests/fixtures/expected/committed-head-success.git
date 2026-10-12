@@ -1,0 +1,4 @@
+{"argv":["-C","$WORKTREE","status","--porcelain=v1","--untracked-files=all"],"git_index":null,"index_matches":null}
+{"argv":["-C","$WORKTREE","symbolic-ref","--quiet","HEAD"],"git_index":null,"index_matches":null}
+{"argv":["-C","$WORKTREE","rev-parse","HEAD"],"git_index":null,"index_matches":null}
+{"argv":["-C","$WORKTREE","push","-q","-f","shared","1111111111111111111111111111111111111111:refs/lanes/verify-worktree"],"git_index":null,"index_matches":null}

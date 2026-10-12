@@ -1,0 +1,2 @@
+{"parentUuid":null,"type":"user","message":{"role":"user","content":"A new conversation."},"uuid":"00000000-0000-4000-8000-0000000005e1","timestamp":"2026-02-02T09:00:00.000Z","sessionId":"SESSION-ID-E"}
+{"parentUuid":"00000000-0000-4000-8000-0000000005e1","type":"assistant","message":{"id":"MESSAGE-ID-E1","role":"assistant","content":[{"type":"text","text":"Starting fresh."}]},"uuid":"00000000-0000-4000-8000-0000000005e2","timestamp":"2026-02-02T09:00:01.000Z","sessionId":"SESSION-ID-E"}

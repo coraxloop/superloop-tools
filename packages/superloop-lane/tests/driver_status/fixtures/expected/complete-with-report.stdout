@@ -1,0 +1,1 @@
+RUN-REPORT lane=oracle exit=0 wall=1s budget=2s verdict=ok dir=oracle

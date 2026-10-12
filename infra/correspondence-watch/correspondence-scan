@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Meson substitutes the release group's manifest or ledger version.
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
+  printf '%s\n' '{"schema":1,"command":"correspondence-scan","kind":"version","message":"version requested","fields":{"type":"version","version":"correspondence-scan @VERSION@"}}' >&2
+  exit 0
+fi
+# correspondence-scan: journal new/changed files in every ~/correspondence.
+# Deployed to /usr/local/libexec/superloop/correspondence-scan; driven by superloop-correspondence-scan.timer.
+# Classification is by an admin-reply filename convention, then file ownership: a
+# *-admin-reply.md file is from=admin regardless of ownership; otherwise a file owned
+# by the home's account is from=user and anything else is from=admin.
+# Watchers escalate only from=user, so the loop's own replies never round-trip.
+set -u
+HOME_ROOT=${CORRESPONDENCE_WATCH_HOME_ROOT:-/var/home}
+STATE=${CORRESPONDENCE_WATCH_STATE_DIR:-/var/lib/correspondence-watch}
+LOGGER=${CORRESPONDENCE_WATCH_LOGGER:-logger}
+STEWARD_SPOOL_ENABLED=${CORRESPONDENCE_WATCH_STEWARD_SPOOL_ENABLED:-0}
+STEWARD_SPOOL_APPEND=${CORRESPONDENCE_WATCH_STEWARD_SPOOL_APPEND:-@PRIVATE_DIR@/steward-spool-append}
+STAMP=$STATE/stamp
+NEXT=$STATE/stamp.next
+case $STEWARD_SPOOL_ENABLED in
+  0|1) ;;
+  *)
+    printf 'correspondence-scan: CORRESPONDENCE_WATCH_STEWARD_SPOOL_ENABLED must be 0 or 1\n' >&2
+    exit 2
+    ;;
+esac
+mkdir -p "$STATE"
+T0=$(date +%s%3N)
+touch "$NEXT"
+n=0
+for h in "$HOME_ROOT"/*/; do
+  u=$(basename "$h")
+  d="${h}correspondence"
+  [ -d "$d" ] || continue
+  huid=$(stat -c %u "$h")
+  if [ -f "$STAMP" ]; then
+    set -- -newer "$STAMP"
+  else
+    set --
+  fi
+  while IFS= read -r -d '' f; do
+    fuid=$(stat -c %u "$f") || continue
+    sz=$(stat -c %s "$f")
+    sha=$(sha256sum "$f" | cut -c1-12)
+    case ${f##*/} in
+      *-admin-reply.md) from=admin ;;
+      *) if [ "$fuid" = "$huid" ]; then from=user; else from=admin; fi ;;
+    esac
+    relative=${f#"$d"/}
+    if [ "$from" = user ] && [ "$STEWARD_SPOOL_ENABLED" = 1 ]; then
+      if ! "$STEWARD_SPOOL_APPEND" \
+        --source "$d" \
+        --file "$relative" \
+        --sha "$sha" \
+        --classification "user=$u from=$from" \
+        --timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; then
+        printf 'correspondence-scan: steward spool append failed for user=%s file=%s\n' "$u" "$relative" >&2
+        exit 1
+      fi
+    fi
+    "$LOGGER" -t correspondence-watch "user=$u from=$from file=$relative size=$sz sha=$sha"
+    n=$((n + 1))
+  done < <(find "$d" -type f "$@" -print0 2>/dev/null)
+done
+mv "$NEXT" "$STAMP"
+T1=$(date +%s%3N)
+[ "$n" -gt 0 ] && "$LOGGER" -t correspondence-watch "scan events=$n duration_ms=$((T1 - T0))"
+exit 0

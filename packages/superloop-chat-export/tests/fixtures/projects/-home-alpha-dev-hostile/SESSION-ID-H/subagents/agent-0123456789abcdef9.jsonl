@@ -1,0 +1,1 @@
+{"parentUuid":null,"isSidechain":true,"agentId":"0123456789abcdef9","type":"user","message":{"role":"user","content":"<script>alert(\"agent\")</script>"},"uuid":"00000000-0000-4000-8000-000000000d01","timestamp":"2026-04-01T10:00:11.500Z","sessionId":"SESSION-ID-H"}

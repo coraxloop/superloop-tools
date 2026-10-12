@@ -1,0 +1,6 @@
+[Unit]
+Description=Journal new correspondence from staff homes
+
+[Service]
+Type=oneshot
+ExecStart=@PRIVATE_DIR@/correspondence-scan

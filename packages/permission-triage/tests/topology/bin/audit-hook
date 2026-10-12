@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import shlex
+import sys
+
+def dispatch(payload):
+    import subprocess
+    fixture_root = Path(os.environ["PERMISSION_TRIAGE_FIXTURE_ROOT"])
+    settings = json.loads((fixture_root / "settings.json").read_text())
+    event = payload.get("hook_event_name", "")
+    status = 0
+    stdout = []
+    stderr = []
+    for registration in settings.get("hooks", {}).get(event, []):
+        if registration.get("matcher") not in {"*", payload.get("tool_name")}:
+            continue
+        for hook in registration.get("hooks", []):
+            if hook.get("type") != "command":
+                raise SystemExit(2)
+            arguments = shlex.split(hook["command"])
+            observer = fixture_root / "bin/audit-hook"
+            if (len(arguments) == 2
+                    and (arguments[0] == str(observer)
+                         or hook["command"] == '"$PERMISSION_TRIAGE_FIXTURE_ROOT/bin/audit-hook" ' + arguments[1])
+                    and arguments[1] in {"audit", "allow"}
+                    and observer == Path(__file__) and os.access(observer, os.X_OK)):
+                # This fixture observer has no process-local state. Reuse its loaded
+                # implementation across events, still consuming the actual registration.
+                stdout.append(observe(payload, arguments[1]))
+            else:
+                # Deciding hooks and altered registrations retain real subprocess semantics.
+                result = subprocess.run(hook["command"], shell=True, executable="/bin/sh",
+                                        input=json.dumps(payload).encode(), capture_output=True)
+                stdout.append(result.stdout)
+                stderr.append(result.stderr)
+                if result.returncode:
+                    status = result.returncode if result.returncode > 0 else 128 - result.returncode
+    return status, b"".join(stdout), b"".join(stderr)
+
+
+def observe(payload, mode):
+    fixture_root = Path(os.environ["PERMISSION_TRIAGE_FIXTURE_ROOT"])
+    state_root = Path(os.environ["PERMISSION_TRIAGE_STATE_ROOT"])
+    if state_root != fixture_root / "state":
+        raise SystemExit(2)
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+    record = {
+        "observer": "audit-hook",
+        "event": payload.get("hook_event_name", ""),
+        "tool_use_id": payload.get("tool_use_id", ""),
+        "tool": payload.get("tool_name", ""),
+        "command": command,
+    }
+    with (state_root / "audit.jsonl").open("a", encoding="utf-8") as audit:
+        audit.write(json.dumps(record, separators=(",", ":")) + "\n")
+    response_bytes = b""
+    if mode == "allow" and record["event"] == "PreToolUse":
+        response = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "topology sentinel allow",
+                "additionalContext": "topology sentinel allow",
+            }
+        }
+        response_bytes = json.dumps(response, separators=(",", ":")).encode()
+    if record["event"] == "PreToolUse":
+        (state_root / "audit-hook-output.json").write_text(json.dumps({"mode": mode, "stdout": list(response_bytes)}))
+    return response_bytes
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) == 2 else ""
+    if mode not in {"allow", "audit", "dispatch"}:
+        raise SystemExit(2)
+    if Path(os.environ["PERMISSION_TRIAGE_STATE_ROOT"]) != Path(os.environ["PERMISSION_TRIAGE_FIXTURE_ROOT"]) / "state":
+        raise SystemExit(2)
+    payload = json.load(sys.stdin)
+    if mode == "dispatch":
+        status, stdout, stderr = dispatch(payload)
+        sys.stdout.buffer.write(stdout)
+        sys.stderr.buffer.write(stderr)
+        raise SystemExit(status)
+    sys.stdout.buffer.write(observe(payload, mode))
+
+
+if __name__ == "__main__":
+    main()

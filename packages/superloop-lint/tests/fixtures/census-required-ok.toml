@@ -1,0 +1,31 @@
+version = [1, 0, 0]
+
+[[paths]]
+path = "doc.md"
+purpose = "Present plain file."
+required = true
+template = true
+
+[[paths]]
+path = "has space.md"
+purpose = "Present file whose name needs reversible display encoding."
+required = true
+template = true
+
+[[paths]]
+path = "*.md"
+purpose = "Present matching pattern."
+required = true
+template = false
+
+[[paths]]
+path = ".linter/"
+purpose = "Present directory."
+required = true
+template = true
+
+[[paths]]
+path = "absent.txt"
+purpose = "Optional absent file."
+required = false
+template = false

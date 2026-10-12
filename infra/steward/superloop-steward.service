@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the resident server steward over pending durable cases
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=superloop-steward
+Group=superloop-steward
+UMask=0077
+Environment=STEWARD_DEADLINE_SECONDS=900
+ExecStart=@PRIVATE_DIR@/steward-runner
+TimeoutStartSec=16min

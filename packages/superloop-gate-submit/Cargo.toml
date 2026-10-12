@@ -1,0 +1,20 @@
+[package]
+name = "superloop-gate-submit"
+description = "Remote verifier for uncommitted worker-lane worktrees"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 2
+release-group = "superloop-gate-submit"
+
+[lints]
+workspace = true
+
+[dependencies]
+superloop-cli-common.workspace = true

@@ -1,0 +1,2 @@
+{"parentUuid":null,"isSidechain":true,"agentId":"0123456789abcdef1","type":"user","message":{"role":"user","content":"Count the lines."},"uuid":"00000000-0000-4000-8000-000000000b01","timestamp":"2026-02-01T10:00:07.300Z","sessionId":"SESSION-ID-A"}
+{"parentUuid":"00000000-0000-4000-8000-000000000b01","isSidechain":true,"agentId":"0123456789abcdef1","type":"assistant","message":{"id":"MESSAGE-ID-B2","role":"assistant","content":[{"type":"text","text":"Twelve."}]},"uuid":"00000000-0000-4000-8000-000000000b02","timestamp":"2026-02-01T10:00:07.700Z","sessionId":"SESSION-ID-A"}

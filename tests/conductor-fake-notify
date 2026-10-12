@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "${FAKE_NOTIFY_LOG:?FAKE_NOTIFY_LOG is required}"

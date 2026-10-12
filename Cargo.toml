@@ -1,0 +1,91 @@
+# Workspace for the orchestration helpers: host hooks, lane tooling,
+# and server wrappers. Engineering decisions live in this repository's adr/;
+# the generic orchestration repository holds the philosophy of using the tools.
+
+[workspace]
+members = [
+    "packages/execute-command",
+    "packages/superloop",
+    "packages/superloop-runtime", "packages/superloop-claude-desktop", "packages/superloop-node-status", "packages/superloop-steward", "packages/superloop-correspondence", "packages/build-sync", "packages/superloop-chat-export", "packages/superloop-cli-common", "packages/superloop-execwrap", "packages/lane-gateway", "packages/lane-lifecycle", "packages/superloop-gate-submit", "packages/superloop-lint", "packages/loop-home", "packages/permission-triage", "packages/superloop-pack", "packages/pulldown-cmark-to-cmark", "packages/superloop-install", "packages/superloop-run-report", "packages/run-worker", "packages/staff-provision", "packages/superloop-lane", "packages/session-core", "packages/superloop-claude-hook", "packages/request-core"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+publish = false
+authors = ["Orchestration helpers authors"]
+
+[workspace.dependencies]
+execute-command = { path = "packages/execute-command" }
+request-core = { path = "packages/request-core" }
+session-core = { path = "packages/session-core" }
+superloop-cli-common = { path = "packages/superloop-cli-common" }
+clap = { version = "4", features = ["derive"] }
+superloop-execwrap = { path = "packages/superloop-execwrap" }
+lane-lifecycle = { path = "packages/lane-lifecycle" }
+libc = "0.2"
+loop-home = { path = "packages/loop-home" }
+# Templates for the chat export. The feature set is the one its embedded
+# templates use: macros and cross-template extends, include and import, with
+# contexts passed through serde. builtins stays off because the templates
+# receive values the program has already counted, cut and summarised; debug
+# stays off because the templates are compiled into the binary and tested.
+minijinja = { version = "2", default-features = false, features = ["macros", "multi_template", "serde"] }
+nix = { version = "0.31", features = ["process", "signal", "fs", "term", "dir", "user", "mount"] }
+# Graph features include serde-1 for state serialization; dot_parser and
+# rayon stay off. Consumers use DiGraph, NodeIndex, Direction and visit.
+petgraph = { version = "0.8", features = ["serde-1"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+pulldown-cmark-to-cmark = { path = "packages/pulldown-cmark-to-cmark" }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+syn = { version = "3", features = ["extra-traits", "full", "parsing", "printing", "proc-macro"] }
+tempfile = "3"
+textwrap = "0.16"
+thiserror = "2"
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2"
+
+[workspace.lints.rust]
+deprecated_safe = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+let_underscore = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+rust_2018_compatibility = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+rust_2021_compatibility = { level = "deny", priority = -1 }
+rust_2024_compatibility = { level = "deny", priority = -1 }
+unsafe_code = "deny"
+unused = { level = "deny", priority = -2 }
+warnings = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+exit = { level = "deny", priority = 0 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+print_stderr = { level = "deny", priority = 0 }
+print_stdout = { level = "deny", priority = 0 }
+style = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Gate tests retain debug-only fixture clocks and overflow checks.
+[profile.gate]
+inherits = "dev"
+opt-level = 1
+debug = 0
+debug-assertions = true

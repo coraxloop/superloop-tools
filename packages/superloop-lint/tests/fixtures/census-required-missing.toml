@@ -1,0 +1,7 @@
+version = [1, 0, 0]
+
+[[paths]]
+path = "absent.txt"
+purpose = "Absent plain file."
+required = true
+template = false

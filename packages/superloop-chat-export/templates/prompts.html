@@ -1,0 +1,6 @@
+{% if prompts %}<details class="prompts" open>
+<summary>{{ prompts_summary }}</summary>
+<ol>
+{% for prompt in prompts %}<li><a href="{{ prompt.href }}"><time>{{ prompt.time }}</time> {{ prompt.line }}</a></li>
+{% endfor %}</ol>
+</details>{% endif %}

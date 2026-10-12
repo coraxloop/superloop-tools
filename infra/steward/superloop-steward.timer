@@ -1,0 +1,13 @@
+[Unit]
+Description=Wake the resident server steward on a conservative pilot cadence
+
+[Timer]
+# STEWARD_PILOT_CADENCE=5min; pilot measurement sets the final value.
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=superloop-steward.service
+
+[Install]
+WantedBy=timers.target

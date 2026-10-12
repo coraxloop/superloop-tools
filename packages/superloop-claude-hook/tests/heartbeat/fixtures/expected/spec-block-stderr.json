@@ -1,0 +1,6 @@
+{
+  "fixture": "spec-block-stderr",
+  "spec": "rule:output:hook-json",
+  "python": {"status": 0, "stream": "stdout", "shape": "decision object"},
+  "specified": {"status": 2, "stdout": "", "stream": "stderr", "shape": "agent reason"}
+}

@@ -1,0 +1,25 @@
+[package]
+name = "request-core"
+description = "Internal validated request transitions and durable transaction primitives"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[package.metadata.superloop]
+tier = 1
+release-group = "request-core"
+
+[dependencies]
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

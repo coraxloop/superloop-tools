@@ -1,0 +1,8 @@
+{% import "macros.html" as m %}
+{% for turn in turns %}<section class="turn">
+{% if turn.before %}<p class="continued"><a href="{{ turn.before.href }}">{{ turn.before.label }}</a></p>
+{% endif %}{% for item in turn.items %}{{ m.item(item) }}
+{% endfor %}{% for fork in turn.forks %}<p class="fork"><a href="{{ fork.href }}">{{ fork.label }}</a></p>
+{% endfor %}{% if turn.after %}<p class="continued"><a href="{{ turn.after.href }}">{{ turn.after.label }}</a></p>
+{% endif %}</section>
+{% endfor %}

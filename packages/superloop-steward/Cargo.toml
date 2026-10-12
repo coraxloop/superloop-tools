@@ -1,0 +1,28 @@
+[package]
+name = "superloop-steward"
+version.workspace = true
+description = "Send steward messages and read transcript records with explicit acknowledgment"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[package.metadata.superloop]
+tier = 2
+release-group = "steward"
+
+[[bin]]
+name = "superloop-steward"
+path = "src/main.rs"
+
+[dependencies]
+superloop-cli-common.workspace = true
+clap.workspace = true
+libc.workspace = true
+nix.workspace = true
+tempfile.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

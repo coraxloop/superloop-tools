@@ -1,0 +1,31 @@
+[package]
+name = "superloop-cli-common"
+description = "Shared CLI scaffolding for ADR-010 command-line tools"
+
+authors = ["Orchestration helpers authors"]
+edition.workspace = true
+license = "GPL-3.0-or-later"
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 0
+release-group = "superloop-cli-common"
+
+[dependencies]
+toml = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

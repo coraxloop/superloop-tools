@@ -1,0 +1,54 @@
+#!/usr/bin/python3
+import json
+import os
+from pathlib import Path
+import sys
+import subprocess
+
+Path(os.environ["ORACLE_SSH_ARGV"]).write_text(
+    json.dumps(sys.argv[1:], separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+script = sys.stdin.buffer.read()
+Path(os.environ["ORACLE_SSH_STDIN"]).write_bytes(script)
+tokens = [line.removeprefix(b"# superloop-gate-submit probe token=").strip() for line in script.splitlines() if line.startswith(b"# superloop-gate-submit probe token=")]
+output = Path(os.environ["ORACLE_SSH_OUTPUT"]).read_bytes()
+if os.environ.get("ORACLE_SSH_EXECUTE_SCRIPT"):
+    first, separator, remainder = script.partition(b"\n")
+    assert separator and first.startswith(b"set -e; ")
+    worktree = os.environ["ORACLE_WORKTREE"]
+    script = ("set -e; . /dev/null; cd '" + worktree + "'\n").encode() + remainder
+    remote_env = os.environ.copy()
+    remote_env["PATH"] += ":/usr/bin:/bin"
+    if os.environ.get("ORACLE_SSH_REMOTE_SEED_FOREIGN"):
+        remote_env["ORACLE_GIT_SEED_FOREIGN"] = "1"
+    if os.environ.get("ORACLE_SSH_REMOTE_SEED_ERROR"):
+        remote_env["ORACLE_GIT_SEED_ERROR"] = "1"
+    completed = subprocess.run(
+        ["/bin/bash", "-s"],
+        input=script,
+        env=remote_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    output = completed.stdout
+    if os.environ.get("ORACLE_SSH_SUPPRESS_SEED_LINE"):
+        output = b"\n".join(line for line in output.split(b"\n") if not line.startswith(b"SEED-ANCESTRY "))
+    if os.environ.get("ORACLE_SSH_UNBIND_SEED_LINE"):
+        output = output.replace(b" token=" + tokens[0] + b" result=", b" token=unbound result=")
+    if os.environ.get("ORACLE_SSH_MISMATCH_SEED_LINE"):
+        output = output.replace(b"SEED-ANCESTRY object=1111111111111111111111111111111111111111", b"SEED-ANCESTRY object=2222222222222222222222222222222222222222")
+    if os.environ.get("ORACLE_SSH_SEED_RESULT_MISSING"):
+        output = output.replace(b" result=descendant", b" result=missing")
+    if os.environ.get("ORACLE_SSH_DUPLICATE_SEED_LINE"):
+        lines = output.splitlines(keepends=True)
+        output = b"".join(line * 2 if line.startswith(b"SEED-ANCESTRY ") else line for line in lines)
+    sys.stdout.buffer.write(output)
+    raise SystemExit(completed.returncode)
+if len(tokens) == 1:
+    output = output.replace(b"PROBE_TOKEN", tokens[0])
+sys.stdout.buffer.write(output)
+status_file = os.environ.get("ORACLE_SSH_RC_FILE")
+status = Path(status_file).read_text(encoding="ascii") if status_file else os.environ.get("ORACLE_SSH_RC", "0")
+raise SystemExit(int(status))

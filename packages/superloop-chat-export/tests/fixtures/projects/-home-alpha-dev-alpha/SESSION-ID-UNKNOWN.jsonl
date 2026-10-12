@@ -1,0 +1,11 @@
+{"parentUuid":null,"type":"future-kind","futureField":{"nested":[1,2]},"uuid":"00000000-0000-4000-8000-000000000301","timestamp":"2026-01-04T12:00:00.000Z","sessionId":"SESSION-ID-UNKNOWN"}
+{"parentUuid":"00000000-0000-4000-8000-000000000301","type":"assistant","message":{"content":[{"type":"future_block","data":"opaque"},"stray text",7,null,[1]]},"uuid":"00000000-0000-4000-8000-000000000302","timestamp":"2026-01-04T12:00:01.000Z","sessionId":"SESSION-ID-UNKNOWN"}
+{"parentUuid":"00000000-0000-4000-8000-000000000302","type":"attachment","attachment":{"type":"future_attachment","payload":{"a":1}},"uuid":"00000000-0000-4000-8000-000000000303","timestamp":"2026-01-04T12:00:02.000Z","sessionId":"SESSION-ID-UNKNOWN"}
+{"type":"user","uuid":"00000000-0000-4000-8000-000000000304",
+[1,2,3]
+{"type":"user","uuid":"not-a-record-id","message":{"content":"An id that is not canonical."}}
+{"type":"user","uuid":"00000000-0000-4000-8000-000000000305","isMeta":"yes"}
+{"type":"user","uuid":"00000000-0000-4000-8000-000000000306","parentUuid":"PARENT"}
+
+{"type":"user","uuid":"00000000-0000-4000-8000-000000000307"}
+{"parentUuid":"00000000-0000-4000-8000-000000000303","type":"user","message":{"content":"An upper-case id."},"uuid":"00000000-0000-4000-8000-0000000003AB","timestamp":"2026-01-04T12:00:03.000Z","sessionId":"SESSION-ID-UNKNOWN"}

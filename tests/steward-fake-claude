@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -u
+
+LOG=${FAKE_STEWARD_CLAUDE_LOG:?FAKE_STEWARD_CLAUDE_LOG is required}
+{
+  printf 'CALL'
+  for arg in "$@"; do
+    printf '\t%s' "$arg"
+  done
+  printf '\n'
+} >> "$LOG"
+
+session=
+message=
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --resume)
+      shift
+      [ "$#" -gt 0 ] || exit 94
+      session=$1
+      shift
+      ;;
+    --print)
+      shift
+      ;;
+    --)
+      shift
+      message=$*
+      break
+      ;;
+    *)
+      exit 93
+      ;;
+  esac
+done
+[ -n "$session" ] && [ -n "$message" ] || exit 92
+printf 'CLAUDE-REPLY session=%s message=%s\n' "$session" "$message"

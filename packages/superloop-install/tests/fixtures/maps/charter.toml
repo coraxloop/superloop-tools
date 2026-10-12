@@ -1,0 +1,10 @@
+[registry]
+path = "~/.config/loops/registry.toml"
+root = "~/.config/loops/{name}/claude"
+missing_root = "skip"
+
+[[targets]]
+kind = "copy"
+source = "copy.md"
+destination = "CLAUDE.md"
+mode = "0644"

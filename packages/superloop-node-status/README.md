@@ -1,0 +1,13 @@
+# Node status
+
+`NODES="alpha beta" superloop-node-status LOOP --known-hosts FILE` reads each configured `NODE-LOOP` alias and reports core counts, one-, five- and fifteen-minute load, one-minute load per core and the lighter node. The first minimum three-decimal ratio wins a tie. `NODE-STATUS-DURATION-MS` reports elapsed wall on success and failure. Unreachable or malformed readings are reported; no valid reading is failure. `NODE-STATUS-FAILED` names the configuration, transport or load stage and its input: the resolved alias and configuration path, known-hosts file, SSH exit and last stderr line, or unparsed load output. Successful peers remain eligible when another peer fails.
+
+`--ssh-config FILE` selects the configuration, defaulting to the user's `.ssh/config`. `--known-hosts` is a required absolute provisioned host-key source. Unknown keys refuse, and SSH cannot enroll keys, update trust or create persistent connection sockets. Configured proxies remain operator-controlled transport dependencies. Node selection reads NODES supplied from the instance registry, never a compiled estate list. `NODE_STATUS_TIMEOUT_MS` bounds each read, defaulting to eight seconds.
+
+The client runs SSH and timeout from PATH; its remote command only reads nproc and proc load averages. Timeout statuses 124 and 137 report `deadline_ms=N expired`, and statuses 125 through 127 report `wrapper_exit=CODE`; these do not claim a measured SSH exit. Other unsuccessful exits report numeric `ssh_exit=CODE`, or `ssh_signal=N` for signal termination. It writes no cursor, node state or local state. Authentication audit records remain operating-system bookkeeping. Its package is tier 2 with independent release group `node-status`; the manifest owns its version. Bite 4 ingests and replaces its interim metadata, version checker and pending-retirement declaration. The former executable is not installed as an alias or shim.
+
+Inside the loop entry, pass `--known-hosts "$HOME/.ssh/known_hosts.clients"` after the runbook's client host-key provisioning row has been applied. This file contains independently verified public node keys; node status never creates or updates it.
+
+A sole `--version` returns one JSON control-plane record on stderr with the installed name and manifest version, no stdout bytes, and exit status zero. The shared release checker verifies this form.
+
+Meson installs the client into the configured binary directory and its identity-bearing build record into the data directory. The predecessor programs and the former client provenance sibling retire through reviewed home-prefix inventories after callers have switched to this client.

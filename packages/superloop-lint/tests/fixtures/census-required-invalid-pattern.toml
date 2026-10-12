@@ -1,0 +1,7 @@
+version = [1, 0, 0]
+
+[[paths]]
+path = "plans*/extra.md"
+purpose = "Star outside the last component."
+required = true
+template = false

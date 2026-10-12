@@ -1,0 +1,27 @@
+[package]
+name = "superloop-correspondence"
+version.workspace = true
+description = "Read correspondence journals with explicit shared cursor advancement"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[package.metadata.superloop]
+tier = 2
+release-group = "correspondence"
+
+[[bin]]
+name = "superloop-correspondence"
+path = "src/main.rs"
+
+[dependencies]
+superloop-cli-common.workspace = true
+clap.workspace = true
+libc.workspace = true
+nix.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

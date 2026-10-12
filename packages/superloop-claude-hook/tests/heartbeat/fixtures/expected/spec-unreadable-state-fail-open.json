@@ -1,0 +1,6 @@
+{
+  "fixture": "spec-unreadable-state-fail-open",
+  "spec": "inv:hooks:fail-open-safety",
+  "python": {"behavior": "recover counter as zero and publish a prompt"},
+  "specified": {"status": 0, "stdout": "", "stderr": "", "verdict": "FAIL_OPEN"}
+}

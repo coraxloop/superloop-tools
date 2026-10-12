@@ -1,0 +1,2 @@
+STALLED age=360s events=1 last=agent_message
+{"type":"agent_message","message":"quiet"}

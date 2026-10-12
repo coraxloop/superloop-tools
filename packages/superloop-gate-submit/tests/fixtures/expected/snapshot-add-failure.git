@@ -1,0 +1,3 @@
+{"argv":["-C","$WORKTREE","rev-parse","HEAD"],"git_index":null,"index_matches":null}
+{"argv":["-C","$WORKTREE","rev-parse","--absolute-git-dir"],"git_index":null,"index_matches":null}
+{"argv":["add","-A","."],"git_index":"$TMP_INDEX","index_matches":true}

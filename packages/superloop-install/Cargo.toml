@@ -1,0 +1,32 @@
+[package]
+name = "superloop-install"
+description = "Deterministic rulebook renderer and transactional installer"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 2
+release-group = "superloop-install"
+
+[dependencies]
+clap = { workspace = true }
+superloop-cli-common = { workspace = true }
+loop-home = { workspace = true }
+nix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

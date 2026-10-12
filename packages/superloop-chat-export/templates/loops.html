@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loops</title>
+<link rel="stylesheet" href="chat-export.css">
+</head>
+<body>
+<header class="site">
+<h1>Loops</h1>
+</header>
+<main class="list">
+<table class="pages">
+<thead><tr><th>Loop</th><th>Title</th><th>Conversations</th><th>Pages</th><th>Last activity</th></tr></thead>
+<tbody>
+{% for row in loops %}<tr><td><a href="{{ row.href }}">{{ row.name }}</a> (<a href="{{ row.latest }}">latest</a>)</td><td>{{ row.title }}</td><td>{{ row.conversations }}</td><td>{{ row.pages }}</td><td>{{ row.last }}</td></tr>
+{% endfor %}</tbody>
+</table>
+</main>
+</body>
+</html>

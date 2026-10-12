@@ -1,0 +1,6 @@
+{"argv":["-C","$WORKTREE","rev-parse","HEAD"],"git_index":null,"index_matches":null}
+{"argv":["-C","$WORKTREE","rev-parse","--absolute-git-dir"],"git_index":null,"index_matches":null}
+{"argv":["add","-A","."],"git_index":"$TMP_INDEX","index_matches":true}
+{"argv":["write-tree"],"git_index":"$TMP_INDEX","index_matches":true}
+{"argv":["commit-tree","2222222222222222222222222222222222222222","-p","1111111111111111111111111111111111111111","-m","superloop-gate-submit snapshot: tail"],"git_index":null,"index_matches":null}
+{"argv":["-C","$WORKTREE","push","-q","-f","shared","3333333333333333333333333333333333333333:refs/lanes/verify-tail"],"git_index":null,"index_matches":null}

@@ -1,0 +1,9 @@
+FROM @BASE_IMAGE@
+RUN for program in sh git jq rg python3 node socat cat find id stat ps sort rpm; do command -v "$program" >/dev/null || { echo "missing base program: $program" >&2; exit 1; }; done
+RUN test -s /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem || { echo "missing base certificate bundle: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem" >&2; exit 1; }
+RUN mkdir -p /usr/libexec/superloop /usr/share/superloop
+COPY codex /usr/libexec/superloop/codex
+COPY codex-code-mode-host /usr/libexec/superloop/codex-code-mode-host
+COPY box-init /usr/libexec/superloop/box-init
+RUN chmod 0555 /usr/libexec/superloop/codex /usr/libexec/superloop/codex-code-mode-host /usr/libexec/superloop/box-init && /usr/libexec/superloop/codex --version && rpm -qa --qf '%{NAME} %{VERSION}-%{RELEASE}\n' > /tmp/package-inventory.raw && sort /tmp/package-inventory.raw > /usr/share/superloop/package-inventory.txt && rm /tmp/package-inventory.raw
+LABEL org.superloop.codex.version="@CODEX_VERSION@" org.superloop.codex.sha256="@CODEX_SHA256@" org.superloop.codex.host.sha256="@CODEX_HOST_SHA256@"

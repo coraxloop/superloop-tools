@@ -1,0 +1,18 @@
+{
+  "authority": "python",
+  "expected_stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"ORCHESTRATION.md changed (mtime 1700000000123456789 -> 1700000010987654321). Run a diff between <STATE_DIR>/orchestration-snapshot-fixture-session-prev.md and the live ORCHESTRATION.md file, then update your working rules accordingly.\"}}",
+  "name": "change-notice",
+  "payload": {
+    "cwd": "/fixture/project",
+    "hook_event_name": "UserPromptSubmit",
+    "prompt_id": "prompt-2",
+    "session_id": "fixture/session"
+  },
+  "state_precondition": {
+    "prior": "fresh-startup",
+    "rulebook": {
+      "mtime_ns": 1700000010987654321,
+      "text": "# Fixture rules\n\nKeep evidence exact and bounded.\n"
+    }
+  }
+}

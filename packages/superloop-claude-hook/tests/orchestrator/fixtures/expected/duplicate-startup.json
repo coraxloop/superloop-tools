@@ -1,0 +1,14 @@
+{
+  "authority": "python",
+  "expected_stdout": "",
+  "name": "duplicate-startup",
+  "payload": {
+    "cwd": "/fixture/project",
+    "hook_event_name": "SessionStart",
+    "session_id": "fixture/session",
+    "source": "startup"
+  },
+  "state_precondition": {
+    "prior": "fresh-startup within five seconds"
+  }
+}

@@ -1,0 +1,7 @@
+option('domain', type: 'combo', choices: ['server', 'trusted-host'], value: 'server', description: 'Execution domain recorded for binary outputs')
+option('release_tag', type: 'string', value: '', description: 'Tag whose commit must equal the clean checkout at configuration and install')
+option('tools_source_commit', type: 'string', value: '', description: 'Reviewed source commit supplied by a release archive without Git history')
+option('server_kits', type: 'boolean', value: false, description: 'Install the reviewed private server kits and system units; never activates services')
+option('steward_projects_root', type: 'string', value: '', description: 'Installation transcript projects root; required for server kits, no default path')
+option('system_unitdir', type: 'string', value: '/etc/systemd/system', description: 'Server system unit destination')
+option('loop_registry', type: 'string', value: '', description: 'Trusted registry read at installation to generate private per-loop entry bridge copies')

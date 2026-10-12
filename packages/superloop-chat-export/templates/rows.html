@@ -1,0 +1,6 @@
+<table class="pages">
+<thead><tr><th>Span</th><th>Page</th><th>Compaction</th><th>Prompts</th><th>First prompt</th></tr></thead>
+<tbody>
+{% for row in conversation.rows %}<tr{% if target %} id="page-{{ row.number }}"{% endif %}><td><a href="{{ row.href }}"{% if target %} target="{{ target }}"{% endif %}>{% if row.span %}{{ row.span }}{% else %}Page {{ row.number }}{% endif %}</a></td><td>{{ row.number }}</td><td>{{ row.compaction }}</td><td>{{ row.prompts }}</td><td>{{ row.first_prompt }}</td></tr>
+{% endfor %}</tbody>
+</table>

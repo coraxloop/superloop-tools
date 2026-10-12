@@ -1,0 +1,2 @@
+verified
+RUN-REPORT lane=verify-bad name exit=0 wall=Ns verdict=ok ref=refs/lanes/verify-bad name

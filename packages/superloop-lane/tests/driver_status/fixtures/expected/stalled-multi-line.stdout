@@ -1,0 +1,2 @@
+STALLED age=420s events=2 last=item.completed
+{"type" : "item.completed","detail":"last"}

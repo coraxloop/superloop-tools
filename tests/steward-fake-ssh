@@ -1,0 +1,62 @@
+#!/bin/bash
+set -u
+
+LOG=${FAKE_STEWARD_SSH_LOG:?FAKE_STEWARD_SSH_LOG is required}
+MODE=${FAKE_STEWARD_SSH_MODE:-run}
+
+{
+  printf 'CALL'
+  for arg in "$@"; do
+    printf '\t%s' "$arg"
+  done
+  printf '\n'
+} >> "$LOG"
+
+if [ "$MODE" = fail ]; then
+  exit 255
+fi
+if [ "$MODE" = slow ]; then
+  exec sleep "${FAKE_STEWARD_SSH_SLEEP_SECONDS:-2}"
+fi
+
+alias_name=
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    -o|-F)
+      shift
+      [ "$#" -gt 0 ] || exit 97
+      shift
+      ;;
+    *)
+      alias_name=$1
+      shift
+      break
+      ;;
+  esac
+done
+[ -n "$alias_name" ] && [ "$#" -eq 1 ] || exit 96
+case $alias_name in
+  *-steward) active_server=${alias_name%-steward} ;;
+  *) exit 95 ;;
+esac
+
+export FAKE_STEWARD_ACTIVE_SERVER=$active_server
+if [ -n "${FAKE_STEWARD_SSH_SNAPSHOT:-}" ]; then
+  # Fixtures prepare and observe these bytes before their deadline is armed.
+  # Seek directly to the requested slice instead of rereading the whole file.
+  read -r exporter verb rest <<< "$1"
+  case $verb in
+    list)
+      while IFS= read -r line; do printf '%s\n' "$line"; done < "$FAKE_STEWARD_SSH_SNAPSHOT/list"
+      ;;
+    read)
+      read -r relative offset count <<< "$rest"
+      relative=${relative#\'}
+      relative=${relative%\'}
+      exec dd if="$FAKE_STEWARD_SSH_SNAPSHOT/$relative" iflag=skip_bytes,count_bytes skip="$offset" count="$count" status=none
+      ;;
+    *) exit 95 ;;
+  esac
+  exit 0
+fi
+exec bash -c "$1"

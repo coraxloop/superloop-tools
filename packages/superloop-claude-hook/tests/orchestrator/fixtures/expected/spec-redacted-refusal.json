@@ -1,0 +1,28 @@
+{
+  "authority": "spec",
+  "divergence": "A refusal log omits caller-supplied paths; Python records the configured path.",
+  "expected_effect": {
+    "log": {
+      "action": "guard4_refusal",
+      "event": "SessionStart",
+      "reason": "rulebook_missing",
+      "session_id": "fixture/session"
+    }
+  },
+  "expected_stdout": "",
+  "name": "spec-redacted-refusal",
+  "payload": {
+    "cwd": "/fixture/project",
+    "hook_event_name": "SessionStart",
+    "session_id": "fixture/session",
+    "source": "startup"
+  },
+  "python_effect": {
+    "log.path_present": true
+  },
+  "spec_label": "req:hooks:redacted-diagnostics",
+  "state_precondition": {
+    "rulebook": "missing at caller-supplied configured path",
+    "state": "absent"
+  }
+}

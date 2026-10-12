@@ -1,0 +1,15 @@
+{
+  "authority": "python",
+  "expected_stdout": "",
+  "name": "unchanged-prompt",
+  "payload": {
+    "cwd": "/fixture/project",
+    "hook_event_name": "UserPromptSubmit",
+    "prompt_id": "prompt-1",
+    "session_id": "fixture/session"
+  },
+  "state_precondition": {
+    "live_rulebook": "unchanged",
+    "prior": "fresh-startup"
+  }
+}

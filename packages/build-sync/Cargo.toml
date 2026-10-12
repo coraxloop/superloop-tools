@@ -1,0 +1,31 @@
+[package]
+name = "build-sync"
+description = "Copy one workspace binary to a declared build output when its bytes change"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 3
+release-group = "build-sync"
+
+[[bin]]
+name = "build-sync"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+superloop-cli-common = { workspace = true }
+proc-macro2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true

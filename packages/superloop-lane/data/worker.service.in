@@ -1,0 +1,13 @@
+[Unit]
+Description=Superloop worker lane for %i
+Requires=superloop-lane-vendor@%i.service
+After=superloop-lane-vendor@%i.service
+
+[Service]
+Type=exec
+ExecStart=@LANE_BIN@ launch --unit %i
+KillMode=mixed
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=default.target

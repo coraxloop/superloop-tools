@@ -1,0 +1,27 @@
+[package]
+name = "staff-provision"
+description = "Guarded staff-account provisioning and loop key generation"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 3
+release-group = "staff-provision"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "account"
+path = "src/bin/account.rs"
+
+[dependencies]
+superloop-cli-common.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

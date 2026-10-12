@@ -1,0 +1,12 @@
+# Declares the tracked corpus and named data exclusions so the census covers live text only.
+namespace = "org.superloop-tools.linter.shape"
+version = [1, 0, 0]
+
+universe = "tracked-exclusive"
+ignore = [
+  { name = "build-target", pattern = '%s"target/" *VCHAR' },
+  { name = "meson-build", pattern = '%s"build/" *VCHAR' },
+  { name = "unreadable-install-inputs", pattern = '( %s"maps/meson.build" )' },
+  { name = "test-fixtures", pattern = '( %s"tests/conductor-fake-notify" / %s"tests/fake-ssh" / %s"tests/steward-fake-claude" / %s"tests/steward-fake-exporter" / %s"tests/steward-fake-ssh" )' },
+  { name = "ignored-local-state", pattern = '( %s"runs/" *PATHCHAR / %s".claude/" *PATHCHAR / [ *PATHCHAR "/" ] %s"loops.d/" *PATHCHAR )' },
+]

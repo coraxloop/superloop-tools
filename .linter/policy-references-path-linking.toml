@@ -1,0 +1,73 @@
+# Declares the owner section and excludes tracked scripts and units whose names have no region reader; the remaining live text stays in the citation census.
+namespace = "class.linter.policy.references.path-linking"
+version = [1, 0, 0]
+
+[owners.SUPERLOOPLINT.path-references]
+exclude = [{ name = "existing-package-outside-python-path-policy", pattern = '%s"packages/superloop-lint" [ "/" *VCHAR ]' }]
+
+[owners.EXECUTECOMMAND.path-references]
+# The Meson file list has no region reader; it is measured by the file census.
+exclude = [{ name = "execute-command-meson-build", pattern = '%s"packages/execute-command/meson.build"' }]
+
+[owners.TOOLS.path-references]
+exclude = [
+  # Verbatim licence texts have no region reader and must retain their packaged bytes.
+  { name = "code-licence-text", pattern = '%s"LICENSE-CODE"' },
+  { name = "documents-licence-text", pattern = '%s"LICENSE-DOCS"' },
+  # Publication selectors are data, not document citations.
+  { name = "public-set-manifest", pattern = '%s"public-set.toml"' },
+  # Generated resolution rows carry addresses and selector data, not authored prose.
+  { name = "unpublished-label-register", pattern = '%s"docs/public/unpublished-labels.toml"' },
+  # This Meson build definition has no region reader; its file lists are the census, not references.
+  { name = "root-meson-build", pattern = '%s"meson.build"' },
+  # This Meson build definition has no region reader; its file lists are the census, not references.
+  { name = "root-meson-options", pattern = '%s"meson.options"' },
+  # This Meson build definition has no region reader; its file lists are the census, not references.
+  { name = "bin-meson-build", pattern = '%s"bin/meson.build"' },
+  # This Meson build definition has no region reader; its file lists are the census, not references.
+  { name = "docs-meson-build", pattern = '%s"docs/meson.build"' },
+  # This Meson build definition has no region reader; its file lists are the census, not references.
+  { name = "hooks-meson-build", pattern = '%s"hooks/meson.build"' },
+  # This Meson build definition has no region reader; its file lists are the census, not references.
+  { name = "infra-meson-build", pattern = '%s"infra/meson.build"' },
+  # This Meson build definition has no region reader; its file lists are the census, not references.
+  { name = "tests-meson-build", pattern = '%s"tests/meson.build"' },
+  # This Meson build definition has no region reader; its file lists are the census, not references.
+  { name = "units-meson-build", pattern = '%s"units/meson.build"' },
+  # This extensionless script has no suffix or exact-name region reader.
+  { name = "gateway-runner-script", pattern = '%s"bin/gateway-runner"' },
+  # This extensionless script has no suffix or exact-name region reader.
+  { name = "loop-codex-home-script", pattern = '%s"bin/loop-codex-home"' },
+  # This extensionless script has no suffix or exact-name region reader.
+  { name = "loop-gh-script", pattern = '%s"bin/loop-gh"' },
+  # This extensionless script has no suffix or exact-name region reader.
+  { name = "steward-transcript-export-script", pattern = '%s"infra/steward/transcript-export"' },
+  # This systemd service suffix has no region reader.
+  { name = "superloop-runtime-service-unit", pattern = '%s"units/superloop-runtime.service"' },
+  # This extensionless hook wrapper has no suffix or exact-name region reader.
+  { name = "heartbeat-hook-wrapper", pattern = '%s"hooks/heartbeat"' },
+  # This extensionless hook wrapper has no suffix or exact-name region reader.
+  { name = "orchestrator-hook-wrapper", pattern = '%s"hooks/orchestrator"' },
+  # This extensionless hook wrapper has no suffix or exact-name region reader.
+  { name = "permission-triage-hook-wrapper", pattern = '%s"hooks/permission-triage"' },
+  # This extensionless kit script has no suffix or exact-name region reader.
+  { name = "cargo-clean-home-script", pattern = '%s"infra/cargo-clean/target-clean"' },
+  # This systemd service suffix has no region reader.
+  { name = "cargo-clean-service-unit", pattern = '%s"infra/cargo-clean/superloop-target-clean@.service"' },
+  # This systemd timer suffix has no region reader.
+  { name = "cargo-clean-timer-unit", pattern = '%s"infra/cargo-clean/superloop-target-clean@.timer"' },
+  # This extensionless kit script has no suffix or exact-name region reader.
+  { name = "correspondence-scan-script", pattern = '%s"infra/correspondence-watch/correspondence-scan"' },
+  # This systemd service suffix has no region reader.
+  { name = "correspondence-watch-service-unit", pattern = '%s"infra/correspondence-watch/superloop-correspondence-scan.service"' },
+  # This systemd timer suffix has no region reader.
+  { name = "correspondence-watch-timer-unit", pattern = '%s"infra/correspondence-watch/superloop-correspondence-scan.timer"' },
+  # This extensionless kit script has no suffix or exact-name region reader.
+  { name = "steward-runner-script", pattern = '%s"infra/steward/steward-runner"' },
+  # This extensionless kit script has no suffix or exact-name region reader.
+  { name = "steward-spool-append-script", pattern = '%s"infra/steward/steward-spool-append"' },
+  # This systemd service suffix has no region reader.
+  { name = "steward-service-unit", pattern = '%s"infra/steward/superloop-steward.service"' },
+  # This systemd timer suffix has no region reader.
+  { name = "steward-timer-unit", pattern = '%s"infra/steward/superloop-steward.timer"' },
+]

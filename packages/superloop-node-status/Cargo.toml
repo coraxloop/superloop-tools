@@ -1,0 +1,27 @@
+[package]
+name = "superloop-node-status"
+version.workspace = true
+description = "Read node load and report the lighter node without enrolling host keys"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[package.metadata.superloop]
+tier = 2
+release-group = "node-status"
+
+[[bin]]
+name = "superloop-node-status"
+path = "src/main.rs"
+
+[dependencies]
+superloop-cli-common.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

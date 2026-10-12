@@ -1,0 +1,2 @@
+STALLED age=30s events=1 last=window.stalled
+{"type":"window.stalled"}

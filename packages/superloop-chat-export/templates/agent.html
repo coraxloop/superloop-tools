@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}{{ loop_name }} · {{ heading }}{% endblock %}
+{% block body %}{% import "macros.html" as m %}
+<header class="site">
+<h1>{{ loop_name }} · {{ heading }}</h1>
+<p class="span">{{ span }}</p>
+<dl class="meta">
+{% if agent_type %}<dt>Type</dt><dd>{{ agent_type }}</dd>{% endif %}
+{% if description %}<dt>Task</dt><dd>{{ description }}</dd>{% endif %}
+</dl>
+{% if back %}<p class="back">Spawned by <a href="{{ back.href }}">{{ back.label }}</a>.</p>{% else %}<p class="back">No loaded transcript holds the call that spawned this agent.</p>{% endif %}
+{{ m.nav(nav) }}
+</header>
+{% include "prompts.html" %}
+<main>
+{% include "turns.html" %}
+</main>
+<footer class="site">
+{{ m.nav(nav) }}
+</footer>
+{% endblock %}

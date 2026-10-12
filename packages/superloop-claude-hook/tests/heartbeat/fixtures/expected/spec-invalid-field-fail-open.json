@@ -1,0 +1,6 @@
+{
+  "fixture": "spec-invalid-field-fail-open",
+  "spec": "scenario:hooks:heartbeat-fail-open",
+  "python": {"status": 1, "failure": "uncaught type error"},
+  "specified": {"status": 0, "stdout": "", "stderr": "", "verdict": "FAIL_OPEN"}
+}

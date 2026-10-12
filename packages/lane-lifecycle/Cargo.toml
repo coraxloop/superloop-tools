@@ -1,0 +1,22 @@
+[package]
+name = "lane-lifecycle"
+description = "Backend-independent durable lane lifecycle"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 1
+release-group = "lane-lifecycle"
+
+[dependencies]
+sha2.workspace = true
+nix = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+exec
+--json
+--skip-git-repo-check
+-C
+$REPO
+-s
+workspace-write
+-o
+$RUN_DIR/last-message.txt
+-

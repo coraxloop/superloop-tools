@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -u
+export LC_ALL=C
+
+BASE=${FAKE_STEWARD_TREE_BASE:?FAKE_STEWARD_TREE_BASE is required}
+SERVER=${FAKE_STEWARD_ACTIVE_SERVER:?FAKE_STEWARD_ACTIVE_SERVER is required}
+ROOT=$BASE/$SERVER
+MODE=${FAKE_STEWARD_EXPORTER_MODE:-run}
+
+fail() {
+  echo "FAKE-EXPORTER-FAILED $1" >&2
+  exit 1
+}
+
+[ "$MODE" != missing-tree ] || fail "missing transcript tree"
+[ -d "$ROOT" ] || fail "missing transcript tree"
+
+validate_path() {
+  local relative=$1 component
+  local -a components
+  [ -n "$relative" ] && [[ $relative != /* ]] || fail "bad relative path"
+  IFS=/ read -r -a components <<< "$relative"
+  for component in "${components[@]}"; do
+    [ -n "$component" ] && [ "$component" != . ] && [ "$component" != .. ] ||
+      fail "bad relative path"
+  done
+}
+
+case ${1:-} in
+  list)
+    [ "$#" -eq 1 ] || fail "bad list argv"
+    while IFS= read -r -d '' path; do
+      relative=${path#"$ROOT"/}
+      details=$(stat -Lc '%s %d:%i %Y:%Z' -- "$path") || fail "stat"
+      read -r size identity stamp <<< "$details"
+      printf '%s\t%s\t%s\t%s\n' "$relative" "$size" "$identity" "$stamp"
+    done < <(find -P "$ROOT" -type f -name '*.jsonl' -print0 | sort -z)
+    ;;
+  read)
+    [ "$#" -eq 4 ] || fail "bad read argv"
+    [ "$MODE" != read-fail ] || fail "forced unreadable transcript"
+    validate_path "$2"
+    case $3 in ''|*[!0-9]*) fail "bad offset" ;; esac
+    case $4 in ''|*[!0-9]*) fail "bad count" ;; esac
+    resolved=$(realpath -e -- "$ROOT/$2") || fail "missing transcript"
+    root_real=$(realpath -e -- "$ROOT") || fail "missing root"
+    case $resolved in
+      "$root_real"/*) ;;
+      *) fail "outside root" ;;
+    esac
+    dd if="$resolved" iflag=skip_bytes,count_bytes skip="$3" count="$4" status=none
+    ;;
+  *)
+    fail "unsupported verb"
+    ;;
+esac

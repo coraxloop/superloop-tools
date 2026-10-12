@@ -1,0 +1,16 @@
+{
+  "authority": "python",
+  "expected_stdout": "",
+  "name": "resume-marker-present",
+  "payload": {
+    "cwd": "/fixture/project",
+    "hook_event_name": "SessionStart",
+    "session_id": "fixture/session",
+    "source": "resume",
+    "transcript_path": "<TRANSCRIPT>"
+  },
+  "state_precondition": {
+    "marker_witness": true,
+    "prior": "fresh-startup"
+  }
+}

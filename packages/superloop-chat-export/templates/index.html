@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ loop_name }}{% endblock %}
+{% block body %}
+<header class="site">
+<h1>{{ loop_name }}</h1>
+{% if title %}<p class="title">{{ title }}</p>{% endif %}
+<nav class="pager"><a href="{{ loops }}">All loops</a> <a href="latest.html">Latest</a></nav>
+</header>
+<main>
+{% for conversation in conversations %}
+<section class="conversation">
+<h2>Conversation {{ conversation.number }}</h2>
+<p>{{ conversation.pages }} pages, {{ conversation.prompts }} prompts, {{ conversation.span }}</p>
+{% include "rows.html" %}
+{% if conversation.branches %}<h3>Branches</h3>
+<ul class="branches">
+{% for branch in conversation.branches %}<li><a href="{{ branch.href }}">{{ branch.label }}</a>, leaving at <a href="{{ branch.fork.href }}">{{ branch.fork.label }}</a></li>
+{% endfor %}</ul>{% endif %}
+</section>
+{% endfor %}
+{% if unattached %}<p class="agents">{{ agents }} subagent threads. Each is linked from the call that spawned it, except the {{ unattached_count }} listed here, whose spawning call no page shows.</p>
+<ul class="agents">
+{% for thread in unattached %}<li><a href="{{ thread.href }}">{{ thread.label }}</a></li>
+{% endfor %}</ul>{% else %}<p class="agents">{{ agents }} subagent threads, each linked from the call that spawned it.</p>{% endif %}
+</main>
+{% endblock %}

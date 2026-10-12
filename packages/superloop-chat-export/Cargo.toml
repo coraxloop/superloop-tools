@@ -1,0 +1,37 @@
+[package]
+name = "superloop-chat-export"
+description = "Read a loop's session transcripts as one record tree and render them as HTML pages"
+version.workspace = true
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[package.metadata.superloop]
+tier = 2
+release-group = "superloop-chat-export"
+
+[[bin]]
+name = "superloop-chat-export"
+path = "src/main.rs"
+
+[dependencies]
+superloop-cli-common.workspace = true
+clap = { workspace = true }
+minijinja = { workspace = true }
+# Directory-relative, no-follow file operations for the output folder; the
+# `dir` feature adds the directory listing on the same file descriptors, and
+# `user` the effective user a staging folder is checked to belong to.
+nix.workspace = true
+pulldown-cmark = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

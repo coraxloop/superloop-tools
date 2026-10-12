@@ -1,0 +1,11 @@
+[Unit]
+Description=Superloop lane vendor proxy for %i
+
+[Service]
+Type=simple
+ExecStart=@LANE_BIN@ _proxy %i --proxy-bin @PROXY_BIN@
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target

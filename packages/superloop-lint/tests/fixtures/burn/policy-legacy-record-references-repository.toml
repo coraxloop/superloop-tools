@@ -1,0 +1,6 @@
+namespace = "class.linter.policy.legacy.record-references-repository"
+version = [1, 0, 0]
+
+[owners.PROJECTA]
+prose = '*VCHAR'
+code = '*VCHAR'

@@ -1,0 +1,64 @@
+#!/usr/bin/python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+worktree = os.environ["ORACLE_WORKTREE"]
+index = os.environ.get("GIT_INDEX_FILE")
+normalized = ["$WORKTREE" if value == worktree else value for value in args]
+record = {
+    "argv": normalized,
+    "git_index": "$TMP_INDEX" if index else None,
+    "index_matches": (
+        Path(index).read_bytes() == (Path(worktree) / ".git" / "index").read_bytes()
+        if index
+        else None
+    ),
+}
+with open(os.environ["ORACLE_GIT_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(record, separators=(",", ":")) + "\n")
+if index:
+    Path(os.environ["ORACLE_INDEX_PATH"]).write_text(index, encoding="utf-8")
+
+failure = os.environ.get("ORACLE_GIT_FAIL")
+failed_remote = os.environ.get("ORACLE_GIT_FAIL_REMOTE")
+if os.environ.get("ORACLE_GIT_DETACHED") and args[-4:] == [
+    "symbolic-ref",
+    "--quiet",
+    "--short",
+    "HEAD",
+]:
+    raise SystemExit(1)
+if failure == "add" and args == ["add", "-A", "."]:
+    print("git-add-failed", file=sys.stderr)
+    raise SystemExit(1)
+if failure == "push" and "push" in args:
+    print("git-push-failed", file=sys.stderr)
+    raise SystemExit(1)
+if failed_remote and args[-3:-1] == ["push", failed_remote]:
+    print("git-branch-push-failed", file=sys.stderr)
+    raise SystemExit(1)
+if os.environ.get("ORACLE_GIT_SEED_FOREIGN") and args[-4:-2] == ["merge-base", "--is-ancestor"]:
+    raise SystemExit(1)
+if os.environ.get("ORACLE_GIT_SEED_ERROR") and args[-4:-2] == ["merge-base", "--is-ancestor"]:
+    print("fixture Git ancestry failure", file=sys.stderr)
+    raise SystemExit(128)
+
+if args[-3:] == ["status", "--porcelain=v1", "--untracked-files=all"]:
+    if os.environ.get("ORACLE_GIT_DIRTY"):
+        print("?? added-file")
+elif args[-3:] == ["symbolic-ref", "--quiet", "HEAD"]:
+    print(os.environ.get("ORACLE_GIT_HEAD_REF", "refs/heads/lane/R"))
+
+if args[-2:] == ["rev-parse", "HEAD"]:
+    print(os.environ.get("ORACLE_GIT_HEAD_OBJECT", "1111111111111111111111111111111111111111"))
+elif args[-2:] == ["rev-parse", "--absolute-git-dir"]:
+    print(str(Path(worktree) / ".git"))
+elif args[-4:] == ["symbolic-ref", "--quiet", "--short", "HEAD"]:
+    print("lane/vfix2")
+elif args == ["write-tree"]:
+    print("2222222222222222222222222222222222222222")
+elif args and args[0] == "commit-tree":
+    print("3333333333333333333333333333333333333333")

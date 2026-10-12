@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+import ctypes
+import errno
+import json
+import signal
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+os.umask(0o077)
+MAX_TOPOLOGY_CEILING_MS = 120000
+started = time.monotonic_ns()
+fixture_root = Path(os.environ["PERMISSION_TRIAGE_FIXTURE_ROOT"])
+audit_state = fixture_root / "state"
+project = fixture_root / "project"
+hook_state = project / "local" / "triage-state"
+hook_state.mkdir(parents=True, exist_ok=True)
+hook_state.chmod(0o700)
+for filename in ("escalations.jsonl", "estate-escalations.jsonl"):
+    (hook_state / filename).unlink(missing_ok=True)
+registry = fixture_root / "driver-loops.d"
+registry.mkdir(exist_ok=True)
+registry.chmod(0o700)
+entry = registry / "topology.env"
+entry.write_text(f"LOOP_NAME=topology\nLOOP_CWD={project}\nLOOP_STATE_ROOT={hook_state}\n", encoding="utf-8")
+entry.chmod(0o600)
+permissions = project / "local" / "permissions"
+permissions.mkdir(exist_ok=True)
+(permissions / "domain.md").write_text("Disposable topology fixture domain.\n", encoding="utf-8")
+hook_bin = os.environ["PERMISSION_TRIAGE_TOPOLOGY_HOOK_BIN"]
+payload = sys.stdin.buffer.read(1024 * 1024 + 1)
+environment = dict(os.environ, PERMISSION_TRIAGE_STATE_ROOT=str(hook_state), PERMISSION_TRIAGE_LOOP_REGISTRY=str(registry))
+if environment.get("PERMISSION_TRIAGE_TOPOLOGY_PHASE") in {"audit", "bypass", "infrastructure", "settings_deny_wins"}:
+    environment["PERMISSION_TRIAGE_FAKE_SCOPE"] = "loop"
+# The nested proof fixture uses the same provisioned checkout as its parent request.
+if environment.get("PERMISSION_TRIAGE_CLI"):
+    model = fixture_root / "driver-model"
+    model.write_text(Path(environment["PERMISSION_TRIAGE_CLI"]).read_text(encoding="utf-8").replace("/workspace/project", str(project)), encoding="utf-8")
+    model.chmod(0o700)
+    environment["PERMISSION_TRIAGE_CLI"] = str(model)
+fault = environment.get("PERMISSION_TRIAGE_TOPOLOGY_FAULT", "")
+model_responses = {"model-timeout": "sleep", "model-nonzero": "nonzero", "authentication": "nonzero", "model-oversized": "oversized", "model-malformed": "malformed-result"}
+if fault in model_responses:
+    environment["PERMISSION_TRIAGE_FAKE_RESPONSE"] = model_responses[fault]
+if fault == "model-timeout":
+    environment["PERMISSION_TRIAGE_MODEL_DEADLINE_MS"] = "20"
+if fault == "model-launch":
+    environment["PERMISSION_TRIAGE_CLI"] = str(fixture_root / "missing-classifier")
+if fault == "invalid-owner-rubric":
+    environment["PERMISSION_TRIAGE_OWNER_RUBRIC"] = "relative-rubric"
+if fault == "forged-nesting":
+    environment["PERMISSION_TRIAGE_NESTED"] = "1"
+if fault == "missing-mode":
+    environment.pop("PERMISSION_TRIAGE_MODE", None)
+if fault == "malformed-mode":
+    environment["PERMISSION_TRIAGE_MODE"] = "ENFORCE"
+if fault == "journal-failure":
+    target = audit_state / "journal-target"
+    target.write_bytes(b"unchanged")
+    for filename in ("escalations.jsonl", "estate-escalations.jsonl"):
+        (hook_state / filename).symlink_to(target)
+if fault == "missing-loop-state-root":
+    entry.write_text(f"LOOP_NAME=topology\nLOOP_CWD={project}\n", encoding="utf-8")
+if fault == "missing-scope":
+    environment["PERMISSION_TRIAGE_FAKE_RESPONSE"] = "scope-fixture"
+    environment["PERMISSION_TRIAGE_FAKE_ENVELOPE"] = json.dumps({"structured_output": {"classification": "safe", "reason": "fixture"}})
+if fault == "unsafe-state-root":
+    hook_state.chmod(0o755)
+if fault == "unreadable-registry":
+    unreadable_registry = audit_state / "unreadable-registry"
+    unreadable_registry.mkdir(exist_ok=True)
+    unreadable_registry.chmod(0o000)
+    environment["PERMISSION_TRIAGE_LOOP_REGISTRY"] = str(unreadable_registry)
+if fault == "unresolved-caller":
+    environment.pop("PERMISSION_TRIAGE_LOOP_REGISTRY", None)
+if fault in {"unreadable-registry", "unresolved-caller"}:
+    environment["PERMISSION_TRIAGE_FAKE_SCOPE"] = "loop"
+if fault == "missing-hook":
+    hook_bin = str(fixture_root / "missing-hook")
+if fault == "nonexecutable-hook":
+    unavailable = audit_state / "nonexecutable-hook"
+    unavailable.write_bytes(b"fixture")
+    unavailable.chmod(0o600)
+    hook_bin = str(unavailable)
+if fault == "unknown-scope":
+    model = audit_state / "unknown-scope-cli"
+    model.write_text("#!/bin/sh\nprintf '%s\\000' \"$@\" > \"${PERMISSION_TRIAGE_FAKE_CAPTURE}.argv\"\ncat > \"${PERMISSION_TRIAGE_FAKE_CAPTURE}.stdin\"\nprintf '%s\\n' '{\"structured_output\":{\"classification\":\"safe\",\"reason\":\"fixture\",\"scope\":\"unknown\"}}'\n", encoding="utf-8")
+    model.chmod(0o700)
+    environment["PERMISSION_TRIAGE_CLI"] = str(model)
+if fault == "valid-nested-proof":
+    environment["PERMISSION_TRIAGE_FAKE_RESPONSE"] = "nested-probe-grandchild"
+    environment["PERMISSION_TRIAGE_FAKE_HOOK"] = hook_bin
+sync_injections = 0
+
+
+def hook_watchdog_seconds():
+    raw = os.environ.get("PERMISSION_TRIAGE_TOPOLOGY_CEILING_MS", str(MAX_TOPOLOGY_CEILING_MS))
+    try:
+        milliseconds = int(raw)
+    except ValueError as error:
+        raise OSError(errno.EINVAL, "driver-ceiling: PERMISSION_TRIAGE_TOPOLOGY_CEILING_MS is not a positive integer") from error
+    if milliseconds <= 0:
+        raise OSError(errno.EINVAL, "driver-ceiling: PERMISSION_TRIAGE_TOPOLOGY_CEILING_MS is not a positive integer")
+    return min(milliseconds, MAX_TOPOLOGY_CEILING_MS) / 1000
+
+
+def waitpid_with_watchdog(pid, deadline):
+    def expired(_signal, _frame):
+        raise TimeoutError("journal sync trace exceeded the hook wait deadline")
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("journal sync trace exceeded the hook wait deadline")
+    previous_handler = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, remaining)
+    try:
+        _, status = os.waitpid(pid, 0)
+        return status
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def run_sync_failure():
+    # One deadline governs the whole traced run. Re-arming the full ceiling on every wait would
+    # never catch a child that keeps issuing syscalls, because each stop restarts the budget.
+    deadline = time.monotonic() + hook_watchdog_seconds()
+    # Linux x86-64 ptrace replaces only the real hook's journal fdatasync return.
+    # No production flag, fake hook response, or edited journal evidence is involved.
+    if os.uname().machine != "x86_64":
+        raise OSError(errno.ENOTSUP, "journal sync injection requires Linux x86-64")
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.ptrace.restype = ctypes.c_long
+    libc.ptrace.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+
+    class Registers(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10", "r9", "r8",
+            "rax", "rcx", "rdx", "rsi", "rdi", "orig_rax", "rip", "cs", "eflags",
+            "rsp", "ss", "fs_base", "gs_base", "ds", "es", "fs", "gs",
+        )]
+
+    def trace(request, pid, data=None):
+        if libc.ptrace(request, pid, None, data) == -1:
+            raise OSError(ctypes.get_errno(), "journal sync ptrace failed")
+
+    input_path = audit_state / "sync-input.json"
+    output_path = audit_state / "sync-stdout.bin"
+    error_path = audit_state / "sync-stderr.bin"
+    input_path.write_bytes(payload)
+    with input_path.open("rb") as source, output_path.open("wb") as output, error_path.open("wb") as error:
+        child = subprocess.Popen([hook_bin, "hook"], stdin=source, stdout=output, stderr=error,
+                                 env=environment, preexec_fn=lambda: trace(0, 0))
+        try:
+            status = waitpid_with_watchdog(child.pid, deadline)
+            if not os.WIFSTOPPED(status):
+                raise OSError(errno.ECHILD, "journal sync trace did not stop at exec")
+            trace(0x4200, child.pid, 0x100001)  # TRACESYSGOOD | EXITKILL
+            injected = False
+            injections = 0
+            delivered_signal = 0
+            while True:
+                trace(24, child.pid, delivered_signal)  # PTRACE_SYSCALL
+                status = waitpid_with_watchdog(child.pid, deadline)
+                if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                    child.returncode = os.waitstatus_to_exitcode(status)
+                    break
+                stopped = os.WSTOPSIG(status)
+                delivered_signal = 0
+                if stopped != signal.SIGTRAP | 0x80:
+                    delivered_signal = stopped
+                    continue
+                registers = Registers()
+                trace(12, child.pid, ctypes.byref(registers))  # PTRACE_GETREGS
+                if injected:
+                    registers.rax = (1 << 64) - errno.EIO
+                    trace(13, child.pid, ctypes.byref(registers))  # PTRACE_SETREGS
+                    injections += 1
+                    injected = False
+                elif registers.rax == (1 << 64) - errno.ENOSYS and registers.orig_rax == 75:
+                    target = os.readlink(f"/proc/{child.pid}/fd/{registers.rdi}")
+                    if target == str(hook_state / "escalations.jsonl"):
+                        registers.orig_rax = (1 << 64) - 1
+                        trace(13, child.pid, ctypes.byref(registers))
+                        injected = True
+        finally:
+            if child.returncode is None:
+                child.kill()
+                child.wait()
+    return subprocess.CompletedProcess(child.args, child.returncode, output_path.read_bytes(), error_path.read_bytes()), injections
+
+
+try:
+    if fault == "journal-sync":
+        result, sync_injections = run_sync_failure()
+    elif fault in {"hook-crash", "hook-timeout"}:
+        import signal
+        child = subprocess.Popen([hook_bin, "hook"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, start_new_session=True)
+        if fault == "hook-timeout":
+            time.sleep(0.02)
+        os.killpg(child.pid, signal.SIGKILL)
+        stdout, stderr = child.communicate()
+        result = subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
+    elif fault == "exit-two":
+        with open("/dev/full", "wb") as sink:
+            completed = subprocess.run([hook_bin, "hook"], input=payload, stdout=sink, stderr=subprocess.PIPE, env=environment)
+        result = subprocess.CompletedProcess(completed.args, completed.returncode, b"", completed.stderr)
+    else:
+        result = subprocess.run([hook_bin, "hook"], input=payload, capture_output=True, env=environment)
+except OSError as error:
+    result = subprocess.CompletedProcess([hook_bin, "hook"], 126 if isinstance(error, PermissionError) else 127, b"", str(error).encode())
+wall_ms = (time.monotonic_ns() - started) // 1_000_000
+(audit_state / "hook-output.json").write_bytes(result.stdout)
+(audit_state / "hook-stderr.bin").write_bytes(result.stderr)
+journal_events = []
+nested_journal_events = []
+nested_response = None
+try:
+    tool_use_id = json.loads(payload).get("tool_use_id")
+    for filename in ("escalations.jsonl", "estate-escalations.jsonl"):
+        stream = hook_state / filename
+        if stream.is_symlink() or not stream.exists():
+            continue
+        for line in stream.read_bytes().splitlines():
+            event = json.loads(line)
+            if event.get("tool_use_id") == tool_use_id:
+                journal_events.append(event)
+            if event.get("tool_use_id") == "nested-use":
+                nested_journal_events.append(event)
+except (OSError, ValueError):
+    pass
+if fault == "valid-nested-proof":
+    try:
+        nested_response = json.loads(Path(environment["PERMISSION_TRIAGE_FAKE_CAPTURE"] + ".nested-output").read_bytes())
+    except (OSError, ValueError):
+        pass
+metadata = {
+    "exit_code": result.returncode,
+    "wall_ms": wall_ms,
+    "mode": environment.get("PERMISSION_TRIAGE_MODE"),
+    "journal_events": journal_events,
+    "nested_journal_events": nested_journal_events,
+    "nested_response": nested_response,
+    "timed_out": fault == "hook-timeout",
+    "fault": fault,
+    "fault_supported": fault != "journal-sync" or sync_injections > 0,
+    "sync_injections": sync_injections,
+}
+(audit_state / "hook-invocation.json").write_text(json.dumps(metadata), encoding="utf-8")
+sys.stdout.buffer.write(result.stdout)
+sys.stderr.buffer.write(result.stderr)
+raise SystemExit(result.returncode if result.returncode >= 0 else 128 - result.returncode)

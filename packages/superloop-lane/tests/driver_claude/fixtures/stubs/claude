@@ -1,0 +1,101 @@
+#!/bin/sh
+set -eu
+
+: "$ORACLE_ARGV" "$ORACLE_STDIN" "$ORACLE_CWD" "$ORACLE_ENV" "$ORACLE_MODE"
+
+: >"$ORACLE_ARGV"
+for argument do
+    printf '%s\n' "$argument" >>"$ORACLE_ARGV"
+done
+/bin/cat >"$ORACLE_STDIN"
+printf '%s\n' "$PWD" >"$ORACLE_CWD"
+/usr/bin/env | /usr/bin/sort >"$ORACLE_ENV"
+
+# A case that must watch a driver write fail names the path here: a directory
+# standing where a file goes fails the rename on every filesystem, and only the
+# child can put it there, because the resume's preparation removes that path
+# before the child starts.
+if [ -n "${ORACLE_BLOCK_PATH:-}" ]; then
+    /bin/mkdir -p "$ORACLE_BLOCK_PATH"
+fi
+
+# A case that must know which process the driver is supervising names a path
+# here; only the child itself can state that identity before it is killed.
+if [ -n "${ORACLE_PID:-}" ]; then
+    printf '%s\n' "$$" >"$ORACLE_PID"
+fi
+
+case "$ORACLE_MODE" in
+    suspend-resume)
+        clock=${CODEX_LANE_TEST_CLOCK#@}
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}'
+        if [ ! -e "$clock.count" ]; then
+            : > "$clock.count"
+            printf '%s\n' '1:901' > "$clock.next"
+            mv "$clock.next" "$clock"
+            exit 1
+        fi
+        printf '%s\n' '{"type":"result","is_error":false,"result":"recovered"}'
+        ;;
+    normal)
+        printf '%s\n' '{"type":"system","subtype":"init","cwd":"/x","session_id":"22222222-2222-4222-8222-222222222222","tools":[],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"auto"}'
+        printf '%s\n' '{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"22222222-2222-4222-8222-222222222222","total_cost_usd":0,"type":"result","subtype":"success","is_error":false,"duration_ms":415,"num_turns":1,"result":"final text"}'
+        ;;
+    fallback)
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}'
+        printf '%s\n' '{"type":"assistant","message":{"id":"m1","role":"assistant","type":"message","content":[{"type":"text","text":"kept answer"}]},"session_id":"22222222-2222-4222-8222-222222222222"}'
+        printf '%s\n' '{"duration_api_ms":0,"type":"result","subtype":"success","result":""}'
+        ;;
+    growing)
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}'
+        printf '%s\n' '{"type":"result","subtype":"success","result":"late text"}'
+        ;;
+    budget-wait)
+        while [ ! -e "$ORACLE_RELEASE" ]; do sleep 0.01; done
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}'
+        printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"late text"}'
+        ;;
+    rate-limited)
+        : "$ORACLE_RESETS_AT"
+        printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":'"$ORACLE_RESETS_AT"',"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":'"$ORACLE_RESETS_AT"'},"seven_day":{"utilization":0.28,"resetsAt":1790301600}}},"uuid":"33333333-3333-4333-8333-333333333333","session_id":"22222222-2222-4222-8222-222222222222"}'
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}'
+        exit 1
+        ;;
+    warning)
+        : "$ORACLE_RESETS_AT"
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}'
+        printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","surpassedThreshold":0.9,"resetsAt":'"$ORACLE_RESETS_AT"',"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.97,"resetsAt":'"$ORACLE_RESETS_AT"'},"seven_day":{"utilization":0.28,"resetsAt":1790301600}}},"uuid":"33333333-3333-4333-8333-333333333333","session_id":"22222222-2222-4222-8222-222222222222"}'
+        printf '%s\n' '{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"22222222-2222-4222-8222-222222222222","total_cost_usd":0,"type":"result","subtype":"success","is_error":false,"duration_ms":415,"num_turns":1,"result":"final text"}'
+        ;;
+    failing)
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}'
+        exit 1
+        ;;
+    silent)
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}'
+        ;;
+    hung)
+        while :; do sleep 0.01; done
+        ;;
+    result-then-idle)
+        # A turn that finished and a child that has not yet gone away: the
+        # shape a driver meets when it decides a step has stopped growing.
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}'
+        printf '%s\n' '{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"session-1","type":"result","subtype":"success","is_error":false,"duration_ms":415,"num_turns":1,"result":"final text"}'
+        while [ ! -e "$ORACLE_RELEASE" ]; do sleep 0.01; done
+        ;;
+    slow)
+        # A child still running at the monitor's first probe, so a case can
+        # move the clock under a live child the way a host suspend does.
+        sleep 1
+        printf '%s\n' '{"type":"system","subtype":"init","cwd":"/x","session_id":"22222222-2222-4222-8222-222222222222","tools":[],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"auto"}'
+        printf '%s\n' '{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"22222222-2222-4222-8222-222222222222","total_cost_usd":0,"type":"result","subtype":"success","is_error":false,"duration_ms":415,"num_turns":1,"result":"final text"}'
+        ;;
+    resume)
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}'
+        printf '%s\n' '{"type":"result","subtype":"success","result":"resumed text"}'
+        ;;
+    *)
+        exit 99
+        ;;
+esac

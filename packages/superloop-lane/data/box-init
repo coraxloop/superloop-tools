@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+runtime_dir=/run/worker
+[ -d "$runtime_dir" ] && [ ! -L "$runtime_dir" ] || { echo "box-init: /run/worker is not a directory" >&2; exit 1; }
+expected="$(id -u):$(id -g):700"
+actual=$(stat -c '%u:%g:%a' "$runtime_dir")
+[ "$actual" = "$expected" ] || { echo "box-init: /run/worker has wrong owner or mode" >&2; exit 1; }
+[ -z "$(find "$runtime_dir" -mindepth 1 -maxdepth 1 -print -quit)" ] || { echo "box-init: /run/worker is not empty" >&2; exit 1; }
+umask 077
+vendor_socket=${SUPERLOOP_VENDOR_SOCKET:-/home/worker/.local/vendor/proxy.sock}
+socat TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork "UNIX-CONNECT:$vendor_socket" &
+exec "$@"

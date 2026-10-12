@@ -1,0 +1,17 @@
+[Unit]
+Description=Reclaim Cargo build output for staff account %i
+
+[Service]
+Type=oneshot
+User=%i
+Environment=HOME=/var/home/%i
+ExecStart=@PRIVATE_DIR@/target-clean
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+TimeoutStartSec=2h
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/home/%i
+ProtectHome=no

@@ -1,0 +1,918 @@
+# Declares empty allowance and burn lists for every activation, so each check measures the whole share it governs.
+namespace = "class.linter.lists"
+version = [1, 0, 0]
+
+[TOOLS."public-pack.values-absent"]
+path_counts = []
+
+[LANELIFECYCLE."profile.claims-conform"]
+allowances = []
+
+[LOOPHOME."profile.claims-conform"]
+allowances = []
+
+[RUNWORKER."profile.claims-conform"]
+allowances = []
+
+[SUPERLOOPPACK."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPINSTALL."labels.mints-well-formed"]
+allowances = []
+
+[RUNWORKER."labels.mints-well-formed"]
+allowances = []
+
+[BUILDSYNC."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPLANE."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."labels.mints-well-formed"]
+allowances = []
+
+[LANEGATEWAY."labels.mints-well-formed"]
+allowances = []
+
+[LANELIFECYCLE."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPLINT."labels.mints-well-formed"]
+allowances = []
+
+[LOOPHOME."labels.mints-well-formed"]
+allowances = []
+
+[TOOLS."labels.mints-well-formed"]
+allowances = []
+
+[PERMISSIONTRIAGE."labels.mints-well-formed"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."labels.mints-well-formed"]
+allowances = []
+
+[STAFFPROVISION."labels.mints-well-formed"]
+allowances = []
+
+[BUILDSYNC."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPLANE."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."labels.mints-kind-conform"]
+allowances = []
+
+[LANEGATEWAY."labels.mints-kind-conform"]
+allowances = []
+
+[LANELIFECYCLE."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPLINT."labels.mints-kind-conform"]
+allowances = []
+
+[LOOPHOME."labels.mints-kind-conform"]
+allowances = []
+
+[TOOLS."labels.mints-kind-conform"]
+allowances = []
+
+[PERMISSIONTRIAGE."labels.mints-kind-conform"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."labels.mints-kind-conform"]
+allowances = []
+
+[STAFFPROVISION."labels.mints-kind-conform"]
+allowances = []
+
+[BUILDSYNC."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPLANE."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."labels.mints-unique"]
+allowances = []
+
+[LANEGATEWAY."labels.mints-unique"]
+allowances = []
+
+[LANELIFECYCLE."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPLINT."labels.mints-unique"]
+allowances = []
+
+[LOOPHOME."labels.mints-unique"]
+allowances = []
+
+[TOOLS."labels.mints-unique"]
+allowances = []
+
+[PERMISSIONTRIAGE."labels.mints-unique"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."labels.mints-unique"]
+allowances = []
+
+[STAFFPROVISION."labels.mints-unique"]
+allowances = []
+
+[BUILDSYNC."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPLANE."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."labels.heads-conform"]
+allowances = []
+
+[LANEGATEWAY."labels.heads-conform"]
+allowances = []
+
+[LANELIFECYCLE."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPLINT."labels.heads-conform"]
+allowances = []
+
+[LOOPHOME."labels.heads-conform"]
+allowances = []
+
+[TOOLS."labels.heads-conform"]
+allowances = []
+
+[PERMISSIONTRIAGE."labels.heads-conform"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."labels.heads-conform"]
+allowances = []
+
+[STAFFPROVISION."labels.heads-conform"]
+allowances = []
+
+[BUILDSYNC."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPLANE."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."labels.citations-local-resolve"]
+allowances = []
+
+[LANEGATEWAY."labels.citations-local-resolve"]
+allowances = []
+
+[LANELIFECYCLE."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPLINT."labels.citations-local-resolve"]
+allowances = []
+
+[LOOPHOME."labels.citations-local-resolve"]
+allowances = []
+
+[TOOLS."labels.citations-local-resolve"]
+allowances = []
+
+[PERMISSIONTRIAGE."labels.citations-local-resolve"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."labels.citations-local-resolve"]
+allowances = []
+
+[STAFFPROVISION."labels.citations-local-resolve"]
+allowances = []
+
+[BUILDSYNC."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPLANE."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."labels.citations-import-form"]
+allowances = []
+
+[LANEGATEWAY."labels.citations-import-form"]
+allowances = []
+
+[LANELIFECYCLE."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPLINT."labels.citations-import-form"]
+allowances = []
+
+[LOOPHOME."labels.citations-import-form"]
+allowances = []
+
+[TOOLS."labels.citations-import-form"]
+allowances = []
+
+[PERMISSIONTRIAGE."labels.citations-import-form"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."labels.citations-import-form"]
+allowances = []
+
+[STAFFPROVISION."labels.citations-import-form"]
+allowances = []
+
+[BUILDSYNC."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPLANE."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."labels.citations-imported-resolve"]
+allowances = []
+
+[LANEGATEWAY."labels.citations-imported-resolve"]
+allowances = []
+
+[LANELIFECYCLE."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPLINT."labels.citations-imported-resolve"]
+allowances = []
+
+[LOOPHOME."labels.citations-imported-resolve"]
+allowances = []
+
+[TOOLS."labels.citations-imported-resolve"]
+allowances = []
+
+[PERMISSIONTRIAGE."labels.citations-imported-resolve"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."labels.citations-imported-resolve"]
+allowances = []
+
+[STAFFPROVISION."labels.citations-imported-resolve"]
+allowances = []
+
+[BUILDSYNC."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPLANE."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."labels.citations-layer-conform"]
+allowances = []
+
+[LANEGATEWAY."labels.citations-layer-conform"]
+allowances = []
+
+[LANELIFECYCLE."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPLINT."labels.citations-layer-conform"]
+allowances = []
+
+[LOOPHOME."labels.citations-layer-conform"]
+allowances = []
+
+[TOOLS."labels.citations-layer-conform"]
+allowances = []
+
+[PERMISSIONTRIAGE."labels.citations-layer-conform"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."labels.citations-layer-conform"]
+allowances = []
+
+[STAFFPROVISION."labels.citations-layer-conform"]
+allowances = []
+
+[BUILDSYNC."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPLANE."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."labels.generated-regions-conform"]
+allowances = []
+
+[LANEGATEWAY."labels.generated-regions-conform"]
+allowances = []
+
+[LANELIFECYCLE."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPLINT."labels.generated-regions-conform"]
+allowances = []
+
+[LOOPHOME."labels.generated-regions-conform"]
+allowances = []
+
+[TOOLS."labels.generated-regions-conform"]
+allowances = []
+
+[PERMISSIONTRIAGE."labels.generated-regions-conform"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."labels.generated-regions-conform"]
+allowances = []
+
+[STAFFPROVISION."labels.generated-regions-conform"]
+allowances = []
+
+[BUILDSYNC."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPLANE."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."labels.outlines-conform"]
+allowances = []
+
+[LANEGATEWAY."labels.outlines-conform"]
+allowances = []
+
+[LANELIFECYCLE."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPLINT."labels.outlines-conform"]
+allowances = []
+
+[LOOPHOME."labels.outlines-conform"]
+allowances = []
+
+[TOOLS."labels.outlines-conform"]
+allowances = []
+
+[PERMISSIONTRIAGE."labels.outlines-conform"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."labels.outlines-conform"]
+allowances = []
+
+[STAFFPROVISION."labels.outlines-conform"]
+allowances = []
+
+[BUILDSYNC."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPCHATEXPORT."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPCLICOMMON."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPEXECWRAP."profile.tests-conform"]
+allowances = []
+
+[LANELIFECYCLE."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPGATESUBMIT."profile.tests-conform"]
+allowances = []
+
+[LOOPHOME."profile.tests-conform"]
+allowances = []
+
+[PERMISSIONTRIAGE."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPPACK."profile.tests-conform"]
+allowances = []
+
+[PULLDOWNCMARKTOCMARK."profile.tests-conform"]
+allowances = []
+
+[REQUESTCORE."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPINSTALL."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPRUNREPORT."profile.tests-conform"]
+allowances = []
+
+[RUNWORKER."profile.tests-conform"]
+allowances = []
+
+[SESSIONCORE."profile.tests-conform"]
+allowances = []
+
+[STAFFPROVISION."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPCORRESPONDENCE."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPLANE."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPSTEWARD."profile.tests-conform"]
+allowances = []
+
+[LANEGATEWAY."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPLINT."references.file-paths-absent"]
+path_counts = []
+
+[SUPERLOOPLINT."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOPLINT."profile.todos-conform"]
+allowances = []
+
+[SUPERLOOPLINT."profile.legacy-conform"]
+allowances = []
+
+[SUPERLOOPLINT."profile.claims-conform"]
+allowances = []
+
+[SUPERLOOPLINT."profile.constants-conform"]
+allowances = []
+
+[LANEGATEWAY."projection.test-indexes-current"]
+allowances = []
+
+[SUPERLOOPLINT."projection.test-indexes-current"]
+allowances = []
+
+[LANEGATEWAY."projection.test-matrices-current"]
+allowances = []
+
+[SUPERLOOPLINT."projection.test-matrices-current"]
+allowances = []
+
+[SUPERLOOPLINT."projection.constant-pins-current"]
+allowances = []
+
+[TOOLS."owners.reach-conform"]
+allowances = []
+
+[TOOLS."policy.owner.names"."quarry"]
+allowances = []
+
+[TOOLS."legacy.todos"]
+path_counts = []
+
+[TOOLS."references.file-paths-absent"]
+path_counts = [
+  { path = "docs/integration.md", maximum = 35 },
+  { path = "infra/cargo-clean/README.md", maximum = 2 },
+  { path = "infra/correspondence-watch/README.md", maximum = 2 },
+  { path = "packages/README.md", maximum = 2 },
+]
+
+[SUPERLOOPCORRESPONDENCE."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPCORRESPONDENCE."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPCORRESPONDENCE."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPCORRESPONDENCE."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPCORRESPONDENCE."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPCORRESPONDENCE."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPCORRESPONDENCE."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPCORRESPONDENCE."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPCORRESPONDENCE."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPCORRESPONDENCE."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPSTEWARD."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPSTEWARD."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPSTEWARD."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPSTEWARD."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPSTEWARD."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPSTEWARD."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPSTEWARD."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPSTEWARD."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPSTEWARD."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPSTEWARD."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPNODESTATUS."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEDESKTOP."labels.outlines-conform"]
+allowances = []
+
+[SESSIONCORE."labels.mints-well-formed"]
+allowances = []
+
+[SESSIONCORE."labels.mints-kind-conform"]
+allowances = []
+
+[SESSIONCORE."labels.mints-unique"]
+allowances = []
+
+[SESSIONCORE."labels.heads-conform"]
+allowances = []
+
+[SESSIONCORE."labels.citations-local-resolve"]
+allowances = []
+
+[SESSIONCORE."labels.citations-import-form"]
+allowances = []
+
+[SESSIONCORE."labels.citations-imported-resolve"]
+allowances = []
+
+[SESSIONCORE."labels.citations-layer-conform"]
+allowances = []
+
+[SESSIONCORE."labels.generated-regions-conform"]
+allowances = []
+
+[SESSIONCORE."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPCLAUDEHOOK."labels.outlines-conform"]
+allowances = []
+
+[REQUESTCORE."labels.mints-well-formed"]
+allowances = []
+
+[EXECUTECOMMAND."labels.mints-well-formed"]
+allowances = []
+
+[EXECUTECOMMAND."labels.mints-kind-conform"]
+allowances = []
+
+[EXECUTECOMMAND."labels.mints-unique"]
+allowances = []
+
+[EXECUTECOMMAND."labels.heads-conform"]
+allowances = []
+
+[EXECUTECOMMAND."labels.citations-local-resolve"]
+allowances = []
+
+[EXECUTECOMMAND."labels.citations-import-form"]
+allowances = []
+
+[EXECUTECOMMAND."labels.citations-imported-resolve"]
+allowances = []
+
+[EXECUTECOMMAND."labels.citations-layer-conform"]
+allowances = []
+
+[EXECUTECOMMAND."labels.generated-regions-conform"]
+allowances = []
+
+[EXECUTECOMMAND."labels.outlines-conform"]
+allowances = []
+
+[EXECUTECOMMAND."profile.tests-conform"]
+allowances = []
+
+[EXECUTECOMMAND."references.file-paths-absent"]
+path_counts = []
+
+[REQUESTCORE."labels.mints-kind-conform"]
+allowances = []
+
+[REQUESTCORE."labels.mints-unique"]
+allowances = []
+
+[REQUESTCORE."labels.heads-conform"]
+allowances = []
+
+[REQUESTCORE."labels.citations-local-resolve"]
+allowances = []
+
+[REQUESTCORE."labels.citations-import-form"]
+allowances = []
+
+[REQUESTCORE."labels.citations-imported-resolve"]
+allowances = []
+
+[REQUESTCORE."labels.citations-layer-conform"]
+allowances = []
+
+[REQUESTCORE."labels.generated-regions-conform"]
+allowances = []
+
+[REQUESTCORE."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPRUNTIME."labels.mints-well-formed"]
+allowances = []
+
+
+[SUPERLOOPRUNTIME."labels.mints-kind-conform"]
+allowances = []
+
+
+[SUPERLOOPRUNTIME."labels.mints-unique"]
+allowances = []
+
+
+[SUPERLOOPRUNTIME."labels.heads-conform"]
+allowances = []
+
+
+[SUPERLOOPRUNTIME."labels.citations-local-resolve"]
+allowances = []
+
+
+[SUPERLOOPRUNTIME."labels.citations-import-form"]
+allowances = []
+
+
+[SUPERLOOPRUNTIME."labels.citations-imported-resolve"]
+allowances = []
+
+
+[SUPERLOOPRUNTIME."labels.citations-layer-conform"]
+allowances = []
+
+
+[SUPERLOOPRUNTIME."labels.generated-regions-conform"]
+allowances = []
+
+
+[SUPERLOOPRUNTIME."labels.outlines-conform"]
+allowances = []
+
+
+[SUPERLOOPRUNTIME."profile.tests-conform"]
+allowances = []
+
+[SUPERLOOP."profile.claims-conform"]
+allowances = []
+
+[SUPERLOOP."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOP."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOP."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOP."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOP."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOP."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOP."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOP."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOP."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOP."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOP."profile.tests-conform"]
+allowances = []

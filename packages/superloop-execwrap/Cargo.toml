@@ -1,0 +1,25 @@
+[package]
+name = "superloop-execwrap"
+description = "Process wrapper that routes stdout/stderr to log files"
+
+authors = ["Orchestration helpers authors"]
+edition.workspace = true
+license = "GPL-3.0-or-later"
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 1
+release-group = "superloop-execwrap"
+
+[dependencies]
+textwrap = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

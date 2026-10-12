@@ -1,0 +1,5 @@
+namespace = "class.linter.policy.legacy.todos"
+version = [1, 0, 0]
+
+[owners.PROJECTA]
+code = '( %s"src" / %s"tests" / %s"packages" ) [ "/" *VCHAR ]'

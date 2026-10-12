@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Meson substitutes the release group's manifest or ledger version.
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
+  printf '%s\n' '{"schema":1,"command":"transcript-export","kind":"version","message":"version requested","fields":{"type":"version","version":"transcript-export @VERSION@"}}' >&2
+  exit 0
+fi
+# Root-owned, read-only steward transcript exporter.
+#
+# Fixed argv contract:
+#   transcript-export list
+#     stdout rows are PATH<TAB>SIZE<TAB>DEVICE:INODE<TAB>MTIME:CTIME.
+#     PATH is relative to the configured projects root (STEWARD_PROJECTS_ROOT
+#     overrides it when set) and every nested
+#     regular *.jsonl file is included. SIZE and times are decimal bytes and
+#     Unix seconds. DEVICE:INODE is the stable file identity.
+#   transcript-export read RELATIVE_PATH OFFSET MAX_BYTES
+#     stdout is at most MAX_BYTES raw bytes beginning at OFFSET.
+#
+# All other argv, lexical escapes, unreadable targets, and symlinks resolving
+# outside the fixed root are refused. Transcript bytes are data, never shell
+# input.
+set -u
+
+ROOT=${STEWARD_PROJECTS_ROOT-"@STEWARD_PROJECTS_ROOT@"}
+TMP_FILES=()
+
+cleanup() {
+  local path
+  for path in "${TMP_FILES[@]}"; do
+    rm -f -- "$path"
+  done
+}
+trap cleanup EXIT
+
+fail() {
+  echo "STEWARD-TRANSCRIPT-EXPORT-FAILED $1" >&2
+  exit 1
+}
+
+[ -n "$ROOT" ] || fail "STEWARD_PROJECTS_ROOT is required"
+[[ $ROOT = /* ]] || fail "STEWARD_PROJECTS_ROOT must be absolute"
+ROOT=${ROOT%/}
+[ -n "$ROOT" ] || fail "STEWARD_PROJECTS_ROOT must not be /"
+
+root_realpath() {
+  local resolved
+  resolved=$(realpath -e -- "$ROOT") || fail "missing or unreadable root: $ROOT"
+  [ -d "$resolved" ] && [ -r "$resolved" ] && [ -x "$resolved" ] ||
+    fail "missing or unreadable root: $ROOT"
+  printf '%s\n' "$resolved"
+}
+
+validate_relative_path() {
+  local relative=$1 component
+  local -a components
+
+  [ -n "$relative" ] || fail "relative path is empty"
+  [[ $relative != /* ]] || fail "absolute path refused: $relative"
+  [[ $relative != *$'\n'* && $relative != *$'\r'* && $relative != *$'\t'* ]] ||
+    fail "control character in relative path"
+  IFS=/ read -r -a components <<< "$relative"
+  for component in "${components[@]}"; do
+    [ -n "$component" ] || fail "empty lexical path component: $relative"
+    [ "$component" != . ] && [ "$component" != .. ] ||
+      fail "lexical path escape refused: $relative"
+  done
+}
+
+resolve_transcript() {
+  local root_real=$1 relative=$2 resolved
+  validate_relative_path "$relative"
+  resolved=$(realpath -e -- "$ROOT/$relative") ||
+    fail "missing or unreadable transcript: $relative"
+  case $resolved in
+    "$root_real"/*) ;;
+    *) fail "path resolves outside root: $relative" ;;
+  esac
+  [ -f "$resolved" ] && [ -r "$resolved" ] ||
+    fail "missing or unreadable transcript: $relative"
+  printf '%s\n' "$resolved"
+}
+
+list_transcripts() {
+  local root_real symlink_file transcript_file link resolved relative details
+  local size identity stamp
+
+  root_real=$(root_realpath)
+  symlink_file=$(mktemp "${TMPDIR:-/var/tmp}/steward-transcript-symlinks.XXXXXX") ||
+    fail "cannot allocate symlink census"
+  transcript_file=$(mktemp "${TMPDIR:-/var/tmp}/steward-transcript-list.XXXXXX") ||
+    fail "cannot allocate transcript census"
+  TMP_FILES+=("$symlink_file" "$transcript_file")
+
+  find -P "$ROOT" -type l -print0 > "$symlink_file" ||
+    fail "cannot scan transcript root for symlinks"
+  while IFS= read -r -d '' link; do
+    resolved=$(realpath -e -- "$link") || fail "broken symlink refused: $link"
+    case $resolved in
+      "$root_real"|"$root_real"/*) ;;
+      *) fail "symlink resolves outside root: $link" ;;
+    esac
+  done < "$symlink_file"
+
+  find -L "$ROOT" -type f -name '*.jsonl' -print0 > "$transcript_file" ||
+    fail "cannot enumerate transcript root"
+  while IFS= read -r -d '' transcript; do
+    relative=${transcript#"$ROOT"/}
+    validate_relative_path "$relative"
+    resolved=$(resolve_transcript "$root_real" "$relative")
+    details=$(stat -Lc '%s %d:%i %Y:%Z' -- "$resolved") ||
+      fail "cannot stat transcript: $relative"
+    read -r size identity stamp <<< "$details"
+    printf '%s\t%s\t%s\t%s\n' "$relative" "$size" "$identity" "$stamp"
+  done < <(sort -zu "$transcript_file")
+}
+
+read_transcript() {
+  local relative=$1 offset=$2 max_bytes=$3 root_real resolved
+
+  case $offset in
+    ''|*[!0-9]*) fail "invalid offset: $offset" ;;
+  esac
+  case $max_bytes in
+    ''|*[!0-9]*) fail "invalid max bytes: $max_bytes" ;;
+  esac
+  [ "$max_bytes" -gt 0 ] || fail "max bytes must be positive: $max_bytes"
+
+  root_real=$(root_realpath)
+  resolved=$(resolve_transcript "$root_real" "$relative")
+  dd if="$resolved" iflag=skip_bytes,count_bytes skip="$offset" count="$max_bytes" status=none ||
+    fail "read failed: $relative"
+}
+
+[ "$#" -gt 0 ] || fail "expected verb: list or read"
+case $1 in
+  list)
+    [ "$#" -eq 1 ] || fail "list takes no arguments"
+    list_transcripts
+    ;;
+  read)
+    [ "$#" -eq 4 ] || fail "read requires RELATIVE_PATH OFFSET MAX_BYTES"
+    read_transcript "$2" "$3" "$4"
+    ;;
+  *)
+    fail "unsupported verb: $1"
+    ;;
+esac

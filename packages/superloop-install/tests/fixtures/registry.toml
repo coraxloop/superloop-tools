@@ -1,0 +1,6 @@
+namespace = "org.superloop-tools.loophome.registry"
+version = [1, 0, 0]
+loops = [
+  { name = "alpha", uid = 41001, launch = "work/alpha" },
+  { name = "beta", uid = 41002, launch = "work/beta" },
+]

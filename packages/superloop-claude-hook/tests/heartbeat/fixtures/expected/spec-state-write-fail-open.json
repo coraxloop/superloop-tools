@@ -1,0 +1,6 @@
+{
+  "fixture": "spec-state-write-fail-open",
+  "spec": "rule:hooks:turn-local-block-cap",
+  "python": {"behavior": "ignore the write failure and publish a repeatable block"},
+  "specified": {"status": 0, "stdout": "", "stderr": "", "verdict": "FAIL_OPEN"}
+}

@@ -1,0 +1,3 @@
+remote failed
+RUN-REPORT exit=1 wall=2s rootfs_tmp_left=1T workspace_left=2T
+RUN-REPORT lane=verify-named exit=1 wall=Ns verdict=FAILED ref=refs/lanes/verify-named

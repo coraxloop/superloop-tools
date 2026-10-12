@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# Meson substitutes the release group's manifest or ledger version.
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
+  printf '%s\n' '{"schema":1,"command":"target-clean","kind":"version","message":"version requested","fields":{"type":"version","version":"target-clean @VERSION@"}}' >&2
+  exit 0
+fi
+# target-clean: reclaim Cargo build output owned by the invoking account.
+set -u
+
+LOGGER=${CARGO_CLEAN_LOGGER:-logger}
+MIN_IDLE_HOURS=${CARGO_CLEAN_MIN_IDLE_HOURS:-0}
+CMD_TIMEOUT=${CARGO_CLEAN_CMD_TIMEOUT:-600}
+ROOT_INPUT=${CARGO_CLEAN_HOME:-${HOME-}}
+HOME_BASE=${HOME-}
+SIGNATURE='Signature: 8a477f597d28d172789f06886806bc55'
+
+emit() {
+  local message=$1
+  printf 'cargo-clean: %s\n' "$message"
+  "$LOGGER" -t cargo-clean "$message"
+}
+
+refuse() {
+  emit "run root=${ROOT_INPUT:-unset} mode=refuse reason=$1"
+  exit 2
+}
+
+case $MIN_IDLE_HOURS in
+  ''|*[!0-9]*) refuse invalid-min-idle-hours ;;
+esac
+case $CMD_TIMEOUT in
+  ''|*[!0-9]*|0) refuse invalid-command-timeout ;;
+esac
+[ "$(id -u)" -ne 0 ] || refuse root-invocation
+[ -n "$ROOT_INPUT" ] || refuse root-unset
+[ -d "$ROOT_INPUT" ] || refuse root-not-directory
+[ ! -L "$ROOT_INPUT" ] || refuse root-symlink
+
+ROOT=$(realpath -m -s -- "$ROOT_INPUT") || refuse root-unresolvable
+INVOKING_UID=$(id -u)
+ROOT_UID=$(stat -c %u "$ROOT") || refuse root-owner-unreadable
+[ "$ROOT_UID" = "$INVOKING_UID" ] || refuse root-unowned
+[ -n "$HOME_BASE" ] || refuse home-unset
+
+LOCK_DIR=$HOME_BASE/.cache/cargo-clean
+for lock_component in "$HOME_BASE" "$HOME_BASE/.cache" "$LOCK_DIR"; do
+  [ ! -L "$lock_component" ] || refuse lock-path-symlink
+done
+mkdir -p "$LOCK_DIR" || refuse lock-directory-unavailable
+[ "$(stat -c %u "$LOCK_DIR")" = "$INVOKING_UID" ] || refuse lock-directory-unowned
+LOCK=$LOCK_DIR/lock
+[ ! -L "$LOCK" ] || refuse lock-file-symlink
+exec 9>"$LOCK" || refuse lock-file-unavailable
+if ! flock -n 9; then
+  emit "run root=$ROOT mode=locked"
+  exit 3
+fi
+
+RUN_T0=$(date +%s%3N)
+targets=0
+cleaned=0
+removed=0
+skipped=0
+failed=0
+total_freed=0
+
+declare -a A_TARGETS=()
+declare -a B_TARGETS=()
+declare -a MANIFESTS=()
+declare -A A_MANIFEST=()
+declare -A B_SEEN=()
+
+is_within_root() {
+  case $1 in
+    "$ROOT"|"$ROOT"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_within_a_target() {
+  local path=$1
+  local target
+  for target in "${A_TARGETS[@]}"; do
+    case $path in
+      "$target"|"$target"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+is_within_b_target() {
+  local path=$1
+  local target
+  for target in "${B_TARGETS[@]}"; do
+    case $path in
+      "$target"|"$target"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+path_has_symlink() {
+  local path=$1
+  local relative current component
+  is_within_root "$path" || return 1
+  [ -L "$ROOT" ] && return 0
+  [ "$path" = "$ROOT" ] && return 1
+  relative=${path#"$ROOT"/}
+  current=$ROOT
+  while [ -n "$relative" ]; do
+    case $relative in
+      */*) component=${relative%%/*}; relative=${relative#*/} ;;
+      *) component=$relative; relative= ;;
+    esac
+    current=$current/$component
+    [ -L "$current" ] && return 0
+  done
+  return 1
+}
+
+measure_bytes() {
+  local path=$1
+  local usage bytes rest
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    printf '0\n'
+    return
+  fi
+  usage=$(du -sb -- "$path" 2>/dev/null) || {
+    printf '0\n'
+    return
+  }
+  read -r bytes rest <<< "$usage"
+  printf '%s\n' "$bytes"
+}
+
+is_busy() {
+  local path=$1
+  local minutes
+  [ "$MIN_IDLE_HOURS" -gt 0 ] || return 1
+  [ -d "$path" ] || return 1
+  minutes=$((MIN_IDLE_HOURS * 60))
+  [ -n "$(find -P "$path" -type f -mmin "-$minutes" -print -quit 2>/dev/null)" ]
+}
+
+report_skip() {
+  local target=$1
+  local mode=$2
+  local before=$3
+  local started=$4
+  local ended
+  ended=$(date +%s%3N)
+  emit "target=$target mode=$mode before_bytes=$before freed_bytes=0 duration_ms=$((ended - started))"
+  targets=$((targets + 1))
+  skipped=$((skipped + 1))
+}
+
+while IFS= read -r -d '' record; do
+  MANIFESTS+=("${record#*$'\t'}")
+done < <(
+  find -P "$ROOT" \
+    \( -type d \( -name .git -o -name node_modules -o -name .rustup -o -path '*/.cargo/registry' -o -path '*/.cargo/git' \) -prune \) -o \
+    \( -type f -name Cargo.toml -printf '%d\t%p\0' \) 2>/dev/null |
+    sort -z -n
+)
+
+CARGO=${CARGO_CLEAN_CARGO-}
+if [ -z "$CARGO" ]; then
+  if [ -x "$HOME_BASE/.cargo/bin/cargo" ]; then
+    CARGO=$HOME_BASE/.cargo/bin/cargo
+  elif command -v cargo >/dev/null 2>&1; then
+    CARGO=$(command -v cargo)
+  fi
+fi
+cargo_missing=0
+if [ "${#MANIFESTS[@]}" -gt 0 ] && [ -z "$CARGO" ]; then
+  cargo_missing=1
+fi
+
+for manifest in "${MANIFESTS[@]}"; do
+  is_within_a_target "$manifest" && continue
+  metadata_t0=$(date +%s%3N)
+  if [ "$cargo_missing" -eq 1 ]; then
+    report_skip "$manifest" skip-metadata 0 "$metadata_t0"
+    continue
+  fi
+  metadata=$(timeout "$CMD_TIMEOUT" "$CARGO" metadata --format-version 1 --no-deps --offline --manifest-path "$manifest" 2>/dev/null)
+  metadata_rc=$?
+  if [ "$metadata_rc" -ne 0 ]; then
+    report_skip "$manifest" skip-metadata 0 "$metadata_t0"
+    continue
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    target=$(printf '%s\n' "$metadata" | jq -er '.target_directory | strings' 2>/dev/null)
+    parse_rc=$?
+  else
+    target=$(printf '%s\n' "$metadata" | sed -n 's/.*"target_directory"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    if [ -n "$target" ]; then parse_rc=0; else parse_rc=1; fi
+  fi
+  if [ "$parse_rc" -ne 0 ] || [ -z "$target" ]; then
+    report_skip "$manifest" skip-metadata 0 "$metadata_t0"
+    continue
+  fi
+  target=$(realpath -m -s -- "$target") || {
+    report_skip "$manifest" skip-metadata 0 "$metadata_t0"
+    continue
+  }
+  if [ -z "${A_MANIFEST[$target]+present}" ]; then
+    A_TARGETS+=("$target")
+    A_MANIFEST["$target"]=$manifest
+  fi
+done
+
+while IFS= read -r -d '' record; do
+  tag=${record#*$'\t'}
+  candidate=${tag%/CACHEDIR.TAG}
+  candidate=$(realpath -m -s -- "$candidate") || continue
+  is_within_a_target "$candidate" && continue
+  is_within_b_target "$candidate" && continue
+  [ -f "$candidate/.rustc_info.json" ] || continue
+  [ ! -L "$candidate/.rustc_info.json" ] || continue
+  IFS= read -r first_line < "$tag" || first_line=
+  [ "$first_line" = "$SIGNATURE" ] || continue
+  if [ -z "${B_SEEN[$candidate]+present}" ]; then
+    B_TARGETS+=("$candidate")
+    B_SEEN["$candidate"]=1
+  fi
+done < <(
+  find -P "$ROOT" \
+    \( -type d \( -name .git -o -name node_modules -o -name .rustup -o -path '*/.cargo/registry' -o -path '*/.cargo/git' \) -prune \) -o \
+    \( -type f -name CACHEDIR.TAG -printf '%d\t%p\0' \) 2>/dev/null |
+    sort -z -n
+)
+
+for target in "${A_TARGETS[@]}"; do
+  action_t0=$(date +%s%3N)
+  if ! is_within_root "$target"; then
+    report_skip "$target" skip-outside 0 "$action_t0"
+    continue
+  fi
+  before=$(measure_bytes "$target")
+  if path_has_symlink "$target"; then
+    report_skip "$target" skip-symlink "$before" "$action_t0"
+    continue
+  fi
+  if [ -e "$target" ]; then
+    if [ ! -d "$target" ] || [ "$(stat -c %u "$target" 2>/dev/null)" != "$INVOKING_UID" ]; then
+      report_skip "$target" skip-unowned "$before" "$action_t0"
+      continue
+    fi
+  fi
+  if is_busy "$target"; then
+    report_skip "$target" skip-busy "$before" "$action_t0"
+    continue
+  fi
+  if timeout "$CMD_TIMEOUT" "$CARGO" clean --manifest-path "${A_MANIFEST[$target]}"; then
+    after=$(measure_bytes "$target")
+    if [ "$before" -gt "$after" ]; then freed=$((before - after)); else freed=0; fi
+    action_t1=$(date +%s%3N)
+    emit "target=$target mode=clean before_bytes=$before freed_bytes=$freed duration_ms=$((action_t1 - action_t0))"
+    targets=$((targets + 1))
+    cleaned=$((cleaned + 1))
+    total_freed=$((total_freed + freed))
+  else
+    action_t1=$(date +%s%3N)
+    emit "target=$target mode=fail before_bytes=$before freed_bytes=0 duration_ms=$((action_t1 - action_t0))"
+    targets=$((targets + 1))
+    failed=$((failed + 1))
+  fi
+done
+
+for target in "${B_TARGETS[@]}"; do
+  action_t0=$(date +%s%3N)
+  before=$(measure_bytes "$target")
+  if ! is_within_root "$target" || [ "$target" = "$ROOT" ]; then
+    report_skip "$target" skip-outside 0 "$action_t0"
+    continue
+  fi
+  if path_has_symlink "$target"; then
+    report_skip "$target" skip-symlink "$before" "$action_t0"
+    continue
+  fi
+  if [ ! -d "$target" ] || [ "$(stat -c %u "$target" 2>/dev/null)" != "$INVOKING_UID" ]; then
+    report_skip "$target" skip-unowned "$before" "$action_t0"
+    continue
+  fi
+  if is_busy "$target"; then
+    report_skip "$target" skip-busy "$before" "$action_t0"
+    continue
+  fi
+  IFS= read -r first_line < "$target/CACHEDIR.TAG" 2>/dev/null || first_line=
+  if [ "$first_line" != "$SIGNATURE" ] || [ ! -f "$target/.rustc_info.json" ] || [ -L "$target/.rustc_info.json" ]; then
+    action_t1=$(date +%s%3N)
+    emit "target=$target mode=fail before_bytes=$before freed_bytes=0 duration_ms=$((action_t1 - action_t0))"
+    targets=$((targets + 1))
+    failed=$((failed + 1))
+    continue
+  fi
+  if rm -rf -- "$target"; then
+    after=$(measure_bytes "$target")
+    if [ "$before" -gt "$after" ]; then freed=$((before - after)); else freed=0; fi
+    action_t1=$(date +%s%3N)
+    emit "target=$target mode=remove before_bytes=$before freed_bytes=$freed duration_ms=$((action_t1 - action_t0))"
+    targets=$((targets + 1))
+    removed=$((removed + 1))
+    total_freed=$((total_freed + freed))
+  else
+    action_t1=$(date +%s%3N)
+    emit "target=$target mode=fail before_bytes=$before freed_bytes=0 duration_ms=$((action_t1 - action_t0))"
+    targets=$((targets + 1))
+    failed=$((failed + 1))
+  fi
+done
+
+if [ "$cargo_missing" -eq 1 ]; then
+  emit "configuration root=$ROOT reason=cargo-unavailable"
+fi
+RUN_T1=$(date +%s%3N)
+emit "run root=$ROOT targets=$targets cleaned=$cleaned removed=$removed skipped=$skipped failed=$failed freed_bytes=$total_freed duration_ms=$((RUN_T1 - RUN_T0))"
+
+if [ "$cargo_missing" -eq 1 ]; then exit 2; fi
+if [ "$failed" -gt 0 ]; then exit 1; fi
+exit 0

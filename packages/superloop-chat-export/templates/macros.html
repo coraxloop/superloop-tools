@@ -1,0 +1,82 @@
+{% macro text(b) -%}
+<div class="text">{{ b.text }}{% if b.omitted %}<span class="omitted">[{{ b.omitted }} bytes omitted]</span>{% endif %}</div>
+{%- endmacro %}
+
+{% macro nav(nav) -%}
+<nav class="pager">
+<a href="{{ nav.loops }}">All loops</a>
+<a href="{{ nav.index }}">Loop index</a>
+{% if nav.previous %}<a rel="prev" href="{{ nav.previous }}">Previous</a>{% else %}<span class="disabled">Previous</span>{% endif %}
+{% if nav.next %}<a rel="next" href="{{ nav.next }}">Next</a>{% else %}<span class="disabled">Next</span>{% endif %}
+<a href="{{ nav.latest }}">Latest</a>
+<button type="button" class="mode" hidden>Prompts only</button>
+{% if nav.pages %}<details class="pages" open><summary>Pages{% if nav.current_page %} · Current page {{ nav.current_page }}{% endif %}</summary><iframe src="{{ nav.pages }}"{% if nav.current_page %} name="page-{{ nav.current_page }}"{% endif %} title="Pages of this conversation{% if nav.current_page %}, current page {{ nav.current_page }}{% endif %}" loading="lazy"></iframe></details>{% endif %}
+</nav>
+{%- endmacro %}
+
+{% macro item(item) -%}
+{% if item.kind == "owner" -%}
+<article class="record owner {{ item.form }}"{% if item.anchor %} id="{{ item.anchor }}"{% endif %}>
+<header><strong>{% if item.form == "queued" %}Owner, queued{% elif item.form == "command" %}Owner, command{% else %}Owner{% endif %}</strong> <time{% if item.time.instant %} datetime="{{ item.time.instant }}"{% endif %}>{{ item.time.shown }}</time>{% if item.form == "queued" %} <span class="marker">Sent while the agent was working</span>{% endif %}</header>
+<div class="text">{{ item.text.text }}{% if item.text.omitted %}<span class="omitted">[{{ item.text.omitted }} bytes omitted]</span>{% endif %}</div>
+</article>
+{%- elif item.kind == "response" -%}
+<details class="response" open>
+<summary>{{ item.summary }}</summary>
+{% for part in item.parts %}
+<article class="record response"{% if part.anchor %} id="{{ part.anchor }}"{% endif %}>
+<header><strong>Agent</strong> <time{% if part.time.instant %} datetime="{{ part.time.instant }}"{% endif %}>{{ part.time.shown }}</time></header>
+{% for t in part.thinking %}<details class="thinking"><summary>Thinking, {{ t.size }}</summary><div class="text">{{ t.text.text }}{% if t.text.omitted %}<span class="omitted">[{{ t.text.omitted }} bytes omitted]</span>{% endif %}</div></details>{% endfor %}
+{% for b in part.text %}<div class="markdown">{{ b.html }}{% if b.omitted %}<span class="omitted">[{{ b.omitted }} bytes omitted]</span>{% endif %}</div>{% endfor %}
+</article>
+{% endfor %}
+</details>
+{%- elif item.kind == "run" -%}
+<details class="run">
+<summary>{{ item.summary }}</summary>
+{% for e in item.entries %}{% if e.entry == "group" %}<div class="group">
+{% for x in e.exchanges %}<article class="record exchange"{% if x.anchor %} id="{{ x.anchor }}"{% endif %}>
+<div class="call" id="{{ x.call_anchor }}">
+<header><strong>{{ x.name }}</strong> <time{% if x.time.instant %} datetime="{{ x.time.instant }}"{% endif %}>{{ x.time.shown }}</time>{% if x.shared %} <span class="marker">Its call id is not unique in this transcript</span>{% endif %}{% if x.agent %} <a class="agent" href="{{ x.agent.href }}">{{ x.agent.label }}</a>{% endif %}</header>
+<div class="text input">{{ x.input.text }}{% if x.input.omitted %}<span class="omitted">[{{ x.input.omitted }} bytes omitted]</span>{% endif %}</div>
+</div>
+{% if x.result %}<div class="result{% if x.result.error %} error{% endif %}" id="{{ x.result.id }}">
+<header{% if x.result.anchor %} id="{{ x.result.anchor }}"{% endif %}><strong>Result{% if x.result.error %}, error{% endif %}</strong> <time{% if x.result.time.instant %} datetime="{{ x.result.time.instant }}"{% endif %}>{{ x.result.time.shown }}</time></header>
+<div class="text">{{ x.result.text.text }}{% if x.result.text.omitted %}<span class="omitted">[{{ x.result.text.omitted }} bytes omitted]</span>{% endif %}</div>
+</div>{% elif x.moved %}<p class="moved">Its result is shown <a href="{{ x.moved.href }}">{{ x.moved.label }}</a>.</p>{% else %}<p class="unanswered">No result was recorded.</p>{% endif %}
+</article>
+{% endfor %}</div>
+{% elif e.entry == "note" %}<article class="record note"{% if e.note.anchor %} id="{{ e.note.anchor }}"{% endif %}>
+<header><strong>{{ e.note.label }}</strong> <time{% if e.note.time.instant %} datetime="{{ e.note.time.instant }}"{% endif %}>{{ e.note.time.shown }}</time></header>
+<div class="text">{{ e.note.text.text }}{% if e.note.text.omitted %}<span class="omitted">[{{ e.note.text.omitted }} bytes omitted]</span>{% endif %}</div>
+</article>
+{% elif e.entry == "result" %}<article class="record result{% if e.result.error %} error{% endif %}" id="{{ e.result.id }}">
+<header{% if e.result.anchor %} id="{{ e.result.anchor }}"{% endif %}><strong>Result{% if e.result.error %}, error{% endif %} of {% if e.call %}<a href="{{ e.call.href }}">{{ e.call.label }}</a>{% else %}a call the transcript does not identify{% endif %}</strong> <time{% if e.result.time.instant %} datetime="{{ e.result.time.instant }}"{% endif %}>{{ e.result.time.shown }}</time></header>
+<div class="text">{{ e.result.text.text }}{% if e.result.text.omitted %}<span class="omitted">[{{ e.result.text.omitted }} bytes omitted]</span>{% endif %}</div>
+</article>
+{% endif %}{% endfor %}
+</details>
+{%- elif item.kind == "notes" -%}
+<details class="run notes">
+<summary>{{ item.summary }}</summary>
+{% for n in item.notes %}<article class="record note"{% if n.anchor %} id="{{ n.anchor }}"{% endif %}>
+<header><strong>{{ n.label }}</strong> <time{% if n.time.instant %} datetime="{{ n.time.instant }}"{% endif %}>{{ n.time.shown }}</time></header>
+<div class="text">{{ n.text.text }}{% if n.text.omitted %}<span class="omitted">[{{ n.text.omitted }} bytes omitted]</span>{% endif %}</div>
+</article>
+{% endfor %}
+</details>
+{%- elif item.kind == "compaction" -%}
+<section class="compaction">
+{% if item.boundary %}<div class="divider"{% if item.boundary.anchor %} id="{{ item.boundary.anchor }}"{% endif %}>Compaction{% if item.boundary.trigger %}, {{ item.boundary.trigger }}{% endif %}{% if item.boundary.pre_tokens %}, {{ item.boundary.pre_tokens }} tokens before{% endif %}{% if item.boundary.post_tokens %}, {{ item.boundary.post_tokens }} after{% endif %} <time{% if item.boundary.time.instant %} datetime="{{ item.boundary.time.instant }}"{% endif %}>{{ item.boundary.time.shown }}</time></div>{% endif %}
+{% if item.summary %}<article class="record summary"{% if item.summary.anchor %} id="{{ item.summary.anchor }}"{% endif %}>
+<header><strong>Compaction summary</strong> <time{% if item.summary.time.instant %} datetime="{{ item.summary.time.instant }}"{% endif %}>{{ item.summary.time.shown }}</time></header>
+<div class="markdown">{{ item.summary.text.html }}{% if item.summary.text.omitted %}<span class="omitted">[{{ item.summary.text.omitted }} bytes omitted]</span>{% endif %}</div>
+</article>{% endif %}
+</section>
+{%- elif item.kind == "peer" -%}
+<article class="record peer"{% if item.anchor %} id="{{ item.anchor }}"{% endif %}>
+<header><strong>From another session</strong> <time{% if item.time.instant %} datetime="{{ item.time.instant }}"{% endif %}>{{ item.time.shown }}</time></header>
+<div class="text">{{ item.text.text }}{% if item.text.omitted %}<span class="omitted">[{{ item.text.omitted }} bytes omitted]</span>{% endif %}</div>
+</article>
+{%- endif %}
+{%- endmacro %}

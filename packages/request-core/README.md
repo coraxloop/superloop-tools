@@ -1,0 +1,9 @@
+# Request core · `guide:requestcore:request-core`
+
+This internal tier 1 library owns common request records, transition validation, review identities and descriptor-relative transaction primitives. Callers register body and answer validators and whether a kind needs a service result. It has no internal source dependencies and grants no permission authority, door custody or effect execution.
+
+Triage validates a whole nonempty document before changing any request. Review accepts only marked requests and changes only bookkeeping. Its UTC time advances monotonically at nanosecond resolution; its eight-digit identifier hashes the specified domain, request ID and time and never reuses an earlier identifier for that request. Adjudication requires the latest identifier. A service claim is idempotent, and a lost waiter never converts a pending request into permission. A service-backed request remains pending until the service result is durable. Ages are whole seconds.
+
+The caller supplies a directory descriptor whose custody it has validated. Writers hold a stable exclusive lock, validate every domain change, stage the complete snapshot, sync it, rename it atomically and sync the directory. Readers open an atomic snapshot without creating either data or lock files. A conflict or failure before rename leaves the prior snapshot intact. A directory sync failure after rename reports commit uncertainty explicitly; no service may infer permission from that error. Consumers retain their domain checks and recovery rules around these primitives.
+
+The `gateway-proposal` service kind binds a calling loop, gateway identity, registration digest and immutable proposal body. Its answer is approve, deny or abandon; promotion is valid only for approval. The private service owns execution, and a decision remains service-pending until its claimed result is published. The journal owner validates caller authority separately from this neutral schema.

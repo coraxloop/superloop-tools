@@ -1,0 +1,6 @@
+version = [1, 0, 0]
+
+[[paths]]
+path = "doc.md"
+purpose = "Missing required field."
+template = false

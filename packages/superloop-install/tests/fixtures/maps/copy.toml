@@ -1,0 +1,7 @@
+root = "/srv/example/example-user/harness"
+
+[[targets]]
+kind = "copy"
+source = "copy.md"
+destination = "nested/copied.md"
+mode = "0644"

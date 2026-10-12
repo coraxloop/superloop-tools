@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ loop_name }} · {% if span %}{{ span }}{% else %}{{ heading }}{% endif %}{% endblock %}
+{% block body %}{% import "macros.html" as m %}
+<header class="site">
+<h1>{{ loop_name }} · {% if span %}{{ span }}{% else %}{{ heading }}{% endif %}</h1>
+{% if span %}<p class="span">{{ heading }}</p>{% endif %}
+{{ m.nav(nav) }}
+</header>
+{% include "prompts.html" %}
+<main>
+{% include "turns.html" %}
+</main>
+<footer class="site">
+{{ m.nav(nav) }}
+</footer>
+{% endblock %}

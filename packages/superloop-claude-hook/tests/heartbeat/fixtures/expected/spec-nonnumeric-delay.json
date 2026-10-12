@@ -1,0 +1,6 @@
+{
+  "fixture": "spec-nonnumeric-delay",
+  "spec": "def:hooks:pending-wakeup",
+  "python": {"behavior": "coerce a numeric string to a pending delay"},
+  "specified": {"behavior": "skip the nonnumeric call as pending evidence"}
+}

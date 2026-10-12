@@ -1,0 +1,9 @@
+root = "/srv/example/example-user/harness"
+
+[[targets]]
+kind = "render"
+base = "base.md"
+overlay = "overlay.md"
+destination = "rendered.md"
+mode = "0644"
+max_bytes = 9500

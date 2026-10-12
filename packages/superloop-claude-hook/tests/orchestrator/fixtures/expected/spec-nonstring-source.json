@@ -1,0 +1,35 @@
+{
+  "authority": "spec",
+  "divergence": "A nonstring source is classified and deduplicated as empty; Python stringifies it in the persisted dedupe key.",
+  "expected_effect": {
+    "sessionstart_dedupe.key": [
+      "fixture/session",
+      "",
+      "6ac9f156a3b4475ed2731f61db1381590b153ce9897d108506c62dd5aa7707a5"
+    ]
+  },
+  "expected_stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"ORCHESTRATION_SCOPE_MARKER v1 sha256=6ac9f156a3b4475ed2731f61db1381590b153ce9897d108506c62dd5aa7707a5 mtime=1700000000123456789\\n# Fixture rules\\n\\nKeep evidence exact.\\nORCHESTRATION_SCOPE_MARKER_END v1 sha256=6ac9f156a3b4475ed2731f61db1381590b153ce9897d108506c62dd5aa7707a5\"}}",
+  "name": "spec-nonstring-source",
+  "payload": {
+    "cwd": "/fixture/project",
+    "hook_event_name": "SessionStart",
+    "session_id": "fixture/session",
+    "source": 7
+  },
+  "python_effect": {
+    "sessionstart_dedupe.key": [
+      "fixture/session",
+      "7",
+      "6ac9f156a3b4475ed2731f61db1381590b153ce9897d108506c62dd5aa7707a5"
+    ]
+  },
+  "spec_label": "sig:hooks:injection-input",
+  "state_precondition": {
+    "rulebook": {
+      "mtime_ns": 1700000000123456789,
+      "text": "# Fixture rules\n\nKeep evidence exact.\n"
+    },
+    "snapshots": "absent",
+    "state": "absent"
+  }
+}

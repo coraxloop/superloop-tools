@@ -1,0 +1,1 @@
+$REPO/bin/codex-lane: line 158: PID Killed                  "$ORACLE_PROGRAM" "${args[@]}" - < "$step_input" >> "$run_dir/events.jsonl" 2>> "$run_dir/stderr.txt"

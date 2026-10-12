@@ -1,0 +1,3236 @@
+# Exclusion is a source-side matter; the cut has consumed those rows.
+namespace = "org.superloop-tools.public-set"
+version = [1, 0, 0]
+
+[exclude]
+rows = []
+
+[[include.rows]]
+pattern = ".gitignore"
+
+[[include.rows]]
+pattern = ".linter/environments.toml"
+
+[[include.rows]]
+pattern = ".linter/imports/orchestration.toml"
+
+[[include.rows]]
+pattern = ".linter/lists.toml"
+
+[[include.rows]]
+pattern = ".linter/owners.toml"
+
+[[include.rows]]
+pattern = ".linter/policies.toml"
+
+[[include.rows]]
+pattern = ".linter/policy-legacy-todos.toml"
+
+[[include.rows]]
+pattern = ".linter/policy-owner-names.toml"
+
+[[include.rows]]
+pattern = ".linter/policy-public-pack-tools.toml"
+
+[[include.rows]]
+pattern = ".linter/policy-references-path-linking.toml"
+
+[[include.rows]]
+pattern = ".linter/policy-spdx.toml"
+
+[[include.rows]]
+pattern = ".linter/shape.toml"
+
+[[include.rows]]
+pattern = "CHANGELOG.md"
+
+[[include.rows]]
+pattern = "Cargo.toml"
+
+[[include.rows]]
+pattern = "LICENSE-CODE"
+
+[[include.rows]]
+pattern = "LICENSE-DOCS"
+
+[[include.rows]]
+pattern = "README.md"
+
+[[include.rows]]
+pattern = "ci/test_docstring_carrier.py"
+
+[[include.rows]]
+pattern = "docs/meson.build"
+
+[[include.rows]]
+pattern = "docs/public/unpublished-labels.toml"
+
+[[include.rows]]
+pattern = "docs/spec/deployment.md"
+
+[[include.rows]]
+pattern = "docs/spec/linter-conformance.md"
+
+[[include.rows]]
+pattern = "docs/spec/output.md"
+
+[[include.rows]]
+pattern = "infra/cargo-clean/README.md"
+
+[[include.rows]]
+pattern = "infra/cargo-clean/superloop-target-clean@.service"
+
+[[include.rows]]
+pattern = "infra/cargo-clean/superloop-target-clean@.timer"
+
+[[include.rows]]
+pattern = "infra/cargo-clean/target-clean"
+
+[[include.rows]]
+pattern = "infra/cargo-clean/tests/run.sh"
+
+[[include.rows]]
+pattern = "infra/correspondence-watch/README.md"
+
+[[include.rows]]
+pattern = "infra/correspondence-watch/correspondence-scan"
+
+[[include.rows]]
+pattern = "infra/correspondence-watch/superloop-correspondence-scan.service"
+
+[[include.rows]]
+pattern = "infra/correspondence-watch/superloop-correspondence-scan.timer"
+
+[[include.rows]]
+pattern = "infra/correspondence-watch/tests/run.sh"
+
+[[include.rows]]
+pattern = "infra/gate/run-slot.sh"
+
+[[include.rows]]
+pattern = "infra/meson.build"
+
+[[include.rows]]
+pattern = "infra/steward/README.md"
+
+[[include.rows]]
+pattern = "infra/steward/charter.md"
+
+[[include.rows]]
+pattern = "infra/steward/steward-runner"
+
+[[include.rows]]
+pattern = "infra/steward/steward-spool-append"
+
+[[include.rows]]
+pattern = "infra/steward/superloop-steward.service"
+
+[[include.rows]]
+pattern = "infra/steward/superloop-steward.timer"
+
+[[include.rows]]
+pattern = "infra/steward/tests/run.sh"
+
+[[include.rows]]
+pattern = "infra/steward/transcript-export"
+
+[[include.rows]]
+pattern = "meson.build"
+
+[[include.rows]]
+pattern = "meson.options"
+
+[[include.rows]]
+pattern = "packages/README.md"
+
+[[include.rows]]
+pattern = "packages/build-sync/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/build-sync/README.md"
+
+[[include.rows]]
+pattern = "packages/build-sync/dependency-ledger.jsonl.in"
+
+[[include.rows]]
+pattern = "packages/build-sync/meson.build"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/census.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/census_calls.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/census_data.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/census_install.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/census_meson.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/census_payloads.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/census_programs.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/census_sources.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/census_test_tools.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/identity.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/tests/census_contract.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/tests/support/temporary_root.rs"
+
+[[include.rows]]
+pattern = "packages/build-sync/workspace.py"
+
+[[include.rows]]
+pattern = "packages/execute-command/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/execute-command/README.md"
+
+[[include.rows]]
+pattern = "packages/execute-command/meson.build"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/checks.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/checks/compute.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/checks/hygiene.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/checks/hygiene_parity.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/escalation.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/learning.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/policy.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/process.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/record.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/request.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/rubric.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/snapshot.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/triage.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/tests/checks_parity.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/tests/learning.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/tests/persistence.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/tests/policy_parity.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/tests/process.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/tests/shapes.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/tests/support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/tests/triage.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/README.md"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/gateway-runner"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/meson.build"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/README.md"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/bin/README.md"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/bin/gateway-service.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/channel.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/command.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/gateway.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/proposal.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/proposal_channel.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/push.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/run.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/serve.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/sha256.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/tests.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/src/types.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/tests/README.md"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/tests/command_surface.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/tests/serve_generations.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/tests/serve_liveness.rs"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/tests/support/README.md"
+
+[[include.rows]]
+pattern = "packages/lane-gateway/tests/support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/lane-lifecycle/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/lane-lifecycle/README.md"
+
+[[include.rows]]
+pattern = "packages/lane-lifecycle/meson.build"
+
+[[include.rows]]
+pattern = "packages/lane-lifecycle/src/execution_settings.rs"
+
+[[include.rows]]
+pattern = "packages/lane-lifecycle/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/lane-lifecycle/src/mailbox.rs"
+
+[[include.rows]]
+pattern = "packages/lane-lifecycle/src/monitor_lock.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/loop-home/README.md"
+
+[[include.rows]]
+pattern = "packages/loop-home/meson.build"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/allocations.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/app.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/custody.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/driver_launch.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/ensure.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/error.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/letters/follow.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/letters/metadata.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/letters/mod.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/letters/record.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/letters/store.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/letters/tests.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/letters/tests/follow.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/letters/wake.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/planner.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/registry.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/runner.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/runner/agent_runner.py"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/runner/sign_in_policy.py"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/runner/signals.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/verify.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/workers_settings.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/permission-triage/README.md"
+
+[[include.rows]]
+pattern = "packages/permission-triage/deploy/assemble.md"
+
+[[include.rows]]
+pattern = "packages/permission-triage/deploy/provenance.md"
+
+[[include.rows]]
+pattern = "packages/permission-triage/deploy/settings-fragment.json"
+
+[[include.rows]]
+pattern = "packages/permission-triage/deploy/settings-fragment.md"
+
+[[include.rows]]
+pattern = "packages/permission-triage/meson.build"
+
+[[include.rows]]
+pattern = "packages/permission-triage/rubrics/general.md"
+
+[[include.rows]]
+pattern = "packages/permission-triage/schema/classification.json"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/bin/permission-triage-assemble.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/bin/permission-triage-hook.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/bin/permission-triage-topology.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/bin/requests-helper.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/command_checks.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/evidence.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/hook.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/hook_entry.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/journal.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/journal/owner.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/journal/request_lock.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/journal/requests.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/model.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/proc.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/request.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/requests.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/review.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/role.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/rubric.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/tests/fixtures/subagent-hook-input-2026-09-23.json"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/tests/hook.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/tests/journal.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/tests/review.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/tests/rubric_model.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/tests/topology.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/topology.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/assemble.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/fixtures/fake-cli.sh"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/hook.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/journal.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/private_hook.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/requests_helper.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/support/temporary_root.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/topology.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/topology/bin/audit-hook"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/topology/bin/negative-twin"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/topology/bin/read-only-stub"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/topology/bin/real-hook-driver"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/topology/bin/triage-sentinel"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/topology/fake-harness.sh"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/topology/outside-project.txt"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/topology/project/data.json"
+
+[[include.rows]]
+pattern = "packages/permission-triage/tests/topology/project/readable.txt"
+
+[[include.rows]]
+pattern = "packages/pulldown-cmark-to-cmark/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/pulldown-cmark-to-cmark/LICENSE-APACHE"
+
+[[include.rows]]
+pattern = "packages/pulldown-cmark-to-cmark/README.md"
+
+[[include.rows]]
+pattern = "packages/pulldown-cmark-to-cmark/meson.build"
+
+[[include.rows]]
+pattern = "packages/pulldown-cmark-to-cmark/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/pulldown-cmark-to-cmark/src/source_range.rs"
+
+[[include.rows]]
+pattern = "packages/pulldown-cmark-to-cmark/src/text_modifications.rs"
+
+[[include.rows]]
+pattern = "packages/request-core/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/request-core/README.md"
+
+[[include.rows]]
+pattern = "packages/request-core/meson.build"
+
+[[include.rows]]
+pattern = "packages/request-core/src/gateway.rs"
+
+[[include.rows]]
+pattern = "packages/request-core/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/request-core/src/model.rs"
+
+[[include.rows]]
+pattern = "packages/request-core/src/review.rs"
+
+[[include.rows]]
+pattern = "packages/request-core/src/transaction.rs"
+
+[[include.rows]]
+pattern = "packages/request-core/tests/gateway.rs"
+
+[[include.rows]]
+pattern = "packages/request-core/tests/transaction.rs"
+
+[[include.rows]]
+pattern = "packages/request-core/tests/transitions.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/run-worker/README.md"
+
+[[include.rows]]
+pattern = "packages/run-worker/meson.build"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/alloc.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/app.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/bin/worker-run.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/cli.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/clock.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/entry.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/error.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/layout.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/table.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/src/watch.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/tests/settings_contract.rs"
+
+[[include.rows]]
+pattern = "packages/session-core/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/session-core/README.md"
+
+[[include.rows]]
+pattern = "packages/session-core/meson.build"
+
+[[include.rows]]
+pattern = "packages/session-core/src/heartbeat.rs"
+
+[[include.rows]]
+pattern = "packages/session-core/src/heartbeat_toggle.rs"
+
+[[include.rows]]
+pattern = "packages/session-core/src/letters.rs"
+
+[[include.rows]]
+pattern = "packages/session-core/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/session-core/src/orchestrator.rs"
+
+[[include.rows]]
+pattern = "packages/session-core/src/orchestrator/tests.rs"
+
+[[include.rows]]
+pattern = "packages/session-core/src/orchestrator_toggle.rs"
+
+[[include.rows]]
+pattern = "packages/session-core/src/pre_tool.rs"
+
+[[include.rows]]
+pattern = "packages/session-core/src/project_root.rs"
+
+[[include.rows]]
+pattern = "packages/session-core/src/sha256.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/staff-provision/README.md"
+
+[[include.rows]]
+pattern = "packages/staff-provision/meson.build"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/app.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/bin/account.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/config.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/error.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/keys.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/loop_keygen.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/planner.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/probe.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/report.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/runner.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/staff.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/state.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/tests/entries.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/src/tests/planners.rs"
+
+[[include.rows]]
+pattern = "packages/staff-provision/tests/account_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/assets/chat-export.css"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/assets/chat-export.js"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/agents.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/folder.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/head.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/input.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/load.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/markdown.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/names.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/output.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/owner.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/plan.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/pool.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/registry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/render.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/templates.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/aids.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/bounds.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/conserve.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/forms.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/input.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/markdown.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/ownership.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/paging.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/render.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tests/tree.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/tree.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/src/view.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/agent.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/base.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/branch.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/index.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/latest.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/loops.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/macros.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/page.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/pages.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/prompts.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/rows.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/templates/turns.html"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-alpha/SESSION-ID-LINEAR.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-alpha/SESSION-ID-ORDER.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-alpha/SESSION-ID-REPEAT.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-alpha/SESSION-ID-UNKNOWN.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-gamma/SESSION-ID-A.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-gamma/SESSION-ID-A/subagents/agent-0123456789abcdef0.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-gamma/SESSION-ID-A/subagents/agent-0123456789abcdef0.meta.json"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-gamma/SESSION-ID-A/subagents/agent-0123456789abcdef1.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-gamma/SESSION-ID-A/subagents/agent-0123456789abcdef1.meta.json"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-gamma/SESSION-ID-A/subagents/agent-0123456789abcdef2.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-gamma/SESSION-ID-B.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-gamma/SESSION-ID-C.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-gamma/SESSION-ID-D.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-gamma/SESSION-ID-E.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-hostile/SESSION-ID-H.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-hostile/SESSION-ID-H/subagents/agent-0123456789abcdef9.jsonl"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/projects/-home-alpha-dev-hostile/SESSION-ID-H/subagents/agent-0123456789abcdef9.meta.json"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/registry/alpha.env"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/registry/beta.env"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/registry/gamma.env"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/fixtures/registry/hostile.env"
+
+[[include.rows]]
+pattern = "packages/superloop-chat-export/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-desktop/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-desktop/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-desktop/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-desktop/src/codec.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-desktop/src/files.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-desktop/src/groups.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-desktop/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-desktop/src/sessions.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-desktop/tests/fixture.py"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-desktop/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/docs/heartbeat.md"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/docs/orchestrator.md"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/reference/heartbeat/heartbeat-guard.py"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/reference/orchestrator/orchestrator.py"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/heartbeat/entry_listing.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/heartbeat/letters.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/heartbeat/letters_context.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/heartbeat/machine.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/heartbeat/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/heartbeat/pre_tool.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/heartbeat/project_root.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/orchestrator.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/src/permission.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/adapter_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/fixtures/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/fixtures/capture_python_oracle.py"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/fixtures/expected/python-reference-suite.status"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/fixtures/expected/python-reference-suite.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/fixtures/expected/spec-block-stderr.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/fixtures/expected/spec-invalid-field-fail-open.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/fixtures/expected/spec-list-feedback-turn-marker.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/fixtures/expected/spec-nonnumeric-delay.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/fixtures/expected/spec-state-write-fail-open.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/fixtures/expected/spec-unreadable-state-fail-open.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/graph_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/letters_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/oracle_fixtures.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/reference_scenarios.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/state_and_faults.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/structural_matrix.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/heartbeat/support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/oracle_fixtures.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/oracle_support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/canonical_scenarios.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/capture_python_oracle.py"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/change-notice.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/duplicate-startup.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/fresh-startup.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/resume-marker-absent.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/resume-marker-present.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/spec-nonstring-cwd.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/spec-nonstring-prompt.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/spec-nonstring-source.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/spec-project-root-disable.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/spec-redacted-refusal.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/unchanged-prompt.json"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/oracle_fixtures.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/project_root_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/project_root_identity.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/orchestrator/support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-cli-common/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-cli-common/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-cli-common/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-cli-common/src/burn_match.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-cli-common/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-cli-common/src/public_set.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-cli-common/src/publication.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-cli-common/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-cli-common/tests/public_api.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-correspondence/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-correspondence/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-correspondence/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-correspondence/src/cursor.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-correspondence/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-correspondence/src/ssh.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-correspondence/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-execwrap/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-execwrap/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-execwrap/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-execwrap/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-execwrap/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-execwrap/src/writer.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-execwrap/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/reference/superloop-gate-submit.sh"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/src/bin/superloop-gate-submit.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/capture_shell_oracle.py"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/committed-head-success.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/committed-head-success.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/committed-head-success.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/committed-head-success.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/committed-head-success.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/committed-head-success.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/committed-head-success.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/default-success.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/default-success.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/default-success.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/default-success.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/default-success.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/default-success.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/default-success.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/overrides-failure.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/overrides-failure.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/overrides-failure.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/overrides-failure.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/overrides-failure.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/overrides-failure.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/overrides-failure.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/push-failure.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/push-failure.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/push-failure.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/push-failure.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/push-failure.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/push-failure.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/push-failure.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/remote-undeclared.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/remote-undeclared.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/remote-undeclared.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/remote-undeclared.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/remote-undeclared.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/remote-undeclared.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/remote-undeclared.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/snapshot-add-failure.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/snapshot-add-failure.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/snapshot-add-failure.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/snapshot-add-failure.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/snapshot-add-failure.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/snapshot-add-failure.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/snapshot-add-failure.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/tail-cap.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/tail-cap.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/tail-cap.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/tail-cap.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/tail-cap.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/tail-cap.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/tail-cap.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unsafe-name.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unsafe-name.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unsafe-name.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unsafe-name.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unsafe-name.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unsafe-name.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unsafe-name.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unterminated-evidence.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unterminated-evidence.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unterminated-evidence.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unterminated-evidence.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unterminated-evidence.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unterminated-evidence.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/unterminated-evidence.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-extra-argument.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-extra-argument.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-extra-argument.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-extra-argument.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-extra-argument.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-extra-argument.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-extra-argument.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-missing-profile.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-missing-profile.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-missing-profile.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-missing-profile.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-missing-profile.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-missing-profile.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-missing-profile.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-no-packages.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-no-packages.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-no-packages.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-no-packages.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-no-packages.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-no-packages.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-no-packages.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-unknown-option.git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-unknown-option.ssh-argv"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-unknown-option.ssh-stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-unknown-option.status"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-unknown-option.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-unknown-option.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/expected/usage-unknown-option.temp-index"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/stubs/git"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/fixtures/stubs/ssh"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-gate-submit/tests/support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-install/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-install/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-install/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-install/src/bin/superloop-install.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-install/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-install/src/retirement.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-install/src/retirement/filesystem.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-install/src/tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-install/tests/fixtures/maps/charter.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-install/tests/fixtures/maps/copy.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-install/tests/fixtures/maps/render.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-install/tests/fixtures/registry.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-install/tests/fixtures/repository/base.md"
+
+[[include.rows]]
+pattern = "packages/superloop-install/tests/fixtures/repository/copy.md"
+
+[[include.rows]]
+pattern = "packages/superloop-install/tests/fixtures/repository/overlay.md"
+
+[[include.rows]]
+pattern = "packages/superloop-install/tests/retirement_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-install/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/data/Containerfile"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/data/box-init"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/data/claude-settings.json"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/data/codex-config.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/data/vendor-proxy.service.in"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/data/worker-AGENTS.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/data/worker.service.in"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/bin/door-service.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/bin/door-ssh.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/build.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/build_payload.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/claude_image_probe.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/container_helper.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/credential.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/agent.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/agent_exercise.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/agent_metadata.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/agent_metadata_tests.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/agent_probes.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/compute.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/compute_node.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/compute_node_tests.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/compute_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/concurrent_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/config.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/metadata.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/ref_check_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/retire_node.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/retire_node_tests.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/retirement.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/route_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/startup_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door/transport.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door_node.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door_sign_in.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door_sign_in_owner.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/door_sign_in_private.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/claude/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/claude/entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/claude/home.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/claude/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/codex/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/codex/entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/codex/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/follow/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/follow/entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/follow/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/follow/outbox.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/follow/outbox/tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/follow/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/status/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/status/entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/status/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/driver/status/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/error.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/fixture_exec.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/gateway_dispatch.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/home.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/install.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/install_door.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/install_private.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/admission.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/bound_roots.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/census.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/census_rewrite.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/checkout.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/checkpoint.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/driver_report.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_cases.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_door.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_door_attribution.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_door_attribution_probe.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_door_extensions.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_door_modes.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_door_probe.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_layout.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_mounts.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_mounts_probe.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_network.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_network_probe.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_resources.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/follow.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/harvest.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/imports.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/letters.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/letters_callback.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/matrix.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/network_evidence.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/probe.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/reaping.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/repin_door.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/repin_door_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/replies.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/replies/exercise.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/replies/tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/report.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/report/tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/retire.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/retire_absences.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/retire_node.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/retire_node_rewrite.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/retire_node_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/retire_proof.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/retire_rewrite.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/rotation.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/rounds.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/seed.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/settle.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/pinned.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/plan.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/prepare.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/repair.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/channel.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/channel_client.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/channel_commands.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/command.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/commands.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/judgement.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/modes.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/provision.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/rewrite.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/store.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/store/snapshot.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/test_helper.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/routes.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/settings.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/sign_in.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/signin_home.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/signin_home/claude.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/signin_home/claude_fs.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/signin_home/claude_move.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/signin_home/claude_rewrite.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/signin_home/claude_scan.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/signin_home/reconcile.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/signin_home/repair.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/tests/install.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/tests/launch.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/tests/prepare.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/vendor_net.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/vendor_proxy.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/worker_launch.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/bound_roots_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/census_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/command_persistence.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/door_rubric_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/door_sign_in_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/door_signal_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_claude/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_claude/fixtures/stubs/claude"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_claude/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_claude/support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/capture_shell_oracle.py"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.argv"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.codex-home"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.cwd"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.events"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.input"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.last-message"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.layout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.report"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/empty-output-fallback.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.argv"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.codex-home"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.cwd"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.events"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.input"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.last-message"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.layout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.report"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/normal-completion.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.argv"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.codex-home"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.cwd"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.events"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.input"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.last-message"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.layout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.report"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/over-budget-growing.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.argv"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.codex-home"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.cwd"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.events"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.input"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.last-message"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.layout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.report"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/resume-step.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.argv"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.codex-home"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.cwd"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.events"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.input"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.last-message"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.layout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.report"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/runaway-kill.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.argv"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.codex-home"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.cwd"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.events"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.input"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.last-message"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.layout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.report"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stalled-kill.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.argv"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.codex-home"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.cwd"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.events"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.input"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.last-message"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.layout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.report"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.stdin"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/expected/stdin-prompt.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/fixtures/stubs/codex"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/reference/codex-lane.sh"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_codex/timing.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_follow/fixtures/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_follow/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_follow/support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/capture_shell_oracle.sh"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/.gitattributes"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/complete-with-report.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/complete-with-report.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/complete-with-report.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/empty-fresh.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/empty-fresh.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/empty-fresh.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/empty-stalled.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/empty-stalled.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/empty-stalled.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/explicit-window-fresh.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/explicit-window-fresh.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/explicit-window-fresh.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/explicit-window-stalled.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/explicit-window-stalled.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/explicit-window-stalled.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/fresh-multi-line.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/fresh-multi-line.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/fresh-multi-line.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/fresh-one-line.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/fresh-one-line.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/fresh-one-line.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/missing-events.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/missing-events.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/missing-events.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/stalled-multi-line.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/stalled-multi-line.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/stalled-multi-line.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/stalled-one-line.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/stalled-one-line.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/stalled-one-line.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/usage-invalid-directory.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/usage-invalid-directory.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/usage-invalid-directory.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/usage-no-arguments.status"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/usage-no-arguments.stderr"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/fixtures/expected/usage-no-arguments.stdout"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/driver_status/support/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/failed_dispatch_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/base-image-build.json"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/handover-next.txt"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/handover-no-next.txt"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/plan.json"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/reconcile-host.c"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/install_door_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/private_dispatch.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/private_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/requests_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/retire_node_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/routes_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/signin_home_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/registry_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/report_custody.c"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/temporary_root.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/vendor_fixture.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/vendor_build_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/vendor_install_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/docs/adrs.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/meson-paths.in"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/abnf.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/adoption.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/application.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/areas.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/assembly.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/bin/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/bin/superloop-lint.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/burn.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/carrier.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/catalogue.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/census.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/claim.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/code.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/comment.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/commentary.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/constant.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/control.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/coverage.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/declaration.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/depend.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/engine.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/export.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/finding.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/fix.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/fmt.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/graph.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/head.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/index.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/interchange.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/label.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/layers.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/leader.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/legacy.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/legacy_profile.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/macro_carrier.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/matrix.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/meson_census.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/names.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/occurrence.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/outline.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/partition.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/pattern.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/plan.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/profile.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/program.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/prose.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/public_set.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/python.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/reference.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/registry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/report.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/residual.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/retired.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/roster.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/selection.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/shape.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/snapshot.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/spdx.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/subscribe.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/surface.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/test_support.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/burn_and_ratchets.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/commands_and_projections.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/control_and_lists.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/coverage_reporting.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/future_plan.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/graph_reporting.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/label_calculus.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/owner_reach.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/partition_and_universe.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/profile_writers.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/program_catalogue.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/tests/surface_loading_and_refusal.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/todo.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/token.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/universe.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/src/workspace.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/corpus.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/declared_surface.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-legacy-implementation.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-legacy-record-references-repository.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-legacy-record-references.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-legacy-section-references-repository.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-legacy-section-references.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-legacy-tag-references.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-legacy-todos.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-legacy-unprefixed-record-references.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-references-divisions.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-references-prefix-numbers.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/burn/policy-references-scenarios.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/census-required-directory-missing.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/census-required-invalid-pattern.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/census-required-malformed-path.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/census-required-malformed-row.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/census-required-malformed-toml.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/census-required-missing.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/census-required-ok.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/census-required-unmatched.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/claims-policies.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/fmt/blockquotes.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/fmt/references-and-lists.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/kind-registry.txt"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fixtures/root-owner.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/fmt.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/meson_census.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/owner_reconciliation.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/public_set.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/support/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/tests/support/git.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-node-status/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-node-status/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-node-status/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-node-status/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-node-status/src/ssh.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-node-status/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/src/bin/superloop-pack.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/src/cut.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/src/tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/tests/consumer.py"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/tests/cut.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/tests/cut_acceptance.py"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-run-report/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-run-report/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-run-report/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-run-report/src/bin/superloop-run-report.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-run-report/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-run-report/src/tests/mod.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-run-report/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-runtime/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-runtime/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-runtime/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-runtime/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-runtime/src/prepare.sh"
+
+[[include.rows]]
+pattern = "packages/superloop-runtime/src/runtime.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-runtime/src/watchdog.sh"
+
+[[include.rows]]
+pattern = "packages/superloop-runtime/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-steward/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-steward/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-steward/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-steward/src/cursor.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-steward/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-steward/src/polling_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-steward/src/protocol.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-steward/src/ssh.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-steward/src/transcript.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-steward/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop/src/bridges.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/src/command.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/src/command/agent.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/src/command/judgement.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/src/command/policy.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/src/command/protocol_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/src/command/store.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/src/dispatch.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/src/session.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/command_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/command_custody.py"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/command_door.py"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/command_gateway.py"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/session_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/subprocess_contract/termination.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/support/mod.rs"
+
+[[include.rows]]
+pattern = "public-set.toml"
+
+[[include.rows]]
+pattern = "rust-toolchain.toml"
+
+[[include.rows]]
+pattern = "tests/conductor-fake-notify"
+
+[[include.rows]]
+pattern = "tests/fake-ssh"
+
+[[include.rows]]
+pattern = "tests/gate-sample-run.sh"
+
+[[include.rows]]
+pattern = "tests/gate-slot-run.sh"
+
+[[include.rows]]
+pattern = "tests/gateway-runner-run.sh"
+
+[[include.rows]]
+pattern = "tests/loop-codex-home-run.sh"
+
+[[include.rows]]
+pattern = "tests/meson.build"
+
+[[include.rows]]
+pattern = "tests/run.sh"
+
+[[include.rows]]
+pattern = "tests/steward-fake-claude"
+
+[[include.rows]]
+pattern = "tests/steward-fake-exporter"
+
+[[include.rows]]
+pattern = "tests/steward-fake-ssh"
+
+[[include.rows]]
+pattern = "tests/steward-run.sh"
+
+[[include.rows]]
+pattern = "tests/version-smoke.py"
+
+[public]
+licence_code = "LICENSE-CODE"
+licence_docs = "LICENSE-DOCS"
+readme = "README.md"
+
+[[reserved.rows]]
+pattern = "docs/public-pack-provenance.toml"
+reason = "Generated pack provenance member; absent from the source tree."
+
+[[reserved.rows]]
+pattern = "docs/briefs/"
+reason = "Private task briefs."
+
+[[reserved.rows]]
+pattern = "docs/drafts/"
+reason = "Unpublished drafts."
+
+[[reserved.rows]]
+pattern = "docs/BACKLOG.md"
+reason = "Internal work queue."
+
+[[reserved.rows]]
+pattern = "briefs/"
+reason = "Private task briefs."
+
+[[reserved.rows]]
+pattern = "gateway/"
+reason = "Internal gateway state and operations."

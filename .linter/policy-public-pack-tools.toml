@@ -1,0 +1,8 @@
+# The release check supplies the instance register outside the tracked tree.
+namespace = "class.linter.policy.public-pack.values-absent"
+version = [1, 0, 0]
+
+[owners.TOOLS]
+surface = "*VCHAR"
+values = "local/public-pack-burn.toml"
+activation = "public-pack"

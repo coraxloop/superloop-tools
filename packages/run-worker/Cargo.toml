@@ -1,0 +1,26 @@
+[package]
+name = "run-worker"
+description = "Per-worker UID preparation, launch, and waiting for dispatched lanes"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 3
+release-group = "run-worker"
+
+[dependencies]
+superloop-cli-common.workspace = true
+loop-home.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "worker-run"
+path = "src/bin/worker-run.rs"

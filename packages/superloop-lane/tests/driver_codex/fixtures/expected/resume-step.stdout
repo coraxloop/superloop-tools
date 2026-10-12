@@ -1,0 +1,1 @@
+RUN-REPORT lane=work exit=0 wall=Ns budget=60s verdict=ok dir=$RUN_DIR

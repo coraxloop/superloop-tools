@@ -1,0 +1,12 @@
+[Unit]
+Description=Reclaim Cargo build output for staff account %i every two hours
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=2h
+AccuracySec=5min
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

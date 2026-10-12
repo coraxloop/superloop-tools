@@ -1,0 +1,28 @@
+PASS P1 stdin not JSON -> allow wall=<elapsed>
+PASS P2 transcript missing (toggle on) -> allow wall=<elapsed>
+PASS P3 toggle OFF skips everything -> allow wall=<elapsed>
+FAIL P4 fresh arm, pending (100s into 1800s) -> block wall=<elapsed>
+PASS P5 previous turn's arm still pending (turn boundary ratifies) -> allow wall=<elapsed>
+PASS P6 arm expired (2000s > 1800+120) -> block wall=<elapsed>
+PASS P7 stop:true after arm disarms -> block wall=<elapsed>
+FAIL P8 re-arm after stop is pending -> block wall=<elapsed>
+PASS P9 call without result is no evidence -> block wall=<elapsed>
+PASS P10 errored call is no evidence -> block wall=<elapsed>
+PASS P11 horizon: entry older than max window ends scan -> block wall=<elapsed>
+PASS P12 malformed arm (no delaySeconds) is no evidence -> block wall=<elapsed>
+FAIL P13 out-of-range delay clamped to 3600 (pending) -> block wall=<elapsed>
+PASS P14 clamped delay still expires (3800s > 3600+120) -> block wall=<elapsed>
+PASS P15 sidechain arm is invisible -> block wall=<elapsed>
+PASS P16 stamps/fields quoted in prose never count -> block wall=<elapsed>
+PASS P17 cap: blocks 1-3 (feedback entries keep marker stable) -> block
+PASS P18 cap drained with violation: EXCEPTION_UNPROMPTED_LAPSE allows + message -> allow +warn
+PASS P20 prompted arm (guard feedback first) draws no warning -> allow wall=<elapsed>
+FAIL P21 warning fires once per user turn (dedup on re-eval) -> block wall=<elapsed>
+PASS P22 unprompted stop:true (disarm) is exempt from the warning -> block wall=<elapsed>
+FAIL P23 expired unprompted arm: EXCEPTION_UNPROMPTED_UNARMED blocks + warns -> block wall=<elapsed>
+FAIL P24 new user turn resets the warning marker -> block wall=<elapsed>
+PASS P25 no violation, cap drained: pure EXCEPTION_LAPSE (blocks clean, then allow + message) -> allow
+PASS P26 lapse resolves: next user turn re-enters PROMPT (fresh cap) -> block wall=<elapsed>
+PASS P19 timing: allow <elapsed>, first-eval block <elapsed> (both <1s), post-block retry <elapsed> (grace ~1s)
+
+20/26 paths verified in <elapsed>; FAILED: P4 fresh arm, pending (100s into 1800s), P8 re-arm after stop is pending, P13 out-of-range delay clamped to 3600 (pending), P21 warning fires once per user turn (dedup on re-eval), P23 expired unprompted arm: EXCEPTION_UNPROMPTED_UNARMED blocks + warns, P24 new user turn resets the warning marker

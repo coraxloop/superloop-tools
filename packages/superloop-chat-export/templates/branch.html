@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ loop_name }} · {{ heading }}{% endblock %}
+{% block body %}{% import "macros.html" as m %}
+<header class="site">
+<h1>{{ loop_name }} · {{ heading }}</h1>
+<p class="span">{{ span }}</p>
+{% if back %}<p class="back">This branch leaves the conversation at <a href="{{ back.href }}">{{ back.label }}</a>.</p>{% endif %}
+{{ m.nav(nav) }}
+</header>
+{% include "prompts.html" %}
+<main>
+{% include "turns.html" %}
+</main>
+<footer class="site">
+{{ m.nav(nav) }}
+</footer>
+{% endblock %}

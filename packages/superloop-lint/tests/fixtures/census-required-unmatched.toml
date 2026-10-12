@@ -1,0 +1,7 @@
+version = [1, 0, 0]
+
+[[paths]]
+path = "plans/*.md"
+purpose = "Unmatched pattern."
+required = true
+template = false

@@ -1,0 +1,7 @@
+set -e; . /srv/orchestration-pack/env/rust.sh; cd /srv/orchestration-pack/worktree
+git fetch -q origin '+refs/lanes/verify-worktree:refs/lanes/verify-worktree'
+git checkout -qf --detach refs/lanes/verify-worktree && git clean -qfdx
+echo '== fmt =='; time nice -n19 cargo fmt --all -- --check
+echo '== clippy =='; time nice -n19 cargo clippy --workspace --all-targets --locked -- -D warnings
+echo '== test =='; time nice -n19 cargo test  -p alpha -p beta  --locked
+

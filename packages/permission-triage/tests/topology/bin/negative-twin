@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+[ "$#" -eq 1 ]
+[ "$1" = "TRIAGE_NEGATIVE_SENTINEL" ]
+fixture_root=${PERMISSION_TRIAGE_FIXTURE_ROOT:?}
+state_root=${PERMISSION_TRIAGE_STATE_ROOT:?}
+[ "$state_root" = "$fixture_root/state" ]

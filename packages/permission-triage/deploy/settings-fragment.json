@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "@PERMISSION_TRIAGE_ADAPTER_BIN@ pre-tool-use",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

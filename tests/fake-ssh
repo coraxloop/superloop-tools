@@ -1,0 +1,72 @@
+#!/bin/bash
+set -u
+
+LOG=${FAKE_SSH_LOG:?FAKE_SSH_LOG is required}
+MODE=${FAKE_SSH_MODE:-empty}
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+trap 'status=$?; printf "EXIT\t%s\n" "$status" >> "$LOG"' EXIT
+
+{
+  printf 'CALL'
+  for arg in "$@"; do
+    printf '\t%s' "$arg"
+  done
+  printf '\n'
+} >> "$LOG"
+
+host=
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    -o|-F)
+      shift
+      [ "$#" -gt 0 ] || exit 97
+      shift
+      ;;
+    *)
+      host=$1
+      break
+      ;;
+  esac
+done
+
+if [ -n "${FAKE_SSH_SNAPSHOT:-}" ]; then
+  while IFS= read -r line; do printf '%s\n' "$line"; done < "$FAKE_SSH_SNAPSHOT/$host.reply"
+  read -r status < "$FAKE_SSH_SNAPSHOT/$host.status"
+  exit "$status"
+fi
+
+case $MODE in
+  all-fail)
+    exit 255
+    ;;
+  partial)
+    if [ "$host" = alpha ]; then
+      exit 255
+    fi
+    printf '%s\n' "-- cursor: cursor-$host"
+    ;;
+  empty)
+    printf '%s\n' "-- cursor: cursor-$host"
+    ;;
+  admin-only)
+    printf '%s\n' "from=admin sender=test file=/messages/$host-admin" "-- cursor: cursor-$host-admin-new"
+    ;;
+  mixed)
+    printf '%s\n' \
+      "from=admin sender=test file=/messages/$host-admin" \
+      "from=user sender=test file=/messages/$host-user" \
+      "-- cursor: cursor-$host-mixed-new"
+    ;;
+  content|user-only)
+    printf '%s\n' "from=user sender=test file=/messages/$host" "-- cursor: cursor-$host-new"
+    ;;
+  slow)
+    exec sleep "${FAKE_SSH_SLEEP_SECONDS:-30}"
+    ;;
+  *)
+    echo "unknown fake ssh mode: $MODE" >&2
+    exit 98
+    ;;
+esac

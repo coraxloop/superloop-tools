@@ -1,0 +1,6 @@
+namespace = "class.linter.policy.spdx"
+version = [1, 0, 0]
+
+[set.identifier]
+
+[set.copyright]

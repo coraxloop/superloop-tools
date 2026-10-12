@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "properties": {
+    "classification": {
+      "type": "string",
+      "enum": [
+        "routine-general",
+        "routine-superloop",
+        "safe",
+        "advanced-read-only",
+        "agent-error",
+        "suspicious"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "loop",
+        "estate"
+      ]
+    }
+  },
+  "required": [
+    "classification",
+    "reason",
+    "scope"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,142 @@
+{
+  "action": "build",
+  "base_image": "registry.example/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "build_environment": {
+    "codex_bin": "@HOME@/codex",
+    "codex_host_bin": "@HOME@/codex-code-mode-host",
+    "podman_bin": "@HOME@/podman",
+    "podman_environment": {
+      "HOME": "@HOME@",
+      "LANG": "C.UTF-8",
+      "PATH": "/usr/bin:/bin"
+    },
+    "template_dir": "@DATA@"
+  },
+  "changed": true,
+  "check": "build and bare image ID inspect completed; package inventory is nonempty",
+  "children": [
+    {
+      "argv": [
+        "build",
+        "--pull=never",
+        "--no-cache",
+        "--network=none",
+        "--tag",
+        "localhost/superloop-lane-codex:0.1.0-1699954-1792281323988467402",
+        "--file",
+        "@HOME@/.cache/tmp/superloop-lane-build-alpha-1699954-1792281323988467402/Containerfile",
+        "@HOME@/.cache/tmp/superloop-lane-build-alpha-1699954-1792281323988467402"
+      ],
+      "cwd": "@HOME@",
+      "direct_private_directory_fd": null,
+      "directory_transfer_socket_fd": null,
+      "environment": {
+        "HOME": "@HOME@",
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/bin:/bin"
+      },
+      "inherited_fd": null,
+      "program": "@HOME@/podman",
+      "timeout_seconds": 900,
+      "transferred_directory_descriptors": []
+    },
+    {
+      "argv": [
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        "localhost/superloop-lane-codex:0.1.0-1699954-1792281323988467402"
+      ],
+      "cwd": "@HOME@",
+      "direct_private_directory_fd": null,
+      "directory_transfer_socket_fd": null,
+      "environment": {
+        "HOME": "@HOME@",
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/bin:/bin"
+      },
+      "inherited_fd": null,
+      "program": "@HOME@/podman",
+      "timeout_seconds": 30,
+      "transferred_directory_descriptors": []
+    },
+    {
+      "argv": [
+        "run",
+        "--rm",
+        "--network=none",
+        "--pull=never",
+        "--entrypoint",
+        "/usr/bin/cat",
+        "IMAGE_ID_FROM_INSPECT",
+        "/usr/share/superloop/package-inventory.txt"
+      ],
+      "cwd": "@HOME@",
+      "direct_private_directory_fd": null,
+      "directory_transfer_socket_fd": null,
+      "environment": {
+        "HOME": "@HOME@",
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/bin:/bin"
+      },
+      "inherited_fd": null,
+      "program": "@HOME@/podman",
+      "timeout_seconds": 60,
+      "transferred_directory_descriptors": []
+    }
+  ],
+  "codex_exec_probe": {
+    "argv": [
+      "exec",
+      "--help"
+    ],
+    "codex_sha256": "31c12232ed6a1b96eff94f881bb812344585560709653d75ee13450863e3bff2",
+    "companions": [
+      {
+        "name": "codex-code-mode-host",
+        "path": "/usr/libexec/superloop/codex-code-mode-host",
+        "sha256": "31c12232ed6a1b96eff94f881bb812344585560709653d75ee13450863e3bff2"
+      }
+    ],
+    "required_options": [
+      "--json",
+      "--sandbox",
+      "--add-dir",
+      "--skip-git-repo-check",
+      "-C",
+      "-o"
+    ],
+    "stdout": "  --json\n  --sandbox\n  --add-dir\n  --skip-git-repo-check\n  -C, --cd\n  -o, --output-last-message\n"
+  },
+  "codex_host_probe": {
+    "argv": [
+      "--help"
+    ],
+    "sha256": "31c12232ed6a1b96eff94f881bb812344585560709653d75ee13450863e3bff2",
+    "stdout": "codex-cli 0.1.0\n"
+  },
+  "codex_host_sha256": "31c12232ed6a1b96eff94f881bb812344585560709653d75ee13450863e3bff2",
+  "codex_image_program": "/usr/libexec/superloop/codex",
+  "codex_sha256": "31c12232ed6a1b96eff94f881bb812344585560709653d75ee13450863e3bff2",
+  "codex_source": "https://fixture.example/codex",
+  "codex_version": "0.1.0",
+  "command": "build",
+  "image_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "init_sha256": "885006a379542d1a65f9a42b2bcea0dd2fec62644678b5caa2c2795ef0236142",
+  "log": "@HOME@/.config/loops/alpha/image-build.log",
+  "old_image_digest": null,
+  "package_inventory": [
+    "glibc 1",
+    "socat 1"
+  ],
+  "retired_contexts": [],
+  "schema": 1,
+  "settings_written": [
+    "image_digest",
+    "backend_argv.codex"
+  ],
+  "template_sha256": "3091d5f4bee50454ace738280d3b7cfa198d237b105d4aecca6b4b74cc153bbf",
+  "tools_commit": "unrecorded",
+  "wall_seconds": 0.260203331
+}

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Meson substitutes the release group's manifest or ledger version.
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
+  printf '%s\n' '{"schema":1,"command":"gateway-runner","kind":"version","message":"version requested","fields":{"type":"version","version":"gateway-runner @VERSION@"}}' >&2
+  exit 0
+fi
+# gateway-runner — production transport for the private gateway service.
+# Invoked by gateway-service as: gateway-runner <mirror-checkout> <argv...>
+# Env from the gateway: LANE_GATEWAY_WALL_BUDGET_SECONDS, LANE_GATEWAY_MIRROR_COMMIT,
+# and, from a gateway that passes it, LANE_GATEWAY_MIRROR_REMOTE (the registration's
+# <alias>:<bare-mirror-path>), which names the node and the mirror PER LANE so one serve
+# places its lanes on either compute node; without it the caller's SSH alias
+# and lanes root apply.
+# Conveys budget and commit to the server wrapper explicitly.
+# The remote script puts the account's own ~/.local/bin ahead of the shared toolchains:
+# Shared toolchains are root-owned, so a loop's own tools (a test's helper binary,
+# say) live in its home, and a registered command must see what the account sees.
+# The lane identity derives from the checkout basename (…/checkouts/<lane>),
+# which names the bare mirror (…/lanes/<lane>.git) and the gateway ref.
+set -euo pipefail
+
+if [ -z "${GATEWAY_RUNNER_SSH:-}" ]; then
+  echo "gateway-runner: missing GATEWAY_RUNNER_SSH" >&2
+  exit 2
+fi
+# These paths belong to the deployment, never to the runner's defaults.
+for required in GATEWAY_RUNNER_REMOTE_WRAPPER GATEWAY_RUNNER_RUST_ENV GATEWAY_RUNNER_LANES; do
+  if [ -z "${!required:-}" ]; then
+    echo "gateway-runner: missing $required" >&2
+    exit 2
+  fi
+  if [[ ${!required} != /* || ${!required} == *$'\n'* || ${!required} == *$'\r'* ]]; then
+    echo "gateway-runner: $required must be an absolute single-line path" >&2
+    exit 2
+  fi
+done
+printf -v remote_wrapper '%q' "$GATEWAY_RUNNER_REMOTE_WRAPPER"
+printf -v remote_environment '%q' "$GATEWAY_RUNNER_RUST_ENV"
+SSH_ALIAS=$GATEWAY_RUNNER_SSH
+LANES_ROOT="${GATEWAY_RUNNER_LANES:?gateway-runner: missing GATEWAY_RUNNER_LANES}"
+
+checkout="$1"; shift
+lane="$(basename "$checkout")"
+mirror_bare="$LANES_ROOT/$lane.git"
+case "${LANE_GATEWAY_MIRROR_REMOTE:-}" in
+  ?*:/*)
+    SSH_ALIAS="${LANE_GATEWAY_MIRROR_REMOTE%%:*}"
+    mirror_bare="${LANE_GATEWAY_MIRROR_REMOTE#*:}"
+    ;;
+esac
+mirror_ref="refs/lanes/gateway/$lane"
+budget="${LANE_GATEWAY_WALL_BUDGET_SECONDS:?}"
+commit="${LANE_GATEWAY_MIRROR_COMMIT:?}"
+
+quoted=""
+for a in "$@"; do quoted+=$(printf ' %q' "$a"); done
+
+# The gateway sets CARGO_TARGET_DIR on this (local) process; ssh does not
+# forward it, and the remote profile would re-export the shared target dir.
+# Re-export it explicitly inside the remote script (backlog entry 51 interim).
+target_export=":"
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  target_export="export CARGO_TARGET_DIR=$(printf '%q' "$CARGO_TARGET_DIR")"
+fi
+
+# ServerAlive probes make an established dead peer visible in about two minutes;
+# ConnectTimeout bounds the TCP connect at thirty seconds so the gateway can audit the loss.
+pid=
+interrupted=0
+terminate_child() {
+  interrupted=1
+  if [ -n "$pid" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+}
+trap terminate_child TERM INT HUP
+status=0
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 -o ConnectTimeout=30 "$SSH_ALIAS" "$remote_wrapper bash -s" <<REMOTE &
+set -euo pipefail
+. $remote_environment
+export PATH=$(printf '%q' "${GATEWAY_RUNNER_REMOTE_PATH:?gateway-runner: missing GATEWAY_RUNNER_REMOTE_PATH}")
+$target_export
+cd $(printf '%q' "$checkout")
+git fetch -q $(printf '%q' "$mirror_bare") "+$mirror_ref:refs/gateway/incoming"
+git checkout -qf $(printf '%q' "$commit")
+git clean -qfd
+timeout $(printf '%q' "$budget")$quoted
+REMOTE
+pid=$!
+wait "$pid" || status=$?
+if [ "$interrupted" -ne 0 ]; then
+  wait "$pid" || status=$?
+fi
+trap - TERM INT HUP
+if [ "$status" -eq 255 ]; then
+  echo "gateway-runner: ssh transport failed (exit 255) to $SSH_ALIAS" >&2
+fi
+exit "$status"

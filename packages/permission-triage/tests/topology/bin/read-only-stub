@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+fixture_root=${PERMISSION_TRIAGE_FIXTURE_ROOT:?}
+state_root=${PERMISSION_TRIAGE_STATE_ROOT:?}
+[ "$state_root" = "$fixture_root/state" ]
+exit 0

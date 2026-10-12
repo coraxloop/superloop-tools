@@ -1,0 +1,16 @@
+{
+  "authority": "python",
+  "expected_stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"ORCHESTRATION_SCOPE_MARKER v1 sha256=6ac9f156a3b4475ed2731f61db1381590b153ce9897d108506c62dd5aa7707a5 mtime=1700000000123456789\\n# Fixture rules\\n\\nKeep evidence exact.\\nORCHESTRATION_SCOPE_MARKER_END v1 sha256=6ac9f156a3b4475ed2731f61db1381590b153ce9897d108506c62dd5aa7707a5\"}}",
+  "name": "resume-marker-absent",
+  "payload": {
+    "cwd": "/fixture/project",
+    "hook_event_name": "SessionStart",
+    "session_id": "fixture/session",
+    "source": "resume",
+    "transcript_path": "<TRANSCRIPT>"
+  },
+  "state_precondition": {
+    "marker_witness": false,
+    "prior": "fresh-startup"
+  }
+}

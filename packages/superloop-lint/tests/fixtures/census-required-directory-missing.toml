@@ -1,0 +1,7 @@
+version = [1, 0, 0]
+
+[[paths]]
+path = "gone/"
+purpose = "Absent directory."
+required = true
+template = false

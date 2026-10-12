@@ -1,0 +1,32 @@
+[package]
+name = "superloop"
+description = "Loop entry and neutral session commands"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[package.metadata.superloop]
+tier = 2
+release-group = "superloop"
+
+[dependencies]
+execute-command.workspace = true
+request-core.workspace = true
+nix.workspace = true
+loop-home.workspace = true
+session-core.workspace = true
+superloop-cli-common.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+libc.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

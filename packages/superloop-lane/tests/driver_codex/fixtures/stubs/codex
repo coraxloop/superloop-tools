@@ -1,0 +1,151 @@
+#!/bin/sh
+set -eu
+
+: "$ORACLE_ARGV" "$ORACLE_STDIN" "$ORACLE_CWD" "$ORACLE_CODEX_HOME"
+: "$ORACLE_MODE" "$ORACLE_EXIT" "$CODEX_HOME"
+
+: >"$ORACLE_ARGV"
+for argument do
+    printf '%s\n' "$argument" >>"$ORACLE_ARGV"
+done
+/bin/cat >"$ORACLE_STDIN"
+printf '%s\n' "$PWD" >"$ORACLE_CWD"
+printf '%s\n' "$CODEX_HOME" >"$ORACLE_CODEX_HOME"
+
+# A case that must know which process the driver is supervising names a path
+# here; only the child itself can state that identity before it is killed.
+if [ -n "${ORACLE_PID:-}" ]; then
+    printf '%s\n' "$$" >"$ORACLE_PID"
+fi
+
+output=""
+previous=""
+for argument do
+    if [ "$previous" = "-o" ]; then
+        output="$argument"
+        break
+    fi
+    previous="$argument"
+done
+[ -n "$output" ]
+
+case "$ORACLE_MODE" in
+    suspend-*)
+        count=0
+        if [ -e "$ORACLE_ACK" ]; then read -r count < "$ORACLE_ACK"; fi
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$ORACLE_ACK"
+        if [ "$ORACLE_MODE" != suspend-no-thread ]; then
+            printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        fi
+        awake=$((count * ${ORACLE_AWAKE:-1}))
+        boot=$((awake + count * ${ORACLE_GAP:-900}))
+        if [ "$ORACLE_MODE" = suspend-first-gap ]; then boot=$((awake + 900)); fi
+        clock=${CODEX_LANE_TEST_CLOCK#@}
+        printf '%s:%s\n' "$awake" "$boot" > "$clock.next"
+        mv "$clock.next" "$clock"
+        case "$ORACLE_MODE" in
+            suspend-terminated) kill -TERM "$PPID"; exit 1 ;;
+            suspend-killed) kill -KILL "$$" ;;
+            suspend-attempt-wall)
+                printf 'attempt-wall wall_seconds=9 bound_seconds=8\n' > "$LANE_ATTEMPT_END"
+                exit 1
+                ;;
+        esac
+        if [ "$ORACLE_MODE" = suspend-complete ] || [ "$ORACLE_MODE" = suspend-trailing ] || { [ "$ORACLE_MODE" = suspend-once ] && [ "$count" -gt 1 ]; }; then
+            printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"recovered"}}'
+            printf '%s\n' '{"type":"turn.completed","usage":{}}'
+            if [ "$ORACLE_MODE" = suspend-trailing ]; then printf '%s\n' '{"type":"notice"}'; fi
+            printf '%s' recovered > "$output"
+            exit 0
+        fi
+        exit 1
+        ;;
+    terminal)
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        printf '%s\n' '{"type":"turn.completed","usage":{}}'
+        printf '%s' 'final answer' >"$output"
+        ;;
+    normal)
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}'
+        printf '%s' 'final answer' >"$output"
+        ;;
+    resume-turn-first)
+        printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}'
+        printf '%s' 'resumed answer' >"$output"
+        ;;
+    fallback)
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"kept answer"}}'
+        printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":""}}'
+        : >"$output"
+        ;;
+    growing)
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        while [ ! -e "$ORACLE_RELEASE" ]; do :; done
+        printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"late answer"}}'
+        printf '%s' 'late answer' >"$output"
+        : >"$ORACLE_ACK"
+        ;;
+    budget-wait)
+        while [ ! -e "$ORACLE_RELEASE" ]; do :; done
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"late answer"}}'
+        printf '%s' 'late answer' >"$output"
+        ;;
+    late)
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"late answer"}}'
+        printf '%s' 'late answer' >"$output"
+        ;;
+    hang)
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        while :; do :; done
+        ;;
+    completed-then-idle)
+        # A turn that finished and a child that has not yet gone away: the
+        # shape a driver meets when it decides a step has stopped growing.
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"final answer"}}'
+        printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":17338944,"cached_input_tokens":17018496,"output_tokens":65375}}'
+        printf '%s' 'final answer' >"$output"
+        while [ ! -e "$ORACLE_RELEASE" ]; do :; done
+        ;;
+    silent-hang)
+        while :; do :; done
+        ;;
+    fail)
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        exit "$ORACLE_EXIT"
+        ;;
+    capacity-then-ok|capacity-large-then-ok)
+        if [ ! -e "$ORACLE_CAPACITY_MARKER" ]; then
+            : >"$ORACLE_CAPACITY_MARKER"
+            printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+            if [ "$ORACLE_MODE" = capacity-large-then-ok ]; then
+                awk 'BEGIN { for (i=0; i<70000; i++) print "{\"type\":\"notice\",\"text\":\"padding\"}" }'
+            fi
+            printf '%s\n' '{"type":"error","message":"The selected model is at capacity"}'
+            printf '%s\n' '{"type":"turn.failed","error":{"message":"The selected model is at capacity"}}'
+            exit 1
+        fi
+        case " $* " in *' resume session-1 - '*) ;; *) exit 98;; esac
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"read-back"}}'
+        printf '%s\n' '{"type":"turn.completed","usage":{}}'
+        printf '%s' 'read-back' >"$output"
+        ;;
+    capacity-always)
+        printf '%s\n' '{"type":"thread.started","thread_id":"session-1"}'
+        printf '%s\n' '{"type":"error","message":"The selected model is at capacity"}'
+        exit 1
+        ;;
+    capacity-no-thread)
+        printf '%s\n' '{"type":"error","message":"The selected model is at capacity"}'
+        exit 1
+        ;;
+    *)
+        exit 99
+        ;;
+esac
