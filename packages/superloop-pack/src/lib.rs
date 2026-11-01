@@ -16,6 +16,8 @@ use sha2::{Digest as _, Sha256};
 
 mod cut;
 pub use cut::{CutError, CutReport, CutRequest, cut, write_cut_report};
+mod replay;
+pub use replay::{ReplayError, ReplayReport, ReplayRequest, replay, write_replay_report};
 
 #[cfg(test)]
 mod tests;

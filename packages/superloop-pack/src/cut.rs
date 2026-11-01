@@ -587,6 +587,17 @@ pub fn project_tree(
     manifest: &Manifest,
     included: Vec<String>,
 ) -> Result<Projection, CutError> {
+    project_tree_with_policy(request, commit, manifest, included, None, false)
+}
+
+pub fn project_tree_with_policy(
+    request: &CutRequest<'_>,
+    commit: &str,
+    manifest: &Manifest,
+    included: Vec<String>,
+    policy_bytes: Option<&[u8]>,
+    readme_fallback: bool,
+) -> Result<Projection, CutError> {
     let root = request.repository_root;
     let manifest_path = request.manifest;
     let burn_register = request.burn_register;
@@ -602,10 +613,15 @@ pub fn project_tree(
         }
         selected.insert(path, entry.clone());
     }
+    let readme_source = if readme_fallback {
+        "README.md"
+    } else {
+        &manifest.public.readme
+    };
     for required in [
-        &manifest.public.licence_code,
-        &manifest.public.licence_docs,
-        &manifest.public.readme,
+        manifest.public.licence_code.as_str(),
+        manifest.public.licence_docs.as_str(),
+        readme_source,
     ] {
         if !selected
             .get(required)
@@ -617,15 +633,16 @@ pub fn project_tree(
         }
     }
     let readme = selected
-        .get(&manifest.public.readme)
+        .get(readme_source)
         .cloned()
         .ok_or_else(|| refuse("missing public README"))?;
-    selected.remove(&manifest.public.readme);
+    selected.remove(readme_source);
     selected.insert("README.md".to_owned(), readme);
     let generated = unpublished_register(
         root,
         commit,
         manifest,
+        readme_source,
         selected.keys(),
         burn_register,
         linter,
@@ -642,7 +659,7 @@ pub fn project_tree(
             None => git(root, &["cat-file", "blob", object])?,
         };
         let content = if Path::new(path) == manifest_path {
-            public_manifest(&content, selected.keys())?
+            public_manifest(policy_bytes.unwrap_or(&content), selected.keys())?
         } else {
             content
         };
@@ -752,6 +769,7 @@ fn unpublished_register<'a>(
     root: &Path,
     commit: &str,
     manifest: &Manifest,
+    readme_source: &str,
     included: impl Iterator<Item = &'a String>,
     burn_register: Option<&Path>,
     linter: Option<&Path>,
@@ -759,7 +777,7 @@ fn unpublished_register<'a>(
     let mut included: std::collections::BTreeSet<_> = included.cloned().collect();
     // The root's public text is read from this source before it is consumed.
     included.remove("README.md");
-    included.insert(manifest.public.readme.clone());
+    included.insert(readme_source.to_owned());
     let mut generated = BTreeMap::new();
     if !included.contains(".linter/owners.toml") {
         return Ok(generated);

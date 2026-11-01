@@ -28,6 +28,8 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum PackCommand {
+    /// Replay linear source history while preserving original commit metadata.
+    Replay(ReplayArgs),
     /// Cut the declared public tree into independent unsigned history.
     Cut {
         #[arg(long)]
@@ -111,6 +113,7 @@ fn run_main(started: Instant) -> ExitCode {
 
 fn run_command(command: PackCommand, started: Instant) -> ExitCode {
     match command {
+        PackCommand::Replay(args) => run_replay(args, started),
         PackCommand::Cut {
             tag,
             manifest,
@@ -281,4 +284,64 @@ fn emit_stderr(diagnostic: &[u8]) {
     let stderr = io::stderr();
     let mut output = stderr.lock();
     let _ignored = output.write_all(diagnostic).and_then(|()| output.flush());
+}
+
+#[derive(Debug, clap::Args)]
+struct ReplayArgs {
+    #[arg(long)]
+    since: String,
+    #[arg(long)]
+    tag: String,
+    #[arg(long)]
+    manifest: PathBuf,
+    #[arg(long)]
+    out: PathBuf,
+    #[arg(long)]
+    previous: PathBuf,
+    #[arg(long)]
+    public_root: String,
+    #[arg(long)]
+    burn_register: PathBuf,
+    #[arg(long)]
+    linter: PathBuf,
+    #[arg(long)]
+    accept_generated_drift: bool,
+}
+
+fn run_replay(args: ReplayArgs, started: Instant) -> ExitCode {
+    let ReplayArgs {
+        since,
+        tag,
+        manifest,
+        out,
+        previous,
+        public_root,
+        burn_register,
+        linter,
+        accept_generated_drift,
+    } = args;
+
+    let Ok(repository_root) = std::env::current_dir() else {
+        return publish_boundary_failure(INTERNAL_DIAGNOSTIC, started.elapsed(), 1);
+    };
+    let result = superloop_pack::replay(superloop_pack::ReplayRequest {
+        repository_root: &repository_root,
+        since: &since,
+        tag: &tag,
+        manifest: &manifest,
+        out: &out,
+        previous: &previous,
+        public_root: &public_root,
+        burn_register: &burn_register,
+        linter: &linter,
+        accept_generated_drift,
+    });
+    let status = if result.is_ok() { 0 } else { 3 };
+    if superloop_pack::write_replay_report(&result, started.elapsed(), &mut io::stdout().lock())
+        .is_err()
+    {
+        emit_stderr(PUBLICATION_DIAGNOSTIC);
+        return CommandExit::Failure.exit_code();
+    }
+    ExitCode::from(status)
 }
