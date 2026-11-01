@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-01
+
+### Added
+
+- `superloop-lint` reports `inactive_prose_owner`: a declared owner whose partitions attribute Markdown sources but which activates no `labels.mints-well-formed` row, because such an owner's prose silently left the corpus and read like a clean result.
+- `superloop-lint` accepts `nested = [{ owner, root, reason }]` in ``.linter/owners.toml`` for a nested corpus checked as its own repository; the loader refuses an unregistered owner, a root outside the owner's partitions, a root without a loadable `.linter/` snapshot, or an empty reason.
+- `superloop-lint` defers an activated pair whose row names a repository-local programme (`programme = { package, binary }`) instead of refusing an uncatalogued policy; the report gains `deferred` and `deferred_policies`, the pair's list table is accepted by shape, and `clean` stays the catalogued policies' verdict.
+- `superloop-pack cut` takes the default annotated tag title from the manifest's required `[public] name` (`NAME TAG`, then the CHANGELOG section body; `--tag-message` overrides verbatim), and the shared reader refuses a blank or multi-line name.
+- `superloop-pack cut` and the linter's `public_set` check refuse an include row that selects the root ``README.md`` while `[public] readme` names a different source, naming the selector to turn into an exclusion with a reason.
+
+### Changed
+
+- The unresolved-import finding names the owner and prefix it searched, and says when the owner activates no `labels.mints-well-formed` row.
+
+### Fixed
+
+- Nested-root containment is judged against the tracked universe, so an untracked or ignored file under a nested root no longer refuses the declaration.
+- A burn or lower rewrite of ``.linter/lists.toml`` keeps the bytes and position of list tables deferred to a repository programme.
+- A `programme` row checked outside a Git checkout refuses with a message naming the programme check and its reason.
+- The pack's real-linter fixtures activate their prose, so the fixtures pass the `inactive_prose_owner` finding.
+
 ## [0.1.0] - 2026-10-12
 
 ### Added
@@ -19,5 +40,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/coraxloop/superloop-tools/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/coraxloop/superloop-tools/releases/tag/v0.1.0
