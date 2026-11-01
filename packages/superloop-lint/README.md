@@ -91,6 +91,8 @@ A first-level Markdown heading is read as the environment `Document`, irrespecti
 
 ## Allowance declarations · `sec:indexlinter:allowance-declarations`
 
+Every declared owner with attributed Markdown sources, including the root and crateless owners, must activate ``labels.mints-well-formed`` with its paired list; otherwise configuration fails rather than silently omitting that owner's prose.
+
 Each activated owner-policy pair needs exactly one list in ``.linter/lists.toml``, using the policy's codec. A fingerprint policy's empty list is `allowances = []`; a nonempty list contains tables, not strings:
 
 ```toml
@@ -230,6 +232,10 @@ The generic repository's bare checkout requires the public-pack snapshot configu
 If this fails: a reader cannot act on what the run found. Locations count lines and columns from one and count columns in characters, so a reported position can be typed straight into an editor rather than landing past the text an accented letter displaced, and an offset beyond the end clamps rather than costing the whole run. The finding variants are kept apart on purpose because the repairs differ — one the sweep writes, one it rewrites, one only renaming fixes, one nothing may paper over — and the stable codes beside them are what let a consumer select the findings it cares about without parsing sentences. The configuration object's `activations` list carries one entry per activated pair — its owner, its policy, the `paths` the declared partition attributes to that owner, the `surface_paths` the policy's own declared surface reaches over the participating corpus where its census domain declares one, and the `findings` this binary ties back to the pair — beside `unattributed_findings`, the findings no pair produced, so that an activation governing nothing reads differently from one that measured a share and found nothing in it.
 
 A finding's class is its `code` member.
+
+|Code|Meaning|
+|----|-------|
+|``inactive_prose_owner``|Failure naming an owner, its Markdown source count, and the missing ``labels.mints-well-formed`` activation.|
 
 The ``unresolved_citation`` finding names the searched owner and registered prefix for an imported label missing from that owner's registry; an unknown prefix remains ``unregistered_prefix``.
 

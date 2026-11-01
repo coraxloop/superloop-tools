@@ -4,6 +4,7 @@
 
 |Test|Area|Claim|
 |----|----|-----|
+|(`test:integration:inactive-prose-fails-the-check-command`)|cli|An inactive root's Markdown fails the command until prose activation is declared. # Panics Panics only if fixture IO or command execution fails, or the verdict differs.|
 |(`test:integration:macro-doc-attributes-share-the-test-standard-place`)|carrier|A property-test macro's source-written documentation mints the same claim through line comments, separate doc attributes and one multiline attribute. Each form resolves from Markdown through the production entry. # Panics Panics only if fixture IO fails or the production check loses a macro carrier.|
 |(`test:integration:invalid-macro-carriers-refuse-by-name`)|carrier|A marked macro body that cannot be read refuses by name, and a misplaced claim remains a placement failure instead of being rescued by its spelling. # Panics Panics only if fixture IO fails or the check accepts an invalid macro carrier.|
 |(`test:integration:python-docstrings-participate-in-production-resolution`)|carrier|An owned Python unittest method mints a claim that a Markdown record can cite, and the active profiles count its docstring as a labelled test site. # Panics Panics only if fixture IO fails or the production check violates the contract.|

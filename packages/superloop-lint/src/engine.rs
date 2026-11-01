@@ -818,6 +818,7 @@ impl<'a> Engine<'a> {
                 label: label.clone(),
                 location: held.occurrence.location().clone(),
                 imported: None,
+                inactive_prose: false,
             },
             |minting_owner| {
                 if let Some((reach, rows)) = self.reach
@@ -885,6 +886,8 @@ impl<'a> Engine<'a> {
                 label: label.clone(),
                 location,
                 imported: Some((cited.to_string(), prefix.clone())),
+                inactive_prose: self.adoption.inactive_prose().contains_key(&cited)
+                    && self.registries.get(&cited).is_none_or(BTreeMap::is_empty),
             });
         }
     }

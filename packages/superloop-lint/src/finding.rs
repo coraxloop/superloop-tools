@@ -326,6 +326,9 @@ pub enum Finding {
         /// The searched owner and the registered prefix naming it, for an import.
         #[serde(skip_serializing_if = "Option::is_none")]
         imported: Option<(String, Prefix)>,
+        /// The named registry is empty and the owner's prose is not activated.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        inactive_prose: bool,
     },
     /// A same-owner citation resolved to no mint in its own owner, but the
     /// label mints in another owner and wants the import form.
@@ -1025,6 +1028,13 @@ pub enum Finding {
         /// Which of the two ways the run came to govern nothing.
         cause: UngovernedCause,
     },
+    /// A declared owner's Markdown sources have no prose-policy activation.
+    InactiveProseOwner {
+        /// The declared owner whose prose is not harvested.
+        owner: String,
+        /// Markdown sources attributed to that owner by the partition.
+        sources: usize,
+    },
     /// One activation governs nothing where other activations govern a share.
     ///
     /// The whole-check report above cannot see this: a declaration where most
@@ -1502,6 +1512,7 @@ impl Finding {
             Self::BurnListGrowth { location, .. }
             | Self::MissingPolicyDependency { location, .. } => location.as_ref(),
             Self::TraversalFailure { .. }
+            | Self::InactiveProseOwner { .. }
             | Self::NothingGoverned { .. }
             | Self::UngovernedActivation { .. }
             | Self::VacuousSurface { .. }
@@ -1627,6 +1638,7 @@ impl Finding {
             Self::UnwarrantedConstantPin { .. } => "unwarranted_constant_pin",
             Self::MissingConstantWarrant { .. } => "missing_constant_warrant",
             Self::NothingGoverned { .. } => "nothing_governed",
+            Self::InactiveProseOwner { .. } => "inactive_prose_owner",
             Self::UngovernedActivation { .. } => "ungoverned_activation",
             Self::VacuousSurface { .. } => "vacuous_surface",
             Self::UntrackedPath { .. } => "untracked_path",
@@ -1695,6 +1707,7 @@ impl fmt::Display for Finding {
                 label,
                 location,
                 imported,
+                inactive_prose,
             } => {
                 write!(
                     formatter,
@@ -1705,6 +1718,12 @@ impl fmt::Display for Finding {
                         formatter,
                         " in owner {owner}, whose prefix {prefix} the citation names"
                     )?;
+                    if *inactive_prose {
+                        write!(
+                            formatter,
+                            "; owner {owner} activates no labels.mints-well-formed row, so none of its mints are harvested"
+                        )?;
+                    }
                 }
                 Ok(())
             }
@@ -2219,6 +2238,10 @@ impl fmt::Display for Finding {
                 formatter,
                 "{location}: {identity} cites no warrant, and its documentation admits owing none"
             ),
+            Self::InactiveProseOwner { owner, sources } => write!(
+                formatter,
+                "owner {owner} has {sources} Markdown sources but activates no labels.mints-well-formed row; activate labels.mints-well-formed to harvest and check its prose"
+            ),
             Self::NothingGoverned { cause } => write!(
                 formatter,
                 "activation: every activation governs nothing: {cause}"
@@ -2580,6 +2603,7 @@ mod tests {
             label: Label::parse("sec:labels:syntax").expect("well-formed"),
             location,
             imported: None,
+            inactive_prose: false,
         };
         assert_eq!(failure.severity(), Severity::Failure);
         assert!(failure.is_failure());

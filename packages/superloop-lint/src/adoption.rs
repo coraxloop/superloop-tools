@@ -93,9 +93,19 @@ pub struct Adoption {
     generated: Vec<PathBuf>,
     imported: BTreeMap<Owner, Vec<(crate::label::Label, PathBuf)>>,
     unpublished: Option<(PathBuf, crate::export::UnpublishedLabels)>,
+    inactive_prose: BTreeMap<Owner, usize>,
 }
 
 impl Adoption {
+    pub(crate) fn with_inactive_prose(mut self, owners: BTreeMap<Owner, usize>) -> Self {
+        self.inactive_prose = owners;
+        self
+    }
+
+    pub(crate) const fn inactive_prose(&self) -> &BTreeMap<Owner, usize> {
+        &self.inactive_prose
+    }
+
     pub(crate) fn with_unpublished(
         mut self,
         document: Option<&(PathBuf, crate::export::UnpublishedLabels)>,
@@ -125,6 +135,7 @@ impl Adoption {
             generated: Vec::new(),
             imported: BTreeMap::new(),
             unpublished: None,
+            inactive_prose: BTreeMap::new(),
         }
     }
 

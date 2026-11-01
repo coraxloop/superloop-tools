@@ -18,6 +18,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`inactive_prose_fails_the_check_command`] | cli | An inactive root's Markdown fails the command until prose activation is declared. # Panics Panics only if fixture IO or command execution fails, or the verdict differs. |
 //! | [`macro_doc_attributes_share_the_test_standard_place`] | carrier | A property-test macro's source-written documentation mints the same claim through line comments, separate doc attributes and one multiline attribute. Each form resolves from Markdown through the production entry. # Panics Panics only if fixture IO fails or the production check loses a macro carrier. |
 //! | [`invalid_macro_carriers_refuse_by_name`] | carrier | A marked macro body that cannot be read refuses by name, and a misplaced claim remains a placement failure instead of being rescued by its spelling. # Panics Panics only if fixture IO fails or the check accepts an invalid macro carrier. |
 //! | [`python_docstrings_participate_in_production_resolution`] | carrier | An owned Python unittest method mints a claim that a Markdown record can cite, and the active profiles count its docstring as a labelled test site. # Panics Panics only if fixture IO fails or the production check violates the contract. |
@@ -185,6 +186,56 @@ fn check_carrier(root: &Path) -> (std::process::Output, serde_json::Value) {
         .expect("production entry");
     let report = serde_json::from_slice(&output.stdout).expect("check report");
     (output, report)
+}
+
+/// An inactive root's Markdown fails the command until prose activation is declared.
+///
+/// # Panics
+/// Panics only if fixture IO or command execution fails, or the verdict differs.
+///
+/// ´claim:cli:inactive-prose-is-a-failing-configuration-finding´
+/// ´test:integration:inactive-prose-fails-the-check-command´
+#[test]
+fn inactive_prose_fails_the_check_command() {
+    let root = tempfile::tempdir().expect("temporary root");
+    write(root.path(), "adr/prose.md", "A document.\n");
+    for active in [false, true] {
+        declare(
+            root.path(),
+            DECLARED_OWNERS,
+            FIXTURE_ENVIRONMENTS,
+            if active {
+                DECLARED_POLICIES
+            } else {
+                "policies = []\n"
+            },
+            if active { DECLARED_LISTS } else { "" },
+        );
+        track(root.path());
+        let (output, report) = check_carrier(root.path());
+        assert_eq!(
+            output.status.code(),
+            Some(if active { 0 } else { 3 }),
+            "{report}"
+        );
+        let findings = report["findings"].as_array().expect("findings");
+        let inactive = findings
+            .iter()
+            .find(|finding| finding["code"] == "inactive_prose_owner");
+        if active {
+            assert!(inactive.is_none(), "{report}");
+            assert_eq!(report["failures"], 0);
+        } else {
+            let finding = inactive.expect("inactive prose finding");
+            assert_eq!(finding["severity"], "failure");
+            assert_eq!(finding["owner"], "PROJECTA");
+            assert_eq!(finding["sources"], 1);
+            assert_eq!(
+                finding["message"],
+                "owner PROJECTA has 1 Markdown sources but activates no labels.mints-well-formed row; activate labels.mints-well-formed to harvest and check its prose"
+            );
+        }
+    }
 }
 
 fn macro_fixture(documentation: &str) -> tempfile::TempDir {
@@ -857,8 +908,8 @@ fn format_namespaces_refuse_foreign_identities_before_checking() {
         root.path(),
         "root_owner = \"EXAMPLE\"\nowners = [\"EXAMPLE\"]\npartitions = [{ name = \"all\", owner = \"EXAMPLE\", pattern = '*VCHAR' }]\nmay_cite = []\n",
         "environments = []\n",
-        "policies = [{ owner = \"EXAMPLE\", policy = \"legacy.section-references\" }]\n",
-        "[EXAMPLE.\"legacy.section-references\"]\npath_counts = []\n",
+        "policies = [{ owner = \"EXAMPLE\", policy = \"legacy.section-references\" }, { owner = \"EXAMPLE\", policy = \"labels.mints-well-formed\" }]\n",
+        "[EXAMPLE.\"legacy.section-references\"]\npath_counts = []\n[EXAMPLE.\"labels.mints-well-formed\"]\nallowances = []\n",
     );
     let policy = ".linter/policy-legacy-section-references.toml";
     write(
@@ -880,7 +931,12 @@ fn format_namespaces_refuse_foreign_identities_before_checking() {
     assert_eq!(report["burn"]["occurrences"], 1);
     assert_eq!(report["findings"][0]["code"], "burn_list_growth");
     assert_eq!(
-        report["configuration"]["activations"][0]["surface_paths"],
+        report["configuration"]["activations"]
+            .as_array()
+            .expect("activation rows")
+            .iter()
+            .find(|row| row["policy"] == "legacy.section-references")
+            .expect("burn activation")["surface_paths"],
         1
     );
     write(root.path(), "note.md", "No section reference remains.\n");

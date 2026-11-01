@@ -294,6 +294,16 @@ pub fn verify_configuration_with_guard(
     let corpus = plan.topology().corpus();
     let universe = corpus.base();
     let mut findings = corpus.findings().to_vec();
+    findings.extend(
+        plan.labels()
+            .adoption()
+            .inactive_prose()
+            .iter()
+            .map(|(owner, sources)| Finding::InactiveProseOwner {
+                owner: owner.to_string(),
+                sources: *sources,
+            }),
+    );
     let partition_plan = plan.topology().partition();
     let partition = partition_plan.counts().clone();
     let partition_findings = partition_plan.findings();

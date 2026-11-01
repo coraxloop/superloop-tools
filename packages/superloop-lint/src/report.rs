@@ -1428,6 +1428,7 @@ mod tests {
         ];
         let policies = [
             Pair::singleton("ORCHARD", "paths.names-well-formed"),
+            Pair::singleton("ORCHARD", MINTS),
             Pair::singleton("QUINCE", MINTS),
         ];
         declare_surface(root.path(), &partitions, &policies);
@@ -1435,6 +1436,7 @@ mod tests {
             root.path().join(".linter/lists.toml"),
             "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n\
              [ORCHARD.\"paths.names-well-formed\"]\npaths = []\n\n\
+             [ORCHARD.\"labels.mints-well-formed\"]\nallowances = []\n\n\
              [QUINCE.\"labels.mints-well-formed\"]\nallowances = []\n",
         )
         .expect("a path-set and an allowance list");
@@ -1506,7 +1508,7 @@ mod tests {
     #[test]
     fn a_check_with_no_activation_reports_it_once() {
         let (report, json) = checked(
-            &[("packages/orchard/one.md", "Nothing stands here.\n")],
+            &[("packages/orchard/one.txt", "Nothing stands here.\n")],
             &two_owners(),
             &[],
         );
