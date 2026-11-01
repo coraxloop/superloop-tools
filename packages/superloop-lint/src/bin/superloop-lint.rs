@@ -118,7 +118,7 @@ const COMMAND: &str = "superloop-lint";
 /// their shared meanings, and a command-specific non-usage code is left to be
 /// documented by the owning command contract. This command's contract now
 /// documents one, and fixes the figure rather than deferring to a document that
-/// defers back (´rule:commandcontract:findings-exit´): three is this binary's
+/// defers back (´[TOOLS-rule:lintcontracts:verdicts]´): three is this binary's
 /// only command-specific code, and it means the run finished, wrote its report,
 /// and that report carries a finding of failing severity.
 ///
@@ -129,7 +129,7 @@ const COMMAND: &str = "superloop-lint";
 /// report travels on stdout, and this is the number that pairs them.
 ///
 /// The configuration probe's own exit 3 belongs to a different program and is no
-/// relation (´rem:commandcontract:not-the-config-probe´).
+/// relation (´[TOOLS-rule:lintcontracts:verdicts]´).
 ///
 /// ´const:indexlinter:unclean-check-exit´ (´[ORCHESTRATION-alg:const:count]´)
 /// ´const:indexlinter:unclean-check-exit-count-3´
@@ -419,7 +419,7 @@ fn run_corpus_command(args: Args, command_started: Instant) -> ExitCode {
 
     // Every corpus subcommand reads one declared configuration snapshot before
     // it does anything else, and a snapshot that is not one refuses the command
-    // entire (´spec:commandcontract:configuration´).
+    // entire (´[TOOLS-rule:lintcontracts:snapshot]´).
     let mode = if args.public_pack {
         SnapshotMode::public_pack(args.burn_input.clone())
     } else {
@@ -545,7 +545,7 @@ fn read_execution_plan(
 /// in its policy's codec is a refused precondition: the command exits with the
 /// shared failure class and an empty stdout, because a command that cannot read
 /// its own configuration has no standing to say anything about the corpus
-/// (´rule:commandcontract:configuration-verdicts´).
+/// (´[TOOLS-rule:lintcontracts:verdicts]´).
 fn read_configuration(
     root: &std::path::Path,
     mode: SnapshotMode,
@@ -998,10 +998,10 @@ fn lower_declared_lists(plan: BurnWritePlan<'_>, write: bool) -> std::io::Result
 /// The response file and the stdout object are the same bytes: the file is made
 /// durable first and copied to stdout afterwards, so the receipt travelling with
 /// a change and the object a caller reads cannot tell different stories
-/// (´req:commandcontract:control-artifacts´). A refused precondition leaves
+/// (´[TOOLS-rule:lintcontracts:maintenance]´). A refused precondition leaves
 /// the configuration and the response path unchanged and writes no stdout. The
 /// request arrives through standard input and is handed to the control plan as
-/// bytes rather than as a path (´dec:controlsurface:request-stream´).
+/// bytes rather than as a path (´[TOOLS-rule:lintcontracts:maintenance]´).
 fn run_maintenance(
     plan: ControlWritePlan<'_>,
     operation: Operation,

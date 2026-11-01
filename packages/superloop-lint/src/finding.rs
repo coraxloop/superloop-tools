@@ -1106,7 +1106,7 @@ pub enum Finding {
     /// Activating a policy for an owner activates a claim about what that verdict
     /// rests on, and the prerequisites are this binary's rather than the
     /// declaration's. Absence is not a waiver: the dependent pair is what makes
-    /// the prerequisite applicable (´req:commandcontract:dependency-contract´).
+    /// the prerequisite applicable (´[TOOLS-rule:lintcontracts:verdicts]´).
     MissingPolicyDependency {
         /// The owner whose pair required it.
         owner: String,

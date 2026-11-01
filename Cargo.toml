@@ -1,6 +1,6 @@
-# Workspace for the orchestration helpers: host hooks, lane tooling,
-# and server wrappers. Engineering decisions live in this repository's adr/;
-# the generic orchestration repository holds the philosophy of using the tools.
+# Workspace for reusable orchestration helpers and their public contracts.
+# Dependency tiers and owners follow (´rule:buildcontracts:tiers´).
+# The generic orchestration repository holds the philosophy of using the tools.
 
 [workspace]
 members = [

@@ -12,7 +12,7 @@
 //! the shipped `check` command in the root pipeline, which judges the
 //! repository's real declarations; a package that judged them too would be
 //! asserting a property of a corpus it is not entitled to know exists
-//! (´req:isolation:boundary´).
+//! (´[TOOLS-rule:lintcontracts:isolation]´).
 //!
 //! # Test index
 //!

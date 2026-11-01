@@ -58,7 +58,7 @@ root = "~/.config/loops/{name}/claude"
 
 [[targets]]
 kind = "copy"
-source = "docs/worker-charter.md"
+source = "docs/worker-instructions.md"
 destination = "CLAUDE.md"
 mode = "0644"
 ```
@@ -105,11 +105,9 @@ When a release pair is supplied, the installer resolves the tag and `HEAD` with 
 
 ## Repository maps · `sec:rulebookinstall:repository-maps`
 
-Programs install natively with build records under the data directory. The public binary map and hook map are retired; private account, worker, gateway and harness helpers install outside the search path. The lane dispatcher supplies both backend drivers and their status and follow commands. Reviewed predecessor inventories retain recovery bytes, and hook retirement still waits for registration and session-drain evidence. Remaining maps describe shared data and charter publication.
+Programs install natively with build records under the data directory. Private account, worker, gateway and harness helpers install outside the search path. The Claude adapter and permission hook install into the private hook directory; permission tools install under `libexec/superloop`, with records under `share/superloop/build-records`.
 
-The Claude adapter and permission hook install natively into the private hook directory; the former hook map is retired. Permission tools install natively under `libexec/superloop`; their build records install under `share/superloop/build-records`. `maps/share-map.toml` lists each document and unit individually under `~/.local/share/superloop-tools`, including `docs/worker-charter.md`, which owner-side Codex homes link directly. The Codex charter map is retired; `maps/charter-lanes-map.toml` installs the charter as `CLAUDE.md` for each registered loop root.
-
-`index-gh` and `lane-gateway.bak-944f5ee` receive no targets, with their host removal left to the estate step. The `orchestration-gpg` and `orchestration-ssh` symlinks are replaced by independent copies, and a live install refuses those symlink destinations until the estate step removes them.
+The deploying instance owns document and charter maps under its `deploy/tools/maps/` directory. It supplies that map path, its own source root and any required tools build root explicitly. The instance publication supplies `~/.local/share/orchestration-instance/docs/tools/integration.md` and `~/.local/share/orchestration-instance/docs/tools/worker-charter.md`; loop sign-in homes use the configured published charter input. Tools install their public specifications natively.
 
 ## Exit statuses · `sec:rulebookinstall:exit-statuses`
 

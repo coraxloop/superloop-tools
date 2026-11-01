@@ -1052,7 +1052,7 @@ fn registry_routes_heading_accepts_only_bare_or_labelled_title() {
     fs::create_dir(root.path().join("out")).expect("output");
     for (heading, changed) in [
         ("## Node routes", 7),
-        ("## Node routes · `sec:servers:node-routes`", 0),
+        ("## Node routes · `sec:fixture:node-routes`", 0),
     ] {
         fs::write(
             root.path().join("servers.md"),
@@ -1067,10 +1067,10 @@ fn registry_routes_heading_accepts_only_bare_or_labelled_title() {
     }
     for heading in [
         "## Node routes extra",
-        "## Node routes · `sec:servers:node-routes` extra",
-        "## Node routes · ``sec:servers:node-routes``",
+        "## Node routes · `sec:fixture:node-routes` extra",
+        "## Node routes · ``sec:fixture:node-routes``",
         "## Node routes · `not a label`",
-        "## Other routes · `sec:servers:node-routes`",
+        "## Other routes · `sec:fixture:node-routes`",
     ] {
         fs::write(
             root.path().join("servers.md"),

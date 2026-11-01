@@ -201,7 +201,7 @@ const ACUTE: char = '\u{b4}';
 ///
 /// The extension set is a corpus's own declaration rather than a compiled
 /// copy, so a fixture wanting the three rows this module's heads pair with
-/// declares them (´gram:isolation:declaration´).
+/// declares them (´[TOOLS-rule:lintcontracts:declarations]´).
 const DECLARED: [(&str, &str); 3] = [
     ("Document", "doc"),
     ("To-do", "todo"),

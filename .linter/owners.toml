@@ -9,6 +9,10 @@ owner = "ORCHESTRATION"
 registry = ".linter/imports/orchestration.toml"
 
 [[may_cite]]
+owner = "LOOPHOME"
+target = "TOOLS"
+
+[[may_cite]]
 owner = "SUPERLOOPLANE"
 target = "EXECUTECOMMAND"
 

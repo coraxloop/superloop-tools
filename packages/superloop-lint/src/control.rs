@@ -6,7 +6,7 @@
 //!
 //! The three are modes of one command rather than three subcommands because they
 //! are three readings of one relation — what the tree holds against what the
-//! lists declare (´spec:commandcontract:burn-modes´). Bare verification is the
+//! lists declare (´[TOOLS-rule:lintcontracts:maintenance]´). Bare verification is the
 //! fourth reading and the default.
 //!
 //! *Audit* is read-only and formally selective: it takes a request naming the
@@ -32,13 +32,13 @@
 //!
 //! Request bytes are caller data rather than a delegated path: the command-line
 //! entrypoint reads them from standard input, and the library surface accepts the
-//! bytes directly (´dec:controlsurface:request-stream´).
+//! bytes directly (´[TOOLS-rule:lintcontracts:maintenance]´).
 //!
 //! The response file and the stdout object are the same bytes, made durable as a
-//! file and then copied to stdout (´req:commandcontract:control-artifacts´).
+//! file and then copied to stdout (´[TOOLS-rule:lintcontracts:maintenance]´).
 //! The durable file is a direct child of the corpus root, selected through a
 //! lexical guard that never probes the response path
-//! (´dec:controlsurface:lexical-receipt´). The pair is the whole provenance the
+//! (´[TOOLS-rule:lintcontracts:maintenance]´). The pair is the whole provenance the
 //! corpus gets, since a direct hand edit leaves none.
 //!
 //! # Test index
@@ -1904,14 +1904,14 @@ fn lower_rows(rows: &mut Rows, observed: &BTreeMap<Identity, u64>) {
 ///
 /// A maintenance run may not overwrite the thing it is reporting on, so the
 /// response may name neither a declared configuration file nor a generated
-/// register (´spec:commandcontract:burn-modes´).
+/// register (´[TOOLS-rule:lintcontracts:maintenance]´).
 fn is_protected(root: &Path, output: &Path) -> bool {
     let output = normalize_lexically(output);
 
     // The declared surface is a directory rather than a filename list, so what is
     // protected is lexical membership of it. A parameter document that arrived
     // without this function being told about it is exactly the file a maintenance
-    // run must not land on (´dec:snapshot:physical-membership´). Resolving the two
+    // run must not land on (´[TOOLS-rule:lintcontracts:snapshot]´). Resolving the two
     // paths lexically keeps an arbitrary response path from becoming a metadata
     // probe while still collapsing the relative components that could disguise a
     // declaration as an unrelated destination.
@@ -2131,7 +2131,7 @@ fn maintain_loaded(
     // an audit can answer them over exactly the configuration it reads
     // permissively. An audit reports them; an append refuses, because every
     // writing mode refuses to mutate under a snapshot that disagrees with the
-    // tree (´rule:commandcontract:configuration-verdicts´). Header failures are
+    // tree (´[TOOLS-rule:lintcontracts:verdicts]´). Header failures are
     // the observation these modes compare and record, not configuration
     // disagreement, so they reach the target comparison instead of also making
     // the audit incoherent or blocking the append growth door.

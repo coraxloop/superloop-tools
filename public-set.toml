@@ -66,13 +66,28 @@ pattern = "docs/meson.build"
 pattern = "docs/public/unpublished-labels.toml"
 
 [[include.rows]]
+pattern = "docs/spec/build-contracts.md"
+
+[[include.rows]]
+pattern = "docs/spec/command-contracts.md"
+
+[[include.rows]]
 pattern = "docs/spec/deployment.md"
+
+[[include.rows]]
+pattern = "docs/spec/executable-contracts.md"
 
 [[include.rows]]
 pattern = "docs/spec/linter-conformance.md"
 
 [[include.rows]]
+pattern = "docs/spec/linter-contracts.md"
+
+[[include.rows]]
 pattern = "docs/spec/output.md"
+
+[[include.rows]]
+pattern = "docs/spec/worker-contracts.md"
 
 [[include.rows]]
 pattern = "infra/cargo-clean/README.md"

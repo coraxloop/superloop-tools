@@ -6,7 +6,7 @@
 //!
 //! An audit of the declared surface found five schema dialects living beside one
 //! another, and the owner's review closed on one grammar for the whole
-//! configuration surface (´gram:isolation:declaration´). This module reads one
+//! configuration surface (´[TOOLS-rule:lintcontracts:declarations]´). This module reads one
 //! instance document written in that grammar into a typed value. It decodes and
 //! nothing else: no document reaches it from the loader, no verdict changes
 //! because it exists, and the questions that are about several documents at once
@@ -27,7 +27,7 @@
 //! Data stands in singular `[set.TYPE]` tables whose every entry is named, its
 //! value a string where the entry is simple and an inline table where it is
 //! parameterized. The name is not decoration. It is what an owner's selection
-//! references, what a ratchet key ends in (´conv:isolation:registers´), and what
+//! references, what a ratchet key ends in (´[TOOLS-rule:lintcontracts:declarations]´), and what
 //! a report says when an entry is at fault — and a positional list has none of
 //! the three, which is why the retiring documents could only say that some value
 //! of some list was involved.
@@ -104,7 +104,7 @@
 //! # Every pattern is the augmented Backus-Naur form, and the value is one rule
 //!
 //! One pattern schema spans the surface and it is RFC 5234
-//! (´lang:isolation:patterns´). A declared value is the right-hand side of a
+//! (´[TOOLS-rule:lintcontracts:declarations]´). A declared value is the right-hand side of a
 //! single rule — an example row writes ``"handbook" [ "/" *VCHAR ]``
 //! and nothing else — so the decoder names that rule [`PATTERN_RULE`], parses
 //! the pair as a rule list over the core rules, and matches against that name. A
@@ -132,7 +132,7 @@
 //! One document at a time. Whether two documents stamp one namespace, whether an
 //! owner is registered, whether a set type is adopted, and whether a selection's
 //! program exists are questions about the union or the catalogue, and each is
-//! asked where its authority stands (´proposal:isolation:one-plan´).
+//! asked where its authority stands (´[TOOLS-rule:lintcontracts:isolation]´).
 //!
 //! # Test index
 //!

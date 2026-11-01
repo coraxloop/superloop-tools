@@ -4,7 +4,7 @@
 //! The augmented Backus-Naur form of RFC 5234: a rule-list parser and a matcher.
 //!
 //! One pattern language spans the whole declared configuration surface and it is
-//! this one (´lang:isolation:patterns´), so the checker carries the engine for it
+//! this one (´[TOOLS-rule:lintcontracts:declarations]´), so the checker carries the engine for it
 //! rather than borrowing a second dialect from a crate. What stands here is the
 //! engine alone: a parser over rule lists, and a decision procedure asking
 //! whether input bytes derive from a named rule. The declared surface's
@@ -14,7 +14,7 @@
 //! The form has no capture semantics, and the designs written over it are built
 //! so that none is needed: a value a program must read back is a declared entry
 //! of its own rather than a fragment a match hands over
-//! (´gram:isolation:declaration´). An engine offering captures would therefore
+//! (´[TOOLS-rule:lintcontracts:declarations]´). An engine offering captures would therefore
 //! be offering a door the grammar cannot open.
 //!
 //! Eight readings are settled here, because each is a place two readers would

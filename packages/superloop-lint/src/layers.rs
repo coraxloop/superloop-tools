@@ -81,7 +81,7 @@ use crate::workspace::Package;
 ///
 /// All three, and the enumeration is the convention's own: reach is declared
 /// "in any dependency table — ordinary, development, or build"
-/// (´[TOOLS-conv:layers:reach-relation]´). A dependency declared for tests
+/// (´[TOOLS-rule:lintcontracts:ownership]´). A dependency declared for tests
 /// warrants a citation exactly as one declared for the build does, because what
 /// the edge records is that the citing corpus has taken on the cited one, not
 /// when it does so.

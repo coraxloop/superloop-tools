@@ -102,7 +102,7 @@ const ANGLE_BETWEEN: &[char] = &['\n', ' ', '\t', '<', '>', '!', '-'];
 /// It is the language's own, not this corpus's, and it stands here because the
 /// script tree is a declared surface of the residual family and a surface is
 /// read for the commentary its language defines
-/// (´[TOOLS-conv:migration:burn-surface-reading]´).
+/// (´[TOOLS-rule:lintcontracts:burn-families]´).
 ///
 /// ´const:indexlinter:script-comment-mark´ (´[ORCHESTRATION-alg:const:codepoint]´)
 /// ´const:indexlinter:script-comment-mark-codepoint-u23´

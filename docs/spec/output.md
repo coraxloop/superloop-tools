@@ -47,7 +47,7 @@ The table assigns each mode to one native consumer and fixes the role of both st
 
 ## Shared contract · `sec:output:shared-contract`
 
-This division binds every mode before a mode-specific rule specializes it. It adopts the ratified declaration, exit, safety, and panic decisions (`rule:output:mode-declaration`), (`rule:output:exit-codes`), (`rule:output:safety`), and (`rule:output:panics`).
+This division binds every mode before a mode-specific rule specializes it. It adopts the ratified declaration, exit, safety, and panic decisions (`rule:output:single-mode-declaration`), (`rule:output:default-exit-classes`), (`rule:output:diagnostic-redaction`), and (`rule:output:panic-suppression`).
 
 **Rule (Single-mode declaration)** · `rule:output:single-mode-declaration`
 
@@ -105,7 +105,7 @@ An `agent-text` command whose evidence is already accepted still attempts its on
 
 ## Hook JSON mode · `sec:output:hook-json-mode`
 
-This division specializes the harness-owned mode ratified for hook callbacks (`rule:output:hook-json`). The hook protocol, not workspace report syntax, determines the JSON response schema.
+This division specializes the harness-owned mode ratified for hook callbacks (`spec:output:hook-json-streams`). The hook protocol, not workspace report syntax, determines the JSON response schema.
 
 **Specification (Hook JSON streams)** · `spec:output:hook-json-streams`
 
@@ -125,7 +125,7 @@ This exception is limited to internal injection failure. It cannot convert an in
 
 ## Agent text mode · `sec:output:agent-text-mode`
 
-This division fixes the human-evidence mode and preserves the ratified legacy report contract (`rule:output:agent-text`) and (`rule:output:run-report`).
+This division fixes the human-evidence mode and preserves the ratified legacy report contract (`spec:output:agent-text-streams`) and (`proto:output:run-report-line`).
 
 **Specification (Agent text streams)** · `spec:output:agent-text-streams`
 
@@ -194,7 +194,7 @@ A wrapper must not report a child's status as its own unless its command contrac
 
 ## Structured modes · `sec:output:structured-modes`
 
-This division fixes the `superloop-lane driver follow` capture tool's schema-two envelope and the single-object machine protocol ratified for structured consumers (`rule:output:machine-json`). The owner-ratified entry-47 migration retires `feeder-stream`: its `DELTA`, `FINISHED`, and `LAST-MESSAGE` frames have no remaining mapped producer.
+This division fixes the `superloop-lane driver follow` capture tool's schema-two envelope and the single-object machine protocol ratified for structured consumers (`spec:output:machine-json-streams`). The owner-ratified entry-47 migration retires `feeder-stream`: its `DELTA`, `FINISHED`, and `LAST-MESSAGE` frames have no remaining mapped producer.
 
 **Specification (Capture documents)** · `spec:output:feeder-streams`
 
@@ -262,15 +262,15 @@ Before semantic work or result publication, a machine-result command must detect
 
 **Rule (Linter findings status)** · `rule:output:linter-findings-status`
 
-`superloop-lint` status 3 means exactly that a judging command completed, published its complete result object on standard output, and the object contains at least one finding of failing severity. It is the binary's only specific status. `check`, `assemble`, `burn`, `project`, and `fix` may return 3; a refused precondition or failed command returns 1 with empty standard output instead. This preserves the owning linter decision (`rule:lintercli:findings-exit`).
+`superloop-lint` status 3 means exactly that a judging command completed, published its complete result object on standard output, and the object contains at least one finding of failing severity. It is the binary's only specific status. `check`, `assemble`, `burn`, `project`, and `fix` may return 3; a refused precondition or failed command returns 1 with empty standard output instead. The configuration and completed-verdict distinction is defined by (`rule:lintcontracts:verdicts`).
 
 **Rule (Informational success)** · `rule:output:informational-success`
 
-The `linter report`, `linter coverage`, and `linter shape` commands return 0 whenever they complete and publish their result, regardless of the length or content of advisory listings. They never return 3. Runtime and usage failures remain 1 and 2, so informational does not mean infallible. This preserves the command-specific informational decision (`rule:lintercli:informational-exit`).
+The `linter report`, `linter coverage`, and `linter shape` commands return 0 whenever they complete and publish their result, regardless of the length or content of advisory listings. They never return 3. Runtime and usage failures remain 1 and 2, so informational does not mean infallible. This keeps advisory reporting separate from judging commands (`rule:lintcontracts:verdicts`).
 
 ## Output evidence · `sec:output:output-evidence`
 
-This division binds planned helpers to their modes and turns the byte contracts above into release evidence. The map specializes the ratified planned map (`rule:output:binary-modes`); the verification set strengthens its ratified gate (`gate:output:verification`).
+This division binds planned helpers to their modes and turns the byte contracts above into release evidence. The map specializes the ratified planned map (`tab:output:binary-mode-map`); the verification set strengthens its ratified gate (`gate:output:output-conformance`).
 
 **Table (Binary mode map)** · `tab:output:binary-mode-map`
 

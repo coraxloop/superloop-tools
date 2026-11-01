@@ -8,7 +8,7 @@
 //! filenames, parses all five, cross-validates them against each other, and only
 //! then runs a policy. There is no partial load and no per-file default: a
 //! command that cannot read its own configuration has no standing to say anything
-//! about the corpus (´spec:commandcontract:configuration´).
+//! about the corpus (´[TOOLS-rule:lintcontracts:snapshot]´).
 //!
 //! Two questions are asked in order, and they get different answers. The first is
 //! whether the snapshot is a snapshot at all — whether it parses, whether every
@@ -20,7 +20,7 @@
 //! runs and no writing mode changes a byte. The second question is whether the
 //! snapshot is coherent as a description of this repository, and that one is
 //! judged rather than refused — the answers are ordinary findings of failing
-//! severity (´rule:commandcontract:configuration-verdicts´). This module owns
+//! severity (´[TOOLS-rule:lintcontracts:verdicts]´). This module owns
 //! the first question entire; the second is the partition verifier's and the
 //! cited-owner dependency validator's.
 //!
@@ -110,7 +110,7 @@ pub const LISTS_FILE: &str = "lists.toml";
 /// The document is found by the identity it stamps rather than by the name it
 /// happens to stand under, because a namespace is a document's whole identity
 /// under the ratified grammar and a filename is only where it was put
-/// (´gram:isolation:declaration´).
+/// (´[TOOLS-rule:lintcontracts:declarations]´).
 pub const SPDX_NAMESPACE: &str = "class.linter.policy.spdx";
 
 /// The allocated namespace of the interchange policy's instance document.
@@ -143,7 +143,7 @@ pub const PREFIX_NUMBERS_NAMESPACE: &str = "class.linter.policy.references.prefi
 /// identifier wherever a policy has a document of its own. A census asking where
 /// it walks therefore asks for its own policy by name and no compiled table of
 /// filenames stands between the question and the answer
-/// (´gram:isolation:declaration´).
+/// (´[TOOLS-rule:lintcontracts:declarations]´).
 pub const POLICY_NAMESPACE: &str = "class.linter.policy.";
 
 /// The format namespace of the owner-indexed lists document.
@@ -199,7 +199,7 @@ const PACKAGE_DIRECTORY_DATUM: &str = "package-directory";
 /// The loader reads it and is grounded below both declarations it supplies: the
 /// directory is read physically and byte for byte, never consulting git and never
 /// applying the ignore relation, including while reading this file itself
-/// (´just:isolation:policy-data´).
+/// (´[TOOLS-rule:lintcontracts:isolation]´).
 pub const SHAPE_FILE: &str = "shape.toml";
 
 /// The declarations a snapshot requires whatever a repository activates.
@@ -209,11 +209,11 @@ pub const SHAPE_FILE: &str = "shape.toml";
 /// shape document joins the core on the fixed core's own argument: a member the
 /// set does not name is a refusal wherever it stands, and a conditional member
 /// would buy two failure modes to save writing one small file
-/// (´just:isolation:policy-data´).
+/// (´[TOOLS-rule:lintcontracts:isolation]´).
 ///
 /// Required is not the same set as recognized. Membership is physical: a present
 /// document whose name identifies a policy declaration joins this core rather
-/// than refusing beside it (´dec:snapshot:physical-membership´), which is what
+/// than refusing beside it (´[TOOLS-rule:lintcontracts:snapshot]´), which is what
 /// lets a declared surface grow a parameter document without a compiled filename
 /// list growing with it.
 pub const FILES: [&str; 5] = [
@@ -1266,7 +1266,7 @@ impl Snapshot {
     /// It stands here rather than beside the loader because everything that
     /// ranges over the corpus ranges over the post-ignore universe, and a caller
     /// holding the snapshot holds the one relation that decided which paths those
-    /// are (´just:isolation:policy-data´).
+    /// are (´[TOOLS-rule:lintcontracts:isolation]´).
     #[must_use]
     pub const fn shape(&self) -> &CorpusShape {
         &self.shape
@@ -1331,7 +1331,7 @@ impl Snapshot {
     /// an instance document and an entry of one of its sets, and the program is
     /// the one this binary catalogues for that set type — so a corpus may deploy a
     /// program several times without the binary being taught which deployments it
-    /// has (´gram:isolation:declaration´).
+    /// has (´[TOOLS-rule:lintcontracts:declarations]´).
     #[must_use]
     pub fn program(&self, pair: &Pair) -> Option<&str> {
         pair.family.as_ref().map_or_else(
@@ -2063,7 +2063,7 @@ fn load(
     // The shape document is read through the one decoder that owns its schema,
     // and the loader reading it is grounded below both declarations it supplies:
     // the directory is read physically, never consulting git and never applying
-    // the ignore relation, including here (´just:isolation:policy-data´).
+    // the ignore relation, including here (´[TOOLS-rule:lintcontracts:isolation]´).
     let shape = read_shape(&surface, &mut refusals);
 
     let (Some(raw_owners), Some(raw_environments), Some(raw_policies), Some(shape)) =
@@ -2174,7 +2174,7 @@ fn load(
     // Every instance document is decoded before any of them is read, because the
     // relations between them are asked over the union rather than through a
     // privileged file, and a document found by its namespace has to be found
-    // before it can be asked for (´proposal:isolation:one-plan´).
+    // before it can be asked for (´[TOOLS-rule:lintcontracts:isolation]´).
     let documents = declared_documents_from_ast(&surface, &members, &mut refusals);
 
     let deployments = deployments(
@@ -2334,7 +2334,7 @@ fn activating(policies: &[Pair], program: &str) -> BTreeSet<String> {
 /// A written section is declared whether or not it was read, since what is wrong
 /// with it is refused where it is written.
 /// Non-application for one owner is the omission of both, which is the ratified
-/// grammar's only way of saying it (´gram:isolation:declaration´).
+/// grammar's only way of saying it (´[TOOLS-rule:lintcontracts:declarations]´).
 fn paired_sections(
     declared: &BTreeSet<String>,
     activated: &BTreeSet<String>,
@@ -2525,7 +2525,7 @@ fn partition_rows(rows: &[PatternRow]) -> Vec<SectionRow> {
 /// The document carries no set, and that is the ratified answer rather than an
 /// omission: which carrier types are in domain is compiled meaning, so a declared
 /// list of them would be a second authority over one relation with nothing able to
-/// say which of the two had drifted (´gram:isolation:declaration´).
+/// say which of the two had drifted (´[TOOLS-rule:lintcontracts:declarations]´).
 fn interchange_parameters(
     documents: &BTreeMap<String, Declaration>,
     registered: &BTreeSet<String>,
@@ -2681,7 +2681,7 @@ fn interchange_rows(rows: &[PatternRow]) -> Vec<InterchangeRow> {
 /// Its whole declaration is an exclude-only owner section over a type no set
 /// declares, which decodes because an exclude row's name labels the exclusion
 /// itself and promises nothing about a set. What the policy requires, and which
-/// sources it reads at all, are the program's own (´proposal:isolation:staging´).
+/// sources it reads at all, are the program's own (´[TOOLS-rule:lintcontracts:isolation]´).
 fn references_parameters(
     documents: &BTreeMap<String, Declaration>,
     registered: &BTreeSet<String>,
@@ -3044,7 +3044,7 @@ fn decode_burn_values(
 /// privileged one, because which policies census a corpus is the corpus's to say
 /// and a loader holding a list of them would be holding that answer twice. A
 /// document declaring neither half is a document about something else and
-/// contributes nothing here (´gram:isolation:declaration´).
+/// contributes nothing here (´[TOOLS-rule:lintcontracts:declarations]´).
 fn surface_parameters(
     documents: &BTreeMap<String, Declaration>,
     registered: &BTreeSet<String>,
@@ -3664,7 +3664,7 @@ pub fn catalogued_list_table(
 ///
 /// The validated list namespace supplies the prefix shared by policy instances,
 /// so the shorter key form is independent of the adopting corpus
-/// (´reg:isolation:owner-questions´).
+/// (´[TOOLS-rule:lintcontracts:declarations]´).
 fn corpus_prefix(namespace: &str) -> Option<&str> {
     let (prefix, _own) = namespace.rsplit_once('.')?;
 
@@ -3701,7 +3701,7 @@ fn list_namespace_from_ast(surface: &SurfaceAst, refusals: &mut Vec<Refusal>) ->
 /// catalogues a program for, keyed as a ratchet key spells it: the document's
 /// namespace relative to the format prefix, then the entry. Which entries exist is
 /// the corpus's to say, so nothing here is compiled but the map from set type to
-/// program (´gram:isolation:declaration´).
+/// program (´[TOOLS-rule:lintcontracts:declarations]´).
 fn deployments(
     documents: &BTreeMap<String, Declaration>,
     prefix: Option<&str>,
@@ -3747,7 +3747,7 @@ fn keyed_program(pair: &Pair, deployed: &BTreeMap<(String, String), String>) -> 
 /// by exactly what the ratified grammar widened: an activation is covered by at
 /// least one key rather than by exactly one, because a program acting on a
 /// declared set acts once per entry the corpus deployed and each of those
-/// deployments earns a ratchet of its own (´conv:isolation:registers´).
+/// deployments earns a ratchet of its own (´[TOOLS-rule:lintcontracts:declarations]´).
 fn list_tables(
     raw: &BTreeMap<String, BTreeMap<String, crate::surface::ListEntry>>,
     registered: &BTreeSet<String>,

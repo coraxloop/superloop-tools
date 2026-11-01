@@ -660,8 +660,10 @@ pub fn project_tree_with_policy(
         .get(readme_source)
         .cloned()
         .ok_or_else(|| refuse("missing public README"))?;
-    selected.remove(readme_source);
-    selected.insert("README.md".to_owned(), readme);
+    if readme_source != "README.md" {
+        selected.remove(readme_source);
+        selected.insert("README.md".to_owned(), readme);
+    }
     let generated = unpublished_register(
         root,
         commit,

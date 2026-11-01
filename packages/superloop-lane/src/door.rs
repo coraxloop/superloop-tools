@@ -4315,7 +4315,7 @@ mod tests {
         }
     }
 
-    /// A request whose wait expires or disconnects performs no effect. (´[TOOLS-rule:capability:expiry-no-effect]´)
+    /// A request whose wait expires or disconnects performs no effect. (´[TOOLS-rule:workercontracts:bounded-judgement]´)
     ///
     /// ´claim:capability:expired-wait-no-effect´
     /// ´test:unit:door-wait-deadline-and-disconnect-have-no-effect´

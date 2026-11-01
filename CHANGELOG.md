@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Public tools now carry their README and reusable worker, command, linter and build contracts directly; operational history and instructions are served by the instance publication.
+
 - Tools installations retain public specifications and executable identities while instance-owned maps, wrappers and the runtime unit leave the tools build.
 
 - Sign-in home commands accept `--charter PATH`, default to the instance worker-charter publication, refuse unavailable inputs before changing a home, report the resolved path, and reconcile existing Codex charter links.

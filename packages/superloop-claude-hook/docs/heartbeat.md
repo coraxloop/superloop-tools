@@ -52,7 +52,7 @@ The guard store has one current shape: `guard-count-{session}` contains the late
 
 The ratified hook and output specifications govern these six reference differences:
 
-- (`[TOOLS-rule:output:hook-json]`): Python prints a block decision object to stdout and exits zero. The harness contract requires the agent reason on stderr with exit two. Fixture: `spec-block-stderr.json`.
+- (`[TOOLS-spec:output:hook-json-streams]`): Python prints a block decision object to stdout and exits zero. The harness contract requires the agent reason on stderr with exit two. Fixture: `spec-block-stderr.json`.
 - (`[ORCHESTRATION-scenario:hooks:heartbeat-fail-open]`): truthy nonstring payload fields, structurally invalid transcript fields, and undecodable transcript bytes can escape Python as exceptions. Rust returns output-free fail-open with no traceback. Fixture: `spec-invalid-field-fail-open.json`.
 - (`[ORCHESTRATION-inv:hooks:fail-open-safety]`): Python treats an I/O-unreadable counter or warning as absent and may fabricate a prompt or correction. Rust distinguishes malformed readable bytes, which recover as specified, from unreadable state, which fails open. Fixture: `spec-unreadable-state-fail-open.json`.
 - (`[ORCHESTRATION-rule:hooks:turn-local-block-cap]`): Python ignores counter and warning write failures and can repeat a block without a persisted bound. Rust takes the explicit anti-wedge fail-open edge before publication. Fixture: `spec-state-write-fail-open.json`.

@@ -77,11 +77,10 @@ impl Fixture {
             .expect("installed outputs");
         fs::write(root.path().join("meson-info/intro-buildoptions.json"), "[]")
             .expect("build options");
-        fs::create_dir(root.path().join("adr")).expect("records");
-        fs::write(root.path().join("adr/036-tools-dependency-concept.md"), "|Present source|Destination and tier|\n|---|---|\n|`base`, `tool`|fixture packages|\n\n|Package|Tier and domain|Accountable owner|Consumers|\n|-------|---------------|-----------------|---------|\n|`base`|Fixture domain|BASE|tool|\n\n").expect("package destinations");
+        fs::create_dir_all(root.path().join("docs/spec")).expect("specifications");
+        fs::write(root.path().join("docs/spec/build-contracts.md"), "|Present source|Destination and tier|\n|---|---|\n|`base`, `tool`|fixture packages|\n\n|Package|Tier and domain|Accountable owner|Consumers|\n|-------|---------------|-----------------|---------|\n|`base`|Fixture domain|BASE|tool|\n\n").expect("package destinations");
         fs::write(
-            root.path()
-                .join("adr/033-tool-executables-names-and-versions.md"),
+            root.path().join("docs/spec/executable-contracts.md"),
             "|Present name|Successor|Installs to|\n|---|---|---|\n\n",
         )
         .expect("successor table");
@@ -437,7 +436,7 @@ fn census_refuses_unaccounted_successor() {
         fixture
             .root
             .path()
-            .join("adr/033-tool-executables-names-and-versions.md"),
+            .join("docs/spec/executable-contracts.md"),
         "|Present name|Successor|Installs to|\n|---|---|---|\n|extra|next|bin|\n\n",
     )
     .expect("successor");
@@ -457,7 +456,7 @@ fn census_refuses_missing_package_destination() {
         fixture
             .root
             .path()
-            .join("adr/036-tools-dependency-concept.md"),
+            .join("docs/spec/build-contracts.md"),
         "|Present source|Destination and tier|\n|---|---|\n|`base`|fixture|\n\n|Package|Tier and domain|Accountable owner|Consumers|\n|-------|---------------|-----------------|---------|\n\n",
     )
     .expect("destination");
@@ -1012,10 +1011,7 @@ fn census_refuses_changed_meson_command_variable() {
 #[test]
 fn census_accepts_recorded_successor_package() {
     let fixture = Fixture::new();
-    let path = fixture
-        .root
-        .path()
-        .join("adr/036-tools-dependency-concept.md");
+    let path = fixture.root.path().join("docs/spec/build-contracts.md");
     fs::write(&path, "|Present source|Destination and tier|\n|---|---|\n|`base`, `former-tool`|Survives as tier 2 `tool`.|\n\n|Package|Tier and domain|Accountable owner|Consumers|\n|-------|---------------|-----------------|---------|\n\n").expect("successor destination");
     assert_eq!(fixture.run()["unaccounted"], json!([]));
     fs::write(path, "|Present source|Destination and tier|\n|---|---|\n|`base`, `former-tool`|No successor declared.|\n\n|Package|Tier and domain|Accountable owner|Consumers|\n|-------|---------------|-----------------|---------|\n\n").expect("missing destination");
@@ -1036,14 +1032,14 @@ fn census_keeps_reporter_successor_build_only() {
         fixture
             .root
             .path()
-            .join("adr/033-tool-executables-names-and-versions.md"),
+            .join("docs/spec/executable-contracts.md"),
         format!("|Present name|Successor|Installs to|\n|---|---|---|\n{row}\n\n"),
     )
     .expect("build-only successor");
     let path = fixture.root.path().join("meson.build");
     let mut source = fs::read_to_string(&path).expect("ledger");
     for declaration in [
-        json!({"kind":"successor","record":"tab:toolnames:successors","row":row,"pending_bites":[],"build_programs":["build/tool"]}),
+        json!({"kind":"successor","record":"tab:buildcontracts:executable-identities","row":row,"pending_bites":[],"build_programs":["build/tool"]}),
         json!({"kind":"program","identity":"build/tool","output":"packages/tool/tool","package":"tool","version_authority":"packages/tool/Cargo.toml","form":"rust","installation_class":"build","cargo_binary":"tool","callers":[]}),
     ] {
         writeln!(source, "\ndependency_ledger += ['''\n{declaration}\n''']").expect("declaration");
@@ -1072,14 +1068,14 @@ fn census_binds_generated_bridges_to_their_owner() {
         fixture
             .root
             .path()
-            .join("adr/033-tool-executables-names-and-versions.md"),
+            .join("docs/spec/executable-contracts.md"),
         format!("|Present name|Successor|Installs to|\n|---|---|---|\n{row}\n\n"),
     )
     .expect("record");
     let path = fixture.root.path().join("meson.build");
     let mut source = fs::read_to_string(&path).expect("ledger");
     for declaration in [
-        json!({"kind":"successor","record":"tab:toolnames:successors","row":row,"pending_bites":[],"generated_programs":[{"program":"build/tool","source":"packages/tool/Cargo.toml","anchor":"[package]","destination":"private/LOOP-gpg"}]}),
+        json!({"kind":"successor","record":"tab:buildcontracts:executable-identities","row":row,"pending_bites":[],"generated_programs":[{"program":"build/tool","source":"packages/tool/Cargo.toml","anchor":"[package]","destination":"private/LOOP-gpg"}]}),
         json!({"kind":"program","identity":"build/tool","output":"packages/tool/tool","package":"tool","version_authority":"packages/tool/Cargo.toml","form":"rust","installation_class":"build","cargo_binary":"tool","callers":[]}),
     ] {
         writeln!(source, "\ndependency_ledger += ['''\n{declaration}\n''']").expect("declaration");
@@ -1240,10 +1236,7 @@ fn census_documents_require_ledger_parent() {
 #[test]
 fn census_refuses_missing_domains_table() {
     let fixture = Fixture::new();
-    let path = fixture
-        .root
-        .path()
-        .join("adr/036-tools-dependency-concept.md");
+    let path = fixture.root.path().join("docs/spec/build-contracts.md");
     let record = fs::read_to_string(&path).expect("record");
     fs::write(
         path,
@@ -1253,7 +1246,7 @@ fn census_refuses_missing_domains_table() {
         ),
     )
     .expect("missing domains header");
-    let error = "record 036 domains table missing";
+    let error = "public domains table missing";
     let report = fixture.run_at(fixture.root.path(), Some(error));
     assert_eq!(report, json!({"schema":1,"complete":false,"error":error}));
 }
@@ -1266,10 +1259,7 @@ fn census_refuses_missing_domains_table() {
 #[test]
 fn census_refuses_malformed_domains_table_row() {
     let fixture = Fixture::new();
-    let path = fixture
-        .root
-        .path()
-        .join("adr/036-tools-dependency-concept.md");
+    let path = fixture.root.path().join("docs/spec/build-contracts.md");
     let record = fs::read_to_string(&path).expect("record");
     fs::write(
         path,
@@ -1279,7 +1269,7 @@ fn census_refuses_malformed_domains_table_row() {
         ),
     )
     .expect("five-field domains row");
-    let error = "record 036 domains table row malformed";
+    let error = "public domains table row malformed";
     let report = fixture.run_at(fixture.root.path(), Some(error));
     assert_eq!(report, json!({"schema":1,"complete":false,"error":error}));
 }
@@ -1292,10 +1282,7 @@ fn census_refuses_malformed_domains_table_row() {
 #[test]
 fn census_refuses_domains_package_outside_roster() {
     let fixture = Fixture::new();
-    let path = fixture
-        .root
-        .path()
-        .join("adr/036-tools-dependency-concept.md");
+    let path = fixture.root.path().join("docs/spec/build-contracts.md");
     let record = fs::read_to_string(&path).expect("record");
     fs::write(
         path,
@@ -1305,12 +1292,12 @@ fn census_refuses_domains_package_outside_roster() {
         ),
     )
     .expect("stale domains package");
-    let error = "record 036 domains table names a package the roster lacks: absent";
+    let error = "public domains table names a package the roster lacks: absent";
     let report = fixture.run_at(fixture.root.path(), Some(error));
     assert_eq!(report, json!({"schema":1,"complete":false,"error":error}));
 }
 
-/// Domain owners cannot drift between the ledger and record 036.
+/// Domain owners cannot drift between the ledger and public domain contract.
 ///
 /// # Panics
 /// Panics only if fixture setup or the disagreement assertion fails.
@@ -1318,15 +1305,12 @@ fn census_refuses_domains_package_outside_roster() {
 #[test]
 fn census_refuses_record_owner_disagreement() {
     let fixture = Fixture::new();
-    let path = fixture
-        .root
-        .path()
-        .join("adr/036-tools-dependency-concept.md");
+    let path = fixture.root.path().join("docs/spec/build-contracts.md");
     let record = fs::read_to_string(&path).expect("record");
     fs::write(path, record.replace("|BASE|", "|OTHER|")).expect("changed record owner");
     assert_eq!(
         fixture.run()["unaccounted"],
-        json!(["accountable owner disagrees with record 036: base"])
+        json!(["accountable owner disagrees with public domain contract: base"])
     );
 }
 

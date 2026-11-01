@@ -72,7 +72,7 @@
 //! Exclusivity is stated at the row: a path matching two rows fails even when
 //! both rows name the same owner. Both are ordinary findings against a snapshot
 //! that parsed, because the snapshot is well-formed and it is the description
-//! that disagrees with the tree (´rule:commandcontract:configuration-verdicts´).
+//! that disagrees with the tree (´[TOOLS-rule:lintcontracts:verdicts]´).
 //!
 use std::collections::BTreeMap;
 

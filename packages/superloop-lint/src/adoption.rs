@@ -27,7 +27,7 @@
 //! its crate name. Low-level callers supply their root owner explicitly.
 //!
 //! The reserved kinds arrive with the kind registry compiled from the declared
-//! configuration snapshot (´dec:kindregistry:runtime-authority´). One profile
+//! configuration snapshot (´[TOOLS-rule:lintcontracts:snapshot]´). One profile
 //! now governs one of them — the test profile of ADR-T-015 governs
 //! `test` — and for every other the warrant-totality invariant
 //! (ADR-T-014, A calculus of documentation and source labels) still makes a bare occurrence a hard
