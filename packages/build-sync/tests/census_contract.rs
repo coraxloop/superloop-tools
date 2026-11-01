@@ -114,6 +114,7 @@ impl Fixture {
         ledger(
             &root.path().join("meson.build"),
             &[
+                json!({"kind":"installation-inputs","owner":"fixture","maps":[],"document_roots":["docs/arch","docs/spec"]}),
                 json!({"kind":"accountable-owner","package":"base","owner":"BASE"}),
                 json!({"kind":"accountable-owner","package":"tool","owner":"TOOL"}),
                 json!({"kind":"admission","name":"petgraph","owner":"ORCHESTRATORHOOK","reason":"state graphs"}),
@@ -604,6 +605,11 @@ fn census_refuses_unaccounted_native_install() {
 #[test]
 fn census_refuses_unaccounted_map_install() {
     let fixture = Fixture::new();
+    let path = fixture.root.path().join("meson.build");
+    let source = fs::read_to_string(&path)
+        .expect("ledger")
+        .replace("\"maps\":[]", "\"maps\":[\"maps/bin.toml\"]");
+    fs::write(path, source).expect("declared map");
     fs::create_dir(fixture.root.path().join("maps")).expect("maps");
     fs::write(fixture.root.path().join("maps/bin.toml"),
         "root = \"~/.local/bin\"\n[[targets]]\nkind = \"build\"\noutput = \"tool\"\ndestination = \"tool\"\nmode = \"0755\"\n").expect("map");
@@ -644,9 +650,12 @@ fn document_fixture(map: Option<&str>, destination: &str) -> Fixture {
         }
         targets.push(target);
     }
+    if let Some(map) = map {
+        source = source.replace("\"maps\":[]", &format!("\"maps\":[\"{map}\"]"));
+    }
     fs::write(root.join("meson.build"), source).expect("installation declarations");
     if let Some(map) = map {
-        fs::create_dir(root.join("maps")).expect("maps");
+        fs::create_dir_all(root.join(map).parent().expect("map parent")).expect("maps");
         let value = json!({"root":"~/.local/share/superloop-tools","targets":targets});
         fs::write(root.join(map), toml::to_string(&value).expect("map TOML"))
             .expect("document map");
@@ -661,18 +670,14 @@ fn document_fixture(map: Option<&str>, destination: &str) -> Fixture {
 /// ´test:integration:census-refuses-uninstalled-docs-prose´
 #[test]
 fn census_refuses_uninstalled_docs_prose() {
-    for (map, destination) in [
-        (None, ""),
-        (Some("maps/other.toml"), ""),
-        (Some("maps/share-map.toml"), "elsewhere/"),
-    ] {
+    for (map, destination) in [(None, ""), (Some("maps/share-map.toml"), "elsewhere/")] {
         let fixture = document_fixture(map, destination);
         let report = fixture.run();
         let findings = report["unaccounted"].as_array().expect("findings");
         assert_eq!(findings.len(), 2, "{report}");
         for document in ["docs/arch/example.md", "docs/spec/example.md"] {
             assert!(findings.contains(&json!(format!(
-                "docs-prose-uninstalled: {document} declared in declared-paths.txt has no installation in maps/share-map.toml"
+                "docs-prose-uninstalled: {document} declared in declared-paths.txt has no declared map or public native installation"
             ))));
         }
     }
@@ -685,8 +690,76 @@ fn census_refuses_uninstalled_docs_prose() {
 /// ´test:integration:census-admits-installed-docs-prose´
 #[test]
 fn census_admits_installed_docs_prose() {
-    let fixture = document_fixture(Some("maps/share-map.toml"), "");
-    assert_eq!(fixture.run()["unaccounted"], json!([]));
+    for map in ["maps/share-map.toml", "deploy/tools/maps/documents.toml"] {
+        let fixture = document_fixture(Some(map), "");
+        assert_eq!(fixture.run()["unaccounted"], json!([]));
+    }
+}
+
+/// A document repository checks declared maps without Cargo metadata.
+///
+/// # Panics
+/// Panics only if fixture setup fails or the installation contract is violated.
+/// ´test:integration:census-installations-without-cargo´
+#[test]
+fn census_installations_without_cargo() {
+    let fixture = document_fixture(Some("deploy/tools/maps/documents.toml"), "");
+    let root = fixture.root.path();
+    fs::remove_file(root.join("Cargo.toml")).expect("remove workspace");
+    let path = root.join("meson.build");
+    let source = fs::read_to_string(&path).expect("source ledger");
+    let source = source.replace("docs/arch", "docs/tools");
+    fs::rename(root.join("docs/arch"), root.join("docs/tools")).expect("instance documents");
+    fs::write(&path, &source).expect("instance ledger");
+    for path in ["declared-paths.txt", "deploy/tools/maps/documents.toml"] {
+        let path = root.join(path);
+        let text = fs::read_to_string(&path)
+            .expect("input")
+            .replace("docs/arch", "docs/tools");
+        fs::write(path, text).expect("instance input");
+    }
+    let configured = source
+        .split("dependency_ledger += ['''\n")
+        .skip(1)
+        .map(|block| block.split_once("\n''']").expect("ledger terminator").0)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ledger = root.join("dependency-ledger.jsonl");
+    fs::write(&ledger, configured).expect("configured ledger");
+    let report = root.join("report.json");
+    build_sync::census::run(root, Path::new("absent-cargo"), &ledger, &report, true)
+        .expect("document census");
+    let value: Value = serde_json::from_slice(&fs::read(report).expect("report")).expect("JSON");
+    assert_eq!(value["scope"], "installations");
+    assert_eq!(value["unaccounted"], json!([]));
+}
+
+/// Declared inputs refuse malformed paths and missing maps.
+///
+/// # Panics
+/// Panics only if fixture setup fails or an invalid input is admitted.
+/// ´test:integration:census-refuses-invalid-installation-inputs´
+#[test]
+fn census_refuses_invalid_installation_inputs() {
+    for (maps, error) in [
+        (
+            r#"["../outside.toml"]"#,
+            "invalid or duplicate installation input",
+        ),
+        (
+            r#"["maps/a.toml","maps/a.toml"]"#,
+            "invalid or duplicate installation input",
+        ),
+        (r#"["maps/absent.toml"]"#, "map maps/absent.toml:"),
+    ] {
+        let fixture = Fixture::new();
+        let path = fixture.root.path().join("meson.build");
+        let source = fs::read_to_string(&path)
+            .expect("ledger")
+            .replace("\"maps\":[]", &format!("\"maps\":{maps}"));
+        fs::write(path, source).expect("invalid declaration");
+        fixture.run_at(fixture.root.path(), Some(error));
+    }
 }
 
 /// Source inclusion cannot bypass dependency accounting by avoiding a Cargo edge.

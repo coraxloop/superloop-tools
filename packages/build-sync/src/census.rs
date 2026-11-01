@@ -116,8 +116,18 @@ fn reachable(start: &str, target: &str, edges: &BTreeMap<String, BTreeSet<String
 /// # Errors
 /// Refuses malformed declarations, failed Cargo metadata, unwritable reports,
 /// or a measured graph that does not agree with its declarations.
-pub fn run(root: &Path, cargo: &Path, configured_ledger: &Path, report: &Path) -> Result<()> {
-    let result = measure(root, cargo, configured_ledger);
+pub fn run(
+    root: &Path,
+    cargo: &Path,
+    configured_ledger: &Path,
+    report: &Path,
+    installations_only: bool,
+) -> Result<()> {
+    let result = if installations_only {
+        measure_installations(root, configured_ledger)
+    } else {
+        measure(root, cargo, configured_ledger)
+    };
     let document = match &result {
         Ok(document) => document.clone(),
         Err(reason) => json!({"schema":1,"complete":false,"error":reason}),
@@ -141,6 +151,21 @@ pub fn run(root: &Path, cargo: &Path, configured_ledger: &Path, report: &Path) -
             report.display()
         ))
     }
+}
+
+fn measure_installations(root: &Path, configured_ledger: &Path) -> Result<Value> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("root: {error}"))?;
+    let ledger = rows(&root.join("meson.build"))?;
+    check_configured_ledger(configured_ledger, &ledger)?;
+    let mut findings = Vec::new();
+    ledger_kinds(&ledger, &mut findings)?;
+    let installations =
+        crate::census_install::inventory(&root, configured_ledger, &ledger, &mut findings)?;
+    Ok(
+        json!({"schema":1,"scope":"installations","installations":installations,"unaccounted":findings}),
+    )
 }
 
 fn measure(root: &Path, cargo: &Path, configured_ledger: &Path) -> Result<Value> {
@@ -267,6 +292,7 @@ fn ledger_kinds(ledger: &[Value], findings: &mut Vec<String>) -> Result<()> {
             "payload",
             "vendored",
             "installation",
+            "installation-inputs",
             "data",
             "source-import",
             "test-tool",

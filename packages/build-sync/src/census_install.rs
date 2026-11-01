@@ -1,6 +1,6 @@
 //! Compare migration maps and configured native destinations with the ledger.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -21,30 +21,48 @@ fn read_json(path: &Path) -> Result<Value> {
     .map_err(|error| format!("decode {}: {error}", path.display()))
 }
 
-fn map_inventory(root: &Path) -> Result<Vec<Value>> {
-    let directory = root.join("maps");
-    if !directory.exists() {
-        return Ok(Vec::new());
+fn input_paths(ledger: &[Value], field: &str) -> Result<Vec<String>> {
+    let rows: Vec<_> = ledger
+        .iter()
+        .filter(|row| row["kind"] == "installation-inputs")
+        .collect();
+    if rows.len() != 1 {
+        return Err("installation census requires exactly one installation-inputs row".into());
     }
-    let mut paths = fs::read_dir(directory)
-        .map_err(|error| error.to_string())?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    paths.sort_by_key(std::fs::DirEntry::file_name);
+    if text(rows[0], "owner")?.is_empty() {
+        return Err("installation-inputs requires an owner".into());
+    }
+    let mut paths = BTreeSet::new();
+    for value in rows[0][field]
+        .as_array()
+        .ok_or_else(|| format!("installation-inputs lacks {field}"))?
+    {
+        let path = value.as_str().ok_or("installation input must be a path")?;
+        if !superloop_cli_common::public_set::safe_path(path) || !paths.insert(path.to_owned()) {
+            return Err(format!("invalid or duplicate installation input: {field}"));
+        }
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn map_inventory(root: &Path, paths: &[String]) -> Result<Vec<Value>> {
     let mut result = Vec::new();
-    for entry in paths {
-        let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "toml") {
+    for relative in paths {
+        if !crate::census::expects_source(root, relative)? {
             continue;
+        }
+        let path = root.join(relative);
+        let resolved = path
+            .canonicalize()
+            .map_err(|error| format!("map {relative}: {error}"))?;
+        if !resolved.starts_with(root) || !resolved.is_file() {
+            return Err(format!(
+                "map must be a file within the source root: {relative}"
+            ));
         }
         let map: Value =
             toml::from_str(&fs::read_to_string(&path).map_err(|error| error.to_string())?)
                 .map_err(|error| error.to_string())?;
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| error.to_string())?
-            .to_str()
-            .ok_or("non-UTF-8 map")?;
         let destination_root = map["root"]
             .as_str()
             .or_else(|| map["registry"]["root"].as_str())
@@ -118,7 +136,7 @@ fn destination_collisions(
     Ok(())
 }
 
-fn document_paths(build: &Path) -> Result<Vec<String>> {
+fn document_paths(build: &Path, roots: &[String]) -> Result<Vec<String>> {
     let path = build.join("declared-paths.txt");
     let source = fs::read_to_string(&path)
         .map_err(|error| format!("docs-prose-unreadable: {error} in {}", path.display()))?;
@@ -140,7 +158,11 @@ fn document_paths(build: &Path) -> Result<Vec<String>> {
         if Path::new(document)
             .extension()
             .is_none_or(|extension| extension != "md")
-            || (!document.starts_with("docs/arch/") && !document.starts_with("docs/spec/"))
+            || !roots.iter().any(|root| {
+                document
+                    .strip_prefix(root)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+            })
         {
             continue;
         }
@@ -170,7 +192,6 @@ fn documents(
         };
         if !installed.iter().any(|row| {
             row["route"] == "map"
-                && row["declaration"] == "maps/share-map.toml"
                 && row["target"]["kind"] == "copy"
                 && row["target"]["source"] == document
                 && row["target"]["destination"] == document
@@ -179,7 +200,7 @@ fn documents(
                     && row["source"] == format!("source:{document}"))
         }) {
             findings.push(format!(
-                "docs-prose-uninstalled: {document} declared in declared-paths.txt has no installation in maps/share-map.toml"
+                "docs-prose-uninstalled: {document} declared in declared-paths.txt has no declared map or public native installation"
             ));
         }
     }
@@ -217,8 +238,10 @@ pub fn inventory(
     let build = build
         .canonicalize()
         .map_err(|error| format!("docs-prose-unreadable: {error} in {}", build.display()))?;
-    let mut measured = map_inventory(root)?;
-    let declared_documents = document_paths(&build)?;
+    let maps = input_paths(ledger, "maps")?;
+    let roots = input_paths(ledger, "document_roots")?;
+    let mut measured = map_inventory(root, &maps)?;
+    let declared_documents = document_paths(&build, &roots)?;
     let installed = read_json(&build.join("meson-info/intro-installed.json"))?;
     let options = read_json(&build.join("meson-info/intro-buildoptions.json"))?;
     for (source, destination) in installed

@@ -808,6 +808,7 @@ test('cargo-test', cargo, args: ['test', '--profile', 'gate', '--workspace', '--
 
 
 dependency_ledger += ['''
+{"kind":"installation-inputs","owner":"TOOLS","maps":["maps/share-map.toml","maps/charter-lanes-map.toml"],"document_roots":["docs/arch","docs/spec"]}
 {"kind":"admission","name":"clap","reason":"Typed argument grammar and help","owner":"SUPERLOOPCLICOMMON"}
 {"kind":"admission","name":"libc","reason":"Unix descriptors and identities","owner":"LOOPHOME"}
 {"kind":"admission","name":"minijinja","reason":"Embedded export templates","owner":"SUPERLOOPCHATEXPORT"}
