@@ -323,6 +323,9 @@ pub enum Finding {
         label: Label,
         /// Where the citation stands.
         location: Location,
+        /// The searched owner and the registered prefix naming it, for an import.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        imported: Option<(String, Prefix)>,
     },
     /// A same-owner citation resolved to no mint in its own owner, but the
     /// label mints in another owner and wants the import form.
@@ -1688,11 +1691,22 @@ impl fmt::Display for Finding {
                 formatter,
                 "{location}: unpublished address {owner}-{label} is cited by no public file"
             ),
-            Self::UnresolvedCitation { label, location } => {
+            Self::UnresolvedCitation {
+                label,
+                location,
+                imported,
+            } => {
                 write!(
                     formatter,
                     "{location}: citation of {label} resolves nowhere"
-                )
+                )?;
+                if let Some((owner, prefix)) = imported {
+                    write!(
+                        formatter,
+                        " in owner {owner}, whose prefix {prefix} the citation names"
+                    )?;
+                }
+                Ok(())
             }
             Self::UnresolvedCitationWantingImport {
                 label,
@@ -2565,6 +2579,7 @@ mod tests {
         let failure = Finding::UnresolvedCitation {
             label: Label::parse("sec:labels:syntax").expect("well-formed"),
             location,
+            imported: None,
         };
         assert_eq!(failure.severity(), Severity::Failure);
         assert!(failure.is_failure());

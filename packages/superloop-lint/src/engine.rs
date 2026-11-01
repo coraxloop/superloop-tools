@@ -817,6 +817,7 @@ impl<'a> Engine<'a> {
             || Finding::UnresolvedCitation {
                 label: label.clone(),
                 location: held.occurrence.location().clone(),
+                imported: None,
             },
             |minting_owner| {
                 if let Some((reach, rows)) = self.reach
@@ -883,6 +884,7 @@ impl<'a> Engine<'a> {
             self.findings.push(Finding::UnresolvedCitation {
                 label: label.clone(),
                 location,
+                imported: Some((cited.to_string(), prefix.clone())),
             });
         }
     }

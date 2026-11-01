@@ -3209,28 +3209,5 @@ pattern = "tests/version-smoke.py"
 [public]
 licence_code = "LICENSE-CODE"
 licence_docs = "LICENSE-DOCS"
+name = "superloop-tools"
 readme = "README.md"
-
-[[reserved.rows]]
-pattern = "docs/public-pack-provenance.toml"
-reason = "Generated pack provenance member; absent from the source tree."
-
-[[reserved.rows]]
-pattern = "docs/briefs/"
-reason = "Private task briefs."
-
-[[reserved.rows]]
-pattern = "docs/drafts/"
-reason = "Unpublished drafts."
-
-[[reserved.rows]]
-pattern = "docs/BACKLOG.md"
-reason = "Internal work queue."
-
-[[reserved.rows]]
-pattern = "briefs/"
-reason = "Private task briefs."
-
-[[reserved.rows]]
-pattern = "gateway/"
-reason = "Internal gateway state and operations."

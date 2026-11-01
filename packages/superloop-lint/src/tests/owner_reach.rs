@@ -7,6 +7,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`resolves_a_prefixed_crateless_owner_before_checking_reach`] | layers | A rendered crateless mint resolves before its declared reach is checked. # Panics Panics only if fixture IO, planning, resolution, or reach differs from the contract. |
 //! | [`derives_reach_from_every_dependency_table`] | layers | Reach is read from the manifests and from all three dependency tables — ordinary, development and build — so a dependency declared for tests warrants a citation exactly as one declared for the build does. A `path` key outside a dependency table, such as a library target's, declares no edge. |
 //! | [`derives_an_inherited_workspace_path_dependency`] | layers | A member dependency inherited from the workspace derives the edge carried by the root workspace dependency's path. |
 //! | [`derives_no_edge_from_an_inherited_dependency_without_a_path`] | layers | A member dependency inherited from a non-path workspace dependency derives no reach edge. |
@@ -359,6 +360,136 @@ fn fixture_reach(root: &Path) -> crate::layers::Reach {
     );
 
     derive_reach(root, &packages, &adoption)
+}
+
+fn crateless_owner_fixture(declare_row: bool) -> tempfile::TempDir {
+    let root = imported_root_fixture(false);
+    write(
+        root.path(),
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/cas\"]\n",
+    );
+    write(
+        root.path(),
+        "crates/cas/Cargo.toml",
+        "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n",
+    );
+    let row = if declare_row {
+        "{ owner = \"CAS\", target = \"DOCS\" }"
+    } else {
+        ""
+    };
+    write(
+        root.path(),
+        ".linter/owners.toml",
+        &format!(
+            r#"namespace = "example.linter.owners"
+version = [1, 0, 0]
+root_owner = "PROJECTA"
+owners = ["PROJECTA", "CAS", "DOCS"]
+partitions = [
+  {{ name = "config", owner = "PROJECTA", pattern = '%s".linter/" *VCHAR' }},
+  {{ name = "manifest", owner = "PROJECTA", pattern = '%s"Cargo.toml"' }},
+  {{ name = "root-prose", owner = "PROJECTA", pattern = '%s"adr/" *VCHAR' }},
+  {{ name = "cas", owner = "CAS", pattern = '%s"crates/cas/" *VCHAR' }},
+  {{ name = "docs", owner = "DOCS", pattern = '%s"docs/" *VCHAR' }},
+  {{ name = "templates", owner = "DOCS", pattern = '%s"templates/docs/" *VCHAR' }},
+]
+may_cite = [{row}]
+"#
+        ),
+    );
+    write(
+        root.path(),
+        ".linter/policies.toml",
+        r#"namespace = "example.linter.policies"
+version = [1, 0, 0]
+policies = [
+  { owner = "CAS", policy = "labels.mints-well-formed" },
+  { owner = "DOCS", policy = "labels.mints-well-formed" },
+]
+"#,
+    );
+    write(
+        root.path(),
+        ".linter/lists.toml",
+        "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n[CAS.\"labels.mints-well-formed\"]\nallowances = []\n[DOCS.\"labels.mints-well-formed\"]\nallowances = []\n",
+    );
+    write(
+        root.path(),
+        ".linter/environments.toml",
+        "namespace = \"example.linter.environments\"\nversion = [1, 0, 0]\nenvironments = [{ environment = \"Definition\", kind = \"def\" }]\nextensions = []\nreserved_kinds = []\nreserved_extensions = []\n",
+    );
+    let head = "**Definition (Reuse)** · `def:nrz:reuse-lemma`\n";
+    write(root.path(), "docs/design/reuse-concept.md", head);
+    write(
+        root.path(),
+        "templates/docs/design/reuse-concept.md.j2",
+        head,
+    );
+    write(
+        root.path(),
+        "crates/cas/README.md",
+        "See (`[DOCS-def:nrz:reuse-lemma]`).\n",
+    );
+    root
+}
+
+/// A rendered crateless mint resolves before its declared reach is checked.
+///
+/// # Panics
+/// Panics only if fixture IO, planning, resolution, or reach differs from the contract.
+///
+/// ´claim:layers:crateless-mints-resolve-before-reach´
+/// ´test:crate:resolves-a-prefixed-crateless-owner-before-checking-reach´
+#[test]
+fn resolves_a_prefixed_crateless_owner_before_checking_reach() {
+    for declare_row in [true, false] {
+        let root = crateless_owner_fixture(declare_row);
+        let plan = crate::plan::ExecutionPlan::compile(
+            root.path(),
+            crate::snapshot::configuration(root.path()),
+        )
+        .expect("crateless fixture plan");
+        let adoption = plan.labels().adoption();
+        let (sources, findings) = plan.labels().read(root.path());
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(sources.len(), 2, "the template is not a second mint");
+        assert_eq!(
+            adoption.owner_of(Path::new("docs/design/reuse-concept.md")),
+            &owner("DOCS")
+        );
+        let analysis = analyze(adoption, &sources, &CodeSurface::default());
+        assert!(analysis.findings().is_empty(), "{:?}", analysis.findings());
+        assert_eq!(analysis.mints(), 1);
+        assert_eq!(analysis.citations_resolved(), 1);
+        let (_, findings) = verify_layers(
+            root.path(),
+            plan.workspace().packages(),
+            adoption,
+            &analysis,
+            plan.snapshot().may_cite(),
+        );
+        let expected = if declare_row {
+            vec![]
+        } else {
+            vec!["unreached_import"]
+        };
+        assert_eq!(codes(&findings), expected, "{findings:?}");
+        write(
+            root.path(),
+            "docs/design/reuse-concept.md",
+            "**Definition (Other)** · `def:nrz:other`\n",
+        );
+        let (sources, _) = plan.labels().read(root.path());
+        let analysis = analyze(adoption, &sources, &CodeSurface::default());
+        let [finding @ Finding::UnresolvedCitation { .. }] = analysis.findings() else {
+            panic!("one missing imported mint: {:?}", analysis.findings());
+        };
+        assert!(finding.to_string().ends_with(
+            "citation of def:nrz:reuse-lemma resolves nowhere in owner DOCS, whose prefix DOCS the citation names"
+        ));
+    }
 }
 
 /// Reach is read from the manifests and from all three dependency tables —

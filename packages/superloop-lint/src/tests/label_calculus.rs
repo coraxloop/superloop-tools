@@ -7,6 +7,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`missing_import_names_the_searched_owner_and_prefix`] | check | Missing imported labels name the searched registry; local misses keep their wording. # Panics Panics only if the fixture prefix is invalid or resolution violates its contract. |
 //! | [`resolves_only_live_unpublished_addresses`] | check | Unpublished addresses resolve without inventing document mints, while unused entries fail. # Panics Panics only if the fixture register fails to parse or resolution violates its contract. |
 //! | [`resolves_a_mint_and_its_citation`] | check | The ordinary case is clean: a head mints, a sentence below cites it, the citation resolves, and the pair becomes an edge of the reference graph. A document may refer to what it has just established. |
 //! | [`resolves_across_files_in_either_traversal_order`] | check | The order the corpus is read in decides nothing: a citation in one file of a mint in another resolves whichever file is visited first, and both orders yield the same counts. Resolution is staged rather than sequential, so no document need be written before another. |
@@ -54,6 +55,54 @@ use crate::profile::{CoveredAsset, cover};
 use crate::registry::{KindRegistry, fixture_kind_registry};
 use crate::todo::{CoveredNotice, TodoCensus, cover_todos, scan_todos};
 use crate::workspace::Package;
+
+/// Missing imported labels name the searched registry; local misses keep their wording.
+///
+/// # Panics
+/// Panics only if the fixture prefix is invalid or resolution violates its contract.
+///
+/// ´claim:check:missing-import-names-the-searched-registry´
+/// ´test:crate:missing-import-names-the-searched-owner-and-prefix´
+#[test]
+fn missing_import_names_the_searched_owner_and_prefix() {
+    let adoption = Adoption::new(
+        BTreeMap::from([(
+            Prefix::parse("DOCS").expect("prefix"),
+            Owner::new("documentation"),
+        )]),
+        extended(),
+        Owner::new("CAS"),
+    );
+    for (citation, suffix) in [
+        (
+            "(`[DOCS-def:nrz:reuse-typo]`)",
+            " in owner documentation, whose prefix DOCS the citation names",
+        ),
+        ("(`def:nrz:reuse-typo`)", ""),
+    ] {
+        let analysis = analyze(
+            &adoption,
+            &[source("cites.md", citation)],
+            &CodeSurface::default(),
+        );
+        let [finding @ Finding::UnresolvedCitation { .. }] = analysis.findings() else {
+            panic!("one unresolved citation: {:?}", analysis.findings());
+        };
+        assert_eq!(finding.code(), "unresolved_citation");
+        assert!(finding.to_string().ends_with(&format!(
+            "citation of def:nrz:reuse-typo resolves nowhere{suffix}"
+        )));
+    }
+    let analysis = analyze(
+        &adoption,
+        &[source("cites.md", "(`[TYPO-def:nrz:reuse-lemma]`)")],
+        &CodeSurface::default(),
+    );
+    assert!(matches!(
+        analysis.findings(),
+        [Finding::UnregisteredPrefix { .. }]
+    ));
+}
 
 /// Unpublished addresses resolve without inventing document mints, while unused entries fail.
 ///
