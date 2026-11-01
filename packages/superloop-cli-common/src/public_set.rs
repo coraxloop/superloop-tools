@@ -57,10 +57,11 @@ struct Row {
     reserved: bool,
 }
 
-/// Public tree entry points; these are source-relative paths.
+/// Public repository name and source-relative tree entry points.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Public {
+    pub name: String,
     pub readme: String,
     pub licence_code: String,
     pub licence_docs: String,

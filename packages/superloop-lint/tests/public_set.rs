@@ -80,6 +80,7 @@ rows = [{ pattern = ".linter/", reason = "Private declaration." }]
 [reserved]
 rows = [{ pattern = "future/", reason = "Private future material." }]
 [public]
+name = "fixture-repository"
 readme = "public/readme.txt"
 licence_code = "LICENSE-CODE"
 licence_docs = "LICENSE-DOCS"

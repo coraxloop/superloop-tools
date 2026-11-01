@@ -293,7 +293,8 @@ pub fn cut(request: CutRequest<'_>) -> Result<CutReport, CutError> {
     )?;
     let date = line(&stage, &["show", "-s", "--format=%aI", &commit])?;
     if let Some(tag) = request.public_tag {
-        let tag_message = publication_tag_message(&stage, tag, request.tag_message)?;
+        let tag_message =
+            publication_tag_message(&stage, &manifest.public.name, tag, request.tag_message)?;
         create_public_tag(&stage, tag, &commit, (name, email), &date, &tag_message)?;
     }
     let rechecked =
@@ -376,6 +377,7 @@ fn publish_commit(
 
 fn publication_tag_message(
     stage: &Path,
+    name: &str,
     tag: &str,
     message: Option<&str>,
 ) -> Result<String, CutError> {
@@ -416,7 +418,7 @@ fn publication_tag_message(
             "CHANGELOG.md requires non-empty body for heading {heading}DATE"
         )));
     }
-    Ok(format!("superloop-tools {tag}\n\n{}", body.concat()))
+    Ok(format!("{name} {tag}\n\n{}", body.concat()))
 }
 
 fn create_public_tag(
@@ -969,9 +971,13 @@ mod guard_tests {
     fn publication_overrides_refuse_invalid_text() {
         for message in ["", " \t\n", "notes\0body"] {
             assert!(super::publication_message(None, Some(message)).is_err());
-            let error =
-                super::publication_tag_message(std::path::Path::new("."), "v0.1.0", Some(message))
-                    .expect_err("invalid tag message");
+            let error = super::publication_tag_message(
+                std::path::Path::new("."),
+                "fixture",
+                "v0.1.0",
+                Some(message),
+            )
+            .expect_err("invalid tag message");
             assert_eq!(
                 error.to_string(),
                 "cut refused: tag-message must be non-empty and contain no NUL"

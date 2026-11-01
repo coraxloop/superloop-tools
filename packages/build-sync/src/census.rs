@@ -1023,6 +1023,7 @@ rows = [{ pattern = "public/" }]
 [exclude]
 rows = [{ pattern = "private/", reason = "Source-only evidence." }]
 [public]
+name = "fixture-repository"
 readme = "public/README.md"
 licence_code = "LICENSE-CODE"
 licence_docs = "LICENSE-DOCS"
