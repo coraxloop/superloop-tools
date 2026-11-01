@@ -525,6 +525,12 @@ pub(super) fn run(settings: &Settings) -> Result<String> {
                 .ok_or_else(|| "locked home missing".into())
         })
         .collect::<Result<Vec<_>>>()?;
+    let charter = super::repair::LinkPlan::new(
+        settings.home.join("AGENTS.md"),
+        settings.charter.clone(),
+        false,
+        true,
+    )?;
     let mut leftovers = Vec::new();
     for home in &homes {
         for entry in fs::read_dir(&home.path).map_err(|e| e.to_string())? {
@@ -573,7 +579,7 @@ pub(super) fn run(settings: &Settings) -> Result<String> {
     if let Some(record) = &settings.record {
         files.push(record.plan());
     }
-    let plan = json!({"loop":settings.name,"nodes":settings.nodes.iter().map(|node|&node.name).collect::<Vec<_>>(),"files":files,"ssh":details(texts[0], settings)?});
+    let plan = json!({"charter":settings.charter,"loop":settings.name,"nodes":settings.nodes.iter().map(|node|&node.name).collect::<Vec<_>>(),"files":files,"links":[charter.report()],"ssh":details(texts[0], settings)?});
     let mut digest = String::new();
     for byte in Sha256::digest(plan.to_string().as_bytes()) {
         write!(digest, "{byte:02x}").map_err(|e| e.to_string())?;
@@ -583,13 +589,18 @@ pub(super) fn run(settings: &Settings) -> Result<String> {
         .zip(&after)
         .filter(|(old, new)| **old != new.as_str())
         .count()
-        + usize::from(settings.record.is_some());
+        + usize::from(settings.record.is_some())
+        + usize::from(charter.changed());
     if settings.dry_run {
-        return Ok(json!({"plan":plan,"digest":digest,"changed":changed}).to_string());
+        return Ok(
+            json!({"charter":settings.charter,"plan":plan,"digest":digest,"changed":changed})
+                .to_string(),
+        );
     }
     if digest != settings.digest.to_ascii_lowercase() {
         return Err("reconcile digest mismatch; repeat --dry-run".into());
     }
+    charter.check()?;
     for (index, (home, name)) in files_to_write.iter().enumerate() {
         let (metadata, bytes) = home.read(name)?;
         let identity = |m: &Option<fs::Metadata>| m.as_ref().map(|m| (m.dev(), m.ino(), m.mode()));
@@ -651,10 +662,10 @@ pub(super) fn run(settings: &Settings) -> Result<String> {
         for home in &homes {
             home.held.sync_all().map_err(|e| e.to_string())?;
         }
-        Ok(format!(
-            "{{\"outcome\": \"applied\", \"digest\": \"{digest}\", \"replaced\": {}}}",
-            staged.len() + usize::from(settings.record.is_some())
-        ))
+        homes[0].check()?;
+        charter.publish(&homes[0].held)?;
+        Ok(json!({"charter":settings.charter,"outcome":"applied","digest":digest,
+            "replaced":staged.len() + usize::from(settings.record.is_some()) + usize::from(charter.changed())}).to_string())
     })();
     for (index, name) in &staged {
         let _removed = nix::unistd::unlinkat(
@@ -740,6 +751,7 @@ pub(super) mod tests {
         }
         fs::create_dir(settings.home.join("keys")).expect("keys");
         fs::write(&settings.key, "synthetic key").expect("key");
+        fs::write(&settings.charter, "fixture charter").expect("charter");
         std::os::unix::fs::symlink(&settings.key, home_key(&settings).expect("key path"))
             .expect("key link");
         fs::write(settings.home.join("ssh_config"), measured(&settings)).expect("measured SSH");
@@ -750,7 +762,8 @@ pub(super) mod tests {
         .expect("sibling SSH");
         let preview: serde_json::Value =
             serde_json::from_str(&run(&settings).expect("preview")).expect("JSON");
-        assert_eq!(preview["changed"], 3);
+        assert_eq!(preview["changed"], 4);
+        assert_eq!(preview["charter"], json!(settings.charter));
         assert_eq!(
             preview["plan"]["ssh"]["removed_stanzas"],
             json!(["gone-one-worker", "gone-two-worker", "gone-three-worker"])
@@ -775,6 +788,10 @@ pub(super) mod tests {
         );
         fs::remove_file(settings.home.join("known_hosts.routes")).expect("restore absence");
         run(&settings).expect("apply");
+        assert_eq!(
+            fs::read_link(settings.home.join("AGENTS.md")).expect("charter link"),
+            settings.charter
+        );
         let after = fs::read_to_string(settings.home.join("ssh_config")).expect("SSH");
         assert!(!after.contains("gone-"));
         assert!(

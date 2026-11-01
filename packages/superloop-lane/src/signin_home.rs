@@ -24,6 +24,7 @@ type Result<T> = std::result::Result<T, String>;
 struct Settings {
     name: String,
     owner: PathBuf,
+    charter: PathBuf,
     home: PathBuf,
     claude_home: PathBuf,
     project: String,
@@ -282,7 +283,7 @@ fn settings(args: &[String], verify: bool) -> Result<Settings> {
                 }
             }
             "--backend" | "--home" | "--claude-home" | "--user" | "--key" | "--project"
-            | "--hosts" | "--nodes" | "--expect-digest" => {
+            | "--hosts" | "--nodes" | "--expect-digest" | "--charter" => {
                 let value = words.next().ok_or("option requires a value")?;
                 if values.insert(word.clone(), value.clone()).is_some() {
                     return Err("duplicate option".into());
@@ -303,6 +304,7 @@ fn settings(args: &[String], verify: bool) -> Result<Settings> {
         .map(PathBuf::from)
         .ok_or("HOME is required")?;
     let value = |key: &str| values.get(key).cloned().unwrap_or_default();
+    let charter = charter(&owner, values.get("--charter"))?;
     let home = values
         .get("--home")
         .map_or_else(|| lane_home(&owner, &name), PathBuf::from);
@@ -423,6 +425,7 @@ fn settings(args: &[String], verify: bool) -> Result<Settings> {
     Ok(Settings {
         name,
         owner,
+        charter,
         home,
         claude_home,
         project,
@@ -554,8 +557,29 @@ pub(super) fn lane_home(owner: &Path, name: &str) -> PathBuf {
     owner.join(".config/loops").join(name).join("codex")
 }
 
-fn charter(owner: &Path) -> PathBuf {
-    owner.join(".local/share/superloop-tools/docs/worker-charter.md")
+fn charter(owner: &Path, supplied: Option<&String>) -> Result<PathBuf> {
+    let path = supplied.map_or_else(
+        || owner.join(".local/share/orchestration-instance/docs/tools/worker-charter.md"),
+        PathBuf::from,
+    );
+    std::path::absolute(path).map_err(|error| format!("--charter: {error}"))
+}
+
+fn validate_charter(path: &Path) -> Result<()> {
+    let readable = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(path)
+        .and_then(|file| file.metadata())
+        .is_ok_and(|metadata| metadata.is_file());
+    if readable {
+        Ok(())
+    } else {
+        Err(format!(
+            "worker charter not found at {}; pass --charter or install the instance publication",
+            path.display()
+        ))
+    }
 }
 
 fn owner_uid() -> u32 {
@@ -706,6 +730,9 @@ fn verify(mut settings: Settings) -> Result<(u8, String)> {
         settings.missing.push(refusal);
         return Ok(verification_report(&settings));
     }
+    if validate_charter(&settings.charter).is_err() {
+        settings.missing.push("charter".into());
+    }
     check_location(&mut settings);
     if !settings.missing.is_empty() {
         return Ok(verification_report(&settings));
@@ -733,7 +760,7 @@ fn verify(mut settings: Settings) -> Result<(u8, String)> {
     for (path, target, label) in [
         (
             settings.home.join("AGENTS.md"),
-            charter(&settings.owner),
+            settings.charter.clone(),
             "AGENTS.md".into(),
         ),
         (
@@ -845,9 +872,10 @@ fn verification_report(settings: &Settings) -> (u8, String) {
     (
         u8::from(!settings.missing.is_empty()),
         format!(
-            "{{\"loop\":{},\"home\":{},\"ok\":{},\"missing\":{},\"varied\":{},\"varied_lines\":{}{location}}}",
+            "{{\"loop\":{},\"home\":{},\"charter\":{},\"ok\":{},\"missing\":{},\"varied\":{},\"varied_lines\":{}{location}}}",
             json!(settings.name),
             json!(settings.home),
+            json!(settings.charter),
             settings.missing.is_empty(),
             json!(settings.missing),
             json!(settings.varied),
@@ -989,7 +1017,7 @@ fn create(settings: &Settings) -> Result<String> {
         settings.key.file_name().ok_or("key filename missing")?,
     )
     .map_err(|e| e.to_string())?;
-    nix::unistd::symlinkat(&charter(&settings.owner), &staged.directory, "AGENTS.md")
+    nix::unistd::symlinkat(&settings.charter, &staged.directory, "AGENTS.md")
         .map_err(|e| e.to_string())?;
     let linked = canonical_ready(settings)?;
     if linked {
@@ -1043,6 +1071,7 @@ pub fn command(args: &[String], check: bool) -> u8 {
         if check {
             return verify(settings);
         }
+        validate_charter(&settings.charter)?;
         let expected = lane_home(&settings.owner, &settings.name);
         if settings.home != expected {
             return Err(format!(

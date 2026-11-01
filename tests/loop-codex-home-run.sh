@@ -34,13 +34,13 @@ expect_line() {
   grep -Fqx -- "$2" "$1" || fail "$3"
 }
 
-mkdir -p "$FIXTURE_ROOT/bin" "$FAKE_HOME/.local/share/superloop-tools/loops.d" "$OUTSIDE" "$FAKE_HOME/dev/superloop-tools/loops.d" "$FAKE_HOME/.codex" "$FAKE_HOME/.local/share/superloop-tools/docs" "$FAKE_HOME/.config/loops/alpha/claude/keys" "$FAKE_HOME/.config/loops/beta/claude" "$FAKE_HOME/.config/loops/exact/claude" "$FAKE_HOME/.config/loops/ambiguous/claude" "$FAKE_HOME/.ssh" "$TEST_ROOT/project-derived" "$TEST_ROOT/project-beta-derived" "$TEST_ROOT/project-exact-derived" "$TEST_ROOT/project-ambiguous-derived"
+mkdir -p "$FIXTURE_ROOT/bin" "$FAKE_HOME/.local/share/superloop-tools/loops.d" "$OUTSIDE" "$FAKE_HOME/dev/superloop-tools/loops.d" "$FAKE_HOME/.codex" "$FAKE_HOME/.local/share/orchestration-instance/docs/tools" "$FAKE_HOME/.config/loops/alpha/claude/keys" "$FAKE_HOME/.config/loops/beta/claude" "$FAKE_HOME/.config/loops/exact/claude" "$FAKE_HOME/.config/loops/ambiguous/claude" "$FAKE_HOME/.ssh" "$TEST_ROOT/project-derived" "$TEST_ROOT/project-beta-derived" "$TEST_ROOT/project-exact-derived" "$TEST_ROOT/project-ambiguous-derived"
 cp "$SOURCE_SCRIPT" "$COPIED_BINARY"
 chmod 700 "$FAKE_HOME"
 chmod 700 "$FAKE_HOME/.config" "$FAKE_HOME/.config/loops" "$FAKE_HOME/.config/loops/alpha" "$FAKE_HOME/.config/loops/beta" "$FAKE_HOME/.config/loops/exact" "$FAKE_HOME/.config/loops/ambiguous"
 chmod 700 "$COPIED_BINARY"
 : > "$FAKE_HOME/.codex/auth.json"
-: > "$FAKE_HOME/.local/share/superloop-tools/docs/worker-charter.md"
+: > "$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md"
 : > "$FAKE_HOME/.ssh/superloop-alpha_ed25519"
 ln -s "$FAKE_HOME/.ssh/superloop-alpha_ed25519" "$FAKE_HOME/.config/loops/alpha/claude/keys/superloop-alpha_ed25519"
 chmod 700 "$FAKE_HOME/.local" "$FAKE_HOME/.local/share" "$FAKE_HOME/.local/share/superloop-tools" "$FAKE_HOME/.local/share/superloop-tools/loops.d"
@@ -182,10 +182,22 @@ set +e
 status=$?
 set -e
 [[ $status -eq 1 ]] || fail "verification without nodes exit was $status"
-expect_line "$TEST_ROOT/verify-no-nodes.out" "{\"loop\":\"alpha\",\"home\":\"$FAKE_HOME/.config/loops/alpha/codex\",\"ok\":false,\"missing\":[\"nodes\",\"hosts\",\"user\",\"key\"],\"varied\":[],\"varied_lines\":[]}" "verification without nodes JSON"
+expect_line "$TEST_ROOT/verify-no-nodes.out" "{\"loop\":\"alpha\",\"home\":\"$FAKE_HOME/.config/loops/alpha/codex\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"nodes\",\"hosts\",\"user\",\"key\"],\"varied\":[],\"varied_lines\":[]}" "verification without nodes JSON"
 [[ ! -s $TEST_ROOT/verify-no-nodes.err ]] || fail "verification without nodes wrote stderr"
 [[ ! -e $FAKE_HOME/.config/loops/alpha/codex ]] || fail "verification without nodes created home"
 pass "verification without nodes reports missing nodes" "$start"
+
+start=$(date +%s%N)
+charter=$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md
+mv "$charter" "$TEST_ROOT/saved-charter.md"
+set +e
+(cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha --nodes node-a,node-b > "$TEST_ROOT/no-charter.out" 2> "$TEST_ROOT/no-charter.err")
+status=$?
+set -e
+[[ $status -ne 0 && ! -e $FAKE_HOME/.config/loops/alpha/codex ]] || fail "absent charter created home"
+expect_line "$TEST_ROOT/no-charter.err" "superloop-lane signin-home: worker charter not found at $charter; pass --charter or install the instance publication" "missing charter refusal"
+mv "$TEST_ROOT/saved-charter.md" "$charter"
+pass "absent charter refuses before home creation" "$start"
 
 start=$(date +%s%N)
 if ! (cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha --nodes node-a,node-b > "$TEST_ROOT/create.out" 2> "$TEST_ROOT/create.err"); then
@@ -197,7 +209,7 @@ HOME_DIR=$FAKE_HOME/.config/loops/alpha/codex
 [[ $(stat -c '%a' -- "$HOME_DIR/config.toml") == 600 ]] || fail "config mode"
 [[ $(stat -c '%a' -- "$HOME_DIR/ssh_config") == 600 ]] || fail "ssh config mode"
 [[ ! -e $HOME_DIR/auth.json && ! -L $HOME_DIR/auth.json ]] || fail "creation placed sign-in"
-[[ $(readlink -- "$HOME_DIR/AGENTS.md") == "$FAKE_HOME/.local/share/superloop-tools/docs/worker-charter.md" ]] || fail "charter link target"
+[[ $(readlink -- "$HOME_DIR/AGENTS.md") == "$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md" ]] || fail "charter link target"
 [[ $(readlink -- "$HOME_DIR/keys/superloop-alpha_ed25519") == "$FAKE_HOME/.ssh/superloop-alpha_ed25519" ]] || fail "key link target"
 cat > "$TEST_ROOT/expected-config.toml" <<EOF
 [sandbox_workspace_write]
@@ -274,7 +286,7 @@ for sign_in in absent symlink hardlink dangling wrong-mode directory; do
   [[ $status -eq 1 ]] || fail "$sign_in sign-in verification exit $status"
   finding=sign-in
   [[ $sign_in != hardlink && $sign_in != wrong-mode ]] || finding=sign-in-link
-  expect_line "$TEST_ROOT/sign-in.out" "{\"loop\":\"alpha\",\"home\":\"$HOME_DIR\",\"ok\":false,\"missing\":[\"$finding\"],\"varied\":[],\"varied_lines\":[]}" "$sign_in sign-in JSON"
+  expect_line "$TEST_ROOT/sign-in.out" "{\"loop\":\"alpha\",\"home\":\"$HOME_DIR\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"$finding\"],\"varied\":[],\"varied_lines\":[]}" "$sign_in sign-in JSON"
   [[ ! -s $TEST_ROOT/sign-in.err ]] || fail "$sign_in sign-in stderr"
   if [[ $sign_in == directory ]]; then rmdir "$HOME_DIR/auth.json"; else rm -f "$HOME_DIR/auth.json"; fi
 done
@@ -292,7 +304,7 @@ HOME=$FAKE_HOME "$SCRIPT" alpha --nodes node-a,node-b > "$TEST_ROOT/bind-repeat.
 cmp "$TEST_ROOT/bind.out" "$TEST_ROOT/bind-repeat.out" || fail "binding repeat"
 chmod 640 "$CANONICAL/auth.json"
 if HOME=$FAKE_HOME "$SCRIPT" alpha --nodes node-a,node-b --verify > "$TEST_ROOT/source.out" 2> "$TEST_ROOT/source.err"; then fail "unsafe canonical source accepted"; fi
-expect_line "$TEST_ROOT/source.out" "{\"loop\":\"alpha\",\"home\":\"$HOME_DIR\",\"ok\":false,\"missing\":[\"sign-in-source\"],\"varied\":[],\"varied_lines\":[]}" "unsafe source finding"
+expect_line "$TEST_ROOT/source.out" "{\"loop\":\"alpha\",\"home\":\"$HOME_DIR\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"sign-in-source\"],\"varied\":[],\"varied_lines\":[]}" "unsafe source finding"
 chmod 600 "$CANONICAL/auth.json"
 rm "$HOME_DIR/auth.json"
 ln -s "$FAKE_HOME/.codex/auth.json" "$HOME_DIR/auth.json"
@@ -315,7 +327,7 @@ HOME=$FAKE_HOME "$SCRIPT" alpha --nodes node-a,node-b > "$TEST_ROOT/bind.out"
 if ! (cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha --nodes node-a,node-b --verify > "$TEST_ROOT/verify-ok.out" 2> "$TEST_ROOT/verify-ok.err"); then
   fail "complete verification exited nonzero"
 fi
-expect_line "$TEST_ROOT/verify-ok.out" "{\"loop\":\"alpha\",\"home\":\"$HOME_DIR\",\"ok\":true,\"missing\":[],\"varied\":[],\"varied_lines\":[]}" "complete verification JSON"
+expect_line "$TEST_ROOT/verify-ok.out" "{\"loop\":\"alpha\",\"home\":\"$HOME_DIR\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":true,\"missing\":[],\"varied\":[],\"varied_lines\":[]}" "complete verification JSON"
 [[ ! -s $TEST_ROOT/verify-ok.err ]] || fail "complete verification wrote stderr"
 chmod 755 "$HOME_DIR/keys"
 set +e
@@ -323,7 +335,7 @@ set +e
 status=$?
 set -e
 [[ $status -ne 0 ]] || fail "wrong keys mode verification exited zero"
-expect_line "$TEST_ROOT/verify-mode.out" "{\"loop\":\"alpha\",\"home\":\"$HOME_DIR\",\"ok\":false,\"missing\":[\"keys-mode-700\"],\"varied\":[],\"varied_lines\":[]}" "keys mode verification JSON"
+expect_line "$TEST_ROOT/verify-mode.out" "{\"loop\":\"alpha\",\"home\":\"$HOME_DIR\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"keys-mode-700\"],\"varied\":[],\"varied_lines\":[]}" "keys mode verification JSON"
 [[ ! -s $TEST_ROOT/verify-mode.err ]] || fail "keys mode verification wrote stderr"
 chmod 700 "$HOME_DIR/keys"
 # Older model defaults remain accepted and untouched; dispatch overrides them.
@@ -340,14 +352,14 @@ set +e
 status=$?
 set -e
 [[ $status -ne 0 ]] || fail "absent home verification exited zero"
-expect_line "$TEST_ROOT/verify-absent.out" "{\"loop\":\"alpha\",\"home\":\"$HOME_DIR\",\"ok\":false,\"missing\":[\"home\"],\"varied\":[],\"varied_lines\":[]}" "absent home verification JSON"
+expect_line "$TEST_ROOT/verify-absent.out" "{\"loop\":\"alpha\",\"home\":\"$HOME_DIR\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"home\"],\"varied\":[],\"varied_lines\":[]}" "absent home verification JSON"
 [[ ! -s $TEST_ROOT/verify-absent.err ]] || fail "absent home verification wrote stderr"
 set +e
 (cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" gamma --nodes node-a,node-b --home "$FAKE_HOME/.config/loops/gamma/codex" --user gamma-account --key "$FAKE_HOME/.ssh/superloop-alpha_ed25519" --hosts 'node-a:203.0.113.10:2401,node-b:203.0.113.20:2402' --verify > "$TEST_ROOT/verify-unresolved.out" 2> "$TEST_ROOT/verify-unresolved.err")
 status=$?
 set -e
 [[ $status -eq 1 ]] || fail "unresolved verification exit was $status"
-expect_line "$TEST_ROOT/verify-unresolved.out" "{\"loop\":\"gamma\",\"home\":\"$FAKE_HOME/.config/loops/gamma/codex\",\"ok\":false,\"missing\":[\"project: no LOOP_CWD in ~/.local/share/superloop-tools/loops.d/gamma.env\"],\"varied\":[],\"varied_lines\":[]}" "unresolved verification JSON"
+expect_line "$TEST_ROOT/verify-unresolved.out" "{\"loop\":\"gamma\",\"home\":\"$FAKE_HOME/.config/loops/gamma/codex\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"project: no LOOP_CWD in ~/.local/share/superloop-tools/loops.d/gamma.env\"],\"varied\":[],\"varied_lines\":[]}" "unresolved verification JSON"
 [[ ! -s $TEST_ROOT/verify-unresolved.err ]] || fail "unresolved verification wrote stderr"
 mv "$TEST_ROOT/held-home" "$HOME_DIR"
 pass "read-only verification states" "$start"
@@ -468,7 +480,7 @@ for node_list in node-a node-a,node-b,node-c; do
     expect_line "$list_home/ssh_config" "Host $node-worker" "list alias $node"
   done
   (cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha --nodes "$node_list" --home "$list_home" --verify > "$TEST_ROOT/list-verify.out" 2> "$TEST_ROOT/list-verify.err") || fail "list $node_list verification"
-  expect_line "$TEST_ROOT/list-verify.out" "{\"loop\":\"alpha\",\"home\":\"$list_home\",\"ok\":true,\"missing\":[],\"varied\":[],\"varied_lines\":[]}" "list verification JSON"
+  expect_line "$TEST_ROOT/list-verify.out" "{\"loop\":\"alpha\",\"home\":\"$list_home\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":true,\"missing\":[],\"varied\":[],\"varied_lines\":[]}" "list verification JSON"
   [[ ! -s $TEST_ROOT/list-verify.err ]] || fail "list verification stderr"
 done
 pass "single and three-node derived creation and verification" "$start"
@@ -484,7 +496,7 @@ for node_list in node-a node-a,node-b node-a,node-b,node-c; do
   [[ $(readlink "$list_home/auth.json") == "$CANONICAL/auth.json" ]] || fail "new home canonical link"
   expect_line "$list_home/ssh_config" '  HostName 192.0.2.10' "label-based host mapping"
   (cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha --nodes "$node_list" --home "$list_home" --hosts "$host_list" --verify > "$TEST_ROOT/hosts-verify.out" 2> "$TEST_ROOT/hosts-verify.err") || fail "hosts $node_list verification"
-  expect_line "$TEST_ROOT/hosts-verify.out" "{\"loop\":\"alpha\",\"home\":\"$list_home\",\"ok\":true,\"missing\":[],\"varied\":[],\"varied_lines\":[]}" "hosts verification JSON"
+  expect_line "$TEST_ROOT/hosts-verify.out" "{\"loop\":\"alpha\",\"home\":\"$list_home\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":true,\"missing\":[],\"varied\":[],\"varied_lines\":[]}" "hosts verification JSON"
 done
 pass "host labels match in any order for one two and three nodes" "$start"
 
@@ -703,7 +715,7 @@ charter_before=$(readlink "$RECONCILE_HOME/AGENTS.md")
 reconcile_home --nodes node-a --reconcile --dry-run > "$TEST_ROOT/reconcile-plan.out"
 digest=$(digest_from "$TEST_ROOT/reconcile-plan.out")
 reconcile_home --nodes node-a --reconcile --expect-digest "$digest" > "$TEST_ROOT/reconcile-apply.out"
-expect_line "$TEST_ROOT/reconcile-apply.out" "{\"outcome\": \"applied\", \"digest\": \"$digest\", \"replaced\": 3}" "reconcile completion result"
+expect_line "$TEST_ROOT/reconcile-apply.out" "{\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"digest\":\"$digest\",\"outcome\":\"applied\",\"replaced\":3}" "reconcile completion result"
 for ssh_file in "$RECONCILE_HOME/ssh_config" "$RECONCILE_CLAUDE/ssh_config"; do
   ! grep -q '^Host node-b-' "$ssh_file" || fail "reconcile kept removed node"
   expect_line "$ssh_file" 'Host unrelated' "unrelated alias preserved"
@@ -718,7 +730,7 @@ expect_line "$RECONCILE_CLAUDE/ssh_config" 'Host node-a-alpha' "retained Claude 
 [[ $(readlink "$RECONCILE_HOME/keys/superloop-alpha_ed25519") == "$key_before" ]] || fail "reconcile changed key link"
 [[ $(readlink "$RECONCILE_HOME/AGENTS.md") == "$charter_before" ]] || fail "reconcile changed charter link"
 reconcile_home --nodes node-a --verify > "$TEST_ROOT/reconcile-verify.out"
-expect_line "$TEST_ROOT/reconcile-verify.out" "{\"loop\":\"alpha\",\"home\":\"$RECONCILE_HOME\",\"ok\":true,\"missing\":[],\"varied\":[],\"varied_lines\":[]}" "reconciled verification"
+expect_line "$TEST_ROOT/reconcile-verify.out" "{\"loop\":\"alpha\",\"home\":\"$RECONCILE_HOME\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":true,\"missing\":[],\"varied\":[],\"varied_lines\":[]}" "reconciled verification"
 pass "two-node home reconciles to one and preserves non-node state" "$start"
 
 start=$(date +%s%N)
@@ -727,7 +739,7 @@ reconcile_home --nodes node-a --reconcile --dry-run > "$TEST_ROOT/reconcile-noop
 python3 -c 'import json, sys; assert json.load(open(sys.argv[1]))["changed"] == 0' "$TEST_ROOT/reconcile-noop.out" || fail "unchanged plan changed count"
 digest=$(digest_from "$TEST_ROOT/reconcile-noop.out")
 reconcile_home --nodes node-a --reconcile --expect-digest "$digest" > "$TEST_ROOT/reconcile-noop-apply.out"
-expect_line "$TEST_ROOT/reconcile-noop-apply.out" "{\"outcome\": \"applied\", \"digest\": \"$digest\", \"replaced\": 0}" "no-op completion result"
+expect_line "$TEST_ROOT/reconcile-noop-apply.out" "{\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"digest\":\"$digest\",\"outcome\":\"applied\",\"replaced\":0}" "no-op completion result"
 [[ $(snapshot) == "$before" ]] || fail "unchanged reconcile wrote home"
 # Existing records do not require configuration lookup.
 mv "$FAKE_HOME/.config/loops/registry.toml" "$TEST_ROOT/registry.toml"
@@ -756,7 +768,7 @@ with open(sys.argv[3], 'wb') as expected:
 PYRECORD
 digest=$(digest_from "$TEST_ROOT/reconcile-no-project.out")
 reconcile_home --nodes node-a --reconcile --expect-digest "$digest" > "$TEST_ROOT/reconcile-record-apply.out"
-expect_line "$TEST_ROOT/reconcile-record-apply.out" "{\"outcome\": \"applied\", \"digest\": \"$digest\", \"replaced\": 1}" "record completion result"
+expect_line "$TEST_ROOT/reconcile-record-apply.out" "{\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"digest\":\"$digest\",\"outcome\":\"applied\",\"replaced\":1}" "record completion result"
 cmp "$TEST_ROOT/reconcile-record.expected" "$FAKE_HOME/.local/share/superloop-tools/loops.d/alpha.env" || fail "applied record differs from preview"
 [[ $(stat -c '%a' "$FAKE_HOME/.local/share/superloop-tools/loops.d/alpha.env") == 600 ]] || fail "record mode"
 expect_line "$FAKE_HOME/.local/share/superloop-tools/loops.d/alpha.env" 'LOOP_SID=alpha-session' "record session"
@@ -938,7 +950,7 @@ reconcile_home --nodes node-a --verify > "$TEST_ROOT/kill-verify.out"
 status=$?
 set -e
 [[ $status -eq 1 ]] || fail "interrupted apply verified"
-expect_line "$TEST_ROOT/kill-verify.out" "{\"loop\":\"alpha\",\"home\":\"$RECONCILE_HOME\",\"ok\":false,\"missing\":[\"ssh-header\",\"known-hosts\"],\"varied\":[],\"varied_lines\":[]}" "interrupted header verification"
+expect_line "$TEST_ROOT/kill-verify.out" "{\"loop\":\"alpha\",\"home\":\"$RECONCILE_HOME\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"ssh-header\",\"known-hosts\"],\"varied\":[],\"varied_lines\":[]}" "interrupted header verification"
 shopt -s nullglob
 leftovers=("$RECONCILE_HOME"/.ssh_config.* "$RECONCILE_CLAUDE"/.ssh_config.*)
 shopt -u nullglob
@@ -954,7 +966,7 @@ rm -- "${leftovers[@]}"
 reconcile_home --nodes node-a --reconcile --dry-run > "$TEST_ROOT/recover-plan.out"
 digest=$(digest_from "$TEST_ROOT/recover-plan.out")
 reconcile_home --nodes node-a --reconcile --expect-digest "$digest" > "$TEST_ROOT/recover-apply.out"
-expect_line "$TEST_ROOT/recover-apply.out" "{\"outcome\": \"applied\", \"digest\": \"$digest\", \"replaced\": 2}" "recovery completion result"
+expect_line "$TEST_ROOT/recover-apply.out" "{\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"digest\":\"$digest\",\"outcome\":\"applied\",\"replaced\":2}" "recovery completion result"
 reconcile_home --nodes node-a --verify > "$TEST_ROOT/recover-verify.out"
 [[ $(cksum "$RECONCILE_HOME/config.toml" "$RECONCILE_HOME/auth.json" "$RECONCILE_CLAUDE/.credentials.json" "$RECONCILE_CLAUDE/projects/transcript") == "$protected_before" ]] || fail "recovery changed protected files"
 before=$(snapshot)

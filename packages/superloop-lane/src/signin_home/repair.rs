@@ -271,7 +271,7 @@ impl FilePlan {
     }
 }
 
-struct LinkPlan {
+pub(super) struct LinkPlan {
     path: PathBuf,
     target: PathBuf,
     before: Option<PathBuf>,
@@ -289,7 +289,12 @@ fn metadata(path: &Path) -> Result<Option<Value>> {
 }
 
 impl LinkPlan {
-    fn new(path: PathBuf, target: PathBuf, moving: bool, replace_link: bool) -> Result<Self> {
+    pub(super) fn new(
+        path: PathBuf,
+        target: PathBuf,
+        moving: bool,
+        replace_link: bool,
+    ) -> Result<Self> {
         let metadata = metadata(&path)?;
         let before = fs::read_link(&path).ok();
         if metadata.is_some()
@@ -306,13 +311,34 @@ impl LinkPlan {
             metadata,
         })
     }
-    fn changed(&self) -> bool {
+    pub(super) fn changed(&self) -> bool {
         self.before.as_ref() != Some(&self.target)
     }
-    fn report(&self) -> Value {
+    pub(super) fn report(&self) -> Value {
         json!({"path":self.path,"target":self.target,"before":self.before,"metadata":self.metadata,
             "before_sha256":self.before.as_ref().map(|p|digest(p.as_os_str().as_encoded_bytes())),
             "after_sha256":digest(self.target.as_os_str().as_encoded_bytes()),"digest_kind":"link-target"})
+    }
+    pub(super) fn check(&self) -> Result<()> {
+        if metadata(&self.path)? != self.metadata || fs::read_link(&self.path).ok() != self.before {
+            return Err("charter link changed; repeat --dry-run".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn publish(&self, directory: &std::fs::File) -> Result<()> {
+        self.check()?;
+        if !self.changed() {
+            return Ok(());
+        }
+        let name = self.path.file_name().ok_or("link filename")?;
+        let stage = format!(".ssh_config.charter-{}", std::process::id());
+        symlinkat(&self.target, directory, stage.as_str()).map_err(|error| error.to_string())?;
+        let result =
+            renameat(directory, stage.as_str(), directory, name).map_err(|error| error.to_string());
+        let _removed = unlinkat(directory, stage.as_str(), UnlinkatFlags::NoRemoveDir);
+        result?;
+        directory.sync_all().map_err(|error| error.to_string())
     }
     fn apply(&self, owner: &Path) -> Result<()> {
         if !self.changed() {
@@ -478,7 +504,7 @@ pub(super) fn run(mut settings: Settings) -> Result<String> {
         )?,
         LinkPlan::new(
             settings.home.join("AGENTS.md"),
-            super::charter(&settings.owner),
+            settings.charter.clone(),
             false,
             false,
         )?,
@@ -514,7 +540,7 @@ pub(super) fn run(mut settings: Settings) -> Result<String> {
         }
         let _parent = open(&settings.owner, parent, false)?;
     }
-    let plan = json!({"loop":settings.name,"nodes":settings.nodes.iter().map(|n|&n.name).collect::<Vec<_>>(),
+    let plan = json!({"charter":settings.charter,"loop":settings.name,"nodes":settings.nodes.iter().map(|n|&n.name).collect::<Vec<_>>(),
         "home":settings.home,"home_identity":home.identity()?,
         "files":files.iter().map(|f|f.report(&settings.home)).collect::<Vec<_>>(),
         "links":links.iter().map(LinkPlan::report).collect::<Vec<_>>(),
@@ -524,7 +550,10 @@ pub(super) fn run(mut settings: Settings) -> Result<String> {
         + links.iter().filter(|l| l.changed()).count()
         + usize::from(moving);
     if settings.dry_run {
-        return Ok(json!({"plan":plan,"digest":digest,"changed":changed}).to_string());
+        return Ok(
+            json!({"charter":settings.charter,"plan":plan,"digest":digest,"changed":changed})
+                .to_string(),
+        );
     }
     if settings.digest.to_ascii_lowercase() != digest {
         return Err("repair digest mismatch; repeat --dry-run".into());
@@ -568,7 +597,10 @@ pub(super) fn run(mut settings: Settings) -> Result<String> {
         file.apply(&home)?;
     }
     home.file.sync_all().map_err(|error| error.to_string())?;
-    Ok(json!({"outcome":"applied","digest":digest,"changed":changed}).to_string())
+    Ok(
+        json!({"charter":settings.charter,"outcome":"applied","digest":digest,"changed":changed})
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -579,6 +611,7 @@ pub(super) mod tests {
         Settings {
             name: "alpha".into(),
             owner: owner.into(),
+            charter: owner.join("worker-charter.md"),
             home: owner.join("codex"),
             claude_home: owner.join("claude"),
             project: "/project".into(),
