@@ -11,7 +11,7 @@ superloop-pack cut --tag TAG --manifest public-set.toml --out DIR --author "Name
 superloop-pack replay --since SRC --tag TAG --manifest public-set.toml --out DIR --previous DIR --burn-register PATH --linter PATH --public-root OID [--accept-generated-drift]
 ```
 
-`--linter-version` defaults to `unspecified`; supplying it binds an archive release's registered linter version into the manifest. All four commands declare `agent-text` output mode. Successful evidence and refusal lines go to standard output, followed by exactly one terminal report; `build` and `stage-verify` retain their path-free refusals:
+`--linter-version` defaults to `unspecified`; supplying it binds an archive release's registered linter version into the manifest. All five commands (`build`, `stage-verify`, `cut`, `replay`, and `release`) declare `agent-text` output mode. Successful evidence and refusal lines go to standard output, followed by exactly one terminal report; `build` and `stage-verify` retain their path-free refusals:
 
 ```text
 RUN-REPORT exit=STATUS wall=SECONDS.MILLISs verdict=VERDICT
@@ -40,6 +40,26 @@ The external, nonempty burn register scans every projected path and blob, every 
 The projected SRC tree must match the public root. Differences refuse as `generated drift` with the affected paths unless `--accept-generated-drift` explicitly accepts them. Accepted drift is recorded and enters the first changed public tree. After preflight, a private staging repository holds only public ancestry and projected objects. Every projected tree passes the linter's public-pack check with evidence that it consumed the external register. A tree equal to its mapped parent's tree is listed as `skipped` and maps to that parent. Otherwise one unsigned, single-parent commit preserves the original author, committer, timestamps, timezone offsets and message bytes. Source signatures are omitted and reported. Only after all checks pass does an expected-old update advance `development`.
 
 Keep the JSON report private: it records the full range, public root and final tip/tree, ordered mapping and parent mapping, original and resulting identities and dates, message digests, selected and omitted path counts, drift, projection/linter versions and digests, policy/register digests, and check exits and wall seconds. A human summary and the terminal report follow the JSON on stdout; no report is placed in the public clone. Identical inputs reproduce identical public objects and mappings; timing and scratch locations are observational fields. `cut` remains available for historical publication reproduction and selection tests, outside normal import, deployment and release.
+
+## Release · `sec:publicpack:release`
+
+```text
+superloop-pack release --repository DIR --version X.Y.Z --manifest public-set.toml --author "Name <addr>" [--date RFC3339] [--tag-message TEXT] [--changelog CHANGELOG.md] [--expected-main M] [--expected-development D] [--check | --dry-run]
+```
+
+Release runs against a clone of the public repository with `main` and `development`. Run `--check` before deployment and retain its M and D; after successful deployment, pass those full object IDs as `--expected-main` and `--expected-development`. Apply requires both pins and refuses with `unpinned` if either is absent; `--check` and `--dry-run` may omit them. The working tree must be clean, main must be an ancestor of development, and development must differ from main. An existing version tag refuses. The root workspace version at D must equal the requested version, the manifest at D must name the public repository, and the selected changelog at D must contain a non-empty `## [X.Y.Z]` section (optionally followed by ` - YYYY-MM-DD`). Paths are repository-relative. Validation reads committed D blobs even when another branch is checked out.
+
+The command creates an unsigned merge R with parents M then D and exactly D's tree, with subject `chore(release): merge development into main for vX.Y.Z`. The supplied author is both author and committer; both dates use `--date` or D's committer date and offset. The annotated tag's title is `NAME vX.Y.Z` from the manifest name; its body is the matching changelog section, with reference definitions omitted and trailing blank lines trimmed. `--tag-message` replaces the tag text verbatim, while the changelog section remains required. Empty, whitespace-only and NUL-containing overrides refuse.
+
+Apply stages objects privately, then locks and verifies both branches and tag absence in one Git expected-old transaction before promoting objects and committing all three refs. A stale development tip refuses without advancing either branch or publishing the tag; the deployment coordinator must wait for a successful deployment of the newer development. A conflicting tag requires reconciliation, never replacement or a different version chosen to bypass the conflict. The release contains D, so advancing development to R needs no force push. A release is never rewound: a bad deployment gets a corrective deployment and the next patch.
+
+`--check` validates and reports state `checked`; `--dry-run` reports state `prepared`. Both compute the prospective objects without writing repository objects or refs. Apply reports `locally-committed`. Each report gives M, D, R, the tree, annotated tag object, JSON-quoted title, body byte count and exactly these three refspecs:
+
+```text
+refs/heads/main refs/heads/development refs/tags/vX.Y.Z
+```
+
+The superloop's transport script holds its coordination lock through remote acknowledgement and pushes those three refs together with `git push --atomic REMOTE refs/heads/main refs/heads/development refs/tags/vX.Y.Z`. It must refuse a remote without atomic push support. Pack never pushes or signs. After transport failure, retain the prepared local objects and revalidate local and remote tips under the coordination lock before retrying exactly those objects; never overwrite intervening imports. Remote acknowledgement is recorded by the script. A clone checked out on old main may need its index and working tree synchronized afterward; the command changes refs and objects only.
 
 ## Archive build · `sec:publicpack:archive-build`
 
@@ -105,7 +125,7 @@ This follows the gate's root/probe distinction: the root check has no burn input
 |0|Success, help, or version.|
 |1|Internal or report-publication failure.|
 |2|Invalid command arguments.|
-|3|Build, cut or replay refusal.|
+|3|Archive build, cut, replay or release refusal.|
 |4|Staging refusal.|
 |5|Archive-member or extraction refusal.|
 |6|Manifest refusal.|
@@ -124,7 +144,7 @@ Panics are caught behind a silent panic hook. Neither payloads nor Rust's defaul
 
 The package tests create fictional Git repositories in disk-backed temporary directories. They cover object-database exclusions and provenance round trips, dirty checkout and moved-tag refusals, a green stub-linter verification, forbidden archive members, register mismatch, non-empty staging, owed burn debt, false superloop-pack reports, and agent-text help and usage paths. End-to-end fixtures build packs in-process and verify them with the executable named by `PUBLIC_PACK_TEST_LINTER`, which a route running these tests must set to the absolute path of its registered linter. They cover a clean bound external family, refusal of an unread register, family-named growth refusals, registered debt, refusal of kept private values, and pack-only activation with an ignored untracked register and narrow provenance ownership. An absent variable fails by name; the tests never search `PATH` or silently skip the real-linter fixtures.
 
-The binary dispatcher exposes `build`, `stage-verify`, `cut`, and `replay`. `stage-verify` explicitly extracts into the supplied staging directory and initializes its verification checkout before invoking the declared linter. There is no `verify` command or old executable alias. The source archive contains the supported `superloop-cli-common` and `superloop-execwrap` libraries under those package names.
+The binary dispatcher exposes `build`, `stage-verify`, `cut`, `replay`, and `release`. `stage-verify` explicitly extracts into the supplied staging directory and initializes its verification checkout before invoking the declared linter. There is no `verify` command or old executable alias. The source archive contains the supported `superloop-cli-common` and `superloop-execwrap` libraries under those package names.
 
 ## Publication follow-ups · `sec:publicpack:publication-follow-ups`
 
