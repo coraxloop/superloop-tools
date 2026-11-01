@@ -3598,7 +3598,11 @@ fn repository_programme(
             .split('/')
             .all(|part| !part.is_empty() && part != "." && part != "..");
     let prefix = format!("{package}/");
-    let tracked = superloop_cli_common::public_set::tracked_paths(root)?;
+    let tracked = superloop_cli_common::public_set::tracked_paths(root).map_err(|_| {
+        format!(
+            "programme package {package:?}: cannot enumerate the repository's tracked paths required by the tracked-directory check"
+        )
+    })?;
     let inside = root
         .canonicalize()
         .ok()

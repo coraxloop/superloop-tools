@@ -102,6 +102,7 @@
 //! | [`citation_sites_preserve_resolved_addresses`] | cli | The executable protocol preserves citations before the first mint and exposes no document text. # Panics Panics only if fixture IO fails or the command violates its versioned protocol. |
 //! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested containment ignores untracked files but refuses tracked foreign ownership. # Panics Panics only if fixture IO fails or the binary violates the containment contract. |
 //! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting catalogued lists preserves an intervening deferred table's bytes and position. # Panics Panics only if fixture IO fails or a rewrite changes opaque source. |
+//! | [`programme_outside_checkout_names_tracked_directory_requirement`] | cli | A programme outside Git names its row and its tracked-directory requirement. # Panics Panics only if fixture IO fails or the refusal loses its feature context. |
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -5339,6 +5340,30 @@ fn deferred_list_rewrite_preserves_bytes_and_order() {
         fs::read_to_string(&path).expect("rewritten inline lists"),
         inline.replace("allowances=[]", "allowances = []")
     );
+}
+
+/// A programme outside Git names its row and its tracked-directory requirement.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the refusal loses its feature context.
+///
+/// ´claim:cli:programme-outside-checkout-names-tracked-directory-requirement´
+/// ´test:integration:programme-outside-checkout-names-tracked-directory-requirement´
+#[test]
+fn programme_outside_checkout_names_tracked_directory_requirement() {
+    let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), "allowances = []");
+    fs::remove_dir_all(root.path().join(".git")).expect("remove checkout metadata");
+    let output = programme_command(root.path(), &["check", "--text"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, [] as [u8; 0]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "PROJECTA : {LOCAL_POLICY}: programme package \"packages/local-lint\": cannot enumerate the repository's tracked paths required by the tracked-directory check"
+        )),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("public-set"), "{stderr}");
 }
 
 fn programme_command(root: &Path, arguments: &[&str]) -> std::process::Output {
