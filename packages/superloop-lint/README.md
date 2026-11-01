@@ -263,6 +263,10 @@ The five required declaration documents — `owners.toml`, `environments.toml`, 
 
 Deployment keys shorten an instance namespace by removing the validated lists namespace's ``class.linter`` prefix; the remaining ``policy.<domain>`` component and the set entry identify the deployment. Policy activation is declared separately in ``policies.toml``. An instance under a corpus-owned prefix does not supply the catalogued policy's parameters or census surface and is refused rather than skipped; a genuinely absent census surface still receives the missing-surface finding. Corpora adopting this format rename lists, policy-instance and import-registry envelopes to the format namespaces while retaining their four corpus-owned core envelopes.
 
+For an uncatalogued policy, an activation row may add ``programme = { package = "packages/NAME", binary = "NAME" }`` with a tracked repository directory and a nonempty binary name to defer checking and interpretation of its ``path_counts`` or ``allowances`` rows to that repository's own programme, explicitly reported in ``deferred`` and ``deferred_policies`` beside ``clean``, which judges only the catalogued policies.
+
+Deferral covers the activation row and its list only: the published linter still decodes every ``policy-*.toml`` document under ``.linter/`` and refuses a namespace outside ``class.linter.policy.``, so a repository programme keeps its own parameter documents in its package rather than in ``.linter/``.
+
 The `lists.toml` document is indexed by owner and every list pairs with a live activation, so it must be rewritten when the owner set changes.
 
 Activations are per owner, with one pair for each owner and policy.
