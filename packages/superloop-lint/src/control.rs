@@ -787,8 +787,6 @@ struct Declared {
     dropped: Vec<String>,
     /// The file's bytes as they stand, for the digest.
     bytes: Vec<u8>,
-    /// What stands above the first table, carried across a rewrite unchanged.
-    prefix: String,
 }
 
 /// The list file's text standing above its first table: its envelope, and any
@@ -894,7 +892,7 @@ impl ListContext for DeclarationCore {
 fn read_list_syntax(
     root: &Path,
     context: &impl ListContext,
-) -> Result<(Vec<u8>, crate::surface::ListDocument, String), String> {
+) -> Result<(Vec<u8>, crate::surface::ListDocument), String> {
     let path = root.join(DIRECTORY).join(LISTS_FILE);
     let document = context
         .surface()
@@ -915,16 +913,14 @@ fn read_list_syntax(
             error.set_input(Some(text));
             format!("{}: {error}", path.display())
         })?;
-    let prefix = String::from(held_prefix(text));
-
-    Ok((bytes, raw, prefix))
+    Ok((bytes, raw))
 }
 
 #[allow(clippy::too_many_lines)]
 fn read_lists(root: &Path, context: &impl ListContext) -> Result<Declared, String> {
     let activated = context.policies();
     let partitions = context.partitions();
-    let (bytes, raw, prefix) = read_list_syntax(root, context)?;
+    let (bytes, raw) = read_list_syntax(root, context)?;
 
     let declared: BTreeSet<&Pair> = activated.iter().collect();
     let mut lists = BTreeMap::new();
@@ -1045,7 +1041,6 @@ fn read_lists(root: &Path, context: &impl ListContext) -> Result<Declared, Strin
         anomalies,
         dropped,
         bytes,
-        prefix,
     })
 }
 
@@ -2217,16 +2212,15 @@ fn maintain_loaded(
         }
         Operation::Append => {
             let (targets, staged, applied) = append(plan, &declared, &targets);
-            let deferred = match render_deferred_lists(snapshot) {
+            let rendered = match rewrite_lists(
+                snapshot,
+                &declared.bytes,
+                &snapshot.ordered(&staged),
+                &staged,
+            ) {
                 Ok(text) => text,
                 Err(error) => return refused(error),
             };
-            let rendered = format!(
-                "{}{}{}",
-                declared.prefix,
-                render_lists(&snapshot.ordered(&staged), &staged),
-                deferred,
-            );
 
             let after = if applied {
                 let path = root.join(DIRECTORY).join(LISTS_FILE);
@@ -2311,12 +2305,13 @@ pub fn lower_lists_with_plan(plan: ControlWritePlan<'_>) -> std::io::Result<bool
     let root = plan.root();
     let path = root.join(DIRECTORY).join(LISTS_FILE);
     let held = std::fs::read_to_string(&path).unwrap_or_default();
-    let rendered = format!(
-        "{}{}{}",
-        held_prefix(&held),
-        render_lists(&snapshot.list_keys(), &lower_planned(plan),),
-        render_deferred_lists(snapshot).map_err(std::io::Error::other)?,
-    );
+    let rendered = rewrite_lists(
+        snapshot,
+        held.as_bytes(),
+        &snapshot.list_keys(),
+        &lower_planned(plan),
+    )
+    .map_err(std::io::Error::other)?;
 
     if held == rendered {
         return Ok(false);
@@ -2327,32 +2322,132 @@ pub fn lower_lists_with_plan(plan: ControlWritePlan<'_>) -> std::io::Result<bool
     Ok(true)
 }
 
-fn render_deferred_lists(snapshot: &Snapshot) -> Result<String, String> {
+fn rewrite_lists(
+    snapshot: &Snapshot,
+    bytes: &[u8],
+    pairs: &[Pair],
+    lists: &BTreeMap<Pair, Rows>,
+) -> Result<String, String> {
+    let held = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
     if snapshot.deferred_policies().is_empty() {
-        return Ok(String::new());
+        return Ok(format!(
+            "{}{}",
+            held_prefix(held),
+            render_lists(pairs, lists)
+        ));
     }
-    let table = snapshot
-        .surface()
-        .document(LISTS_FILE)
-        .ok_or_else(|| String::from("missing lists document"))?
-        .table()
-        .map_err(str::to_owned)?;
-    let mut preserved = toml::Table::new();
-    for row in snapshot.deferred_policies() {
-        if let Some(list) = table
-            .get(&row.owner)
-            .and_then(toml::Value::as_table)
-            .and_then(|owner| owner.get(&row.policy))
-        {
-            let owner = preserved
-                .entry(row.owner.clone())
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-            if let Some(owner) = owner.as_table_mut() {
-                owner.insert(row.policy.clone(), list.clone());
+    let (starts, inline) = list_table_starts(held, pairs)?;
+    let mut replacements = Vec::new();
+    let mut emitted = BTreeSet::new();
+    for (index, (start, pair)) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).map_or(held.len(), |(at, _)| *at);
+        let section = &held[*start..end];
+        if let Some(pair) = pair {
+            let replacement = if emitted.insert(pair.clone()) {
+                render_lists(std::slice::from_ref(pair), lists)
+            } else {
+                String::new()
+            };
+            // Comments and blank lines following a table belong to the source,
+            // including an introduction to the next deferred table.
+            let mut content_end = 0;
+            let mut offset = 0;
+            for line in section.split_inclusive('\n') {
+                offset += line.len();
+                if !line.trim().is_empty() && !line.trim_start().starts_with('#') {
+                    content_end = offset;
+                }
+            }
+            replacements.push((*start..*start + content_end, replacement));
+        }
+    }
+    for (span, pair) in inline {
+        let canonical: toml::Table =
+            toml::from_str(&render_lists(std::slice::from_ref(&pair), lists))
+                .map_err(|error| error.to_string())?;
+        let mut value = &canonical[&pair.owner][&pair.policy];
+        if let Some(family) = &pair.family {
+            value = &value[family];
+        }
+        replacements.push((span, value.to_string()));
+        emitted.insert(pair);
+    }
+    replacements.sort_by_key(|(span, _)| span.start);
+    let mut rendered = String::new();
+    let mut cursor = 0;
+    for (span, replacement) in replacements {
+        rendered.push_str(&held[cursor..span.start]);
+        rendered.push_str(&replacement);
+        cursor = span.end;
+    }
+    rendered.push_str(&held[cursor..]);
+    let missing: Vec<_> = pairs
+        .iter()
+        .filter(|pair| !emitted.contains(*pair))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        rendered.push('\n');
+        rendered.push_str(&render_lists(&missing, lists));
+    }
+    Ok(rendered)
+}
+
+type TableStarts = Vec<(usize, Option<Pair>)>;
+type InlineLists = Vec<(std::ops::Range<usize>, Pair)>;
+
+/// Locate real table headers through TOML spans, never through apparent headers
+/// inside opaque multiline strings. A missing pair marks source owned elsewhere.
+fn list_table_starts(held: &str, pairs: &[Pair]) -> Result<(TableStarts, InlineLists), String> {
+    type Fields = BTreeMap<String, toml::Spanned<toml::Value>>;
+    type Policies = BTreeMap<String, toml::Spanned<Fields>>;
+    let prefix = held_prefix(held).len();
+    let body = &held[prefix..];
+    let owners: BTreeMap<String, toml::Spanned<Policies>> =
+        toml::from_str(body).map_err(|error| error.to_string())?;
+    let mut starts = Vec::new();
+    let mut inline = Vec::new();
+    for (owner, policies) in owners {
+        let span = policies.span();
+        if body[span.clone()].starts_with('[') {
+            starts.push((prefix + span.start, None));
+        }
+        for (policy, fields) in policies.into_inner() {
+            let singleton = Pair::singleton(owner.clone(), policy.clone());
+            let span = fields.span();
+            let header = body[span.clone()].starts_with('[');
+            if header {
+                starts.push((
+                    prefix + span.start,
+                    pairs.contains(&singleton).then_some(singleton.clone()),
+                ));
+            } else if body[span.clone()].starts_with('{') && pairs.contains(&singleton) {
+                inline.push((prefix + span.start..prefix + span.end, singleton));
+            }
+            for (family, value) in fields.into_inner() {
+                let span = value.span();
+                let pair = pairs.iter().find(|pair| {
+                    pair.owner == owner
+                        && pair.policy == policy
+                        && (pair.family.as_ref() == Some(&family)
+                            || (!header && pair.family.is_none()))
+                });
+                if (value.get_ref().is_table() || (!header && body[span.clone()].starts_with("[[")))
+                    && body[span.clone()].starts_with('[')
+                    && toml::from_str::<toml::Table>(&body[span.clone()]).is_ok()
+                {
+                    starts.push((prefix + span.start, pair.cloned()));
+                } else if value.get_ref().is_table()
+                    && body[span.clone()].starts_with('{')
+                    && let Some(pair) = pair
+                {
+                    inline.push((prefix + span.start..prefix + span.end, pair.clone()));
+                }
             }
         }
     }
-    toml::to_string(&preserved).map_err(|error| error.to_string())
+    starts.sort_by_key(|(start, _)| *start);
+    Ok((starts, inline))
 }
 
 #[cfg(test)]

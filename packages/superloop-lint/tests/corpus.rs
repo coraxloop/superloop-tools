@@ -101,6 +101,7 @@
 //! | [`characterizes_fix_bytes`] | harness | Both fix profiles refuse before writing over deliberately undeclared fixtures, freezing the refusal and the untouched sources. |
 //! | [`citation_sites_preserve_resolved_addresses`] | cli | The executable protocol preserves citations before the first mint and exposes no document text. # Panics Panics only if fixture IO fails or the command violates its versioned protocol. |
 //! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested containment ignores untracked files but refuses tracked foreign ownership. # Panics Panics only if fixture IO fails or the binary violates the containment contract. |
+//! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting catalogued lists preserves an intervening deferred table's bytes and position. # Panics Panics only if fixture IO fails or a rewrite changes opaque source. |
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -5266,6 +5267,77 @@ fn nested_root_containment_uses_tracked_paths() {
     assert_programme_refusal(
         root.path(),
         "nested[1] (owner PROJECTA, root nested): root must be a normalized relative directory inside the owner's partitions",
+    );
+}
+
+/// Rewriting catalogued lists preserves an intervening deferred table's bytes and position.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a rewrite changes opaque source.
+///
+/// ´claim:cli:deferred-list-rewrite-preserves-bytes-and-order´
+/// ´test:integration:deferred-list-rewrite-preserves-bytes-and-order´
+#[test]
+fn deferred_list_rewrite_preserves_bytes_and_order() {
+    let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), "allowances = []");
+    let owners = root.path().join(".linter/owners.toml");
+    let text = fs::read_to_string(&owners).expect("owners");
+    fs::write(
+        &owners,
+        text.replace(
+            "owners = [\"PROJECTA\"]",
+            "owners = [\"PROJECTA\", \"PROJECTB\"]",
+        ),
+    )
+    .expect("second owner");
+    let policies = root.path().join(".linter/policies.toml");
+    let text = fs::read_to_string(&policies).expect("policies");
+    fs::write(
+        &policies,
+        text.replace(
+            "policies = [",
+            "policies = [{ owner = \"PROJECTB\", policy = \"labels.mints-well-formed\" }, ",
+        ),
+    )
+    .expect("second catalogued policy");
+    let deferred = format!(
+        "# Repository programme owns the following bytes.\r\n[PROJECTA.'{LOCAL_POLICY}'] # keep this spelling\r\nallowances = [{{ local_identity = '''opaque\n[PROJECTB.\"labels.mints-well-formed\"]\n''', decision = 'kept' }}]\r\n\r\n"
+    );
+    let lists = format!(
+        "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances=[]\n\n{deferred}[PROJECTB.\"labels.mints-well-formed\"]\nallowances=[]\n"
+    );
+    let path = root.path().join(".linter/lists.toml");
+    fs::write(&path, &lists).expect("interleaved lists");
+    let output = programme_command(root.path(), &["burn", "--write"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rewritten = fs::read_to_string(&path).expect("rewritten lists");
+    assert_eq!(rewritten, lists.replace("allowances=[]", "allowances = []"));
+    assert!(rewritten.contains(&deferred));
+    let inline = lists
+        .replace(
+            "[PROJECTA.\"labels.mints-well-formed\"]\nallowances=[]",
+            "[PROJECTA]\n\"labels.mints-well-formed\" = { allowances=[] }",
+        )
+        .replace(
+            "[PROJECTB.\"labels.mints-well-formed\"]\nallowances=[]",
+            "[PROJECTB]\n\"labels.mints-well-formed\" = { allowances=[] }",
+        );
+    fs::write(&path, &inline).expect("inline catalogued lists");
+    let output = programme_command(root.path(), &["burn", "--write"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&path).expect("rewritten inline lists"),
+        inline.replace("allowances=[]", "allowances = []")
     );
 }
 
