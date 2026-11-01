@@ -6,6 +6,8 @@ Copyright (c) 2026 Torrust project contributors. Licensed under GPL-3.0-or-later
 
 Declare the repository carrier explicitly at top level in `.linter/owners.toml` with `root_owner = "OWNER"`, replacing `OWNER` with a name registered in `owners`. A root-files partition alone does not declare the carrier; paths outside every partition use this explicit root owner for label attribution while partition coverage still reports them. Assembly publication checks use `assembly.publications-current`.
 
+An optional top-level `nested = [{ owner = "EXAMPLES", root = "docs/examples", reason = "Fictional instance tree checked as its own corpus" }]` row in `.linter/owners.toml` names a registered owner, a normalized relative directory inside its partitions containing a loadable `.linter/` snapshot, and a nonempty reason; the configuration report lists these rows.
+
 ## Overview · `sec:indexlinter:readme-overview`
 
 This package is the checker the label calculus names as its gate. It reads the corpus's authored prose and its Rust sources, harvests every mint into its owner's registry, resolves every citation against those registries, validates every environment head against the kind registry read from the record's own tables, and reports what does not hold. Beside the gate it runs the inventory profiles for tests, to-do notices and declared constants, the claim census of the test documentation policy, the burn registers that ratchet a migration down to zero, and three generated surfaces — ADR-T-017's two projections, the in-file test index and per-folder test matrix, plus ADR-T-018's constant pins — which it verifies by exact byte comparison and rewrites on request.
@@ -92,6 +94,8 @@ A first-level Markdown heading is read as the environment `Document`, irrespecti
 ## Allowance declarations · `sec:indexlinter:allowance-declarations`
 
 Every declared owner with attributed Markdown sources, including the root and crateless owners, must activate ``labels.mints-well-formed`` with its paired list; otherwise configuration fails rather than silently omitting that owner's prose.
+
+A declared nested corpus is the only exemption from this owner's prose count, because its own snapshot is the evidence it is checked; only that owner's Markdown beneath the nested root is exempt, and its paths remain visible to all other policies.
 
 Each activated owner-policy pair needs exactly one list in ``.linter/lists.toml``, using the policy's codec. A fingerprint policy's empty list is `allowances = []`; a nonempty list contains tables, not strings:
 

@@ -1244,6 +1244,13 @@ impl LabelPlan {
             let Some(owner) = topology.partition().owner(path) else {
                 continue;
             };
+            if snapshot
+                .nested()
+                .iter()
+                .any(|nested| nested.owner == owner && native.starts_with(&nested.root))
+            {
+                continue;
+            }
             if !activations
                 .owners("labels.mints-well-formed")
                 .is_some_and(|owners| owners.contains(owner))

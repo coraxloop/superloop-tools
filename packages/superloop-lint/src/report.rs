@@ -333,6 +333,8 @@ pub fn check_with_plan(plan: &ExecutionPlan) -> CheckReport {
 /// configuration. Every compiled command plan carries the parsed snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ConfigurationCounts {
+    /// Nested corpora whose own snapshots account for their prose.
+    pub nested: Vec<crate::snapshot::NestedCorpus>,
     /// How many owners the declaration registers.
     pub owners: usize,
     /// How many partition rows it carries.

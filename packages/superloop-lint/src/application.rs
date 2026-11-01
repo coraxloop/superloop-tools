@@ -310,6 +310,7 @@ pub fn verify_configuration_with_guard(
     let dependency_findings = plan.dependencies().verify(citations);
 
     let counts = ConfigurationCounts {
+        nested: snapshot.nested().to_vec(),
         owners: snapshot.owners().len(),
         inclusions: snapshot.partitions().len(),
         excluded: snapshot.shape().ignore().len(),

@@ -7,6 +7,8 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`nested_prose_retains_other_policy_coverage`] | layers | Nested prose is exempt only under its declared root and remains in the burn census. # Panics Panics only if fixture IO or planning fails, or the measured scope differs. |
+//! | [`refuses_invalid_nested_corpus_declarations`] | layers | A nested declaration must name an owner, a contained directory, a snapshot and a reason. # Panics Panics only if fixture IO fails or a malformed nested declaration is accepted. |
 //! | [`reports_every_kind_of_inactive_prose_owner`] | layers | Root, crate-bearing, and crateless owners must activate their Markdown prose. # Panics Panics only if fixture IO or planning fails, or the activation finding differs. |
 //! | [`explains_inactive_prose_and_clears_it_on_activation`] | layers | Activating prose restores its mints; an inactive owner without Markdown is harmless. # Panics Panics only if fixture IO or planning fails, or resolution differs from the contract. |
 //! | [`resolves_a_prefixed_crateless_owner_before_checking_reach`] | layers | A rendered crateless mint resolves before its declared reach is checked. # Panics Panics only if fixture IO, planning, resolution, or reach differs from the contract. |
@@ -436,6 +438,181 @@ policies = [
         "See (`[DOCS-def:nrz:reuse-lemma]`).\n",
     );
     root
+}
+
+fn nested_fixture() -> tempfile::TempDir {
+    let root = crateless_owner_fixture(true);
+    for file in ["owners", "environments", "policies", "lists", "shape"] {
+        let text = fs::read_to_string(root.path().join(format!(".linter/{file}.toml")))
+            .expect("fixture declaration");
+        write(
+            root.path(),
+            &format!("docs/design/.linter/{file}.toml"),
+            &text,
+        );
+    }
+    activate_prose(root.path(), &["CAS", "PROJECTA"]);
+    root
+}
+
+fn declare_nested(root: &Path, owner: &str, nested_root: &str, reason: &str) {
+    let path = root.join(".linter/owners.toml");
+    let mut text = fs::read_to_string(&path).expect("owners");
+    writeln!(
+        text,
+        "nested = [{{ owner = {owner:?}, root = {nested_root:?}, reason = {reason:?} }}]"
+    )
+    .expect("write to string");
+    fs::write(path, text).expect("nested declaration");
+}
+
+/// Nested prose is exempt only under its declared root and remains in the burn census.
+///
+/// # Panics
+/// Panics only if fixture IO or planning fails, or the measured scope differs.
+///
+/// ´claim:layers:nested-prose-retains-other-policy-coverage´
+/// ´test:crate:nested-prose-retains-other-policy-coverage´
+#[test]
+fn nested_prose_retains_other_policy_coverage() {
+    let root = nested_fixture();
+    declare_nested(root.path(), "DOCS", "docs/design", "Checked independently");
+    let policies_path = root.path().join(".linter/policies.toml");
+    let policies = fs::read_to_string(&policies_path).expect("policies");
+    fs::write(
+        &policies_path,
+        policies.replace(
+            "policies = [",
+            "policies = [{ owner = \"DOCS\", policy = \"legacy.section-references\" },",
+        ),
+    )
+    .expect("activate burn");
+    let lists_path = root.path().join(".linter/lists.toml");
+    let mut lists = fs::read_to_string(&lists_path).expect("lists");
+    lists.push_str("\n[DOCS.\"legacy.section-references\"]\npath_counts = []\n");
+    fs::write(lists_path, lists).expect("burn list");
+    write(
+        root.path(),
+        ".linter/policy-legacy-section-references.toml",
+        "namespace = \"class.linter.policy.legacy.section-references\"\nversion = [1, 0, 0]\n[owners.DOCS]\nprose = '%s\"docs/design/\" *VCHAR'\n",
+    );
+    write(
+        root.path(),
+        "docs/design/reuse-concept.md",
+        "See § 12.3 for details.\n",
+    );
+    for outside in [false, true] {
+        if outside {
+            write(
+                root.path(),
+                "docs/design-other.md",
+                "Outside the nested corpus.\n",
+            );
+        }
+        let plan = crate::plan::ExecutionPlan::compile(
+            root.path(),
+            crate::snapshot::configuration(root.path()),
+        )
+        .expect("nested plan");
+        let (counts, findings) = crate::application::verify_configuration_with_plan(&plan, &[]);
+        let inactive: Vec<_> = findings
+            .iter()
+            .filter(|finding| matches!(finding, Finding::InactiveProseOwner { .. }))
+            .collect();
+        if outside {
+            assert!(
+                matches!(inactive.as_slice(), [Finding::InactiveProseOwner { owner, sources: 1 }] if owner == "DOCS")
+            );
+        } else {
+            assert!(inactive.is_empty(), "{findings:?}");
+        }
+        let report = serde_json::to_value(counts).expect("configuration report");
+        assert_eq!(
+            report["nested"],
+            serde_json::json!([{
+                "owner": "DOCS", "root": "docs/design", "reason": "Checked independently"
+            }])
+        );
+        let checked = crate::application::check_with_plan(&plan);
+        assert!(
+            checked
+                .findings
+                .iter()
+                .any(|finding| matches!(finding.finding, Finding::BurnListGrowth { .. })),
+            "nested prose remains visible to the burn policy"
+        );
+    }
+}
+
+/// A nested declaration must name an owner, a contained directory, a snapshot and a reason.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a malformed nested declaration is accepted.
+///
+/// ´claim:layers:nested-corpus-declarations-require-evidence´
+/// ´test:crate:refuses-invalid-nested-corpus-declarations´
+#[test]
+fn refuses_invalid_nested_corpus_declarations() {
+    for (owner, path, reason, missing, condition) in [
+        (
+            "UNKNOWN",
+            "docs/design",
+            "Checked",
+            false,
+            "owner is not registered",
+        ),
+        (
+            "DOCS",
+            "../docs/design",
+            "Checked",
+            false,
+            "root must be a normalized relative directory inside the owner's partitions",
+        ),
+        (
+            "DOCS",
+            "docs//design",
+            "Checked",
+            false,
+            "root must be a normalized relative directory inside the owner's partitions",
+        ),
+        (
+            "CAS",
+            "docs/design",
+            "Checked",
+            false,
+            "root must be a normalized relative directory inside the owner's partitions",
+        ),
+        (
+            "DOCS",
+            "docs/design",
+            "Checked",
+            true,
+            "root must hold a loadable .linter/ snapshot",
+        ),
+        (
+            "DOCS",
+            "docs/design",
+            "  ",
+            false,
+            "reason must not be empty",
+        ),
+    ] {
+        let root = nested_fixture();
+        if missing {
+            fs::remove_file(root.path().join("docs/design/.linter/policies.toml"))
+                .expect("remove snapshot member");
+        }
+        declare_nested(root.path(), owner, path, reason);
+        let loaded = crate::snapshot::configuration(root.path());
+        assert!(loaded.snapshot().is_none());
+        let messages: Vec<_> = loaded.refusals().iter().map(ToString::to_string).collect();
+        assert_eq!(
+            messages,
+            [format!(
+                ".linter/owners.toml: nested[1] (owner {owner}, root {path}): {condition}"
+            )]
+        );
+    }
 }
 
 fn activate_prose(root: &Path, owners: &[&str]) {

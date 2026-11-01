@@ -346,6 +346,18 @@ pub struct ReachRow {
     pub target: String,
 }
 
+/// A nested corpus whose own snapshot accounts for its prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NestedCorpus {
+    /// The owner retaining these paths in the enclosing corpus.
+    pub owner: String,
+    /// The normalized repository-relative directory of the nested corpus.
+    pub root: String,
+    /// Why this corpus is checked independently.
+    pub reason: String,
+}
+
 /// One row of the declared environment relation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct EnvironmentRow {
@@ -1047,6 +1059,7 @@ pub struct Snapshot {
     imports: BTreeMap<String, crate::export::RegistryDocument>,
     unpublished: Option<(PathBuf, crate::export::UnpublishedLabels)>,
     partitions: Vec<OwnerRow>,
+    nested: Vec<NestedCorpus>,
     shape: CorpusShape,
     may_cite: Vec<ReachRow>,
     environments: Vec<EnvironmentRow>,
@@ -1075,6 +1088,7 @@ pub struct DeclarationCore {
     imports: BTreeMap<String, crate::export::RegistryDocument>,
     unpublished: Option<(PathBuf, crate::export::UnpublishedLabels)>,
     partitions: Vec<OwnerRow>,
+    nested: Vec<NestedCorpus>,
     shape: CorpusShape,
     may_cite: Vec<ReachRow>,
     environments: Vec<EnvironmentRow>,
@@ -1134,6 +1148,7 @@ impl DeclarationCore {
             imports: self.imports,
             unpublished: self.unpublished,
             partitions: self.partitions,
+            nested: self.nested,
             shape: self.shape,
             may_cite: self.may_cite,
             environments: self.environments,
@@ -1486,6 +1501,12 @@ impl Snapshot {
         &self.root_owner
     }
 
+    /// The declared corpora whose prose is checked through their own snapshots.
+    #[must_use]
+    pub fn nested(&self) -> &[NestedCorpus] {
+        &self.nested
+    }
+
     /// The owner-name reconciliation the owner-name document declares.
     ///
     /// The stripped namespace is the sole entry of the prefix-ignore set, and the
@@ -1746,6 +1767,8 @@ struct RawOwners {
     /// Explicit repository carrier, validated against the registered owners.
     #[serde(default)]
     root_owner: Option<String>,
+    #[serde(default)]
+    nested: Vec<NestedCorpus>,
     /// Imported owners cite a registry in place of taking a partition.
     #[serde(default)]
     imports: Vec<RawImportRow>,
@@ -2051,6 +2074,13 @@ fn load(
 
     let declared = declared_partition(&raw_owners, &mut refusals);
     let partitions = owner_rows(declared, "partitions", &registered, &mut refusals);
+    let nested = nested_corpora(
+        root,
+        &raw_owners.nested,
+        &registered,
+        &partitions,
+        &mut refusals,
+    );
     let may_cite = reach_rows(&raw_owners.may_cite, &registered, &mut refusals);
     let environments = environment_rows(&raw_environments.environments, &mut refusals);
     let environment_extensions = environment_rows(&raw_environments.extensions, &mut refusals);
@@ -2140,6 +2170,7 @@ fn load(
         imports,
         unpublished,
         partitions,
+        nested,
         shape,
         may_cite,
         environments,
@@ -3887,6 +3918,96 @@ fn path_rows(
 
     parsed.sort();
     parsed
+}
+
+/// Validate the evidence behind each independently checked nested corpus.
+fn nested_corpora(
+    root: &Path,
+    rows: &[NestedCorpus],
+    registered: &BTreeSet<String>,
+    partitions: &[OwnerRow],
+    refusals: &mut Vec<Refusal>,
+) -> Vec<NestedCorpus> {
+    let mut nested = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let problem = if !registered.contains(&row.owner) {
+            Some("owner is not registered")
+        } else if !nested_directory(root, row, partitions) {
+            Some("root must be a normalized relative directory inside the owner's partitions")
+        } else if row.reason.trim().is_empty() {
+            Some("reason must not be empty")
+        } else if configuration(&root.join(&row.root)).snapshot().is_none() {
+            Some("root must hold a loadable .linter/ snapshot")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            refusals.push(Refusal::Malformed {
+                file: OWNERS_FILE,
+                message: format!(
+                    "nested[{}] (owner {}, root {}): {problem}",
+                    index + 1,
+                    row.owner,
+                    row.root
+                ),
+            });
+        } else {
+            nested.push(row.clone());
+        }
+    }
+    nested
+}
+
+fn nested_directory(root: &Path, row: &NestedCorpus, partitions: &[OwnerRow]) -> bool {
+    if row.root.is_empty()
+        || row
+            .root
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || Path::new(&row.root).is_absolute()
+    {
+        return false;
+    }
+    let Ok(base) = root.canonicalize() else {
+        return false;
+    };
+    let directory = base.join(&row.root);
+    // Reject aliases to ancestors as well as escapes: recursive snapshot loading
+    // must descend into a physical child, never return to an enclosing corpus.
+    if !directory.is_dir() || directory.canonicalize().ok().as_ref() != Some(&directory) {
+        return false;
+    }
+    let mut pending = vec![directory];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            let Ok(kind) = entry.file_type() else {
+                return false;
+            };
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else {
+                let path = entry.path();
+                let Some(relative) = path
+                    .strip_prefix(&base)
+                    .ok()
+                    .and_then(crate::pattern::path_bytes)
+                    .and_then(|bytes| BytePath::from_bytes(bytes).ok())
+                else {
+                    return false;
+                };
+                if !attributed_to(&relative, &row.owner, partitions) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Whether the inclusion relation attributes a declared path to exactly this owner.
