@@ -718,6 +718,55 @@ fn missing_public_name_refuses_publication() {
     }
 }
 
+/// Root README replacement requires an explicit reasoned exclusion.
+///
+/// # Panics
+/// Panics only if fixture IO fails or README selection violates its contract.
+/// ´test:integration:root-readme-replacement-requires-exclusion´
+#[test]
+fn root_readme_replacement_requires_exclusion() {
+    for selector in ["README.md", "README.*"] {
+        let root = fixture();
+        let source = root.path().join("source");
+        let out = root.path().join("out");
+        fs::write(source.join("README.md"), "private root README\n").expect("root README");
+        for excluded in [false, true] {
+            let manifest = if excluded {
+                MANIFEST.replace(
+                    "[exclude]\nrows = [",
+                    &format!("[exclude]\nrows = [{{ pattern = \"{selector}\", reason = \"Public README replaces it.\" }}, "),
+                )
+            } else {
+                MANIFEST.replace(
+                    "[include]\nrows = [",
+                    &format!("[include]\nrows = [{{ pattern = \"{selector}\" }}, "),
+                )
+            };
+            fs::write(source.join("public-set.toml"), manifest).expect("README selection");
+            git(&source, &["add", "."]);
+            git(
+                &source,
+                &["commit", "-q", "--no-gpg-sign", "-m", "README selection"],
+            );
+            git(&source, &["tag", "-f", "source-v1"]);
+            let output = cut(&source, &out, None, true);
+            if excluded {
+                success(output);
+                assert_eq!(
+                    fs::read(out.join("README.md")).expect("public README"),
+                    b"public readme\n"
+                );
+            } else {
+                assert_eq!(output.status.code(), Some(3));
+                let report = String::from_utf8_lossy(&output.stdout);
+                assert!(report.contains(&format!("include selector {selector}")));
+                assert!(report.contains("change the row to an exclusion with a reason"));
+                assert!(!out.exists());
+            }
+        }
+    }
+}
+
 fn refuses_consumed_input(input: &str) {
     let root = fixture();
     let source = root.path().join("source");

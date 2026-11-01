@@ -176,6 +176,18 @@ impl Manifest {
             }
         }
         selection.included.sort();
+        if self.public.readme != "README.md"
+            && selection.included.iter().any(|path| path == "README.md")
+        {
+            for (row, excluded, _) in &rows {
+                if !excluded && matches_path(&row.pattern, "README.md") {
+                    selection.issues.push(format!(
+                        "include selector {} selects root README.md, which public.readme {} would replace; change the row to an exclusion with a reason",
+                        row.pattern, self.public.readme
+                    ));
+                }
+            }
+        }
         selection.issues.sort();
         selection
     }
