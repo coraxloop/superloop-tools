@@ -706,7 +706,7 @@ pub enum Finding {
     /// A file holds more occurrences of a burned family than its register allows.
     ///
     /// The ratchet of the burn discipline
-    /// (ADR-T-020, The migration disciplines) only turns one way, so this is the
+    /// (´[TOOLS-rule:lintcontracts:burn-families]´) only turns one way, so this is the
     /// failure that forbids growth: the corpus wrote a form the campaign is
     /// retiring, and no commit may add one.
     BurnListGrowth {
@@ -1080,7 +1080,7 @@ pub enum Finding {
     ///
     /// The fallback that once answered for an unaccounted path is gone with
     /// nothing put in its place, so the corpus asks whose the file is instead of
-    /// assuming (ADR-T-019, The layer owner graph). The path is rendered
+    /// assuming (´[TOOLS-rule:lintcontracts:ownership]´). The path is rendered
     /// in the reversible display, because a file whose name is not text is
     /// exactly the file a lossy report would lose.
     UnaccountedPath {

@@ -20,7 +20,7 @@
 //! residual recognizer already had is declared here once, and every recognizer
 //! consumes it: a reference wrapped across a comment line boundary is one
 //! reference to every rule that reads its shape
-//! (ADR-T-020, The migration disciplines).
+//! (´[TOOLS-rule:lintcontracts:burn-families]´).
 //!
 //! # Tokenization sees more; participation is unchanged
 //!

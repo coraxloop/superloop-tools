@@ -17,7 +17,7 @@
 //! which is why it reads the list file permissively: a defect the ordinary
 //! loader refuses is a defect audit must be able to report.
 //!
-//! *Append* is the one growth door (ADR-T-020, The migration disciplines).
+//! *Append* is the one growth door (´[TOOLS-rule:lintcontracts:burn-families]´).
 //! It re-reads the tree, and accepts a row only when that row names growth the
 //! tree currently holds and its ceiling equals exactly that current observation,
 //! so an append records a debt the tree already carries and cannot pre-authorize
@@ -108,7 +108,7 @@ impl Operation {
 /// The linter validates that all three strings are nonempty and preserves them
 /// byte for byte in the response. It neither decides that the named person may
 /// rule nor resolves the ruling reference, and no reader should read the receipt
-/// as authentication (ADR-T-020, The migration disciplines).
+/// as authentication (´[TOOLS-rule:lintcontracts:burn-families]´).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Authority {
@@ -836,7 +836,7 @@ fn held_prefix(text: &str) -> &str {
 /// component were a policy name. And owner containment is asked only of a policy
 /// that divides the owner partition, because a census declared over the corpus
 /// root reaches every share at once and its rows stand at the activating owner
-/// wherever their files are (ADR-T-019, The layer owner graph).
+/// wherever their files are (´[TOOLS-rule:lintcontracts:ownership]´).
 trait ListContext {
     fn surface(&self) -> &SurfaceAst;
     fn deferred_policies(&self) -> &[crate::snapshot::DeferredPolicy];
@@ -1631,7 +1631,7 @@ fn audit(
 /// a defect anywhere in the file puts every row in the file at risk, and the pair
 /// being appended to is no safer for being clean itself. What the caller is owed
 /// is the list of rows a write would have dropped, so the refusal names them
-/// (ADR-T-020, The migration disciplines).
+/// (´[TOOLS-rule:lintcontracts:burn-families]´).
 fn truncation_refusals(declared: &Declared, target: &Target) -> Vec<AppendRefusal> {
     if declared.dropped.is_empty() {
         return Vec::new();

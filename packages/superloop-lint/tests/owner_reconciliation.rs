@@ -70,8 +70,8 @@ fn reconcile_partition(plan: &ExecutionPlan) -> BTreeMap<PathBuf, String> {
         .map(|(name, count)| (name.as_str(), *count))
         .collect();
     let mut expected_ignores = BTreeMap::from([("test-fixtures", 5)]);
-    if plan.root().join("maps/meson.build").exists() {
-        expected_ignores.insert("unreadable-install-inputs", 1);
+    if plan.root().join("Cargo.lock").exists() {
+        expected_ignores.insert("consumer-lockfile", 1);
     }
     assert_eq!(fixed_ignores, expected_ignores);
     assert_eq!(partition.counts().unaccounted, 0);

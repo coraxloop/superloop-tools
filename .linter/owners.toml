@@ -294,11 +294,6 @@ owner = "TOOLS"
 pattern = '%s"docs" [ "/" *VCHAR ]'
 
 [[partitions]]
-name = "engineering-records"
-owner = "TOOLS"
-pattern = '%s"adr" [ "/" *VCHAR ]'
-
-[[partitions]]
 name = "harnesses"
 owner = "TOOLS"
 pattern = '%s"tests" [ "/" *VCHAR ]'

@@ -68,7 +68,7 @@
 //! Neither was a gap in this rule. The owner ruled both a defect of the
 //! tokenization layer rather than of the policy, and the mark's reader now
 //! parses every occurrence to exactly one of four readings
-//! (ADR-T-020, The migration disciplines). A quoted heading is the same
+//! (´[TOOLS-rule:lintcontracts:burn-families]´). A quoted heading is the same
 //! named-division reference the spaced spelling makes, so it is the section
 //! family's, by the degraded-spelling reading rather than by a new family. A
 //! doubled mark opens one reference whose locator its companion carries, which
@@ -90,7 +90,7 @@
 //! one is owed. So comment leaders are resolved away and a run of adjacent
 //! comment lines is read as one region, which is what the surface reading
 //! already requires of anything reading commentary
-//! (ADR-T-020, The migration disciplines). Prose is joined across a
+//! (´[TOOLS-rule:lintcontracts:burn-families]´). Prose is joined across a
 //! soft line break for the same reason and by the same rule.
 //!
 //! That joining used to live here, and it does not any more. It was this

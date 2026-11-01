@@ -135,15 +135,15 @@ pub struct CitationEdge {
 
 /// One participating imported citation, held for the layer pass.
 ///
-/// The layer law of ADR-T-019 judges admissibility rather than resolution, so
+/// The layer law of (´[TOOLS-rule:lintcontracts:ownership]´) judges admissibility rather than resolution, so
 /// it needs the imports this engine already recognized rather than a second
-/// recognizer of its own (ADR-T-020, The migration disciplines). What
+/// recognizer of its own (´[TOOLS-rule:lintcontracts:burn-families]´). What
 /// it needs of each is the citing corpus, the cited prefix, the surface, and
 /// the location — never the cited label, whose kind, area and mint site are the
-/// cited corpus's business (ADR-T-019, The layer owner graph).
+/// cited corpus's business (´[TOOLS-rule:lintcontracts:ownership]´).
 ///
 /// Only participating occurrences are collected, which is what makes the law
-/// blind to a displayed import (ADR-T-019, The layer owner graph).
+/// blind to a displayed import (´[TOOLS-rule:lintcontracts:ownership]´).
 /// Generated imports participate in full: their derivation exclusion only
 /// keeps a register row from feeding the set it presents
 /// (ADR-T-014, A calculus of documentation and source labels).
@@ -285,7 +285,7 @@ impl Analysis {
 
     /// Every participating imported citation the harvest met.
     ///
-    /// These are the occurrences the layer law of ADR-T-019 ranges over. They
+    /// These are the occurrences the layer law of (´[TOOLS-rule:lintcontracts:ownership]´) ranges over. They
     /// are reported here rather than judged here, because whether an import is
     /// admissible is a question about the workspace's manifests and not about
     /// the reference graph.

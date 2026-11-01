@@ -5,7 +5,7 @@
 //!
 //! # Output contract
 //!
-//! This command follows the global JSON-only output contract of ADR-T-010.
+//! This command follows the global JSON-only output contract of (´[TOOLS-spec:output:machine-json-streams]´).
 //! Stdout carries exactly one JSON result object followed by one newline, stderr
 //! carries JSON control-plane and diagnostic records (or configuration refusal
 //! lines with `check --text`), and stdout is refused when
@@ -13,7 +13,7 @@
 //!
 //! # Documented exit-code exception
 //!
-//! ADR-T-010 leaves the exit-code taxonomy beyond the shared `success`,
+//! (´[TOOLS-spec:output:machine-json-streams]´) leaves the exit-code taxonomy beyond the shared `success`,
 //! `failure`, and `usage` classes to the owning command's contract. A check that
 //! runs to completion and reports findings has not failed as a command: it has
 //! produced its result. Emitting that result on stdout while still signalling
@@ -45,7 +45,7 @@
 //! stdout.
 //!
 //! The assemble command takes the same taxonomy as the check, because it is one:
-//! its default mode is the exact-byte freshness comparison of ADR-T-012 and
+//! its default mode is the exact-byte freshness comparison of (´[TOOLS-rule:lintcontracts:projections]´) and
 //! nothing else, so a publication that is not what its parts say it is exits 3
 //! with the report on stdout. With `--write` the publications are regenerated
 //! first, and the staleness it repaired is no longer reported — what remains at

@@ -98,12 +98,6 @@ pkg_superloop_lint_prose = files(
   'tests/support/README.md',
 )
 
-foreach path : source_paths
-  if path.startswith('packages/superloop-lint/adr/') or path.startswith('packages/superloop-lint/docs/plans/') or path == 'packages/superloop-lint/docs/isolation-audit.md'
-    pkg_superloop_lint_prose += files(path.substring(24))
-  endif
-endforeach
-
 pkg_superloop_lint_toml = files(
   'meson-paths.in',
 )
@@ -216,11 +210,11 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
-{"kind":"meson-call","site":"packages/superloop-lint/meson.build:custom_target#1","sha256":"5d58c2a0c06db241bdc59317f8835ada6178fe82df36e415a7caf5c97866d81a","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"5a98894903de5956047b48f4a25c36fa23942a7a00a7bcb9b17f0bfa1af05646"}
+{"kind":"meson-call","site":"packages/superloop-lint/meson.build:custom_target#1","sha256":"5d58c2a0c06db241bdc59317f8835ada6178fe82df36e415a7caf5c97866d81a","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"b09912c5f9d94f4a0d87daad99896b65d81ddef22e00322588ea06dbabf7897a"}
 ''']
 
 dependency_ledger += ['''
-{"kind":"meson-call","site":"packages/superloop-lint/meson.build:find_program#1","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env to invoke the shared artifact staging helper","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"5a98894903de5956047b48f4a25c36fa23942a7a00a7bcb9b17f0bfa1af05646"}
+{"kind":"meson-call","site":"packages/superloop-lint/meson.build:find_program#1","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env to invoke the shared artifact staging helper","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"b09912c5f9d94f4a0d87daad99896b65d81ddef22e00322588ea06dbabf7897a"}
 ''']
 
 # Publication command dependencies.

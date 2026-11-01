@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Private architecture, runbooks and linter design history leave the tools tree together with their ownership and prose inventory; public projections and the empty label register remain checked, and consumer-generated lockfiles remain local build inputs.
+
 - Public tools now carry their README and reusable worker, command, linter and build contracts directly; operational history and instructions are served by the instance publication.
 
 - Tools installations retain public specifications and executable identities while instance-owned maps, wrappers and the runtime unit leave the tools build.

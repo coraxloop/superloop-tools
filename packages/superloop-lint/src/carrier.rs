@@ -14,7 +14,7 @@
 //! every package — because the migration of a package's corpus onto the calculus
 //! cannot be checked by a tool that never reads it. The root's top-level prose
 //! then arrives entire rather than one readme of it: the corpus convention
-//! (ADR-T-019, The layer owner graph) names the root member's carrier
+//! (´[TOOLS-rule:lintcontracts:ownership]´) names the root member's carrier
 //! as the repository tree outside the packages tree, top-level prose included,
 //! and a register short of that let the repository's own instruction file
 //! prescribe retired forms with nothing reading it. The same register then
@@ -88,7 +88,7 @@ const CARRIED_DIRECTORIES: &[&str] = &["adr", "docs"];
 /// as the top-level prose, and that phrase is the record's rather than this
 /// module's: the root member's carrier is the repository tree outside the
 /// packages tree — `adr/`, `docs/`, `src/`, `tests/`, and the top-level prose
-/// (ADR-T-019, The layer owner graph). The four trees are carried by
+/// (´[TOOLS-rule:lintcontracts:ownership]´). The four trees are carried by
 /// the constants around this one; prose with no directory over it, and prose
 /// under a directory no constant carries, is enumerated here, and the filename
 /// rule below reaches it only at depths these entries do not cover. Each is

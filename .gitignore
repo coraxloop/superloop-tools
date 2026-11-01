@@ -2,3 +2,4 @@
 /.claude/
 loops.d/
 /target/
+/Cargo.lock

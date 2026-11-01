@@ -266,7 +266,7 @@ const FINGERPRINT_DIGITS: usize = 64;
 /// family; a program a corpus deploys several times is named by its identifier
 /// and the family naming one deployment, and the two deployments are two pairs
 /// that can neither satisfy nor pay for one another
-/// (ADR-T-020, The migration disciplines). What grows is the pair's
+/// (´[TOOLS-rule:lintcontracts:burn-families]´). What grows is the pair's
 /// second component and never its arity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Pair {
@@ -3944,7 +3944,7 @@ fn allowance_rows(
 /// share at once, so its ratchet is one repository-wide artifact filed under the
 /// owner who activated it, and holding each of its rows to that owner's
 /// attribution would refuse the very table the census earned
-/// (ADR-T-019, The layer owner graph).
+/// (´[TOOLS-rule:lintcontracts:ownership]´).
 fn path_count_rows(
     pair: &Pair,
     program: &str,

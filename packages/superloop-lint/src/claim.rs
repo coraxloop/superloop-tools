@@ -252,7 +252,7 @@ fn claim_occurrences(doc: &DocComment) -> Vec<(usize, Label, bool)> {
 /// Whether a documentation line's sole occurrence is claim-kind, either form.
 ///
 /// The one recognizer every consumer of the standard place shares
-/// (ADR-T-020, The migration disciplines): the code lint deciding which
+/// (´[TOOLS-rule:lintcontracts:burn-families]´): the code lint deciding which
 /// lines a profile owns, and the fix mode deciding where the paragraph break
 /// belongs, both ask this rather than each judging a claim line for itself. A
 /// writer carrying a private copy of this judgment is exactly how the fix mode
@@ -302,7 +302,7 @@ fn gloss_above(lines: &[String], claim: usize) -> String {
 /// coverage figure the staging turns on is the same fact counted.
 ///
 /// TODO ´todo:code:the-record-fixes-that-an-unclaimed´: the record fixes that an unclaimed cell carries a placeholder, but no
-/// record fixes which character it is. ADR-T-012 marks an absent entry of its
+/// record fixes which character it is. (´[TOOLS-rule:lintcontracts:projections]´) marks an absent entry of its
 /// own class column with an em dash, which is a precedent rather than a rule
 /// reaching this table; promoting it to one is a record edit, not a code edit.
 ///

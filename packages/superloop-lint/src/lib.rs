@@ -39,7 +39,7 @@
 //! document too large to rewrite in one pass be written in parts, each
 //! independently lintable, and concatenated into one committed publication in an
 //! order its authors declare — with the publication held to the exact-byte
-//! freshness of ADR-T-012 rather than to anybody's memory. And the shape report
+//! freshness of (´[TOOLS-rule:lintcontracts:projections]´) rather than to anybody's memory. And the shape report
 //! measures what "short and super sharp" has never had numbers for: heads per
 //! document, words and citations per environment, against a band measured from
 //! the records the campaign is content with rather than against a constant.

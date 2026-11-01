@@ -10,7 +10,7 @@
 //! covers. When the document goes, a reference to either names nothing at all.
 //!
 //! That is what makes them burn families rather than a style preference. The
-//! burn discipline (ADR-T-020, The migration disciplines) requires that a legacy
+//! burn discipline (´[TOOLS-rule:lintcontracts:burn-families]´) requires that a legacy
 //! reference family is enumerated in a register the linter verifies exactly and
 //! that the enumeration only shrinks, and these two qualify on its
 //! own terms: the corpus carries hundreds of such references, most of them in

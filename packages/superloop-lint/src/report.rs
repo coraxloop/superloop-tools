@@ -3,7 +3,7 @@
 
 //! The check report, and the top-level check itself.
 //!
-//! The report is this command's stdout result data under ADR-T-010, so it is one
+//! The report is this command's stdout result data under (´[TOOLS-spec:output:machine-json-streams]´), so it is one
 //! JSON object with no human-oriented text outside the `message` fields carried
 //! inside the JSON.
 //!
@@ -139,7 +139,7 @@ pub struct CheckReport {
     pub assembly: AssemblyCounts,
     /// What the burn lists were censused at.
     pub burn: BurnCounts,
-    /// What the layer owner graph of ADR-T-019 was found to be, and what it refused.
+    /// What the layer owner graph of (´[TOOLS-rule:lintcontracts:ownership]´) was found to be, and what it refused.
     pub layers: LayerAnalysis,
     /// What the declared configuration was found to be.
     ///
@@ -221,7 +221,7 @@ pub struct Verdicts {
     pub assembly: AssemblyCounts,
     /// What the burn lists were censused at.
     pub burn: BurnCounts,
-    /// What the layer owner graph of ADR-T-019 was found to be.
+    /// What the layer owner graph of (´[TOOLS-rule:lintcontracts:ownership]´) was found to be.
     pub layers: LayerAnalysis,
     /// What the declared configuration was found to be, when one stands.
     pub configuration: Option<ConfigurationCounts>,
@@ -737,7 +737,7 @@ pub struct AssembleReport {
 /// Assemble every adopted publication, verifying or writing it.
 ///
 /// Without `write` the command forms no side effect at all: it is the exact-byte
-/// freshness comparison of ADR-T-012 and nothing else, which is the mode a gate
+/// freshness comparison of (´[TOOLS-rule:lintcontracts:projections]´) and nothing else, which is the mode a gate
 /// runs. With it, every publication is rewritten to what its parts say it is, and
 /// the freshness findings of that same run are the ones the write repaired.
 #[must_use]

@@ -5,7 +5,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`the_repository_snapshot_loads_as_one_exact_surface`] | declarations | The repository exposes exactly the fixed and parameter declaration documents, while the imports directory belongs to the registry loader; every envelope parses independently, and the atomic loader accepts their joined snapshot with 35 partitions, 55 may-cite rows and four list rows. The declared environment relation is also the exact relation the imported generic snapshot publishes, with the generic title genres held as extensions. # Panics Panics only when this checkout cannot be read or parsed, or when its declared surface differs from the repository facts asserted here. |
+//! | [`the_repository_snapshot_loads_as_one_exact_surface`] | declarations | The repository exposes exactly the fixed and parameter declaration documents, while the imports directory belongs to the registry loader; every envelope parses independently, and the atomic loader accepts their joined snapshot with 34 partitions, 55 may-cite rows and three list rows. The declared environment relation is also the exact relation the imported generic snapshot publishes, with the generic title genres held as extensions. # Panics Panics only when this checkout cannot be read or parsed, or when its declared surface differs from the repository facts asserted here. |
 
 //! Repository declaration-loading integration tests.
 
@@ -65,7 +65,7 @@ fn relation_pairs(relation: &KindRelation, extensions: bool) -> BTreeSet<(String
 /// The repository exposes exactly the fixed and parameter declaration documents,
 /// while the imports directory belongs to the registry loader; every envelope
 /// parses independently, and the atomic loader accepts their joined snapshot
-/// with 35 partitions, 55 may-cite rows and four list rows.
+/// with 34 partitions, 55 may-cite rows and three list rows.
 /// The declared environment relation is also the exact relation the imported
 /// generic snapshot publishes, with the generic title genres held as extensions.
 ///
@@ -127,7 +127,7 @@ fn the_repository_snapshot_loads_as_one_exact_surface() {
     );
 
     assert_eq!(snapshot.owners().len(), 28 + snapshot.imports().len());
-    assert_eq!(snapshot.partitions().len(), 35);
+    assert_eq!(snapshot.partitions().len(), 34);
     assert_eq!(snapshot.may_cite().len(), 55);
     assert_eq!(snapshot.environments().len(), 349);
     assert_eq!(snapshot.environment_extensions().len(), 9);
@@ -143,7 +143,7 @@ fn the_repository_snapshot_loads_as_one_exact_surface() {
         assert!(snapshot.policies().contains(&pair));
         assert!(list_keys.contains(&pair));
     }
-    assert_eq!(snapshot.lists().values().map(Rows::len).sum::<usize>(), 4);
+    assert_eq!(snapshot.lists().values().map(Rows::len).sum::<usize>(), 3);
 
     let imported = snapshot
         .imports()

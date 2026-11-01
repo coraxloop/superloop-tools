@@ -7,7 +7,7 @@
 //! a file small enough to hold in the head and lint on its own, and the document
 //! the corpus publishes is the concatenation of them. The concatenation is
 //! generated, so it is a committed generated publication in the sense of
-//! ADR-T-012, and that record decides how it is checked: exact expected-byte
+//! (´[TOOLS-rule:lintcontracts:projections]´), and that record decides how it is checked: exact expected-byte
 //! comparison, and no digest anywhere. This module is that comparison, and the
 //! generator beside it.
 //!
@@ -810,7 +810,7 @@ fn freshness(root: &Path, assembly: &Assembly, text: &str) -> Vec<Finding> {
 ///
 /// The comparison itself is over the whole byte strings and nothing else; this
 /// only says where, so that a reader has somewhere to look. No digest is taken,
-/// per the artifact case of ADR-T-012.
+/// per the artifact case of (´[TOOLS-rule:lintcontracts:projections]´).
 fn first_difference(expected: &str, found: &str) -> String {
     let mut expected_lines = expected.lines();
     let mut found_lines = found.lines();

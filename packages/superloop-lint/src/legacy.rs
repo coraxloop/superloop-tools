@@ -5,7 +5,7 @@
 //!
 //! The calculus supersedes a two-level tag system in favour of labels minted at
 //! heads, and retires section-number and record-by-number identities with it
-//! (ADR-T-020, The migration disciplines). No retirement
+//! (´[TOOLS-rule:lintcontracts:burn-families]´). No retirement
 //! is worth anything while the forms can still be written, so this module reads
 //! a document for the four shapes the campaign leaves behind: a section-number
 //! reference, a tag of the superseded system, a decision record named by its
@@ -356,7 +356,7 @@ const TITLE_QUOTE: char = '"';
 /// that a later corpus could falsify. The two families that read the mark read
 /// it through here — the section family takes [`Mark::Section`] and the residual
 /// register takes [`Mark::WordShaped`] — so neither can drift into counting what
-/// the other counts (ADR-T-020, The migration disciplines).
+/// the other counts (´[TOOLS-rule:lintcontracts:burn-families]´).
 ///
 /// The companion arm is the decision the old line-at-a-time reading could not
 /// make. The retired convention introduced a range or a list with a doubled
@@ -606,7 +606,7 @@ fn collect_record_references(raw: &str, found: &mut Vec<Read>) {
 ///
 /// The shape is the record prefix opening a token, then a digit run of exactly
 /// the declared width. Both halves of that are the family's bound rather than
-/// taste (ADR-T-020, The migration disciplines), and both are what keep the
+/// taste (´[TOOLS-rule:lintcontracts:burn-families]´), and both are what keep the
 /// canonical series out of the family by construction rather than by exempting
 /// the files they stand in: a series letter is not a digit, so no lettered form
 /// can be read as a bare one, and a prefix standing inside a longer word

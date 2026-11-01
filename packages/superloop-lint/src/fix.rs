@@ -390,7 +390,7 @@ fn plan(asset: &CoveredAsset) -> Result<Option<(Repair, LineEdit)>, String> {
     // a break driven between them writes a comment the check refuses. The
     // judgment of what a claim line is comes from the claim profile's own
     // recognizer rather than a copy made here
-    // (ADR-T-020, The migration disciplines).
+    // (´[TOOLS-rule:lintcontracts:burn-families]´).
     let separator_needed = |above: &str| !above.trim().is_empty() && !line_holds_claim(above);
     let separator_above_last = |lines: &[String]| {
         lines
