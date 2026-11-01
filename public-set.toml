@@ -3009,6 +3009,9 @@ pattern = "packages/superloop-pack/src/cut.rs"
 pattern = "packages/superloop-pack/src/lib.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-pack/src/release.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-pack/src/replay.rs"
 
 [[include.rows]]
@@ -3022,6 +3025,9 @@ pattern = "packages/superloop-pack/tests/cut.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-pack/tests/cut_acceptance.py"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/tests/release.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-pack/tests/replay.rs"

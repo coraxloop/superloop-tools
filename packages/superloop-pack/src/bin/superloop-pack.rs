@@ -30,6 +30,8 @@ struct Args {
 enum PackCommand {
     /// Replay linear source history while preserving original commit metadata.
     Replay(ReplayArgs),
+    /// Validate and create an unsigned local deployment release.
+    Release(ReleaseArgs),
     /// Cut the declared public tree into independent unsigned history.
     Cut {
         #[arg(long)]
@@ -93,6 +95,62 @@ enum PackCommand {
     },
 }
 
+#[derive(Debug, clap::Args)]
+struct ReleaseArgs {
+    #[arg(long)]
+    repository: PathBuf,
+    #[arg(long)]
+    version: String,
+    #[arg(long)]
+    manifest: PathBuf,
+    #[arg(long)]
+    author: String,
+    #[arg(long)]
+    date: Option<String>,
+    #[arg(long)]
+    tag_message: Option<String>,
+    #[arg(long, default_value = "CHANGELOG.md")]
+    changelog: PathBuf,
+    #[arg(long)]
+    expected_main: Option<String>,
+    #[arg(long)]
+    expected_development: Option<String>,
+    #[arg(long, conflicts_with = "check")]
+    dry_run: bool,
+    #[arg(long)]
+    check: bool,
+}
+
+impl ReleaseArgs {
+    fn run(&self, started: Instant) -> ExitCode {
+        let result = superloop_pack::release(superloop_pack::ReleaseRequest {
+            repository: &self.repository,
+            version: &self.version,
+            manifest: &self.manifest,
+            author: &self.author,
+            date: self.date.as_deref(),
+            tag_message: self.tag_message.as_deref(),
+            changelog: &self.changelog,
+            expected_main: self.expected_main.as_deref(),
+            expected_development: self.expected_development.as_deref(),
+            dry_run: self.dry_run,
+            check: self.check,
+        });
+        let status = if result.is_ok() { 0 } else { 3 };
+        if superloop_pack::write_release_report(
+            &result,
+            started.elapsed(),
+            &mut io::stdout().lock(),
+        )
+        .is_err()
+        {
+            emit_stderr(PUBLICATION_DIAGNOSTIC);
+            return CommandExit::Failure.exit_code();
+        }
+        ExitCode::from(status)
+    }
+}
+
 fn main() -> ExitCode {
     superloop_cli_common::version_or_exit("superloop-pack", env!("CARGO_PKG_VERSION"), None);
     install_panic_hook();
@@ -114,6 +172,7 @@ fn run_main(started: Instant) -> ExitCode {
 fn run_command(command: PackCommand, started: Instant) -> ExitCode {
     match command {
         PackCommand::Replay(args) => run_replay(args, started),
+        PackCommand::Release(args) => args.run(started),
         PackCommand::Cut {
             tag,
             manifest,

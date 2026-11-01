@@ -85,7 +85,7 @@ fn line(root: &Path, args: &[&str]) -> Result<String, CutError> {
     crate::one_line(&output).ok_or_else(|| refuse("invalid git response"))
 }
 
-fn author(text: &str) -> Result<(&str, &str), CutError> {
+pub fn author(text: &str) -> Result<(&str, &str), CutError> {
     let (name, address) = text
         .rsplit_once(" <")
         .ok_or_else(|| refuse("author requires Name <addr>"))?;
@@ -104,7 +104,7 @@ fn author(text: &str) -> Result<(&str, &str), CutError> {
     Ok((name.trim(), address))
 }
 
-fn publication_date(text: &str) -> Result<String, CutError> {
+pub fn publication_date(text: &str) -> Result<String, CutError> {
     let invalid = || refuse("date requires RFC 3339 with an explicit offset or Z");
     let bytes = text.as_bytes();
     if bytes.len() < 20
@@ -297,8 +297,13 @@ pub fn cut(request: CutRequest<'_>) -> Result<CutReport, CutError> {
     )?;
     let date = line(&stage, &["show", "-s", "--format=%aI", &commit])?;
     if let Some(tag) = request.public_tag {
-        let tag_message =
-            publication_tag_message(&stage, &manifest.public.name, tag, request.tag_message)?;
+        let tag_message = publication_tag_message(
+            &stage,
+            &manifest.public.name,
+            tag,
+            request.tag_message,
+            None,
+        )?;
         create_public_tag(&stage, tag, &commit, (name, email), &date, &tag_message)?;
     }
     let rechecked =
@@ -379,11 +384,12 @@ fn publish_commit(
     Ok(())
 }
 
-fn publication_tag_message(
+pub fn publication_tag_message(
     stage: &Path,
     name: &str,
     tag: &str,
     message: Option<&str>,
+    content: Option<&str>,
 ) -> Result<String, CutError> {
     if let Some(message) = message {
         if message.trim().is_empty() || message.contains('\0') {
@@ -393,15 +399,28 @@ fn publication_tag_message(
     }
     let version = tag.strip_prefix('v').unwrap_or(tag);
     let heading = format!("## [{version}] - ");
-    let missing = || refuse(&format!("CHANGELOG.md requires heading {heading}DATE"));
-    let bytes = git(stage, &["show", ":CHANGELOG.md"]).map_err(|_| missing())?;
-    let changelog = String::from_utf8(bytes).map_err(|_| missing())?;
+    let selected_heading = format!("## [{version}] (optionally - DATE)");
+    let missing = || {
+        if content.is_some() {
+            refuse(&format!(
+                "selected changelog requires heading {selected_heading}"
+            ))
+        } else {
+            refuse(&format!("CHANGELOG.md requires heading {heading}DATE"))
+        }
+    };
+    let changelog = match content {
+        Some(text) => text.to_owned(),
+        None => String::from_utf8(git(stage, &["show", ":CHANGELOG.md"]).map_err(|_| missing())?)
+            .map_err(|_| missing())?,
+    };
     let mut lines = changelog.split_inclusive('\n');
     lines
         .find(|line| {
-            line.trim_end().strip_prefix(&heading).is_some_and(|date| {
-                date.len() == 10 && publication_date(&format!("{date}T00:00:00Z")).is_ok()
-            })
+            (content.is_some() && line.trim_end() == format!("## [{version}]"))
+                || line.trim_end().strip_prefix(&heading).is_some_and(|date| {
+                    date.len() == 10 && publication_date(&format!("{date}T00:00:00Z")).is_ok()
+                })
         })
         .ok_or_else(missing)?;
     let mut body: Vec<_> = lines
@@ -418,6 +437,11 @@ fn publication_tag_message(
         body.pop();
     }
     if body.is_empty() {
+        if content.is_some() {
+            return Err(refuse(&format!(
+                "selected changelog requires non-empty body for heading {selected_heading}"
+            )));
+        }
         return Err(refuse(&format!(
             "CHANGELOG.md requires non-empty body for heading {heading}DATE"
         )));
@@ -1066,6 +1090,7 @@ mod guard_tests {
                 "fixture",
                 "v0.1.0",
                 Some(message),
+                None,
             )
             .expect_err("invalid tag message");
             assert_eq!(

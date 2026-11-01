@@ -15,8 +15,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 mod cut;
-pub use cut::{CutError, CutReport, CutRequest, cut, write_cut_report};
+mod release;
 mod replay;
+pub use cut::{CutError, CutReport, CutRequest, cut, write_cut_report};
+pub use release::{ReleaseError, ReleaseReport, ReleaseRequest, release, write_release_report};
 pub use replay::{ReplayError, ReplayReport, ReplayRequest, replay, write_replay_report};
 
 #[cfg(test)]
