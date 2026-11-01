@@ -31,22 +31,64 @@ pub struct ReplayRequest<'a> {
 /// A refusal never includes a matched burn value.
 #[derive(Debug, thiserror::Error)]
 #[error("replay refused: {0}")]
-pub struct ReplayError(String);
+pub struct ReplayError(String, Option<Box<ValidationEvidence>>);
 
 impl From<io::Error> for ReplayError {
     fn from(error: io::Error) -> Self {
-        Self(error.to_string())
+        Self(error.to_string(), None)
     }
 }
 
 impl From<cut::CutError> for ReplayError {
     fn from(error: cut::CutError) -> Self {
-        Self(error.to_string())
+        Self(error.to_string(), None)
     }
 }
 
 fn refuse(reason: impl Into<String>) -> ReplayError {
-    ReplayError(reason.into())
+    ReplayError(reason.into(), None)
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct ValidationContext {
+    check: String,
+    ordinal: Option<usize>,
+    commit: Option<String>,
+    field: String,
+    path: Option<String>,
+    matcher_kind: Option<String>,
+    register_kind: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct ValidationEvidence {
+    scratch_root: PathBuf,
+    report_path: PathBuf,
+    validated: Vec<ValidationContext>,
+    current: ValidationContext,
+}
+
+impl ValidationEvidence {
+    fn begin(
+        &mut self,
+        check: &str,
+        ordinal: Option<usize>,
+        commit: Option<&str>,
+        field: &str,
+        path: Option<&str>,
+    ) {
+        if !self.current.check.is_empty() {
+            self.validated.push(self.current.clone());
+        }
+        self.current = ValidationContext {
+            check: check.into(),
+            ordinal,
+            commit: commit.map(str::to_owned),
+            field: field.into(),
+            path: path.map(str::to_owned),
+            ..ValidationContext::default()
+        };
+    }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -246,6 +288,7 @@ fn scan(
     ordinal: usize,
     field: &str,
     bytes: &[u8],
+    evidence: &mut ValidationEvidence,
 ) -> Result<(), ReplayError> {
     let folded = String::from_utf8_lossy(bytes).to_lowercase();
     for value in &burn.values {
@@ -263,8 +306,13 @@ fn scan(
             } else {
                 "substring"
             };
+            evidence.current.matcher_kind = Some(kind.into());
+            evidence.current.register_kind = Some("values".into());
+            if field == "path" {
+                evidence.current.path = Some(format!("sha256:{}", crate::sha256_bytes(bytes)));
+            }
             return Err(refuse(format!(
-                "source ordinal {ordinal} field {field} match kind {kind}"
+                "source ordinal {ordinal} field {field} match kind {kind} register kind values"
             )));
         }
     }
@@ -275,15 +323,30 @@ fn scan_metadata(
     burn: &crate::BurnDocument,
     ordinal: usize,
     source: &SourceCommit,
+    evidence: &mut ValidationEvidence,
 ) -> Result<(), ReplayError> {
-    scan(burn, ordinal, "message", &source.message)?;
+    evidence.begin(
+        "metadata scan",
+        Some(ordinal),
+        Some(&source.oid),
+        "message",
+        None,
+    );
+    scan(burn, ordinal, "message", &source.message, evidence)?;
     for (field, value) in [
         ("author.name", &source.author.name),
         ("author.email", &source.author.email),
         ("committer.name", &source.committer.name),
         ("committer.email", &source.committer.email),
     ] {
-        scan(burn, ordinal, field, value.as_bytes())?;
+        evidence.begin(
+            "metadata scan",
+            Some(ordinal),
+            Some(&source.oid),
+            field,
+            None,
+        );
+        scan(burn, ordinal, field, value.as_bytes(), evidence)?;
     }
     Ok(())
 }
@@ -370,17 +433,21 @@ fn project(
     request: &ReplayRequest<'_>,
     oid: &str,
     policy: &Policy,
+    evidence: &mut ValidationEvidence,
 ) -> Result<PlannedCommit, ReplayError> {
     let entries = cut::tree_entries(request.repository_root, oid)?;
     let manifest = &policy.manifest;
     let paths = entries.keys().cloned().collect::<Vec<_>>();
     let mut selected = manifest.select(&paths);
     // Final rows may name files introduced later in the range.
-    if selected
+    if let Some(issue) = selected
         .issues
         .iter()
-        .any(|issue| !issue.starts_with("dead manifest row:"))
+        .find(|issue| !issue.starts_with("dead manifest row:"))
     {
+        evidence.current.check = "manifest".into();
+        evidence.current.field = "historical classification".into();
+        evidence.current.path = issue.split_once(": ").map(|(_, path)| path.to_owned());
         return Err(refuse("final policy cannot classify historical tree"));
     }
     for path in [&manifest.public.licence_code, &manifest.public.licence_docs] {
@@ -389,6 +456,8 @@ fn project(
                 .get(path)
                 .is_some_and(|(mode, _)| matches!(mode.as_str(), "100644" | "100755"))
         {
+            evidence.current.check = "licence/README validation".into();
+            evidence.current.path = Some(path.clone());
             return Err(refuse(format!(
                 "commit {oid}: required licence absent or not regular"
             )));
@@ -398,6 +467,29 @@ fn project(
     if readme_fallback && !selected.included.iter().any(|path| path == "README.md") {
         selected.included.push("README.md".into());
     }
+    let readme_path = if readme_fallback {
+        "README.md"
+    } else {
+        &manifest.public.readme
+    };
+    if !selected.included.iter().any(|path| path == readme_path)
+        || !entries
+            .get(readme_path)
+            .is_some_and(|(mode, _)| matches!(mode.as_str(), "100644" | "100755"))
+    {
+        evidence.current.check = "licence/README validation".into();
+        evidence.current.path = Some(readme_path.into());
+        return Err(refuse("required README absent or not regular"));
+    }
+    for path in &selected.included {
+        if !entries
+            .get(path)
+            .is_some_and(|(mode, _)| matches!(mode.as_str(), "100644" | "100755" | "120000"))
+        {
+            evidence.current.path = Some(path.clone());
+            return Err(refuse("unsupported public tree entry"));
+        }
+    }
     let omitted = selected.tracked.saturating_sub(selected.included.len());
     let mut projected = cut::project_tree_with_policy(
         &cut_request(request),
@@ -406,7 +498,8 @@ fn project(
         selected.included,
         Some(&policy.bytes),
         readme_fallback,
-    )?;
+    )
+    .map_err(|error| annotate_projection_error(evidence, error))?;
     // Cut retains historical reservations for archive reproduction. Replay consumes
     // them, just as it consumes exclusions, rather than publishing private selectors.
     let path = request
@@ -432,6 +525,31 @@ fn project(
         omitted,
         readme_fallback,
     })
+}
+
+fn annotate_projection_error(
+    evidence: &mut ValidationEvidence,
+    error: cut::CutError,
+) -> ReplayError {
+    evidence.current.field = "public projection inputs".into();
+    if error.to_string().contains("citation-sites") {
+        evidence.current.field = "citation-sites".into();
+        evidence.current.path = Some(".linter/owners.toml".into());
+    }
+    if let Some((_, suffix)) = error.to_string().rsplit_once(" field ") {
+        for field in ["label", "owner", "path_class"] {
+            for kind in ["identifier", "substring"] {
+                if suffix == format!("{field} matches private audit kind {kind}") {
+                    evidence.current.check = "burn scan".into();
+                    evidence.current.field = format!("unpublished.{field}");
+                    evidence.current.path = Some("docs/public/unpublished-labels.toml".into());
+                    evidence.current.matcher_kind = Some(kind.into());
+                    evidence.current.register_kind = Some("values".into());
+                }
+            }
+        }
+    }
+    ReplayError::from(error)
 }
 
 fn output_ready(request: &ReplayRequest<'_>, expected: &str) -> Result<PathBuf, ReplayError> {
@@ -541,12 +659,103 @@ fn clear_stage(stage: &Path) -> Result<(), ReplayError> {
 /// Refuses unsafe inputs, private values, drift without acceptance, non-linear
 /// history, metadata loss, linter failures or a concurrently changed destination.
 pub fn replay(request: ReplayRequest<'_>) -> Result<ReplayReport, ReplayError> {
+    let started = Instant::now();
+    let scratch = fs::canonicalize(std::env::temp_dir())?;
+    for root in [request.repository_root, request.out] {
+        if fs::canonicalize(root).is_ok_and(|root| scratch.starts_with(root)) {
+            return Err(refuse(
+                "check=inputs field=TMPDIR: TMPDIR must be outside source and output",
+            ));
+        }
+    }
+    let temporary = tempfile::Builder::new()
+        .prefix("pack-replay-evidence-")
+        .tempdir()?;
+    let mut evidence = ValidationEvidence {
+        scratch_root: temporary.path().to_path_buf(),
+        report_path: temporary.path().join("refusal.json"),
+        ..ValidationEvidence::default()
+    };
+    evidence.begin("inputs", None, None, "source repository", None);
+    let result = replay_preflight(request, &mut evidence);
+    match result {
+        Ok(report) => Ok(report),
+        Err(mut error) => {
+            drop(temporary.keep());
+            redact_diagnostic_paths(&request, &mut evidence);
+            let context = &evidence.current;
+            error.0 = format!(
+                "check={} source ordinal={} commit={} field={} path={}: {}",
+                context.check,
+                context
+                    .ordinal
+                    .map_or_else(|| "unresolved".into(), |value| value.to_string()),
+                context.commit.as_deref().unwrap_or("unresolved"),
+                context.field,
+                context.path.as_deref().unwrap_or("none"),
+                error.0,
+            );
+            error.1 = Some(Box::new(evidence));
+            if let Some(evidence) = &error.1 {
+                let saved = fs::File::create(&evidence.report_path).and_then(|file| {
+                    serde_json::to_writer_pretty(
+                        file,
+                        &serde_json::json!({
+                            "outcome": "refused", "reason": error.0, "validation": evidence,
+                            "exit": 3, "wall_seconds": started.elapsed().as_secs_f64()
+                        }),
+                    )
+                    .map_err(io::Error::other)
+                });
+                if saved.is_err() {
+                    error.0.push_str("; private report write failed");
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn redact_diagnostic_paths(request: &ReplayRequest<'_>, evidence: &mut ValidationEvidence) {
+    let Ok(burn) = cut::cut_burn_register(request.repository_root, Some(request.burn_register))
+    else {
+        return;
+    };
+    for context in evidence
+        .validated
+        .iter_mut()
+        .chain(std::iter::once(&mut evidence.current))
+    {
+        if let Some(path) = &mut context.path {
+            let folded = path.to_lowercase();
+            if burn.values.iter().any(|value| {
+                burn_offsets(
+                    folded.as_bytes(),
+                    value.value.to_lowercase().as_bytes(),
+                    matches!(value.mode, crate::BurnMatch::Identifier),
+                )
+                .next()
+                .is_some()
+            }) {
+                *path = format!("sha256:{}", crate::sha256_bytes(path.as_bytes()));
+            }
+        }
+    }
+}
+
+fn replay_preflight(
+    request: ReplayRequest<'_>,
+    evidence: &mut ValidationEvidence,
+) -> Result<ReplayReport, ReplayError> {
     crate::validate_repository(request.repository_root).map_err(|_| refuse("source repository"))?;
+    evidence.begin("inputs", None, None, "since", None);
     let since = resolve(request.repository_root, request.since)?;
+    evidence.begin("inputs", Some(0), Some(&since), "tag", None);
     let tag = resolve(request.repository_root, request.tag)?;
+    evidence.begin("inputs", Some(0), Some(&since), "public root", None);
     let public_root = resolve(request.out, request.public_root)?;
     let context = format!("since={since} tag={tag} public_root={public_root}");
-    replay_resolved(request, since, tag, public_root)
+    replay_resolved(request, since, tag, public_root, evidence)
         .map_err(|error| refuse(format!("{context}: {}", error.0)))
 }
 
@@ -555,57 +764,69 @@ fn replay_resolved(
     since: String,
     tag: String,
     public_root: String,
+    evidence: &mut ValidationEvidence,
 ) -> Result<ReplayReport, ReplayError> {
     let started = Instant::now();
-    crate::validate_checkout(request.repository_root, &tag)
-        .map_err(|_| refuse("clean checkout of tag required"))?;
-    if since == tag {
-        return Err(refuse("nothing to replay"));
-    }
-    let out = output_ready(&request, &public_root)?;
-    let scratch_root = fs::canonicalize(std::env::temp_dir())?;
-    if scratch_root.starts_with(&out)
-        || scratch_root.starts_with(fs::canonicalize(request.repository_root)?)
-    {
-        return Err(refuse("TMPDIR must be outside source and output"));
-    }
+    evidence.begin("inputs", Some(0), Some(&since), "source checkout", None);
+    let (out, scratch_root) =
+        preflight_destination(&request, &since, &tag, &public_root, evidence)?;
+    evidence.begin("burn scan", Some(0), Some(&since), "burn register", None);
     let burn = cut::cut_burn_register(request.repository_root, Some(request.burn_register))?;
     let register = fs::canonicalize(request.burn_register)?;
     if register.starts_with(&out) {
         return Err(refuse("burn register must be outside output"));
     }
     let register_sha256 = crate::sha256_file(&register)?;
+    evidence.begin("projection", Some(0), Some(&since), "linter", None);
     let linter = fs::canonicalize(request.linter)?;
     let linter_sha256 = crate::sha256_file(&linter)?;
     let version = Command::new(&linter).arg("--version").output()?;
-    if !version.status.success() {
-        return Err(refuse("linter version failed"));
-    }
-    let linter_version =
-        serde_json::from_slice(&version.stderr).map_err(|_| refuse("linter version protocol"))?;
+    let linter_version = linter_version(&version)?;
     let projection_sha256 = crate::sha256_file(&std::env::current_exe()?)?;
+    let sources = linear_sources(&request, &since, &tag, &burn, evidence)?;
+    evidence.begin(
+        "manifest",
+        Some(sources.len()),
+        Some(&tag),
+        "final policy",
+        request.manifest.to_str(),
+    );
     let (policy, policy_sha256) = read_policy(&request, &tag)?;
-    let sources = linear_sources(&request, &since, &tag, &burn)?;
-    let (public, planned, generated_drift) =
-        plan_trees(&request, &since, &public_root, &policy, &burn, &sources)?;
+    let (public, planned, generated_drift) = plan_trees(
+        &request,
+        &since,
+        &public_root,
+        &policy,
+        &burn,
+        &sources,
+        evidence,
+    )?;
     let checks = vec![Check {
         name: "whole-range-preflight".into(),
         exit: 0,
         wall_seconds: started.elapsed().as_secs_f64(),
     }];
     // No output write occurred above. Only input snapshots lived in TMPDIR.
-    let temporary = staging_repository(&scratch_root, &out, &public_root)?;
-    let stage = temporary.path();
-    let parent = public_root.clone();
-    let parent_tree = public;
-    let mapping = Vec::new();
+    evidence.begin("staging", None, Some(&tag), "repository", None);
+    let temporary = staging_repository(&evidence.scratch_root, &out, &public_root)?;
+    let stage_path = temporary.keep();
+    let stage = stage_path.as_path();
     let mut writer = Writer {
-        parent,
-        parent_tree,
-        mapping,
+        parent: public_root.clone(),
+        parent_tree: public,
+        mapping: Vec::new(),
         checks,
     };
-    replay_commits(stage, &linter, &register, &sources, planned, &mut writer)?;
+    replay_commits(
+        stage,
+        &linter,
+        &register,
+        &sources,
+        planned,
+        &mut writer,
+        evidence,
+    )?;
+    evidence.begin("inputs", None, Some(&tag), "immutable inputs", None);
     if resolve(request.repository_root, request.since)? != since
         || resolve(request.repository_root, request.tag)? != tag
         || crate::sha256_file(&register)? != register_sha256
@@ -613,6 +834,7 @@ fn replay_resolved(
     {
         return Err(refuse("replay inputs changed"));
     }
+    evidence.begin("destination", None, Some(&tag), "expected tip", None);
     output_ready(&request, &public_root)?;
     publish(stage, &out, &public_root, &mut writer)?;
     let Writer {
@@ -642,6 +864,42 @@ fn replay_resolved(
         mapping,
         checks,
     })
+}
+
+fn linter_version(version: &std::process::Output) -> Result<serde_json::Value, ReplayError> {
+    if !version.status.success() {
+        return Err(refuse("linter version failed"));
+    }
+    serde_json::from_slice(&version.stderr).map_err(|_| refuse("linter version protocol"))
+}
+
+fn preflight_destination(
+    request: &ReplayRequest<'_>,
+    since: &str,
+    tag: &str,
+    public_root: &str,
+    evidence: &mut ValidationEvidence,
+) -> Result<(PathBuf, PathBuf), ReplayError> {
+    crate::validate_checkout(request.repository_root, tag)
+        .map_err(|_| refuse("clean checkout of tag required"))?;
+    if since == tag {
+        return Err(refuse("nothing to replay"));
+    }
+    evidence.begin(
+        "destination",
+        Some(0),
+        Some(since),
+        "output repository",
+        None,
+    );
+    let out = output_ready(request, public_root)?;
+    let scratch_root = fs::canonicalize(std::env::temp_dir())?;
+    if scratch_root.starts_with(&out)
+        || scratch_root.starts_with(fs::canonicalize(request.repository_root)?)
+    {
+        return Err(refuse("TMPDIR must be outside source and output"));
+    }
+    Ok((out, scratch_root))
 }
 
 fn staging_repository(
@@ -707,7 +965,11 @@ pub fn write_replay_report<W: io::Write>(
             serde_json::to_writer(
                 &mut *output,
                 &serde_json::json!({
-                    "outcome": "refused", "scratch_root": std::env::temp_dir(),
+                    "outcome": "refused", "scratch_root": error.1.as_ref().map(|evidence| &evidence.scratch_root),
+                    "validation": error.1.as_ref().map(|evidence| serde_json::json!({
+                        "current": evidence.current, "report_path": evidence.report_path,
+                        "validated_checks": evidence.validated.len()
+                    })),
                     "reason": error.0, "exit": 3, "wall_seconds": wall.as_secs_f64()
                 }),
             )?;
@@ -727,7 +989,9 @@ fn linear_sources(
     since: &str,
     tag: &str,
     burn: &crate::BurnDocument,
+    evidence: &mut ValidationEvidence,
 ) -> Result<Vec<SourceCommit>, ReplayError> {
+    evidence.begin("range", None, Some(tag), "source range", None);
     let range = git(
         request.repository_root,
         &[
@@ -744,6 +1008,13 @@ fn linear_sources(
     let mut sources = Vec::new();
     let mut previous = since.to_owned();
     for (index, oid) in range.lines().enumerate() {
+        evidence.begin(
+            "range",
+            Some(index + 1),
+            Some(oid),
+            "parents and commit headers",
+            None,
+        );
         let source = source_commit(request.repository_root, oid)
             .map_err(|error| refuse(format!("source ordinal {}: {error}", index + 1)))?;
         if source.parent != previous {
@@ -752,7 +1023,14 @@ fn linear_sources(
                 index + 1
             )));
         }
-        scan_metadata(burn, index + 1, &source)?;
+        scan_metadata(burn, index + 1, &source, evidence)?;
+        evidence.begin(
+            "metadata scan",
+            Some(index + 1),
+            Some(oid),
+            "identity and date",
+            None,
+        );
         validate_git_identity(request.repository_root, &source)
             .map_err(|error| refuse(format!("source ordinal {}: {error}", index + 1)))?;
         previous = oid.into();
@@ -775,6 +1053,7 @@ fn replay_commits(
     sources: &[SourceCommit],
     planned: Vec<PlannedCommit>,
     writer: &mut Writer,
+    evidence: &mut ValidationEvidence,
 ) -> Result<(), ReplayError> {
     for (
         index,
@@ -788,6 +1067,13 @@ fn replay_commits(
         ),
     ) in sources.iter().zip(planned).enumerate()
     {
+        evidence.begin(
+            "projection",
+            Some(index + 1),
+            Some(&source.oid),
+            "staged tree",
+            None,
+        );
         let mapped_parent = writer.parent.clone();
         let skipped = tree == writer.parent_tree;
         clear_stage(stage)?;
@@ -797,6 +1083,13 @@ fn replay_commits(
             return Err(refuse("written tree differs from preflight projection"));
         }
         let check_start = Instant::now();
+        evidence.begin(
+            "projection",
+            Some(index + 1),
+            Some(&source.oid),
+            "public tree linter",
+            None,
+        );
         let observation = crate::run_linter(linter, stage, register).map_err(|_| {
             refuse(format!(
                 "source ordinal {}: linter protocol failed",
@@ -854,8 +1147,11 @@ fn plan_trees(
     policy: &Policy,
     burn: &crate::BurnDocument,
     sources: &[SourceCommit],
+    evidence: &mut ValidationEvidence,
 ) -> Result<PlannedTrees, ReplayError> {
-    let base = project(request, since, policy).map_err(|error| projection_refusal(0, &error))?;
+    evidence.begin("projection", Some(0), Some(since), "historical tree", None);
+    let base =
+        project(request, since, policy, evidence).map_err(|error| projection_refusal(0, &error))?;
     let public = read_projection(request.out, public_root)?;
     let paths: BTreeSet<_> = base.tree.keys().chain(public.keys()).cloned().collect();
     let generated_drift: Vec<_> = paths
@@ -864,20 +1160,49 @@ fn plan_trees(
         .collect();
     let mut planned = Vec::new();
     for (index, source) in sources.iter().enumerate() {
-        let projection = project(request, &source.oid, policy)
+        evidence.begin(
+            "projection",
+            Some(index + 1),
+            Some(&source.oid),
+            "historical tree",
+            None,
+        );
+        let projection = project(request, &source.oid, policy, evidence)
             .map_err(|error| projection_refusal(index + 1, &error))?;
         for path in projection.tree.keys() {
-            scan(burn, index + 1, "path", path.as_bytes())?;
+            evidence.begin(
+                "burn scan",
+                Some(index + 1),
+                Some(&source.oid),
+                "path",
+                None,
+            );
+            scan(burn, index + 1, "path", path.as_bytes(), evidence)?;
         }
-        for (_, bytes) in projection.tree.values() {
-            scan(burn, index + 1, "blob", bytes)?;
+        for (path, (_, bytes)) in &projection.tree {
+            evidence.begin(
+                "burn scan",
+                Some(index + 1),
+                Some(&source.oid),
+                "blob",
+                Some(path),
+            );
+            scan(burn, index + 1, "blob", bytes, evidence)?;
         }
         planned.push(projection);
     }
     if !generated_drift.is_empty() && !request.accept_generated_drift {
         for path in &generated_drift {
-            scan(burn, 0, "generated-drift path", path.as_bytes())?;
+            evidence.begin("burn scan", Some(0), Some(since), "path", None);
+            scan(burn, 0, "path", path.as_bytes(), evidence)?;
         }
+        evidence.begin(
+            "drift guard",
+            Some(0),
+            Some(since),
+            "base projection versus public root",
+            Some(&generated_drift.join(", ")),
+        );
         return Err(refuse(format!(
             "generated drift: {}",
             generated_drift.join(", ")
@@ -887,6 +1212,48 @@ fn plan_trees(
 }
 
 fn projection_refusal(ordinal: usize, error: &ReplayError) -> ReplayError {
+    let reason = error.0.strip_prefix("cut refused: ").unwrap_or(&error.0);
+    if reason.starts_with("citation-sites linter refused; diagnostic scratch=") {
+        return refuse(format!("source ordinal {ordinal}: {reason}"));
+    }
+    if [
+        "git operation failed",
+        "invalid git response",
+        "non-UTF-8 tree path",
+        "invalid tree entry",
+        "unsafe tree path",
+        "invalid tree entry fields",
+        "unsupported historical tree entry",
+        "tracked path missing from tag tree",
+        "both licence files and public README must be regular files",
+        "missing public README",
+        "manifest must be UTF-8",
+        "unpublished labels require --linter",
+        "unreadable citation-sites linter",
+        "citation-sites linter could not run",
+        "owner snapshot must be a table",
+        "unpublished labels require --burn-register",
+        "unreadable unpublished-label burn register",
+        "invalid unpublished-label burn register",
+        "unpublished-label burn register must stay outside the source tree",
+        "unpublished-label burn register must contain non-empty values",
+        "citation-sites linter refused",
+        "invalid citation-sites JSON",
+        "unknown citation-sites protocol",
+        "required README absent or not regular",
+        "unsupported public tree entry",
+        "final policy cannot classify historical tree",
+        "manifest excluded by final policy",
+        "manifest encoding",
+        "invalid unpublished path class",
+        "unpublished site has no path class",
+        "owner snapshot envelope missing",
+        "owners must be UTF-8",
+    ]
+    .contains(&reason)
+    {
+        return refuse(format!("source ordinal {ordinal}: {reason}"));
+    }
     if error.0.starts_with("commit ")
         && error
             .0
@@ -901,7 +1268,7 @@ fn projection_refusal(ordinal: usize, error: &ReplayError) -> ReplayError {
             for kind in ["identifier", "substring"] {
                 if suffix == format!("{field} matches private audit kind {kind}") {
                     return refuse(format!(
-                        "source ordinal {ordinal} field unpublished.{field} match kind {kind}"
+                        "source ordinal {ordinal} field unpublished.{field} match kind {kind} register kind values"
                     ));
                 }
             }

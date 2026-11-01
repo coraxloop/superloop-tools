@@ -781,7 +781,13 @@ fn resolved_sites(
         .output()
         .map_err(|_| refuse("citation-sites linter could not run"))?;
     if !output.status.success() {
-        return Err(refuse("citation-sites linter refused"));
+        let retained = scratch.keep();
+        fs::write(retained.join("citation-sites.stdout"), &output.stdout)?;
+        fs::write(retained.join("citation-sites.stderr"), &output.stderr)?;
+        return Err(refuse(&format!(
+            "citation-sites linter refused; diagnostic scratch={}",
+            retained.display()
+        )));
     }
     let report: CitationSites = serde_json::from_slice(&output.stdout)
         .map_err(|_| refuse("invalid citation-sites JSON"))?;

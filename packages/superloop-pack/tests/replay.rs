@@ -204,7 +204,24 @@ impl Fixture {
             git(&self.out, &["status", "--porcelain=v1", "--ignored"]),
             contents
         );
-        assert_eq!(fs::read_dir(&self.scratch).expect("scratch").count(), 0);
+        let result: serde_json::Value =
+            serde_json::from_str(text.lines().next().expect("report")).expect("JSON");
+        let validation = &result["validation"];
+        assert!(
+            validation["current"]["check"]
+                .as_str()
+                .is_some_and(|check| !check.is_empty()),
+            "{text}"
+        );
+        let saved = Path::new(
+            validation["report_path"]
+                .as_str()
+                .expect("private report path"),
+        );
+        assert!(saved.starts_with(&self.scratch));
+        let saved = fs::read_to_string(saved).expect("retained private report");
+        assert!(saved.contains(expected));
+        assert!(!saved.contains("forbidden-value"));
     }
 }
 
@@ -291,6 +308,102 @@ fn private_message_refuses_before_output_writes() {
     fixture.unchanged_refusal("source ordinal 2 field message match kind substring");
     let output = fixture.replay(&fixture.out).output().expect("replay");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden-value"));
+    let text = String::from_utf8_lossy(&output.stdout);
+    let result: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("report")).expect("JSON");
+    let context = &result["validation"]["current"];
+    assert_eq!(context["check"], "metadata scan");
+    assert_eq!(context["ordinal"], 2);
+    assert_eq!(
+        context["commit"],
+        line(&fixture.source, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(context["field"], "message");
+    assert_eq!(context["matcher_kind"], "substring");
+    assert_eq!(context["register_kind"], "values");
+}
+
+/// Refusals identify manifest, README and projection checks and retain their evidence.
+///
+/// # Panics
+/// Panics only if fixture IO fails or diagnostic context is missing.
+/// ´test:integration:replay-refusal-checks-retain-private-evidence´
+#[test]
+fn replay_refusal_checks_retain_private_evidence() {
+    for (path, content, check, field) in [
+        (
+            "public-set.toml",
+            "invalid manifest",
+            "manifest",
+            "final policy",
+        ),
+        ("public/file.txt", "forbidden-value", "burn scan", "blob"),
+    ] {
+        let fixture = Fixture::new();
+        let oid = fixture.commit(path, content, "Candidate\n");
+        let output = fixture.replay(&fixture.out).output().expect("replay");
+        assert_eq!(output.status.code(), Some(3));
+        let text = String::from_utf8_lossy(&output.stdout);
+        let result: serde_json::Value =
+            serde_json::from_str(text.lines().next().expect("report")).expect("JSON");
+        let context = &result["validation"]["current"];
+        assert_eq!(context["check"], check, "{text}");
+        assert_eq!(context["commit"], oid, "{text}");
+        assert_eq!(context["field"], field, "{text}");
+        assert_eq!(context["path"], path, "{text}");
+        assert!(text.contains("source ordinal="));
+        assert!(!text.contains("forbidden-value"));
+    }
+    let fixture = Fixture::new();
+    git(&fixture.source, &["rm", "docs/readme.txt"]);
+    git(
+        &fixture.source,
+        &["commit", "--no-gpg-sign", "-m", "Missing README"],
+    );
+    fixture.unchanged_refusal("check=licence/README validation");
+    fixture.unchanged_refusal("path=README.md");
+
+    let fixture = Fixture::new();
+    fixture.commit(".linter/owners.toml", "invalid owners", "Invalid owners\n");
+    fixture.unchanged_refusal("citation-sites linter refused");
+    fixture.unchanged_refusal("field=citation-sites");
+}
+
+/// Unclassified paths are redacted before diagnostic evidence is persisted.
+///
+/// # Panics
+/// Panics only if fixture IO fails or diagnostics expose a registered value.
+/// ´test:integration:unclassified-path-diagnostics-redact-register-values´
+#[test]
+fn unclassified_path_diagnostics_redact_register_values() {
+    let fixture = Fixture::new();
+    fixture.commit(
+        "forbidden-value.txt",
+        "safe content\n",
+        "Unclassified path\n",
+    );
+    fixture.unchanged_refusal("path=sha256:");
+    let output = fixture.replay(&fixture.out).output().expect("replay");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!text.contains("forbidden-value"));
+    let result: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("report")).expect("JSON");
+    let context = &result["validation"]["current"];
+    assert_eq!(context["check"], "manifest");
+    assert!(
+        context["path"]
+            .as_str()
+            .expect("path")
+            .starts_with("sha256:")
+    );
+    let saved = fs::read_to_string(
+        result["validation"]["report_path"]
+            .as_str()
+            .expect("report path"),
+    )
+    .expect("private report");
+    assert!(!saved.contains("forbidden-value"));
+    assert!(saved.contains("sha256:"));
 }
 
 /// Merge ranges never partially replay their linear prefix.
@@ -317,6 +430,7 @@ fn merge_range_refuses_before_output_writes() {
         ],
     );
     fixture.unchanged_refusal("merge or root commit");
+    fixture.unchanged_refusal("check=range");
 }
 
 /// Source, output and required input guards refuse without changing objects or refs.
@@ -361,6 +475,7 @@ fn replay_required_inputs_and_destination_are_guarded() {
         &["commit", "--no-gpg-sign", "-m", "Missing licence"],
     );
     fixture.unchanged_refusal("licence");
+    fixture.unchanged_refusal("path=LICENSE-CODE");
     fixture.base = line(&fixture.source, &["rev-parse", "HEAD"]);
     fixture.unchanged_refusal("nothing to replay");
 }
@@ -439,6 +554,7 @@ fn generated_drift_requires_acceptance() {
     );
     fixture.public_root = line(&fixture.out, &["rev-parse", "HEAD"]);
     fixture.unchanged_refusal("generated drift: README.md");
+    fixture.unchanged_refusal("check=drift guard");
     let result = report(
         fixture
             .replay(&fixture.out)
@@ -548,7 +664,7 @@ fn projected_fields_and_unsupported_entries_refuse_before_output_writes() {
     );
     fs::create_dir(fixture.source.join("public/submodule")).expect("unpopulated submodule");
     // A populated submodule is unnecessary: the index records the unsupported mode.
-    fixture.unchanged_refusal("public projection refused");
+    fixture.unchanged_refusal("unsupported public tree entry");
 }
 
 /// Citation resolution uses each historical definition rather than the tip's text.
