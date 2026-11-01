@@ -23,33 +23,13 @@ exclude = [
   # This Meson build definition has no region reader; its file lists are the census, not references.
   { name = "root-meson-options", pattern = '%s"meson.options"' },
   # This Meson build definition has no region reader; its file lists are the census, not references.
-  { name = "bin-meson-build", pattern = '%s"bin/meson.build"' },
-  # This Meson build definition has no region reader; its file lists are the census, not references.
   { name = "docs-meson-build", pattern = '%s"docs/meson.build"' },
-  # This Meson build definition has no region reader; its file lists are the census, not references.
-  { name = "hooks-meson-build", pattern = '%s"hooks/meson.build"' },
   # This Meson build definition has no region reader; its file lists are the census, not references.
   { name = "infra-meson-build", pattern = '%s"infra/meson.build"' },
   # This Meson build definition has no region reader; its file lists are the census, not references.
   { name = "tests-meson-build", pattern = '%s"tests/meson.build"' },
-  # This Meson build definition has no region reader; its file lists are the census, not references.
-  { name = "units-meson-build", pattern = '%s"units/meson.build"' },
-  # This extensionless script has no suffix or exact-name region reader.
-  { name = "gateway-runner-script", pattern = '%s"bin/gateway-runner"' },
-  # This extensionless script has no suffix or exact-name region reader.
-  { name = "loop-codex-home-script", pattern = '%s"bin/loop-codex-home"' },
-  # This extensionless script has no suffix or exact-name region reader.
-  { name = "loop-gh-script", pattern = '%s"bin/loop-gh"' },
   # This extensionless script has no suffix or exact-name region reader.
   { name = "steward-transcript-export-script", pattern = '%s"infra/steward/transcript-export"' },
-  # This systemd service suffix has no region reader.
-  { name = "superloop-runtime-service-unit", pattern = '%s"units/superloop-runtime.service"' },
-  # This extensionless hook wrapper has no suffix or exact-name region reader.
-  { name = "heartbeat-hook-wrapper", pattern = '%s"hooks/heartbeat"' },
-  # This extensionless hook wrapper has no suffix or exact-name region reader.
-  { name = "orchestrator-hook-wrapper", pattern = '%s"hooks/orchestrator"' },
-  # This extensionless hook wrapper has no suffix or exact-name region reader.
-  { name = "permission-triage-hook-wrapper", pattern = '%s"hooks/permission-triage"' },
   # This extensionless kit script has no suffix or exact-name region reader.
   { name = "cargo-clean-home-script", pattern = '%s"infra/cargo-clean/target-clean"' },
   # This systemd service suffix has no region reader.
