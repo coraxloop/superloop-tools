@@ -7,6 +7,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`does_not_report_owners_without_markdown`] | layers | Owners with no Markdown need no prose activation, even when they own other files. # Panics Panics only if fixture IO or planning fails, or a no-prose owner is reported. |
 //! | [`nested_prose_retains_other_policy_coverage`] | layers | Nested prose is exempt only under its declared root and remains in the burn census. # Panics Panics only if fixture IO or planning fails, or the measured scope differs. |
 //! | [`refuses_invalid_nested_corpus_declarations`] | layers | A nested declaration must name an owner, a contained directory, a snapshot and a reason. # Panics Panics only if fixture IO fails or a malformed nested declaration is accepted. |
 //! | [`reports_every_kind_of_inactive_prose_owner`] | layers | Root, crate-bearing, and crateless owners must activate their Markdown prose. # Panics Panics only if fixture IO or planning fails, or the activation finding differs. |
@@ -438,6 +439,40 @@ policies = [
         "See (`[DOCS-def:nrz:reuse-lemma]`).\n",
     );
     root
+}
+
+/// Owners with no Markdown need no prose activation, even when they own other files.
+///
+/// # Panics
+/// Panics only if fixture IO or planning fails, or a no-prose owner is reported.
+///
+/// ´claim:layers:owners-without-markdown-need-no-prose-activation´
+/// ´test:crate:does-not-report-owners-without-markdown´
+#[test]
+fn does_not_report_owners_without_markdown() {
+    let root = crateless_owner_fixture(true);
+    for path in [
+        "adr/cites.md",
+        "crates/cas/README.md",
+        "docs/design/reuse-concept.md",
+    ] {
+        fs::remove_file(root.path().join(path)).expect("remove Markdown");
+    }
+    write(root.path(), "docs/guide.txt", "A non-Markdown document.\n");
+    activate_prose(root.path(), &[]);
+    let plan = crate::plan::ExecutionPlan::compile(
+        root.path(),
+        crate::snapshot::configuration(root.path()),
+    )
+    .expect("no-prose plan");
+    assert!(plan.labels().adoption().inactive_prose().is_empty());
+    let (_, findings) = crate::application::verify_configuration_with_plan(&plan, &[]);
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| matches!(finding, Finding::InactiveProseOwner { .. })),
+        "{findings:?}"
+    );
 }
 
 fn nested_fixture() -> tempfile::TempDir {
