@@ -718,6 +718,47 @@ fn missing_public_name_refuses_publication() {
     }
 }
 
+/// Blank names and control characters cannot become annotated tag subjects.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an invalid publication name is accepted.
+/// ´test:integration:invalid-public-names-refuse-publication´
+#[test]
+fn invalid_public_names_refuse_publication() {
+    for name in [
+        "",
+        "   ",
+        "fixture\\nrepository",
+        "fixture\\trepository",
+        "fixture\\u007Frepository",
+    ] {
+        let root = fixture();
+        let source = root.path().join("source");
+        fs::write(
+            source.join("public-set.toml"),
+            MANIFEST.replace(
+                "name = \"fixture-repository\"",
+                &format!("name = \"{name}\""),
+            ),
+        )
+        .expect("invalid name manifest");
+        git(&source, &["add", "public-set.toml"]);
+        git(
+            &source,
+            &["commit", "-q", "--no-gpg-sign", "-m", "Invalid name"],
+        );
+        git(&source, &["tag", "-f", "source-v1"]);
+        let out = root.path().join("out");
+        let output = cut_with_public_tag(&source, &out, None, true, None, Some("v0.1.0"));
+        assert_eq!(output.status.code(), Some(3));
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("public-set requires a non-empty single-line public.name")
+        );
+        assert!(!out.exists());
+    }
+}
+
 /// Root README replacement requires an explicit reasoned exclusion.
 ///
 /// # Panics

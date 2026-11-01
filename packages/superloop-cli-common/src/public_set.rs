@@ -93,6 +93,11 @@ impl Manifest {
         if manifest.namespace != "org.superloop-tools.public-set" || manifest.version != [1, 0, 0] {
             return Err("public-set requires namespace org.superloop-tools.public-set and version [1, 0, 0]".into());
         }
+        if manifest.public.name.trim().is_empty()
+            || manifest.public.name.chars().any(char::is_control)
+        {
+            return Err("public-set requires a non-empty single-line public.name".into());
+        }
         for (row, excluded, _) in manifest.rows() {
             if !safe_path(row.pattern.trim_end_matches('/'))
                 || row.pattern.contains("**")
