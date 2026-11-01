@@ -68,7 +68,11 @@ fn refuse(reason: &str) -> CutError {
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, CutError> {
-    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    let args: Vec<OsString> = ["-c", "core.hooksPath=/dev/null"]
+        .iter()
+        .chain(args)
+        .map(OsString::from)
+        .collect();
     let output = run_git(root, &args)?;
     if !output.status.success() {
         return Err(refuse("git operation failed"));
@@ -513,7 +517,7 @@ fn create_commit(
     Ok(commit)
 }
 
-fn select_source(
+pub fn select_source(
     request: &CutRequest<'_>,
     identity: &crate::SourceIdentity,
 ) -> Result<(Manifest, superloop_cli_common::public_set::Selection), CutError> {
@@ -571,6 +575,18 @@ fn stage_tree(
     manifest: &Manifest,
     included: Vec<String>,
 ) -> Result<(usize, u64), CutError> {
+    let projected = project_tree(request, commit, manifest, included)?;
+    write_projection(stage, &projected)
+}
+
+pub type Projection = BTreeMap<String, (String, Vec<u8>)>;
+
+pub fn project_tree(
+    request: &CutRequest<'_>,
+    commit: &str,
+    manifest: &Manifest,
+    included: Vec<String>,
+) -> Result<Projection, CutError> {
     let root = request.repository_root;
     let manifest_path = request.manifest;
     let burn_register = request.burn_register;
@@ -606,13 +622,20 @@ fn stage_tree(
         .ok_or_else(|| refuse("missing public README"))?;
     selected.remove(&manifest.public.readme);
     selected.insert("README.md".to_owned(), readme);
-    let generated = unpublished_register(root, manifest, selected.keys(), burn_register, linter)?;
+    let generated = unpublished_register(
+        root,
+        commit,
+        manifest,
+        selected.keys(),
+        burn_register,
+        linter,
+    )?;
     for path in generated.keys() {
         selected
             .entry(path.clone())
             .or_insert_with(|| ("100644".into(), String::new()));
     }
-    let mut bytes = 0_u64;
+    let mut projected = BTreeMap::new();
     for (path, (mode, object)) in &selected {
         let content = match generated.get(path) {
             Some(content) => content.clone(),
@@ -623,11 +646,19 @@ fn stage_tree(
         } else {
             content
         };
+        projected.insert(path.clone(), (mode.clone(), content));
+    }
+    Ok(projected)
+}
+
+pub fn write_projection(stage: &Path, projected: &Projection) -> Result<(usize, u64), CutError> {
+    let mut bytes = 0;
+    for (path, (mode, content)) in projected {
         bytes += content.len() as u64;
         let target = stage.join(path);
         fs::create_dir_all(crate::usable_parent(&target))?;
         // Hash regular staging bytes without Git filters, then restore link/mode semantics.
-        fs::write(&target, &content)?;
+        fs::write(&target, content)?;
         let object = line(stage, &["hash-object", "-w", "--no-filters", "--", path])?;
         git(
             stage,
@@ -635,7 +666,7 @@ fn stage_tree(
         )?;
         if mode == "120000" {
             fs::remove_file(&target)?;
-            symlink(std::ffi::OsStr::from_bytes(&content), &target)?;
+            symlink(std::ffi::OsStr::from_bytes(content), &target)?;
         } else {
             fs::set_permissions(
                 &target,
@@ -643,7 +674,7 @@ fn stage_tree(
             )?;
         }
     }
-    Ok((selected.len(), bytes))
+    Ok((projected.len(), bytes))
 }
 
 const UNPUBLISHED_PATH: &str = "docs/public/unpublished-labels.toml";
@@ -690,14 +721,19 @@ enum CitationSurface {
     Unpublished,
 }
 
-fn resolved_sites(root: &Path, linter: Option<&Path>) -> Result<CitationSites, CutError> {
+fn resolved_sites(
+    root: &Path,
+    commit: &str,
+    linter: Option<&Path>,
+) -> Result<CitationSites, CutError> {
     let linter = linter.ok_or_else(|| refuse("unpublished labels require --linter"))?;
     let linter =
         fs::canonicalize(linter).map_err(|_| refuse("unreadable citation-sites linter"))?;
+    let scratch = historical_tree(root, commit)?;
     let output = Command::new(linter)
         .arg("citation-sites")
         .arg("--root")
-        .arg(root)
+        .arg(scratch.path())
         .stdin(Stdio::null())
         .output()
         .map_err(|_| refuse("citation-sites linter could not run"))?;
@@ -714,6 +750,7 @@ fn resolved_sites(root: &Path, linter: Option<&Path>) -> Result<CitationSites, C
 
 fn unpublished_register<'a>(
     root: &Path,
+    commit: &str,
     manifest: &Manifest,
     included: impl Iterator<Item = &'a String>,
     burn_register: Option<&Path>,
@@ -728,7 +765,7 @@ fn unpublished_register<'a>(
         return Ok(generated);
     }
     let burn = cut_burn_register(root, burn_register)?;
-    let sites = resolved_sites(root, linter)?;
+    let sites = resolved_sites(root, commit, linter)?;
     let mut labels = std::collections::BTreeSet::new();
     for site in sites.sites {
         if !included.contains(&site.citing_path) {
@@ -763,13 +800,17 @@ fn unpublished_register<'a>(
     let content = toml::to_string(&document).map_err(|error| CutError(error.to_string()))?;
     guard_unpublished(&document, &burn)?;
     generated.insert(UNPUBLISHED_PATH.to_owned(), content.into_bytes());
-    generated.insert(".linter/owners.toml".to_owned(), public_owners(root)?);
+    generated.insert(
+        ".linter/owners.toml".to_owned(),
+        public_owners(root, commit)?,
+    );
     Ok(generated)
 }
 
-fn public_owners(root: &Path) -> Result<Vec<u8>, CutError> {
+fn public_owners(root: &Path, commit: &str) -> Result<Vec<u8>, CutError> {
+    let content = git(root, &["show", &format!("{commit}:.linter/owners.toml")])?;
     let mut owners: toml::Value =
-        toml::from_str(&fs::read_to_string(root.join(".linter/owners.toml"))?)
+        toml::from_str(std::str::from_utf8(&content).map_err(|_| refuse("owners must be UTF-8"))?)
             .map_err(|error| CutError(error.to_string()))?;
     let table = owners
         .as_table_mut()
@@ -792,7 +833,10 @@ fn public_owners(root: &Path) -> Result<Vec<u8>, CutError> {
     Ok(content.into_bytes())
 }
 
-fn cut_burn_register(root: &Path, path: Option<&Path>) -> Result<crate::BurnDocument, CutError> {
+pub fn cut_burn_register(
+    root: &Path,
+    path: Option<&Path>,
+) -> Result<crate::BurnDocument, CutError> {
     let path = path.ok_or_else(|| refuse("unpublished labels require --burn-register"))?;
     let path =
         fs::canonicalize(path).map_err(|_| refuse("unreadable unpublished-label burn register"))?;
@@ -895,7 +939,10 @@ fn public_manifest<'a>(
     )
 }
 
-fn tree_entries(root: &Path, commit: &str) -> Result<BTreeMap<String, (String, String)>, CutError> {
+pub fn tree_entries(
+    root: &Path,
+    commit: &str,
+) -> Result<BTreeMap<String, (String, String)>, CutError> {
     let output = git(root, &["ls-tree", "-r", "-z", commit])?;
     let mut entries = BTreeMap::new();
     for record in output
@@ -906,6 +953,13 @@ fn tree_entries(root: &Path, commit: &str) -> Result<BTreeMap<String, (String, S
         let (header, path) = record
             .split_once('\t')
             .ok_or_else(|| refuse("invalid tree entry"))?;
+        if !safe_path(path)
+            || path
+                .split('/')
+                .any(|part| part.eq_ignore_ascii_case(".git"))
+        {
+            return Err(refuse("unsafe tree path"));
+        }
         let fields: Vec<_> = header.split(' ').collect();
         if let [mode, _, object] = fields.as_slice() {
             entries.insert(path.to_owned(), ((*mode).to_owned(), (*object).to_owned()));
@@ -914,6 +968,24 @@ fn tree_entries(root: &Path, commit: &str) -> Result<BTreeMap<String, (String, S
         }
     }
     Ok(entries)
+}
+
+// A disposable input snapshot, never inside a publication destination. Blob writes
+// bypass attributes, filters and hooks; the index supplies the linter's tracked set.
+fn historical_tree(root: &Path, commit: &str) -> Result<tempfile::TempDir, CutError> {
+    let scratch = tempfile::Builder::new()
+        .prefix("pack-citations-")
+        .tempdir()?;
+    git(scratch.path(), &["init", "-q", "--template="])?;
+    let mut projected = Projection::new();
+    for (path, (mode, object)) in tree_entries(root, commit)? {
+        if !matches!(mode.as_str(), "100644" | "100755" | "120000") {
+            return Err(refuse("unsupported historical tree entry"));
+        }
+        projected.insert(path, (mode, git(root, &["cat-file", "blob", &object])?));
+    }
+    write_projection(scratch.path(), &projected)?;
+    Ok(scratch)
 }
 
 /// Publish a cut's evidence using the pack command's terminal report convention.
