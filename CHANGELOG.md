@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `superloop-pack replay` projects linear source history onto an existing public development branch, preserving commit metadata, skipping unchanged public trees, and preflighting the entire range against the external burn register before output writes.
+
 ## [0.2.0] - 2026-11-01
 
 ### Added
