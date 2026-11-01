@@ -487,6 +487,7 @@ fn nested_fixture() -> tempfile::TempDir {
         );
     }
     activate_prose(root.path(), &["CAS", "PROJECTA"]);
+    crate::test_support::initialise_and_track(root.path());
     root
 }
 

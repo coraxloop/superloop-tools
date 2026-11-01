@@ -4126,37 +4126,13 @@ fn nested_directory(root: &Path, row: &NestedCorpus, partitions: &[OwnerRow]) ->
     if !directory.is_dir() || directory.canonicalize().ok().as_ref() != Some(&directory) {
         return false;
     }
-    let mut pending = vec![directory];
-    while let Some(directory) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return false;
-        };
-        for entry in entries {
-            let Ok(entry) = entry else {
-                return false;
-            };
-            let Ok(kind) = entry.file_type() else {
-                return false;
-            };
-            if kind.is_dir() {
-                pending.push(entry.path());
-            } else {
-                let path = entry.path();
-                let Some(relative) = path
-                    .strip_prefix(&base)
-                    .ok()
-                    .and_then(crate::pattern::path_bytes)
-                    .and_then(|bytes| BytePath::from_bytes(bytes).ok())
-                else {
-                    return false;
-                };
-                if !attributed_to(&relative, &row.owner, partitions) {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    let (tracked, findings) = crate::plan::git_tracked(&base);
+    let prefix = format!("{}/", row.root);
+    findings.is_empty()
+        && tracked
+            .iter()
+            .filter(|path| path.as_bytes().starts_with(prefix.as_bytes()))
+            .all(|path| attributed_to(path, &row.owner, partitions))
 }
 
 /// Whether the inclusion relation attributes a declared path to exactly this owner.

@@ -100,6 +100,7 @@
 //! | [`characterizes_assembly_bytes`] | harness | Assembly fixes both its report and the generated publication. |
 //! | [`characterizes_fix_bytes`] | harness | Both fix profiles refuse before writing over deliberately undeclared fixtures, freezing the refusal and the untouched sources. |
 //! | [`citation_sites_preserve_resolved_addresses`] | cli | The executable protocol preserves citations before the first mint and exposes no document text. # Panics Panics only if fixture IO fails or the command violates its versioned protocol. |
+//! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested containment ignores untracked files but refuses tracked foreign ownership. # Panics Panics only if fixture IO fails or the binary violates the containment contract. |
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -5224,6 +5225,47 @@ fn citation_sites_preserve_resolved_addresses() {
             "sites":[{"citing_path":"adr/fixture.md", "target_path":"adr/fixture.md",
                       "surface":"document", "label":"sec:fixture:one", "owner":"PROJECTA", "path_class":null}]
         })
+    );
+}
+
+/// Nested containment ignores untracked files but refuses tracked foreign ownership.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the binary violates the containment contract.
+///
+/// ´claim:cli:nested-root-containment-uses-tracked-paths´
+/// ´test:integration:nested-root-containment-uses-tracked-paths´
+#[test]
+fn nested_root_containment_uses_tracked_paths() {
+    let root = build_mode_fixture("## One · `sec:fixture:one`\n");
+    declare(
+        &root.path().join("nested"),
+        "root_owner = \"PROJECTA\"\nowners = [\"PROJECTA\"]\npartitions = [{ name = \"all\", owner = \"PROJECTA\", pattern = '*VCHAR' }]\nmay_cite = []\n",
+        FIXTURE_ENVIRONMENTS,
+        DECLARED_POLICIES,
+        DECLARED_LISTS,
+    );
+    declare(
+        root.path(),
+        "root_owner = \"PROJECTA\"\nowners = [\"PROJECTA\", \"PROJECTB\"]\npartitions = [{ name = \"project-a\", owner = \"PROJECTA\", pattern = '( %s\".linter/\" / %s\"adr/\" / %s\"nested/.linter/\" ) *VCHAR / %s\".gitignore\"' }, { name = \"scratch\", owner = \"PROJECTB\", pattern = '%s\"nested/scratch/\" *VCHAR' }]\nmay_cite = []\nnested = [{ owner = \"PROJECTA\", root = \"nested\", reason = \"Checked independently\" }]\n",
+        FIXTURE_ENVIRONMENTS,
+        DECLARED_POLICIES,
+        DECLARED_LISTS,
+    );
+    write(root.path(), ".gitignore", "nested/scratch/\n");
+    track(root.path());
+    write(root.path(), "nested/scratch/editor.tmp", "untracked\n");
+    let output = programme_command(root.path(), &["report"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    track(root.path());
+    assert_programme_refusal(
+        root.path(),
+        "nested[1] (owner PROJECTA, root nested): root must be a normalized relative directory inside the owner's partitions",
     );
 }
 

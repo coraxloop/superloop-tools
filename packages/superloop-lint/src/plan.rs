@@ -1957,7 +1957,9 @@ fn tracked_exclusive(
     (base, missing, findings)
 }
 
-fn git_tracked(root: &Path) -> (Vec<BytePath>, Vec<Finding>) {
+/// Enumerate repository paths in their recorded bytes, retaining traversal refusals.
+#[must_use]
+pub fn git_tracked(root: &Path) -> (Vec<BytePath>, Vec<Finding>) {
     let mut findings = Vec::new();
     let output = match std::process::Command::new("git")
         .arg("-C")
