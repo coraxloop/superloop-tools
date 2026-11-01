@@ -694,6 +694,12 @@ fn run_check(
     let elapsed_micros = command_started.elapsed().as_micros();
     let clean = report.clean;
 
+    if report.deferred != 0 {
+        tracing::info!(
+            "deferred to the repository's own programme: {} rows",
+            report.deferred
+        );
+    }
     tracing::info!(
         sources_scanned = report.sources_scanned,
         mints = report.mints,
@@ -703,6 +709,7 @@ fn run_check(
         collision_groups = report.profile.collision_groups,
         failures = report.failures,
         warnings = report.warnings,
+        deferred = report.deferred,
         elapsed_micros,
         "label check complete"
     );

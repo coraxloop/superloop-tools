@@ -841,12 +841,17 @@ fn held_prefix(text: &str) -> &str {
 /// wherever their files are (ADR-T-019, The layer owner graph).
 trait ListContext {
     fn surface(&self) -> &SurfaceAst;
+    fn deferred_policies(&self) -> &[crate::snapshot::DeferredPolicy];
     fn policies(&self) -> &[Pair];
     fn partitions(&self) -> &[OwnerRow];
     fn program(&self, pair: &Pair) -> Option<&str>;
 }
 
 impl ListContext for Snapshot {
+    fn deferred_policies(&self) -> &[crate::snapshot::DeferredPolicy] {
+        self.deferred_policies()
+    }
+
     fn surface(&self) -> &SurfaceAst {
         self.surface()
     }
@@ -865,6 +870,10 @@ impl ListContext for Snapshot {
 }
 
 impl ListContext for DeclarationCore {
+    fn deferred_policies(&self) -> &[crate::snapshot::DeferredPolicy] {
+        self.deferred_policies()
+    }
+
     fn surface(&self) -> &SurfaceAst {
         self.surface()
     }
@@ -898,17 +907,14 @@ fn read_list_syntax(
     let text = document
         .text()
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    let table = document
-        .table()
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let table =
+        crate::snapshot::catalogued_list_table(context.surface(), context.deferred_policies())
+            .map_err(|error| format!("{}: {error}", path.display()))?;
     let raw: crate::surface::ListDocument =
-        table
-            .clone()
-            .try_into()
-            .map_err(|mut error: toml::de::Error| {
-                error.set_input(Some(text));
-                format!("{}: {error}", path.display())
-            })?;
+        table.try_into().map_err(|mut error: toml::de::Error| {
+            error.set_input(Some(text));
+            format!("{}: {error}", path.display())
+        })?;
     let prefix = String::from(held_prefix(text));
 
     Ok((bytes, raw, prefix))
@@ -2211,10 +2217,15 @@ fn maintain_loaded(
         }
         Operation::Append => {
             let (targets, staged, applied) = append(plan, &declared, &targets);
+            let deferred = match render_deferred_lists(snapshot) {
+                Ok(text) => text,
+                Err(error) => return refused(error),
+            };
             let rendered = format!(
-                "{}{}",
+                "{}{}{}",
                 declared.prefix,
-                render_lists(&snapshot.ordered(&staged), &staged)
+                render_lists(&snapshot.ordered(&staged), &staged),
+                deferred,
             );
 
             let after = if applied {
@@ -2301,9 +2312,10 @@ pub fn lower_lists_with_plan(plan: ControlWritePlan<'_>) -> std::io::Result<bool
     let path = root.join(DIRECTORY).join(LISTS_FILE);
     let held = std::fs::read_to_string(&path).unwrap_or_default();
     let rendered = format!(
-        "{}{}",
+        "{}{}{}",
         held_prefix(&held),
-        render_lists(&snapshot.list_keys(), &lower_planned(plan),)
+        render_lists(&snapshot.list_keys(), &lower_planned(plan),),
+        render_deferred_lists(snapshot).map_err(std::io::Error::other)?,
     );
 
     if held == rendered {
@@ -2313,6 +2325,34 @@ pub fn lower_lists_with_plan(plan: ControlWritePlan<'_>) -> std::io::Result<bool
     replace_atomically(&path, rendered.as_bytes())?;
 
     Ok(true)
+}
+
+fn render_deferred_lists(snapshot: &Snapshot) -> Result<String, String> {
+    if snapshot.deferred_policies().is_empty() {
+        return Ok(String::new());
+    }
+    let table = snapshot
+        .surface()
+        .document(LISTS_FILE)
+        .ok_or_else(|| String::from("missing lists document"))?
+        .table()
+        .map_err(str::to_owned)?;
+    let mut preserved = toml::Table::new();
+    for row in snapshot.deferred_policies() {
+        if let Some(list) = table
+            .get(&row.owner)
+            .and_then(toml::Value::as_table)
+            .and_then(|owner| owner.get(&row.policy))
+        {
+            let owner = preserved
+                .entry(row.owner.clone())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if let Some(owner) = owner.as_table_mut() {
+                owner.insert(row.policy.clone(), list.clone());
+            }
+        }
+    }
+    toml::to_string(&preserved).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

@@ -230,5 +230,9 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#30","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Verify explicit repository-programme deferral, loader refusals, independent verdicts and preservation of opaque lists through the built checker and burn writer","binding":"CARGO_BIN_EXE_superloop-lint"}
+''']
+
+dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#29","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Assert the citation-sites executable protocol preserves resolved addresses without prose","binding":"CARGO_BIN_EXE_superloop-lint"}
 ''']

@@ -115,6 +115,10 @@ pub struct CheckReport {
     pub warnings: usize,
     /// Whether the carrier is in good standing.
     pub clean: bool,
+    /// Activated rows checked by the repository's own programme, outside this verdict.
+    pub deferred: usize,
+    /// The owner, policy and checker for every deferred activation.
+    pub deferred_policies: Vec<crate::snapshot::DeferredPolicy>,
     /// What the test profile found over the Rust carrier.
     pub profile: ProfileAnalysis,
     /// What the to-do profile found over the Rust carrier.
@@ -224,6 +228,14 @@ pub struct Verdicts {
 }
 
 impl CheckReport {
+    /// Record the checking boundary without changing the catalogued verdict.
+    #[must_use]
+    pub fn with_deferred(mut self, policies: &[crate::snapshot::DeferredPolicy]) -> Self {
+        self.deferred_policies = policies.to_vec();
+        self.deferred = policies.len();
+        self
+    }
+
     /// Build a report from an analysis and any findings raised before it.
     #[must_use]
     pub fn new(
@@ -275,6 +287,8 @@ impl CheckReport {
             failures,
             warnings: findings.len() - failures,
             clean: failures == 0,
+            deferred: 0,
+            deferred_policies: Vec::new(),
             profile,
             todo,
             legacy,

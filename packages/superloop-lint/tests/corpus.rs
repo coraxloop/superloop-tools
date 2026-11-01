@@ -18,6 +18,14 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`repository_programme_policy_is_deferred`] | cli | Explicit local ownership defers opaque rows and keeps their checker visible. # Panics Panics only if fixture IO fails or the binary violates the deferral contract. |
+//! | [`unknown_policy_without_programme_still_refuses`] | cli | A bare unknown activation keeps the existing loader refusal. # Panics Panics only if fixture IO fails or the refusal changes. |
+//! | [`catalogued_policy_cannot_claim_programme`] | cli | A published policy cannot be claimed by a local checker. # Panics Panics only if fixture IO fails or a published policy can be deferred. |
+//! | [`programme_package_must_be_tracked_directory`] | cli | A programme package must be a tracked repository directory. # Panics Panics only if fixture IO fails or an invalid package is admitted. |
+//! | [`programme_binary_must_be_nonempty`] | cli | An empty or whitespace-only binary does not identify a checker. # Panics Panics only if fixture IO fails or an empty binary is admitted. |
+//! | [`malformed_programme_refuses`] | cli | A programme is exactly a package and binary string table. # Panics Panics only if fixture IO fails or a malformed declaration is admitted. |
+//! | [`deferred_list_requires_supported_shape`] | cli | Deferral admits opaque row tables but still checks their container shape. # Panics Panics only if fixture IO fails or an invalid list shape is admitted. |
+//! | [`deferred_policy_does_not_hide_catalogued_failure`] | cli | A deferred policy does not clear failures found by a catalogued policy. # Panics Panics only if fixture IO fails or deferral conceals a failure. |
 //! | [`inactive_prose_fails_the_check_command`] | cli | An inactive root's Markdown fails the command until prose activation is declared. # Panics Panics only if fixture IO or command execution fails, or the verdict differs. |
 //! | [`macro_doc_attributes_share_the_test_standard_place`] | carrier | A property-test macro's source-written documentation mints the same claim through line comments, separate doc attributes and one multiline attribute. Each form resolves from Markdown through the production entry. # Panics Panics only if fixture IO fails or the production check loses a macro carrier. |
 //! | [`invalid_macro_carriers_refuse_by_name`] | carrier | A marked macro body that cannot be read refuses by name, and a misplaced claim remains a placement failure instead of being rescued by its spelling. # Panics Panics only if fixture IO fails or the check accepts an invalid macro carrier. |
@@ -186,6 +194,260 @@ fn check_carrier(root: &Path) -> (std::process::Output, serde_json::Value) {
         .expect("production entry");
     let report = serde_json::from_slice(&output.stdout).expect("check report");
     (output, report)
+}
+
+const LOCAL_POLICY: &str = "profile.notice-dispositions-conform";
+const LOCAL_PROGRAMME: &str = "{ package = \"packages/local-lint\", binary = \"local-lint\" }";
+
+fn programme_fixture(policy: &str, programme: Option<&str>, list: &str) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("temporary corpus");
+    write(
+        root.path(),
+        "packages/local-lint/checker.txt",
+        "repository checker\n",
+    );
+    write(root.path(), "adr/one.md", "## One · `sec:fixture:one`\n");
+    let mut activation = format!("{{ owner = \"PROJECTA\", policy = \"{policy}\"");
+    if let Some(programme) = programme {
+        write!(activation, ", programme = {programme}").expect("string");
+    }
+    activation.push_str(" }");
+    let policies = if policy == "labels.mints-well-formed" {
+        format!("policies = [{activation}]\n")
+    } else {
+        format!(
+            "policies = [{{ owner = \"PROJECTA\", policy = \"labels.mints-well-formed\" }}, {activation}]\n"
+        )
+    };
+    let lists = if policy == "labels.mints-well-formed" {
+        format!("[PROJECTA.\"{policy}\"]\n{list}\n")
+    } else {
+        format!("{DECLARED_LISTS}\n[PROJECTA.\"{policy}\"]\n{list}\n")
+    };
+    declare(
+        root.path(),
+        "root_owner = \"PROJECTA\"\nowners = [\"PROJECTA\"]\npartitions = [{ name = \"fixture\", owner = \"PROJECTA\", pattern = '*VCHAR' }]\nmay_cite = []\n",
+        FIXTURE_ENVIRONMENTS,
+        &policies,
+        &lists,
+    );
+    track(root.path());
+    root
+}
+
+fn assert_programme_refusal(root: &Path, message: &str) {
+    let output = programme_command(root, &["check", "--text"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, [] as [u8; 0]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(message), "{stderr}");
+}
+
+/// Explicit local ownership defers opaque rows and keeps their checker visible.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the binary violates the deferral contract.
+///
+/// ´claim:cli:repository-programme-policy-is-deferred´
+/// ´test:integration:repository-programme-policy-is-deferred´
+#[test]
+fn repository_programme_policy_is_deferred() {
+    for field in ["allowances", "path_counts"] {
+        let list = format!("{field} = [{{ local_identity = \"opaque\", decision = \"kept\" }}]");
+        let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), &list);
+        let output = programme_command(root.path(), &["check"]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report");
+        assert_eq!(report["clean"], true);
+        assert_eq!(report["deferred"], 1);
+        assert_eq!(
+            report["deferred_policies"],
+            serde_json::json!([{
+                "owner": "PROJECTA", "policy": LOCAL_POLICY,
+                "package": "packages/local-lint", "binary": "local-lint"
+            }])
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr)
+                .matches("deferred to the repository's own programme: 1 rows")
+                .count(),
+            1
+        );
+        let output = programme_command(root.path(), &["burn", "--write"]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lists: toml::Table = toml::from_str(
+            &fs::read_to_string(root.path().join(".linter/lists.toml")).expect("lists"),
+        )
+        .expect("table");
+        assert_eq!(
+            lists["PROJECTA"][LOCAL_POLICY][field][0]["local_identity"].as_str(),
+            Some("opaque")
+        );
+        assert_eq!(
+            programme_command(root.path(), &["check"]).status.code(),
+            Some(0)
+        );
+    }
+}
+
+/// A bare unknown activation keeps the existing loader refusal.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the refusal changes.
+///
+/// ´claim:cli:unknown-policy-without-programme-still-refuses´
+/// ´test:integration:unknown-policy-without-programme-still-refuses´
+#[test]
+fn unknown_policy_without_programme_still_refuses() {
+    let root = programme_fixture(LOCAL_POLICY, None, "allowances = []");
+    assert_programme_refusal(
+        root.path(),
+        &format!(".linter/policies.toml: {LOCAL_POLICY}: this binary catalogues no such policy"),
+    );
+}
+
+/// A published policy cannot be claimed by a local checker.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a published policy can be deferred.
+///
+/// ´claim:cli:catalogued-policy-cannot-claim-programme´
+/// ´test:integration:catalogued-policy-cannot-claim-programme´
+#[test]
+fn catalogued_policy_cannot_claim_programme() {
+    let root = programme_fixture(
+        "labels.mints-well-formed",
+        Some(LOCAL_PROGRAMME),
+        "allowances = []",
+    );
+    assert_programme_refusal(
+        root.path(),
+        "programme cannot claim a policy this binary catalogues",
+    );
+}
+
+/// A programme package must be a tracked repository directory.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an invalid package is admitted.
+///
+/// ´claim:cli:programme-package-must-be-tracked-directory´
+/// ´test:integration:programme-package-must-be-tracked-directory´
+#[test]
+fn programme_package_must_be_tracked_directory() {
+    for package in [
+        "",
+        "packages/absent",
+        "packages/untracked",
+        "packages/local-lint/checker.txt",
+        "../outside",
+        "/",
+        "packages/../packages/local-lint",
+    ] {
+        let programme = format!("{{ package = {package:?}, binary = \"local-lint\" }}");
+        let root = programme_fixture(LOCAL_POLICY, Some(&programme), "allowances = []");
+        write(
+            root.path(),
+            "packages/untracked/checker.txt",
+            "not tracked\n",
+        );
+        assert_programme_refusal(root.path(), "is not a tracked directory of the repository");
+    }
+}
+
+/// An empty or whitespace-only binary does not identify a checker.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an empty binary is admitted.
+///
+/// ´claim:cli:programme-binary-must-be-nonempty´
+/// ´test:integration:programme-binary-must-be-nonempty´
+#[test]
+fn programme_binary_must_be_nonempty() {
+    for binary in ["", "   "] {
+        let programme = format!("{{ package = \"packages/local-lint\", binary = {binary:?} }}");
+        let root = programme_fixture(LOCAL_POLICY, Some(&programme), "allowances = []");
+        assert_programme_refusal(root.path(), "programme binary must not be empty");
+    }
+}
+
+/// A programme is exactly a package and binary string table.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a malformed declaration is admitted.
+///
+/// ´claim:cli:malformed-programme-refuses´
+/// ´test:integration:malformed-programme-refuses´
+#[test]
+fn malformed_programme_refuses() {
+    for programme in [
+        "\"local-lint\"",
+        "[]",
+        "{}",
+        "{ package = 3, binary = \"local-lint\" }",
+        "{ package = \"packages/local-lint\", binary = \"local-lint\", extra = true }",
+    ] {
+        let root = programme_fixture(LOCAL_POLICY, Some(programme), "allowances = []");
+        assert_programme_refusal(root.path(), "malformed programme; expected");
+    }
+}
+
+/// Deferral admits opaque row tables but still checks their container shape.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an invalid list shape is admitted.
+///
+/// ´claim:cli:deferred-list-requires-supported-shape´
+/// ´test:integration:deferred-list-requires-supported-shape´
+#[test]
+fn deferred_list_requires_supported_shape() {
+    for list in [
+        "",
+        "paths = []",
+        "allowances = 1",
+        "allowances = [1]",
+        "allowances = []\npath_counts = []",
+        "allowances = []\nextra = []",
+    ] {
+        let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), list);
+        assert_programme_refusal(
+            root.path(),
+            "deferred list must be a table with path_counts or allowances rows",
+        );
+    }
+}
+
+/// A deferred policy does not clear failures found by a catalogued policy.
+///
+/// # Panics
+/// Panics only if fixture IO fails or deferral conceals a failure.
+///
+/// ´claim:cli:deferred-policy-does-not-hide-catalogued-failure´
+/// ´test:integration:deferred-policy-does-not-hide-catalogued-failure´
+#[test]
+fn deferred_policy_does_not_hide_catalogued_failure() {
+    let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), "allowances = []");
+    write(
+        root.path(),
+        "adr/one.md",
+        "Cites (`sec:fixture:missing`).\n",
+    );
+    let output = programme_command(root.path(), &["check"]);
+    assert_eq!(output.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report");
+    assert_eq!(report["clean"], false);
+    assert_eq!(report["deferred"], 1);
+    assert!(report["failures"].as_u64().expect("failures") > 0);
 }
 
 /// An inactive root's Markdown fails the command until prose activation is declared.
@@ -4963,4 +5225,14 @@ fn citation_sites_preserve_resolved_addresses() {
                       "surface":"document", "label":"sec:fixture:one", "owner":"PROJECTA", "path_class":null}]
         })
     );
+}
+
+fn programme_command(root: &Path, arguments: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_superloop-lint"))
+        .env("RUST_LOG", "info")
+        .args(arguments)
+        .arg("--root")
+        .arg(root)
+        .output()
+        .expect("run programme fixture")
 }

@@ -4,6 +4,14 @@
 
 |Test|Area|Claim|
 |----|----|-----|
+|(`test:integration:repository-programme-policy-is-deferred`)|cli|Explicit local ownership defers opaque rows and keeps their checker visible. # Panics Panics only if fixture IO fails or the binary violates the deferral contract.|
+|(`test:integration:unknown-policy-without-programme-still-refuses`)|cli|A bare unknown activation keeps the existing loader refusal. # Panics Panics only if fixture IO fails or the refusal changes.|
+|(`test:integration:catalogued-policy-cannot-claim-programme`)|cli|A published policy cannot be claimed by a local checker. # Panics Panics only if fixture IO fails or a published policy can be deferred.|
+|(`test:integration:programme-package-must-be-tracked-directory`)|cli|A programme package must be a tracked repository directory. # Panics Panics only if fixture IO fails or an invalid package is admitted.|
+|(`test:integration:programme-binary-must-be-nonempty`)|cli|An empty or whitespace-only binary does not identify a checker. # Panics Panics only if fixture IO fails or an empty binary is admitted.|
+|(`test:integration:malformed-programme-refuses`)|cli|A programme is exactly a package and binary string table. # Panics Panics only if fixture IO fails or a malformed declaration is admitted.|
+|(`test:integration:deferred-list-requires-supported-shape`)|cli|Deferral admits opaque row tables but still checks their container shape. # Panics Panics only if fixture IO fails or an invalid list shape is admitted.|
+|(`test:integration:deferred-policy-does-not-hide-catalogued-failure`)|cli|A deferred policy does not clear failures found by a catalogued policy. # Panics Panics only if fixture IO fails or deferral conceals a failure.|
 |(`test:integration:inactive-prose-fails-the-check-command`)|cli|An inactive root's Markdown fails the command until prose activation is declared. # Panics Panics only if fixture IO or command execution fails, or the verdict differs.|
 |(`test:integration:macro-doc-attributes-share-the-test-standard-place`)|carrier|A property-test macro's source-written documentation mints the same claim through line comments, separate doc attributes and one multiline attribute. Each form resolves from Markdown through the production entry. # Panics Panics only if fixture IO fails or the production check loses a macro carrier.|
 |(`test:integration:invalid-macro-carriers-refuse-by-name`)|carrier|A marked macro body that cannot be read refuses by name, and a misplaced claim remains a placement failure instead of being rescued by its spelling. # Panics Panics only if fixture IO fails or the check accepts an invalid macro carrier.|

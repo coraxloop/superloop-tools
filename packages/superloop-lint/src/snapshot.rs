@@ -1067,6 +1067,7 @@ pub struct Snapshot {
     reserved_kinds: BTreeSet<String>,
     reserved_extensions: BTreeSet<String>,
     policies: Vec<Pair>,
+    deferred: Vec<DeferredPolicy>,
     lists: BTreeMap<Pair, Rows>,
     deployments: BTreeMap<(String, String), String>,
     documents: BTreeMap<String, Declaration>,
@@ -1096,6 +1097,7 @@ pub struct DeclarationCore {
     reserved_kinds: BTreeSet<String>,
     reserved_extensions: BTreeSet<String>,
     policies: Vec<Pair>,
+    deferred: Vec<DeferredPolicy>,
     deployments: BTreeMap<(String, String), String>,
     documents: BTreeMap<String, Declaration>,
     spdx: Parameters,
@@ -1108,6 +1110,10 @@ pub struct DeclarationCore {
 }
 
 impl DeclarationCore {
+    pub(crate) fn deferred_policies(&self) -> &[DeferredPolicy] {
+        &self.deferred
+    }
+
     /// The one syntax tree both validators consume.
     #[must_use]
     pub(crate) const fn surface(&self) -> &Arc<SurfaceAst> {
@@ -1156,6 +1162,7 @@ impl DeclarationCore {
             reserved_kinds: self.reserved_kinds,
             reserved_extensions: self.reserved_extensions,
             policies: self.policies,
+            deferred: self.deferred,
             lists,
             deployments: self.deployments,
             documents: self.documents,
@@ -1178,6 +1185,12 @@ pub enum CoreConfiguration {
 }
 
 impl Snapshot {
+    /// Activated policies checked by a repository-local programme.
+    #[must_use]
+    pub fn deferred_policies(&self) -> &[DeferredPolicy] {
+        &self.deferred
+    }
+
     /// The one syntax tree this compiled snapshot projects from.
     #[must_use]
     pub(crate) const fn surface(&self) -> &Arc<SurfaceAst> {
@@ -1890,15 +1903,33 @@ struct RawPolicies {
 
 /// One raw activation row: an owner and the program it activates.
 ///
-/// No third field. Under the ratified grammar the activation document says that a
-/// program acts for an owner, and the instance document then says what that means
-/// for that owner, so the family key the retiring dialect carried has nothing left
-/// to discriminate (´gram:isolation:declaration´).
+/// A programme names the repository-local checker for an uncatalogued policy.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPair {
     owner: String,
     policy: String,
+    programme: Option<toml::Value>,
+}
+
+/// A repository-local checker, declared explicitly rather than silently skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeferredPolicy {
+    /// The activating owner.
+    pub owner: String,
+    /// The policy this binary does not catalogue.
+    pub policy: String,
+    /// The tracked repository directory containing the checker.
+    pub package: String,
+    /// The checker executable's name.
+    pub binary: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Programme {
+    package: String,
+    binary: String,
 }
 
 /// Project one core schema from the surface's single parsed document.
@@ -2029,12 +2060,6 @@ fn load(
         read_ast_file(&surface, ENVIRONMENTS_FILE, &mut refusals);
     let raw_policies: Option<RawPolicies> = read_ast_file(&surface, POLICIES_FILE, &mut refusals);
 
-    let raw_lists: Option<crate::surface::ListDocument> = if strict {
-        read_ast_file(&surface, LISTS_FILE, &mut refusals)
-    } else {
-        None
-    };
-
     // The shape document is read through the one decoder that owns its schema,
     // and the loader reading it is grounded below both declarations it supplies:
     // the directory is read physically, never consulting git and never applying
@@ -2046,10 +2071,6 @@ fn load(
     else {
         return Err(refusals);
     };
-
-    if strict && raw_lists.is_none() {
-        return Err(refusals);
-    }
 
     let registered = registered_owners(&raw_owners.owners, &mut refusals);
     let root_owner = match &raw_owners.root_owner {
@@ -2120,7 +2141,35 @@ fn load(
             }
         }
     });
-    let policies = activation_pairs(&raw_policies.policies, &registered, &mut refusals);
+    let (policies, deferred) =
+        activation_pairs(root, &raw_policies.policies, &registered, &mut refusals);
+    let raw_lists: Option<crate::surface::ListDocument> = if deferred.is_empty() {
+        if strict {
+            read_ast_file(&surface, LISTS_FILE, &mut refusals)
+        } else {
+            None
+        }
+    } else {
+        match catalogued_list_table(&surface, &deferred).and_then(|table| {
+            if strict {
+                table
+                    .try_into()
+                    .map(Some)
+                    .map_err(|error: toml::de::Error| error.to_string())
+            } else {
+                Ok(None)
+            }
+        }) {
+            Ok(lists) => lists,
+            Err(message) => {
+                refusals.push(Refusal::Malformed {
+                    file: LISTS_FILE,
+                    message,
+                });
+                None
+            }
+        }
+    };
 
     // Every instance document is decoded before any of them is read, because the
     // relations between them are asked over the union rather than through a
@@ -2178,6 +2227,7 @@ fn load(
         reserved_kinds,
         reserved_extensions,
         policies,
+        deferred,
         deployments,
         documents,
         spdx,
@@ -3455,11 +3505,13 @@ fn is_kind_token(kind: &str) -> bool {
 
 /// Validate the activation pairs against the owner list and this binary's catalog.
 fn activation_pairs(
+    root: &Path,
     rows: &[RawPair],
     registered: &BTreeSet<String>,
     refusals: &mut Vec<Refusal>,
-) -> Vec<Pair> {
+) -> (Vec<Pair>, Vec<DeferredPolicy>) {
     let mut parsed = Vec::with_capacity(rows.len());
+    let mut deferred = Vec::new();
     let mut seen = BTreeSet::new();
 
     for row in rows {
@@ -3481,7 +3533,7 @@ fn activation_pairs(
             continue;
         }
 
-        if catalogued(&row.policy).is_none() {
+        if catalogued(&row.policy).is_none() && row.programme.is_none() {
             refusals.push(Refusal::UnknownPolicy {
                 file: POLICIES_FILE,
                 policy: row.policy.clone(),
@@ -3501,10 +3553,107 @@ fn activation_pairs(
             continue;
         }
 
-        parsed.push(pair);
+        if let Some(value) = &row.programme {
+            match repository_programme(root, row, value) {
+                Ok(programme) => deferred.push(DeferredPolicy {
+                    owner: row.owner.clone(),
+                    policy: row.policy.clone(),
+                    package: programme.package,
+                    binary: programme.binary,
+                }),
+                Err(message) => refusals.push(Refusal::Malformed {
+                    file: POLICIES_FILE,
+                    message: format!("{pair}: {message}"),
+                }),
+            }
+        } else {
+            parsed.push(pair);
+        }
     }
 
-    parsed
+    (parsed, deferred)
+}
+
+fn repository_programme(
+    root: &Path,
+    row: &RawPair,
+    value: &toml::Value,
+) -> Result<Programme, String> {
+    let programme: Programme = value.clone().try_into().map_err(|_| {
+        String::from(
+            "malformed programme; expected { package = \"packages/NAME\", binary = \"NAME\" }",
+        )
+    })?;
+    if catalogued(&row.policy).is_some() {
+        return Err(String::from(
+            "programme cannot claim a policy this binary catalogues",
+        ));
+    }
+    if programme.binary.trim().is_empty() {
+        return Err(String::from("programme binary must not be empty"));
+    }
+    let package = &programme.package;
+    let normal = !package.is_empty()
+        && package
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    let prefix = format!("{package}/");
+    let tracked = superloop_cli_common::public_set::tracked_paths(root)?;
+    let inside = root
+        .canonicalize()
+        .ok()
+        .zip(root.join(package).canonicalize().ok())
+        .is_some_and(|(root, directory)| directory.starts_with(root));
+    if !normal
+        || !inside
+        || !root.join(package).is_dir()
+        || !tracked.iter().any(|path| path.starts_with(&prefix))
+    {
+        return Err(format!(
+            "programme package {package:?} is not a tracked directory of the repository"
+        ));
+    }
+    Ok(programme)
+}
+
+/// Validate only the outer shape of deferred lists, leaving their rows to their checker.
+///
+/// # Errors
+/// Returns the document or shape refusal without decoding deferred row contents.
+pub fn catalogued_list_table(
+    surface: &SurfaceAst,
+    deferred: &[DeferredPolicy],
+) -> Result<toml::Table, String> {
+    let mut table = surface
+        .document(LISTS_FILE)
+        .ok_or_else(|| String::from("missing lists document"))?
+        .table()
+        .map_err(str::to_owned)?
+        .clone();
+    for row in deferred {
+        let owner = table
+            .get_mut(&row.owner)
+            .and_then(toml::Value::as_table_mut);
+        let list = owner.and_then(|owner| owner.remove(&row.policy));
+        let valid = list
+            .as_ref()
+            .and_then(toml::Value::as_table)
+            .is_some_and(|list| {
+                list.len() == 1
+                    && ["path_counts", "allowances"].iter().any(|field| {
+                        list.get(*field)
+                            .and_then(toml::Value::as_array)
+                            .is_some_and(|rows| rows.iter().all(toml::Value::is_table))
+                    })
+            });
+        if !valid {
+            return Err(format!(
+                "{} : {}: deferred list must be a table with path_counts or allowances rows",
+                row.owner, row.policy
+            ));
+        }
+    }
+    Ok(table)
 }
 
 /// The format prefix a ratchet key's middle component is relative to.

@@ -180,7 +180,7 @@ pub fn check_with_plan(plan: &ExecutionPlan) -> CheckReport {
 
     let mut report = CheckReport::new(root, &analysis, passes, verdicts, before);
     report.public_set = public_set;
-    report
+    report.with_deferred(declared.deferred_policies())
 }
 
 // Label resolution still needs code mints and their owned commentary places
