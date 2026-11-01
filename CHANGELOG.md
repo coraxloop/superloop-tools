@@ -11,6 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-pack replay` projects linear source history onto an existing public development branch, preserving commit metadata, skipping unchanged public trees, and preflighting the entire range against the external burn register before output writes.
 - `superloop-pack release` validates a pinned public development tree and creates an unsigned merge and annotated version tag in one expected-old transaction advancing main and development, with check and dry-run reports and an explicit three-ref push allowlist.
 
+### Changed
+
+- Sign-in home commands accept `--charter PATH`, default to the instance worker-charter publication, refuse unavailable inputs before changing a home, report the resolved path, and reconcile existing Codex charter links.
+
 ## [0.2.0] - 2026-11-01
 
 ### Added
