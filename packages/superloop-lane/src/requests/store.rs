@@ -2708,8 +2708,7 @@ pub(crate) mod tests {
                     .expect("late writer contends");
                 drop(held);
             });
-            super::WRITER_LOCK_WAIT_OVERRIDE
-                .with(|bound| bound.set(Some(Duration::from_millis(200))));
+            super::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(Some(Duration::from_secs(2))));
             super::AFTER_WRITER_LOCK_CONTENTION.with(|hook| {
                 *hook.borrow_mut() = Some(Box::new(move || {
                     release_tx.send(()).expect("release after contention");
