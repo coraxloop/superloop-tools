@@ -1681,6 +1681,48 @@ fn symlinked_step_letter_is_refused_by_name() {
 }
 
 /// # Panics
+/// Panics only if fixture setup fails or a FIFO letter blocks or loses its named refusal.
+/// ´test:integration:fifo-step-letter-is-refused-without-blocking´
+#[test]
+fn fifo_step_letter_is_refused_without_blocking() {
+    let harness = Harness::new("fifo-letter");
+    let fifo = harness.root().join("fifo-letter.md");
+    nix::unistd::mkfifo(
+        &fifo,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .expect("FIFO letter");
+    let mut child = harness
+        .command()
+        .args(["-t", "60", "--step-letter"])
+        .arg(&fifo)
+        .arg("pointer")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn_serialized()
+        .expect("driver refusal");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while child.try_wait().expect("driver status").is_none() {
+        if Instant::now() >= deadline {
+            child.kill().expect("kill blocked driver");
+            child.wait().expect("reap blocked driver");
+            panic!("--step-letter blocked on FIFO {}", fifo.display());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = child.wait_with_output().expect("driver output");
+    assert_eq!(result.status.code(), Some(2));
+    let diagnostic = String::from_utf8_lossy(&result.stderr);
+    assert!(diagnostic.contains("--step-letter"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(fifo.to_str().expect("fixture path")),
+        "{diagnostic}"
+    );
+    assert!(!harness.run_dir("lane").exists());
+}
+
+/// # Panics
 /// Panics only if fixture setup fails or the asserted retry contract is violated.
 /// ´test:integration:model-capacity-stops-at-the-fourth-attempt´
 #[test]
