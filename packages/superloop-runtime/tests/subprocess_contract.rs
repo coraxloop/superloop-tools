@@ -96,7 +96,7 @@ fn version_and_usage_do_not_open_runtime_state() {
     success(&output);
     assert_eq!(output.stdout, [] as [u8; 0]);
     let record: Value = serde_json::from_slice(&output.stderr).expect("JSON version");
-    assert_eq!(record["fields"]["version"], "superloop-runtime 0.2.0");
+    assert_eq!(record["fields"]["version"], "superloop-runtime 0.3.0");
     assert_eq!(record["command"], "superloop-runtime");
     assert_eq!(
         fixture
