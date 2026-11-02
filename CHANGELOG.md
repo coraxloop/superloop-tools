@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Replay attributes unparseable public root metadata to its input context before refusing (`req:output:failure-class-naming`).
 
+- Replay author examples use the same double-quoted identity as cut (`spec:outputspec:command-and-output-contracts`).
+
 ## [0.3.1] - 2026-11-02
 
 ### Added
