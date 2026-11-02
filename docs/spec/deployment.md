@@ -147,7 +147,7 @@ When removal depends on nobody using the old thing, the change that stops new us
 
 **Requirement (Removal identity comes from reviewed text)** · `req:deployment:reviewed-removal-digest`
 
-For a program of this family, the authority to remove an entry comes from its full digest in the reviewed manifest, checked against the opened target before the move. A sidecar beside the target cannot supply this authority, because an actor able to replace the target can replace the sidecar too (`req:deployment:reversible-manifest-removal`).
+For a program of this family, the authority to remove an entry comes from its full digest in the reviewed manifest, checked against the opened target before the move. A sidecar beside the target cannot supply this authority, because an actor able to replace the target can replace the sidecar too (`req:deployment:reversible-manifest-removal`). The independently reviewed manifest is the trusted reference; the full digest binds its approved bytes to the opened target against that actor's substitution, as required by (`rule:digests:full-digest-justification`).
 
 **Requirement (Recovery place is exclusive)** · `req:deployment:exclusive-recovery-place`
 

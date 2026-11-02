@@ -8,6 +8,8 @@ This directory contains workstation-prepared, owner-installed artifacts for the 
 
 `steward-runner` runs only as the dedicated non-root, non-owner `superloop-steward` identity. It locks against overlap, subtracts the steward-owned disposition ledger, checks pending source visibility, and gives the visible batch plus the installed charter to `claude --print`. Tests replace only the executable through `STEWARD_CLAUDE_COMMAND`. For every case the CLI installs the exact case-named administrative disposition requested in the batch and emits a tab-delimited `STEWARD-DISPOSITION` marker carrying the case id, absolute path, and full digest.
 
+The disposition digest must be classified by its trust boundary under (`rule:digests:full-digest-justification`): a marker and file supplied by the same agent do not independently authenticate its action. The existing marker reader requires the full representation; changing it is protocol work.
+
 `STEWARD_OWNER_CORRESPONDENCE` is required and has no default. It must be an absolute path naming a directory. When it is unset, empty, relative, or not a directory, the runner returns status 1 with final line `STEWARD-RUN-FAILED configuration variable=STEWARD_OWNER_CORRESPONDENCE` and writes journal payload `result=failed reason=configuration variable=STEWARD_OWNER_CORRESPONDENCE` under the `steward-runner` tag.
 
 The runner first durably installs the invocation output, then verifies and synchronizes every root-owned disposition letter, and only then appends and synchronizes ledger entries. A failed or killed invocation therefore leaves the case pending. Stable case ids and case-named disposition paths make replay idempotent.

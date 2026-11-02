@@ -20,6 +20,8 @@ Staging runs the same installation declarations below an explicit destination pr
 
 An executable's build record binds it to its reviewed source, toolchain and execution domain. Build and temporary directories, toolchain paths and source inputs are explicit. A compute artifact is not evidence that a host artifact was built in the authorized host environment. Deployment checks the actual artifact digest and domain and retains command status and wall with the source identity.
 
+The full artifact digest binds the executable bytes to the independently retained build record against an artifact supplier who can replace delivered binaries but cannot rewrite the trusted record. Reviewed payload and Meson expression digests likewise bind measured source to the reviewed ledger against a contributor changing executable inputs without updating their reviewed declaration. Both uses require the protection statements of (`rule:digests:full-digest-justification`); a record returned under the same supplier's control needs independent review before it can be that reference.
+
 **Rule (Server kit authority)** · `rule:buildcontracts:server-kits`
 
 Protocol-coupled clients and server helpers share a release authority. A server kit installation names its prefix, program and unit destinations and staged evidence without implicitly activating services. State and timer intent survive replacement. Pending work is accounted for before a protocol switch, and a second installation proves idempotence. Live account, service and registration changes belong to the instance's authorized deployment procedure.

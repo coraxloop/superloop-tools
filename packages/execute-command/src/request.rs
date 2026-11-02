@@ -172,6 +172,10 @@ pub enum MatchEvaluation {
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub request_id: Text,
+    /// Full context digest compared with the authenticated decision owner's
+    /// retained context, so a requester controlling arguments and request text
+    /// cannot substitute an operation for the reviewed one. The adapter owns
+    /// framing and reference custody (´[TOOLS-rule:commandcontracts:policy-and-binding]´).
     pub context_digest: Text,
 }
 
