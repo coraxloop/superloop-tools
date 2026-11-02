@@ -780,7 +780,120 @@ pub fn write_release_report<W: io::Write>(
 
 #[cfg(test)]
 mod signing_shape_tests {
-    use super::{tag_shape_matches, unsigned_commit};
+    use super::{ReleaseReport, command, run, tag_shape_matches, unsigned_commit, verify_shapes};
+    use std::path::Path;
+
+    fn store_shape(root: &Path, kind: &str, bytes: &[u8]) -> String {
+        let oid = run(
+            command(root).args(["hash-object", "--literally", "-w", "-t", kind, "--stdin"]),
+            Some(bytes),
+        )
+        .expect("store synthetic signed shape");
+        String::from_utf8(oid)
+            .expect("object identity")
+            .trim()
+            .to_owned()
+    }
+
+    fn shape_report(root: &Path, commit: &[u8], tag_body: &str) -> ReleaseReport {
+        let commit = store_shape(root, "commit", commit);
+        let tag_object = store_shape(
+            root,
+            "tag",
+            format!("object {commit}\n{tag_body}").as_bytes(),
+        );
+        ReleaseReport {
+            main: String::new(),
+            development: String::new(),
+            commit,
+            tree: String::new(),
+            tag_object,
+            signing: "commit,tag",
+            signing_key: None,
+            title: String::new(),
+            body_bytes: 0,
+            version_source: String::new(),
+            refspecs: std::array::from_fn(|_| String::new()),
+            state: "preview",
+        }
+    }
+
+    const COMMIT: &str =
+        "tree pinned\nparent first\nparent second\nauthor pinned\ncommitter pinned\n\nmessage\n";
+    const SIGNED_COMMIT: &str = "tree pinned\nparent first\nparent second\nauthor pinned\ncommitter pinned\ngpgsig signature\n continuation\n\nmessage\n";
+    const TAG_BODY: &str = "type commit\ntag v1\ntagger pinned\n\nnotes";
+    const SIGNATURE: &str = "\n-----BEGIN PGP SIGNATURE-----\nsignature\n";
+
+    fn shape_repository() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("shape repository");
+        run(
+            command(root.path()).args(["init", "--bare", "--quiet"]),
+            None,
+        )
+        .expect("isolated object store");
+        root
+    }
+
+    /// Each unsigned commit field is checked by the production refusal boundary.
+    ///
+    /// # Panics
+    /// Panics only if the isolated fixture fails or shape drift is not refused as signing.
+    /// ´test:unit:release-commit-shape-drift-refuses-signing´
+    #[test]
+    fn release_commit_shape_drift_refuses_signing() {
+        let root = shape_repository();
+        let tag = format!("object preview\n{TAG_BODY}");
+        let signed_tag = format!("{TAG_BODY}{SIGNATURE}");
+        let report = shape_report(root.path(), SIGNED_COMMIT.as_bytes(), &signed_tag);
+        verify_shapes(|| command(root.path()), &report, (COMMIT, &tag))
+            .expect("unchanged signed shape");
+        for field in [
+            "tree pinned",
+            "parent first",
+            "parent second",
+            "author pinned",
+            "committer pinned",
+            "message",
+        ] {
+            let drift = SIGNED_COMMIT.replace(field, &format!("{field} changed"));
+            assert_ne!(drift, SIGNED_COMMIT, "{field}");
+            let report = shape_report(root.path(), drift.as_bytes(), &signed_tag);
+            let error = verify_shapes(|| command(root.path()), &report, (COMMIT, &tag))
+                .expect_err("commit drift must refuse");
+            assert_eq!(error.code, "signing", "{field}: {error}");
+            assert_eq!(
+                error.detail, "commit differs from the preview unsigned shape",
+                "{field}"
+            );
+        }
+    }
+
+    /// Tag drift is checked after accepting the final signed commit identity.
+    ///
+    /// # Panics
+    /// Panics only if the isolated fixture fails or shape drift is not refused as signing.
+    /// ´test:unit:release-tag-shape-drift-refuses-signing´
+    #[test]
+    fn release_tag_shape_drift_refuses_signing() {
+        let root = shape_repository();
+        let tag = format!("object preview\n{TAG_BODY}");
+        let signed_tag = format!("{TAG_BODY}{SIGNATURE}");
+        let report = shape_report(root.path(), SIGNED_COMMIT.as_bytes(), &signed_tag);
+        verify_shapes(|| command(root.path()), &report, (COMMIT, &tag))
+            .expect("unchanged signed shape with final commit target");
+        for field in ["type commit", "tag v1", "tagger pinned", "notes"] {
+            let drift = signed_tag.replace(field, &format!("{field} changed"));
+            assert_ne!(drift, signed_tag, "{field}");
+            let report = shape_report(root.path(), SIGNED_COMMIT.as_bytes(), &drift);
+            let error = verify_shapes(|| command(root.path()), &report, (COMMIT, &tag))
+                .expect_err("tag drift must refuse");
+            assert_eq!(error.code, "signing", "{field}: {error}");
+            assert_eq!(
+                error.detail, "tag differs from the preview unsigned shape",
+                "{field}"
+            );
+        }
+    }
 
     /// Signature removal retains every unsigned header and message byte.
     /// ´test:unit:release-unsigned-shape´
