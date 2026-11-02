@@ -9,15 +9,17 @@ The backend-independent durable process lifecycle lives in `lane-lifecycle`; thi
 ```text
 superloop-lane driver start --backend codex -t BUDGET [-C DIR] [-s SANDBOX] [-m MODEL] [-e EFFORT]
            [-n NAME] [--pool-threshold F] [--ignore-pool]
-           [--gateway-lane LANE] PROMPT|-
+           [--gateway-lane LANE] [--step-letter FILE] PROMPT|-
 superloop-lane driver start --backend codex -t BUDGET -r SESSION -d RUN_DIR [-C DIR] [-s SANDBOX]
            [-m MODEL] [-e EFFORT] [-n STEP] [--pool-threshold F]
-           [--ignore-pool] [--gateway-lane LANE] MESSAGE|-
+           [--ignore-pool] [--gateway-lane LANE] [--step-letter FILE] MESSAGE|-
 Fresh launch environment: LANE_RUNS_ROOT=/absolute/runs
 Boxed entry also supplies: LANE_RUN_DIR=/absolute/runs/R
 ```
 
 `CODEX_HOME` must be nonempty for host start and resume. An absent or empty value is refused by name before the vendor child starts. Boxed starts and resumes take the child environment, including its home, from `runtime.env`; the boxed driver does not require or inherit a host `CODEX_HOME`.
+
+`--step-letter FILE` saves the letter body as the named step text while retaining the positional pointer as child input, on host and boxed routes alike (`[LANELIFECYCLE-sec:lanelifecycle:resume-boundary]`).
 
 `-t` is a mandatory positive decimal reporting threshold in seconds. `-C` defaults to the caller's current directory. `-s` defaults to `workspace-write` and accepts `read-only`, `workspace-write`, and `danger-full-access`. `-m` and `-e` add model and reasoning-effort controls. `-n` defaults to `lane`; in fresh mode it names the run and in resume mode it uniquely names the step. A literal `-` reads its bytes from standard input; an argument prompt receives the reference's terminating LF.
 

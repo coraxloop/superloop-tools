@@ -11,7 +11,7 @@ pub(super) fn option_value(arguments: &[OsString], selected: u8) -> Option<&OsSt
         let bytes = word.as_bytes();
         match bytes {
             b"--ignore-pool" => continue,
-            b"--pool-threshold" | b"--gateway-lane" => {
+            b"--pool-threshold" | b"--gateway-lane" | b"--step-letter" => {
                 words.next()?;
                 continue;
             }

@@ -1568,13 +1568,21 @@ fn await_capacity_boundary(
 fn model_capacity_retries_and_records_each_attempt_before_success() {
     let harness = Harness::new("capacity-retry");
     let run_dir = harness.run_dir("lane");
+    let letter = harness.root().join("letter.md");
+    fs::write(&letter, b"The complete letter body.\n").expect("step letter");
     let mut command = harness.command();
     command
         .env("ORACLE_MODE", "capacity-then-ok")
         .env("ORACLE_CAPACITY_MARKER", run_dir.join("capacity-marker"));
     let result = output(
         &mut command,
-        &[OsStr::new("-t"), OsStr::new("600"), OsStr::new("read back")],
+        &[
+            OsStr::new("--step-letter"),
+            letter.as_os_str(),
+            OsStr::new("-t"),
+            OsStr::new("600"),
+            OsStr::new("read back"),
+        ],
     );
     assert_eq!(result.status.code(), Some(0));
     assert_eq!(
@@ -1589,7 +1597,7 @@ fn model_capacity_retries_and_records_each_attempt_before_success() {
     assert_eq!(harness.read("stdin"), b"read back\n");
     assert_eq!(
         fs::read(run_dir.join("step-lane.txt")).expect("saved duty"),
-        b"read back\n"
+        b"The complete letter body.\n"
     );
     assert!(
         String::from_utf8_lossy(&result.stdout).contains("capacity_attempts=2 capacity_waits=60s")

@@ -1768,6 +1768,8 @@ mod tests {
                 "gpt-6-sol",
                 "-e",
                 "high",
+                "--step-letter",
+                "/home/worker/.local/inbox/review.md",
                 "Read /home/worker/.local/inbox/review.md."
             ]
         );
