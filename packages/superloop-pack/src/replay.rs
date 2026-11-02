@@ -127,7 +127,6 @@ struct Mapping {
     signature_omitted: bool,
     selected_paths: usize,
     omitted_paths: usize,
-    readme_fallback: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,7 +147,6 @@ pub struct ReplayReport {
     files: usize,
     scratch_root: PathBuf,
     generated_drift: Vec<String>,
-    readme_fallback_commits: usize,
     projection_version: String,
     projection_sha256: String,
     policy_sha256: String,
@@ -397,10 +395,111 @@ struct Policy {
     bytes: Vec<u8>,
 }
 
+impl Policy {
+    fn permits_public_path(&self, path: &str) -> bool {
+        // The bound is on public destinations: the final README source is consumed
+        // at README.md, never emitted at its source path as a second README.
+        if path != "README.md" && path == self.manifest.public.readme {
+            return false;
+        }
+        let source = if path == "README.md" {
+            &self.manifest.public.readme
+        } else {
+            path
+        };
+        self.manifest
+            .select(&[source.to_owned()])
+            .included
+            .iter()
+            .any(|included| included == source)
+    }
+}
+
+fn historical_policy(
+    request: &ReplayRequest<'_>,
+    oid: &str,
+    bound: &Policy,
+) -> Result<Policy, ReplayError> {
+    let path = request
+        .manifest
+        .to_str()
+        .ok_or_else(|| refuse("manifest must be UTF-8"))?;
+    let bytes = git(request.repository_root, &["show", &format!("{oid}:{path}")])
+        .map_err(|_| refuse("historical manifest missing or unreadable"))?;
+    let mut document: toml::Value = toml::from_str(
+        std::str::from_utf8(&bytes).map_err(|_| refuse("historical manifest encoding"))?,
+    )
+    .map_err(|_| refuse("invalid historical manifest"))?;
+    let public = document
+        .get_mut("public")
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| refuse("historical manifest public table missing"))?;
+    // Backfill publication naming only for manifests that predate the field.
+    // Historical selection and required input paths remain commit-local.
+    if !public.contains_key("name") {
+        public.insert(
+            "name".into(),
+            toml::Value::String(bound.manifest.public.name.clone()),
+        );
+    }
+    let text = toml::to_string(&document).map_err(|_| refuse("historical manifest encoding"))?;
+    let manifest = Manifest::parse(&text).map_err(|_| refuse("invalid historical manifest"))?;
+    if [&manifest.public.licence_code, &manifest.public.licence_docs]
+        .contains(&&manifest.public.readme)
+        || manifest.public.readme == path
+    {
+        return Err(refuse(
+            "public README source must differ from manifest and licence paths",
+        ));
+    }
+    Ok(Policy {
+        manifest,
+        bytes: text.into_bytes(),
+    })
+}
+
+fn bounded_policy(
+    historical: &Policy,
+    included: &[String],
+    removed: &[String],
+) -> Result<Policy, ReplayError> {
+    let mut document: toml::Value = toml::from_str(
+        std::str::from_utf8(&historical.bytes)
+            .map_err(|_| refuse("historical manifest encoding"))?,
+    )
+    .map_err(|_| refuse("invalid historical manifest"))?;
+    let rows = included
+        .iter()
+        .map(|path| {
+            let mut row = toml::map::Map::new();
+            row.insert("pattern".into(), toml::Value::String(path.clone()));
+            toml::Value::Table(row)
+        })
+        .collect();
+    document["include"]["rows"] = toml::Value::Array(rows);
+    let exclusions = document["exclude"]["rows"]
+        .as_array_mut()
+        .ok_or_else(|| refuse("invalid historical manifest"))?;
+    for path in removed {
+        let mut row = toml::map::Map::new();
+        row.insert("pattern".into(), toml::Value::String(path.clone()));
+        row.insert(
+            "reason".into(),
+            toml::Value::String("Outside the final public-path bound.".into()),
+        );
+        exclusions.push(toml::Value::Table(row));
+    }
+    let text = toml::to_string(&document).map_err(|_| refuse("historical manifest encoding"))?;
+    let manifest = Manifest::parse(&text).map_err(|_| refuse("invalid historical manifest"))?;
+    Ok(Policy {
+        manifest,
+        bytes: text.into_bytes(),
+    })
+}
+
 struct PlannedCommit {
     tree: Projection,
     omitted: usize,
-    readme_fallback: bool,
 }
 
 fn read_policy(request: &ReplayRequest<'_>, tag: &str) -> Result<(Policy, String), ReplayError> {
@@ -435,11 +534,21 @@ fn project(
     policy: &Policy,
     evidence: &mut ValidationEvidence,
 ) -> Result<PlannedCommit, ReplayError> {
+    let ordinal = evidence.current.ordinal;
+    evidence.begin(
+        "manifest",
+        ordinal,
+        Some(oid),
+        "historical policy",
+        request.manifest.to_str(),
+    );
+    let historical = historical_policy(request, oid, policy)?;
+    evidence.begin("projection", ordinal, Some(oid), "tree", None);
     let entries = cut::tree_entries(request.repository_root, oid)?;
-    let manifest = &policy.manifest;
+    let manifest = &historical.manifest;
     let paths = entries.keys().cloned().collect::<Vec<_>>();
     let mut selected = manifest.select(&paths);
-    // Final rows may name files introduced later in the range.
+    // Classification is historical, before the final bound removes any paths.
     if let Some(issue) = selected
         .issues
         .iter()
@@ -448,10 +557,55 @@ fn project(
         evidence.current.check = "manifest".into();
         evidence.current.field = "historical classification".into();
         evidence.current.path = issue.split_once(": ").map(|(_, path)| path.to_owned());
-        return Err(refuse("final policy cannot classify historical tree"));
+        return Err(refuse("historical policy cannot classify tree"));
     }
+    let mut removed = Vec::new();
+    selected.included.retain(|path| {
+        let public_path = if path == &manifest.public.readme {
+            "README.md"
+        } else {
+            path
+        };
+        let keep = policy.permits_public_path(public_path);
+        if !keep {
+            removed.push(path.clone());
+        }
+        keep
+    });
+    validate_required_entries(oid, manifest, &selected.included, &entries, evidence)?;
+    let bounded = bounded_policy(&historical, &selected.included, &removed)?;
+    let omitted = selected.tracked.saturating_sub(selected.included.len());
+    let mut projected = cut::project_tree_with_policy(
+        &cut_request(request),
+        oid,
+        &bounded.manifest,
+        selected.included,
+        Some(&bounded.bytes),
+        false,
+    )
+    .map_err(|error| annotate_projection_error(evidence, error))?;
+    // Generated paths obey the same public destination bound as source paths.
+    projected.retain(|path, _| policy.permits_public_path(path));
+    refresh_projected_manifest(request, &mut projected, &bounded.bytes).inspect_err(|_| {
+        evidence.current.check = "manifest".into();
+        evidence.current.field = "projected inventory".into();
+        evidence.current.path = request.manifest.to_str().map(str::to_owned);
+    })?;
+    Ok(PlannedCommit {
+        tree: projected,
+        omitted,
+    })
+}
+
+fn validate_required_entries(
+    oid: &str,
+    manifest: &Manifest,
+    included: &[String],
+    entries: &std::collections::BTreeMap<String, (String, String)>,
+    evidence: &mut ValidationEvidence,
+) -> Result<(), ReplayError> {
     for path in [&manifest.public.licence_code, &manifest.public.licence_docs] {
-        if !selected.included.contains(path)
+        if !included.contains(path)
             || !entries
                 .get(path)
                 .is_some_and(|(mode, _)| matches!(mode.as_str(), "100644" | "100755"))
@@ -463,16 +617,8 @@ fn project(
             )));
         }
     }
-    let readme_fallback = !entries.contains_key(&manifest.public.readme);
-    if readme_fallback && !selected.included.iter().any(|path| path == "README.md") {
-        selected.included.push("README.md".into());
-    }
-    let readme_path = if readme_fallback {
-        "README.md"
-    } else {
-        &manifest.public.readme
-    };
-    if !selected.included.iter().any(|path| path == readme_path)
+    let readme_path = &manifest.public.readme;
+    if !included.iter().any(|path| path == readme_path)
         || !entries
             .get(readme_path)
             .is_some_and(|(mode, _)| matches!(mode.as_str(), "100644" | "100755"))
@@ -481,7 +627,7 @@ fn project(
         evidence.current.path = Some(readme_path.into());
         return Err(refuse("required README absent or not regular"));
     }
-    for path in &selected.included {
+    for path in included {
         if !entries
             .get(path)
             .is_some_and(|(mode, _)| matches!(mode.as_str(), "100644" | "100755" | "120000"))
@@ -490,27 +636,26 @@ fn project(
             return Err(refuse("unsupported public tree entry"));
         }
     }
-    let omitted = selected.tracked.saturating_sub(selected.included.len());
-    let mut projected = cut::project_tree_with_policy(
-        &cut_request(request),
-        oid,
-        manifest,
-        selected.included,
-        Some(&policy.bytes),
-        readme_fallback,
-    )
-    .map_err(|error| annotate_projection_error(evidence, error))?;
+    Ok(())
+}
+
+fn refresh_projected_manifest(
+    request: &ReplayRequest<'_>,
+    projected: &mut Projection,
+    policy_bytes: &[u8],
+) -> Result<(), ReplayError> {
     // Cut retains historical reservations for archive reproduction. Replay consumes
     // them, just as it consumes exclusions, rather than publishing private selectors.
     let path = request
         .manifest
         .to_str()
         .ok_or_else(|| refuse("manifest must be UTF-8"))?;
+    let bytes = cut::public_manifest(policy_bytes, projected.keys())?;
     let (_, content) = projected
         .get_mut(path)
         .ok_or_else(|| refuse("manifest excluded by final policy"))?;
     let mut document: toml::Value =
-        toml::from_str(std::str::from_utf8(content).map_err(|_| refuse("manifest encoding"))?)
+        toml::from_str(std::str::from_utf8(&bytes).map_err(|_| refuse("manifest encoding"))?)
             .map_err(|_| refuse("manifest encoding"))?;
     if let Some(table) = document.as_table_mut() {
         table.remove("reserved");
@@ -520,11 +665,7 @@ fn project(
         toml::to_string(&document).map_err(|_| refuse("manifest encoding"))?
     )
     .into_bytes();
-    Ok(PlannedCommit {
-        tree: projected,
-        omitted,
-        readme_fallback,
-    })
+    Ok(())
 }
 
 fn annotate_projection_error(
@@ -853,7 +994,6 @@ fn replay_resolved(
         files: parent_tree.len(),
         scratch_root,
         generated_drift,
-        readme_fallback_commits: mapping.iter().filter(|row| row.readme_fallback).count(),
         projection_version: env!("CARGO_PKG_VERSION").into(),
         projection_sha256,
         policy_sha256,
@@ -1055,17 +1195,8 @@ fn replay_commits(
     writer: &mut Writer,
     evidence: &mut ValidationEvidence,
 ) -> Result<(), ReplayError> {
-    for (
-        index,
-        (
-            source,
-            PlannedCommit {
-                tree,
-                omitted,
-                readme_fallback,
-            },
-        ),
-    ) in sources.iter().zip(planned).enumerate()
+    for (index, (source, PlannedCommit { tree, omitted })) in
+        sources.iter().zip(planned).enumerate()
     {
         evidence.begin(
             "projection",
@@ -1131,7 +1262,6 @@ fn replay_commits(
             signature_omitted: source.signature_omitted,
             selected_paths: tree.len(),
             omitted_paths: omitted,
-            readme_fallback,
         });
         writer.parent_tree = tree;
     }
@@ -1242,7 +1372,12 @@ fn projection_refusal(ordinal: usize, error: &ReplayError) -> ReplayError {
         "unknown citation-sites protocol",
         "required README absent or not regular",
         "unsupported public tree entry",
-        "final policy cannot classify historical tree",
+        "historical policy cannot classify tree",
+        "historical manifest missing or unreadable",
+        "historical manifest encoding",
+        "invalid historical manifest",
+        "historical manifest public table missing",
+        "public README source must differ from manifest and licence paths",
         "manifest excluded by final policy",
         "manifest encoding",
         "invalid unpublished path class",

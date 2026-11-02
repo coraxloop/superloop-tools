@@ -964,7 +964,7 @@ fn guard_unpublished(
     Ok(())
 }
 
-fn public_manifest<'a>(
+pub fn public_manifest<'a>(
     content: &[u8],
     paths: impl Iterator<Item = &'a String>,
 ) -> Result<Vec<u8>, CutError> {

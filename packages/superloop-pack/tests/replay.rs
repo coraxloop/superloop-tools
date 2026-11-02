@@ -361,7 +361,7 @@ fn replay_refusal_checks_retain_private_evidence() {
         &["commit", "--no-gpg-sign", "-m", "Missing README"],
     );
     fixture.unchanged_refusal("check=licence/README validation");
-    fixture.unchanged_refusal("path=README.md");
+    fixture.unchanged_refusal("path=docs/readme.txt");
 
     let fixture = Fixture::new();
     fixture.commit(".linter/owners.toml", "invalid owners", "Invalid owners\n");
@@ -480,13 +480,13 @@ fn replay_required_inputs_and_destination_are_guarded() {
     fixture.unchanged_refusal("nothing to replay");
 }
 
-/// Final policy spans older manifest schemas and a README source introduced later.
+/// Missing historical README inputs refuse even when a later source exists.
 ///
 /// # Panics
 /// Panics only if fixture IO fails or historical projection violates its contract.
-/// ´test:integration:final-policy-spans-manifest-schema-and-readme-introduction´
+/// ´test:integration:historical-readme-must-exist-at-each-commit´
 #[test]
-fn final_policy_spans_manifest_schema_and_readme_introduction() {
+fn historical_readme_must_exist_at_each_commit() {
     let fixture = Fixture::new();
     let final_manifest = MANIFEST.replace(
         "{pattern = \"private.txt\", reason = \"Private fixture.\"}",
@@ -515,26 +515,112 @@ fn final_policy_spans_manifest_schema_and_readme_introduction() {
         &final_manifest,
         "Final manifest policy\n",
     );
+    fixture.unchanged_refusal("check=licence/README validation source ordinal=1");
+    fixture.unchanged_refusal("path=docs/readme.txt");
+}
+
+/// Historical public READMEs survive a final switch away from an internal root README.
+///
+/// # Panics
+/// Panics only if fixture IO fails or replay publishes the private historical root.
+/// ´test:integration:historical-manifest-bounds-readme-transition´
+#[test]
+fn historical_manifest_bounds_readme_transition() {
+    let fixture = Fixture::new();
+    let historical = MANIFEST.replace("name = \"replay-fixture\"\n", "").replace(
+        "[exclude]\nrows = [",
+        "[exclude]\nrows = [{pattern = \"README.md\", reason = \"Internal overview.\"}, ",
+    );
+    fs::write(fixture.source.join("README.md"), "forbidden-value\n").expect("internal README");
+    fixture.commit("public-set.toml", &historical, "Historical policy\n");
+    fixture.commit("public/file.txt", "public change\n", "Public edit\n");
+    let final_policy = MANIFEST
+        .replace("readme = \"docs/readme.txt\"", "readme = \"README.md\"")
+        .replace(
+            "[include]\nrows = [",
+            "[include]\nrows = [{pattern = \"README.md\"}, ",
+        );
+    fs::write(fixture.source.join("README.md"), "New public README\n").expect("public README");
+    fs::remove_file(fixture.source.join("docs/readme.txt")).expect("consumed README source");
+    fixture.commit("public-set.toml", &final_policy, "Switch public README\n");
     let result = report(fixture.replay(&fixture.out).output().expect("replay"));
-    assert_eq!(result["readme_fallback_commits"], 2);
-    for (index, expected) in [
-        "Early root README\n",
-        "Early root README\n",
-        "Replacement README\n",
-        "Replacement README\n",
-    ]
-    .iter()
-    .enumerate()
+    assert_eq!(result["mapping"][0]["outcome"], "skipped");
+    for row in result["mapping"]
+        .as_array()
+        .expect("mapping")
+        .iter()
+        .take(2)
     {
-        let row = &result["mapping"][index];
-        assert_eq!(row["readme_fallback"], index < 2);
-        let oid = row["public_commit"].as_str().expect("mapped commit");
+        let oid = row["public_commit"].as_str().expect("public commit");
         assert_eq!(
             git(&fixture.out, &["show", &format!("{oid}:README.md")]),
-            expected.as_bytes()
+            b"Public readme\n"
         );
     }
-    assert_eq!(result["mapping"][3]["outcome"], "skipped");
+    assert_eq!(
+        fs::read(fixture.out.join("README.md")).expect("README"),
+        b"New public README\n"
+    );
+}
+
+/// A declared historical publication name survives a later name change.
+///
+/// # Panics
+/// Panics only if fixture IO fails or replay overwrites a declared name.
+/// ´test:integration:historical-publication-name-is-preserved´
+#[test]
+fn historical_publication_name_is_preserved() {
+    let fixture = Fixture::new();
+    fixture.commit("public/file.txt", "public change\n", "Public edit\n");
+    fixture.commit(
+        "public-set.toml",
+        &MANIFEST.replace("replay-fixture", "renamed-fixture"),
+        "Rename publication\n",
+    );
+    let result = report(fixture.replay(&fixture.out).output().expect("replay"));
+    let oid = result["mapping"][0]["public_commit"]
+        .as_str()
+        .expect("commit");
+    let historical = git(&fixture.out, &["show", &format!("{oid}:public-set.toml")]);
+    assert!(
+        String::from_utf8(historical)
+            .expect("manifest")
+            .contains("name = \"replay-fixture\"")
+    );
+    let final_manifest = fs::read_to_string(fixture.out.join("public-set.toml")).expect("manifest");
+    assert!(final_manifest.contains("name = \"renamed-fixture\""));
+}
+
+/// Missing manifests and unclassified historical paths cannot borrow a later policy.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a missing historical input is accepted.
+/// ´test:integration:historical-manifest-inputs-are-required´
+#[test]
+fn historical_manifest_inputs_are_required() {
+    let fixture = Fixture::new();
+    git(&fixture.source, &["rm", "public-set.toml"]);
+    git(
+        &fixture.source,
+        &["commit", "--no-gpg-sign", "-m", "Missing manifest"],
+    );
+    fixture.commit("public-set.toml", MANIFEST, "Restore manifest\n");
+    fixture.unchanged_refusal("historical manifest missing or unreadable");
+    fixture.unchanged_refusal("check=manifest source ordinal=1");
+
+    let fixture = Fixture::new();
+    fixture.commit(
+        "unclassified.txt",
+        "unclassified\n",
+        "Unknown historical path\n",
+    );
+    let final_policy = MANIFEST.replace(
+        "[exclude]\nrows = [",
+        "[exclude]\nrows = [{pattern = \"unclassified.txt\", reason = \"Private.\"}, ",
+    );
+    fixture.commit("public-set.toml", &final_policy, "Classify at tip\n");
+    fixture.unchanged_refusal("historical policy cannot classify tree");
+    fixture.unchanged_refusal("path=unclassified.txt");
 }
 
 /// Accepted base drift is carried by the first commit and recorded explicitly.
@@ -717,6 +803,67 @@ fn historical_citations_use_their_own_commit() {
         .expect("register");
     assert!(register.contains("sec:private:later"), "{register}");
     assert!(!fixture.out.join("private.md").exists());
+}
+
+/// Final-bound omissions still produce audited historical citation snapshots.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a removed public target is resurrected.
+/// ´test:integration:final-bound-omissions-retain-historical-citation-evidence´
+#[test]
+fn final_bound_omissions_retain_historical_citation_evidence() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.source.join("public/target.md"),
+        "# Target · `sec:fixture:retired`\n",
+    )
+    .expect("target");
+    fixture.commit(
+        "public/guide.md",
+        "# Guide · `guide:fixture:public`\n\nSee (`sec:fixture:retired`).\n",
+        "Public reference\n",
+    );
+    let policy = MANIFEST
+        .replace(
+            "{pattern = \"public/\"}",
+            "{pattern = \"public/file.txt\"}, {pattern = \"public/guide.md\"}",
+        )
+        .replace(
+            "[exclude]\nrows = [",
+            "[exclude]\nrows = [{pattern = \"public/target.md\", reason = \"Retired.\"}, ",
+        );
+    fs::write(
+        fixture.source.join("public/guide.md"),
+        "# Guide · `guide:fixture:public`\n",
+    )
+    .expect("clean final guide");
+    fixture.commit("public-set.toml", &policy, "Retire target and reference\n");
+    let result = report(fixture.replay(&fixture.out).output().expect("replay"));
+    let first = result["mapping"][0]["public_commit"]
+        .as_str()
+        .expect("first");
+    assert_eq!(
+        line(
+            &fixture.out,
+            &["ls-tree", "--name-only", first, "--", "public/target.md"]
+        ),
+        ""
+    );
+    assert!(
+        line(
+            &fixture.out,
+            &[
+                "show",
+                &format!("{first}:docs/public/unpublished-labels.toml")
+            ]
+        )
+        .contains("sec:fixture:retired")
+    );
+    assert!(
+        !fs::read_to_string(fixture.out.join("docs/public/unpublished-labels.toml"))
+            .expect("final snapshot")
+            .contains("sec:fixture:retired")
+    );
 }
 
 fn declare_linter(source: &Path) {
