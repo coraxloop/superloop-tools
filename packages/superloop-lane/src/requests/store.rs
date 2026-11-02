@@ -15,6 +15,7 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -55,6 +56,26 @@ pub(crate) const LOOP_CAP_REMEDY: &str = "retire LOOP RUN for a finished run to 
 static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 type RunSnapshot = (Option<Vec<u8>>, u64, Vec<RequestRecord>);
 
+// Diagnostic only: flock remains authoritative. Other processes and shared
+// readers have an unknown holder; never infer an identity from stale disk data.
+static LOCK_HOLDERS: Mutex<BTreeMap<(u64, u64), String>> = Mutex::new(BTreeMap::new());
+
+#[derive(Debug)]
+pub(crate) struct StoreLock {
+    _file: File,
+    holder: Option<(u64, u64)>,
+}
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        if let Some(key) = self.holder
+            && let Ok(mut holders) = LOCK_HOLDERS.lock()
+        {
+            holders.remove(&key);
+        }
+    }
+}
+
 pub(super) enum ReadFailure {
     Contended(LaneError),
     Other(LaneError),
@@ -84,11 +105,10 @@ fn problem(kind: &'static str, detail: impl Into<String>) -> LaneError {
 
 pub(crate) fn is_lock_contention(error: &LaneError) -> bool {
     error.kind == "requests-record-refusal"
-        && error.detail
-            == format!(
-                "request lock: {}",
-                std::io::Error::from_raw_os_error(libc::EAGAIN)
-            )
+        && error.detail.starts_with(&format!(
+            "request lock: {}",
+            std::io::Error::from_raw_os_error(libc::EAGAIN)
+        ))
 }
 
 fn open_child(
@@ -225,8 +245,9 @@ pub(super) fn replace_leaf(
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static WRITER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static READER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
-    static BEFORE_LEAF_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static BEFORE_LEAF_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static FAIL_SHAPE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_MODE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FILE_CAP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
@@ -245,6 +266,7 @@ thread_local! {
     static AFTER_READER_LOCK_ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_CONTENTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static AFTER_WRITER_LOCK_TIMEOUT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static STRETCH_SHARED_HOLD: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
@@ -455,9 +477,41 @@ pub struct Store {
     registry_digest: String,
     reader_deadline: Option<Instant>,
     reader_budget: Option<Duration>,
+    writer_deadline: Option<Instant>,
+    request_id: Option<String>,
 }
 
 impl Store {
+    /// Pin a request's store view with one deadline for all of its lock waits.
+    pub(crate) fn for_request(&self, deadline: Instant) -> Result<Self, LaneError> {
+        Ok(Self {
+            runs: self
+                .runs
+                .try_clone()
+                .map_err(|error| problem("requests-record-refusal", error.to_string()))?,
+            state: self
+                .state
+                .try_clone()
+                .map_err(|error| problem("requests-record-refusal", error.to_string()))?,
+            owner: self.owner,
+            loop_uid: self.loop_uid,
+            loop_name: self.loop_name.clone(),
+            floor: self.floor,
+            state_path: self.state_path.clone(),
+            loop_root: self.loop_root.clone(),
+            registry_digest: self.registry_digest.clone(),
+            reader_deadline: Some(deadline),
+            reader_budget: None,
+            writer_deadline: Some(deadline),
+            request_id: None,
+        })
+    }
+
+    pub(crate) fn with_request_id(mut self, id: &str) -> Self {
+        self.request_id = Some(id.to_owned());
+        self
+    }
+
     /// Retry only shared-lock contention until this caller's absolute deadline.
     /// Record validation errors and writer acquisition retain their own rules.
     pub(crate) const fn with_reader_deadline(mut self, deadline: Instant) -> Self {
@@ -536,6 +590,8 @@ impl Store {
         Ok(Self {
             reader_deadline: None,
             reader_budget: None,
+            writer_deadline: None,
+            request_id: None,
             runs,
             state,
             owner,
@@ -567,7 +623,7 @@ impl Store {
         run: &str,
         runs: &impl AsFd,
         dry_run: bool,
-    ) -> Result<Option<File>, LaneError> {
+    ) -> Result<Option<StoreLock>, LaneError> {
         let held =
             fstat(runs).map_err(|error| problem("requests-record-refusal", error.to_string()))?;
         let opened = fstat(&self.runs)
@@ -993,16 +1049,28 @@ impl Store {
         Ok(report)
     }
 
-    fn lock_inner(&self, changing: bool) -> Result<File, ReadFailure> {
-        self.lock_retry(changing, self.read_deadline())
+    fn lock_inner(&self, changing: bool) -> Result<StoreLock, ReadFailure> {
+        self.lock_retry(
+            changing,
+            if changing {
+                self.writer_deadline
+            } else {
+                self.read_deadline()
+            },
+        )
     }
 
-    fn lock_retry(&self, changing: bool, deadline: Option<Instant>) -> Result<File, ReadFailure> {
+    fn lock_retry(
+        &self,
+        changing: bool,
+        deadline: Option<Instant>,
+    ) -> Result<StoreLock, ReadFailure> {
+        let started = Instant::now();
         loop {
             let result = self.lock_attempt(changing, deadline);
             match result {
                 Err(ReadFailure::Contended(_))
-                    if !changing && deadline.is_some_and(|end| Instant::now() < end) =>
+                    if deadline.is_some_and(|end| Instant::now() < end) =>
                 {
                     // Yield between bounded acquisitions just as wait callers do.
                     std::thread::sleep(
@@ -1012,6 +1080,15 @@ impl Store {
                                 .saturating_duration_since(Instant::now()),
                         ),
                     );
+                }
+                Err(ReadFailure::Contended(mut error)) => {
+                    use std::fmt::Write as _;
+                    let _written = write!(
+                        error.detail,
+                        "; total_wait_seconds={:.3}",
+                        started.elapsed().as_secs_f64()
+                    );
+                    return Err(ReadFailure::Contended(error));
                 }
                 result => return result,
             }
@@ -1023,7 +1100,7 @@ impl Store {
         &self,
         changing: bool,
         caller_deadline: Option<Instant>,
-    ) -> Result<File, ReadFailure> {
+    ) -> Result<StoreLock, ReadFailure> {
         let state = self.state_dir();
         let flags = if changing {
             OFlag::O_RDWR
@@ -1111,18 +1188,36 @@ impl Store {
         #[cfg(test)]
         let reader_wait =
             READER_LOCK_WAIT_OVERRIDE.with(|bound| bound.get().unwrap_or(reader_wait));
-        let mut deadline = Instant::now()
-            + if changing {
-                WRITER_LOCK_WAIT
-            } else {
-                reader_wait
-            };
-        if !changing && let Some(caller_deadline) = caller_deadline {
+        let writer_wait = WRITER_LOCK_WAIT;
+        #[cfg(test)]
+        let writer_wait =
+            WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.get().unwrap_or(writer_wait));
+        let started = Instant::now();
+        let mut contended = false;
+        let mut holder = None;
+        let key = (stat.st_dev, stat.st_ino);
+        let mut deadline = started + if changing { writer_wait } else { reader_wait };
+        if let Some(caller_deadline) = caller_deadline {
             deadline = deadline.min(caller_deadline);
         }
         loop {
             // SAFETY: flock receives a live file descriptor and a fixed operation.
             if unsafe { libc::flock(fd.as_raw_fd(), operation) } == 0 {
+                if contended {
+                    self.log_lock_wait(changing, started, "acquired", holder.as_deref());
+                }
+                let holder_key = if changing && let Some(id) = &self.request_id {
+                    if let Ok(mut holders) = LOCK_HOLDERS.lock() {
+                        holders.insert(key, id.clone());
+                    }
+                    Some(key)
+                } else {
+                    None
+                };
+                let guard = StoreLock {
+                    _file: File::from(fd),
+                    holder: holder_key,
+                };
                 #[cfg(test)]
                 if changing {
                     AFTER_WRITER_LOCK_ACQUIRED.with(|hook| {
@@ -1135,9 +1230,16 @@ impl Store {
                 if !changing {
                     after_reader_lock_acquired();
                 }
-                break;
+                return Ok(guard);
             }
             let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                contended = true;
+                holder = LOCK_HOLDERS
+                    .lock()
+                    .ok()
+                    .and_then(|holders| holders.get(&key).cloned());
+            }
             #[cfg(test)]
             if !changing && error.kind() == std::io::ErrorKind::WouldBlock {
                 after_reader_lock_contention();
@@ -1160,18 +1262,47 @@ impl Store {
                 );
                 continue;
             }
-            let refusal = problem("requests-record-refusal", format!("request lock: {error}"));
-            if !changing && error.kind() == std::io::ErrorKind::WouldBlock {
+            let refusal = problem(
+                "requests-record-refusal",
+                format!(
+                    "request lock: {error}; wait_seconds={:.3}; holder_request_id={}",
+                    started.elapsed().as_secs_f64(),
+                    holder.as_deref().unwrap_or("unknown")
+                ),
+            );
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                self.log_lock_wait(changing, started, "timeout", holder.as_deref());
                 #[cfg(test)]
-                after_reader_lock_timeout();
+                if changing {
+                    AFTER_WRITER_LOCK_TIMEOUT.with(|hook| {
+                        if let Some(action) = hook.borrow_mut().take() {
+                            action();
+                        }
+                    });
+                }
+                #[cfg(test)]
+                if !changing {
+                    after_reader_lock_timeout();
+                }
                 return Err(ReadFailure::Contended(refusal));
             }
             return Err(ReadFailure::Other(refusal));
         }
-        Ok(File::from(fd))
     }
 
-    fn lock(&self, changing: bool) -> Result<File, LaneError> {
+    fn log_lock_wait(&self, changing: bool, started: Instant, outcome: &str, holder: Option<&str>) {
+        let _logged = writeln!(
+            std::io::stderr().lock(),
+            "door-request-lock {}",
+            json!({
+                "loop":self.loop_name,"request_id":self.request_id,"lock":LOCK_FILE,
+                "operation":if changing {"write"} else {"read"},"outcome":outcome,
+                "wait_seconds":started.elapsed().as_secs_f64(),"holder_request_id":holder
+            })
+        );
+    }
+
+    fn lock(&self, changing: bool) -> Result<StoreLock, LaneError> {
         self.lock_inner(changing).map_err(ReadFailure::into_error)
     }
 
@@ -2048,7 +2179,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub(crate) fn fixture_exclusive_lock(&self) -> Result<File, LaneError> {
+    pub(crate) fn fixture_exclusive_lock(&self) -> Result<StoreLock, LaneError> {
         self.lock(true)
     }
 
@@ -2411,6 +2542,110 @@ pub(crate) mod tests {
 
     pub fn arm_mode_write_failure() {
         FAIL_MODE_WRITE.with(|fail| fail.set(true));
+    }
+
+    /// # Panics
+    /// Panics only if the synchronized fixture fails to preserve both completed effects.
+    /// ´test:unit:request-writers-retry-record-until-request-deadline´
+    #[test]
+    fn request_writers_retry_record_until_request_deadline() {
+        use std::time::{Duration, Instant};
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let first = waiting("R", "1a", 3000, Mode::Audit);
+        let second = waiting("S", "2b", 3001, Mode::Audit);
+        let mut effect = first.value()["effect"].clone();
+        effect["state"] = json!("completed");
+        effect["reason"] = json!("door-complete");
+        effect["exit_status"] = json!(0);
+        effect["ref_check"] = json!("not-applicable");
+        store.file(first).expect("first reservation");
+        store.file(second).expect("second reservation");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let first = store
+            .for_request(deadline)
+            .expect("first view")
+            .with_request_id("R:1a");
+        let second = store
+            .for_request(deadline)
+            .expect("second view")
+            .with_request_id("S:2b");
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let effect = &effect;
+            let first = scope.spawn(move || {
+                super::BEFORE_LEAF_SYNC.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        held_tx.send(()).expect("first syncing");
+                        release_rx
+                            .recv_timeout(Duration::from_secs(4))
+                            .expect("second exhausted one wait");
+                    }));
+                });
+                first
+                    .record_effect("R:1a", effect.clone())
+                    .expect("first completed")
+            });
+            held_rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("first holds record lock");
+            super::WRITER_LOCK_WAIT_OVERRIDE
+                .with(|bound| bound.set(Some(Duration::from_millis(20))));
+            super::AFTER_WRITER_LOCK_TIMEOUT.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    release_tx.send(()).expect("release first after timeout");
+                }));
+            });
+            second
+                .record_effect("S:2b", effect.clone())
+                .expect("retry preserves second completed effect");
+            super::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(None));
+            first.join().expect("first writer");
+        });
+        for id in ["R:1a", "S:2b"] {
+            assert_eq!(
+                store.request(id).expect("durable effect").value()["effect"],
+                effect
+            );
+        }
+    }
+
+    /// # Panics
+    /// Panics only if contention ignores the request deadline or masks a different refusal.
+    /// ´test:unit:request-writer-deadline-names-lock-wait-and-holder´
+    #[test]
+    fn request_writer_deadline_names_lock_wait_and_holder() {
+        use std::time::{Duration, Instant};
+        let fixture = Fixture::new();
+        let store = fixture.store().with_request_id("R:holder");
+        let held = store.fixture_exclusive_lock().expect("holder");
+        let started = Instant::now();
+        let waiter = store
+            .for_request(started + Duration::from_millis(30))
+            .expect("waiter");
+        for fd in [&waiter.runs, &waiter.state] {
+            let flags =
+                nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFD).expect("descriptor flags");
+            assert_ne!(
+                flags & libc::FD_CLOEXEC,
+                0,
+                "request custody must not reach spawned commands"
+            );
+        }
+        let error = waiter.ensure_first_mode("ssh").expect_err("deadline");
+        assert!(super::is_lock_contention(&error));
+        assert!(error.detail.contains("wait_seconds="));
+        assert!(error.detail.contains("holder_request_id=R:holder"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(held);
+        store
+            .ensure_first_mode("ssh")
+            .expect("record after holder release");
+        assert!(!super::is_lock_contention(&crate::error::LaneError::input(
+            "requests-record-refusal",
+            "request lock owner or mode differs"
+        )));
     }
 
     /// ´test:unit:agent-merge-preserves-effect-and-supervisory-label´

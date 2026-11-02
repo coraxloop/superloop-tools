@@ -55,11 +55,16 @@ pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Opt
         )
     {
         Some(format!(
-            "{reason} check={reason} mediation_wall={}s",
-            reply["mediation_wall_seconds"]
+            "{reason} check={reason} mediation_wall={}s{}",
+            reply["mediation_wall_seconds"],
+            reply["request_record_error"]
+                .as_str()
+                .map_or_else(String::new, |cause| format!(": {cause}"))
         ))
     } else if reason == "door-request-concurrent" {
         Some(format!("{reason}: {ADMISSION_WINDOW}"))
+    } else if let Some(cause) = reply["request_record_error"].as_str() {
+        Some(format!("{reason}: {cause}"))
     } else if reason != "door-complete" {
         Some(reason.to_owned())
     } else {
@@ -840,6 +845,25 @@ fn preflight_refusal(
         let store = fixture_store
             .or(opened.as_ref())
             .ok_or_else(|| io::Error::other("door store is absent"))?;
+        let maximum = if transport::argument_bytes(request)
+            .as_deref()
+            .is_some_and(compute::candidate)
+        {
+            compute::DEADLINE_MS
+        } else {
+            120_000
+        };
+        let store = store
+            .for_request(
+                started
+                    + Duration::from_millis(
+                        request["deadline_ms"]
+                            .as_u64()
+                            .unwrap_or(maximum)
+                            .min(maximum),
+                    ),
+            )
+            .map_err(io::Error::other)?;
         let setting = store
             .ensure_first_mode("preflight")
             .map_err(io::Error::other)?;
@@ -861,7 +885,10 @@ fn preflight_refusal(
         value["effect"]["preflight"] = json!({"check":reason,"words":request["argv"]});
         let record = RequestRecord::decode(value).map_err(io::Error::other)?;
         let id = record.id().to_owned();
-        store.file(record).map_err(io::Error::other)?;
+        store
+            .with_request_id(&id)
+            .file(record)
+            .map_err(io::Error::other)?;
         Ok(id)
     };
     match file() {
@@ -1125,6 +1152,7 @@ fn serve_request_with_agent(
     let store = fixture_store
         .or(opened.as_ref())
         .ok_or_else(|| io::Error::other("door store is absent"))?;
+    let store = store.for_request(deadline).map_err(io::Error::other)?;
     let default_class = if compute_candidate { "compute" } else { "ssh" };
     let default_rubric = Rubric::decode(&json!({"schema":1,"class":default_class,
         "undecided_reason":"no registered rule for this operation","rules":[]}))
@@ -1219,6 +1247,7 @@ fn serve_request_with_agent(
     value["matched_rule"] = matched_rule;
     let record = RequestRecord::decode(value).map_err(io::Error::other)?;
     let id = record.id().to_owned();
+    let store = store.with_request_id(&id);
     let binding_source = record.value().clone();
     if let Err(error) = store.file(record) {
         let _logged = writeln!(io::stderr().lock(), "door request file: {}", error.line());
@@ -1234,7 +1263,8 @@ fn serve_request_with_agent(
         } else {
             "door-request-record-refusal".to_owned()
         };
-        let reply = transport::refusal(registration, peer, &reason, started);
+        let mut reply = transport::refusal(registration, peer, &reason, started);
+        reply["request_record_error"] = json!(error.line());
         frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
     }
@@ -1263,6 +1293,7 @@ fn serve_request_with_agent(
             let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
             let mut reply =
                 transport::refusal(registration, peer, "door-request-record-refusal", started);
+            reply["request_record_error"] = json!(error.line());
             reply["request_id"] = json!(id);
             frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             return Ok((reply, Vec::new()));
@@ -1282,6 +1313,7 @@ fn serve_request_with_agent(
         if let Err(error) = result {
             let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
             reply["reason"] = json!("door-record-incomplete");
+            reply["request_record_error"] = json!(error.line());
         }
         frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
@@ -1373,7 +1405,7 @@ fn serve_request_with_agent(
         }
         return result.map(|reply| (reply, Vec::new()));
     }
-    let answer = wait_answer(store, &id, stream, deadline);
+    let answer = wait_answer(&store, &id, stream, deadline);
     match answer {
         Answer::Allow(wall) => {
             let complete = |reply: &Value| {
@@ -1435,6 +1467,7 @@ fn serve_request_with_agent(
             if let Err(error) = store.record_effect(&id, effect_from_final(&reply)) {
                 let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
                 reply["reason"] = json!("door-record-incomplete");
+                reply["request_record_error"] = json!(error.line());
             }
             if !disconnected {
                 frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
@@ -2020,14 +2053,7 @@ fn run_service_with_snapshot(
             })();
             if let Err(error) = result {
                 let _logged = writeln!(io::stderr().lock(), "door connection: {error}");
-                let _sent = frame_write(
-                    &mut stream,
-                    &json!({"schema":2,"type":"final","status":125,
-                    "reason":"door-request-refusal","ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
-                    "queue_state":"no-queue","queue_wall_seconds":null,"compute_exit_status":null,
-                    "mediation_wall_seconds":started.elapsed().as_secs_f64(),
-                    "compute_wall_seconds":0.0}),
-                );
+                let _sent = frame_write(&mut stream, &connection_refusal(&error, started));
             }
         });
     }
@@ -2039,6 +2065,14 @@ fn run_service_with_snapshot(
         return Err(LaneError::operation("door-socket", "socket changed type"));
     }
     Ok(())
+}
+
+fn connection_refusal(error: &io::Error, started: Instant) -> Value {
+    json!({"schema":2,"type":"final","status":125,
+        "reason":"door-request-refusal","ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
+        "queue_state":"no-queue","queue_wall_seconds":null,"compute_exit_status":null,
+        "mediation_wall_seconds":started.elapsed().as_secs_f64(),"compute_wall_seconds":0.0,
+        "request_record_error":error.to_string()})
 }
 
 /// Send exact argument bytes to the registered socket and return its typed status.
@@ -3935,6 +3969,177 @@ mod tests {
                 )
                 .expect("fixture mode");
         }
+    }
+
+    /// # Panics
+    /// Panics only if concurrent records lose a completed command or execute it twice.
+    /// ´test:unit:door-completed-command-outlasts-sibling-record-wait´
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn door_completed_command_outlasts_sibling_record_wait() {
+        use crate::requests::store::{
+            AFTER_WRITER_LOCK_TIMEOUT, BEFORE_LEAF_SYNC, WRITER_LOCK_WAIT_OVERRIDE,
+        };
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        set_fixture_mode(&store, Mode::Allow);
+        let sibling = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "S",
+            3001,
+            Scope::Work,
+        )
+        .expect("sibling registration");
+        let sibling = super::request_record(
+            &sibling,
+            "ssh",
+            Operation::ProbeEcho,
+            &store.effective_mode("ssh").expect("settings"),
+            &json!({"decision":"allow","reason":"fixture sibling"}),
+            false,
+            &[],
+        )
+        .expect("sibling reservation");
+        let sibling_id = sibling.id().to_owned();
+        let mut effect = sibling.value()["effect"].clone();
+        effect["state"] = json!("completed");
+        effect["reason"] = json!("door-complete");
+        effect["exit_status"] = json!(0);
+        effect["ref_check"] = json!("not-applicable");
+        store.file(sibling).expect("sibling admitted");
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        super::REQUEST_READY.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(Some(Duration::from_millis(20))));
+                AFTER_WRITER_LOCK_TIMEOUT.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        release_tx.send(()).expect("record wait expired once");
+                    }));
+                });
+                Ok(Instant::now() + Duration::from_secs(5))
+            }));
+        });
+        let (runner, calls, _) = counting_runner(&fixture);
+        let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 5000, None);
+        let mut client = UnixStream::connect(socket).expect("second connection");
+        frame_write(
+            &mut client,
+            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":5000}),
+        )
+        .expect("second request");
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while calls.load(Ordering::Relaxed) == 0 {
+            assert!(Instant::now() < deadline, "second command never started");
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Seeing stdout proves spawn's custody read has finished; the child
+        // stays live on stdin while the sibling takes the record lock.
+        client.write_all(b"x").expect("running command input");
+        assert_eq!(
+            frame_read(&mut client).expect("running command output")["type"],
+            "stdout"
+        );
+        let sibling_store = store
+            .for_request(deadline)
+            .expect("sibling view")
+            .with_request_id(&sibling_id);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        thread::scope(|scope| {
+            let sibling_id = &sibling_id;
+            let writer = scope.spawn(move || {
+                BEFORE_LEAF_SYNC.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        held_tx.send(()).expect("sibling syncing");
+                        release_rx
+                            .recv_timeout(Duration::from_secs(4))
+                            .expect("second record retried");
+                    }));
+                });
+                sibling_store
+                    .record_effect(sibling_id, effect)
+                    .expect("sibling complete")
+            });
+            held_rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("sibling holds lock");
+            client
+                .shutdown(Shutdown::Write)
+                .expect("second command finishes");
+            let reply = frame_read(&mut client).expect("second final frame");
+            assert_eq!(reply["reason"], "door-complete");
+            assert_eq!(reply["status"], 0);
+            writer.join().expect("sibling writer");
+        });
+        server
+            .join()
+            .expect("service thread")
+            .expect("second complete");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let records = store.list().expect("both records").0;
+        assert_eq!(records.len(), 2);
+        for record in records {
+            assert_eq!(record.value()["effect"]["state"], "completed");
+            assert_eq!(record.value()["effect"]["exit_status"], 0);
+        }
+    }
+
+    /// # Panics
+    /// Panics only if a store contention refusal loses its cause at the worker boundary.
+    /// ´test:unit:door-admission-lock-refusal-retains-worker-cause´
+    #[test]
+    fn door_admission_lock_refusal_retains_worker_cause() {
+        let fixture = Fixture::new();
+        let store = fixture.store().with_request_id("S:holder");
+        let route = route_for(&fixture.home);
+        let (runner, calls, _) = counting_runner(&fixture);
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("registration");
+        let held = store.fixture_exclusive_lock().expect("sibling holder");
+        let (mut server, mut worker) = UnixStream::pair().expect("worker connection");
+        let started = Instant::now();
+        let error = serve_request(
+            &mut server,
+            &registration,
+            3000,
+            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":30}),
+            Some(&route),
+            Some(&runner),
+            Some(&fixture.home),
+            Some(&rubric(Some("allow"))),
+            Some(&store),
+            started,
+        )
+        .expect_err("admission lock deadline");
+        let reply = super::connection_refusal(&error, started);
+        frame_write(&mut server, &reply).expect("production connection refusal");
+        let reply = frame_read(&mut worker).expect("worker final frame");
+        assert_eq!(reply["reason"], "door-request-refusal");
+        let line = super::final_line(&["fixture".into(), "git status --short".into()], &reply)
+            .expect("worker diagnostic");
+        assert!(line.contains("request lock:"), "{line}");
+        assert!(line.contains("wait_seconds="), "{line}");
+        assert!(line.contains("holder_request_id=S:holder"), "{line}");
+        let mut preflight = reply;
+        preflight["reason"] = json!("door-compute-words-refusal");
+        let line = super::final_line(&["fixture".into(), "cargo check".into()], &preflight)
+            .expect("preflight diagnostic");
+        assert!(line.contains("holder_request_id=S:holder"), "{line}");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        drop(held);
+        assert!(
+            store
+                .list_run("R")
+                .expect("no execution or reservation")
+                .is_empty()
+        );
     }
 
     fn fixture_class_call(
