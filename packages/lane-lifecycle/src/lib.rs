@@ -5221,6 +5221,13 @@ mod tests {
         fs::write(&letter, vec![b'x'; 1_048_577]).expect("oversized letter");
         assert!(parse_arguments(&arguments).is_none());
         fs::write(&letter, b"letter").expect("valid letter");
+        let config = parse_arguments(&arguments).expect("single valid letter parses");
+        super::prepare_fresh(&config, b"pointer\n", &fixture.0).expect("save valid letter");
+        assert_eq!(
+            fs::read(fixture.0.join(format!("step-{}.txt", config.name)))
+                .expect("saved valid letter"),
+            b"letter"
+        );
         arguments.splice(
             4..4,
             [OsString::from("--step-letter"), letter.into_os_string()],

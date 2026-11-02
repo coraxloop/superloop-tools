@@ -1606,6 +1606,54 @@ fn model_capacity_retries_and_records_each_attempt_before_success() {
 }
 
 /// # Panics
+/// Panics only if the launcher option order loses the letter or pointer input.
+/// ´test:integration:launcher-option-order-saves-threadless-and-resumed-letters´
+#[test]
+fn launcher_option_order_saves_threadless_and_resumed_letters() {
+    for resumed in [false, true] {
+        let harness = Harness::new("launcher-letter");
+        let run_dir = if resumed {
+            harness.seed_resume("prior", b"0\n")
+        } else {
+            harness.run_dir("review")
+        };
+        let letter = harness.root().join("review.md");
+        fs::create_dir_all(run_dir.parent().expect("round parent")).expect("runs directory");
+        let body = b"The complete review letter.\n\nRetain its bytes.\n";
+        fs::write(&letter, body).expect("letter");
+        let mut command = if resumed {
+            harness.resume_command()
+        } else {
+            harness.command()
+        };
+        command.args(["-t", "900", "-n", "review", "-C"]);
+        command.arg(harness.root()).args(["-s", "workspace-write"]);
+        if resumed {
+            command.args(["-r", "session-1"]);
+        }
+        command.arg("-d").arg(&run_dir);
+        if resumed {
+            command.args(["-m", "gpt-6-sol", "-e", "high"]);
+        }
+        let result = command
+            .arg("--step-letter")
+            .arg(&letter)
+            .arg("Read /home/worker/.local/inbox/review.md.")
+            .output_serialized()
+            .expect("driver launch");
+        assert_eq!(result.status.code(), Some(0), "{result:?}");
+        assert_eq!(
+            fs::read(run_dir.join("step-review.txt")).expect("letter"),
+            body
+        );
+        assert_eq!(
+            harness.read("stdin"),
+            b"Read /home/worker/.local/inbox/review.md.\n"
+        );
+    }
+}
+
+/// # Panics
 /// Panics only if fixture setup fails or the asserted retry contract is violated.
 /// ´test:integration:model-capacity-stops-at-the-fourth-attempt´
 #[test]

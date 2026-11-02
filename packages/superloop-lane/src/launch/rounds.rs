@@ -1431,7 +1431,7 @@ mod tests {
     use std::fs;
     use std::io::Write as _;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn client_environment_fixture() -> (tempfile::TempDir, Plan) {
         let fixture = tempfile::tempdir().expect("fixture");
@@ -1777,6 +1777,54 @@ mod tests {
         assert_eq!(
             prior_round_dir(&second).expect("second round source"),
             PathBuf::from("/runs/R/20261007T093830Z-dispatch")
+        );
+    }
+
+    /// ´test:unit:threadless-round-vector-carries-step-letter´
+    #[test]
+    fn threadless_round_vector_carries_step_letter() {
+        let plan = Plan {
+            home: PathBuf::from("/home/worker"),
+            driver_dir: PathBuf::from("/runs/R"),
+            letter: PathBuf::new(),
+            document: json!({}),
+        };
+        let words = entry_argv_round(
+            Path::new("/bin/driver"),
+            &plan,
+            "alpha",
+            "R",
+            "review",
+            900,
+            Some(Path::new("/runs/R/fresh-review")),
+            None,
+        )
+        .expect("threadless continuation vector");
+        assert_eq!(
+            words,
+            vec![
+                "driver-launch",
+                "alpha",
+                "R",
+                "--driver-bin",
+                "/bin/driver",
+                "--run-dir",
+                "/runs/R",
+                "--",
+                "-t",
+                "900",
+                "-n",
+                "review",
+                "-C",
+                "/runs/R",
+                "-s",
+                "workspace-write",
+                "-d",
+                "/runs/R/fresh-review",
+                "--step-letter",
+                "/home/worker/.local/inbox/review.md",
+                "Read /home/worker/.local/inbox/review.md."
+            ]
         );
     }
 
