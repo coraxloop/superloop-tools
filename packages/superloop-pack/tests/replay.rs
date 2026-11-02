@@ -234,6 +234,40 @@ impl Fixture {
     }
 }
 
+/// Unparseable public metadata retains an input context and leaves the output untouched.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the refusal context is incorrect.
+/// ´test:integration:public-root-metadata-refusal-context´
+#[test]
+fn public_root_metadata_refusal_context() {
+    let mut fixture = Fixture::new();
+    fixture.commit("public/file.txt", "changed\n", "Public edit\n");
+    let original = git(&fixture.out, &["cat-file", "commit", &fixture.public_root]);
+    let malformed = String::from_utf8(original).expect("commit text").replacen(
+        "\n\n",
+        "\nunsupported metadata\n\n",
+        1,
+    );
+    let input = fixture.scratch.join("commit");
+    fs::write(&input, malformed).expect("malformed commit");
+    fixture.public_root = line(
+        &fixture.out,
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            input.to_str().expect("input"),
+        ],
+    );
+    git(&fixture.out, &["reset", "--hard", &fixture.public_root]);
+    fixture.unchanged_refusal("unsupported commit header");
+    fixture.unchanged_refusal("check=inputs source ordinal=0");
+    fixture.unchanged_refusal("field=public root metadata");
+    fixture.unchanged_refusal(&format!("commit={}", fixture.public_root));
+}
+
 fn report(output: Output) -> serde_json::Value {
     assert!(
         output.status.success(),

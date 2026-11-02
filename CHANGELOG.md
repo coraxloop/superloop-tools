@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Round launches retain the selected letter text beside the pointer brief for both driver backends, including resumed and threadless continuations; retries preserve the pointer input (`rule:workercontracts:letters-and-retention`).
 
+- Replay attributes unparseable public root metadata to its input context before refusing (`req:output:failure-class-naming`).
+
 ## [0.3.1] - 2026-11-02
 
 ### Added
