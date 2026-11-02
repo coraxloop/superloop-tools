@@ -1,6 +1,7 @@
 //! Built-command deployment releases and refusal atomicity.
 
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -582,7 +583,11 @@ impl Drop for SigningHome {
                 .args(args)
                 .status();
             if !result.is_ok_and(|status| status.success()) {
-                eprintln!("fixture GPG cleanup failed for {}", self.0.display());
+                let _diagnostic = writeln!(
+                    std::io::stderr(),
+                    "fixture GPG cleanup failed for {}",
+                    self.0.display()
+                );
             }
         }
     }
