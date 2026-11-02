@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Replay author examples use the same double-quoted identity as cut (`spec:outputspec:command-and-output-contracts`).
 
+- Release refuses conflicting public and Cargo workspace versions, naming both declarations (`rule:commandcontracts:public-release-version-agreement`).
+
 ## [0.3.1] - 2026-11-02
 
 ### Added

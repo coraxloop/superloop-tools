@@ -131,15 +131,28 @@ fn validate_version(
     } else {
         let cargo: toml::Value = toml::from_str(&blob(root, development, Path::new("Cargo.toml"))?)
             .map_err(|error| refuse("version", error.to_string()))?;
-        (
-            cargo
-                .get("workspace")
-                .and_then(|workspace| workspace.get("package"))
-                .and_then(|package| package.get("version"))
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            "Cargo.toml:workspace.package.version".to_owned(),
-        )
+        let version = cargo
+            .get("workspace")
+            .and_then(|workspace| workspace.get("package"))
+            .and_then(|package| package.get("version"))
+            .and_then(toml::Value::as_str);
+        let source = "Cargo.toml:workspace.package.version".to_owned();
+        if let Some(declared) = manifest
+            .get("public")
+            .and_then(|public| public.get("version"))
+            .and_then(toml::Value::as_str)
+            && Some(declared) != version
+        {
+            return Err(refuse(
+                "version-mismatch",
+                format!(
+                    "{}:public.version={declared} differs from {source}={}",
+                    request.manifest.display(),
+                    version.unwrap_or("<missing>"),
+                ),
+            ));
+        }
+        (version.map(str::to_owned), source)
     };
     if version.as_deref() != Some(request.version) {
         return Err(refuse(

@@ -273,7 +273,7 @@ fn documents_version_refusals() {
     }
 }
 
-/// Cargo remains authoritative even when the manifest declares a matching version.
+/// Cargo is authoritative and a declared public version must agree with it.
 ///
 /// # Panics
 /// Panics only if fixture IO or source precedence fails.
@@ -282,15 +282,28 @@ fn documents_version_refusals() {
 fn cargo_version_precedence() {
     let fixture = fixture("0.1.1");
     let root = fixture.path();
+    success(release(root, "0.1.1", &["--check"]));
+    fs::write(
+        root.join("public-set.toml"),
+        "[public]\nname = 'fixture-tools'\nversion = '0.1.1'\n",
+    )
+    .expect("manifest");
+    commit(root, "matching manifest version");
+    let report = success(release(root, "0.1.1", &["--check"]));
+    assert!(report.contains("version_source=\"Cargo.toml:workspace.package.version\""));
     fs::write(
         root.join("public-set.toml"),
         "[public]\nname = 'fixture-tools'\nversion = '0.2.0'\n",
     )
     .expect("manifest");
     commit(root, "different manifest version");
-    success(release(root, "0.1.1", &["--check"]));
-    let report = refusal(root, "0.2.0", &[], "version-mismatch");
-    assert!(report.contains("Cargo.toml:workspace.package.version"));
+    for mode in [vec!["--check"], vec!["--dry-run"], vec![]] {
+        for requested in ["0.1.1", "0.2.0"] {
+            let report = refusal(root, requested, &mode, "version-mismatch");
+            assert!(report.contains("public-set.toml:public.version=0.2.0"));
+            assert!(report.contains("Cargo.toml:workspace.package.version=0.1.1"));
+        }
+    }
     fs::write(root.join("Cargo.toml"), "invalid toml [").expect("invalid cargo");
     commit(root, "malformed cargo");
     refusal(root, "0.2.0", &[], "reason=version ");
