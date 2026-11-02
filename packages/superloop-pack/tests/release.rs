@@ -8,6 +8,9 @@ use std::process::{Command, Output};
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
+        .env("GNUPGHOME", root.join(".git/gnupg"))
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(root)
         .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00+02:00")
         .env("GIT_COMMITTER_DATE", "2000-01-02T00:00:00+02:00")
@@ -36,6 +39,10 @@ fn fixture(version: &str) -> tempfile::TempDir {
     git(root, &["config", "user.name", "Fixture"]);
     git(root, &["config", "user.email", "fixture@example.com"]);
     git(root, &["config", "tag.gpgsign", "false"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+    let home = root.join(".git/gnupg");
+    fs::create_dir(&home).expect("GPG home");
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).expect("GPG home mode");
     fs::write(
         root.join("Cargo.toml"),
         "[workspace.package]\nversion = '0.1.0'\n",
@@ -77,6 +84,9 @@ fn release(root: &Path, version: &str, extra: &[&str]) -> Output {
 
 fn release_unpinned(root: &Path, version: &str, extra: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_superloop-pack"))
+        .env("GNUPGHOME", root.join(".git/gnupg"))
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["release", "--repository"])
         .arg(root)
         .args([
@@ -559,4 +569,159 @@ fn stale_main() {
         &["--expected-main", &main],
         "reason=stale-main",
     );
+}
+
+fn signing_key(root: &Path) -> String {
+    let output = Command::new("gpg")
+        .env("GNUPGHOME", root.join(".git/gnupg"))
+        .args([
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-generate-key",
+            "Release fixture <release@example.com>",
+            "ed25519",
+            "sign",
+            "0",
+        ])
+        .output()
+        .expect("generate throwaway key");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new("gpg")
+        .env("GNUPGHOME", root.join(".git/gnupg"))
+        .args(["--batch", "--with-colons", "--list-secret-keys"])
+        .output()
+        .expect("list throwaway key");
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).expect("key listing");
+    let key = text
+        .lines()
+        .find(|line| line.starts_with("fpr:"))
+        .and_then(|line| line.split(':').nth(9))
+        .expect("fingerprint")
+        .to_owned();
+    git(root, &["config", "user.signingkey", &key]);
+    let signer = root.join(".git/test-signer");
+    fs::write(
+        &signer,
+        "#!/bin/sh\nprintf 'invoked\\n' >> \"$GNUPGHOME/invocations\"\nexec gpg \"$@\"\n",
+    )
+    .expect("signer");
+    fs::set_permissions(&signer, fs::Permissions::from_mode(0o700)).expect("signer mode");
+    git(
+        root,
+        &[
+            "config",
+            "gpg.program",
+            signer.to_str().expect("signer path"),
+        ],
+    );
+    key
+}
+
+/// Each switch independently signs its object with the configured program and key.
+///
+/// # Panics
+/// Panics only if isolated key generation or release verification fails.
+/// ´test:integration:release-signing´
+#[test]
+fn release_signing() {
+    for (commit_signing, tag_signing, signing) in [
+        (true, true, "commit,tag"),
+        (true, false, "commit"),
+        (false, true, "tag"),
+    ] {
+        let fixture = fixture("0.1.1");
+        let root = fixture.path();
+        let key = signing_key(root);
+        git(
+            root,
+            &["config", "commit.gpgsign", &commit_signing.to_string()],
+        );
+        git(root, &["config", "tag.gpgsign", &tag_signing.to_string()]);
+        let before = snapshot(root);
+        for mode in ["--check", "--dry-run"] {
+            let preview = success(release(root, "0.1.1", &[mode]));
+            assert!(preview.contains(&format!("signing={signing} signing_key=null")));
+            assert_eq!(snapshot(root), before);
+            assert!(!root.join(".git/gnupg/invocations").exists());
+        }
+        let report = success(release(root, "0.1.1", &[]));
+        assert!(report.contains(&format!("signing={signing} signing_key=\"{key}\"")));
+        assert!(report.contains(&format!("R={} ", git(root, &["rev-parse", "main"]))));
+        assert!(report.contains(&format!(
+            "tag_object={} ",
+            git(root, &["rev-parse", "v0.1.1"])
+        )));
+        assert_eq!(
+            git(root, &["rev-parse", "main"]),
+            git(root, &["rev-parse", "development"])
+        );
+        assert_eq!(
+            git(root, &["rev-parse", "main"]),
+            git(root, &["rev-parse", &format!("{}^{{commit}}", "v0.1.1")])
+        );
+        let commit = git(root, &["cat-file", "commit", "main"]);
+        let tag = git(root, &["cat-file", "tag", "v0.1.1"]);
+        assert_eq!(
+            commit.contains("\ngpgsig -----BEGIN PGP SIGNATURE-----"),
+            commit_signing
+        );
+        assert_eq!(tag.contains("\n-----BEGIN PGP SIGNATURE-----"), tag_signing);
+        let calls = fs::read_to_string(root.join(".git/gnupg/invocations")).expect("signer calls");
+        assert_eq!(
+            calls.lines().count(),
+            usize::from(commit_signing) + usize::from(tag_signing)
+        );
+        if commit_signing {
+            git(root, &["verify-commit", "main"]);
+        }
+        if tag_signing {
+            git(root, &["verify-tag", "v0.1.1"]);
+        }
+        assert!(
+            Command::new("gpgconf")
+                .env("GNUPGHOME", root.join(".git/gnupg"))
+                .args(["--kill", "gpg-agent"])
+                .status()
+                .expect("stop fixture agent")
+                .success()
+        );
+    }
+}
+
+/// Signer failure, including empty successful output, never promotes objects or refs.
+///
+/// # Panics
+/// Panics only if fixture setup or refusal atomicity fails.
+/// ´test:integration:release-signing-failure´
+#[test]
+fn release_signing_failure() {
+    for switch in ["commit.gpgsign", "tag.gpgsign"] {
+        for status in ["0", "1"] {
+            let fixture = fixture("0.1.1");
+            let root = fixture.path();
+            git(root, &["config", switch, "true"]);
+            git(root, &["config", "user.signingkey", "fixture-only"]);
+            let signer = root.join(".git/failing-signer");
+            fs::write(&signer, format!("#!/bin/sh\nexit {status}\n")).expect("failing signer");
+            fs::set_permissions(&signer, fs::Permissions::from_mode(0o700)).expect("signer mode");
+            git(
+                root,
+                &[
+                    "config",
+                    "gpg.program",
+                    signer.to_str().expect("signer path"),
+                ],
+            );
+            success(release(root, "0.1.1", &["--check"]));
+            refusal(root, "0.1.1", &[], "reason=git");
+        }
+    }
 }

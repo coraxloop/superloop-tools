@@ -1,4 +1,4 @@
-//! Local, unsigned deployment release with an expected-old three-ref transaction.
+//! Local deployment release with an expected-old three-ref transaction.
 
 use std::io::{self, BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ pub struct ReleaseRequest<'a> {
     pub check: bool,
 }
 
-/// Reproducible object identities and the complete transport allowlist.
+/// Preview or final object identities and the complete transport allowlist.
 #[derive(Debug)]
 pub struct ReleaseReport {
     pub main: String,
@@ -29,6 +29,8 @@ pub struct ReleaseReport {
     pub commit: String,
     pub tree: String,
     pub tag_object: String,
+    pub signing: &'static str,
+    pub signing_key: Option<String>,
     pub title: String,
     pub body_bytes: usize,
     pub version_source: String,
@@ -185,6 +187,49 @@ fn hash(root: &Path, kind: &str, bytes: &[u8]) -> Result<String, ReleaseError> {
     crate::one_line(&output).ok_or_else(|| refuse("object", "invalid object identity"))
 }
 
+/// Read Git's boolean switches without treating malformed configuration as disabled.
+fn signing_enabled(root: &Path, key: &str) -> Result<bool, ReleaseError> {
+    let output = command(root)
+        .args(["config", "--bool", "--get", key])
+        .output()?;
+    match output.status.code() {
+        Some(0) => Ok(output.stdout == b"true\n"),
+        Some(1) => Ok(false),
+        _ => Err(refuse(
+            "signing-config",
+            String::from_utf8_lossy(&output.stderr),
+        )),
+    }
+}
+
+/// Snapshot Git's effective signing configuration for the private tag repository.
+fn signing_config(root: &Path) -> Result<Vec<String>, ReleaseError> {
+    let output = command(root)
+        .args([
+            "config",
+            "--null",
+            "--get-regexp",
+            r"^(gpg\.|user\.signingkey$)",
+        ])
+        .output()?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(refuse(
+            "signing-config",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|error| refuse("signing-config", error.to_string()))?;
+    text.split_terminator('\0')
+        .map(|entry| {
+            let (key, value) = entry
+                .split_once('\n')
+                .ok_or_else(|| refuse("signing-config", "invalid Git configuration response"))?;
+            Ok(format!("{key}={value}"))
+        })
+        .collect()
+}
+
 fn check_expected(
     actual: &str,
     expected: Option<&str>,
@@ -249,12 +294,22 @@ pub fn release(request: ReleaseRequest<'_>) -> Result<ReleaseReport, ReleaseErro
     let commit = hash(root, "commit", commit_bytes.as_bytes())?;
     let tag_bytes = format!("object {commit}\ntype commit\ntag {tag}\ntagger {ident}\n\n{message}");
     let tag_object = hash(root, "tag", tag_bytes.as_bytes())?;
-    let report = ReleaseReport {
+    let sign_commit = signing_enabled(root, "commit.gpgsign")?;
+    let sign_tag = signing_enabled(root, "tag.gpgsign")?;
+    let signing = match (sign_commit, sign_tag) {
+        (false, false) => "none",
+        (true, false) => "commit",
+        (false, true) => "tag",
+        (true, true) => "commit,tag",
+    };
+    let mut report = ReleaseReport {
         main,
         development,
         commit,
         tree,
         tag_object,
+        signing,
+        signing_key: None,
         title: title.to_owned(),
         body_bytes: body.len(),
         version_source,
@@ -272,7 +327,7 @@ pub fn release(request: ReleaseRequest<'_>) -> Result<ReleaseReport, ReleaseErro
         },
     };
     if !request.check && !request.dry_run {
-        apply(root, &report, &subject, &ident, &tag_bytes)?;
+        apply(root, &mut report, &subject, &ident, &message)?;
     }
     Ok(report)
 }
@@ -358,10 +413,10 @@ fn staged_command(root: &Path, objects: &Path, original: &Path) -> Command {
 
 fn apply(
     root: &Path,
-    report: &ReleaseReport,
+    report: &mut ReleaseReport,
     subject: &str,
     ident: &str,
-    tag_bytes: &str,
+    message: &str,
 ) -> Result<(), ReleaseError> {
     let original = PathBuf::from(line(
         root,
@@ -373,59 +428,150 @@ fn apply(
         ],
     )?);
     let stage = tempfile::tempdir()?;
-    let objects = stage.path();
+    let format = line(root, &["rev-parse", "--show-object-format"])?;
+    run(
+        command(root)
+            .args([
+                "init",
+                "--bare",
+                "--quiet",
+                &format!("--object-format={format}"),
+            ])
+            .arg(stage.path()),
+        None,
+    )?;
+    let objects = stage.path().join("objects");
     write_objects(
-        || staged_command(root, objects, &original),
+        root,
+        stage.path(),
+        &original,
         report,
         subject,
         ident,
-        tag_bytes,
+        message,
     )?;
-    commit_refs(root, report, objects, &original, || {
-        write_objects(|| command(root), report, subject, ident, tag_bytes)
+    commit_refs(root, report, &objects, &original, || {
+        // Promote the exact staged bytes: signatures must never be generated twice.
+        for (kind, oid) in [("commit", &report.commit), ("tag", &report.tag_object)] {
+            let bytes = run(
+                staged_command(root, &objects, &original).args(["cat-file", kind, oid]),
+                None,
+            )?;
+            let stored = run(
+                command(root).args(["hash-object", "-w", "-t", kind, "--stdin"]),
+                Some(&bytes),
+            )?;
+            if crate::one_line(&stored).as_ref() != Some(oid) {
+                return Err(refuse("object", "promoted object identity mismatch"));
+            }
+        }
+        Ok(())
     })
 }
 
 fn write_objects(
-    git: impl Fn() -> Command,
-    report: &ReleaseReport,
+    root: &Path,
+    stage: &Path,
+    original: &Path,
+    report: &mut ReleaseReport,
     subject: &str,
     ident: &str,
-    tag_bytes: &str,
+    message: &str,
 ) -> Result<(), ReleaseError> {
+    let objects = stage.join("objects");
     let (author, date) = ident
         .rsplit_once("> ")
         .ok_or_else(|| refuse("author", "invalid normalized identity"))?;
     let author = format!("{author}>");
     let (name, email) =
         crate::cut::author(&author).map_err(|error| refuse("author", error.to_string()))?;
-    let commit = run(
-        git()
-            .args([
-                "-c",
-                "commit.gpgsign=false",
-                "commit-tree",
-                &report.tree,
-                "-p",
-                &report.main,
-                "-p",
-                &report.development,
-            ])
-            .env("GIT_AUTHOR_NAME", name)
+    let config = if report.signing == "none" {
+        Vec::new()
+    } else {
+        signing_config(root)?
+    };
+    if report.signing != "none" {
+        report.signing_key = Some(
+            config
+                .iter()
+                .rev()
+                .find_map(|entry| entry.strip_prefix("user.signingkey="))
+                .unwrap_or(&author)
+                .to_owned(),
+        );
+    }
+    let git = || {
+        let mut git = staged_command(root, &objects, original);
+        git.env("GIT_AUTHOR_NAME", name)
             .env("GIT_AUTHOR_EMAIL", email)
             .env("GIT_AUTHOR_DATE", date)
             .env("GIT_COMMITTER_NAME", name)
             .env("GIT_COMMITTER_EMAIL", email)
-            .env("GIT_COMMITTER_DATE", date),
-        Some(subject.as_bytes()),
-    )?;
-    if crate::one_line(&commit).as_deref() != Some(&report.commit) {
+            .env("GIT_COMMITTER_DATE", date);
+        git
+    };
+    let mut commit = git();
+    commit.args([
+        "-c",
+        "commit.gpgsign=false",
+        "commit-tree",
+        &report.tree,
+        "-p",
+        &report.main,
+        "-p",
+        &report.development,
+    ]);
+    if report.signing.contains("commit") {
+        commit.arg(format!(
+            "-S{}",
+            report.signing_key.as_deref().unwrap_or(&author)
+        ));
+    }
+    let oid = run(&mut commit, Some(subject.as_bytes()))?;
+    let oid = crate::one_line(&oid).ok_or_else(|| refuse("object", "invalid commit identity"))?;
+    if !report.signing.contains("commit") && oid != report.commit {
         return Err(refuse("object", "commit identity mismatch"));
     }
-    let tag = run(git().args(["mktag"]), Some(tag_bytes.as_bytes()))?;
-    if crate::one_line(&tag).as_deref() != Some(&report.tag_object) {
+    report.commit = oid;
+    let tag = report.refspecs[2].trim_start_matches("refs/tags/");
+    let oid = if report.signing.contains("tag") {
+        // Git owns signing and message framing; the temporary ref is private.
+        let mut signer = git();
+        signer.arg("--git-dir").arg(stage);
+        for entry in &config {
+            signer.args(["-c", entry]);
+        }
+        signer.args([
+            "tag",
+            "--sign",
+            "--local-user",
+            report.signing_key.as_deref().unwrap_or(&author),
+            "--cleanup=verbatim",
+            "--file=-",
+            tag,
+            &report.commit,
+        ]);
+        run(&mut signer, Some(message.as_bytes()))?;
+        let output = run(
+            git()
+                .arg("--git-dir")
+                .arg(stage)
+                .args(["rev-parse", &report.refspecs[2]]),
+            None,
+        )?;
+        crate::one_line(&output).ok_or_else(|| refuse("object", "invalid tag identity"))?
+    } else {
+        let bytes = format!(
+            "object {}\ntype commit\ntag {tag}\ntagger {ident}\n\n{message}",
+            report.commit
+        );
+        let output = run(git().args(["mktag"]), Some(bytes.as_bytes()))?;
+        crate::one_line(&output).ok_or_else(|| refuse("object", "invalid tag identity"))?
+    };
+    if report.signing == "none" && oid != report.tag_object {
         return Err(refuse("object", "tag identity mismatch"));
     }
+    report.tag_object = oid;
     Ok(())
 }
 
@@ -510,7 +656,7 @@ pub fn write_release_report<W: io::Write>(
         Ok(report) => {
             writeln!(
                 output,
-                "release state={} M={} D={} R={} tree={} tag_object={} title={} body_bytes={} version_source={}",
+                "release state={} M={} D={} R={} tree={} tag_object={} title={} body_bytes={} version_source={} signing={} signing_key={}",
                 report.state,
                 report.main,
                 report.development,
@@ -519,7 +665,9 @@ pub fn write_release_report<W: io::Write>(
                 report.tag_object,
                 serde_json::to_string(&report.title)?,
                 report.body_bytes,
-                serde_json::to_string(&report.version_source)?
+                serde_json::to_string(&report.version_source)?,
+                report.signing,
+                serde_json::to_string(&report.signing_key)?
             )?;
             writeln!(
                 output,
