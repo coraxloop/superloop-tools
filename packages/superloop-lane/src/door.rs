@@ -83,6 +83,9 @@ const FRAME_LIMIT: usize = 65_536;
 pub const INPUT_LIMIT: usize = 16 * 1024 * 1024;
 const PEER_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_PEERS: usize = 16;
+const ADMISSION_WAIT: Duration = Duration::from_secs(30);
+const ADMISSION_POLL: Duration = Duration::from_millis(100);
+const ADMISSION_REPLY_MARGIN: Duration = Duration::from_secs(2);
 pub(crate) const FULL_STORE_REASON_PREFIX: &str = "door-requests-full-refusal: ";
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -92,6 +95,32 @@ struct RequestGuard {
 }
 
 impl RequestGuard {
+    fn acquire_wait(
+        home: &Path,
+        registration: &Registration,
+        request: &Value,
+        started: Instant,
+    ) -> io::Result<(Option<Self>, Duration)> {
+        let began = Instant::now();
+        let remaining = Duration::from_millis(request["deadline_ms"].as_u64().unwrap_or(0))
+            .saturating_sub(started.elapsed())
+            .saturating_sub(ADMISSION_REPLY_MARGIN);
+        let budget = remaining.min(ADMISSION_WAIT);
+        loop {
+            if let Some(guard) = Self::acquire(home, registration)? {
+                return Ok((Some(guard), began.elapsed()));
+            }
+            let remaining = budget.saturating_sub(began.elapsed());
+            if remaining.is_zero() {
+                return Ok((None, began.elapsed()));
+            }
+            thread::sleep(remaining.min(ADMISSION_POLL));
+            if began.elapsed() >= budget {
+                return Ok((None, began.elapsed()));
+            }
+        }
+    }
+
     fn acquire(home: &Path, registration: &Registration) -> io::Result<Option<Self>> {
         use nix::fcntl::{Flock, FlockArg, OFlag, OpenHow, ResolveFlag, openat2};
         loop_home::validate_name(&registration.loop_name).map_err(io::Error::other)?;
@@ -945,9 +974,11 @@ fn root_refusal(
     started: Instant,
 ) -> io::Result<()> {
     let (_request_guard, admission_error) = if peer == registration.worker_uid {
-        match RequestGuard::acquire(owner_home, registration) {
-            Ok(Some(guard)) => (Some(guard), None),
-            Ok(None) => return concurrent_refusal(stream, registration, peer, started).map(|_| ()),
+        match RequestGuard::acquire_wait(owner_home, registration, request, started) {
+            Ok((Some(guard), _)) => (Some(guard), None),
+            Ok((None, _)) => {
+                return concurrent_refusal(stream, registration, peer, started).map(|_| ());
+            }
             Err(error) => (None, Some(error)),
         }
     } else {
@@ -1015,9 +1046,9 @@ fn serve_request_with_agent(
     // and retain it through the final effect publication and reply.
     let (_request_guard, admission_error) =
         if let Some(home) = owner_home.filter(|_| peer == registration.worker_uid) {
-            match RequestGuard::acquire(home, registration) {
-                Ok(Some(guard)) => (Some(guard), None),
-                Ok(None) => return concurrent_refusal(stream, registration, peer, started),
+            match RequestGuard::acquire_wait(home, registration, request, started) {
+                Ok((Some(guard), _)) => (Some(guard), None),
+                Ok((None, _)) => return concurrent_refusal(stream, registration, peer, started),
                 Err(error) => (None, Some(error)),
             }
         } else {
@@ -2944,7 +2975,8 @@ fn fixture_agent_call_once(
         reply
     });
     let mut id = None;
-    for _ in 0..300 {
+    let filed_deadline = Instant::now() + ADMISSION_WAIT + Duration::from_secs(3);
+    while Instant::now() < filed_deadline {
         let rows = store.list_run(&registration.run)?;
         if let Some(row) = rows.iter().find(|row| {
             !prior.contains(row.id()) && (answer.is_none() || row.value()["state"] == "waiting")
