@@ -56,6 +56,9 @@ struct CensusArgs {
     cargo: PathBuf,
     #[arg(long)]
     ledger: Option<PathBuf>,
+    /// Check only installation declarations in a documents-only repository.
+    #[arg(long)]
+    installations_only: bool,
 }
 
 fn main() -> ExitCode {
@@ -90,6 +93,7 @@ fn main() -> ExitCode {
             &args.cargo,
             &ledger,
             &args.report,
+            args.installations_only,
         ));
     }
     let args = parse_args_or_exit::<Args>();

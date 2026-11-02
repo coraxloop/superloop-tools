@@ -6,6 +6,8 @@ Copyright (c) 2026 Torrust project contributors. Licensed under GPL-3.0-or-later
 
 Declare the repository carrier explicitly at top level in `.linter/owners.toml` with `root_owner = "OWNER"`, replacing `OWNER` with a name registered in `owners`. A root-files partition alone does not declare the carrier; paths outside every partition use this explicit root owner for label attribution while partition coverage still reports them. Assembly publication checks use `assembly.publications-current`.
 
+An optional top-level `nested = [{ owner = "EXAMPLES", root = "docs/examples", reason = "Fictional instance tree checked as its own corpus" }]` row in `.linter/owners.toml` names a registered owner, a normalized relative directory inside its partitions containing a loadable `.linter/` snapshot, and a nonempty reason; the configuration report lists these rows.
+
 ## Overview · `sec:indexlinter:readme-overview`
 
 This package is the checker the label calculus names as its gate. It reads the corpus's authored prose and its Rust sources, harvests every mint into its owner's registry, resolves every citation against those registries, validates every environment head against the kind registry read from the record's own tables, and reports what does not hold. Beside the gate it runs the inventory profiles for tests, to-do notices and declared constants, the claim census of the test documentation policy, the burn registers that ratchet a migration down to zero, and three generated surfaces — ADR-T-017's two projections, the in-file test index and per-folder test matrix, plus ADR-T-018's constant pins — which it verifies by exact byte comparison and rewrites on request.
@@ -90,6 +92,10 @@ The cross-owner form is the bracketed prefix ``[OWNER-kind:area:slug]`` inside t
 A first-level Markdown heading is read as the environment `Document`, irrespective of its title words. The adopted base relation does not catalogue that environment. An owner checking document heads therefore needs a local extension row for each title genre it uses, such as `{ environment = "Document", kind = "guide" }` in the `extensions` array of ``.linter/environments.toml``. This repository declares `guide`, `plan`, `proposal`, `rec`, `reg`, `rep` and `spec` as document-title extensions. These rows extend the effective registry without changing the adopted base relation or imported registry compatibility.
 
 ## Allowance declarations · `sec:indexlinter:allowance-declarations`
+
+Every declared owner with attributed Markdown sources, including the root and crateless owners, must activate ``labels.mints-well-formed`` with its paired list; otherwise configuration fails rather than silently omitting that owner's prose.
+
+A declared nested corpus is the only exemption from this owner's prose count, because its own snapshot is the evidence it is checked; only that owner's Markdown beneath the nested root is exempt, and its paths remain visible to all other policies.
 
 Each activated owner-policy pair needs exactly one list in ``.linter/lists.toml``, using the policy's codec. A fingerprint policy's empty list is `allowances = []`; a nonempty list contains tables, not strings:
 
@@ -185,6 +191,8 @@ If this fails: a corpus cites what it never took on, and repo-wide policy stops 
 
 An imported owner is a crateless endpoint of the may-cite relation: a citing owner, including the root corpus's prose, needs an explicit ``may_cite`` row to reach it, and without one a resolved citation raises the ordinary ``unreached_import`` finding. It has no partition or manifest in the importing tree, so the reach reconciliation counts its declared edge as reach but does not compare that edge with a manifest dependency; the crate-bearing subrelation remains the one reconciled in both directions. The layer counters count an import from the root to any other owner as ``downward_imports``, including an admitted imported-owner citation, and an import between two non-root owners as ``sideways_imports``; imported mints resolve citations without entering this tree's mint count. The owner-reconciliation pin counts the declared owners as the manifest-derived owners, the repository owner and the imported owners, sorts rows aimed at imported owners with the crateless rows outside manifest comparison, and asserts that no imported owner receives a manifest edge. The declared-surface pin keeps its exact table of declaration documents, treats ``.linter/imports/`` as the registry loader's directory rather than a document, and adds imported owners to its owner count without adding partitions or declaration documents.
 
+A local crateless owner's Markdown mints enter its declared owner's registry when ``labels.mints-well-formed`` is activated, and a prefixed citation resolves there before an explicit ``may_cite`` row admits it; a sibling ``.md.j2`` template contributes no second mint.
+
 **Section (legacy)** · `sec:indexlinter:area-legacy`
 
 If this fails: retiring a notation buys nothing, because the retired forms can still be written. The recognizer reads a source for the shapes the campaign leaves behind, and what holds a corpus to them is the burn ratchet: each family is enumerated per file in a register that may only shrink, over the surface its own list names. A per-document register in the checker was the earlier arrangement and it retires, because the ratchet already says which sources are counted and says it where the corpus can read it. Where a form may stand is as much of the rule as what it looks like: a form in code font is a token exhibited rather than a reference made, which is what lets the campaign's own documents name what they ban.
@@ -229,6 +237,12 @@ If this fails: a reader cannot act on what the run found. Locations count lines 
 
 A finding's class is its `code` member.
 
+|Code|Meaning|
+|----|-------|
+|``inactive_prose_owner``|Failure naming an owner, its Markdown source count, and the missing ``labels.mints-well-formed`` activation.|
+
+The ``unresolved_citation`` finding names the searched owner and registered prefix for an imported label missing from that owner's registry; an unknown prefix remains ``unregistered_prefix``.
+
 The report's `burn.declared` counts the burn lists declared by activated migration policies, not the policies themselves, with one list per family and every family named in `burn.families`.
 
 A policy document copied from another corpus keeps that corpus's `prose`, `code`, and `exclude` surface paths until they are rewritten; when a burn policy censuses those paths, the report exposes them as `burn.families[].prose`, `burn.families[].code`, and `burn.families[].excluded`.
@@ -248,6 +262,10 @@ If this fails: a command stops having one coherent declaration snapshot to judge
 The five required declaration documents — `owners.toml`, `environments.toml`, `policies.toml`, `lists.toml` and `shape.toml` — are found by filename. The namespaces of owners, environments, policies and shape are parsed and discarded, so these four kinds may keep corpus-owned identities such as ``org.example.linter.owners``. The lists envelope must be ``class.linter.lists``. Every ``policy-*.toml`` instance must carry a namespace beginning with ``class.linter.policy.`` followed by its declared domain; a catalogued policy's compiled identity fixes that domain unchanged across corpora. The loader refuses foreign lists and policy-instance namespaces before checking, naming the offending namespace and the expected identity or prefix. Renaming a document's file does not change its namespace identity.
 
 Deployment keys shorten an instance namespace by removing the validated lists namespace's ``class.linter`` prefix; the remaining ``policy.<domain>`` component and the set entry identify the deployment. Policy activation is declared separately in ``policies.toml``. An instance under a corpus-owned prefix does not supply the catalogued policy's parameters or census surface and is refused rather than skipped; a genuinely absent census surface still receives the missing-surface finding. Corpora adopting this format rename lists, policy-instance and import-registry envelopes to the format namespaces while retaining their four corpus-owned core envelopes.
+
+For an uncatalogued policy, an activation row may add ``programme = { package = "packages/NAME", binary = "NAME" }`` with a tracked repository directory and a nonempty binary name to defer checking and interpretation of its ``path_counts`` or ``allowances`` rows to that repository's own programme, explicitly reported in ``deferred`` and ``deferred_policies`` beside ``clean``, which judges only the catalogued policies.
+
+Deferral covers the activation row and its list only: the published linter still decodes every ``policy-*.toml`` document under ``.linter/`` and refuses a namespace outside ``class.linter.policy.``, so a repository programme keeps its own parameter documents in its package rather than in ``.linter/``.
 
 The `lists.toml` document is indexed by owner and every list pairs with a live activation, so it must be rewritten when the owner set changes.
 

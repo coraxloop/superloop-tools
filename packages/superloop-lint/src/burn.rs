@@ -4,7 +4,7 @@
 //! Burn lists: a legacy reference family, censused, and a ratchet that may only
 //! shrink.
 //!
-//! The burn discipline (ADR-T-020, The migration disciplines) requires that
+//! The burn discipline (´[TOOLS-rule:lintcontracts:burn-families]´) requires that
 //! every legacy reference family is enumerated exactly and that the enumeration
 //! is a ratchet: a new occurrence anywhere is a failure, and a vanished
 //! occurrence must leave the enumeration in the same commit. This module is that
@@ -16,14 +16,14 @@
 //! every other tolerated debt. It used to stand in a generated register document
 //! per family, and those registers retired: content that was an argument became a
 //! record, content that was a ratchet became these rows, and no declaration
-//! points at a file (´conv:isolation:registers´). What the gate compares did not
+//! points at a file (´[TOOLS-rule:lintcontracts:declarations]´). What the gate compares did not
 //! change with them — it is the register-equals-census relation over the same
 //! numbers, asked of the list.
 //!
 //! A family declared over the corpus root is keyed to the root owner rather than
 //! to the owner of each file it counts, because the ratchet such a census earns is
 //! one repository-wide artifact that no member can repair alone
-//! (ADR-T-019, The layer owner graph).
+//! (´[TOOLS-rule:lintcontracts:ownership]´).
 //!
 //! # Why an enumeration rather than a count
 //!
@@ -104,7 +104,7 @@ use crate::token::{Region, markdown_regions, rust_regions};
 /// owner it is the same way it knows its own name, and asking a declaration to
 /// tell it would be asking the corpus to say who is judging it. Where that share
 /// stands is the corpus's to state and is read from the declared partition at
-/// runtime, so nothing here knows a directory (´reg:isolation:owner-questions´).
+/// runtime, so nothing here knows a directory (´[TOOLS-rule:lintcontracts:declarations]´).
 ///
 /// ´const:indexlinter:self-owner´ (´[ORCHESTRATION-alg:const:text]´)
 /// ´const:indexlinter:self-owner-text-x66bcd86b´
@@ -122,7 +122,7 @@ const SELF_OWNER: &str = "SUPERLOOPLINT";
 /// The run is what makes a corpus-wide census tellable from a per-owner one
 /// without asking a declaration which it is, and the ratchet such a census earns
 /// belongs to the root owner for exactly that reason
-/// (´[TOOLS-conv:layers:verdict-location]´).
+/// (´[TOOLS-rule:lintcontracts:ownership]´).
 ///
 /// ´const:indexlinter:repository-policy-run´ (´[ORCHESTRATION-alg:const:text]´)
 /// ´const:indexlinter:repository-policy-run-text-x8f7cd1cc´
@@ -335,23 +335,23 @@ pub fn decode_external_values(source: &str) -> Result<Vec<BurnValue>, BurnDocume
 /// Three open the discipline, one per legacy family a migration campaign
 /// retires — section references, retired record numbers and superseded tag
 /// forms — each enumerated in a register the linter verifies exactly, a ratchet
-/// that may only shrink (´[TOOLS-req:migration:burn-ratchet]´). A fourth reads
+/// that may only shrink (´[TOOLS-rule:lintcontracts:burn-families]´). A fourth reads
 /// the record shape the other three cannot: a number written with no series at
 /// all, which is ambiguous between the corpus that keeps its numbers and the
 /// local numbering that retired. It is declared beside the lettered family
 /// rather than folded into it, because a family is a bounded shape and
 /// broadening one to admit a second shape leaves neither bounded
-/// (´[TOOLS-conv:migration:burn-family]´) — and because the two are swept by
+/// (´[TOOLS-rule:lintcontracts:burn-families]´) — and because the two are swept by
 /// different judgments, the lettered form by rewriting a citation and the bare
 /// one by first finding which record was meant. A fifth counts
 /// an inventory profile's remainder rather than a reference family, under the
 /// policy ADR-T-016 records
-/// (´[TOOLS-conv:migration:burn-inventory-remainder]´). The remaining two are
+/// (´[TOOLS-rule:lintcontracts:burn-families]´). The remaining two are
 /// the families the scenario matrix took with it when it retired, each
 /// declaring its own recogniser and surface beside its register — the scenario
 /// numbers bounded by range and the division names by enumeration, which are
 /// the two bounding devices the family convention licenses
-/// (´[TOOLS-conv:migration:burn-family]´).
+/// (´[TOOLS-rule:lintcontracts:burn-families]´).
 ///
 /// Each declares what it counts and nothing about where. Where a family's census
 /// walks is the corpus's to state, and the corpus states it in the document of
@@ -359,7 +359,7 @@ pub fn decode_external_values(source: &str) -> Result<Vec<BurnValue>, BurnDocume
 /// a source is and what a bench is, that knowledge belongs to the domain of that
 /// policy. So a family is joined to its policy through the catalog and asks that
 /// policy's own document for its surface; nothing here knows a directory, a reach
-/// name or an owner's geography (´[TOOLS-conv:migration:burn-surfaces]´).
+/// name or an owner's geography (´[TOOLS-rule:lintcontracts:burn-families]´).
 ///
 /// ´const:indexlinter:adopted-burn-lists´ (´[ORCHESTRATION-alg:const:form]´)
 /// ´const:indexlinter:adopted-burn-lists-form-x34de554d´
@@ -779,7 +779,7 @@ impl BurnList {
     /// census it takes is nobody's share in particular. Such a census is one
     /// repository-wide artifact that no member can repair alone, which is exactly
     /// the shape whose verdict belongs to the root owner rather than to the owner
-    /// of each file it counts (ADR-T-019, The layer owner graph).
+    /// of each file it counts (´[TOOLS-rule:lintcontracts:ownership]´).
     #[must_use]
     pub fn spans_corpus(&self) -> bool {
         self.prose
@@ -798,7 +798,7 @@ impl BurnList {
 /// without a declaration, so it reads the identifier the catalog gives the
 /// family: a repository-scoped policy is the corpus-wide half of a program whose
 /// other half is per-owner, and its identifier says so
-/// (ADR-T-019, The layer owner graph).
+/// (´[TOOLS-rule:lintcontracts:ownership]´).
 #[must_use]
 pub fn family_spans_corpus(family: &str) -> bool {
     family == PUBLIC_PACK_BURN_FAMILY
@@ -1350,7 +1350,7 @@ fn retired(
 /// lines are one region there, so a retired identity the corpus wrapped across a
 /// line boundary is one occurrence here too, and a census that could not see the
 /// corpus's own wrapped spelling would close with that debt still standing
-/// (ADR-T-020, The migration disciplines). Offsets are mapped back
+/// (´[TOOLS-rule:lintcontracts:burn-families]´). Offsets are mapped back
 /// through the region that produced them, so an occurrence is still reported
 /// where its first character really stands.
 fn retired_comments(
@@ -1412,7 +1412,7 @@ fn residual(
 /// wrapped across a line boundary is one reference here too. Reading each
 /// comment alone made a census that could not see the corpus's own wrapped
 /// spelling, which is a defect of the reading rather than a narrowness of the
-/// rules (ADR-T-020, The migration disciplines).
+/// rules (´[TOOLS-rule:lintcontracts:burn-families]´).
 fn scan_comments(path: &Path, source: &str, rules: &[LegacyRule]) -> Vec<Finding> {
     scan_regions(path, source, &rust_regions(source), rules)
 }
@@ -1556,7 +1556,7 @@ fn sources(corpus: &CorpusPlan, trees: &[Place], extension: &str) -> Vec<(BytePa
 ///
 /// The ratchet is the canonical list, which is what the retired registers left
 /// behind them: their content was either an argument, which became a record, or a
-/// ratchet, which became these rows (´conv:isolation:registers´). The relation is
+/// ratchet, which became these rows (´[TOOLS-rule:lintcontracts:declarations]´). The relation is
 /// the one the register-equals-census gate held, over the same numbers.
 ///
 /// Growth is attributed positionally: counts alone cannot say which of a file's
@@ -1623,7 +1623,7 @@ fn growth(list: &BurnList, row: &BurnRow, registered: usize, census: &BurnCensus
 /// A family reaching one owner's share has one key, and a family declared over
 /// the corpus root has one too — the root owner's, because the ratchet such a
 /// census earns is one repository-wide artifact no member can repair alone
-/// (ADR-T-019, The layer owner graph). The rows are gathered across every
+/// (´[TOOLS-rule:lintcontracts:ownership]´). The rows are gathered across every
 /// key naming the family's program, so neither shape has to be told apart here.
 #[must_use]
 pub fn declared_rows(snapshot: &Snapshot, family: &str) -> Vec<RegisterRow> {

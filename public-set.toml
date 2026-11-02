@@ -66,13 +66,28 @@ pattern = "docs/meson.build"
 pattern = "docs/public/unpublished-labels.toml"
 
 [[include.rows]]
+pattern = "docs/spec/build-contracts.md"
+
+[[include.rows]]
+pattern = "docs/spec/command-contracts.md"
+
+[[include.rows]]
 pattern = "docs/spec/deployment.md"
+
+[[include.rows]]
+pattern = "docs/spec/executable-contracts.md"
 
 [[include.rows]]
 pattern = "docs/spec/linter-conformance.md"
 
 [[include.rows]]
+pattern = "docs/spec/linter-contracts.md"
+
+[[include.rows]]
 pattern = "docs/spec/output.md"
+
+[[include.rows]]
+pattern = "docs/spec/worker-contracts.md"
 
 [[include.rows]]
 pattern = "infra/cargo-clean/README.md"
@@ -3009,6 +3024,12 @@ pattern = "packages/superloop-pack/src/cut.rs"
 pattern = "packages/superloop-pack/src/lib.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-pack/src/release.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/src/replay.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-pack/src/tests.rs"
 
 [[include.rows]]
@@ -3019,6 +3040,12 @@ pattern = "packages/superloop-pack/tests/cut.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-pack/tests/cut_acceptance.py"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/tests/release.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-pack/tests/replay.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-pack/tests/subprocess_contract.rs"
@@ -3209,28 +3236,5 @@ pattern = "tests/version-smoke.py"
 [public]
 licence_code = "LICENSE-CODE"
 licence_docs = "LICENSE-DOCS"
+name = "superloop-tools"
 readme = "README.md"
-
-[[reserved.rows]]
-pattern = "docs/public-pack-provenance.toml"
-reason = "Generated pack provenance member; absent from the source tree."
-
-[[reserved.rows]]
-pattern = "docs/briefs/"
-reason = "Private task briefs."
-
-[[reserved.rows]]
-pattern = "docs/drafts/"
-reason = "Unpublished drafts."
-
-[[reserved.rows]]
-pattern = "docs/BACKLOG.md"
-reason = "Internal work queue."
-
-[[reserved.rows]]
-pattern = "briefs/"
-reason = "Private task briefs."
-
-[[reserved.rows]]
-pattern = "gateway/"
-reason = "Internal gateway state and operations."

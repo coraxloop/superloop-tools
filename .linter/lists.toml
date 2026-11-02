@@ -586,7 +586,6 @@ path_counts = []
 
 [TOOLS."references.file-paths-absent"]
 path_counts = [
-  { path = "docs/integration.md", maximum = 35 },
   { path = "infra/cargo-clean/README.md", maximum = 2 },
   { path = "infra/correspondence-watch/README.md", maximum = 2 },
   { path = "packages/README.md", maximum = 2 },

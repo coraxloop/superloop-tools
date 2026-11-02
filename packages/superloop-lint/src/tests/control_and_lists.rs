@@ -91,7 +91,7 @@ fn tree(prose: &str, rows: &str) -> TempDir {
         "namespace = \"org.example.linter.policies\"\n\
              version = [1, 0, 0]\n\
              \n\
-             policies = [{ owner = \"PROJECTB\", policy = \"legacy.section-references\" }]\n",
+             policies = [{ owner = \"PROJECTB\", policy = \"legacy.section-references\" }, { owner = \"PROJECTB\", policy = \"labels.mints-well-formed\" }]\n",
     );
     write(
         root.path(),
@@ -100,6 +100,7 @@ fn tree(prose: &str, rows: &str) -> TempDir {
             "namespace = \"class.linter.lists\"\n\
                  version = [1, 0, 0]\n\
                  \n\
+                 [PROJECTB.\"labels.mints-well-formed\"]\nallowances = []\n\n\
                  [PROJECTB.\"legacy.section-references\"]\npath_counts = [{rows}]\n"
         ),
     );
@@ -208,6 +209,7 @@ fn instanced_tree() -> TempDir {
              version = [1, 0, 0]\n\
              \n\
              policies = [\n  \
+             { owner = \"PROJECTB\", policy = \"labels.mints-well-formed\" },\n  \
              { owner = \"PROJECTB\", policy = \"legacy.section-references\" },\n  \
              { owner = \"PROJECTB\", policy = \"references.prefix-numbers-absent\" },\n\
              ]\n",
@@ -218,6 +220,7 @@ fn instanced_tree() -> TempDir {
         "namespace = \"class.linter.lists\"\n\
              version = [1, 0, 0]\n\
              \n\
+             [PROJECTB.\"labels.mints-well-formed\"]\nallowances = []\n\n\
              [PROJECTB.\"legacy.section-references\"]\npath_counts = []\n\
              \n\
              [PROJECTB.\"policy.references.quarry-numbers\".\"invented-alpha\"]\n\
@@ -247,7 +250,7 @@ fn instanced_tree() -> TempDir {
 /// That is the shape a corpus-spanning census earns rather than a defect: the
 /// census reaches every share at once and its ratchet is one repository-wide
 /// artifact filed under the owner that activated it, wherever the counted
-/// files stand (ADR-T-019, The layer owner graph). The fixture holds two
+/// files stand (´[TOOLS-rule:lintcontracts:ownership]´). The fixture holds two
 /// such rows so that appending to one of them still leaves the other to
 /// survive the rewrite.
 fn spanning_tree() -> TempDir {
@@ -265,7 +268,7 @@ fn spanning_tree() -> TempDir {
         "namespace = \"org.example.linter.policies\"\n\
              version = [1, 0, 0]\n\
              \n\
-             policies = [{ owner = \"PROJECTA\", policy = \"legacy.section-references-repository\" }]\n",
+             policies = [{ owner = \"PROJECTA\", policy = \"legacy.section-references-repository\" }, { owner = \"PROJECTB\", policy = \"labels.mints-well-formed\" }]\n",
     );
     write(
         root.path(),
@@ -273,7 +276,7 @@ fn spanning_tree() -> TempDir {
         "namespace = \"class.linter.lists\"\n\
              version = [1, 0, 0]\n\
              \n\
-             [PROJECTA.\"legacy.section-references-repository\"]\n\
+             [PROJECTB.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"legacy.section-references-repository\"]\n\
              path_counts = [\n  \
              { path = \"packages/project-b/docs/note.md\", maximum = 1 },\n  \
              { path = \"packages/project-b/docs/other.md\", maximum = 1 },\n\
@@ -479,7 +482,7 @@ fn envelope_tree() -> TempDir {
 /// A tree whose path-name pair governs one text name and one byte name.
 fn names_tree() -> Option<TempDir> {
     let root = TempDir::new().expect("a temporary root");
-    write(root.path(), "share/kept.md", "Nothing stands here.\n");
+    write(root.path(), "share/kept.txt", "Nothing stands here.\n");
     let _opaque = byte_named_fixture(root.path(), b"share/opaque\xff", "")?;
 
     for (file, schema, text) in [
@@ -764,7 +767,8 @@ fn a_rendered_list_loads_back_unchanged() {
         rendered,
         "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n\
              [PROJECTB.\"legacy.section-references\"]\npath_counts = [\n  \
-             { path = \"packages/project-b/docs/note.md\", maximum = 1 },\n]\n"
+             { path = \"packages/project-b/docs/note.md\", maximum = 1 },\n]\n\n\
+             [PROJECTB.\"labels.mints-well-formed\"]\nallowances = []\n"
     );
 
     std::fs::write(&path, &rendered).expect("the rendered list");
@@ -854,7 +858,7 @@ fn a_rendered_instanced_list_keeps_its_families_apart() {
     let path = root.path().join(".linter/lists.toml");
     let loaded = snapshot(root.path());
 
-    assert_eq!(loaded.lists().len(), 3, "the fixture declares three pairs");
+    assert_eq!(loaded.lists().len(), 4, "the fixture declares four pairs");
 
     let rendered = format!(
         "{}{}",
@@ -865,6 +869,7 @@ fn a_rendered_instanced_list_keeps_its_families_apart() {
     assert_eq!(
         rendered,
         "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n\
+             [PROJECTB.\"labels.mints-well-formed\"]\nallowances = []\n\n\
              [PROJECTB.\"legacy.section-references\"]\npath_counts = []\n\n\
              [PROJECTB.\"policy.references.quarry-numbers\".\"invented-alpha\"]\npath_counts = [\n  \
              { path = \"packages/project-b/docs/note.md\", maximum = 2 },\n]\n\n\
@@ -949,8 +954,8 @@ fn an_instanced_key_crosses_a_rewrite_whole() {
 
     assert_eq!(
         snapshot(root.path()).lists().len(),
-        3,
-        "the fixture declares three pairs"
+        4,
+        "the fixture declares four pairs"
     );
 
     let (input, output) = request(
@@ -981,8 +986,8 @@ fn an_instanced_key_crosses_a_rewrite_whole() {
 
     assert_eq!(
         after.lists().len(),
-        3,
-        "the two instanced tables stand beside the appended one"
+        4,
+        "the two instanced tables stand beside the appended one and prose activation"
     );
     assert!(
         after
@@ -1024,7 +1029,7 @@ fn an_append_refuses_a_declaration_a_rewrite_would_truncate() {
         "namespace = \"class.linter.lists\"\n\
              version = [1, 0, 0]\n\
              \n\
-             [PROJECTA.\"legacy.section-references-repository\"]\n\
+             [PROJECTB.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"legacy.section-references-repository\"]\n\
              path_counts = [\n  \
              { path = \"packages/project-b/docs/note.md\", maximum = 1 },\n  \
              { path = \"packages/project-b/docs/other.md\", maximum = 1 },\n  \
@@ -1084,7 +1089,7 @@ fn an_append_refuses_a_zero_ceiling_row() {
         ".linter/lists.toml",
         &format!(
             "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n\
-             [PROJECTA.\"legacy.section-references-repository\"]\npath_counts = [\n  \
+             [PROJECTB.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"legacy.section-references-repository\"]\npath_counts = [\n  \
              {{ path = \"packages/project-b/docs/note.md\", maximum = 1 }},\n  \
              {{ path = \"{zero_path}\", maximum = 0 }},\n]\n"
         ),

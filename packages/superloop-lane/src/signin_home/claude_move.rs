@@ -282,5 +282,5 @@ pub(super) fn run(options: &Options, source: &Path) -> Result<String> {
             home.replace("move-record.json", record.to_string().as_bytes())?;
         }
     }
-    Ok(json!({"plan":plan,"digest":preview_digest,"changed":changed,"environ_unreadable":environ_unreadable,"sign_in":if credential_metadata.is_some() {"present"} else {"absent"},"credential_metadata":credential_metadata,"old_home_spellings_remaining":0,"outcome":if options.dry_run {"preview"} else {"applied"}}).to_string())
+    Ok(json!({"charter":options.charter,"plan":plan,"digest":preview_digest,"changed":changed,"environ_unreadable":environ_unreadable,"sign_in":if credential_metadata.is_some() {"present"} else {"absent"},"credential_metadata":credential_metadata,"old_home_spellings_remaining":0,"outcome":if options.dry_run {"preview"} else {"applied"}}).to_string())
 }

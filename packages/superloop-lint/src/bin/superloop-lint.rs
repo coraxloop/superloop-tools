@@ -5,7 +5,7 @@
 //!
 //! # Output contract
 //!
-//! This command follows the global JSON-only output contract of ADR-T-010.
+//! This command follows the global JSON-only output contract of (´[TOOLS-spec:output:machine-json-streams]´).
 //! Stdout carries exactly one JSON result object followed by one newline, stderr
 //! carries JSON control-plane and diagnostic records (or configuration refusal
 //! lines with `check --text`), and stdout is refused when
@@ -13,7 +13,7 @@
 //!
 //! # Documented exit-code exception
 //!
-//! ADR-T-010 leaves the exit-code taxonomy beyond the shared `success`,
+//! (´[TOOLS-spec:output:machine-json-streams]´) leaves the exit-code taxonomy beyond the shared `success`,
 //! `failure`, and `usage` classes to the owning command's contract. A check that
 //! runs to completion and reports findings has not failed as a command: it has
 //! produced its result. Emitting that result on stdout while still signalling
@@ -45,7 +45,7 @@
 //! stdout.
 //!
 //! The assemble command takes the same taxonomy as the check, because it is one:
-//! its default mode is the exact-byte freshness comparison of ADR-T-012 and
+//! its default mode is the exact-byte freshness comparison of (´[TOOLS-rule:lintcontracts:projections]´) and
 //! nothing else, so a publication that is not what its parts say it is exits 3
 //! with the report on stdout. With `--write` the publications are regenerated
 //! first, and the staleness it repaired is no longer reported — what remains at
@@ -118,7 +118,7 @@ const COMMAND: &str = "superloop-lint";
 /// their shared meanings, and a command-specific non-usage code is left to be
 /// documented by the owning command contract. This command's contract now
 /// documents one, and fixes the figure rather than deferring to a document that
-/// defers back (´rule:commandcontract:findings-exit´): three is this binary's
+/// defers back (´[TOOLS-rule:lintcontracts:verdicts]´): three is this binary's
 /// only command-specific code, and it means the run finished, wrote its report,
 /// and that report carries a finding of failing severity.
 ///
@@ -129,7 +129,7 @@ const COMMAND: &str = "superloop-lint";
 /// report travels on stdout, and this is the number that pairs them.
 ///
 /// The configuration probe's own exit 3 belongs to a different program and is no
-/// relation (´rem:commandcontract:not-the-config-probe´).
+/// relation (´[TOOLS-rule:lintcontracts:verdicts]´).
 ///
 /// ´const:indexlinter:unclean-check-exit´ (´[ORCHESTRATION-alg:const:count]´)
 /// ´const:indexlinter:unclean-check-exit-count-3´
@@ -419,7 +419,7 @@ fn run_corpus_command(args: Args, command_started: Instant) -> ExitCode {
 
     // Every corpus subcommand reads one declared configuration snapshot before
     // it does anything else, and a snapshot that is not one refuses the command
-    // entire (´spec:commandcontract:configuration´).
+    // entire (´[TOOLS-rule:lintcontracts:snapshot]´).
     let mode = if args.public_pack {
         SnapshotMode::public_pack(args.burn_input.clone())
     } else {
@@ -545,7 +545,7 @@ fn read_execution_plan(
 /// in its policy's codec is a refused precondition: the command exits with the
 /// shared failure class and an empty stdout, because a command that cannot read
 /// its own configuration has no standing to say anything about the corpus
-/// (´rule:commandcontract:configuration-verdicts´).
+/// (´[TOOLS-rule:lintcontracts:verdicts]´).
 fn read_configuration(
     root: &std::path::Path,
     mode: SnapshotMode,
@@ -694,6 +694,12 @@ fn run_check(
     let elapsed_micros = command_started.elapsed().as_micros();
     let clean = report.clean;
 
+    if report.deferred != 0 {
+        tracing::info!(
+            "deferred to the repository's own programme: {} rows",
+            report.deferred
+        );
+    }
     tracing::info!(
         sources_scanned = report.sources_scanned,
         mints = report.mints,
@@ -703,6 +709,7 @@ fn run_check(
         collision_groups = report.profile.collision_groups,
         failures = report.failures,
         warnings = report.warnings,
+        deferred = report.deferred,
         elapsed_micros,
         "label check complete"
     );
@@ -991,10 +998,10 @@ fn lower_declared_lists(plan: BurnWritePlan<'_>, write: bool) -> std::io::Result
 /// The response file and the stdout object are the same bytes: the file is made
 /// durable first and copied to stdout afterwards, so the receipt travelling with
 /// a change and the object a caller reads cannot tell different stories
-/// (´req:commandcontract:control-artifacts´). A refused precondition leaves
+/// (´[TOOLS-rule:lintcontracts:maintenance]´). A refused precondition leaves
 /// the configuration and the response path unchanged and writes no stdout. The
 /// request arrives through standard input and is handed to the control plan as
-/// bytes rather than as a path (´dec:controlsurface:request-stream´).
+/// bytes rather than as a path (´[TOOLS-rule:lintcontracts:maintenance]´).
 fn run_maintenance(
     plan: ControlWritePlan<'_>,
     operation: Operation,

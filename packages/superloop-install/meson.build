@@ -49,7 +49,7 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
-{"kind":"program","identity":"bin/superloop-install","output":"packages/superloop-install/superloop-install","package":"superloop-install","version_authority":"packages/superloop-install/Cargo.toml","form":"rust","installation_class":"bin","cargo_binary":"superloop-install","callers":["meson:build-sync","release-suite","superloop-install"]}
+{"kind":"program","identity":"bin/superloop-install","output":"packages/superloop-install/superloop-install","package":"superloop-install","version_authority":"packages/superloop-install/Cargo.toml","form":"rust","installation_class":"bin","cargo_binary":"superloop-install","callers":["release-suite","superloop-install"]}
 ''']
 
 dependency_ledger += ['''

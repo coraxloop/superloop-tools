@@ -20,7 +20,7 @@
 //! residual recognizer already had is declared here once, and every recognizer
 //! consumes it: a reference wrapped across a comment line boundary is one
 //! reference to every rule that reads its shape
-//! (ADR-T-020, The migration disciplines).
+//! (´[TOOLS-rule:lintcontracts:burn-families]´).
 //!
 //! # Tokenization sees more; participation is unchanged
 //!
@@ -102,7 +102,7 @@ const ANGLE_BETWEEN: &[char] = &['\n', ' ', '\t', '<', '>', '!', '-'];
 /// It is the language's own, not this corpus's, and it stands here because the
 /// script tree is a declared surface of the residual family and a surface is
 /// read for the commentary its language defines
-/// (´[TOOLS-conv:migration:burn-surface-reading]´).
+/// (´[TOOLS-rule:lintcontracts:burn-families]´).
 ///
 /// ´const:indexlinter:script-comment-mark´ (´[ORCHESTRATION-alg:const:codepoint]´)
 /// ´const:indexlinter:script-comment-mark-codepoint-u23´

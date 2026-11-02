@@ -7,6 +7,12 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`does_not_report_owners_without_markdown`] | layers | Owners with no Markdown need no prose activation, even when they own other files. # Panics Panics only if fixture IO or planning fails, or a no-prose owner is reported. |
+//! | [`nested_prose_retains_other_policy_coverage`] | layers | Nested prose is exempt only under its declared root and remains in the burn census. # Panics Panics only if fixture IO or planning fails, or the measured scope differs. |
+//! | [`refuses_invalid_nested_corpus_declarations`] | layers | A nested declaration must name an owner, a contained directory, a snapshot and a reason. # Panics Panics only if fixture IO fails or a malformed nested declaration is accepted. |
+//! | [`reports_every_kind_of_inactive_prose_owner`] | layers | Root, crate-bearing, and crateless owners must activate their Markdown prose. # Panics Panics only if fixture IO or planning fails, or the activation finding differs. |
+//! | [`explains_inactive_prose_and_clears_it_on_activation`] | layers | Activating prose restores its mints; an inactive owner without Markdown is harmless. # Panics Panics only if fixture IO or planning fails, or resolution differs from the contract. |
+//! | [`resolves_a_prefixed_crateless_owner_before_checking_reach`] | layers | A rendered crateless mint resolves before its declared reach is checked. # Panics Panics only if fixture IO, planning, resolution, or reach differs from the contract. |
 //! | [`derives_reach_from_every_dependency_table`] | layers | Reach is read from the manifests and from all three dependency tables — ordinary, development and build — so a dependency declared for tests warrants a citation exactly as one declared for the build does. A `path` key outside a dependency table, such as a library target's, declares no edge. |
 //! | [`derives_an_inherited_workspace_path_dependency`] | layers | A member dependency inherited from the workspace derives the edge carried by the root workspace dependency's path. |
 //! | [`derives_no_edge_from_an_inherited_dependency_without_a_path`] | layers | A member dependency inherited from a non-path workspace dependency derives no reach edge. |
@@ -30,6 +36,7 @@
 //! | [`derives_no_edge_for_a_package_the_workspace_does_not_build`] | layers | cites (´claim:layers:an-absent-owner-is-reachable-by-nobody´) |
 //! | [`keeps_an_edgeless_corpus_in_the_relation`] | layers | cites (´claim:layers:reach-is-one-declared-hop´) |
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -359,6 +366,468 @@ fn fixture_reach(root: &Path) -> crate::layers::Reach {
     );
 
     derive_reach(root, &packages, &adoption)
+}
+
+fn crateless_owner_fixture(declare_row: bool) -> tempfile::TempDir {
+    let root = imported_root_fixture(false);
+    write(
+        root.path(),
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/cas\"]\n",
+    );
+    write(
+        root.path(),
+        "crates/cas/Cargo.toml",
+        "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n",
+    );
+    let row = if declare_row {
+        "{ owner = \"CAS\", target = \"DOCS\" }"
+    } else {
+        ""
+    };
+    write(
+        root.path(),
+        ".linter/owners.toml",
+        &format!(
+            r#"namespace = "example.linter.owners"
+version = [1, 0, 0]
+root_owner = "PROJECTA"
+owners = ["PROJECTA", "CAS", "DOCS"]
+partitions = [
+  {{ name = "config", owner = "PROJECTA", pattern = '%s".linter/" *VCHAR' }},
+  {{ name = "manifest", owner = "PROJECTA", pattern = '%s"Cargo.toml"' }},
+  {{ name = "root-prose", owner = "PROJECTA", pattern = '%s"adr/" *VCHAR' }},
+  {{ name = "cas", owner = "CAS", pattern = '%s"crates/cas/" *VCHAR' }},
+  {{ name = "docs", owner = "DOCS", pattern = '%s"docs/" *VCHAR' }},
+  {{ name = "templates", owner = "DOCS", pattern = '%s"templates/docs/" *VCHAR' }},
+]
+may_cite = [{row}]
+"#
+        ),
+    );
+    write(
+        root.path(),
+        ".linter/policies.toml",
+        r#"namespace = "example.linter.policies"
+version = [1, 0, 0]
+policies = [
+  { owner = "CAS", policy = "labels.mints-well-formed" },
+  { owner = "DOCS", policy = "labels.mints-well-formed" },
+]
+"#,
+    );
+    write(
+        root.path(),
+        ".linter/lists.toml",
+        "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n[CAS.\"labels.mints-well-formed\"]\nallowances = []\n[DOCS.\"labels.mints-well-formed\"]\nallowances = []\n",
+    );
+    write(
+        root.path(),
+        ".linter/environments.toml",
+        "namespace = \"example.linter.environments\"\nversion = [1, 0, 0]\nenvironments = [{ environment = \"Definition\", kind = \"def\" }]\nextensions = []\nreserved_kinds = []\nreserved_extensions = []\n",
+    );
+    let head = "**Definition (Reuse)** · `def:nrz:reuse-lemma`\n";
+    write(root.path(), "docs/design/reuse-concept.md", head);
+    write(
+        root.path(),
+        "templates/docs/design/reuse-concept.md.j2",
+        head,
+    );
+    write(
+        root.path(),
+        "crates/cas/README.md",
+        "See (`[DOCS-def:nrz:reuse-lemma]`).\n",
+    );
+    root
+}
+
+/// Owners with no Markdown need no prose activation, even when they own other files.
+///
+/// # Panics
+/// Panics only if fixture IO or planning fails, or a no-prose owner is reported.
+///
+/// ´claim:layers:owners-without-markdown-need-no-prose-activation´
+/// ´test:crate:does-not-report-owners-without-markdown´
+#[test]
+fn does_not_report_owners_without_markdown() {
+    let root = crateless_owner_fixture(true);
+    for path in [
+        "adr/cites.md",
+        "crates/cas/README.md",
+        "docs/design/reuse-concept.md",
+    ] {
+        fs::remove_file(root.path().join(path)).expect("remove Markdown");
+    }
+    write(root.path(), "docs/guide.txt", "A non-Markdown document.\n");
+    activate_prose(root.path(), &[]);
+    let plan = crate::plan::ExecutionPlan::compile(
+        root.path(),
+        crate::snapshot::configuration(root.path()),
+    )
+    .expect("no-prose plan");
+    assert!(plan.labels().adoption().inactive_prose().is_empty());
+    let (_, findings) = crate::application::verify_configuration_with_plan(&plan, &[]);
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| matches!(finding, Finding::InactiveProseOwner { .. })),
+        "{findings:?}"
+    );
+}
+
+fn nested_fixture() -> tempfile::TempDir {
+    let root = crateless_owner_fixture(true);
+    for file in ["owners", "environments", "policies", "lists", "shape"] {
+        let text = fs::read_to_string(root.path().join(format!(".linter/{file}.toml")))
+            .expect("fixture declaration");
+        write(
+            root.path(),
+            &format!("docs/design/.linter/{file}.toml"),
+            &text,
+        );
+    }
+    activate_prose(root.path(), &["CAS", "PROJECTA"]);
+    crate::test_support::initialise_and_track(root.path());
+    root
+}
+
+fn declare_nested(root: &Path, owner: &str, nested_root: &str, reason: &str) {
+    let path = root.join(".linter/owners.toml");
+    let mut text = fs::read_to_string(&path).expect("owners");
+    writeln!(
+        text,
+        "nested = [{{ owner = {owner:?}, root = {nested_root:?}, reason = {reason:?} }}]"
+    )
+    .expect("write to string");
+    fs::write(path, text).expect("nested declaration");
+}
+
+/// Nested prose is exempt only under its declared root and remains in the burn census.
+///
+/// # Panics
+/// Panics only if fixture IO or planning fails, or the measured scope differs.
+///
+/// ´claim:layers:nested-prose-retains-other-policy-coverage´
+/// ´test:crate:nested-prose-retains-other-policy-coverage´
+#[test]
+fn nested_prose_retains_other_policy_coverage() {
+    let root = nested_fixture();
+    declare_nested(root.path(), "DOCS", "docs/design", "Checked independently");
+    let policies_path = root.path().join(".linter/policies.toml");
+    let policies = fs::read_to_string(&policies_path).expect("policies");
+    fs::write(
+        &policies_path,
+        policies.replace(
+            "policies = [",
+            "policies = [{ owner = \"DOCS\", policy = \"legacy.section-references\" },",
+        ),
+    )
+    .expect("activate burn");
+    let lists_path = root.path().join(".linter/lists.toml");
+    let mut lists = fs::read_to_string(&lists_path).expect("lists");
+    lists.push_str("\n[DOCS.\"legacy.section-references\"]\npath_counts = []\n");
+    fs::write(lists_path, lists).expect("burn list");
+    write(
+        root.path(),
+        ".linter/policy-legacy-section-references.toml",
+        "namespace = \"class.linter.policy.legacy.section-references\"\nversion = [1, 0, 0]\n[owners.DOCS]\nprose = '%s\"docs/design/\" *VCHAR'\n",
+    );
+    write(
+        root.path(),
+        "docs/design/reuse-concept.md",
+        "See § 12.3 for details.\n",
+    );
+    for outside in [false, true] {
+        if outside {
+            write(
+                root.path(),
+                "docs/design-other.md",
+                "Outside the nested corpus.\n",
+            );
+        }
+        let plan = crate::plan::ExecutionPlan::compile(
+            root.path(),
+            crate::snapshot::configuration(root.path()),
+        )
+        .expect("nested plan");
+        let (counts, findings) = crate::application::verify_configuration_with_plan(&plan, &[]);
+        let inactive: Vec<_> = findings
+            .iter()
+            .filter(|finding| matches!(finding, Finding::InactiveProseOwner { .. }))
+            .collect();
+        if outside {
+            assert!(
+                matches!(inactive.as_slice(), [Finding::InactiveProseOwner { owner, sources: 1 }] if owner == "DOCS")
+            );
+        } else {
+            assert!(inactive.is_empty(), "{findings:?}");
+        }
+        let report = serde_json::to_value(counts).expect("configuration report");
+        assert_eq!(
+            report["nested"],
+            serde_json::json!([{
+                "owner": "DOCS", "root": "docs/design", "reason": "Checked independently"
+            }])
+        );
+        let checked = crate::application::check_with_plan(&plan);
+        assert!(
+            checked
+                .findings
+                .iter()
+                .any(|finding| matches!(finding.finding, Finding::BurnListGrowth { .. })),
+            "nested prose remains visible to the burn policy"
+        );
+    }
+}
+
+/// A nested declaration must name an owner, a contained directory, a snapshot and a reason.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a malformed nested declaration is accepted.
+///
+/// ´claim:layers:nested-corpus-declarations-require-evidence´
+/// ´test:crate:refuses-invalid-nested-corpus-declarations´
+#[test]
+fn refuses_invalid_nested_corpus_declarations() {
+    for (owner, path, reason, missing, condition) in [
+        (
+            "UNKNOWN",
+            "docs/design",
+            "Checked",
+            false,
+            "owner is not registered",
+        ),
+        (
+            "DOCS",
+            "../docs/design",
+            "Checked",
+            false,
+            "root must be a normalized relative directory inside the owner's partitions",
+        ),
+        (
+            "DOCS",
+            "docs//design",
+            "Checked",
+            false,
+            "root must be a normalized relative directory inside the owner's partitions",
+        ),
+        (
+            "CAS",
+            "docs/design",
+            "Checked",
+            false,
+            "root must be a normalized relative directory inside the owner's partitions",
+        ),
+        (
+            "DOCS",
+            "docs/design",
+            "Checked",
+            true,
+            "root must hold a loadable .linter/ snapshot",
+        ),
+        (
+            "DOCS",
+            "docs/design",
+            "  ",
+            false,
+            "reason must not be empty",
+        ),
+    ] {
+        let root = nested_fixture();
+        if missing {
+            fs::remove_file(root.path().join("docs/design/.linter/policies.toml"))
+                .expect("remove snapshot member");
+        }
+        declare_nested(root.path(), owner, path, reason);
+        let loaded = crate::snapshot::configuration(root.path());
+        assert!(loaded.snapshot().is_none());
+        let messages: Vec<_> = loaded.refusals().iter().map(ToString::to_string).collect();
+        assert_eq!(
+            messages,
+            [format!(
+                ".linter/owners.toml: nested[1] (owner {owner}, root {path}): {condition}"
+            )]
+        );
+    }
+}
+
+fn activate_prose(root: &Path, owners: &[&str]) {
+    let policies = owners
+        .iter()
+        .map(|owner| format!("{{ owner = \"{owner}\", policy = \"labels.mints-well-formed\" }}"))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let lists = owners.iter().fold(String::new(), |mut text, owner| {
+        writeln!(
+            text,
+            "[{owner}.\"labels.mints-well-formed\"]\nallowances = []"
+        )
+        .expect("write to string");
+        text
+    });
+    write(
+        root,
+        ".linter/policies.toml",
+        &format!(
+            "namespace = \"example.linter.policies\"\nversion = [1, 0, 0]\npolicies = [{policies}]\n"
+        ),
+    );
+    write(
+        root,
+        ".linter/lists.toml",
+        &format!("namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n{lists}"),
+    );
+}
+
+/// Root, crate-bearing, and crateless owners must activate their Markdown prose.
+///
+/// # Panics
+/// Panics only if fixture IO or planning fails, or the activation finding differs.
+///
+/// ´claim:layers:every-owner-with-markdown-needs-prose-activation´
+/// ´test:crate:reports-every-kind-of-inactive-prose-owner´
+#[test]
+fn reports_every_kind_of_inactive_prose_owner() {
+    for inactive in ["DOCS", "CAS", "PROJECTA"] {
+        let root = crateless_owner_fixture(true);
+        write(root.path(), "docs/second.md", "Another document.\n");
+        let active: Vec<_> = ["DOCS", "CAS", "PROJECTA"]
+            .into_iter()
+            .filter(|owner| *owner != inactive)
+            .collect();
+        activate_prose(root.path(), &active);
+        let plan = crate::plan::ExecutionPlan::compile(
+            root.path(),
+            crate::snapshot::configuration(root.path()),
+        )
+        .expect("fixture plan");
+        let (_, findings) = crate::application::verify_configuration_with_plan(&plan, &[]);
+        let [finding @ Finding::InactiveProseOwner { owner, sources }] = findings.as_slice() else {
+            panic!("one inactive prose owner: {findings:?}");
+        };
+        let count = if inactive == "DOCS" { 2 } else { 1 };
+        assert_eq!(owner, inactive);
+        assert_eq!(*sources, count, "templates are not Markdown sources");
+        assert!(finding.is_failure());
+        assert_eq!(finding.code(), "inactive_prose_owner");
+        assert_eq!(
+            finding.to_string(),
+            format!(
+                "owner {inactive} has {count} Markdown sources but activates no labels.mints-well-formed row; activate labels.mints-well-formed to harvest and check its prose"
+            )
+        );
+        assert!(!crate::application::check_with_plan(&plan).clean);
+    }
+}
+
+/// Activating prose restores its mints; an inactive owner without Markdown is harmless.
+///
+/// # Panics
+/// Panics only if fixture IO or planning fails, or resolution differs from the contract.
+///
+/// ´claim:layers:inactive-prose-explains-only-an-empty-registry´
+/// ´test:crate:explains-inactive-prose-and-clears-it-on-activation´
+#[test]
+fn explains_inactive_prose_and_clears_it_on_activation() {
+    let root = crateless_owner_fixture(true);
+    write(root.path(), "adr/cites.md", "Root prose.\n");
+    for (active, has_markdown) in [(false, true), (true, true), (false, false)] {
+        if !has_markdown {
+            fs::remove_file(root.path().join("docs/design/reuse-concept.md")).expect("remove mint");
+        }
+        let owners = if active {
+            vec!["CAS", "PROJECTA", "DOCS"]
+        } else {
+            vec!["CAS", "PROJECTA"]
+        };
+        activate_prose(root.path(), &owners);
+        let plan = crate::plan::ExecutionPlan::compile(
+            root.path(),
+            crate::snapshot::configuration(root.path()),
+        )
+        .expect("fixture plan");
+        let (_, findings) = crate::application::verify_configuration_with_plan(&plan, &[]);
+        assert_eq!(
+            findings.len(),
+            usize::from(!active && has_markdown),
+            "{findings:?}"
+        );
+        let (sources, _) = plan.labels().read(root.path());
+        let analysis = analyze(plan.labels().adoption(), &sources, &CodeSurface::default());
+        if active {
+            assert!(analysis.findings().is_empty(), "{:?}", analysis.findings());
+            assert_eq!(analysis.citations_resolved(), 1);
+        } else {
+            let [finding @ Finding::UnresolvedCitation { .. }] = analysis.findings() else {
+                panic!("one unresolved import: {:?}", analysis.findings());
+            };
+            let cause = if has_markdown {
+                "; owner DOCS activates no labels.mints-well-formed row, so none of its mints are harvested"
+            } else {
+                ""
+            };
+            assert!(finding.to_string().ends_with(&format!(
+                "citation of def:nrz:reuse-lemma resolves nowhere in owner DOCS, whose prefix DOCS the citation names{cause}"
+            )));
+        }
+    }
+}
+
+/// A rendered crateless mint resolves before its declared reach is checked.
+///
+/// # Panics
+/// Panics only if fixture IO, planning, resolution, or reach differs from the contract.
+///
+/// ´claim:layers:crateless-mints-resolve-before-reach´
+/// ´test:crate:resolves-a-prefixed-crateless-owner-before-checking-reach´
+#[test]
+fn resolves_a_prefixed_crateless_owner_before_checking_reach() {
+    for declare_row in [true, false] {
+        let root = crateless_owner_fixture(declare_row);
+        let plan = crate::plan::ExecutionPlan::compile(
+            root.path(),
+            crate::snapshot::configuration(root.path()),
+        )
+        .expect("crateless fixture plan");
+        let adoption = plan.labels().adoption();
+        let (sources, findings) = plan.labels().read(root.path());
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(sources.len(), 2, "the template is not a second mint");
+        assert_eq!(
+            adoption.owner_of(Path::new("docs/design/reuse-concept.md")),
+            &owner("DOCS")
+        );
+        let analysis = analyze(adoption, &sources, &CodeSurface::default());
+        assert!(analysis.findings().is_empty(), "{:?}", analysis.findings());
+        assert_eq!(analysis.mints(), 1);
+        assert_eq!(analysis.citations_resolved(), 1);
+        let (_, findings) = verify_layers(
+            root.path(),
+            plan.workspace().packages(),
+            adoption,
+            &analysis,
+            plan.snapshot().may_cite(),
+        );
+        let expected = if declare_row {
+            vec![]
+        } else {
+            vec!["unreached_import"]
+        };
+        assert_eq!(codes(&findings), expected, "{findings:?}");
+        write(
+            root.path(),
+            "docs/design/reuse-concept.md",
+            "**Definition (Other)** · `def:nrz:other`\n",
+        );
+        let (sources, _) = plan.labels().read(root.path());
+        let analysis = analyze(adoption, &sources, &CodeSurface::default());
+        let [finding @ Finding::UnresolvedCitation { .. }] = analysis.findings() else {
+            panic!("one missing imported mint: {:?}", analysis.findings());
+        };
+        assert!(finding.to_string().ends_with(
+            "citation of def:nrz:reuse-lemma resolves nowhere in owner DOCS, whose prefix DOCS the citation names"
+        ));
+    }
 }
 
 /// Reach is read from the manifests and from all three dependency tables —

@@ -3,7 +3,7 @@
 
 //! The check report, and the top-level check itself.
 //!
-//! The report is this command's stdout result data under ADR-T-010, so it is one
+//! The report is this command's stdout result data under (´[TOOLS-spec:output:machine-json-streams]´), so it is one
 //! JSON object with no human-oriented text outside the `message` fields carried
 //! inside the JSON.
 //!
@@ -115,6 +115,10 @@ pub struct CheckReport {
     pub warnings: usize,
     /// Whether the carrier is in good standing.
     pub clean: bool,
+    /// Activated rows checked by the repository's own programme, outside this verdict.
+    pub deferred: usize,
+    /// The owner, policy and checker for every deferred activation.
+    pub deferred_policies: Vec<crate::snapshot::DeferredPolicy>,
     /// What the test profile found over the Rust carrier.
     pub profile: ProfileAnalysis,
     /// What the to-do profile found over the Rust carrier.
@@ -135,7 +139,7 @@ pub struct CheckReport {
     pub assembly: AssemblyCounts,
     /// What the burn lists were censused at.
     pub burn: BurnCounts,
-    /// What the layer owner graph of ADR-T-019 was found to be, and what it refused.
+    /// What the layer owner graph of (´[TOOLS-rule:lintcontracts:ownership]´) was found to be, and what it refused.
     pub layers: LayerAnalysis,
     /// What the declared configuration was found to be.
     ///
@@ -217,13 +221,21 @@ pub struct Verdicts {
     pub assembly: AssemblyCounts,
     /// What the burn lists were censused at.
     pub burn: BurnCounts,
-    /// What the layer owner graph of ADR-T-019 was found to be.
+    /// What the layer owner graph of (´[TOOLS-rule:lintcontracts:ownership]´) was found to be.
     pub layers: LayerAnalysis,
     /// What the declared configuration was found to be, when one stands.
     pub configuration: Option<ConfigurationCounts>,
 }
 
 impl CheckReport {
+    /// Record the checking boundary without changing the catalogued verdict.
+    #[must_use]
+    pub fn with_deferred(mut self, policies: &[crate::snapshot::DeferredPolicy]) -> Self {
+        self.deferred_policies = policies.to_vec();
+        self.deferred = policies.len();
+        self
+    }
+
     /// Build a report from an analysis and any findings raised before it.
     #[must_use]
     pub fn new(
@@ -275,6 +287,8 @@ impl CheckReport {
             failures,
             warnings: findings.len() - failures,
             clean: failures == 0,
+            deferred: 0,
+            deferred_policies: Vec::new(),
             profile,
             todo,
             legacy,
@@ -333,6 +347,8 @@ pub fn check_with_plan(plan: &ExecutionPlan) -> CheckReport {
 /// configuration. Every compiled command plan carries the parsed snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ConfigurationCounts {
+    /// Nested corpora whose own snapshots account for their prose.
+    pub nested: Vec<crate::snapshot::NestedCorpus>,
     /// How many owners the declaration registers.
     pub owners: usize,
     /// How many partition rows it carries.
@@ -721,7 +737,7 @@ pub struct AssembleReport {
 /// Assemble every adopted publication, verifying or writing it.
 ///
 /// Without `write` the command forms no side effect at all: it is the exact-byte
-/// freshness comparison of ADR-T-012 and nothing else, which is the mode a gate
+/// freshness comparison of (´[TOOLS-rule:lintcontracts:projections]´) and nothing else, which is the mode a gate
 /// runs. With it, every publication is rewritten to what its parts say it is, and
 /// the freshness findings of that same run are the ones the write repaired.
 #[must_use]
@@ -1428,6 +1444,7 @@ mod tests {
         ];
         let policies = [
             Pair::singleton("ORCHARD", "paths.names-well-formed"),
+            Pair::singleton("ORCHARD", MINTS),
             Pair::singleton("QUINCE", MINTS),
         ];
         declare_surface(root.path(), &partitions, &policies);
@@ -1435,6 +1452,7 @@ mod tests {
             root.path().join(".linter/lists.toml"),
             "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n\
              [ORCHARD.\"paths.names-well-formed\"]\npaths = []\n\n\
+             [ORCHARD.\"labels.mints-well-formed\"]\nallowances = []\n\n\
              [QUINCE.\"labels.mints-well-formed\"]\nallowances = []\n",
         )
         .expect("a path-set and an allowance list");
@@ -1506,7 +1524,7 @@ mod tests {
     #[test]
     fn a_check_with_no_activation_reports_it_once() {
         let (report, json) = checked(
-            &[("packages/orchard/one.md", "Nothing stands here.\n")],
+            &[("packages/orchard/one.txt", "Nothing stands here.\n")],
             &two_owners(),
             &[],
         );

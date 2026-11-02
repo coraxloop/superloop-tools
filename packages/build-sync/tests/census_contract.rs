@@ -77,11 +77,10 @@ impl Fixture {
             .expect("installed outputs");
         fs::write(root.path().join("meson-info/intro-buildoptions.json"), "[]")
             .expect("build options");
-        fs::create_dir(root.path().join("adr")).expect("records");
-        fs::write(root.path().join("adr/036-tools-dependency-concept.md"), "|Present source|Destination and tier|\n|---|---|\n|`base`, `tool`|fixture packages|\n\n|Package|Tier and domain|Accountable owner|Consumers|\n|-------|---------------|-----------------|---------|\n|`base`|Fixture domain|BASE|tool|\n\n").expect("package destinations");
+        fs::create_dir_all(root.path().join("docs/spec")).expect("specifications");
+        fs::write(root.path().join("docs/spec/build-contracts.md"), "|Present source|Destination and tier|\n|---|---|\n|`base`, `tool`|fixture packages|\n\n|Package|Tier and domain|Accountable owner|Consumers|\n|-------|---------------|-----------------|---------|\n|`base`|Fixture domain|BASE|tool|\n\n").expect("package destinations");
         fs::write(
-            root.path()
-                .join("adr/033-tool-executables-names-and-versions.md"),
+            root.path().join("docs/spec/executable-contracts.md"),
             "|Present name|Successor|Installs to|\n|---|---|---|\n\n",
         )
         .expect("successor table");
@@ -114,6 +113,7 @@ impl Fixture {
         ledger(
             &root.path().join("meson.build"),
             &[
+                json!({"kind":"installation-inputs","owner":"fixture","maps":[],"document_roots":["docs/arch","docs/spec"]}),
                 json!({"kind":"accountable-owner","package":"base","owner":"BASE"}),
                 json!({"kind":"accountable-owner","package":"tool","owner":"TOOL"}),
                 json!({"kind":"admission","name":"petgraph","owner":"ORCHESTRATORHOOK","reason":"state graphs"}),
@@ -436,7 +436,7 @@ fn census_refuses_unaccounted_successor() {
         fixture
             .root
             .path()
-            .join("adr/033-tool-executables-names-and-versions.md"),
+            .join("docs/spec/executable-contracts.md"),
         "|Present name|Successor|Installs to|\n|---|---|---|\n|extra|next|bin|\n\n",
     )
     .expect("successor");
@@ -456,7 +456,7 @@ fn census_refuses_missing_package_destination() {
         fixture
             .root
             .path()
-            .join("adr/036-tools-dependency-concept.md"),
+            .join("docs/spec/build-contracts.md"),
         "|Present source|Destination and tier|\n|---|---|\n|`base`|fixture|\n\n|Package|Tier and domain|Accountable owner|Consumers|\n|-------|---------------|-----------------|---------|\n\n",
     )
     .expect("destination");
@@ -604,6 +604,11 @@ fn census_refuses_unaccounted_native_install() {
 #[test]
 fn census_refuses_unaccounted_map_install() {
     let fixture = Fixture::new();
+    let path = fixture.root.path().join("meson.build");
+    let source = fs::read_to_string(&path)
+        .expect("ledger")
+        .replace("\"maps\":[]", "\"maps\":[\"maps/bin.toml\"]");
+    fs::write(path, source).expect("declared map");
     fs::create_dir(fixture.root.path().join("maps")).expect("maps");
     fs::write(fixture.root.path().join("maps/bin.toml"),
         "root = \"~/.local/bin\"\n[[targets]]\nkind = \"build\"\noutput = \"tool\"\ndestination = \"tool\"\nmode = \"0755\"\n").expect("map");
@@ -644,9 +649,12 @@ fn document_fixture(map: Option<&str>, destination: &str) -> Fixture {
         }
         targets.push(target);
     }
+    if let Some(map) = map {
+        source = source.replace("\"maps\":[]", &format!("\"maps\":[\"{map}\"]"));
+    }
     fs::write(root.join("meson.build"), source).expect("installation declarations");
     if let Some(map) = map {
-        fs::create_dir(root.join("maps")).expect("maps");
+        fs::create_dir_all(root.join(map).parent().expect("map parent")).expect("maps");
         let value = json!({"root":"~/.local/share/superloop-tools","targets":targets});
         fs::write(root.join(map), toml::to_string(&value).expect("map TOML"))
             .expect("document map");
@@ -661,18 +669,14 @@ fn document_fixture(map: Option<&str>, destination: &str) -> Fixture {
 /// ´test:integration:census-refuses-uninstalled-docs-prose´
 #[test]
 fn census_refuses_uninstalled_docs_prose() {
-    for (map, destination) in [
-        (None, ""),
-        (Some("maps/other.toml"), ""),
-        (Some("maps/share-map.toml"), "elsewhere/"),
-    ] {
+    for (map, destination) in [(None, ""), (Some("maps/share-map.toml"), "elsewhere/")] {
         let fixture = document_fixture(map, destination);
         let report = fixture.run();
         let findings = report["unaccounted"].as_array().expect("findings");
         assert_eq!(findings.len(), 2, "{report}");
         for document in ["docs/arch/example.md", "docs/spec/example.md"] {
             assert!(findings.contains(&json!(format!(
-                "docs-prose-uninstalled: {document} declared in declared-paths.txt has no installation in maps/share-map.toml"
+                "docs-prose-uninstalled: {document} declared in declared-paths.txt has no declared map or public native installation"
             ))));
         }
     }
@@ -685,8 +689,76 @@ fn census_refuses_uninstalled_docs_prose() {
 /// ´test:integration:census-admits-installed-docs-prose´
 #[test]
 fn census_admits_installed_docs_prose() {
-    let fixture = document_fixture(Some("maps/share-map.toml"), "");
-    assert_eq!(fixture.run()["unaccounted"], json!([]));
+    for map in ["maps/share-map.toml", "deploy/tools/maps/documents.toml"] {
+        let fixture = document_fixture(Some(map), "");
+        assert_eq!(fixture.run()["unaccounted"], json!([]));
+    }
+}
+
+/// A document repository checks declared maps without Cargo metadata.
+///
+/// # Panics
+/// Panics only if fixture setup fails or the installation contract is violated.
+/// ´test:integration:census-installations-without-cargo´
+#[test]
+fn census_installations_without_cargo() {
+    let fixture = document_fixture(Some("deploy/tools/maps/documents.toml"), "");
+    let root = fixture.root.path();
+    fs::remove_file(root.join("Cargo.toml")).expect("remove workspace");
+    let path = root.join("meson.build");
+    let source = fs::read_to_string(&path).expect("source ledger");
+    let source = source.replace("docs/arch", "docs/tools");
+    fs::rename(root.join("docs/arch"), root.join("docs/tools")).expect("instance documents");
+    fs::write(&path, &source).expect("instance ledger");
+    for path in ["declared-paths.txt", "deploy/tools/maps/documents.toml"] {
+        let path = root.join(path);
+        let text = fs::read_to_string(&path)
+            .expect("input")
+            .replace("docs/arch", "docs/tools");
+        fs::write(path, text).expect("instance input");
+    }
+    let configured = source
+        .split("dependency_ledger += ['''\n")
+        .skip(1)
+        .map(|block| block.split_once("\n''']").expect("ledger terminator").0)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ledger = root.join("dependency-ledger.jsonl");
+    fs::write(&ledger, configured).expect("configured ledger");
+    let report = root.join("report.json");
+    build_sync::census::run(root, Path::new("absent-cargo"), &ledger, &report, true)
+        .expect("document census");
+    let value: Value = serde_json::from_slice(&fs::read(report).expect("report")).expect("JSON");
+    assert_eq!(value["scope"], "installations");
+    assert_eq!(value["unaccounted"], json!([]));
+}
+
+/// Declared inputs refuse malformed paths and missing maps.
+///
+/// # Panics
+/// Panics only if fixture setup fails or an invalid input is admitted.
+/// ´test:integration:census-refuses-invalid-installation-inputs´
+#[test]
+fn census_refuses_invalid_installation_inputs() {
+    for (maps, error) in [
+        (
+            r#"["../outside.toml"]"#,
+            "invalid or duplicate installation input",
+        ),
+        (
+            r#"["maps/a.toml","maps/a.toml"]"#,
+            "invalid or duplicate installation input",
+        ),
+        (r#"["maps/absent.toml"]"#, "map maps/absent.toml:"),
+    ] {
+        let fixture = Fixture::new();
+        let path = fixture.root.path().join("meson.build");
+        let source = fs::read_to_string(&path)
+            .expect("ledger")
+            .replace("\"maps\":[]", &format!("\"maps\":{maps}"));
+        fs::write(path, source).expect("invalid declaration");
+        fixture.run_at(fixture.root.path(), Some(error));
+    }
 }
 
 /// Source inclusion cannot bypass dependency accounting by avoiding a Cargo edge.
@@ -939,10 +1011,7 @@ fn census_refuses_changed_meson_command_variable() {
 #[test]
 fn census_accepts_recorded_successor_package() {
     let fixture = Fixture::new();
-    let path = fixture
-        .root
-        .path()
-        .join("adr/036-tools-dependency-concept.md");
+    let path = fixture.root.path().join("docs/spec/build-contracts.md");
     fs::write(&path, "|Present source|Destination and tier|\n|---|---|\n|`base`, `former-tool`|Survives as tier 2 `tool`.|\n\n|Package|Tier and domain|Accountable owner|Consumers|\n|-------|---------------|-----------------|---------|\n\n").expect("successor destination");
     assert_eq!(fixture.run()["unaccounted"], json!([]));
     fs::write(path, "|Present source|Destination and tier|\n|---|---|\n|`base`, `former-tool`|No successor declared.|\n\n|Package|Tier and domain|Accountable owner|Consumers|\n|-------|---------------|-----------------|---------|\n\n").expect("missing destination");
@@ -963,14 +1032,14 @@ fn census_keeps_reporter_successor_build_only() {
         fixture
             .root
             .path()
-            .join("adr/033-tool-executables-names-and-versions.md"),
+            .join("docs/spec/executable-contracts.md"),
         format!("|Present name|Successor|Installs to|\n|---|---|---|\n{row}\n\n"),
     )
     .expect("build-only successor");
     let path = fixture.root.path().join("meson.build");
     let mut source = fs::read_to_string(&path).expect("ledger");
     for declaration in [
-        json!({"kind":"successor","record":"tab:toolnames:successors","row":row,"pending_bites":[],"build_programs":["build/tool"]}),
+        json!({"kind":"successor","record":"tab:buildcontracts:executable-identities","row":row,"pending_bites":[],"build_programs":["build/tool"]}),
         json!({"kind":"program","identity":"build/tool","output":"packages/tool/tool","package":"tool","version_authority":"packages/tool/Cargo.toml","form":"rust","installation_class":"build","cargo_binary":"tool","callers":[]}),
     ] {
         writeln!(source, "\ndependency_ledger += ['''\n{declaration}\n''']").expect("declaration");
@@ -999,14 +1068,14 @@ fn census_binds_generated_bridges_to_their_owner() {
         fixture
             .root
             .path()
-            .join("adr/033-tool-executables-names-and-versions.md"),
+            .join("docs/spec/executable-contracts.md"),
         format!("|Present name|Successor|Installs to|\n|---|---|---|\n{row}\n\n"),
     )
     .expect("record");
     let path = fixture.root.path().join("meson.build");
     let mut source = fs::read_to_string(&path).expect("ledger");
     for declaration in [
-        json!({"kind":"successor","record":"tab:toolnames:successors","row":row,"pending_bites":[],"generated_programs":[{"program":"build/tool","source":"packages/tool/Cargo.toml","anchor":"[package]","destination":"private/LOOP-gpg"}]}),
+        json!({"kind":"successor","record":"tab:buildcontracts:executable-identities","row":row,"pending_bites":[],"generated_programs":[{"program":"build/tool","source":"packages/tool/Cargo.toml","anchor":"[package]","destination":"private/LOOP-gpg"}]}),
         json!({"kind":"program","identity":"build/tool","output":"packages/tool/tool","package":"tool","version_authority":"packages/tool/Cargo.toml","form":"rust","installation_class":"build","cargo_binary":"tool","callers":[]}),
     ] {
         writeln!(source, "\ndependency_ledger += ['''\n{declaration}\n''']").expect("declaration");
@@ -1167,10 +1236,7 @@ fn census_documents_require_ledger_parent() {
 #[test]
 fn census_refuses_missing_domains_table() {
     let fixture = Fixture::new();
-    let path = fixture
-        .root
-        .path()
-        .join("adr/036-tools-dependency-concept.md");
+    let path = fixture.root.path().join("docs/spec/build-contracts.md");
     let record = fs::read_to_string(&path).expect("record");
     fs::write(
         path,
@@ -1180,7 +1246,7 @@ fn census_refuses_missing_domains_table() {
         ),
     )
     .expect("missing domains header");
-    let error = "record 036 domains table missing";
+    let error = "public domains table missing";
     let report = fixture.run_at(fixture.root.path(), Some(error));
     assert_eq!(report, json!({"schema":1,"complete":false,"error":error}));
 }
@@ -1193,10 +1259,7 @@ fn census_refuses_missing_domains_table() {
 #[test]
 fn census_refuses_malformed_domains_table_row() {
     let fixture = Fixture::new();
-    let path = fixture
-        .root
-        .path()
-        .join("adr/036-tools-dependency-concept.md");
+    let path = fixture.root.path().join("docs/spec/build-contracts.md");
     let record = fs::read_to_string(&path).expect("record");
     fs::write(
         path,
@@ -1206,7 +1269,7 @@ fn census_refuses_malformed_domains_table_row() {
         ),
     )
     .expect("five-field domains row");
-    let error = "record 036 domains table row malformed";
+    let error = "public domains table row malformed";
     let report = fixture.run_at(fixture.root.path(), Some(error));
     assert_eq!(report, json!({"schema":1,"complete":false,"error":error}));
 }
@@ -1219,10 +1282,7 @@ fn census_refuses_malformed_domains_table_row() {
 #[test]
 fn census_refuses_domains_package_outside_roster() {
     let fixture = Fixture::new();
-    let path = fixture
-        .root
-        .path()
-        .join("adr/036-tools-dependency-concept.md");
+    let path = fixture.root.path().join("docs/spec/build-contracts.md");
     let record = fs::read_to_string(&path).expect("record");
     fs::write(
         path,
@@ -1232,12 +1292,12 @@ fn census_refuses_domains_package_outside_roster() {
         ),
     )
     .expect("stale domains package");
-    let error = "record 036 domains table names a package the roster lacks: absent";
+    let error = "public domains table names a package the roster lacks: absent";
     let report = fixture.run_at(fixture.root.path(), Some(error));
     assert_eq!(report, json!({"schema":1,"complete":false,"error":error}));
 }
 
-/// Domain owners cannot drift between the ledger and record 036.
+/// Domain owners cannot drift between the ledger and public domain contract.
 ///
 /// # Panics
 /// Panics only if fixture setup or the disagreement assertion fails.
@@ -1245,15 +1305,12 @@ fn census_refuses_domains_package_outside_roster() {
 #[test]
 fn census_refuses_record_owner_disagreement() {
     let fixture = Fixture::new();
-    let path = fixture
-        .root
-        .path()
-        .join("adr/036-tools-dependency-concept.md");
+    let path = fixture.root.path().join("docs/spec/build-contracts.md");
     let record = fs::read_to_string(&path).expect("record");
     fs::write(path, record.replace("|BASE|", "|OTHER|")).expect("changed record owner");
     assert_eq!(
         fixture.run()["unaccounted"],
-        json!(["accountable owner disagrees with record 036: base"])
+        json!(["accountable owner disagrees with public domain contract: base"])
     );
 }
 

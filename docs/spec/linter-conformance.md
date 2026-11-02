@@ -95,7 +95,7 @@ Every recognized generated in-file test index and folder test matrix must equal 
 
 **Rule (Informational reports do not judge)** · `rule:conformance:informational-reports-do-not-judge`
 
-Graph, coverage, and shape commands describe the completed analysis and return success whenever they publish their result, regardless of orphan, unwitnessed, dangling, long, or short listings. They never use the linter's finding-bearing status. Runtime and usage failures retain their own statuses. This applies the output rule (`rule:output:informational-success`) and the command-specific rule (`rule:lintercli:informational-exit`); judging checks, not reports, own corpus standing.
+Graph, coverage, and shape commands describe the completed analysis and return success whenever they publish their result, regardless of orphan, unwitnessed, dangling, long, or short listings. They never use the linter's finding-bearing status. Runtime and usage failures retain their own statuses. This applies the output rule (`rule:output:informational-success`) and the command-specific rule (`rule:lintcontracts:verdicts`); judging checks, not reports, own corpus standing.
 
 **Verification (Repository prose)** · `verif:conformance:repository-prose`
 

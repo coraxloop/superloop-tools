@@ -8,7 +8,7 @@
 //! beside each policy's recognizer and row codec, and they are not configurable —
 //! a repository ruling selects which policies apply, and the linter defines what
 //! a policy means and therefore what it presupposes
-//! (´req:commandcontract:dependency-contract´).
+//! (´[TOOLS-rule:lintcontracts:verdicts]´).
 //!
 //! Checking each declared pair against its immediate edges is checking the
 //! closure. A required pair that is present is itself a declared pair, so its own

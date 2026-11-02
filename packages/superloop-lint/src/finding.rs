@@ -323,6 +323,12 @@ pub enum Finding {
         label: Label,
         /// Where the citation stands.
         location: Location,
+        /// The searched owner and the registered prefix naming it, for an import.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        imported: Option<(String, Prefix)>,
+        /// The named registry is empty and the owner's prose is not activated.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        inactive_prose: bool,
     },
     /// A same-owner citation resolved to no mint in its own owner, but the
     /// label mints in another owner and wants the import form.
@@ -700,7 +706,7 @@ pub enum Finding {
     /// A file holds more occurrences of a burned family than its register allows.
     ///
     /// The ratchet of the burn discipline
-    /// (ADR-T-020, The migration disciplines) only turns one way, so this is the
+    /// (´[TOOLS-rule:lintcontracts:burn-families]´) only turns one way, so this is the
     /// failure that forbids growth: the corpus wrote a form the campaign is
     /// retiring, and no commit may add one.
     BurnListGrowth {
@@ -1022,6 +1028,13 @@ pub enum Finding {
         /// Which of the two ways the run came to govern nothing.
         cause: UngovernedCause,
     },
+    /// A declared owner's Markdown sources have no prose-policy activation.
+    InactiveProseOwner {
+        /// The declared owner whose prose is not harvested.
+        owner: String,
+        /// Markdown sources attributed to that owner by the partition.
+        sources: usize,
+    },
     /// One activation governs nothing where other activations govern a share.
     ///
     /// The whole-check report above cannot see this: a declaration where most
@@ -1067,7 +1080,7 @@ pub enum Finding {
     ///
     /// The fallback that once answered for an unaccounted path is gone with
     /// nothing put in its place, so the corpus asks whose the file is instead of
-    /// assuming (ADR-T-019, The layer owner graph). The path is rendered
+    /// assuming (´[TOOLS-rule:lintcontracts:ownership]´). The path is rendered
     /// in the reversible display, because a file whose name is not text is
     /// exactly the file a lossy report would lose.
     UnaccountedPath {
@@ -1093,7 +1106,7 @@ pub enum Finding {
     /// Activating a policy for an owner activates a claim about what that verdict
     /// rests on, and the prerequisites are this binary's rather than the
     /// declaration's. Absence is not a waiver: the dependent pair is what makes
-    /// the prerequisite applicable (´req:commandcontract:dependency-contract´).
+    /// the prerequisite applicable (´[TOOLS-rule:lintcontracts:verdicts]´).
     MissingPolicyDependency {
         /// The owner whose pair required it.
         owner: String,
@@ -1499,6 +1512,7 @@ impl Finding {
             Self::BurnListGrowth { location, .. }
             | Self::MissingPolicyDependency { location, .. } => location.as_ref(),
             Self::TraversalFailure { .. }
+            | Self::InactiveProseOwner { .. }
             | Self::NothingGoverned { .. }
             | Self::UngovernedActivation { .. }
             | Self::VacuousSurface { .. }
@@ -1624,6 +1638,7 @@ impl Finding {
             Self::UnwarrantedConstantPin { .. } => "unwarranted_constant_pin",
             Self::MissingConstantWarrant { .. } => "missing_constant_warrant",
             Self::NothingGoverned { .. } => "nothing_governed",
+            Self::InactiveProseOwner { .. } => "inactive_prose_owner",
             Self::UngovernedActivation { .. } => "ungoverned_activation",
             Self::VacuousSurface { .. } => "vacuous_surface",
             Self::UntrackedPath { .. } => "untracked_path",
@@ -1688,11 +1703,29 @@ impl fmt::Display for Finding {
                 formatter,
                 "{location}: unpublished address {owner}-{label} is cited by no public file"
             ),
-            Self::UnresolvedCitation { label, location } => {
+            Self::UnresolvedCitation {
+                label,
+                location,
+                imported,
+                inactive_prose,
+            } => {
                 write!(
                     formatter,
                     "{location}: citation of {label} resolves nowhere"
-                )
+                )?;
+                if let Some((owner, prefix)) = imported {
+                    write!(
+                        formatter,
+                        " in owner {owner}, whose prefix {prefix} the citation names"
+                    )?;
+                    if *inactive_prose {
+                        write!(
+                            formatter,
+                            "; owner {owner} activates no labels.mints-well-formed row, so none of its mints are harvested"
+                        )?;
+                    }
+                }
+                Ok(())
             }
             Self::UnresolvedCitationWantingImport {
                 label,
@@ -2205,6 +2238,10 @@ impl fmt::Display for Finding {
                 formatter,
                 "{location}: {identity} cites no warrant, and its documentation admits owing none"
             ),
+            Self::InactiveProseOwner { owner, sources } => write!(
+                formatter,
+                "owner {owner} has {sources} Markdown sources but activates no labels.mints-well-formed row; activate labels.mints-well-formed to harvest and check its prose"
+            ),
             Self::NothingGoverned { cause } => write!(
                 formatter,
                 "activation: every activation governs nothing: {cause}"
@@ -2565,6 +2602,8 @@ mod tests {
         let failure = Finding::UnresolvedCitation {
             label: Label::parse("sec:labels:syntax").expect("well-formed"),
             location,
+            imported: None,
+            inactive_prose: false,
         };
         assert_eq!(failure.severity(), Severity::Failure);
         assert!(failure.is_failure());

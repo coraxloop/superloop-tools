@@ -27,7 +27,7 @@
 //! its crate name. Low-level callers supply their root owner explicitly.
 //!
 //! The reserved kinds arrive with the kind registry compiled from the declared
-//! configuration snapshot (´dec:kindregistry:runtime-authority´). One profile
+//! configuration snapshot (´[TOOLS-rule:lintcontracts:snapshot]´). One profile
 //! now governs one of them — the test profile of ADR-T-015 governs
 //! `test` — and for every other the warrant-totality invariant
 //! (ADR-T-014, A calculus of documentation and source labels) still makes a bare occurrence a hard
@@ -93,9 +93,19 @@ pub struct Adoption {
     generated: Vec<PathBuf>,
     imported: BTreeMap<Owner, Vec<(crate::label::Label, PathBuf)>>,
     unpublished: Option<(PathBuf, crate::export::UnpublishedLabels)>,
+    inactive_prose: BTreeMap<Owner, usize>,
 }
 
 impl Adoption {
+    pub(crate) fn with_inactive_prose(mut self, owners: BTreeMap<Owner, usize>) -> Self {
+        self.inactive_prose = owners;
+        self
+    }
+
+    pub(crate) const fn inactive_prose(&self) -> &BTreeMap<Owner, usize> {
+        &self.inactive_prose
+    }
+
     pub(crate) fn with_unpublished(
         mut self,
         document: Option<&(PathBuf, crate::export::UnpublishedLabels)>,
@@ -125,6 +135,7 @@ impl Adoption {
             generated: Vec::new(),
             imported: BTreeMap::new(),
             unpublished: None,
+            inactive_prose: BTreeMap::new(),
         }
     }
 

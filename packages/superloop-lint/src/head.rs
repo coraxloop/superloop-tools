@@ -441,7 +441,7 @@ mod tests {
     ///
     /// The extension rows are a corpus's own declaration rather than a compiled
     /// set, so a fixture wanting them says which it wants. These three are the
-    /// ones this module's own heads pair with (´gram:isolation:declaration´).
+    /// ones this module's own heads pair with (´[TOOLS-rule:lintcontracts:declarations]´).
     fn registry() -> KindRegistry {
         fixture_kind_registry().with_declared([
             ("Document", "doc"),

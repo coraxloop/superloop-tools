@@ -13,16 +13,16 @@
 //! The layer owner graph: reach derived from the manifests, and the two
 //! owner-layer rules of the citation law.
 //!
-//! ADR-T-019 supplies the half of the calculus that the calculus deliberately
+//! (´[TOOLS-rule:lintcontracts:ownership]´) supplies the half of the calculus that the calculus deliberately
 //! left out. The calculus fixes which citations *resolve*
 //! (ADR-T-014, A calculus of documentation and source labels) and says nothing about which
 //! imports a corpus ought to admit. This module is the enforcement that record
-//! requires (ADR-T-019, The layer owner graph): it learns the reach relation,
+//! requires (´[TOOLS-rule:lintcontracts:ownership]´): it learns the reach relation,
 //! reconciles the may-cite rows the owner surface declares against what the
 //! manifests say, and reports every import the law refuses.
 //!
 //! Reach is one declared hop and nothing else
-//! (ADR-T-019, The layer owner graph): corpus *A* reaches corpus *B* when
+//! (´[TOOLS-rule:lintcontracts:ownership]´): corpus *A* reaches corpus *B* when
 //! *A* is *B*, or when *A*'s manifest declares a workspace-path dependency on
 //! *B*, in any dependency table. The relation is derived here from the
 //! manifests on disk at check time rather than transcribed into this source, so
@@ -33,21 +33,21 @@
 //! Two rules read that relation, and their asymmetry is the substance of the
 //! two-layer picture. Upward is open: every corpus reaches the root's repo-wide
 //! policy whether or not a manifest says so
-//! (ADR-T-019, The layer owner graph), because policy that binds every
+//! (´[TOOLS-rule:lintcontracts:ownership]´), because policy that binds every
 //! member must be citable by every member, and no member declares a dependency
 //! on the root crate. Downward is closed: the root corpus's prose carries no
 //! import of a package prefix at all
-//! (ADR-T-019, The layer owner graph), even one its manifest
+//! (´[TOOLS-rule:lintcontracts:ownership]´), even one its manifest
 //! reaches, because a common policy with a private premise is not common.
 //! Between the packages the manifest decides
-//! (ADR-T-019, The layer owner graph).
+//! (´[TOOLS-rule:lintcontracts:ownership]´).
 //!
 //! # What this pass does not do
 //!
 //! It reads prefixes only. The cited label's kind, its area, and the file it
 //! mints in are the cited corpus's business, and a rule consulting them would
 //! be legislating another owner's naming from outside it — the granularity the
-//! owner ruled against (ADR-T-019, The layer owner graph).
+//! owner ruled against (´[TOOLS-rule:lintcontracts:ownership]´).
 //!
 //! It leaves resolution alone. An import this law refuses still resolves, and
 //! reporting it as unresolved would be a false statement about the graph
@@ -61,9 +61,9 @@
 //! (ADR-T-014, A calculus of documentation and source labels). No second recognizer for the bracket
 //! form is written here, because a register counting one thing while a gate
 //! judged another is a ratchet that cannot hold
-//! (ADR-T-020, The migration disciplines). The three display sites
-//! ADR-T-019 settles are invisible to this pass for that reason rather than by
-//! an exemption list (ADR-T-019, The layer owner graph).
+//! (´[TOOLS-rule:lintcontracts:burn-families]´). The three display sites
+//! (´[TOOLS-rule:lintcontracts:ownership]´) settles are invisible to this pass for that reason rather than by
+//! an exemption list (´[TOOLS-rule:lintcontracts:ownership]´).
 //!
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -81,7 +81,7 @@ use crate::workspace::Package;
 ///
 /// All three, and the enumeration is the convention's own: reach is declared
 /// "in any dependency table — ordinary, development, or build"
-/// (´[TOOLS-conv:layers:reach-relation]´). A dependency declared for tests
+/// (´[TOOLS-rule:lintcontracts:ownership]´). A dependency declared for tests
 /// warrants a citation exactly as one declared for the build does, because what
 /// the edge records is that the citing corpus has taken on the cited one, not
 /// when it does so.
@@ -109,9 +109,9 @@ impl Reach {
     ///
     /// Three ways, and only three. A corpus is itself. Every corpus reaches a
     /// crate-bearing root, by the rule that keeps repo-wide policy readable
-    /// from the repository it governs (ADR-T-019, The layer owner graph). And
+    /// from the repository it governs (´[TOOLS-rule:lintcontracts:ownership]´). And
     /// a manifest edge reaches what it declares — one hop, never its closure
-    /// (ADR-T-019, The layer owner graph). A crateless root has no structural
+    /// (´[TOOLS-rule:lintcontracts:ownership]´). A crateless root has no structural
     /// manifest reach; its explicit declared edges are applied by the verifier.
     #[must_use]
     pub fn reaches(&self, citing: &Owner, cited: &Owner) -> bool {
@@ -138,7 +138,7 @@ impl Reach {
     /// a set rather than answered one pair at a time: the corpus itself, the
     /// root, and each manifest edge. This is the form the owner surface writes
     /// the relation in, so it is the form the reconciliation compares against
-    /// (ADR-T-019, The layer owner graph).
+    /// (´[TOOLS-rule:lintcontracts:ownership]´).
     #[must_use]
     pub fn admissible(&self, citing: &Owner) -> BTreeSet<Owner> {
         let mut reached: BTreeSet<Owner> = BTreeSet::new();
@@ -549,7 +549,7 @@ fn declared_crateless_edge(
 ///
 /// The manifests keep their authority and the owner surface states the graph,
 /// so a disagreement is a defect of the declaration
-/// (ADR-T-019, The layer owner graph). What is compared is the whole
+/// (´[TOOLS-rule:lintcontracts:ownership]´). What is compared is the whole
 /// admissibility relation rather than the manifest edges alone: the derivation
 /// contributes self reach, the universal upward edge and the workspace-path
 /// dependencies, which is exactly the three ways [`Reach::reaches`] admits a

@@ -6,12 +6,12 @@
 //! Runtime construction starts from the accepted configuration snapshot. Its
 //! base and repository-local relations are kept distinct in the declaration
 //! and united in the effective lookup, as decided by the package-local registry
-//! record (´dec:kindregistry:runtime-authority´). No Markdown document is a
+//! record (´[TOOLS-rule:lintcontracts:snapshot]´). No Markdown document is a
 //! runtime input.
 //!
 //! The Markdown parser remains because the repository-level synchronization
 //! test projects the human registry into exact environment-name/kind pairs and
-//! reserved kinds (´dec:kindregistry:sync-seam´). Convention-table rows with
+//! reserved kinds (´[TOOLS-rule:lintcontracts:snapshot]´). Convention-table rows with
 //! kind tokens enter that projection. Device rows do not. A dagger is retained
 //! as row status and removed from the exact catalogue name.
 //!
@@ -306,7 +306,7 @@ impl KindRegistry {
     /// The rows are read from the corpus's declaration rather than compiled beside
     /// it, and that is the whole of what this method changes. A compiled copy
     /// standing beside the declaration would be two authorities over one
-    /// relation (´dec:kindregistry:runtime-authority´). A declared row the registry's own
+    /// relation (´[TOOLS-rule:lintcontracts:snapshot]´). A declared row the registry's own
     /// relation already carries is that relation's and is not repeated here.
     ///
     /// Reservation is a separate declared relation. Adding a name-to-kind row

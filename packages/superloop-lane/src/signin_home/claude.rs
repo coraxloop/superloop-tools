@@ -16,6 +16,7 @@ pub(super) struct Options {
     pub owner: PathBuf,
     pub name: String,
     pub home: PathBuf,
+    pub charter: PathBuf,
     pub dry_run: bool,
     pub digest: Option<String>,
     pub reconcile: bool,
@@ -38,7 +39,7 @@ fn options(args: &[String], check: bool) -> Result<Options> {
                     return Err("claude-home-arguments: duplicate flag".into());
                 }
             }
-            "--backend" | "--nodes" | "--expect-digest" | "--move-from" => {
+            "--backend" | "--nodes" | "--expect-digest" | "--move-from" | "--charter" => {
                 let value = words.next().ok_or("claude-home-arguments: missing value")?;
                 if values.insert(word.as_str(), value.clone()).is_some() {
                     return Err("claude-home-arguments: duplicate option".into());
@@ -82,7 +83,10 @@ fn options(args: &[String], check: bool) -> Result<Options> {
     if move_from.is_some() && (nodes.is_some() || flags.contains("--reconcile")) {
         return Err("claude-home-arguments: move excludes reconcile and nodes".into());
     }
+    let charter = super::charter(&owner, values.get("--charter"))?;
+    super::validate_charter(&charter)?;
     Ok(Options {
+        charter,
         home: super::claude_home(&owner, &name),
         owner,
         name,
@@ -402,8 +406,8 @@ pub(super) fn run(args: &[String], check: bool) -> Result<String> {
         before.insert("settings.json", None);
     }
     let changes = files.iter().filter(|(name, bytes)| before[*name].as_ref() != Some(*bytes)).map(|(name, bytes)| json!({"path":name,"before":before[name].as_ref().map(|bytes| digest(bytes)),"after":digest(bytes)})).collect::<Vec<_>>();
-    let mut plan = json!({"loop":options.name,"home":options.home,"identity":home.as_ref().map(Directory::identity).transpose()?,"create":!exists,"files":changes,"settings_digest":settings.as_ref().map(|bytes| digest(bytes))});
-    // Keep issued previews valid by hashing the original digest-only representation.
+    let mut plan = json!({"charter":options.charter,"loop":options.name,"home":options.home,"identity":home.as_ref().map(Directory::identity).transpose()?,"create":!exists,"files":changes,"settings_digest":settings.as_ref().map(|bytes| digest(bytes))});
+    // Bind the charter input alongside the digest-only file representation.
     let preview_digest = digest(plan.to_string().as_bytes());
     plan["file_digests"] = json!(changes);
     plan["files"] = json!(file_previews(&options.home, &files, &before)?);
@@ -438,7 +442,7 @@ pub(super) fn run(args: &[String], check: bool) -> Result<String> {
             create(&options, &files, parent.as_ref())?;
         }
     }
-    Ok(json!({"plan":plan,"digest":preview_digest,"changed":changes.len() + usize::from(!exists),"report":report,"outcome":if options.dry_run {"preview"} else {"applied"}}).to_string())
+    Ok(json!({"charter":options.charter,"plan":plan,"digest":preview_digest,"changed":changes.len() + usize::from(!exists),"report":report,"outcome":if options.dry_run {"preview"} else {"applied"}}).to_string())
 }
 
 #[cfg(test)]

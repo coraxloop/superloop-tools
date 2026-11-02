@@ -27,7 +27,7 @@ Run the Meson release suite in the reviewed build directory. Meson binds the con
 
 ## Owner install and dormant probes · `sec:steward:owner-install-and-dormant-probes`
 
-The orchestrator installs each handed-over server after recording its read-only freshness inventory and first-time announcement (`dec:toolnames:server-kit-authority`). An uncertain or nonestate finding stops the operation for the person's answer. The build selects one install prefix; private programs and configured units use that same prefix. A workstation build leaves `server_kits` false and installs none of these server outputs.
+The orchestrator installs each handed-over server after recording its read-only freshness inventory and first-time announcement (`rule:buildcontracts:server-kits`). An uncertain or nonestate finding stops the operation for the person's answer. The build selects one install prefix; private programs and configured units use that same prefix. A workstation build leaves `server_kits` false and installs none of these server outputs.
 
 ```bash
 meson setup SERVER_BUILD . --prefix /usr/local --libexecdir libexec --sysconfdir /etc -Ddomain=server -Dserver_kits=true -Dsteward_projects_root=/srv/INSTALLATION/transcript-projects -Dsystem_unitdir=/etc/systemd/system
@@ -43,7 +43,7 @@ A fresh installation provisions `superloop-steward` as a dedicated non-root acco
 
 ## Account and layout migration · `sec:steward:account-and-layout-migration`
 
-Run this per server in the order of (`proto:toolnames:steward-migration`). The account rename preserves numeric uid and gid, the home, spool, state, ledger and correspondence paths and their bytes.
+Run this per server in the order of (`rule:buildcontracts:server-kits`). The account rename preserves numeric uid and gid, the home, spool, state, ledger and correspondence paths and their bytes.
 
 1. Record both steward and scanner timers' enabled and active states, spool-hook drop-in, spool and ledger digests, pending case identifiers, ownership and modes. Preserve old programs, provenance siblings, units, drop-ins and sudo rules in a root-only rollback directory with their original metadata.
 2. When the steward timer was active, retain one pending case; if needed append one through the old appender from a test file in the owner folder. An inactive steward gets no new case.

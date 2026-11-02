@@ -57,10 +57,11 @@ struct Row {
     reserved: bool,
 }
 
-/// Public tree entry points; these are source-relative paths.
+/// Public repository name and source-relative tree entry points.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Public {
+    pub name: String,
     pub readme: String,
     pub licence_code: String,
     pub licence_docs: String,
@@ -91,6 +92,11 @@ impl Manifest {
         let manifest: Self = toml::from_str(text).map_err(|error| error.to_string())?;
         if manifest.namespace != "org.superloop-tools.public-set" || manifest.version != [1, 0, 0] {
             return Err("public-set requires namespace org.superloop-tools.public-set and version [1, 0, 0]".into());
+        }
+        if manifest.public.name.trim().is_empty()
+            || manifest.public.name.chars().any(char::is_control)
+        {
+            return Err("public-set requires a non-empty single-line public.name".into());
         }
         for (row, excluded, _) in manifest.rows() {
             if !safe_path(row.pattern.trim_end_matches('/'))
@@ -175,6 +181,18 @@ impl Manifest {
             }
         }
         selection.included.sort();
+        if self.public.readme != "README.md"
+            && selection.included.iter().any(|path| path == "README.md")
+        {
+            for (row, excluded, _) in &rows {
+                if !excluded && matches_path(&row.pattern, "README.md") {
+                    selection.issues.push(format!(
+                        "include selector {} selects root README.md, which public.readme {} would replace; change the row to an exclusion with a reason",
+                        row.pattern, self.public.readme
+                    ));
+                }
+            }
+        }
         selection.issues.sort();
         selection
     }

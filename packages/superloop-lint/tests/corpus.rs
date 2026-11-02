@@ -12,12 +12,21 @@
 //! the shipped `check` command in the root pipeline, which judges the
 //! repository's real declarations; a package that judged them too would be
 //! asserting a property of a corpus it is not entitled to know exists
-//! (´req:isolation:boundary´).
+//! (´[TOOLS-rule:lintcontracts:isolation]´).
 //!
 //! # Test index
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`repository_programme_policy_is_deferred`] | cli | Explicit local ownership defers opaque rows and keeps their checker visible. # Panics Panics only if fixture IO fails or the binary violates the deferral contract. |
+//! | [`unknown_policy_without_programme_still_refuses`] | cli | A bare unknown activation keeps the existing loader refusal. # Panics Panics only if fixture IO fails or the refusal changes. |
+//! | [`catalogued_policy_cannot_claim_programme`] | cli | A published policy cannot be claimed by a local checker. # Panics Panics only if fixture IO fails or a published policy can be deferred. |
+//! | [`programme_package_must_be_tracked_directory`] | cli | A programme package must be a tracked repository directory. # Panics Panics only if fixture IO fails or an invalid package is admitted. |
+//! | [`programme_binary_must_be_nonempty`] | cli | An empty or whitespace-only binary does not identify a checker. # Panics Panics only if fixture IO fails or an empty binary is admitted. |
+//! | [`malformed_programme_refuses`] | cli | A programme is exactly a package and binary string table. # Panics Panics only if fixture IO fails or a malformed declaration is admitted. |
+//! | [`deferred_list_requires_supported_shape`] | cli | Deferral admits opaque row tables but still checks their container shape. # Panics Panics only if fixture IO fails or an invalid list shape is admitted. |
+//! | [`deferred_policy_does_not_hide_catalogued_failure`] | cli | A deferred policy does not clear failures found by a catalogued policy. # Panics Panics only if fixture IO fails or deferral conceals a failure. |
+//! | [`inactive_prose_fails_the_check_command`] | cli | An inactive root's Markdown fails the command until prose activation is declared. # Panics Panics only if fixture IO or command execution fails, or the verdict differs. |
 //! | [`macro_doc_attributes_share_the_test_standard_place`] | carrier | A property-test macro's source-written documentation mints the same claim through line comments, separate doc attributes and one multiline attribute. Each form resolves from Markdown through the production entry. # Panics Panics only if fixture IO fails or the production check loses a macro carrier. |
 //! | [`invalid_macro_carriers_refuse_by_name`] | carrier | A marked macro body that cannot be read refuses by name, and a misplaced claim remains a placement failure instead of being rescued by its spelling. # Panics Panics only if fixture IO fails or the check accepts an invalid macro carrier. |
 //! | [`python_docstrings_participate_in_production_resolution`] | carrier | An owned Python unittest method mints a claim that a Markdown record can cite, and the active profiles count its docstring as a labelled test site. # Panics Panics only if fixture IO fails or the production check violates the contract. |
@@ -91,6 +100,9 @@
 //! | [`characterizes_assembly_bytes`] | harness | Assembly fixes both its report and the generated publication. |
 //! | [`characterizes_fix_bytes`] | harness | Both fix profiles refuse before writing over deliberately undeclared fixtures, freezing the refusal and the untouched sources. |
 //! | [`citation_sites_preserve_resolved_addresses`] | cli | The executable protocol preserves citations before the first mint and exposes no document text. # Panics Panics only if fixture IO fails or the command violates its versioned protocol. |
+//! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested containment ignores untracked files but refuses tracked foreign ownership. # Panics Panics only if fixture IO fails or the binary violates the containment contract. |
+//! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting catalogued lists preserves an intervening deferred table's bytes and position. # Panics Panics only if fixture IO fails or a rewrite changes opaque source. |
+//! | [`programme_outside_checkout_names_tracked_directory_requirement`] | cli | A programme outside Git names its row and its tracked-directory requirement. # Panics Panics only if fixture IO fails or the refusal loses its feature context. |
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -185,6 +197,310 @@ fn check_carrier(root: &Path) -> (std::process::Output, serde_json::Value) {
         .expect("production entry");
     let report = serde_json::from_slice(&output.stdout).expect("check report");
     (output, report)
+}
+
+const LOCAL_POLICY: &str = "profile.notice-dispositions-conform";
+const LOCAL_PROGRAMME: &str = "{ package = \"packages/local-lint\", binary = \"local-lint\" }";
+
+fn programme_fixture(policy: &str, programme: Option<&str>, list: &str) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("temporary corpus");
+    write(
+        root.path(),
+        "packages/local-lint/checker.txt",
+        "repository checker\n",
+    );
+    write(root.path(), "adr/one.md", "## One · `sec:fixture:one`\n");
+    let mut activation = format!("{{ owner = \"PROJECTA\", policy = \"{policy}\"");
+    if let Some(programme) = programme {
+        write!(activation, ", programme = {programme}").expect("string");
+    }
+    activation.push_str(" }");
+    let policies = if policy == "labels.mints-well-formed" {
+        format!("policies = [{activation}]\n")
+    } else {
+        format!(
+            "policies = [{{ owner = \"PROJECTA\", policy = \"labels.mints-well-formed\" }}, {activation}]\n"
+        )
+    };
+    let lists = if policy == "labels.mints-well-formed" {
+        format!("[PROJECTA.\"{policy}\"]\n{list}\n")
+    } else {
+        format!("{DECLARED_LISTS}\n[PROJECTA.\"{policy}\"]\n{list}\n")
+    };
+    declare(
+        root.path(),
+        "root_owner = \"PROJECTA\"\nowners = [\"PROJECTA\"]\npartitions = [{ name = \"fixture\", owner = \"PROJECTA\", pattern = '*VCHAR' }]\nmay_cite = []\n",
+        FIXTURE_ENVIRONMENTS,
+        &policies,
+        &lists,
+    );
+    track(root.path());
+    root
+}
+
+fn assert_programme_refusal(root: &Path, message: &str) {
+    let output = programme_command(root, &["check", "--text"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, [] as [u8; 0]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(message), "{stderr}");
+}
+
+/// Explicit local ownership defers opaque rows and keeps their checker visible.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the binary violates the deferral contract.
+///
+/// ´claim:cli:repository-programme-policy-is-deferred´
+/// ´test:integration:repository-programme-policy-is-deferred´
+#[test]
+fn repository_programme_policy_is_deferred() {
+    for field in ["allowances", "path_counts"] {
+        let list = format!("{field} = [{{ local_identity = \"opaque\", decision = \"kept\" }}]");
+        let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), &list);
+        let output = programme_command(root.path(), &["check"]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report");
+        assert_eq!(report["clean"], true);
+        assert_eq!(report["deferred"], 1);
+        assert_eq!(
+            report["deferred_policies"],
+            serde_json::json!([{
+                "owner": "PROJECTA", "policy": LOCAL_POLICY,
+                "package": "packages/local-lint", "binary": "local-lint"
+            }])
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr)
+                .matches("deferred to the repository's own programme: 1 rows")
+                .count(),
+            1
+        );
+        let output = programme_command(root.path(), &["burn", "--write"]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lists: toml::Table = toml::from_str(
+            &fs::read_to_string(root.path().join(".linter/lists.toml")).expect("lists"),
+        )
+        .expect("table");
+        assert_eq!(
+            lists["PROJECTA"][LOCAL_POLICY][field][0]["local_identity"].as_str(),
+            Some("opaque")
+        );
+        assert_eq!(
+            programme_command(root.path(), &["check"]).status.code(),
+            Some(0)
+        );
+    }
+}
+
+/// A bare unknown activation keeps the existing loader refusal.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the refusal changes.
+///
+/// ´claim:cli:unknown-policy-without-programme-still-refuses´
+/// ´test:integration:unknown-policy-without-programme-still-refuses´
+#[test]
+fn unknown_policy_without_programme_still_refuses() {
+    let root = programme_fixture(LOCAL_POLICY, None, "allowances = []");
+    assert_programme_refusal(
+        root.path(),
+        &format!(".linter/policies.toml: {LOCAL_POLICY}: this binary catalogues no such policy"),
+    );
+}
+
+/// A published policy cannot be claimed by a local checker.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a published policy can be deferred.
+///
+/// ´claim:cli:catalogued-policy-cannot-claim-programme´
+/// ´test:integration:catalogued-policy-cannot-claim-programme´
+#[test]
+fn catalogued_policy_cannot_claim_programme() {
+    let root = programme_fixture(
+        "labels.mints-well-formed",
+        Some(LOCAL_PROGRAMME),
+        "allowances = []",
+    );
+    assert_programme_refusal(
+        root.path(),
+        "programme cannot claim a policy this binary catalogues",
+    );
+}
+
+/// A programme package must be a tracked repository directory.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an invalid package is admitted.
+///
+/// ´claim:cli:programme-package-must-be-tracked-directory´
+/// ´test:integration:programme-package-must-be-tracked-directory´
+#[test]
+fn programme_package_must_be_tracked_directory() {
+    for package in [
+        "",
+        "packages/absent",
+        "packages/untracked",
+        "packages/local-lint/checker.txt",
+        "../outside",
+        "/",
+        "packages/../packages/local-lint",
+    ] {
+        let programme = format!("{{ package = {package:?}, binary = \"local-lint\" }}");
+        let root = programme_fixture(LOCAL_POLICY, Some(&programme), "allowances = []");
+        write(
+            root.path(),
+            "packages/untracked/checker.txt",
+            "not tracked\n",
+        );
+        assert_programme_refusal(root.path(), "is not a tracked directory of the repository");
+    }
+}
+
+/// An empty or whitespace-only binary does not identify a checker.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an empty binary is admitted.
+///
+/// ´claim:cli:programme-binary-must-be-nonempty´
+/// ´test:integration:programme-binary-must-be-nonempty´
+#[test]
+fn programme_binary_must_be_nonempty() {
+    for binary in ["", "   "] {
+        let programme = format!("{{ package = \"packages/local-lint\", binary = {binary:?} }}");
+        let root = programme_fixture(LOCAL_POLICY, Some(&programme), "allowances = []");
+        assert_programme_refusal(root.path(), "programme binary must not be empty");
+    }
+}
+
+/// A programme is exactly a package and binary string table.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a malformed declaration is admitted.
+///
+/// ´claim:cli:malformed-programme-refuses´
+/// ´test:integration:malformed-programme-refuses´
+#[test]
+fn malformed_programme_refuses() {
+    for programme in [
+        "\"local-lint\"",
+        "[]",
+        "{}",
+        "{ package = 3, binary = \"local-lint\" }",
+        "{ package = \"packages/local-lint\", binary = \"local-lint\", extra = true }",
+    ] {
+        let root = programme_fixture(LOCAL_POLICY, Some(programme), "allowances = []");
+        assert_programme_refusal(root.path(), "malformed programme; expected");
+    }
+}
+
+/// Deferral admits opaque row tables but still checks their container shape.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an invalid list shape is admitted.
+///
+/// ´claim:cli:deferred-list-requires-supported-shape´
+/// ´test:integration:deferred-list-requires-supported-shape´
+#[test]
+fn deferred_list_requires_supported_shape() {
+    for list in [
+        "",
+        "paths = []",
+        "allowances = 1",
+        "allowances = [1]",
+        "allowances = []\npath_counts = []",
+        "allowances = []\nextra = []",
+    ] {
+        let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), list);
+        assert_programme_refusal(
+            root.path(),
+            "deferred list must be a table with path_counts or allowances rows",
+        );
+    }
+}
+
+/// A deferred policy does not clear failures found by a catalogued policy.
+///
+/// # Panics
+/// Panics only if fixture IO fails or deferral conceals a failure.
+///
+/// ´claim:cli:deferred-policy-does-not-hide-catalogued-failure´
+/// ´test:integration:deferred-policy-does-not-hide-catalogued-failure´
+#[test]
+fn deferred_policy_does_not_hide_catalogued_failure() {
+    let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), "allowances = []");
+    write(
+        root.path(),
+        "adr/one.md",
+        "Cites (`sec:fixture:missing`).\n",
+    );
+    let output = programme_command(root.path(), &["check"]);
+    assert_eq!(output.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report");
+    assert_eq!(report["clean"], false);
+    assert_eq!(report["deferred"], 1);
+    assert!(report["failures"].as_u64().expect("failures") > 0);
+}
+
+/// An inactive root's Markdown fails the command until prose activation is declared.
+///
+/// # Panics
+/// Panics only if fixture IO or command execution fails, or the verdict differs.
+///
+/// ´claim:cli:inactive-prose-is-a-failing-configuration-finding´
+/// ´test:integration:inactive-prose-fails-the-check-command´
+#[test]
+fn inactive_prose_fails_the_check_command() {
+    let root = tempfile::tempdir().expect("temporary root");
+    write(root.path(), "adr/prose.md", "A document.\n");
+    for active in [false, true] {
+        declare(
+            root.path(),
+            DECLARED_OWNERS,
+            FIXTURE_ENVIRONMENTS,
+            if active {
+                DECLARED_POLICIES
+            } else {
+                "policies = []\n"
+            },
+            if active { DECLARED_LISTS } else { "" },
+        );
+        track(root.path());
+        let (output, report) = check_carrier(root.path());
+        assert_eq!(
+            output.status.code(),
+            Some(if active { 0 } else { 3 }),
+            "{report}"
+        );
+        let findings = report["findings"].as_array().expect("findings");
+        let inactive = findings
+            .iter()
+            .find(|finding| finding["code"] == "inactive_prose_owner");
+        if active {
+            assert!(inactive.is_none(), "{report}");
+            assert_eq!(report["failures"], 0);
+        } else {
+            let finding = inactive.expect("inactive prose finding");
+            assert_eq!(finding["severity"], "failure");
+            assert_eq!(finding["owner"], "PROJECTA");
+            assert_eq!(finding["sources"], 1);
+            assert_eq!(
+                finding["message"],
+                "owner PROJECTA has 1 Markdown sources but activates no labels.mints-well-formed row; activate labels.mints-well-formed to harvest and check its prose"
+            );
+        }
+    }
 }
 
 fn macro_fixture(documentation: &str) -> tempfile::TempDir {
@@ -857,8 +1173,8 @@ fn format_namespaces_refuse_foreign_identities_before_checking() {
         root.path(),
         "root_owner = \"EXAMPLE\"\nowners = [\"EXAMPLE\"]\npartitions = [{ name = \"all\", owner = \"EXAMPLE\", pattern = '*VCHAR' }]\nmay_cite = []\n",
         "environments = []\n",
-        "policies = [{ owner = \"EXAMPLE\", policy = \"legacy.section-references\" }]\n",
-        "[EXAMPLE.\"legacy.section-references\"]\npath_counts = []\n",
+        "policies = [{ owner = \"EXAMPLE\", policy = \"legacy.section-references\" }, { owner = \"EXAMPLE\", policy = \"labels.mints-well-formed\" }]\n",
+        "[EXAMPLE.\"legacy.section-references\"]\npath_counts = []\n[EXAMPLE.\"labels.mints-well-formed\"]\nallowances = []\n",
     );
     let policy = ".linter/policy-legacy-section-references.toml";
     write(
@@ -880,7 +1196,12 @@ fn format_namespaces_refuse_foreign_identities_before_checking() {
     assert_eq!(report["burn"]["occurrences"], 1);
     assert_eq!(report["findings"][0]["code"], "burn_list_growth");
     assert_eq!(
-        report["configuration"]["activations"][0]["surface_paths"],
+        report["configuration"]["activations"]
+            .as_array()
+            .expect("activation rows")
+            .iter()
+            .find(|row| row["policy"] == "legacy.section-references")
+            .expect("burn activation")["surface_paths"],
         1
     );
     write(root.path(), "note.md", "No section reference remains.\n");
@@ -4907,4 +5228,150 @@ fn citation_sites_preserve_resolved_addresses() {
                       "surface":"document", "label":"sec:fixture:one", "owner":"PROJECTA", "path_class":null}]
         })
     );
+}
+
+/// Nested containment ignores untracked files but refuses tracked foreign ownership.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the binary violates the containment contract.
+///
+/// ´claim:cli:nested-root-containment-uses-tracked-paths´
+/// ´test:integration:nested-root-containment-uses-tracked-paths´
+#[test]
+fn nested_root_containment_uses_tracked_paths() {
+    let root = build_mode_fixture("## One · `sec:fixture:one`\n");
+    declare(
+        &root.path().join("nested"),
+        "root_owner = \"PROJECTA\"\nowners = [\"PROJECTA\"]\npartitions = [{ name = \"all\", owner = \"PROJECTA\", pattern = '*VCHAR' }]\nmay_cite = []\n",
+        FIXTURE_ENVIRONMENTS,
+        DECLARED_POLICIES,
+        DECLARED_LISTS,
+    );
+    declare(
+        root.path(),
+        "root_owner = \"PROJECTA\"\nowners = [\"PROJECTA\", \"PROJECTB\"]\npartitions = [{ name = \"project-a\", owner = \"PROJECTA\", pattern = '( %s\".linter/\" / %s\"adr/\" / %s\"nested/.linter/\" ) *VCHAR / %s\".gitignore\"' }, { name = \"scratch\", owner = \"PROJECTB\", pattern = '%s\"nested/scratch/\" *VCHAR' }]\nmay_cite = []\nnested = [{ owner = \"PROJECTA\", root = \"nested\", reason = \"Checked independently\" }]\n",
+        FIXTURE_ENVIRONMENTS,
+        DECLARED_POLICIES,
+        DECLARED_LISTS,
+    );
+    write(root.path(), ".gitignore", "nested/scratch/\n");
+    track(root.path());
+    write(root.path(), "nested/scratch/editor.tmp", "untracked\n");
+    let output = programme_command(root.path(), &["report"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    track(root.path());
+    assert_programme_refusal(
+        root.path(),
+        "nested[1] (owner PROJECTA, root nested): root must be a normalized relative directory inside the owner's partitions",
+    );
+}
+
+/// Rewriting catalogued lists preserves an intervening deferred table's bytes and position.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a rewrite changes opaque source.
+///
+/// ´claim:cli:deferred-list-rewrite-preserves-bytes-and-order´
+/// ´test:integration:deferred-list-rewrite-preserves-bytes-and-order´
+#[test]
+fn deferred_list_rewrite_preserves_bytes_and_order() {
+    let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), "allowances = []");
+    let owners = root.path().join(".linter/owners.toml");
+    let text = fs::read_to_string(&owners).expect("owners");
+    fs::write(
+        &owners,
+        text.replace(
+            "owners = [\"PROJECTA\"]",
+            "owners = [\"PROJECTA\", \"PROJECTB\"]",
+        ),
+    )
+    .expect("second owner");
+    let policies = root.path().join(".linter/policies.toml");
+    let text = fs::read_to_string(&policies).expect("policies");
+    fs::write(
+        &policies,
+        text.replace(
+            "policies = [",
+            "policies = [{ owner = \"PROJECTB\", policy = \"labels.mints-well-formed\" }, ",
+        ),
+    )
+    .expect("second catalogued policy");
+    let deferred = format!(
+        "# Repository programme owns the following bytes.\r\n[PROJECTA.'{LOCAL_POLICY}'] # keep this spelling\r\nallowances = [{{ local_identity = '''opaque\n[PROJECTB.\"labels.mints-well-formed\"]\n''', decision = 'kept' }}]\r\n\r\n"
+    );
+    let lists = format!(
+        "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances=[]\n\n{deferred}[PROJECTB.\"labels.mints-well-formed\"]\nallowances=[]\n"
+    );
+    let path = root.path().join(".linter/lists.toml");
+    fs::write(&path, &lists).expect("interleaved lists");
+    let output = programme_command(root.path(), &["burn", "--write"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rewritten = fs::read_to_string(&path).expect("rewritten lists");
+    assert_eq!(rewritten, lists.replace("allowances=[]", "allowances = []"));
+    assert!(rewritten.contains(&deferred));
+    let inline = lists
+        .replace(
+            "[PROJECTA.\"labels.mints-well-formed\"]\nallowances=[]",
+            "[PROJECTA]\n\"labels.mints-well-formed\" = { allowances=[] }",
+        )
+        .replace(
+            "[PROJECTB.\"labels.mints-well-formed\"]\nallowances=[]",
+            "[PROJECTB]\n\"labels.mints-well-formed\" = { allowances=[] }",
+        );
+    fs::write(&path, &inline).expect("inline catalogued lists");
+    let output = programme_command(root.path(), &["burn", "--write"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&path).expect("rewritten inline lists"),
+        inline.replace("allowances=[]", "allowances = []")
+    );
+}
+
+/// A programme outside Git names its row and its tracked-directory requirement.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the refusal loses its feature context.
+///
+/// ´claim:cli:programme-outside-checkout-names-tracked-directory-requirement´
+/// ´test:integration:programme-outside-checkout-names-tracked-directory-requirement´
+#[test]
+fn programme_outside_checkout_names_tracked_directory_requirement() {
+    let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), "allowances = []");
+    fs::remove_dir_all(root.path().join(".git")).expect("remove checkout metadata");
+    let output = programme_command(root.path(), &["check", "--text"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, [] as [u8; 0]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "PROJECTA : {LOCAL_POLICY}: programme package \"packages/local-lint\": cannot enumerate the repository's tracked paths required by the tracked-directory check"
+        )),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("public-set"), "{stderr}");
+}
+
+fn programme_command(root: &Path, arguments: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_superloop-lint"))
+        .env("RUST_LOG", "info")
+        .args(arguments)
+        .arg("--root")
+        .arg(root)
+        .output()
+        .expect("run programme fixture")
 }

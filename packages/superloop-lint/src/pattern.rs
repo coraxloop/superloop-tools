@@ -18,7 +18,7 @@
 //! in. They were never one language. The display says what a path *is*; a matcher
 //! says which paths a row *selects*, and which matcher language the surface
 //! speaks is a question the ratified grammar answers for itself
-//! (´gram:isolation:declaration´). The matcher that stood beside this display has
+//! (´[TOOLS-rule:lintcontracts:declarations]´). The matcher that stood beside this display has
 //! retired with the rows that read it, and the display is unchanged by its going:
 //! a path value is written this way under any pattern language at all.
 //!

@@ -48,6 +48,7 @@ rows = [{ pattern = ".linter/", reason = "Fixture policy declarations." }]
 [reserved]
 rows = [{ pattern = "docs/public-pack-provenance.toml", reason = "Generated archive provenance." }]
 [public]
+name = "fixture-repository"
 readme = "README.md"
 licence_code = "LICENSE-CODE"
 licence_docs = "LICENSE-DOCS"

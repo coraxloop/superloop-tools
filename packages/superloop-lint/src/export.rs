@@ -47,7 +47,7 @@ pub struct UnpublishedLabels {
     pub labels: Vec<UnpublishedLabel>,
 }
 
-/// The public register's stable destination; only the cut writes this file.
+/// The public register's stable destination; source trees declare it and cuts project it.
 pub const UNPUBLISHED_PATH: &str = "docs/public/unpublished-labels.toml";
 
 impl UnpublishedLabels {

@@ -208,7 +208,7 @@ fn is_canonical_triple(spellings: &[String]) -> bool {
 /// What a governed document's envelope is wrong about.
 ///
 /// A document is conforming when this list is empty. The variants are the
-/// finding forms of the envelope decision (´dec:envelope:source-shape´), one to
+/// finding forms of the envelope decision (´[TOOLS-rule:lintcontracts:verdicts]´), one to
 /// one, and the carrier the document was read as decides which of them can
 /// arise: the wrong-order defect belongs to TOML alone, because neither of the
 /// other carriers requires an order and a rule that is not made has no finding.
@@ -1166,9 +1166,9 @@ impl std::fmt::Display for SectionRow {
 /// the owner's in-domain share minus the union of its exclusions, and nothing
 /// else selects it. The inclusion list is optional and, where it stands, is a
 /// diagnostic gloss on that computed set rather than an instrument that forms it
-/// (´dec:envelope:computed-governance´). An absent gloss owes nothing; a present
+/// (´[TOOLS-rule:lintcontracts:verdicts]´). An absent gloss owes nothing; a present
 /// one is held to the ordinary partition judgment over the governed set
-/// (´dec:rows:subtract-then-partition´), and a false gloss fails configuration
+/// (´[TOOLS-rule:lintcontracts:ownership]´), and a false gloss fails configuration
 /// without moving one path into or out of governance.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Section {
@@ -1407,7 +1407,7 @@ fn surviving<'a, 'r>(
 /// Divide each owner's accounted share into excluded and governed.
 ///
 /// The universe is the in-domain set and nothing wider, and within it exclusion
-/// alone computes governance (´dec:envelope:computed-governance´): the governed
+/// alone computes governance (´[TOOLS-rule:lintcontracts:verdicts]´): the governed
 /// set is the owner's in-domain share minus the union of its named exclusions.
 /// Nothing has to be included for a file to be governed, so there is no totality
 /// obligation left to fail and the exclude rows that stand are the ones a reader
@@ -2024,7 +2024,7 @@ mod tests {
             vec![Defect::NotTriple(String::from("[0x1, 0, 0]"))]
         );
 
-        // The remaining non-shapes the decision names (´dec:envelope:source-shape´), and the underscore form.
+        // The remaining non-shapes the decision names (´[TOOLS-rule:lintcontracts:verdicts]´), and the underscore form.
         assert_eq!(
             versioned(r#"["1", 0, 0]"#),
             vec![Defect::NotTriple(String::from(r#"["1", 0, 0]"#))]

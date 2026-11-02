@@ -116,7 +116,7 @@ use crate::label::Label;
 ///
 /// The three cells are what makes a table a tracking declaration: this tool
 /// reads a table as one exactly when its header cells are Entry, Head and
-/// Document (´[TOOLS-conv:migration:tracking-columns]´). The spelling is
+/// Document (´[TOOLS-rule:lintcontracts:burn-families]´). The spelling is
 /// therefore a recognition contract rather than a caption — a table naming its
 /// columns otherwise is not a tracking table with a defect, it is not one.
 ///
@@ -127,7 +127,7 @@ const HEAD_COLUMN: &str = "Head";
 /// The header cell naming the column that carries the tracked document.
 ///
 /// The second of the three cells of the recognition contract
-/// (´[TOOLS-conv:migration:tracking-columns]´).
+/// (´[TOOLS-rule:lintcontracts:burn-families]´).
 ///
 /// ´const:indexlinter:tracking-document-column´ (´[ORCHESTRATION-alg:const:text]´)
 /// ´const:indexlinter:tracking-document-column-text-x1471a974´
@@ -139,7 +139,7 @@ const DOCUMENT_COLUMN: &str = "Document";
 /// avoid: were its per-record tables read as tracking declarations, every row
 /// would verify a declared head against a document that does not yet exist, and
 /// would fail correctly and uselessly
-/// (´[TOOLS-conv:migration:tracking-columns]´).
+/// (´[TOOLS-rule:lintcontracts:burn-families]´).
 ///
 /// ´const:indexlinter:tracking-entry-column´ (´[ORCHESTRATION-alg:const:text]´)
 /// ´const:indexlinter:tracking-entry-column-text-xbe21fb73´

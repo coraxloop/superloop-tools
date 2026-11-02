@@ -32,9 +32,9 @@ This division fixes the maintained implementation and build layers. Package boun
 
 **Rule (Rust or Meson only)** · `rule:deployment:rust-or-meson-only`
 
-Maintained executable and library behavior shall be implemented in Rust. Meson shall be the only maintained build and install orchestration layer. The tools repository holds the one Cargo workspace and the root Meson graph that enumerates its packages; a package-level declaration owns each Rust target, scoped test set, and installable output. The generic and instance repositories hold documents-only Meson layers that run the deployed tools and build nothing. Shared behavior belongs in an explicit Rust library rather than being duplicated in wrappers (`dec:workspacemove:division`).
+Maintained executable and library behavior shall be implemented in Rust. Meson shall be the only maintained build and install orchestration layer. The tools repository holds the one Cargo workspace and the root Meson graph that enumerates its packages; a package-level declaration owns each Rust target, scoped test set, and installable output. The generic and instance repositories hold documents-only Meson layers that run the deployed tools and build nothing. Shared behavior belongs in an explicit Rust library rather than being duplicated in wrappers (`rule:buildcontracts:repository-boundaries`).
 
-Meson selects and orders Rust outputs and obtains every binary through the Rust sync primitive. It invokes a Rust install primitive with each repository's declared target map: the tools repository's install runs the primitive built from the same tagged tree, and the generic and instance layers, which build nothing, run the deployed one. Meson shall not reimplement helper semantics or the content, backup, permission, and modification-time contract. This is the durable shape anticipated by the planned Meson skeleton and the no-shell decision (`[ORCHESTRATION-dec:decisions:no-shell]`). A package split, merge, or port must leave the external contract unchanged unless a separate owner-ratified change applies (`[ORCHESTRATION-rule:architecture:external-contract-stability]`).
+Meson selects and orders Rust outputs and obtains every binary through the Rust sync primitive. The tools layer installs its native outputs and public specifications through Meson declarations. The generic and instance layers, which build nothing, invoke the deployed Rust install primitive with their own declared target maps. Meson shall not reimplement the primitive's content, backup, permission, and modification-time contract. Shared installation behavior stays in that primitive under the no-shell decision (`[ORCHESTRATION-dec:decisions:no-shell]`). A package split, merge, or port must leave the external contract unchanged unless a separate owner-ratified change applies (`[ORCHESTRATION-rule:architecture:external-contract-stability]`).
 
 **Rule (No shell helpers)** · `rule:deployment:no-shell-helpers`
 
@@ -84,11 +84,11 @@ A tagged installation build or qualifying vendored-checker build that crosses th
 
 ## Installation · `sec:deployment:installation`
 
-This division turns one admitted milestone tag into declared managed copies. It preserves the load-bearing content and mtime behavior of the historical copy loops while replacing their shell implementation with Meson and Rust.
+This division turns one admitted milestone tag into declared managed copies. Native tools destinations are declared in Meson and verified through staged inventories and build provenance. The target-map protocol and managed-copy requirements below govern the generic and instance installations performed by the Rust install primitive.
 
 **Protocol (Meson install)** · `proto:deployment:meson-install`
 
-Installation from a milestone tag proceeds in repository order: tools, then generic, then instance. Each install runs only tools and shapes no older than the tree it installs, and each repository publishes to its own share folder (`dec:workspacemove:instance-layer`). Within each install, the steps divide between Meson and the primitive as (`tab:mesonlayer:protocol-split`) records:
+Installation from a milestone tag proceeds in repository order: tools, then generic, then instance. Each install runs only tools and shapes no older than the tree it installs, and each repository publishes to its own share folder (`rule:buildcontracts:repository-boundaries`). For target maps, the steps divide between Meson and the primitive as (`rule:buildcontracts:installation`) records:
 
 1. Meson resolves the reviewed tag to its fixed commit and verifies a clean tagged source tree as the first action of configuration; the primitive resolves both again before planning and binds the tagged target map to that identity.
 2. The host recipe resolves the trusted-host execution domain, toolchain, scheduling mechanism, disk-backed build, cache, temporary, staging, and harness configuration roots from their owned registries and passes all placement preflights; Meson and the records capture the selected values.

@@ -920,7 +920,7 @@ pub(super) mod tests {
         assert_eq!(result.reason, "door-agent-refresh-lock");
     }
 
-    /// The runner uses an empty private context and the loop sign-in and reviewed rubric. (´[TOOLS-rule:capability:agent-home-isolation]´)
+    /// The runner uses an empty private context and the loop sign-in and reviewed rubric. (´[TOOLS-rule:workercontracts:bounded-judgement]´)
     ///
     /// ´claim:capability:agent-context-isolated´
     /// ´test:unit:runner-isolates-loop-sign-in-and-rubric´
@@ -1034,7 +1034,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         (root, runner, input)
     }
 
-    /// Invalid output, failed calls and timed-out calls produce referral evidence. (´[TOOLS-rule:capability:agent-failure-refers]´)
+    /// Invalid output, failed calls and timed-out calls produce referral evidence. (´[TOOLS-rule:workercontracts:bounded-judgement]´)
     ///
     /// ´claim:capability:agent-failures-refer´
     /// ´test:unit:failure-invalid-timeout-and-rubric-referrals´

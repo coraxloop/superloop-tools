@@ -58,6 +58,7 @@ with tempfile.TemporaryDirectory(prefix='cut-acceptance-') as directory:
     assert not (public / 'Cargo.lock').exists(), 'public cut must omit Cargo.lock'
     run(['meson', 'setup', 'build'], public)
     assert not (public / 'docs/public/README.md').exists()
+    assert (public / 'README.md').read_bytes() == (source / 'README.md').read_bytes()
     readme = (public / 'README.md').read_text()
     for label in ('guide:publictools:superloop-tools', 'sec:publictools:build',
                   'sec:publictools:public-releases', 'sec:publictools:acknowledgements',

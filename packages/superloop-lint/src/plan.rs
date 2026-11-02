@@ -1236,7 +1236,31 @@ impl LabelPlan {
             path_owners.insert(package.directory().to_path_buf(), owner);
         }
 
-        adoption = adoption.with_path_owners(path_owners);
+        let mut inactive_prose = BTreeMap::new();
+        for (path, native) in topology.corpus().natives() {
+            if !is_markdown(native) {
+                continue;
+            }
+            let Some(owner) = topology.partition().owner(path) else {
+                continue;
+            };
+            if snapshot
+                .nested()
+                .iter()
+                .any(|nested| nested.owner == owner && native.starts_with(&nested.root))
+            {
+                continue;
+            }
+            if !activations
+                .owners("labels.mints-well-formed")
+                .is_some_and(|owners| owners.contains(owner))
+            {
+                *inactive_prose.entry(Owner::new(owner)).or_insert(0) += 1;
+            }
+        }
+        adoption = adoption
+            .with_path_owners(path_owners)
+            .with_inactive_prose(inactive_prose);
 
         let sources =
             activations
@@ -1933,7 +1957,9 @@ fn tracked_exclusive(
     (base, missing, findings)
 }
 
-fn git_tracked(root: &Path) -> (Vec<BytePath>, Vec<Finding>) {
+/// Enumerate repository paths in their recorded bytes, retaining traversal refusals.
+#[must_use]
+pub fn git_tracked(root: &Path) -> (Vec<BytePath>, Vec<Finding>) {
     let mut findings = Vec::new();
     let output = match std::process::Command::new("git")
         .arg("-C")

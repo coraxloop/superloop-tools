@@ -116,8 +116,18 @@ fn reachable(start: &str, target: &str, edges: &BTreeMap<String, BTreeSet<String
 /// # Errors
 /// Refuses malformed declarations, failed Cargo metadata, unwritable reports,
 /// or a measured graph that does not agree with its declarations.
-pub fn run(root: &Path, cargo: &Path, configured_ledger: &Path, report: &Path) -> Result<()> {
-    let result = measure(root, cargo, configured_ledger);
+pub fn run(
+    root: &Path,
+    cargo: &Path,
+    configured_ledger: &Path,
+    report: &Path,
+    installations_only: bool,
+) -> Result<()> {
+    let result = if installations_only {
+        measure_installations(root, configured_ledger)
+    } else {
+        measure(root, cargo, configured_ledger)
+    };
     let document = match &result {
         Ok(document) => document.clone(),
         Err(reason) => json!({"schema":1,"complete":false,"error":reason}),
@@ -141,6 +151,21 @@ pub fn run(root: &Path, cargo: &Path, configured_ledger: &Path, report: &Path) -
             report.display()
         ))
     }
+}
+
+fn measure_installations(root: &Path, configured_ledger: &Path) -> Result<Value> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("root: {error}"))?;
+    let ledger = rows(&root.join("meson.build"))?;
+    check_configured_ledger(configured_ledger, &ledger)?;
+    let mut findings = Vec::new();
+    ledger_kinds(&ledger, &mut findings)?;
+    let installations =
+        crate::census_install::inventory(&root, configured_ledger, &ledger, &mut findings)?;
+    Ok(
+        json!({"schema":1,"scope":"installations","installations":installations,"unaccounted":findings}),
+    )
 }
 
 fn measure(root: &Path, cargo: &Path, configured_ledger: &Path) -> Result<Value> {
@@ -267,6 +292,7 @@ fn ledger_kinds(ledger: &[Value], findings: &mut Vec<String>) -> Result<()> {
             "payload",
             "vendored",
             "installation",
+            "installation-inputs",
             "data",
             "source-import",
             "test-tool",
@@ -330,7 +356,7 @@ fn vendored_census(
 }
 
 fn package_destinations(root: &Path, roster: &[Value], findings: &mut Vec<String>) -> Result<()> {
-    let Some(source) = record(root, "adr/036-tools-dependency-concept.md")? else {
+    let Some(source) = record(root, "docs/spec/build-contracts.md")? else {
         return Ok(());
     };
     let (_, table) = source
@@ -344,8 +370,7 @@ fn package_destinations(root: &Path, roster: &[Value], findings: &mut Vec<String
         .lines()
         .filter(|line| line.starts_with('|') && !line.starts_with("|---"))
     {
-        // Both the original packages and their recorded successors can be present
-        // during the transition; the destination column names the final packages.
+        // The public table names every admitted package and its declared destination.
         for (index, word) in line.split('`').enumerate() {
             if index % 2 == 1 {
                 names.insert(word);
@@ -389,7 +414,7 @@ fn successor_census(
     metadata: &Value,
     findings: &mut Vec<String>,
 ) -> Result<Vec<Value>> {
-    let source = record(root, "adr/033-tool-executables-names-and-versions.md")?;
+    let source = record(root, "docs/spec/executable-contracts.md")?;
     let table = if let Some(source) = &source {
         let (_, table) = source
             .split_once("|Present name|Successor|Installs to|\n")
@@ -408,7 +433,7 @@ fn successor_census(
     let mut pending = Vec::new();
     for row in ledger.iter().filter(|row| row["kind"] == "successor") {
         let text = string(row, "row")?;
-        if row["record"] != "tab:toolnames:successors"
+        if row["record"] != "tab:buildcontracts:executable-identities"
             || (source.is_some() && !expected.remove(text))
         {
             findings.push(format!("extra or duplicate successor ledger row: {text}"));
@@ -761,12 +786,12 @@ fn closure_checks(
 }
 
 fn domain_owners(root: &Path) -> Result<BTreeMap<String, String>> {
-    let Some(source) = record(root, "adr/036-tools-dependency-concept.md")? else {
+    let Some(source) = record(root, "docs/spec/build-contracts.md")? else {
         return Ok(BTreeMap::new());
     };
     let (_, table) = source
         .split_once("|Package|Tier and domain|Accountable owner|Consumers|\n")
-        .ok_or("record 036 domains table missing")?;
+        .ok_or("public domains table missing")?;
     let mut owners = BTreeMap::new();
     for line in table.lines().take_while(|line| line.starts_with('|')) {
         if line.starts_with("|---") {
@@ -774,23 +799,21 @@ fn domain_owners(root: &Path) -> Result<BTreeMap<String, String>> {
         }
         let fields: Vec<_> = line.split('|').collect();
         if fields.len() != 6 {
-            return Err("record 036 domains table row malformed".into());
+            return Err("public domains table row malformed".into());
         }
         let package = fields[1]
             .trim()
             .strip_prefix('`')
             .and_then(|name| name.strip_suffix('`'))
             .filter(|name| !name.is_empty())
-            .ok_or("record 036 domains table package malformed")?;
+            .ok_or("public domains table package malformed")?;
         let owner = fields[3].trim();
         if owner.is_empty()
             || owners
                 .insert(package.to_owned(), owner.to_owned())
                 .is_some()
         {
-            return Err(format!(
-                "record 036 domains table owner malformed: {package}"
-            ));
+            return Err(format!("public domains table owner malformed: {package}"));
         }
     }
     Ok(owners)
@@ -811,7 +834,7 @@ fn accountability(
             .any(|package| package["name"] == name.as_str())
         {
             return Err(format!(
-                "record 036 domains table names a package the roster lacks: {name}"
+                "public domains table names a package the roster lacks: {name}"
             ));
         }
     }
@@ -841,7 +864,7 @@ fn accountability(
             .is_some_and(|recorded| owner.as_str() != Some(recorded.as_str()))
         {
             findings.push(format!(
-                "accountable owner disagrees with record 036: {name}"
+                "accountable owner disagrees with public domain contract: {name}"
             ));
         }
         let consumers: BTreeSet<_> = edges
@@ -1023,6 +1046,7 @@ rows = [{ pattern = "public/" }]
 [exclude]
 rows = [{ pattern = "private/", reason = "Source-only evidence." }]
 [public]
+name = "fixture-repository"
 readme = "public/README.md"
 licence_code = "LICENSE-CODE"
 licence_docs = "LICENSE-DOCS"

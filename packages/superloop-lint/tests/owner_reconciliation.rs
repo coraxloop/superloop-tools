@@ -5,7 +5,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`the_repository_owner_surface_reconciles_in_both_directions`] | owners | The declared partition attributes every live path exactly once to the 27 manifest owners and the crateless repository owner, with the declared shape exclusions and the imported generic owner added without a partition; its 38 crate-to-crate may-cite rows equal internal path dependencies, its ten edges to the imported generic owner are declaration-authoritative and reach no partition of this tree, six edges reach the crateless repository owner, and no imported owner receives a manifest edge. # Panics Panics only when this checkout cannot be read or parsed, or when its owner, partition, crate-name, or direct-reach facts diverge from the declaration. |
+//! | [`the_repository_owner_surface_reconciles_in_both_directions`] | owners | The declared partition attributes every live path exactly once to the 27 manifest owners and the crateless repository owner, with the declared shape exclusions and the imported generic owner added without a partition; its 38 crate-to-crate may-cite rows equal internal path dependencies, its ten edges to the imported generic owner are declaration-authoritative and reach no partition of this tree, seven edges reach the crateless repository owner, and no imported owner receives a manifest edge. # Panics Panics only when this checkout cannot be read or parsed, or when its owner, partition, crate-name, or direct-reach facts diverge from the declaration. |
 
 //! Repository owner-partition and manifest-reach integration tests.
 
@@ -70,8 +70,8 @@ fn reconcile_partition(plan: &ExecutionPlan) -> BTreeMap<PathBuf, String> {
         .map(|(name, count)| (name.as_str(), *count))
         .collect();
     let mut expected_ignores = BTreeMap::from([("test-fixtures", 5)]);
-    if plan.root().join("maps/meson.build").exists() {
-        expected_ignores.insert("unreadable-install-inputs", 1);
+    if plan.root().join("Cargo.lock").exists() {
+        expected_ignores.insert("consumer-lockfile", 1);
     }
     assert_eq!(fixed_ignores, expected_ignores);
     assert_eq!(partition.counts().unaccounted, 0);
@@ -209,7 +209,7 @@ fn manifest_reach(
 /// its 38 crate-to-crate may-cite rows equal internal path dependencies,
 /// its ten edges to the imported
 /// generic owner are declaration-authoritative and reach no partition of this
-/// tree, six edges reach the crateless repository owner, and no imported owner
+/// tree, seven edges reach the crateless repository owner, and no imported owner
 /// receives a manifest edge.
 ///
 /// # Panics
@@ -270,6 +270,7 @@ fn the_repository_owner_surface_reconciles_in_both_directions() {
     assert_eq!(derived_reach, crate_reach);
     assert_eq!(imported_reach, expected_imported_reach);
     let expected_repository_reach = BTreeSet::from([
+        ("LOOPHOME".to_owned(), REPOSITORY_OWNER.to_owned()),
         ("EXECUTECOMMAND".to_owned(), REPOSITORY_OWNER.to_owned()),
         ("BUILDSYNC".to_owned(), REPOSITORY_OWNER.to_owned()),
         ("SUPERLOOPLANE".to_owned(), REPOSITORY_OWNER.to_owned()),

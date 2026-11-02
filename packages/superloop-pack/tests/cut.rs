@@ -33,6 +33,7 @@ rows = [{ pattern = "private.txt", reason = "Private fixture." }]
 [reserved]
 rows = [{ pattern = "future-private/", reason = "Reserved private fixture." }]
 [public]
+name = "fixture-repository"
 readme = "docs/readme.txt"
 licence_code = "LICENSE-CODE"
 licence_docs = "LICENSE-DOCS"
@@ -245,7 +246,7 @@ fn public_tags_bind_reproducible_public_commits() {
             );
             let tag = git(out, &["cat-file", "-p", "v0.1.0"]);
             assert!(tag.contains("tagger Fixture Author <fixture@example.com>"));
-            assert!(tag.ends_with("superloop-tools v0.1.0\n\n### Added\n\n- First fixture."));
+            assert!(tag.ends_with("fixture-repository v0.1.0\n\n### Added\n\n- First fixture."));
             assert!(!tag.contains("BEGIN PGP SIGNATURE"));
             assert_eq!(
                 git(
@@ -308,7 +309,7 @@ fn tag_notes_select_release_sections_and_preserve_overrides() {
     ));
     assert_eq!(
         git(&first, &["tag", "-l", "--format=%(contents)", "0.1.1"]),
-        "superloop-tools 0.1.1\n\n### Fixed\n\n- Later fixture."
+        "fixture-repository 0.1.1\n\n### Fixed\n\n- Later fixture."
     );
     let footer = root.path().join("footer-notes");
     success(cut_with_public_tag(
@@ -328,7 +329,7 @@ fn tag_notes_select_release_sections_and_preserve_overrides() {
     let object = String::from_utf8(object.stdout).expect("tag text");
     assert_eq!(
         object.split_once("\n\n").expect("tag message").1,
-        "superloop-tools v0.1.0\n\n### Added\n\n- First fixture.\n"
+        "fixture-repository v0.1.0\n\n### Added\n\n- First fixture.\n"
     );
     let absent = root.path().join("absent");
     let output = cut_with_public_tag(&source, &absent, None, true, None, Some("v9.0.0"));
@@ -681,6 +682,129 @@ fn required_inputs_and_existing_publication_are_guarded() {
                 .contains(&format!("{licence} is absent from the public set"))
         );
         assert!(!missing.exists());
+    }
+}
+
+/// A publication must declare its repository name even with a tag-message override.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an unnamed publication is accepted.
+/// ´test:integration:missing-public-name-refuses-publication´
+#[test]
+fn missing_public_name_refuses_publication() {
+    let root = fixture();
+    let source = root.path().join("source");
+    fs::write(
+        source.join("public-set.toml"),
+        MANIFEST.replace("name = \"fixture-repository\"\n", ""),
+    )
+    .expect("unnamed manifest");
+    git(&source, &["add", "public-set.toml"]);
+    git(
+        &source,
+        &["commit", "-q", "--no-gpg-sign", "-m", "Missing name"],
+    );
+    git(&source, &["tag", "-f", "source-v1"]);
+    let out = root.path().join("out");
+    for override_message in [None, Some("Explicit notes")] {
+        let mut command = cut_command(&source, &out, None, true, None, Some("v0.1.0"));
+        if let Some(message) = override_message {
+            command.args(["--tag-message", message]);
+        }
+        let output = command.output().expect("cut binary");
+        assert_eq!(output.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("missing field `name`"));
+        assert!(!out.exists());
+    }
+}
+
+/// Blank names and control characters cannot become annotated tag subjects.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an invalid publication name is accepted.
+/// ´test:integration:invalid-public-names-refuse-publication´
+#[test]
+fn invalid_public_names_refuse_publication() {
+    for name in [
+        "",
+        "   ",
+        "fixture\\nrepository",
+        "fixture\\trepository",
+        "fixture\\u007Frepository",
+    ] {
+        let root = fixture();
+        let source = root.path().join("source");
+        fs::write(
+            source.join("public-set.toml"),
+            MANIFEST.replace(
+                "name = \"fixture-repository\"",
+                &format!("name = \"{name}\""),
+            ),
+        )
+        .expect("invalid name manifest");
+        git(&source, &["add", "public-set.toml"]);
+        git(
+            &source,
+            &["commit", "-q", "--no-gpg-sign", "-m", "Invalid name"],
+        );
+        git(&source, &["tag", "-f", "source-v1"]);
+        let out = root.path().join("out");
+        let output = cut_with_public_tag(&source, &out, None, true, None, Some("v0.1.0"));
+        assert_eq!(output.status.code(), Some(3));
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("public-set requires a non-empty single-line public.name")
+        );
+        assert!(!out.exists());
+    }
+}
+
+/// Root README replacement requires an explicit reasoned exclusion.
+///
+/// # Panics
+/// Panics only if fixture IO fails or README selection violates its contract.
+/// ´test:integration:root-readme-replacement-requires-exclusion´
+#[test]
+fn root_readme_replacement_requires_exclusion() {
+    for selector in ["README.md", "README.*"] {
+        let root = fixture();
+        let source = root.path().join("source");
+        let out = root.path().join("out");
+        fs::write(source.join("README.md"), "private root README\n").expect("root README");
+        for excluded in [false, true] {
+            let manifest = if excluded {
+                MANIFEST.replace(
+                    "[exclude]\nrows = [",
+                    &format!("[exclude]\nrows = [{{ pattern = \"{selector}\", reason = \"Public README replaces it.\" }}, "),
+                )
+            } else {
+                MANIFEST.replace(
+                    "[include]\nrows = [",
+                    &format!("[include]\nrows = [{{ pattern = \"{selector}\" }}, "),
+                )
+            };
+            fs::write(source.join("public-set.toml"), manifest).expect("README selection");
+            git(&source, &["add", "."]);
+            git(
+                &source,
+                &["commit", "-q", "--no-gpg-sign", "-m", "README selection"],
+            );
+            git(&source, &["tag", "-f", "source-v1"]);
+            let output = cut(&source, &out, None, true);
+            if excluded {
+                success(output);
+                assert_eq!(
+                    fs::read(out.join("README.md")).expect("public README"),
+                    b"public readme\n"
+                );
+            } else {
+                assert_eq!(output.status.code(), Some(3));
+                let report = String::from_utf8_lossy(&output.stdout);
+                assert!(report.contains(&format!("include selector {selector}")));
+                assert!(report.contains("change the row to an exclusion with a reason"));
+                assert!(!out.exists());
+            }
+        }
     }
 }
 

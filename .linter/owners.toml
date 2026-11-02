@@ -9,6 +9,10 @@ owner = "ORCHESTRATION"
 registry = ".linter/imports/orchestration.toml"
 
 [[may_cite]]
+owner = "LOOPHOME"
+target = "TOOLS"
+
+[[may_cite]]
 owner = "SUPERLOOPLANE"
 target = "EXECUTECOMMAND"
 
@@ -285,29 +289,9 @@ owner = "TOOLS"
 pattern = '%s"packages/README.md"'
 
 [[partitions]]
-name = "shell-tools"
-owner = "TOOLS"
-pattern = '%s"bin" [ "/" *VCHAR ]'
-
-[[partitions]]
-name = "install-maps"
-owner = "TOOLS"
-pattern = '%s"maps" [ "/" *VCHAR ]'
-
-[[partitions]]
 name = "documents"
 owner = "TOOLS"
 pattern = '%s"docs" [ "/" *VCHAR ]'
-
-[[partitions]]
-name = "engineering-records"
-owner = "TOOLS"
-pattern = '%s"adr" [ "/" *VCHAR ]'
-
-[[partitions]]
-name = "units"
-owner = "TOOLS"
-pattern = '%s"units" [ "/" *VCHAR ]'
 
 [[partitions]]
 name = "harnesses"
@@ -318,11 +302,6 @@ pattern = '%s"tests" [ "/" *VCHAR ]'
 name = "server-kits"
 owner = "TOOLS"
 pattern = '%s"infra" [ "/" *VCHAR ]'
-
-[[partitions]]
-name = "hook-wrappers"
-owner = "TOOLS"
-pattern = '%s"hooks" [ "/" *VCHAR ]'
 
 [[partitions]]
 name = "declared-surface"

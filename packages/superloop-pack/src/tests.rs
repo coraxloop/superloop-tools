@@ -564,15 +564,16 @@ fn declared_fixture(external: bool, guide: &str, rows: &str) -> Fixture {
     let declaration = fixture.repository.join(".linter");
     fs::create_dir(&declaration).expect("fixture declaration");
     let policies = if external {
-        "policies = [{ owner = \"PROJECTA\", policy = \"public-pack.values-absent\" }]\n"
+        "policies = [{ owner = \"PROJECTA\", policy = \"public-pack.values-absent\" }, { owner = \"PROJECTA\", policy = \"labels.mints-well-formed\" }]\n"
     } else {
-        "policies = []\n"
+        "policies = [{ owner = \"PROJECTA\", policy = \"labels.mints-well-formed\" }]\n"
     };
-    let lists = if external {
+    let mut lists = if external {
         format!("[PROJECTA.\"public-pack.values-absent\"]\npath_counts = [{rows}]\n")
     } else {
         String::new()
     };
+    lists.push_str("[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n");
     for (name, body) in [
         (
             "owners",
@@ -654,7 +655,15 @@ fn pack_only_fixture(manifest_owned: bool) -> Fixture {
         let path = declaration.join(name);
         let mut text = fs::read_to_string(&path)
             .expect("declaration")
-            .replace("PROJECTA", "TOOLS");
+            .replace("PROJECTA", "TOOLS")
+            .replace(
+                "owner = \"TOOLS\", policy = \"labels.mints-well-formed\"",
+                "owner = \"DOCS\", policy = \"labels.mints-well-formed\"",
+            )
+            .replace(
+                "[TOOLS.\"labels.mints-well-formed\"]",
+                "[DOCS.\"labels.mints-well-formed\"]",
+            );
         if name == "policy-public-pack-values.toml" {
             text = text
                 .replace(
@@ -731,6 +740,7 @@ fn pack_only_activation_builds_and_verifies_with_narrow_provenance_ownership() {
             let report: serde_json::Value =
                 serde_json::from_slice(&plain.stdout).expect("plain report");
             assert_eq!(report["clean"], true);
+            assert_eq!(report["sources_scanned"], 1, "the guide is activated prose");
             assert_eq!(report["public_pack"], false);
             assert!(
                 !report["burn"]["families"]
@@ -867,6 +877,7 @@ fn activation_requires_local_values_for_plain_checks_and_external_values_for_pac
     );
     let report: serde_json::Value = serde_json::from_slice(&local.stdout).expect("plain report");
     assert_eq!(report["clean"], true);
+    assert_eq!(report["sources_scanned"], 1, "the guide is activated prose");
     let family = report["burn"]["families"]
         .as_array()
         .expect("burn families")

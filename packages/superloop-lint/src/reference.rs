@@ -673,13 +673,13 @@ impl std::fmt::Display for SectionRow {
 ///
 /// The section is evaluated only over its owner's share of the declared
 /// partition and is never offered another owner's file
-/// (´dec:rows:owner-input´), so a row written here is that owner's exception and
+/// (´[TOOLS-rule:lintcontracts:ownership]´), so a row written here is that owner's exception and
 /// reaches no further. The rows subtract as an orderless union, and subtraction
 /// is what a policy file of this shape does
-/// (´dec:rows:subtract-then-partition´).
+/// (´[TOOLS-rule:lintcontracts:ownership]´).
 ///
 /// The inclusion records are absent by default and owe nothing where they are
-/// absent (´dec:references:declarations´). They are not an instrument: the
+/// absent (´[TOOLS-rule:lintcontracts:references]´). They are not an instrument: the
 /// sources this policy reads are the owner's share minus its exclusions, and
 /// which kinds are read at all is fixed by this program and its code-owned
 /// carrier catalog. Where an owner writes the key anyway, the rows must satisfy
@@ -718,10 +718,10 @@ impl Section {
     ///
     /// The rows subtract as an orderless union, so *which* row is reported when
     /// several match is a reporting choice and never a semantic one
-    /// (´dec:rows:subtract-then-partition´). The path is offered in the one
-    /// repository coordinate system (´dec:rows:repository-coordinates´), and the
+    /// (´[TOOLS-rule:lintcontracts:ownership]´). The path is offered in the one
+    /// repository coordinate system (´[TOOLS-rule:lintcontracts:ownership]´), and the
     /// caller has already restricted it to this owner's share
-    /// (´dec:rows:owner-input´), so a row is never asked about a foreign file.
+    /// (´[TOOLS-rule:lintcontracts:ownership]´), so a row is never asked about a foreign file.
     #[cfg(test)]
     pub(super) fn excluded_by(&self, path: &BytePath) -> Option<&str> {
         self.exclude
@@ -964,9 +964,9 @@ pub fn retiring_exclusions(
 
 /// Which sources of the declared partition this policy reads.
 ///
-/// A section is offered only its own owner's share (´dec:rows:owner-input´), and
+/// A section is offered only its own owner's share (´[TOOLS-rule:lintcontracts:ownership]´), and
 /// its rows subtract as an orderless union before anything else is asked of them
-/// (´dec:rows:subtract-then-partition´). What survives is read; nothing else is
+/// (´[TOOLS-rule:lintcontracts:ownership]´). What survives is read; nothing else is
 /// opened at all. The result is ordered by path so that a census over it, and
 /// every finding the census raises, arrive in the order a reader reads the tree.
 #[must_use]
@@ -1005,11 +1005,11 @@ pub fn govern(parameters: &Parameters, attribution: &BTreeMap<&BytePath, &str>) 
 ///
 /// The `include` records are absent by default; when present they must satisfy
 /// the checked partition, but they supply diagnostic gloss only — they neither
-/// admit carriers nor narrow total reach (´dec:references:declarations´). So this
+/// admit carriers nor narrow total reach (´[TOOLS-rule:lintcontracts:references]´). So this
 /// pass reads [`govern`]'s answer rather than helping to form it, and every
 /// verdict it reaches leaves the governed set exactly as it found it.
 ///
-/// The judgment is the ordinary one (´dec:rows:subtract-then-partition´), taken
+/// The judgment is the ordinary one (´[TOOLS-rule:lintcontracts:ownership]´), taken
 /// over the governed set and nothing wider: a governed source no gloss row names
 /// breaks completeness, one that two rows name breaks disjointness, and a row
 /// reaching nothing in the governed set is idle — which is what a row naming only
@@ -1120,7 +1120,7 @@ pub struct Censused<'a> {
 
 /// The structural bounds a generator or a registered table schema establishes in one source.
 ///
-/// The two cases the reach rule names (´rule:references:total-reach´) are the
+/// The two cases the reach rule names (´[TOOLS-rule:lintcontracts:references]´) are the
 /// folder-projection region and the burn register's file column, and neither
 /// reaches a governed source at this boundary. A projection stands only in a
 /// folder README, and every README is removed by the named row before a source

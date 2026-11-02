@@ -6,7 +6,7 @@
 //!
 //! The three are modes of one command rather than three subcommands because they
 //! are three readings of one relation — what the tree holds against what the
-//! lists declare (´spec:commandcontract:burn-modes´). Bare verification is the
+//! lists declare (´[TOOLS-rule:lintcontracts:maintenance]´). Bare verification is the
 //! fourth reading and the default.
 //!
 //! *Audit* is read-only and formally selective: it takes a request naming the
@@ -17,7 +17,7 @@
 //! which is why it reads the list file permissively: a defect the ordinary
 //! loader refuses is a defect audit must be able to report.
 //!
-//! *Append* is the one growth door (ADR-T-020, The migration disciplines).
+//! *Append* is the one growth door (´[TOOLS-rule:lintcontracts:burn-families]´).
 //! It re-reads the tree, and accepts a row only when that row names growth the
 //! tree currently holds and its ceiling equals exactly that current observation,
 //! so an append records a debt the tree already carries and cannot pre-authorize
@@ -32,13 +32,13 @@
 //!
 //! Request bytes are caller data rather than a delegated path: the command-line
 //! entrypoint reads them from standard input, and the library surface accepts the
-//! bytes directly (´dec:controlsurface:request-stream´).
+//! bytes directly (´[TOOLS-rule:lintcontracts:maintenance]´).
 //!
 //! The response file and the stdout object are the same bytes, made durable as a
-//! file and then copied to stdout (´req:commandcontract:control-artifacts´).
+//! file and then copied to stdout (´[TOOLS-rule:lintcontracts:maintenance]´).
 //! The durable file is a direct child of the corpus root, selected through a
 //! lexical guard that never probes the response path
-//! (´dec:controlsurface:lexical-receipt´). The pair is the whole provenance the
+//! (´[TOOLS-rule:lintcontracts:maintenance]´). The pair is the whole provenance the
 //! corpus gets, since a direct hand edit leaves none.
 //!
 //! # Test index
@@ -108,7 +108,7 @@ impl Operation {
 /// The linter validates that all three strings are nonempty and preserves them
 /// byte for byte in the response. It neither decides that the named person may
 /// rule nor resolves the ruling reference, and no reader should read the receipt
-/// as authentication (ADR-T-020, The migration disciplines).
+/// as authentication (´[TOOLS-rule:lintcontracts:burn-families]´).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Authority {
@@ -787,8 +787,6 @@ struct Declared {
     dropped: Vec<String>,
     /// The file's bytes as they stand, for the digest.
     bytes: Vec<u8>,
-    /// What stands above the first table, carried across a rewrite unchanged.
-    prefix: String,
 }
 
 /// The list file's text standing above its first table: its envelope, and any
@@ -838,15 +836,20 @@ fn held_prefix(text: &str) -> &str {
 /// component were a policy name. And owner containment is asked only of a policy
 /// that divides the owner partition, because a census declared over the corpus
 /// root reaches every share at once and its rows stand at the activating owner
-/// wherever their files are (ADR-T-019, The layer owner graph).
+/// wherever their files are (´[TOOLS-rule:lintcontracts:ownership]´).
 trait ListContext {
     fn surface(&self) -> &SurfaceAst;
+    fn deferred_policies(&self) -> &[crate::snapshot::DeferredPolicy];
     fn policies(&self) -> &[Pair];
     fn partitions(&self) -> &[OwnerRow];
     fn program(&self, pair: &Pair) -> Option<&str>;
 }
 
 impl ListContext for Snapshot {
+    fn deferred_policies(&self) -> &[crate::snapshot::DeferredPolicy] {
+        self.deferred_policies()
+    }
+
     fn surface(&self) -> &SurfaceAst {
         self.surface()
     }
@@ -865,6 +868,10 @@ impl ListContext for Snapshot {
 }
 
 impl ListContext for DeclarationCore {
+    fn deferred_policies(&self) -> &[crate::snapshot::DeferredPolicy] {
+        self.deferred_policies()
+    }
+
     fn surface(&self) -> &SurfaceAst {
         self.surface()
     }
@@ -885,7 +892,7 @@ impl ListContext for DeclarationCore {
 fn read_list_syntax(
     root: &Path,
     context: &impl ListContext,
-) -> Result<(Vec<u8>, crate::surface::ListDocument, String), String> {
+) -> Result<(Vec<u8>, crate::surface::ListDocument), String> {
     let path = root.join(DIRECTORY).join(LISTS_FILE);
     let document = context
         .surface()
@@ -898,27 +905,22 @@ fn read_list_syntax(
     let text = document
         .text()
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    let table = document
-        .table()
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let table =
+        crate::snapshot::catalogued_list_table(context.surface(), context.deferred_policies())
+            .map_err(|error| format!("{}: {error}", path.display()))?;
     let raw: crate::surface::ListDocument =
-        table
-            .clone()
-            .try_into()
-            .map_err(|mut error: toml::de::Error| {
-                error.set_input(Some(text));
-                format!("{}: {error}", path.display())
-            })?;
-    let prefix = String::from(held_prefix(text));
-
-    Ok((bytes, raw, prefix))
+        table.try_into().map_err(|mut error: toml::de::Error| {
+            error.set_input(Some(text));
+            format!("{}: {error}", path.display())
+        })?;
+    Ok((bytes, raw))
 }
 
 #[allow(clippy::too_many_lines)]
 fn read_lists(root: &Path, context: &impl ListContext) -> Result<Declared, String> {
     let activated = context.policies();
     let partitions = context.partitions();
-    let (bytes, raw, prefix) = read_list_syntax(root, context)?;
+    let (bytes, raw) = read_list_syntax(root, context)?;
 
     let declared: BTreeSet<&Pair> = activated.iter().collect();
     let mut lists = BTreeMap::new();
@@ -1039,7 +1041,6 @@ fn read_lists(root: &Path, context: &impl ListContext) -> Result<Declared, Strin
         anomalies,
         dropped,
         bytes,
-        prefix,
     })
 }
 
@@ -1630,7 +1631,7 @@ fn audit(
 /// a defect anywhere in the file puts every row in the file at risk, and the pair
 /// being appended to is no safer for being clean itself. What the caller is owed
 /// is the list of rows a write would have dropped, so the refusal names them
-/// (ADR-T-020, The migration disciplines).
+/// (´[TOOLS-rule:lintcontracts:burn-families]´).
 fn truncation_refusals(declared: &Declared, target: &Target) -> Vec<AppendRefusal> {
     if declared.dropped.is_empty() {
         return Vec::new();
@@ -1903,14 +1904,14 @@ fn lower_rows(rows: &mut Rows, observed: &BTreeMap<Identity, u64>) {
 ///
 /// A maintenance run may not overwrite the thing it is reporting on, so the
 /// response may name neither a declared configuration file nor a generated
-/// register (´spec:commandcontract:burn-modes´).
+/// register (´[TOOLS-rule:lintcontracts:maintenance]´).
 fn is_protected(root: &Path, output: &Path) -> bool {
     let output = normalize_lexically(output);
 
     // The declared surface is a directory rather than a filename list, so what is
     // protected is lexical membership of it. A parameter document that arrived
     // without this function being told about it is exactly the file a maintenance
-    // run must not land on (´dec:snapshot:physical-membership´). Resolving the two
+    // run must not land on (´[TOOLS-rule:lintcontracts:snapshot]´). Resolving the two
     // paths lexically keeps an arbitrary response path from becoming a metadata
     // probe while still collapsing the relative components that could disguise a
     // declaration as an unrelated destination.
@@ -2130,7 +2131,7 @@ fn maintain_loaded(
     // an audit can answer them over exactly the configuration it reads
     // permissively. An audit reports them; an append refuses, because every
     // writing mode refuses to mutate under a snapshot that disagrees with the
-    // tree (´rule:commandcontract:configuration-verdicts´). Header failures are
+    // tree (´[TOOLS-rule:lintcontracts:verdicts]´). Header failures are
     // the observation these modes compare and record, not configuration
     // disagreement, so they reach the target comparison instead of also making
     // the audit incoherent or blocking the append growth door.
@@ -2211,11 +2212,15 @@ fn maintain_loaded(
         }
         Operation::Append => {
             let (targets, staged, applied) = append(plan, &declared, &targets);
-            let rendered = format!(
-                "{}{}",
-                declared.prefix,
-                render_lists(&snapshot.ordered(&staged), &staged)
-            );
+            let rendered = match rewrite_lists(
+                snapshot,
+                &declared.bytes,
+                &snapshot.ordered(&staged),
+                &staged,
+            ) {
+                Ok(text) => text,
+                Err(error) => return refused(error),
+            };
 
             let after = if applied {
                 let path = root.join(DIRECTORY).join(LISTS_FILE);
@@ -2300,11 +2305,13 @@ pub fn lower_lists_with_plan(plan: ControlWritePlan<'_>) -> std::io::Result<bool
     let root = plan.root();
     let path = root.join(DIRECTORY).join(LISTS_FILE);
     let held = std::fs::read_to_string(&path).unwrap_or_default();
-    let rendered = format!(
-        "{}{}",
-        held_prefix(&held),
-        render_lists(&snapshot.list_keys(), &lower_planned(plan),)
-    );
+    let rendered = rewrite_lists(
+        snapshot,
+        held.as_bytes(),
+        &snapshot.list_keys(),
+        &lower_planned(plan),
+    )
+    .map_err(std::io::Error::other)?;
 
     if held == rendered {
         return Ok(false);
@@ -2313,6 +2320,134 @@ pub fn lower_lists_with_plan(plan: ControlWritePlan<'_>) -> std::io::Result<bool
     replace_atomically(&path, rendered.as_bytes())?;
 
     Ok(true)
+}
+
+fn rewrite_lists(
+    snapshot: &Snapshot,
+    bytes: &[u8],
+    pairs: &[Pair],
+    lists: &BTreeMap<Pair, Rows>,
+) -> Result<String, String> {
+    let held = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+    if snapshot.deferred_policies().is_empty() {
+        return Ok(format!(
+            "{}{}",
+            held_prefix(held),
+            render_lists(pairs, lists)
+        ));
+    }
+    let (starts, inline) = list_table_starts(held, pairs)?;
+    let mut replacements = Vec::new();
+    let mut emitted = BTreeSet::new();
+    for (index, (start, pair)) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).map_or(held.len(), |(at, _)| *at);
+        let section = &held[*start..end];
+        if let Some(pair) = pair {
+            let replacement = if emitted.insert(pair.clone()) {
+                render_lists(std::slice::from_ref(pair), lists)
+            } else {
+                String::new()
+            };
+            // Comments and blank lines following a table belong to the source,
+            // including an introduction to the next deferred table.
+            let mut content_end = 0;
+            let mut offset = 0;
+            for line in section.split_inclusive('\n') {
+                offset += line.len();
+                if !line.trim().is_empty() && !line.trim_start().starts_with('#') {
+                    content_end = offset;
+                }
+            }
+            replacements.push((*start..*start + content_end, replacement));
+        }
+    }
+    for (span, pair) in inline {
+        let canonical: toml::Table =
+            toml::from_str(&render_lists(std::slice::from_ref(&pair), lists))
+                .map_err(|error| error.to_string())?;
+        let mut value = &canonical[&pair.owner][&pair.policy];
+        if let Some(family) = &pair.family {
+            value = &value[family];
+        }
+        replacements.push((span, value.to_string()));
+        emitted.insert(pair);
+    }
+    replacements.sort_by_key(|(span, _)| span.start);
+    let mut rendered = String::new();
+    let mut cursor = 0;
+    for (span, replacement) in replacements {
+        rendered.push_str(&held[cursor..span.start]);
+        rendered.push_str(&replacement);
+        cursor = span.end;
+    }
+    rendered.push_str(&held[cursor..]);
+    let missing: Vec<_> = pairs
+        .iter()
+        .filter(|pair| !emitted.contains(*pair))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        rendered.push('\n');
+        rendered.push_str(&render_lists(&missing, lists));
+    }
+    Ok(rendered)
+}
+
+type TableStarts = Vec<(usize, Option<Pair>)>;
+type InlineLists = Vec<(std::ops::Range<usize>, Pair)>;
+
+/// Locate real table headers through TOML spans, never through apparent headers
+/// inside opaque multiline strings. A missing pair marks source owned elsewhere.
+fn list_table_starts(held: &str, pairs: &[Pair]) -> Result<(TableStarts, InlineLists), String> {
+    type Fields = BTreeMap<String, toml::Spanned<toml::Value>>;
+    type Policies = BTreeMap<String, toml::Spanned<Fields>>;
+    let prefix = held_prefix(held).len();
+    let body = &held[prefix..];
+    let owners: BTreeMap<String, toml::Spanned<Policies>> =
+        toml::from_str(body).map_err(|error| error.to_string())?;
+    let mut starts = Vec::new();
+    let mut inline = Vec::new();
+    for (owner, policies) in owners {
+        let span = policies.span();
+        if body[span.clone()].starts_with('[') {
+            starts.push((prefix + span.start, None));
+        }
+        for (policy, fields) in policies.into_inner() {
+            let singleton = Pair::singleton(owner.clone(), policy.clone());
+            let span = fields.span();
+            let header = body[span.clone()].starts_with('[');
+            if header {
+                starts.push((
+                    prefix + span.start,
+                    pairs.contains(&singleton).then_some(singleton.clone()),
+                ));
+            } else if body[span.clone()].starts_with('{') && pairs.contains(&singleton) {
+                inline.push((prefix + span.start..prefix + span.end, singleton));
+            }
+            for (family, value) in fields.into_inner() {
+                let span = value.span();
+                let pair = pairs.iter().find(|pair| {
+                    pair.owner == owner
+                        && pair.policy == policy
+                        && (pair.family.as_ref() == Some(&family)
+                            || (!header && pair.family.is_none()))
+                });
+                if (value.get_ref().is_table() || (!header && body[span.clone()].starts_with("[[")))
+                    && body[span.clone()].starts_with('[')
+                    && toml::from_str::<toml::Table>(&body[span.clone()]).is_ok()
+                {
+                    starts.push((prefix + span.start, pair.cloned()));
+                } else if value.get_ref().is_table()
+                    && body[span.clone()].starts_with('{')
+                    && let Some(pair) = pair
+                {
+                    inline.push((prefix + span.start..prefix + span.end, pair.clone()));
+                }
+            }
+        }
+    }
+    starts.sort_by_key(|(start, _)| *start);
+    Ok((starts, inline))
 }
 
 #[cfg(test)]

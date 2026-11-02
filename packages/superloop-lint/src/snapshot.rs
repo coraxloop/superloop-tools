@@ -8,7 +8,7 @@
 //! filenames, parses all five, cross-validates them against each other, and only
 //! then runs a policy. There is no partial load and no per-file default: a
 //! command that cannot read its own configuration has no standing to say anything
-//! about the corpus (´spec:commandcontract:configuration´).
+//! about the corpus (´[TOOLS-rule:lintcontracts:snapshot]´).
 //!
 //! Two questions are asked in order, and they get different answers. The first is
 //! whether the snapshot is a snapshot at all — whether it parses, whether every
@@ -20,7 +20,7 @@
 //! runs and no writing mode changes a byte. The second question is whether the
 //! snapshot is coherent as a description of this repository, and that one is
 //! judged rather than refused — the answers are ordinary findings of failing
-//! severity (´rule:commandcontract:configuration-verdicts´). This module owns
+//! severity (´[TOOLS-rule:lintcontracts:verdicts]´). This module owns
 //! the first question entire; the second is the partition verifier's and the
 //! cited-owner dependency validator's.
 //!
@@ -110,7 +110,7 @@ pub const LISTS_FILE: &str = "lists.toml";
 /// The document is found by the identity it stamps rather than by the name it
 /// happens to stand under, because a namespace is a document's whole identity
 /// under the ratified grammar and a filename is only where it was put
-/// (´gram:isolation:declaration´).
+/// (´[TOOLS-rule:lintcontracts:declarations]´).
 pub const SPDX_NAMESPACE: &str = "class.linter.policy.spdx";
 
 /// The allocated namespace of the interchange policy's instance document.
@@ -143,7 +143,7 @@ pub const PREFIX_NUMBERS_NAMESPACE: &str = "class.linter.policy.references.prefi
 /// identifier wherever a policy has a document of its own. A census asking where
 /// it walks therefore asks for its own policy by name and no compiled table of
 /// filenames stands between the question and the answer
-/// (´gram:isolation:declaration´).
+/// (´[TOOLS-rule:lintcontracts:declarations]´).
 pub const POLICY_NAMESPACE: &str = "class.linter.policy.";
 
 /// The format namespace of the owner-indexed lists document.
@@ -199,7 +199,7 @@ const PACKAGE_DIRECTORY_DATUM: &str = "package-directory";
 /// The loader reads it and is grounded below both declarations it supplies: the
 /// directory is read physically and byte for byte, never consulting git and never
 /// applying the ignore relation, including while reading this file itself
-/// (´just:isolation:policy-data´).
+/// (´[TOOLS-rule:lintcontracts:isolation]´).
 pub const SHAPE_FILE: &str = "shape.toml";
 
 /// The declarations a snapshot requires whatever a repository activates.
@@ -209,11 +209,11 @@ pub const SHAPE_FILE: &str = "shape.toml";
 /// shape document joins the core on the fixed core's own argument: a member the
 /// set does not name is a refusal wherever it stands, and a conditional member
 /// would buy two failure modes to save writing one small file
-/// (´just:isolation:policy-data´).
+/// (´[TOOLS-rule:lintcontracts:isolation]´).
 ///
 /// Required is not the same set as recognized. Membership is physical: a present
 /// document whose name identifies a policy declaration joins this core rather
-/// than refusing beside it (´dec:snapshot:physical-membership´), which is what
+/// than refusing beside it (´[TOOLS-rule:lintcontracts:snapshot]´), which is what
 /// lets a declared surface grow a parameter document without a compiled filename
 /// list growing with it.
 pub const FILES: [&str; 5] = [
@@ -266,7 +266,7 @@ const FINGERPRINT_DIGITS: usize = 64;
 /// family; a program a corpus deploys several times is named by its identifier
 /// and the family naming one deployment, and the two deployments are two pairs
 /// that can neither satisfy nor pay for one another
-/// (ADR-T-020, The migration disciplines). What grows is the pair's
+/// (´[TOOLS-rule:lintcontracts:burn-families]´). What grows is the pair's
 /// second component and never its arity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Pair {
@@ -344,6 +344,18 @@ pub struct ReachRow {
     pub owner: String,
     /// The owner it reaches.
     pub target: String,
+}
+
+/// A nested corpus whose own snapshot accounts for its prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NestedCorpus {
+    /// The owner retaining these paths in the enclosing corpus.
+    pub owner: String,
+    /// The normalized repository-relative directory of the nested corpus.
+    pub root: String,
+    /// Why this corpus is checked independently.
+    pub reason: String,
 }
 
 /// One row of the declared environment relation.
@@ -1047,6 +1059,7 @@ pub struct Snapshot {
     imports: BTreeMap<String, crate::export::RegistryDocument>,
     unpublished: Option<(PathBuf, crate::export::UnpublishedLabels)>,
     partitions: Vec<OwnerRow>,
+    nested: Vec<NestedCorpus>,
     shape: CorpusShape,
     may_cite: Vec<ReachRow>,
     environments: Vec<EnvironmentRow>,
@@ -1054,6 +1067,7 @@ pub struct Snapshot {
     reserved_kinds: BTreeSet<String>,
     reserved_extensions: BTreeSet<String>,
     policies: Vec<Pair>,
+    deferred: Vec<DeferredPolicy>,
     lists: BTreeMap<Pair, Rows>,
     deployments: BTreeMap<(String, String), String>,
     documents: BTreeMap<String, Declaration>,
@@ -1075,6 +1089,7 @@ pub struct DeclarationCore {
     imports: BTreeMap<String, crate::export::RegistryDocument>,
     unpublished: Option<(PathBuf, crate::export::UnpublishedLabels)>,
     partitions: Vec<OwnerRow>,
+    nested: Vec<NestedCorpus>,
     shape: CorpusShape,
     may_cite: Vec<ReachRow>,
     environments: Vec<EnvironmentRow>,
@@ -1082,6 +1097,7 @@ pub struct DeclarationCore {
     reserved_kinds: BTreeSet<String>,
     reserved_extensions: BTreeSet<String>,
     policies: Vec<Pair>,
+    deferred: Vec<DeferredPolicy>,
     deployments: BTreeMap<(String, String), String>,
     documents: BTreeMap<String, Declaration>,
     spdx: Parameters,
@@ -1094,6 +1110,10 @@ pub struct DeclarationCore {
 }
 
 impl DeclarationCore {
+    pub(crate) fn deferred_policies(&self) -> &[DeferredPolicy] {
+        &self.deferred
+    }
+
     /// The one syntax tree both validators consume.
     #[must_use]
     pub(crate) const fn surface(&self) -> &Arc<SurfaceAst> {
@@ -1134,6 +1154,7 @@ impl DeclarationCore {
             imports: self.imports,
             unpublished: self.unpublished,
             partitions: self.partitions,
+            nested: self.nested,
             shape: self.shape,
             may_cite: self.may_cite,
             environments: self.environments,
@@ -1141,6 +1162,7 @@ impl DeclarationCore {
             reserved_kinds: self.reserved_kinds,
             reserved_extensions: self.reserved_extensions,
             policies: self.policies,
+            deferred: self.deferred,
             lists,
             deployments: self.deployments,
             documents: self.documents,
@@ -1163,6 +1185,12 @@ pub enum CoreConfiguration {
 }
 
 impl Snapshot {
+    /// Activated policies checked by a repository-local programme.
+    #[must_use]
+    pub fn deferred_policies(&self) -> &[DeferredPolicy] {
+        &self.deferred
+    }
+
     /// The one syntax tree this compiled snapshot projects from.
     #[must_use]
     pub(crate) const fn surface(&self) -> &Arc<SurfaceAst> {
@@ -1238,7 +1266,7 @@ impl Snapshot {
     /// It stands here rather than beside the loader because everything that
     /// ranges over the corpus ranges over the post-ignore universe, and a caller
     /// holding the snapshot holds the one relation that decided which paths those
-    /// are (´just:isolation:policy-data´).
+    /// are (´[TOOLS-rule:lintcontracts:isolation]´).
     #[must_use]
     pub const fn shape(&self) -> &CorpusShape {
         &self.shape
@@ -1303,7 +1331,7 @@ impl Snapshot {
     /// an instance document and an entry of one of its sets, and the program is
     /// the one this binary catalogues for that set type — so a corpus may deploy a
     /// program several times without the binary being taught which deployments it
-    /// has (´gram:isolation:declaration´).
+    /// has (´[TOOLS-rule:lintcontracts:declarations]´).
     #[must_use]
     pub fn program(&self, pair: &Pair) -> Option<&str> {
         pair.family.as_ref().map_or_else(
@@ -1484,6 +1512,12 @@ impl Snapshot {
     #[must_use]
     pub fn root_owner(&self) -> &str {
         &self.root_owner
+    }
+
+    /// The declared corpora whose prose is checked through their own snapshots.
+    #[must_use]
+    pub fn nested(&self) -> &[NestedCorpus] {
+        &self.nested
     }
 
     /// The owner-name reconciliation the owner-name document declares.
@@ -1746,6 +1780,8 @@ struct RawOwners {
     /// Explicit repository carrier, validated against the registered owners.
     #[serde(default)]
     root_owner: Option<String>,
+    #[serde(default)]
+    nested: Vec<NestedCorpus>,
     /// Imported owners cite a registry in place of taking a partition.
     #[serde(default)]
     imports: Vec<RawImportRow>,
@@ -1867,15 +1903,33 @@ struct RawPolicies {
 
 /// One raw activation row: an owner and the program it activates.
 ///
-/// No third field. Under the ratified grammar the activation document says that a
-/// program acts for an owner, and the instance document then says what that means
-/// for that owner, so the family key the retiring dialect carried has nothing left
-/// to discriminate (´gram:isolation:declaration´).
+/// A programme names the repository-local checker for an uncatalogued policy.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPair {
     owner: String,
     policy: String,
+    programme: Option<toml::Value>,
+}
+
+/// A repository-local checker, declared explicitly rather than silently skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeferredPolicy {
+    /// The activating owner.
+    pub owner: String,
+    /// The policy this binary does not catalogue.
+    pub policy: String,
+    /// The tracked repository directory containing the checker.
+    pub package: String,
+    /// The checker executable's name.
+    pub binary: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Programme {
+    package: String,
+    binary: String,
 }
 
 /// Project one core schema from the surface's single parsed document.
@@ -2006,16 +2060,10 @@ fn load(
         read_ast_file(&surface, ENVIRONMENTS_FILE, &mut refusals);
     let raw_policies: Option<RawPolicies> = read_ast_file(&surface, POLICIES_FILE, &mut refusals);
 
-    let raw_lists: Option<crate::surface::ListDocument> = if strict {
-        read_ast_file(&surface, LISTS_FILE, &mut refusals)
-    } else {
-        None
-    };
-
     // The shape document is read through the one decoder that owns its schema,
     // and the loader reading it is grounded below both declarations it supplies:
     // the directory is read physically, never consulting git and never applying
-    // the ignore relation, including here (´just:isolation:policy-data´).
+    // the ignore relation, including here (´[TOOLS-rule:lintcontracts:isolation]´).
     let shape = read_shape(&surface, &mut refusals);
 
     let (Some(raw_owners), Some(raw_environments), Some(raw_policies), Some(shape)) =
@@ -2023,10 +2071,6 @@ fn load(
     else {
         return Err(refusals);
     };
-
-    if strict && raw_lists.is_none() {
-        return Err(refusals);
-    }
 
     let registered = registered_owners(&raw_owners.owners, &mut refusals);
     let root_owner = match &raw_owners.root_owner {
@@ -2051,6 +2095,13 @@ fn load(
 
     let declared = declared_partition(&raw_owners, &mut refusals);
     let partitions = owner_rows(declared, "partitions", &registered, &mut refusals);
+    let nested = nested_corpora(
+        root,
+        &raw_owners.nested,
+        &registered,
+        &partitions,
+        &mut refusals,
+    );
     let may_cite = reach_rows(&raw_owners.may_cite, &registered, &mut refusals);
     let environments = environment_rows(&raw_environments.environments, &mut refusals);
     let environment_extensions = environment_rows(&raw_environments.extensions, &mut refusals);
@@ -2090,12 +2141,40 @@ fn load(
             }
         }
     });
-    let policies = activation_pairs(&raw_policies.policies, &registered, &mut refusals);
+    let (policies, deferred) =
+        activation_pairs(root, &raw_policies.policies, &registered, &mut refusals);
+    let raw_lists: Option<crate::surface::ListDocument> = if deferred.is_empty() {
+        if strict {
+            read_ast_file(&surface, LISTS_FILE, &mut refusals)
+        } else {
+            None
+        }
+    } else {
+        match catalogued_list_table(&surface, &deferred).and_then(|table| {
+            if strict {
+                table
+                    .try_into()
+                    .map(Some)
+                    .map_err(|error: toml::de::Error| error.to_string())
+            } else {
+                Ok(None)
+            }
+        }) {
+            Ok(lists) => lists,
+            Err(message) => {
+                refusals.push(Refusal::Malformed {
+                    file: LISTS_FILE,
+                    message,
+                });
+                None
+            }
+        }
+    };
 
     // Every instance document is decoded before any of them is read, because the
     // relations between them are asked over the union rather than through a
     // privileged file, and a document found by its namespace has to be found
-    // before it can be asked for (´proposal:isolation:one-plan´).
+    // before it can be asked for (´[TOOLS-rule:lintcontracts:isolation]´).
     let documents = declared_documents_from_ast(&surface, &members, &mut refusals);
 
     let deployments = deployments(
@@ -2140,6 +2219,7 @@ fn load(
         imports,
         unpublished,
         partitions,
+        nested,
         shape,
         may_cite,
         environments,
@@ -2147,6 +2227,7 @@ fn load(
         reserved_kinds,
         reserved_extensions,
         policies,
+        deferred,
         deployments,
         documents,
         spdx,
@@ -2253,7 +2334,7 @@ fn activating(policies: &[Pair], program: &str) -> BTreeSet<String> {
 /// A written section is declared whether or not it was read, since what is wrong
 /// with it is refused where it is written.
 /// Non-application for one owner is the omission of both, which is the ratified
-/// grammar's only way of saying it (´gram:isolation:declaration´).
+/// grammar's only way of saying it (´[TOOLS-rule:lintcontracts:declarations]´).
 fn paired_sections(
     declared: &BTreeSet<String>,
     activated: &BTreeSet<String>,
@@ -2444,7 +2525,7 @@ fn partition_rows(rows: &[PatternRow]) -> Vec<SectionRow> {
 /// The document carries no set, and that is the ratified answer rather than an
 /// omission: which carrier types are in domain is compiled meaning, so a declared
 /// list of them would be a second authority over one relation with nothing able to
-/// say which of the two had drifted (´gram:isolation:declaration´).
+/// say which of the two had drifted (´[TOOLS-rule:lintcontracts:declarations]´).
 fn interchange_parameters(
     documents: &BTreeMap<String, Declaration>,
     registered: &BTreeSet<String>,
@@ -2600,7 +2681,7 @@ fn interchange_rows(rows: &[PatternRow]) -> Vec<InterchangeRow> {
 /// Its whole declaration is an exclude-only owner section over a type no set
 /// declares, which decodes because an exclude row's name labels the exclusion
 /// itself and promises nothing about a set. What the policy requires, and which
-/// sources it reads at all, are the program's own (´proposal:isolation:staging´).
+/// sources it reads at all, are the program's own (´[TOOLS-rule:lintcontracts:isolation]´).
 fn references_parameters(
     documents: &BTreeMap<String, Declaration>,
     registered: &BTreeSet<String>,
@@ -2963,7 +3044,7 @@ fn decode_burn_values(
 /// privileged one, because which policies census a corpus is the corpus's to say
 /// and a loader holding a list of them would be holding that answer twice. A
 /// document declaring neither half is a document about something else and
-/// contributes nothing here (´gram:isolation:declaration´).
+/// contributes nothing here (´[TOOLS-rule:lintcontracts:declarations]´).
 fn surface_parameters(
     documents: &BTreeMap<String, Declaration>,
     registered: &BTreeSet<String>,
@@ -3424,11 +3505,13 @@ fn is_kind_token(kind: &str) -> bool {
 
 /// Validate the activation pairs against the owner list and this binary's catalog.
 fn activation_pairs(
+    root: &Path,
     rows: &[RawPair],
     registered: &BTreeSet<String>,
     refusals: &mut Vec<Refusal>,
-) -> Vec<Pair> {
+) -> (Vec<Pair>, Vec<DeferredPolicy>) {
     let mut parsed = Vec::with_capacity(rows.len());
+    let mut deferred = Vec::new();
     let mut seen = BTreeSet::new();
 
     for row in rows {
@@ -3450,7 +3533,7 @@ fn activation_pairs(
             continue;
         }
 
-        if catalogued(&row.policy).is_none() {
+        if catalogued(&row.policy).is_none() && row.programme.is_none() {
             refusals.push(Refusal::UnknownPolicy {
                 file: POLICIES_FILE,
                 policy: row.policy.clone(),
@@ -3470,17 +3553,118 @@ fn activation_pairs(
             continue;
         }
 
-        parsed.push(pair);
+        if let Some(value) = &row.programme {
+            match repository_programme(root, row, value) {
+                Ok(programme) => deferred.push(DeferredPolicy {
+                    owner: row.owner.clone(),
+                    policy: row.policy.clone(),
+                    package: programme.package,
+                    binary: programme.binary,
+                }),
+                Err(message) => refusals.push(Refusal::Malformed {
+                    file: POLICIES_FILE,
+                    message: format!("{pair}: {message}"),
+                }),
+            }
+        } else {
+            parsed.push(pair);
+        }
     }
 
-    parsed
+    (parsed, deferred)
+}
+
+fn repository_programme(
+    root: &Path,
+    row: &RawPair,
+    value: &toml::Value,
+) -> Result<Programme, String> {
+    let programme: Programme = value.clone().try_into().map_err(|_| {
+        String::from(
+            "malformed programme; expected { package = \"packages/NAME\", binary = \"NAME\" }",
+        )
+    })?;
+    if catalogued(&row.policy).is_some() {
+        return Err(String::from(
+            "programme cannot claim a policy this binary catalogues",
+        ));
+    }
+    if programme.binary.trim().is_empty() {
+        return Err(String::from("programme binary must not be empty"));
+    }
+    let package = &programme.package;
+    let normal = !package.is_empty()
+        && package
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    let prefix = format!("{package}/");
+    let tracked = superloop_cli_common::public_set::tracked_paths(root).map_err(|_| {
+        format!(
+            "programme package {package:?}: cannot enumerate the repository's tracked paths required by the tracked-directory check"
+        )
+    })?;
+    let inside = root
+        .canonicalize()
+        .ok()
+        .zip(root.join(package).canonicalize().ok())
+        .is_some_and(|(root, directory)| directory.starts_with(root));
+    if !normal
+        || !inside
+        || !root.join(package).is_dir()
+        || !tracked.iter().any(|path| path.starts_with(&prefix))
+    {
+        return Err(format!(
+            "programme package {package:?} is not a tracked directory of the repository"
+        ));
+    }
+    Ok(programme)
+}
+
+/// Validate only the outer shape of deferred lists, leaving their rows to their checker.
+///
+/// # Errors
+/// Returns the document or shape refusal without decoding deferred row contents.
+pub fn catalogued_list_table(
+    surface: &SurfaceAst,
+    deferred: &[DeferredPolicy],
+) -> Result<toml::Table, String> {
+    let mut table = surface
+        .document(LISTS_FILE)
+        .ok_or_else(|| String::from("missing lists document"))?
+        .table()
+        .map_err(str::to_owned)?
+        .clone();
+    for row in deferred {
+        let owner = table
+            .get_mut(&row.owner)
+            .and_then(toml::Value::as_table_mut);
+        let list = owner.and_then(|owner| owner.remove(&row.policy));
+        let valid = list
+            .as_ref()
+            .and_then(toml::Value::as_table)
+            .is_some_and(|list| {
+                list.len() == 1
+                    && ["path_counts", "allowances"].iter().any(|field| {
+                        list.get(*field)
+                            .and_then(toml::Value::as_array)
+                            .is_some_and(|rows| rows.iter().all(toml::Value::is_table))
+                    })
+            });
+        if !valid {
+            return Err(format!(
+                "{} : {}: deferred list must be a table with path_counts or allowances rows",
+                row.owner, row.policy
+            ));
+        }
+    }
+    Ok(table)
 }
 
 /// The format prefix a ratchet key's middle component is relative to.
 ///
 /// The validated list namespace supplies the prefix shared by policy instances,
 /// so the shorter key form is independent of the adopting corpus
-/// (´reg:isolation:owner-questions´).
+/// (´[TOOLS-rule:lintcontracts:declarations]´).
 fn corpus_prefix(namespace: &str) -> Option<&str> {
     let (prefix, _own) = namespace.rsplit_once('.')?;
 
@@ -3517,7 +3701,7 @@ fn list_namespace_from_ast(surface: &SurfaceAst, refusals: &mut Vec<Refusal>) ->
 /// catalogues a program for, keyed as a ratchet key spells it: the document's
 /// namespace relative to the format prefix, then the entry. Which entries exist is
 /// the corpus's to say, so nothing here is compiled but the map from set type to
-/// program (´gram:isolation:declaration´).
+/// program (´[TOOLS-rule:lintcontracts:declarations]´).
 fn deployments(
     documents: &BTreeMap<String, Declaration>,
     prefix: Option<&str>,
@@ -3563,7 +3747,7 @@ fn keyed_program(pair: &Pair, deployed: &BTreeMap<(String, String), String>) -> 
 /// by exactly what the ratified grammar widened: an activation is covered by at
 /// least one key rather than by exactly one, because a program acting on a
 /// declared set acts once per entry the corpus deployed and each of those
-/// deployments earns a ratchet of its own (´conv:isolation:registers´).
+/// deployments earns a ratchet of its own (´[TOOLS-rule:lintcontracts:declarations]´).
 fn list_tables(
     raw: &BTreeMap<String, BTreeMap<String, crate::surface::ListEntry>>,
     registered: &BTreeSet<String>,
@@ -3760,7 +3944,7 @@ fn allowance_rows(
 /// share at once, so its ratchet is one repository-wide artifact filed under the
 /// owner who activated it, and holding each of its rows to that owner's
 /// attribution would refuse the very table the census earned
-/// (ADR-T-019, The layer owner graph).
+/// (´[TOOLS-rule:lintcontracts:ownership]´).
 fn path_count_rows(
     pair: &Pair,
     program: &str,
@@ -3887,6 +4071,72 @@ fn path_rows(
 
     parsed.sort();
     parsed
+}
+
+/// Validate the evidence behind each independently checked nested corpus.
+fn nested_corpora(
+    root: &Path,
+    rows: &[NestedCorpus],
+    registered: &BTreeSet<String>,
+    partitions: &[OwnerRow],
+    refusals: &mut Vec<Refusal>,
+) -> Vec<NestedCorpus> {
+    let mut nested = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let problem = if !registered.contains(&row.owner) {
+            Some("owner is not registered")
+        } else if !nested_directory(root, row, partitions) {
+            Some("root must be a normalized relative directory inside the owner's partitions")
+        } else if row.reason.trim().is_empty() {
+            Some("reason must not be empty")
+        } else if configuration(&root.join(&row.root)).snapshot().is_none() {
+            Some("root must hold a loadable .linter/ snapshot")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            refusals.push(Refusal::Malformed {
+                file: OWNERS_FILE,
+                message: format!(
+                    "nested[{}] (owner {}, root {}): {problem}",
+                    index + 1,
+                    row.owner,
+                    row.root
+                ),
+            });
+        } else {
+            nested.push(row.clone());
+        }
+    }
+    nested
+}
+
+fn nested_directory(root: &Path, row: &NestedCorpus, partitions: &[OwnerRow]) -> bool {
+    if row.root.is_empty()
+        || row
+            .root
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || Path::new(&row.root).is_absolute()
+    {
+        return false;
+    }
+    let Ok(base) = root.canonicalize() else {
+        return false;
+    };
+    let directory = base.join(&row.root);
+    // Reject aliases to ancestors as well as escapes: recursive snapshot loading
+    // must descend into a physical child, never return to an enclosing corpus.
+    if !directory.is_dir() || directory.canonicalize().ok().as_ref() != Some(&directory) {
+        return false;
+    }
+    let (tracked, findings) = crate::plan::git_tracked(&base);
+    let prefix = format!("{}/", row.root);
+    findings.is_empty()
+        && tracked
+            .iter()
+            .filter(|path| path.as_bytes().starts_with(prefix.as_bytes()))
+            .all(|path| attributed_to(path, &row.owner, partitions))
 }
 
 /// Whether the inclusion relation attributes a declared path to exactly this owner.

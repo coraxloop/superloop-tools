@@ -8,7 +8,7 @@
 //! reason there are two rather than one of each kind is that they answer the two
 //! questions nothing else can answer for a corpus: which paths are there at all,
 //! and which of those the corpus has decided not to account for
-//! (´just:isolation:policy-data´). Compiling either answer into the programs was
+//! (´[TOOLS-rule:lintcontracts:isolation]´). Compiling either answer into the programs was
 //! the alternative, and it is the arrangement in which a linter can serve only
 //! the corpus it was written beside — a repository that does not use git would
 //! have had to be told it was one.
@@ -215,7 +215,7 @@ impl CorpusShape {
 /// carries a well-formed, unique declared name and a pattern the engine compiles. A third
 /// question refuses as a surplus key rather than being read, because widening this
 /// document is an owner act and never a schema extension an implementation
-/// inferred (´just:isolation:policy-data´).
+/// inferred (´[TOOLS-rule:lintcontracts:isolation]´).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapeDefect {
     /// The text is not a well-formed document.

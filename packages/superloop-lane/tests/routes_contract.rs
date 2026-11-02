@@ -37,7 +37,7 @@ fn canonical_signin(home: &std::path::Path) {
 fn render_fixture(home: &std::path::Path) {
     for dir in [
         "out",
-        ".local/share/superloop-tools/docs",
+        ".local/share/orchestration-instance/docs/tools",
         ".config/loops/alpha/claude",
     ] {
         fs::create_dir_all(home.join(dir)).expect("directory");
@@ -49,7 +49,7 @@ fn render_fixture(home: &std::path::Path) {
     .expect("mode");
     fs::write(home.join("worker-key"), "fixture only").expect("key");
     fs::write(
-        home.join(".local/share/superloop-tools/docs/worker-charter.md"),
+        home.join(".local/share/orchestration-instance/docs/tools/worker-charter.md"),
         "fixture",
     )
     .expect("charter");
@@ -131,15 +131,7 @@ fn rendered_routes_pass_signin_check_and_reconcile() {
     assert!(preview.status.success(), "{preview:?}");
     let report: serde_json::Value = serde_json::from_slice(&preview.stdout).expect("preview");
     assert_eq!(report["changed"], 0);
-    let applied = signin(
-        "prepare-signin-home",
-        &[
-            "--reconcile",
-            "--expect-digest",
-            report["digest"].as_str().expect("digest"),
-        ],
-    );
-    assert!(applied.status.success(), "{applied:?}");
+    assert_charter_reconciled(home, &signin);
     for (kind, installed) in [
         ("codex", ".config/loops/alpha/codex/ssh_config"),
         ("claude", ".config/loops/alpha/claude/ssh_config"),
@@ -171,6 +163,62 @@ fn rendered_routes_pass_signin_check_and_reconcile() {
             assert!(!output.contains("/home/alpha/private-key"), "{output}");
         }
     }
+}
+
+fn assert_charter_reconciled(
+    home: &std::path::Path,
+    signin: &impl Fn(&str, &[&str]) -> std::process::Output,
+) {
+    let charter = home.join(".local/share/orchestration-instance/docs/tools/worker-charter.md");
+    let agents = home.join(".config/loops/alpha/codex/AGENTS.md");
+    fs::remove_file(&agents).expect("old link");
+    std::os::unix::fs::symlink(home.join("old-charter.md"), &agents).expect("retired charter link");
+    let preview = signin("prepare-signin-home", &["--reconcile", "--dry-run"]);
+    assert!(preview.status.success(), "{preview:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&preview.stdout).expect("charter preview");
+    assert_eq!(report["changed"], 1);
+    assert_eq!(
+        report["plan"]["links"][0]["target"],
+        serde_json::json!(charter)
+    );
+    assert_eq!(
+        fs::read_link(&agents).expect("preview preserves link"),
+        home.join("old-charter.md")
+    );
+    fs::remove_file(&charter).expect("remove input before apply");
+    let refused = signin(
+        "prepare-signin-home",
+        &[
+            "--reconcile",
+            "--expect-digest",
+            report["digest"].as_str().expect("digest"),
+        ],
+    );
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("worker charter not found at"));
+    assert_eq!(
+        fs::read_link(&agents).expect("refusal preserves link"),
+        home.join("old-charter.md")
+    );
+    fs::write(&charter, "fixture").expect("restore input");
+    let applied = signin(
+        "prepare-signin-home",
+        &[
+            "--reconcile",
+            "--expect-digest",
+            report["digest"].as_str().expect("digest"),
+        ],
+    );
+    assert!(applied.status.success(), "{applied:?}");
+    let result: serde_json::Value = serde_json::from_slice(&applied.stdout).expect("apply report");
+    assert_eq!(result["charter"], serde_json::json!(charter));
+    assert_eq!(result["replaced"], 1);
+    assert_eq!(fs::read_link(&agents).expect("new link"), charter);
+    let preview = signin("prepare-signin-home", &["--reconcile", "--dry-run"]);
+    assert!(preview.status.success(), "{preview:?}");
+    let report: serde_json::Value = serde_json::from_slice(&preview.stdout).expect("unchanged");
+    assert_eq!(report["changed"], 0);
 }
 
 fn assert_reconciled_render(home: &std::path::Path, kind: &str, installed: &str) {
@@ -254,7 +302,12 @@ fn claude_fixture() -> tempfile::TempDir {
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("owner home");
     fs::create_dir(root.path().join("processes")).expect("process table");
     let instance = root.path().join(".local/share/orchestration-instance");
-    fs::create_dir_all(&instance).expect("instance");
+    fs::create_dir_all(instance.join("docs/tools")).expect("instance");
+    fs::write(
+        instance.join("docs/tools/worker-charter.md"),
+        "fixture charter",
+    )
+    .expect("charter");
     fs::write(
         instance.join("servers.md"),
         registry().replace(
@@ -265,6 +318,36 @@ fn claude_fixture() -> tempfile::TempDir {
     .expect("routes");
     fs::write(root.path().join("worker-key"), "fixture key").expect("key");
     root
+}
+
+/// # Panics
+/// Panics only if fixture setup or preparation violates the charter preflight contract.
+/// ´test:integration:claude-home-requires-selected-charter-before-preparation´
+#[test]
+fn claude_home_requires_selected_charter_before_preparation() {
+    let root = claude_fixture();
+    let owner = root.path();
+    let default = owner.join(".local/share/orchestration-instance/docs/tools/worker-charter.md");
+    fs::remove_file(&default).expect("remove default");
+    let missing = claude_call(owner, &["--dry-run"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains(&format!(
+        "worker charter not found at {}; pass --charter or install the instance publication",
+        default.display()
+    )));
+    assert!(!owner.join(".config/loops/alpha/claude").exists());
+    let selected = owner.join("selected.md");
+    fs::write(&selected, "selected charter").expect("input");
+    let args = ["--charter", selected.to_str().expect("path")];
+    let report = claude_apply(owner, &args);
+    assert_eq!(report["charter"], serde_json::json!(selected));
+    let home = owner.join(".config/loops/alpha/claude");
+    assert!(home.is_dir());
+    assert!(!home.join("CLAUDE.md").exists());
+    fs::remove_file(&selected).expect("remove selected input");
+    let missing = claude_call(owner, &["--charter", args[1], "--reconcile", "--dry-run"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("worker charter not found at"));
 }
 
 fn claude_apply(home: &std::path::Path, args: &[&str]) -> serde_json::Value {
@@ -969,7 +1052,7 @@ fn registry_routes_heading_accepts_only_bare_or_labelled_title() {
     fs::create_dir(root.path().join("out")).expect("output");
     for (heading, changed) in [
         ("## Node routes", 7),
-        ("## Node routes · `sec:servers:node-routes`", 0),
+        ("## Node routes · `sec:fixture:node-routes`", 0),
     ] {
         fs::write(
             root.path().join("servers.md"),
@@ -984,10 +1067,10 @@ fn registry_routes_heading_accepts_only_bare_or_labelled_title() {
     }
     for heading in [
         "## Node routes extra",
-        "## Node routes · `sec:servers:node-routes` extra",
-        "## Node routes · ``sec:servers:node-routes``",
+        "## Node routes · `sec:fixture:node-routes` extra",
+        "## Node routes · ``sec:fixture:node-routes``",
         "## Node routes · `not a label`",
-        "## Other routes · `sec:servers:node-routes`",
+        "## Other routes · `sec:fixture:node-routes`",
     ] {
         fs::write(
             root.path().join("servers.md"),

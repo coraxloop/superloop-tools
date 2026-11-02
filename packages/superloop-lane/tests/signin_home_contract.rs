@@ -11,7 +11,8 @@ impl CodexHomeFixture {
         let owner = root.path();
         std::fs::set_permissions(owner, std::fs::Permissions::from_mode(0o700))
             .expect("protected owner");
-        let charter = owner.join(".local/share/superloop-tools/docs/worker-charter.md");
+        let charter =
+            owner.join(".local/share/orchestration-instance/docs/tools/worker-charter.md");
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -392,17 +393,18 @@ fn codex_home_keeps_canonical_signin_and_owner_custody() {
 
 /// # Panics
 /// Panics only if fixture setup or the production command violates the asserted contract.
-/// ´test:integration:codex-home-links-only-the-tools-charter-publication´
+/// ´test:integration:codex-home-links-the-selected-charter-publication´
 #[test]
-fn codex_home_links_only_the_tools_charter_publication() {
+fn codex_home_links_the_selected_charter_publication() {
     use std::fs;
     use std::os::unix::fs::symlink;
     let fixture = CodexHomeFixture::new();
     let owner = fixture.root.path();
     fixture.prepare();
     let agents = fixture.home().join("AGENTS.md");
-    let charter = owner.join(".local/share/superloop-tools/docs/worker-charter.md");
+    let charter = owner.join(".local/share/orchestration-instance/docs/tools/worker-charter.md");
     assert_eq!(fs::read_link(&agents).expect("charter route"), charter);
+    assert_eq!(fixture.check().1["charter"], serde_json::json!(charter));
     assert_eq!(
         fs::read_to_string(&agents).expect("published bytes"),
         "published worker charter\n"
@@ -417,6 +419,78 @@ fn codex_home_links_only_the_tools_charter_publication() {
         fixture.check().1["missing"],
         serde_json::json!(["sign-in", "AGENTS.md"])
     );
+}
+
+/// # Panics
+/// Panics only if fixture setup or the command violates the no-write charter contract.
+/// ´test:integration:codex-home-refuses-missing-or-nonfile-charter-before-creation´
+#[test]
+fn codex_home_refuses_missing_or_nonfile_charter_before_creation() {
+    let fixture = CodexHomeFixture::new();
+    let charter = fixture
+        .root
+        .path()
+        .join(".local/share/orchestration-instance/docs/tools/worker-charter.md");
+    std::fs::remove_file(&charter).expect("remove charter");
+    for directory in [false, true] {
+        if directory {
+            std::fs::create_dir(&charter).expect("nonfile charter");
+        }
+        let output = fixture.invoke(
+            "prepare-signin-home",
+            None,
+            nix::unistd::Uid::effective().as_raw(),
+        );
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(&format!(
+            "worker charter not found at {}; pass --charter or install the instance publication",
+            charter.display()
+        )));
+        assert!(!fixture.home().exists());
+        assert!(
+            !fixture
+                .root
+                .path()
+                .join(".local/share/superloop-tools/loops.d/alpha.env")
+                .exists()
+        );
+    }
+}
+
+/// # Panics
+/// Panics only if fixture setup or the command loses the supplied charter path.
+/// ´test:integration:codex-home-resolves-explicit-relative-charter´
+#[test]
+fn codex_home_resolves_explicit_relative_charter() {
+    let fixture = CodexHomeFixture::new();
+    let owner = fixture.root.path();
+    let selected = owner.join("selected.md");
+    std::fs::write(&selected, "selected charter").expect("selected input");
+    std::fs::remove_file(
+        owner.join(".local/share/orchestration-instance/docs/tools/worker-charter.md"),
+    )
+    .expect("remove default");
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let output = fixture
+        .command("prepare-signin-home", None, uid)
+        .current_dir(owner)
+        .args(["--charter", "selected.md"])
+        .output()
+        .expect("prepare");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_link(fixture.home().join("AGENTS.md")).expect("link"),
+        selected
+    );
+    let checked = fixture
+        .command("check-signin-home", None, uid)
+        .arg("--charter")
+        .arg(&selected)
+        .output()
+        .expect("check");
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).expect("report");
+    assert_eq!(report["charter"], serde_json::json!(selected));
+    assert_eq!(report["missing"], serde_json::json!(["sign-in"]));
 }
 
 /// # Panics
@@ -491,7 +565,7 @@ fn codex_home_publication_stays_on_the_pinned_parent() {
         fixture
             .root
             .path()
-            .join(".local/share/superloop-tools/docs/worker-charter.md")
+            .join(".local/share/orchestration-instance/docs/tools/worker-charter.md")
     );
 }
 
