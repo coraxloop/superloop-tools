@@ -2068,11 +2068,18 @@ fn run_service_with_snapshot(
 }
 
 fn connection_refusal(error: &io::Error, started: Instant) -> Value {
-    json!({"schema":2,"type":"final","status":125,
+    let mut reply = json!({"schema":2,"type":"final","status":125,
         "reason":"door-request-refusal","ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
         "queue_state":"no-queue","queue_wall_seconds":null,"compute_exit_status":null,
-        "mediation_wall_seconds":started.elapsed().as_secs_f64(),"compute_wall_seconds":0.0,
-        "request_record_error":error.to_string()})
+        "mediation_wall_seconds":started.elapsed().as_secs_f64(),"compute_wall_seconds":0.0});
+    if let Some(cause) = error
+        .get_ref()
+        .and_then(|cause| cause.downcast_ref::<LaneError>())
+        && crate::requests::store::is_lock_contention(cause)
+    {
+        reply["request_record_error"] = json!(cause.to_string());
+    }
+    reply
 }
 
 /// Send exact argument bytes to the registered socket and return its typed status.
@@ -4086,6 +4093,29 @@ mod tests {
     }
 
     /// # Panics
+    /// Panics only if a connection refusal discloses a non-lock cause to the worker.
+    /// ´test:unit:door-connection-refusal-withholds-non-lock-cause´
+    #[test]
+    fn door_connection_refusal_withholds_non_lock_cause() {
+        for error in [
+            std::io::Error::other("unmapped peer with private host context"),
+            std::io::Error::other(crate::error::LaneError::input(
+                "requests-record-refusal",
+                "request lock owner or mode differs at private host path",
+            )),
+            std::io::Error::other("request lock: Resource temporarily unavailable (os error 11)"),
+        ] {
+            let reply = super::connection_refusal(&error, Instant::now());
+            assert_eq!(reply["reason"], "door-request-refusal");
+            assert!(reply.get("request_record_error").is_none());
+            let line = super::final_line(&["fixture".into(), "git status --short".into()], &reply)
+                .expect("worker diagnostic");
+            assert!(!line.contains("private"));
+            assert!(!line.contains("request lock:"));
+        }
+    }
+
+    /// # Panics
     /// Panics only if a store contention refusal loses its cause at the worker boundary.
     /// ´test:unit:door-admission-lock-refusal-retains-worker-cause´
     #[test]
@@ -4105,6 +4135,8 @@ mod tests {
         let held = store.fixture_exclusive_lock().expect("sibling holder");
         let (mut server, mut worker) = UnixStream::pair().expect("worker connection");
         let started = Instant::now();
+        crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE
+            .with(|bound| bound.set(Some(Duration::from_millis(30))));
         let error = serve_request(
             &mut server,
             &registration,
@@ -4118,6 +4150,7 @@ mod tests {
             started,
         )
         .expect_err("admission lock deadline");
+        crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(None));
         let reply = super::connection_refusal(&error, started);
         frame_write(&mut server, &reply).expect("production connection refusal");
         let reply = frame_read(&mut worker).expect("worker final frame");

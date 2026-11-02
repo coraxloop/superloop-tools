@@ -56,6 +56,19 @@ pub(crate) const LOOP_CAP_REMEDY: &str = "retire LOOP RUN for a finished run to 
 static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 type RunSnapshot = (Option<Vec<u8>>, u64, Vec<RequestRecord>);
 
+#[cfg(not(test))]
+const fn writer_lock_wait() -> Duration {
+    WRITER_LOCK_WAIT
+}
+
+#[cfg(test)]
+fn writer_lock_wait() -> Duration {
+    if let Some(wait) = WRITER_LOCK_WAIT_OVERRIDE.with(std::cell::Cell::get) {
+        return wait;
+    }
+    WRITER_LOCK_WAIT
+}
+
 // Diagnostic only: flock remains authoritative. Other processes and shared
 // readers have an unknown holder; never infer an identity from stale disk data.
 static LOCK_HOLDERS: Mutex<BTreeMap<(u64, u64), String>> = Mutex::new(BTreeMap::new());
@@ -1066,8 +1079,15 @@ impl Store {
         deadline: Option<Instant>,
     ) -> Result<StoreLock, ReadFailure> {
         let started = Instant::now();
+        // A late effect, deadline outcome or agent publication still gets the
+        // base writer allowance. Fix this bound once, never at each retry.
+        let deadline = if changing {
+            deadline.map(|end| end.max(started + writer_lock_wait()))
+        } else {
+            deadline
+        };
         loop {
-            let result = self.lock_attempt(changing, deadline);
+            let result = self.lock_attempt(changing, deadline, true);
             match result {
                 Err(ReadFailure::Contended(_))
                     if deadline.is_some_and(|end| Instant::now() < end) =>
@@ -1100,6 +1120,7 @@ impl Store {
         &self,
         changing: bool,
         caller_deadline: Option<Instant>,
+        retry: bool,
     ) -> Result<StoreLock, ReadFailure> {
         let state = self.state_dir();
         let flags = if changing {
@@ -1188,10 +1209,7 @@ impl Store {
         #[cfg(test)]
         let reader_wait =
             READER_LOCK_WAIT_OVERRIDE.with(|bound| bound.get().unwrap_or(reader_wait));
-        let writer_wait = WRITER_LOCK_WAIT;
-        #[cfg(test)]
-        let writer_wait =
-            WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.get().unwrap_or(writer_wait));
+        let writer_wait = writer_lock_wait();
         let started = Instant::now();
         let mut contended = false;
         let mut holder = None;
@@ -1271,7 +1289,12 @@ impl Store {
                 ),
             );
             if error.kind() == std::io::ErrorKind::WouldBlock {
-                self.log_lock_wait(changing, started, "timeout", holder.as_deref());
+                let outcome = if retry && caller_deadline.is_some_and(|end| Instant::now() < end) {
+                    "retry"
+                } else {
+                    "timeout"
+                };
+                self.log_lock_wait(changing, started, outcome, holder.as_deref());
                 #[cfg(test)]
                 if changing {
                     AFTER_WRITER_LOCK_TIMEOUT.with(|hook| {
@@ -1291,6 +1314,9 @@ impl Store {
     }
 
     fn log_lock_wait(&self, changing: bool, started: Instant, outcome: &str, holder: Option<&str>) {
+        if self.request_id.is_none() {
+            return;
+        }
         let _logged = writeln!(
             std::io::stderr().lock(),
             "door-request-lock {}",
@@ -2064,7 +2090,7 @@ impl Store {
         let _lock = if retry {
             self.lock_retry(false, deadline)
         } else {
-            self.lock_attempt(false, deadline)
+            self.lock_attempt(false, deadline, false)
         }
         .map_err(ReadFailure::into_error)?;
         self.read_run(run)?
@@ -2633,7 +2659,9 @@ pub(crate) mod tests {
                 "request custody must not reach spawned commands"
             );
         }
+        super::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(Some(Duration::from_millis(30))));
         let error = waiter.ensure_first_mode("ssh").expect_err("deadline");
+        super::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(None));
         assert!(super::is_lock_contention(&error));
         assert!(error.detail.contains("wait_seconds="));
         assert!(error.detail.contains("holder_request_id=R:holder"));
@@ -2646,6 +2674,56 @@ pub(crate) mod tests {
             "requests-record-refusal",
             "request lock owner or mode differs"
         )));
+    }
+
+    /// # Panics
+    /// Panics only if a completed effect loses its base wait after the request deadline.
+    /// ´test:unit:request-effect-after-deadline-retains-writer-allowance´
+    #[test]
+    fn request_effect_after_deadline_retains_writer_allowance() {
+        use std::time::{Duration, Instant};
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let request = waiting("R", "1a", 3000, Mode::Audit);
+        let mut effect = request.value()["effect"].clone();
+        effect["state"] = json!("completed");
+        effect["reason"] = json!("door-complete");
+        effect["exit_status"] = json!(0);
+        effect["ref_check"] = json!("not-applicable");
+        store.file(request).expect("reservation");
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("past deadline");
+        let waiter = store
+            .for_request(expired)
+            .expect("expired view")
+            .with_request_id("R:1a");
+        let holder = store.with_request_id("S:holder");
+        let held = holder.fixture_exclusive_lock().expect("sibling holder");
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                release_rx
+                    .recv_timeout(Duration::from_secs(4))
+                    .expect("late writer contends");
+                drop(held);
+            });
+            super::WRITER_LOCK_WAIT_OVERRIDE
+                .with(|bound| bound.set(Some(Duration::from_millis(200))));
+            super::AFTER_WRITER_LOCK_CONTENTION.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    release_tx.send(()).expect("release after contention");
+                }));
+            });
+            waiter
+                .record_effect("R:1a", effect.clone())
+                .expect("late completed effect");
+            super::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(None));
+        });
+        assert_eq!(
+            holder.request("R:1a").expect("durable effect").value()["effect"],
+            effect
+        );
     }
 
     /// ´test:unit:agent-merge-preserves-effect-and-supervisory-label´
