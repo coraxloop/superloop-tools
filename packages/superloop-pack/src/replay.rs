@@ -630,7 +630,6 @@ fn project(
         &bounded.manifest,
         selected.included,
         Some(&bounded.bytes),
-        false,
     )
     .map_err(|error| annotate_projection_error(evidence, error))?;
     // Generated paths obey the same public destination bound as source paths.
