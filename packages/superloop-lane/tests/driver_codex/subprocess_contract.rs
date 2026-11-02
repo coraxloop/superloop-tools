@@ -1654,6 +1654,33 @@ fn launcher_option_order_saves_threadless_and_resumed_letters() {
 }
 
 /// # Panics
+/// Panics only if a linked letter is followed or its refusal loses the option and path.
+/// ´test:integration:symlinked-step-letter-is-refused-by-name´
+#[test]
+fn symlinked_step_letter_is_refused_by_name() {
+    let harness = Harness::new("linked-letter");
+    let target = harness.root().join("letter.md");
+    let link = harness.root().join("linked-letter.md");
+    fs::write(&target, b"Letter body.\n").expect("letter");
+    std::os::unix::fs::symlink(&target, &link).expect("linked letter");
+    let result = harness
+        .command()
+        .args(["-t", "60", "--step-letter"])
+        .arg(&link)
+        .arg("pointer")
+        .output_serialized()
+        .expect("driver refusal");
+    assert_eq!(result.status.code(), Some(2));
+    let diagnostic = String::from_utf8_lossy(&result.stderr);
+    assert!(diagnostic.contains("--step-letter"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(link.to_str().expect("fixture path")),
+        "{diagnostic}"
+    );
+    assert!(!harness.run_dir("lane").exists());
+}
+
+/// # Panics
 /// Panics only if fixture setup fails or the asserted retry contract is violated.
 /// ´test:integration:model-capacity-stops-at-the-fourth-attempt´
 #[test]

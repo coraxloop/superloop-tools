@@ -7,7 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -602,6 +602,7 @@ pub struct UsageError {
     budget: u64,
     resume_refusal: Option<ResumeRefusal>,
     runs_root_refusal: Option<RootRefusal>,
+    step_letter_refusal: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -621,6 +622,9 @@ impl UsageError {
     /// Classed fresh-root or resume-boundary evidence.
     #[must_use]
     pub fn refusal_diagnostic(&self, backend_name: &str) -> Option<Vec<u8>> {
+        if let Some(detail) = &self.step_letter_refusal {
+            return Some(diagnostic_line(backend_name, "step-letter", detail));
+        }
         if let Some(refusal) = self.runs_root_refusal {
             let (kind, detail) = match refusal {
                 RootRefusal::Required => (
@@ -1032,11 +1036,14 @@ where
 {
     let arguments = arguments.into_iter().map(Into::into).collect::<Vec<_>>();
     let budget_hint = budget_hint(&arguments);
-    let config = parse_arguments(&arguments).ok_or(UsageError {
-        budget: budget_hint,
-        resume_refusal: None,
-        runs_root_refusal: None,
-    })?;
+    let mut step_letter_refusal = None;
+    let config =
+        parse_arguments_with_refusal(&arguments, &mut step_letter_refusal).ok_or(UsageError {
+            budget: budget_hint,
+            resume_refusal: None,
+            runs_root_refusal: None,
+            step_letter_refusal,
+        })?;
     if let Err(refusal) = validate_run_selection(
         &config,
         std::env::var_os("LANE_RUNS_ROOT").as_deref(),
@@ -1046,6 +1053,7 @@ where
             budget: config.budget,
             resume_refusal: None,
             runs_root_refusal: Some(refusal),
+            step_letter_refusal: None,
         });
     }
     Ok(config)
@@ -1065,6 +1073,7 @@ pub fn validate_resume(backend: &dyn Backend, config: &mut Config) -> Result<(),
                     budget: config.budget,
                     resume_refusal: Some(resume_refusal),
                     runs_root_refusal: None,
+                    step_letter_refusal: None,
                 });
             }
         }
@@ -1072,9 +1081,39 @@ pub fn validate_resume(backend: &dyn Backend, config: &mut Config) -> Result<(),
     Ok(())
 }
 
-// The child wait, monitor decision, and context capture share one poll boundary.
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 fn parse_arguments(arguments: &[OsString]) -> Option<Config> {
+    parse_arguments_with_refusal(arguments, &mut None)
+}
+
+fn read_step_letter(path: &Path) -> io::Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > 1_048_576 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected a regular file of at most 1 MiB",
+        ));
+    }
+    let mut body = Vec::new();
+    file.take(1_048_577).read_to_end(&mut body)?;
+    if body.len() > 1_048_576 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "letter exceeds 1 MiB",
+        ));
+    }
+    Ok(body)
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_arguments_with_refusal(
+    arguments: &[OsString],
+    step_letter_refusal: &mut Option<String>,
+) -> Option<Config> {
     let mut budget = None;
     let mut workdir = std::env::current_dir().ok()?;
     let mut sandbox = OsString::from(DEFAULT_SANDBOX);
@@ -1115,19 +1154,25 @@ fn parse_arguments(arguments: &[OsString]) -> Option<Config> {
         }
         if bytes == b"--step-letter" {
             position += 1;
+            let Some(path) = arguments.get(position) else {
+                *step_letter_refusal = Some("--step-letter requires a path".into());
+                return None;
+            };
             if step_letter.is_some() {
+                *step_letter_refusal = Some(format!(
+                    "--step-letter {}: repeated option",
+                    Path::new(path).display()
+                ));
                 return None;
             }
-            let file = File::open(arguments.get(position)?).ok()?;
-            let metadata = file.metadata().ok()?;
-            if !metadata.is_file() || metadata.len() > 1_048_576 {
-                return None;
-            }
-            let mut body = Vec::new();
-            file.take(1_048_577).read_to_end(&mut body).ok()?;
-            if body.len() > 1_048_576 {
-                return None;
-            }
+            let body = read_step_letter(Path::new(path))
+                .map_err(|error| {
+                    *step_letter_refusal = Some(format!(
+                        "--step-letter {}: {error}",
+                        Path::new(path).display()
+                    ));
+                })
+                .ok()?;
             step_letter = Some(body);
             position += 1;
             continue;
@@ -6080,6 +6125,7 @@ mod tests {
             budget: 60,
             resume_refusal: None,
             runs_root_refusal: Some(RootRefusal::Required),
+            step_letter_refusal: None,
         };
         assert_eq!(
             error.refusal_diagnostic("copied-driver"),
@@ -6377,6 +6423,7 @@ mod tests {
             budget: 60,
             resume_refusal: Some(ResumeRefusal::MissingReport(report.clone())),
             runs_root_refusal: None,
+            step_letter_refusal: None,
         };
         let config = Config {
             budget: 60,
