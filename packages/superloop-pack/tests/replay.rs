@@ -271,6 +271,14 @@ fn replay_preserves_metadata_readme_and_deterministic_mapping() {
     assert_eq!(first["mapping"][0]["outcome"], "skipped");
     assert_eq!(first["mapping"][0]["public_commit"], fixture.public_root);
     for (index, source) in [(1, readme), (2, ordinary)] {
+        assert_eq!(
+            first["mapping"][index]["old_author"],
+            first["mapping"][index]["new_author"]
+        );
+        assert_eq!(
+            first["mapping"][index]["old_committer"],
+            first["mapping"][index]["new_committer"]
+        );
         let public = first["mapping"][index]["public_commit"]
             .as_str()
             .expect("mapped commit");
@@ -302,6 +310,135 @@ fn replay_preserves_metadata_readme_and_deterministic_mapping() {
     assert_eq!(line(&fixture.out, &["rev-list", "--count", "HEAD"]), "3");
     assert_eq!(line(&fixture.out, &["status", "--porcelain"]), "");
     assert_eq!(fs::read_dir(&fixture.scratch).expect("scratch").count(), 0);
+}
+
+/// An explicit author maps both identities while preserving each source date.
+///
+/// # Panics
+/// Panics only if fixture IO fails or mapped commits lose metadata or determinism.
+/// ´test:integration:replay-maps-author-and-committer-with-original-dates´
+#[test]
+fn replay_maps_author_and_committer_with_original_dates() {
+    let fixture = Fixture::new();
+    fixture.commit("private.txt", "excluded change\n", "Excluded only\n");
+    fixture.commit("public/file.txt", "first change\n", "First change\n");
+    fixture.commit("docs/readme.txt", "readme change\n", "Second change\n");
+    let run = |out: &Path| {
+        report(
+            fixture
+                .replay(out)
+                .args(["--author", "Loop Author <loop@example.net>"])
+                .output()
+                .expect("mapped replay"),
+        )
+    };
+    let first = run(&fixture.out);
+    let second = run(&fixture.second);
+    assert_eq!(first["mapping"], second["mapping"]);
+    assert_eq!(first["final_tip"], second["final_tip"]);
+    assert_eq!(first["mapping"][0]["outcome"], "skipped");
+    assert!(first["mapping"][0]["new_author"].is_null());
+    assert!(first["mapping"][0]["new_committer"].is_null());
+    for entry in first["mapping"].as_array().expect("mapping").iter().skip(1) {
+        assert_eq!(entry["old_author"]["name"], "Original Author");
+        assert_eq!(entry["old_committer"]["name"], "Original Committer");
+        let written = String::from_utf8(git(
+            &fixture.out,
+            &[
+                "cat-file",
+                "commit",
+                entry["public_commit"].as_str().expect("commit"),
+            ],
+        ))
+        .expect("commit bytes");
+        for (field, prefix) in [("author", "author "), ("committer", "committer ")] {
+            let old = &entry[format!("old_{field}")];
+            let new = &entry[format!("new_{field}")];
+            assert_eq!(new["name"], "Loop Author");
+            assert_eq!(new["email"], "loop@example.net");
+            assert_eq!(old["timestamp"], new["timestamp"]);
+            assert_eq!(old["timezone"], new["timezone"]);
+            let expected = format!(
+                "{prefix}Loop Author <loop@example.net> {} {}",
+                old["timestamp"].as_str().expect("timestamp"),
+                old["timezone"].as_str().expect("timezone")
+            );
+            assert!(written.lines().any(|line| line == expected));
+        }
+    }
+}
+
+/// Mapping cannot hide source burns or introduce a burned identity, and invalid input refuses.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a refused author mapping writes public output.
+/// ´test:integration:replay-author-mapping-retains-source-burn-checks´
+#[test]
+fn replay_author_mapping_retains_source_burn_checks() {
+    for (message, source_author, author, check, field) in [
+        (
+            "forbidden-value\n",
+            None,
+            "Loop Author <loop@example.net>",
+            "metadata scan",
+            "message",
+        ),
+        (
+            "Safe message\n",
+            Some("forbidden-value <source@example.net>"),
+            "Loop Author <loop@example.net>",
+            "metadata scan",
+            "author.name",
+        ),
+        (
+            "Safe message\n",
+            None,
+            "forbidden-value <loop@example.net>",
+            "mapped metadata scan",
+            "author.name",
+        ),
+        (
+            "Safe message\n",
+            None,
+            "invalid",
+            "inputs",
+            "author override",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.commit("public/file.txt", "safe change\n", message);
+        if let Some(source_author) = source_author {
+            git(
+                &fixture.source,
+                &[
+                    "commit",
+                    "--amend",
+                    "--no-gpg-sign",
+                    "--author",
+                    source_author,
+                    "-m",
+                    message,
+                ],
+            );
+        }
+        let refs = git(&fixture.out, &["show-ref"]);
+        let objects = git(&fixture.out, &["count-objects", "-v"]);
+        let output = fixture
+            .replay(&fixture.out)
+            .args(["--author", author])
+            .output()
+            .expect("refused replay");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(3), "{text}");
+        assert!(!text.contains("forbidden-value"));
+        let result: serde_json::Value =
+            serde_json::from_str(text.lines().next().expect("report")).expect("JSON");
+        assert_eq!(result["validation"]["current"]["check"], check);
+        assert_eq!(result["validation"]["current"]["field"], field);
+        assert_eq!(git(&fixture.out, &["show-ref"]), refs);
+        assert_eq!(git(&fixture.out, &["count-objects", "-v"]), objects);
+        assert_eq!(line(&fixture.out, &["status", "--porcelain"]), "");
+    }
 }
 
 /// Burn checks include messages even when a source commit would be skipped.

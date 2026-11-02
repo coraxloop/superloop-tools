@@ -347,6 +347,8 @@ fn emit_stderr(diagnostic: &[u8]) {
 
 #[derive(Debug, clap::Args)]
 struct ReplayArgs {
+    #[arg(long, value_name = "IDENTITY")]
+    author: Option<String>,
     #[arg(long)]
     since: String,
     #[arg(long)]
@@ -369,6 +371,7 @@ struct ReplayArgs {
 
 fn run_replay(args: ReplayArgs, started: Instant) -> ExitCode {
     let ReplayArgs {
+        author,
         since,
         tag,
         manifest,
@@ -384,6 +387,7 @@ fn run_replay(args: ReplayArgs, started: Instant) -> ExitCode {
         return publish_boundary_failure(INTERNAL_DIAGNOSTIC, started.elapsed(), 1);
     };
     let result = superloop_pack::replay(superloop_pack::ReplayRequest {
+        author: author.as_deref(),
         repository_root: &repository_root,
         since: &since,
         tag: &tag,

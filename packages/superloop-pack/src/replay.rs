@@ -16,6 +16,7 @@ use crate::cut::{self, Projection};
 /// Explicit inputs to an unsigned replay into an existing development branch.
 #[derive(Clone, Copy, Debug)]
 pub struct ReplayRequest<'a> {
+    pub author: Option<&'a str>,
     pub repository_root: &'a Path,
     pub since: &'a str,
     pub tag: &'a str,
@@ -101,7 +102,7 @@ struct Identity {
     timezone: String,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SourceCommit {
     oid: String,
     parents: Vec<String>,
@@ -365,6 +366,17 @@ fn scan_metadata(
         Some(&public.message),
         evidence,
     )?;
+    scan_identity_fields(burn, ordinal, source, public, "metadata scan", evidence)
+}
+
+fn scan_identity_fields(
+    burn: &crate::BurnDocument,
+    ordinal: usize,
+    source: &SourceCommit,
+    public: &SourceCommit,
+    check: &str,
+    evidence: &mut ValidationEvidence,
+) -> Result<(), ReplayError> {
     for (field, value, public_value) in [
         ("author.name", &source.author.name, &public.author.name),
         ("author.email", &source.author.email, &public.author.email),
@@ -379,13 +391,7 @@ fn scan_metadata(
             &public.committer.email,
         ),
     ] {
-        evidence.begin(
-            "metadata scan",
-            Some(ordinal),
-            Some(&source.oid),
-            field,
-            None,
-        );
+        evidence.begin(check, Some(ordinal), Some(&source.oid), field, None);
         scan_with_root(
             burn,
             ordinal,
@@ -414,12 +420,50 @@ fn validate_git_identity(root: &Path, source: &SourceCommit) -> Result<(), Repla
             identity.name, identity.email, identity.timestamp, identity.timezone
         );
         if !output.status.success() || output.stdout != expected.as_bytes() {
-            return Err(refuse(
-                "Git cannot preserve the source identity and date verbatim",
-            ));
+            return Err(refuse("Git cannot preserve the identity and date verbatim"));
         }
     }
     Ok(())
+}
+
+fn map_author(source: &SourceCommit, author: Option<&(String, String)>) -> SourceCommit {
+    let mut mapped = source.clone();
+    if let Some((name, email)) = author {
+        for identity in [&mut mapped.author, &mut mapped.committer] {
+            identity.name.clone_from(name);
+            identity.email.clone_from(email);
+        }
+    }
+    mapped
+}
+
+fn prepare_author_override(
+    request: &ReplayRequest<'_>,
+    sources: &[SourceCommit],
+    public: &SourceCommit,
+    burn: &crate::BurnDocument,
+    evidence: &mut ValidationEvidence,
+) -> Result<Option<(String, String)>, ReplayError> {
+    let author = request
+        .author
+        .map(cut::author)
+        .transpose()?
+        .map(|(name, email)| (name.to_owned(), email.to_owned()));
+    if author.is_some() {
+        for (index, source) in sources.iter().enumerate() {
+            let mapped = map_author(source, author.as_ref());
+            scan_identity_fields(
+                burn,
+                index + 1,
+                &mapped,
+                public,
+                "mapped metadata scan",
+                evidence,
+            )?;
+            validate_git_identity(request.repository_root, &mapped)?;
+        }
+    }
+    Ok(author)
 }
 
 const fn cut_request<'a>(request: &'a ReplayRequest<'a>) -> cut::CutRequest<'a> {
@@ -821,7 +865,7 @@ fn write_commit(
         || written.committer != source.committer
         || written.message != source.message
     {
-        return Err(refuse("commit-tree changed source metadata"));
+        return Err(refuse("commit-tree changed requested metadata"));
     }
     Ok(oid)
 }
@@ -974,6 +1018,9 @@ fn replay_resolved(
     let projection_sha256 = crate::sha256_file(&std::env::current_exe()?)?;
     let public_metadata = read_commit(request.out, &public_root)?;
     let sources = linear_sources(&request, &since, &tag, &burn, &public_metadata, evidence)?;
+    evidence.begin("inputs", None, Some(&tag), "author override", None);
+    let author_override =
+        prepare_author_override(&request, &sources, &public_metadata, &burn, evidence)?;
     evidence.begin(
         "manifest",
         Some(sources.len()),
@@ -1002,6 +1049,7 @@ fn replay_resolved(
     let stage_path = temporary.keep();
     let stage = stage_path.as_path();
     let mut writer = Writer {
+        author_override,
         parent: public_root.clone(),
         parent_tree: public,
         mapping: Vec::new(),
@@ -1027,20 +1075,14 @@ fn replay_resolved(
     evidence.begin("destination", None, Some(&tag), "expected tip", None);
     output_ready(&request, &public_root)?;
     publish(stage, &out, &public_root, &mut writer)?;
-    let Writer {
-        parent,
-        parent_tree,
-        mapping,
-        checks,
-    } = writer;
-    let final_tree = line(&out, &["rev-parse", &format!("{parent}^{{tree}}")])?;
+    let final_tree = line(&out, &["rev-parse", &format!("{}^{{tree}}", writer.parent)])?;
     Ok(ReplayReport {
         since,
         tag,
         public_root,
-        final_tip: parent,
+        final_tip: writer.parent,
         final_tree,
-        files: parent_tree.len(),
+        files: writer.parent_tree.len(),
         scratch_root,
         generated_drift,
         projection_version: env!("CARGO_PKG_VERSION").into(),
@@ -1050,8 +1092,8 @@ fn replay_resolved(
         linter_sha256,
         register_sha256,
         register_schema: "unversioned-values",
-        mapping,
-        checks,
+        mapping: writer.mapping,
+        checks: writer.checks,
         pre_existing: evidence.pre_existing.clone(),
     })
 }
@@ -1238,6 +1280,7 @@ fn linear_sources(
 }
 
 struct Writer {
+    author_override: Option<(String, String)>,
     parent: String,
     parent_tree: Projection,
     mapping: Vec<Mapping>,
@@ -1296,8 +1339,9 @@ fn replay_commits(
             exit: 0,
             wall_seconds: check_start.elapsed().as_secs_f64(),
         });
+        let mapped = map_author(source, writer.author_override.as_ref());
         if !skipped {
-            writer.parent = write_commit(stage, &tree_oid, &writer.parent, source)?;
+            writer.parent = write_commit(stage, &tree_oid, &writer.parent, &mapped)?;
         }
         writer.mapping.push(Mapping {
             ordinal: index + 1,
@@ -1314,8 +1358,8 @@ fn replay_commits(
             outcome: if skipped { "skipped" } else { "replayed" },
             old_author: source.author.clone(),
             old_committer: source.committer.clone(),
-            new_author: (!skipped).then(|| source.author.clone()),
-            new_committer: (!skipped).then(|| source.committer.clone()),
+            new_author: (!skipped).then_some(mapped.author),
+            new_committer: (!skipped).then_some(mapped.committer),
             message_sha256: crate::sha256_bytes(&source.message),
             signature_omitted: source.signature_omitted,
             selected_paths: tree.len(),
