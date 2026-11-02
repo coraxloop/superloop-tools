@@ -1914,7 +1914,14 @@ fn entry_argv_round(
             selection.effort.clone(),
         ]);
     }
-    argv.push(format!("Read /home/worker/.local/inbox/{step}.md."));
+    argv.extend([
+        "--step-letter".into(),
+        crate::pinned::path_word(
+            &plan.home.join(".local/inbox").join(format!("{step}.md")),
+            "letter-path",
+        )?,
+        format!("Read /home/worker/.local/inbox/{step}.md."),
+    ]);
     Ok(argv)
 }
 

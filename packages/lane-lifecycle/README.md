@@ -18,6 +18,8 @@ The shared fresh allocator exclusively creates `{UTC-stamp}-{name}` when free, t
 
 ## Resume boundary · `sec:lanelifecycle:resume-boundary`
 
+The optional `--step-letter FILE` snapshots a regular letter file of at most 1 MiB when parsing the launch. Both backends save those exact bytes as `step-<name>.txt` before publishing the active step, including a fresh continuation after an interrupted round with no thread. The positional prompt remains the child input in `step-<name>.prompt.txt`, and a fresh round also retains it in `brief.txt`. Capacity and suspend retries keep using that saved prompt without replacing the letter. Without the option, fresh and resumed inputs retain their existing layout. The launcher supplies the option with the selected inbox letter so watchers can read the step text without inbox access (`test:unit:resumed-round-saves-letter-beside-pointer-input`).
+
 A resume requires the prior step's `run-report.txt`, a step name no earlier step used, and an event stream whose first thread identity matches the requested session. A lock file whose holder is still live is a running step and refuses the resume. A lock file whose holder is dead is recovered before those checks, because the step behind it can no longer publish anything itself.
 
 Dead-holder recovery reads the run directory before it writes, and what it finds there decides which of three things happened. A `run-report.txt` beside the dead lock is proof the step published before its driver died: that report and its `last-message.txt` are kept untouched, only the stale lock is cleared, and no recovery ever manufactures a record over a settled one.

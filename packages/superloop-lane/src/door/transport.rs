@@ -1405,6 +1405,7 @@ pub(super) fn serve_compute(
         let _logged = writeln!(io::stderr().lock(), "door effect record: {}", error.line());
         reply["status"] = json!(125);
         reply["reason"] = json!("door-record-incomplete");
+        reply["request_record_error"] = json!(error.line());
     }
     write_frame_locked(&writer, &reply, Instant::now() + Duration::from_secs(2))?;
     Ok(reply)

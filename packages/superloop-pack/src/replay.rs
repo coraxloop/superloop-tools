@@ -1016,7 +1016,7 @@ fn replay_resolved(
     let version = Command::new(&linter).arg("--version").output()?;
     let linter_version = linter_version(&version)?;
     let projection_sha256 = crate::sha256_file(&std::env::current_exe()?)?;
-    let public_metadata = read_commit(request.out, &public_root)?;
+    let public_metadata = read_public_root(request.out, &public_root, evidence)?;
     let sources = linear_sources(&request, &since, &tag, &burn, &public_metadata, evidence)?;
     evidence.begin("inputs", None, Some(&tag), "author override", None);
     let author_override =
@@ -1096,6 +1096,15 @@ fn replay_resolved(
         checks: writer.checks,
         pre_existing: evidence.pre_existing.clone(),
     })
+}
+
+fn read_public_root(
+    root: &Path,
+    oid: &str,
+    evidence: &mut ValidationEvidence,
+) -> Result<SourceCommit, ReplayError> {
+    evidence.begin("inputs", Some(0), Some(oid), "public root metadata", None);
+    read_commit(root, oid)
 }
 
 fn linter_version(version: &std::process::Output) -> Result<serde_json::Value, ReplayError> {

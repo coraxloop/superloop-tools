@@ -16,7 +16,7 @@ The workspace contains the individual tools and shared libraries. The contracts 
 
 ## Versioning · `sec:publictools:versioning`
 
-This is version 0.3.1; before 1.0 backwards compatibility is explicitly excluded, every release may change any interface, file format or command, and compatibility code (a reader that accepts an older form, a shim, a deprecated alias) is a defect to be reported, not a courtesy.
+This is version 0.3.2; before 1.0 backwards compatibility is explicitly excluded, every release may change any interface, file format or command, and compatibility code (a reader that accepts an older form, a shim, a deprecated alias) is a defect to be reported, not a courtesy.
 
 ## Public releases · `sec:publictools:public-releases`
 

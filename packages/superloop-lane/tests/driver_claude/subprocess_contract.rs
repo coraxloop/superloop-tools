@@ -13,11 +13,15 @@ fn claude_recovers_a_suspended_resumed_step_with_its_saved_brief() {
     let run_dir = harness.seed_resume("lane", "session-1");
     let clock = harness.home().join("clock");
     fs::write(&clock, "0:0").expect("paired clock");
+    let letter = harness.home().join("letter.md");
+    fs::write(&letter, b"The complete resumed letter.\n").expect("step letter");
     let result = harness
         .command()
         .env("CODEX_LANE_TEST_CLOCK", format!("@{}", clock.display()))
         .env("ORACLE_MODE", "suspend-resume")
         .args([
+            OsStr::new("--step-letter"),
+            letter.as_os_str(),
             OsStr::new("-t60"),
             OsStr::new("-r"),
             OsStr::new("session-1"),
@@ -30,9 +34,10 @@ fn claude_recovers_a_suspended_resumed_step_with_its_saved_brief() {
         .expect("production driver");
     assert!(result.status.success(), "{result:?}");
     assert!(String::from_utf8_lossy(&result.stdout).contains("suspend_resumes=1"));
+    assert_eq!(harness.read("stdin"), b"saved resumed duty\n");
     assert_eq!(
-        harness.read("stdin"),
-        fs::read(run_dir.join("step-work.txt")).expect("saved brief")
+        fs::read(run_dir.join("step-work.txt")).expect("saved letter"),
+        b"The complete resumed letter.\n"
     );
     assert!(String::from_utf8_lossy(&harness.read("argv")).contains("--resume\nsession-1\n"));
     assert_eq!(

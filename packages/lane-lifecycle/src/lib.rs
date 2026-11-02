@@ -499,6 +499,7 @@ pub struct Config {
     crash_recovery: Option<CrashRecovery>,
     pure: bool,
     prompt: Prompt,
+    step_letter: Option<Vec<u8>>,
 }
 
 impl Config {
@@ -1086,6 +1087,7 @@ fn parse_arguments(arguments: &[OsString]) -> Option<Config> {
     let mut pool_threshold = DEFAULT_POOL_THRESHOLD;
     let mut ignore_pool = false;
     let mut gateway_lane = None;
+    let mut step_letter = None;
     let mut position = 0;
 
     while position < arguments.len() {
@@ -1108,6 +1110,25 @@ fn parse_arguments(arguments: &[OsString]) -> Option<Config> {
         if bytes == GATEWAY_LANE_OPTION {
             position += 1;
             gateway_lane = Some(parse_gateway_lane(arguments.get(position)?)?);
+            position += 1;
+            continue;
+        }
+        if bytes == b"--step-letter" {
+            position += 1;
+            if step_letter.is_some() {
+                return None;
+            }
+            let file = File::open(arguments.get(position)?).ok()?;
+            let metadata = file.metadata().ok()?;
+            if !metadata.is_file() || metadata.len() > 1_048_576 {
+                return None;
+            }
+            let mut body = Vec::new();
+            file.take(1_048_577).read_to_end(&mut body).ok()?;
+            if body.len() > 1_048_576 {
+                return None;
+            }
+            step_letter = Some(body);
             position += 1;
             continue;
         }
@@ -1205,6 +1226,7 @@ fn parse_arguments(arguments: &[OsString]) -> Option<Config> {
         crash_recovery: None,
         pure,
         prompt,
+        step_letter,
     })
 }
 
@@ -1288,7 +1310,7 @@ fn budget_hint(arguments: &[OsString]) -> u64 {
             position += 2;
             continue;
         }
-        if bytes == GATEWAY_LANE_OPTION {
+        if bytes == GATEWAY_LANE_OPTION || bytes == b"--step-letter" {
             position += 2;
             continue;
         }
@@ -1610,6 +1632,7 @@ fn undo_preparation(run_dir: &Path, prior: &str, step: &str) -> io::Result<()> {
         fs::remove_dir_all(&history)?;
     }
     remove_optional(run_dir.join(format!("step-{step}.txt")))?;
+    remove_optional(run_dir.join(format!("step-{step}.prompt.txt")))?;
     atomic_write(
         &run_dir.join(STEP_NAME_FILE),
         format!("{prior}\n").as_bytes(),
@@ -2363,7 +2386,7 @@ fn prepare_same_thread_resume(
     else {
         return Ok(false);
     };
-    if config.session.is_none() {
+    if config.session.is_none() && config.step_letter.is_none() {
         let brief = fs::read(run_dir.join("brief.txt"))
             .map_err(|error| format!("{recovery} resume brief: {error}"))?;
         atomic_write(&run_dir.join(format!("step-{}.txt", config.name)), &brief)
@@ -2506,6 +2529,10 @@ impl PreparationFailure {
 fn prepare_fresh(config: &Config, prompt: &[u8], run_dir: &Path) -> Result<(), PreparationFailure> {
     atomic_write(&run_dir.join("brief.txt"), prompt)
         .map_err(|_error| PreparationFailure::Runtime { live: true })?;
+    if config.step_letter.is_some() {
+        write_step_input(config, prompt, run_dir)
+            .map_err(|_error| PreparationFailure::Runtime { live: true })?;
+    }
     atomic_write(
         &run_dir.join(STEP_NAME_FILE),
         format!("{}\n", config.name).as_bytes(),
@@ -2517,6 +2544,29 @@ fn prepare_fresh(config: &Config, prompt: &[u8], run_dir: &Path) -> Result<(), P
     create_append_file(&run_dir.join("events.jsonl"))
         .and_then(|()| create_append_file(&run_dir.join("stderr.txt")))
         .map_err(|_error| PreparationFailure::Runtime { live: true })
+}
+
+fn write_step_input(config: &Config, prompt: &[u8], run_dir: &Path) -> io::Result<()> {
+    if config.step_letter.is_some() {
+        atomic_write(
+            &run_dir.join(format!("step-{}.prompt.txt", config.name)),
+            prompt,
+        )?;
+    }
+    atomic_write(
+        &run_dir.join(format!("step-{}.txt", config.name)),
+        config.step_letter.as_deref().unwrap_or(prompt),
+    )
+}
+
+fn child_input_path(config: &Config, run_dir: &Path) -> PathBuf {
+    if config.step_letter.is_some() {
+        run_dir.join(format!("step-{}.prompt.txt", config.name))
+    } else if config.session.is_some() {
+        run_dir.join(format!("step-{}.txt", config.name))
+    } else {
+        run_dir.join("brief.txt")
+    }
 }
 
 fn prepare_resume(
@@ -2599,8 +2649,8 @@ fn prepare_resume_with_size<F: FnOnce(&Path) -> io::Result<u64>>(
     atomic_write(&history.join("event-end.txt"), event_boundary.as_bytes())
         .map_err(|_error| PreparationFailure::Runtime { live: false })?;
 
-    let input = run_dir.join(format!("step-{}.txt", config.name));
-    atomic_write(&input, prompt).map_err(|_error| PreparationFailure::Runtime { live: false })?;
+    write_step_input(config, prompt, run_dir)
+        .map_err(|_error| PreparationFailure::Runtime { live: false })?;
     atomic_write(
         &run_dir.join(STEP_NAME_FILE),
         format!("{}\n", config.name).as_bytes(),
@@ -3588,11 +3638,7 @@ fn run_child(
         .append(true)
         .open(&diagnostics_path)
         .map_err(|error| format!("diagnostics file {}: {error}", diagnostics_path.display()))?;
-    let input_path = if config.session.is_some() {
-        run_dir.join(format!("step-{}.txt", config.name))
-    } else {
-        run_dir.join("brief.txt")
-    };
+    let input_path = child_input_path(config, run_dir);
     let input = File::open(&input_path)
         .map_err(|error| format!("input {}: {error}", input_path.display()))?;
     let mut command = backend
@@ -5080,6 +5126,108 @@ mod tests {
 
     struct TestBackend;
 
+    /// # Panics
+    /// Panics only if fixture setup or the saved letter contract fails.
+    ///
+    /// ´claim:lifecycle:resumed-round-saves-letter-beside-pointer-input´
+    /// ´test:unit:resumed-round-saves-letter-beside-pointer-input´
+    #[test]
+    fn resumed_round_saves_letter_beside_pointer_input() {
+        for fresh in [false, true] {
+            let fixture = FreshRunFixture::new("step-letter");
+            let letter = fixture.0.join("resume.md");
+            let body = b"Resume the interrupted work.\n\nKeep the final newline.\n";
+            fs::write(&letter, body).expect("write letter");
+            let pointer = b"Read /home/worker/.local/inbox/resume.md.\n";
+            let arguments = [
+                OsString::from("--step-letter"),
+                letter.into_os_string(),
+                OsString::from("-t"),
+                OsString::from("60"),
+                OsString::from("-n"),
+                OsString::from("resume"),
+                OsString::from("pointer"),
+            ];
+            let mut config = parse_arguments(&arguments).expect("parse letter option");
+            assert_eq!(budget_hint(&arguments), 60);
+            if fresh {
+                super::prepare_fresh(&config, pointer, &fixture.0).expect("fresh continuation");
+                assert_eq!(
+                    fs::read(fixture.0.join("brief.txt")).expect("brief"),
+                    pointer
+                );
+            } else {
+                let mut dispatch = config.clone();
+                dispatch.name = "dispatch".into();
+                dispatch.step_letter = None;
+                super::prepare_fresh(&dispatch, b"first pointer\n", &fixture.0)
+                    .expect("first round");
+                fs::write(
+                    fixture.0.join("run-report.txt"),
+                    b"RUN-REPORT lane=dispatch exit=0\n",
+                )
+                .expect("prior report");
+                config.session = Some("session-1".into());
+                super::prepare_resume(&config, pointer, &fixture.0).expect("resumed round");
+                assert_eq!(
+                    fs::read(fixture.0.join("brief.txt")).expect("first brief"),
+                    b"first pointer\n"
+                );
+            }
+            assert_eq!(
+                fs::read(fixture.0.join("step-resume.txt")).expect("saved step letter"),
+                body
+            );
+            config.session = Some("session-1".into());
+            for recovery in ["capacity", "suspend"] {
+                assert!(
+                    super::prepare_same_thread_resume(
+                        &TestBackend,
+                        &mut config,
+                        &fixture.0,
+                        recovery
+                    )
+                    .expect("same-thread retry")
+                );
+                assert_eq!(
+                    fs::read(super::child_input_path(&config, &fixture.0)).expect("child input"),
+                    pointer
+                );
+                assert_eq!(
+                    fs::read(fixture.0.join("step-resume.txt")).expect("retained letter"),
+                    body
+                );
+            }
+        }
+    }
+
+    /// # Panics
+    /// Panics only if fixture setup or the letter option refusal contract fails.
+    ///
+    /// ´claim:lifecycle:step-letter-option-refuses-missing-oversized-and-repeated-inputs´
+    /// ´test:unit:step-letter-option-refuses-missing-oversized-and-repeated-inputs´
+    #[test]
+    fn step_letter_option_refuses_missing_oversized_and_repeated_inputs() {
+        let fixture = FreshRunFixture::new("invalid-step-letter");
+        let letter = fixture.0.join("letter");
+        let mut arguments = vec![
+            OsString::from("-t"),
+            OsString::from("60"),
+            OsString::from("--step-letter"),
+            letter.clone().into_os_string(),
+            OsString::from("pointer"),
+        ];
+        assert!(parse_arguments(&arguments).is_none());
+        fs::write(&letter, vec![b'x'; 1_048_577]).expect("oversized letter");
+        assert!(parse_arguments(&arguments).is_none());
+        fs::write(&letter, b"letter").expect("valid letter");
+        arguments.splice(
+            4..4,
+            [OsString::from("--step-letter"), letter.into_os_string()],
+        );
+        assert!(parse_arguments(&arguments).is_none());
+    }
+
     struct FreshRunFixture(PathBuf);
 
     impl FreshRunFixture {
@@ -5874,6 +6022,7 @@ mod tests {
             crash_recovery: None,
             pure: false,
             prompt: Prompt::Argument(OsString::from("prompt")),
+            step_letter: None,
         };
         assert_eq!(resolve_run_dir(&config), Ok(resume));
     }
@@ -5963,6 +6112,7 @@ mod tests {
             crash_recovery: None,
             pure: false,
             prompt: Prompt::Argument(OsString::from("next")),
+            step_letter: None,
         };
         let mut reads = 0;
         let result = prepare_resume_with_size(&config, b"next", &fixture.0, |path| {
@@ -6040,6 +6190,7 @@ mod tests {
             crash_recovery: None,
             pure: false,
             prompt: Prompt::Argument(OsString::from("prompt")),
+            step_letter: None,
         };
         let result = super::execute(&TestBackend, &config, b"prompt");
         assert_eq!(result.status(), 2);
@@ -6238,6 +6389,7 @@ mod tests {
             }),
             pure: false,
             prompt: Prompt::Argument(OsString::from("prompt")),
+            step_letter: None,
         };
 
         assert_eq!(
