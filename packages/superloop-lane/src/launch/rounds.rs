@@ -1828,6 +1828,84 @@ mod tests {
         );
     }
 
+    /// Pin the launcher's model and effort insertion for a fresh thread.
+    ///
+    /// # Panics
+    /// Panics only if fixture setup or the continuation argument contract fails.
+    /// ´test:unit:threadless-continuation-vector-carries-model-and-effort´
+    #[test]
+    fn threadless_continuation_vector_carries_model_and_effort() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let plan = Plan {
+            home: PathBuf::from("/home/worker"),
+            driver_dir: fixture.path().join("R"),
+            letter: PathBuf::new(),
+            document: json!({}),
+        };
+        let record = json!({
+            "phase":"settled", "thread_id":null, "readback_end":"completed",
+            "active_round":"dispatch",
+            "driver_end":{"state":"completed", "successful":false},
+            "helper_end":{"state":"completed"},
+            "rounds":[{"step":"dispatch", "phase":"failed", "ended_by":"by-report",
+                "reply":null, "driver_dir":plan.driver_dir.join("prior-dispatch"),
+                "settle_attempts":[{"phase":"complete"}]}]
+        });
+        let request = super::LaunchRequest::parse(
+            &["alpha", "R", "--round", "review", "--budget", "900"].map(str::to_owned),
+        )
+        .expect("round request");
+        let selection = super::super::LaunchModel::select(
+            b"Model: gpt-6-sol\nEffort: high\nReview this round.\n",
+            None,
+            None,
+        )
+        .expect("round letter selection");
+        let (directory, words) = super::continuation_argv(
+            &plan,
+            &record,
+            Path::new("/bin/driver"),
+            &request,
+            &selection,
+        )
+        .expect("threadless continuation vector");
+        assert_eq!(directory.parent(), Some(plan.driver_dir.as_path()));
+        assert!(directory.to_str().expect("fresh path").ends_with("-review"));
+        assert_ne!(directory, plan.driver_dir.join("prior-dispatch"));
+        assert!(!directory.exists());
+        let run_dir = plan.driver_dir.to_str().expect("run path");
+        assert_eq!(
+            words,
+            vec![
+                "driver-launch",
+                "alpha",
+                "R",
+                "--driver-bin",
+                "/bin/driver",
+                "--run-dir",
+                run_dir,
+                "--",
+                "-t",
+                "900",
+                "-n",
+                "review",
+                "-C",
+                run_dir,
+                "-s",
+                "workspace-write",
+                "-d",
+                directory.to_str().expect("fresh path"),
+                "--step-letter",
+                "/home/worker/.local/inbox/review.md",
+                "-m",
+                "gpt-6-sol",
+                "-e",
+                "high",
+                "Read /home/worker/.local/inbox/review.md."
+            ]
+        );
+    }
+
     fn settlement_fixture(with_thread: bool) -> (tempfile::TempDir, Plan) {
         let fixture = tempfile::TempDir::new_in("/tmp").expect("fixture");
         fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700)).expect("root mode");
