@@ -31,6 +31,7 @@ pub struct ReleaseReport {
     pub tag_object: String,
     pub title: String,
     pub body_bytes: usize,
+    pub version_source: String,
     pub refspecs: [String; 3],
     pub state: &'static str,
 }
@@ -103,6 +104,52 @@ fn blob(root: &Path, commit: &str, path: &Path) -> Result<String, ReleaseError> 
     String::from_utf8(bytes).map_err(|error| refuse("text", error.to_string()))
 }
 
+fn validate_version(
+    root: &Path,
+    development: &str,
+    manifest: &toml::Value,
+    request: ReleaseRequest<'_>,
+) -> Result<String, ReleaseError> {
+    let entries = run(
+        command(root).args(["ls-tree", "--name-only", development, "--", "Cargo.toml"]),
+        None,
+    )?;
+    let (version, source) = if entries.is_empty() {
+        let source = format!("{}:public.version", request.manifest.display());
+        let version = manifest
+            .get("public")
+            .and_then(|public| public.get("version"))
+            .ok_or_else(|| {
+                refuse(
+                    "version-missing",
+                    format!("{source} is required without Cargo.toml"),
+                )
+            })?
+            .as_str()
+            .ok_or_else(|| refuse("version", format!("{source} must be a string")))?;
+        (Some(version.to_owned()), source)
+    } else {
+        let cargo: toml::Value = toml::from_str(&blob(root, development, Path::new("Cargo.toml"))?)
+            .map_err(|error| refuse("version", error.to_string()))?;
+        (
+            cargo
+                .get("workspace")
+                .and_then(|workspace| workspace.get("package"))
+                .and_then(|package| package.get("version"))
+                .and_then(toml::Value::as_str)
+                .map(str::to_owned),
+            "Cargo.toml:workspace.package.version".to_owned(),
+        )
+    };
+    if version.as_deref() != Some(request.version) {
+        return Err(refuse(
+            "version-mismatch",
+            format!("{source} differs from requested version"),
+        ));
+    }
+    Ok(source)
+}
+
 fn identity(root: &Path, author: &str, date: &str) -> Result<String, ReleaseError> {
     let (name, email) =
         crate::cut::author(author).map_err(|error| refuse("author", error.to_string()))?;
@@ -153,22 +200,9 @@ pub fn release(request: ReleaseRequest<'_>) -> Result<ReleaseReport, ReleaseErro
     let root = request.repository;
     let (main, development, tag) = validate_refs(request)?;
     let tag_ref = format!("refs/tags/{tag}");
-    let cargo: toml::Value = toml::from_str(&blob(root, &development, Path::new("Cargo.toml"))?)
-        .map_err(|error| refuse("version", error.to_string()))?;
-    if cargo
-        .get("workspace")
-        .and_then(|v| v.get("package"))
-        .and_then(|v| v.get("version"))
-        .and_then(toml::Value::as_str)
-        != Some(request.version)
-    {
-        return Err(refuse(
-            "version-mismatch",
-            "workspace version differs from requested version",
-        ));
-    }
     let manifest: toml::Value = toml::from_str(&blob(root, &development, request.manifest)?)
         .map_err(|error| refuse("manifest", error.to_string()))?;
+    let version_source = validate_version(root, &development, &manifest, request)?;
     let name = manifest
         .get("public")
         .and_then(|v| v.get("name"))
@@ -210,6 +244,7 @@ pub fn release(request: ReleaseRequest<'_>) -> Result<ReleaseReport, ReleaseErro
         tag_object,
         title: title.to_owned(),
         body_bytes: body.len(),
+        version_source,
         refspecs: [
             "refs/heads/main".to_owned(),
             "refs/heads/development".to_owned(),
@@ -462,7 +497,7 @@ pub fn write_release_report<W: io::Write>(
         Ok(report) => {
             writeln!(
                 output,
-                "release state={} M={} D={} R={} tree={} tag_object={} title={} body_bytes={}",
+                "release state={} M={} D={} R={} tree={} tag_object={} title={} body_bytes={} version_source={}",
                 report.state,
                 report.main,
                 report.development,
@@ -470,7 +505,8 @@ pub fn write_release_report<W: io::Write>(
                 report.tree,
                 report.tag_object,
                 serde_json::to_string(&report.title)?,
-                report.body_bytes
+                report.body_bytes,
+                serde_json::to_string(&report.version_source)?
             )?;
             writeln!(
                 output,

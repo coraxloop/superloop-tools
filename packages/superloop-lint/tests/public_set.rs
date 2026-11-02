@@ -111,6 +111,34 @@ fn publication_classification_is_optional_and_complete() {
             .len(),
         2
     );
+    fs::write(
+        root.path().join("public-set.toml"),
+        format!("{MANIFEST}version = \"2.10.0\"\n"),
+    )
+    .expect("repository version");
+    let (success, report) = check(root.path());
+    assert!(success, "{report}");
+    for value in [
+        "\"\"",
+        "\"1.2\"",
+        "\"1.2.3.4\"",
+        "\"v1.2.3\"",
+        "\"1.2.x\"",
+        "\"1.2.3-rc1\"",
+        "\"01.2.3\"",
+        "\" 1.2.3\"",
+        "[1, 2, 3]",
+        "123",
+    ] {
+        fs::write(
+            root.path().join("public-set.toml"),
+            format!("{MANIFEST}version = {value}\n"),
+        )
+        .expect("invalid repository version");
+        let (success, report) = check(root.path());
+        assert!(!success, "{value}: {report}");
+        assert!(report.to_string().contains("public_set"), "{report}");
+    }
     for (invalid, detail) in [
         (
             MANIFEST.replace(", reason = \"Private declaration.\"", ""),

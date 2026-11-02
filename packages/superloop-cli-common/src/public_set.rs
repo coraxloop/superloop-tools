@@ -62,6 +62,7 @@ struct Row {
 #[serde(deny_unknown_fields)]
 pub struct Public {
     pub name: String,
+    pub version: Option<String>,
     pub readme: String,
     pub licence_code: String,
     pub licence_docs: String,
@@ -97,6 +98,18 @@ impl Manifest {
             || manifest.public.name.chars().any(char::is_control)
         {
             return Err("public-set requires a non-empty single-line public.name".into());
+        }
+        if let Some(version) = &manifest.public.version {
+            let parts: Vec<_> = version.split('.').collect();
+            if parts.len() != 3
+                || parts.iter().any(|part| {
+                    part.is_empty()
+                        || !part.bytes().all(|byte| byte.is_ascii_digit())
+                        || (part.len() > 1 && part.starts_with('0'))
+                })
+            {
+                return Err("public-set public.version must be X.Y.Z".into());
+            }
         }
         for (row, excluded, _) in manifest.rows() {
             if !safe_path(row.pattern.trim_end_matches('/'))

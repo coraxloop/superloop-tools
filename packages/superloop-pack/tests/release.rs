@@ -140,6 +140,7 @@ fn verify_release(version: &str, date: Option<&str>) {
     let tree = git(root, &["rev-parse", &format!("{}^{{tree}}", "development")]);
     let extra: Vec<_> = date.map_or_else(Vec::new, |date| vec!["--date", date]);
     let report = success(release(root, version, &extra));
+    assert!(report.contains("version_source=\"Cargo.toml:workspace.package.version\""));
     let released = git(root, &["rev-parse", "main"]);
     assert_eq!(git(root, &["rev-parse", "development"]), released);
     assert_eq!(
@@ -209,6 +210,90 @@ fn patch_release() {
 #[test]
 fn minor_release() {
     verify_release("0.2.0", None);
+}
+
+/// Documents releases read the declared version from committed development.
+///
+/// # Panics
+/// Panics only if fixture IO or the release contract fails.
+/// ´test:integration:documents-release-version´
+#[test]
+fn documents_release_version() {
+    for mode in ["--check", "--dry-run", "apply"] {
+        let fixture = fixture("0.1.1");
+        let root = fixture.path();
+        fs::remove_file(root.join("Cargo.toml")).expect("remove cargo");
+        fs::write(
+            root.join("public-set.toml"),
+            "version = [1, 0, 0]\n[public]\nname = 'fixture-documents'\nversion = '0.1.1'\n",
+        )
+        .expect("manifest version");
+        commit(root, "documents version");
+        // Main still carries Cargo.toml: only development determines the source.
+        git(root, &["checkout", "-q", "main"]);
+        let before = snapshot(root);
+        let args = if mode == "apply" { vec![] } else { vec![mode] };
+        let report = success(release(root, "0.1.1", &args));
+        assert!(report.contains("version_source=\"public-set.toml:public.version\""));
+        if mode == "apply" {
+            assert_eq!(
+                git(root, &["rev-parse", "main"]),
+                git(root, &["rev-parse", "development"])
+            );
+            assert!(git(root, &["cat-file", "tag", "v0.1.1"]).contains("fixture-documents v0.1.1"));
+        } else {
+            assert_eq!(snapshot(root), before);
+        }
+    }
+}
+
+/// Documents version refusals preserve refs and objects and identify the source.
+///
+/// # Panics
+/// Panics only if fixture IO or refusal atomicity fails.
+/// ´test:integration:documents-version-refusals´
+#[test]
+fn documents_version_refusals() {
+    for (declaration, reason) in [
+        ("version = '0.2.0'\n", "version-mismatch"),
+        ("", "version-missing"),
+        ("version = [1, 2, 3]\n", "reason=version "),
+    ] {
+        let fixture = fixture("0.1.1");
+        let root = fixture.path();
+        fs::remove_file(root.join("Cargo.toml")).expect("remove cargo");
+        fs::write(
+            root.join("public-set.toml"),
+            format!("version = [1, 0, 0]\n[public]\nname = 'fixture-documents'\n{declaration}"),
+        )
+        .expect("manifest");
+        commit(root, "documents version");
+        let report = refusal(root, "0.1.1", &[], reason);
+        assert!(report.contains("public-set.toml:public.version"));
+    }
+}
+
+/// Cargo remains authoritative even when the manifest declares a matching version.
+///
+/// # Panics
+/// Panics only if fixture IO or source precedence fails.
+/// ´test:integration:cargo-version-precedence´
+#[test]
+fn cargo_version_precedence() {
+    let fixture = fixture("0.1.1");
+    let root = fixture.path();
+    fs::write(
+        root.join("public-set.toml"),
+        "[public]\nname = 'fixture-tools'\nversion = '0.2.0'\n",
+    )
+    .expect("manifest");
+    commit(root, "different manifest version");
+    success(release(root, "0.1.1", &["--check"]));
+    let report = refusal(root, "0.2.0", &[], "version-mismatch");
+    assert!(report.contains("Cargo.toml:workspace.package.version"));
+    fs::write(root.join("Cargo.toml"), "invalid toml [").expect("invalid cargo");
+    commit(root, "malformed cargo");
+    refusal(root, "0.2.0", &[], "reason=version ");
 }
 
 /// A second release cannot create a duplicate merge.
