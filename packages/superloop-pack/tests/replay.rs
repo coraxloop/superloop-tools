@@ -206,6 +206,15 @@ impl Fixture {
         );
         let result: serde_json::Value =
             serde_json::from_str(text.lines().next().expect("report")).expect("JSON");
+        let summary = text
+            .lines()
+            .find(|line| line.starts_with("replay outcome="))
+            .expect("summary");
+        let (_, entries) = summary
+            .rsplit_once(" pre-existing=")
+            .expect("summary evidence");
+        let entries: serde_json::Value = serde_json::from_str(entries).expect("match evidence");
+        assert_eq!(entries, result["pre-existing"]);
         let validation = &result["validation"];
         assert!(
             validation["current"]["check"]
@@ -321,6 +330,151 @@ fn private_message_refuses_before_output_writes() {
     assert_eq!(context["field"], "message");
     assert_eq!(context["matcher_kind"], "substring");
     assert_eq!(context["register_kind"], "values");
+}
+
+/// Root values remain pre-existing in changed blobs; new values and paths refuse.
+///
+/// # Panics
+/// Panics only if fixture IO fails or replay misclassifies a burn match.
+/// ´test:integration:replay-classifies-pre-existing-blobs´
+#[test]
+fn replay_classifies_pre_existing_blobs() {
+    let fixture = Fixture::new();
+    fs::write(
+        &fixture.burn,
+        "[[values]]\nvalue = \"ordinary\"\nmatch = \"identifier\"\n",
+    )
+    .expect("updated register");
+    let first = fixture.commit("private.txt", "changed\n", "Excluded change\n");
+    let changed = fixture.commit(
+        "public/file.txt",
+        "ordinary changed\n",
+        "Changed public file\n",
+    );
+    fixture.commit("public/file.txt", "repaired\n", "Repair\n");
+    let output = fixture.replay(&fixture.out).output().expect("replay");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    let summary = text
+        .lines()
+        .find(|line| line.starts_with("replay since="))
+        .expect("summary");
+    assert!(summary.contains("pre-existing=["));
+    assert!(summary.contains(&first));
+    assert!(summary.contains("public/file.txt"));
+    assert!(!summary.contains("ordinary"));
+    let result = report(output);
+    let entries = result["pre-existing"].as_array().expect("matches");
+    assert_eq!(entries.len(), 2);
+    let matched = &entries[0];
+    assert_eq!(matched["ordinal"], 1);
+    assert_eq!(matched["commit"], first);
+    assert_eq!(matched["path"], "public/file.txt");
+    assert_eq!(matched["field"], "blob");
+    assert_eq!(matched["matcher_kind"], "identifier");
+    assert_eq!(matched["register_kind"], "values");
+    assert_eq!(entries[1]["ordinal"], 2);
+    assert_eq!(entries[1]["commit"], changed);
+    assert_eq!(entries[1]["path"], "public/file.txt");
+    assert_eq!(entries[1]["matcher_kind"], "identifier");
+    assert_eq!(entries[1]["register_kind"], "values");
+
+    for (path, bytes, value) in [
+        ("public/file.txt", "ordinary introduced\n", "introduced"),
+        ("public/new.txt", "ordinary\n", "ordinary"),
+        ("public/file.txt", "ord\n", "ord"),
+    ] {
+        let fixture = Fixture::new();
+        fs::write(
+            &fixture.burn,
+            format!("[[values]]\nvalue = \"ordinary\"\nmatch = \"identifier\"\n[[values]]\nvalue = \"{value}\"\nmatch = \"identifier\"\n"),
+        )
+        .expect("updated register");
+        fixture.commit(path, bytes, "Candidate\n");
+        fixture.unchanged_refusal("source ordinal 1 field blob match kind identifier");
+    }
+}
+
+/// Each metadata field is compared with the corresponding parentless public root field.
+///
+/// # Panics
+/// Panics only if fixture IO fails or replay misclassifies metadata.
+/// ´test:integration:replay-classifies-pre-existing-metadata´
+#[test]
+fn replay_classifies_pre_existing_metadata() {
+    let mut fixture = Fixture::new();
+    git(
+        &fixture.out,
+        &[
+            "commit",
+            "--amend",
+            "--no-gpg-sign",
+            "--reset-author",
+            "-m",
+            "Shared message",
+        ],
+    );
+    fixture.public_root = line(&fixture.out, &["rev-parse", "HEAD"]);
+    assert_eq!(line(&fixture.out, &["rev-list", "--count", "HEAD"]), "1");
+    fs::write(&fixture.burn, "[[values]]\nvalue = \"Original\"\nmatch = \"identifier\"\n[[values]]\nvalue = \"example.com\"\nmatch = \"substring\"\n[[values]]\nvalue = \"Shared message\"\nmatch = \"substring\"\n")
+        .expect("updated register");
+    let first = fixture.commit("public/file.txt", "safe change\n", "Shared message\n");
+    let result = report(fixture.replay(&fixture.out).output().expect("replay"));
+    let entries = result["pre-existing"].as_array().expect("matches");
+    assert_eq!(entries.len(), 5);
+    for (matched, field) in entries.iter().zip([
+        "message",
+        "author.name",
+        "author.email",
+        "committer.name",
+        "committer.email",
+    ]) {
+        assert_eq!(matched["ordinal"], 1);
+        assert_eq!(matched["commit"], first);
+        assert_eq!(matched["field"], field);
+        assert_eq!(matched["register_kind"], "values");
+        assert!(matched["path"].is_null());
+    }
+    git(&fixture.out, &["reset", "--hard", &fixture.public_root]);
+    fixture.commit(
+        "public/file.txt",
+        "another safe change\n",
+        "Shared message changed\n",
+    );
+    git(
+        &fixture.source,
+        &[
+            "commit",
+            "--amend",
+            "--no-gpg-sign",
+            "--author",
+            "Original Changed <changed@example.com>",
+            "-m",
+            "Shared message changed",
+        ],
+    );
+    let result = report(
+        fixture
+            .replay(&fixture.out)
+            .output()
+            .expect("changed metadata replay"),
+    );
+    assert_eq!(
+        result["pre-existing"].as_array().expect("matches").len(),
+        10
+    );
+    git(&fixture.out, &["reset", "--hard", &fixture.public_root]);
+    fs::write(
+        &fixture.burn,
+        "[[values]]\nvalue = \"introduced-message\"\nmatch = \"substring\"\n",
+    )
+    .expect("updated register");
+    fixture.commit(
+        "public/file.txt",
+        "last safe change\n",
+        "introduced-message\n",
+    );
+    fixture.unchanged_refusal("source ordinal 3 field message match kind substring");
 }
 
 /// Refusals identify manifest, README and projection checks and retain their evidence.

@@ -66,6 +66,8 @@ struct ValidationEvidence {
     report_path: PathBuf,
     validated: Vec<ValidationContext>,
     current: ValidationContext,
+    #[serde(rename = "pre-existing")]
+    pre_existing: Vec<ValidationContext>,
 }
 
 impl ValidationEvidence {
@@ -102,7 +104,7 @@ struct Identity {
 #[derive(Debug)]
 struct SourceCommit {
     oid: String,
-    parent: String,
+    parents: Vec<String>,
     author: Identity,
     committer: Identity,
     message: Vec<u8>,
@@ -156,6 +158,8 @@ pub struct ReplayReport {
     register_schema: &'static str,
     mapping: Vec<Mapping>,
     checks: Vec<Check>,
+    #[serde(rename = "pre-existing")]
+    pre_existing: Vec<ValidationContext>,
 }
 
 fn command(root: &Path) -> Command {
@@ -235,6 +239,14 @@ fn identity(bytes: &[u8]) -> Result<Identity, ReplayError> {
 }
 
 fn source_commit(root: &Path, oid: &str) -> Result<SourceCommit, ReplayError> {
+    let source = read_commit(root, oid)?;
+    if source.parents.len() != 1 {
+        return Err(refuse("merge or root commit in replay range"));
+    }
+    Ok(source)
+}
+
+fn read_commit(root: &Path, oid: &str) -> Result<SourceCommit, ReplayError> {
     let bytes = git(root, &["cat-file", "commit", oid])?;
     let boundary = bytes
         .windows(2)
@@ -261,9 +273,6 @@ fn source_commit(root: &Path, oid: &str) -> Result<SourceCommit, ReplayError> {
             return Err(refuse("unsupported commit header"));
         }
     }
-    if parents.len() != 1 {
-        return Err(refuse("merge or root commit in replay range"));
-    }
     if authors.len() != 1 || committers.len() != 1 {
         return Err(refuse("commit requires one author and one committer"));
     }
@@ -273,7 +282,7 @@ fn source_commit(root: &Path, oid: &str) -> Result<SourceCommit, ReplayError> {
     }
     Ok(SourceCommit {
         oid: oid.into(),
-        parent: parents.remove(0),
+        parents,
         author: authors.remove(0),
         committer: committers.remove(0),
         message,
@@ -288,16 +297,25 @@ fn scan(
     bytes: &[u8],
     evidence: &mut ValidationEvidence,
 ) -> Result<(), ReplayError> {
+    scan_with_root(burn, ordinal, field, bytes, None, evidence)
+}
+
+fn scan_with_root(
+    burn: &crate::BurnDocument,
+    ordinal: usize,
+    field: &str,
+    bytes: &[u8],
+    root_bytes: Option<&[u8]>,
+    evidence: &mut ValidationEvidence,
+) -> Result<(), ReplayError> {
     let folded = String::from_utf8_lossy(bytes).to_lowercase();
+    let root_folded = root_bytes.map(|bytes| String::from_utf8_lossy(bytes).to_lowercase());
     for value in &burn.values {
         let identifier = matches!(value.mode, crate::BurnMatch::Identifier);
-        if burn_offsets(
-            folded.as_bytes(),
-            value.value.to_lowercase().as_bytes(),
-            identifier,
-        )
-        .next()
-        .is_some()
+        let needle = value.value.to_lowercase();
+        if burn_offsets(folded.as_bytes(), needle.as_bytes(), identifier)
+            .next()
+            .is_some()
         {
             let kind = if identifier {
                 "identifier"
@@ -306,6 +324,14 @@ fn scan(
             };
             evidence.current.matcher_kind = Some(kind.into());
             evidence.current.register_kind = Some("values".into());
+            if root_folded.as_ref().is_some_and(|root| {
+                burn_offsets(root.as_bytes(), needle.as_bytes(), identifier)
+                    .next()
+                    .is_some()
+            }) {
+                evidence.pre_existing.push(evidence.current.clone());
+                continue;
+            }
             if field == "path" {
                 evidence.current.path = Some(format!("sha256:{}", crate::sha256_bytes(bytes)));
             }
@@ -321,6 +347,7 @@ fn scan_metadata(
     burn: &crate::BurnDocument,
     ordinal: usize,
     source: &SourceCommit,
+    public: &SourceCommit,
     evidence: &mut ValidationEvidence,
 ) -> Result<(), ReplayError> {
     evidence.begin(
@@ -330,12 +357,27 @@ fn scan_metadata(
         "message",
         None,
     );
-    scan(burn, ordinal, "message", &source.message, evidence)?;
-    for (field, value) in [
-        ("author.name", &source.author.name),
-        ("author.email", &source.author.email),
-        ("committer.name", &source.committer.name),
-        ("committer.email", &source.committer.email),
+    scan_with_root(
+        burn,
+        ordinal,
+        "message",
+        &source.message,
+        Some(&public.message),
+        evidence,
+    )?;
+    for (field, value, public_value) in [
+        ("author.name", &source.author.name, &public.author.name),
+        ("author.email", &source.author.email, &public.author.email),
+        (
+            "committer.name",
+            &source.committer.name,
+            &public.committer.name,
+        ),
+        (
+            "committer.email",
+            &source.committer.email,
+            &public.committer.email,
+        ),
     ] {
         evidence.begin(
             "metadata scan",
@@ -344,7 +386,14 @@ fn scan_metadata(
             field,
             None,
         );
-        scan(burn, ordinal, field, value.as_bytes(), evidence)?;
+        scan_with_root(
+            burn,
+            ordinal,
+            field,
+            value.as_bytes(),
+            Some(public_value.as_bytes()),
+            evidence,
+        )?;
     }
     Ok(())
 }
@@ -924,7 +973,8 @@ fn replay_resolved(
     let version = Command::new(&linter).arg("--version").output()?;
     let linter_version = linter_version(&version)?;
     let projection_sha256 = crate::sha256_file(&std::env::current_exe()?)?;
-    let sources = linear_sources(&request, &since, &tag, &burn, evidence)?;
+    let public_metadata = read_commit(request.out, &public_root)?;
+    let sources = linear_sources(&request, &since, &tag, &burn, &public_metadata, evidence)?;
     evidence.begin(
         "manifest",
         Some(sources.len()),
@@ -1003,6 +1053,7 @@ fn replay_resolved(
         register_schema: "unversioned-values",
         mapping,
         checks,
+        pre_existing: evidence.pre_existing.clone(),
     })
 }
 
@@ -1082,7 +1133,7 @@ pub fn write_replay_report<W: io::Write>(
             writeln!(output)?;
             writeln!(
                 output,
-                "replay since={} tag={} public_root={} tip={} files={} replayed={} skipped={} signatures=omitted",
+                "replay since={} tag={} public_root={} tip={} files={} replayed={} skipped={} signatures=omitted pre-existing={}",
                 report.since,
                 report.tag,
                 report.public_root,
@@ -1097,11 +1148,16 @@ pub fn write_replay_report<W: io::Write>(
                     .mapping
                     .iter()
                     .filter(|row| row.outcome == "skipped")
-                    .count()
+                    .count(),
+                serde_json::to_string(&report.pre_existing)?
             )?;
             crate::write_terminal_report(output, "replay", 0, wall, "ok")
         }
         Err(error) => {
+            let pre_existing = error
+                .1
+                .as_ref()
+                .map_or(&[][..], |evidence| evidence.pre_existing.as_slice());
             serde_json::to_writer(
                 &mut *output,
                 &serde_json::json!({
@@ -1110,14 +1166,16 @@ pub fn write_replay_report<W: io::Write>(
                         "current": evidence.current, "report_path": evidence.report_path,
                         "validated_checks": evidence.validated.len()
                     })),
-                    "reason": error.0, "exit": 3, "wall_seconds": wall.as_secs_f64()
+                    "reason": error.0, "exit": 3, "wall_seconds": wall.as_secs_f64(),
+                    "pre-existing": pre_existing
                 }),
             )?;
             writeln!(output)?;
             writeln!(
                 output,
-                "replay outcome=refused status=3 reason={}",
-                error.0.replace(['\n', '\r'], " ")
+                "replay outcome=refused status=3 reason={} pre-existing={}",
+                error.0.replace(['\n', '\r'], " "),
+                serde_json::to_string(pre_existing)?
             )?;
             crate::write_terminal_report(output, "replay", 3, wall, "refused")
         }
@@ -1129,6 +1187,7 @@ fn linear_sources(
     since: &str,
     tag: &str,
     burn: &crate::BurnDocument,
+    public_metadata: &SourceCommit,
     evidence: &mut ValidationEvidence,
 ) -> Result<Vec<SourceCommit>, ReplayError> {
     evidence.begin("range", None, Some(tag), "source range", None);
@@ -1157,13 +1216,13 @@ fn linear_sources(
         );
         let source = source_commit(request.repository_root, oid)
             .map_err(|error| refuse(format!("source ordinal {}: {error}", index + 1)))?;
-        if source.parent != previous {
+        if source.parents[0] != previous {
             return Err(refuse(format!(
                 "source ordinal {}: disconnected first-parent range",
                 index + 1
             )));
         }
-        scan_metadata(burn, index + 1, &source, evidence)?;
+        scan_metadata(burn, index + 1, &source, public_metadata, evidence)?;
         evidence.begin(
             "metadata scan",
             Some(index + 1),
@@ -1227,7 +1286,7 @@ fn replay_commits(
                 index + 1
             ))
         })?;
-        if crate::validate_linter_verdict(&observation, register).is_err() {
+        if !valid_replay_linter(&observation, register, index + 1, evidence) {
             return Err(refuse(format!(
                 "source ordinal {}: public tree lint failed",
                 index + 1
@@ -1244,7 +1303,7 @@ fn replay_commits(
         writer.mapping.push(Mapping {
             ordinal: index + 1,
             source: source.oid.clone(),
-            source_parent: source.parent.clone(),
+            source_parent: source.parents[0].clone(),
             subject: String::from_utf8_lossy(&source.message)
                 .lines()
                 .next()
@@ -1266,6 +1325,59 @@ fn replay_commits(
         writer.parent_tree = tree;
     }
     Ok(())
+}
+
+fn valid_replay_linter(
+    observation: &crate::LinterObservation,
+    register: &Path,
+    ordinal: usize,
+    evidence: &ValidationEvidence,
+) -> bool {
+    if crate::validate_linter_verdict(observation, register).is_ok() {
+        return true;
+    }
+    let report = &observation.report;
+    let source = register.to_string_lossy();
+    let bound: Vec<_> = report
+        .burn
+        .families
+        .iter()
+        .filter(|family| family.binds(&source))
+        .collect();
+    let paths: BTreeSet<_> = evidence
+        .pre_existing
+        .iter()
+        .filter(|context| context.ordinal == Some(ordinal) && context.field == "blob")
+        .filter_map(|context| context.path.as_deref())
+        .collect();
+    // The whole-range byte scan has already refused every introduced match.
+    // Only external-register growth at those proved paths can excuse a finding;
+    // all other linter failures and burn families retain their ordinary verdict.
+    let failures: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.severity == "failure")
+        .collect();
+    !paths.is_empty()
+        && !bound.is_empty()
+        && report.public_pack
+        && report.clean == (report.failures == 0)
+        && observation.status_success == report.clean
+        && failures.len() == report.failures
+        && failures.iter().all(|finding| {
+            finding.code == "burn_list_growth"
+                && finding
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| paths.contains(path))
+                && bound
+                    .iter()
+                    .any(|family| finding.family.as_deref() == Some(family.family.as_str()))
+        })
+        && report.burn.owed == bound.iter().map(|family| family.owed).sum::<usize>()
+        && report.burn.families.iter().all(|family| {
+            family.binds(&source) || (family.owed == 0 && family.occurrences <= family.registered)
+        })
 }
 
 type PlannedTrees = (Projection, Vec<PlannedCommit>, Vec<String>);
@@ -1317,7 +1429,14 @@ fn plan_trees(
                 "blob",
                 Some(path),
             );
-            scan(burn, index + 1, "blob", bytes, evidence)?;
+            scan_with_root(
+                burn,
+                index + 1,
+                "blob",
+                bytes,
+                public.get(path).map(|(_, bytes)| bytes.as_slice()),
+                evidence,
+            )?;
         }
         planned.push(projection);
     }
@@ -1452,4 +1571,62 @@ fn publish(
         wall_seconds: publish_start.elapsed().as_secs_f64(),
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ValidationContext, ValidationEvidence, valid_replay_linter};
+    use std::path::Path;
+
+    /// Only external burn growth at a proved pre-existing blob can pass replay lint.
+    ///
+    /// # Panics
+    /// Panics only if fixture decoding fails or an unrelated failure is accepted.
+    /// ´test:unit:pre-existing-lint-exception-is-bounded´
+    #[test]
+    fn pre_existing_lint_exception_is_bounded() {
+        let evidence = ValidationEvidence {
+            pre_existing: vec![ValidationContext {
+                ordinal: Some(1),
+                field: "blob".into(),
+                path: Some("public/file.txt".into()),
+                ..ValidationContext::default()
+            }],
+            ..ValidationEvidence::default()
+        };
+        let report = serde_json::json!({
+            "clean": false, "failures": 1, "public_pack": true,
+            "burn": {"owed": 0, "families": [{
+                "family": "public-pack values", "declared": 1,
+                "source": "/register.toml", "source_kind": "external",
+                "occurrences": 1, "registered": 0, "owed": 0
+            }]},
+            "findings": [{"severity": "failure", "code": "burn_list_growth",
+                "family": "public-pack values", "path": "public/file.txt"}]
+        });
+        let accepts = |report| {
+            let observation = crate::LinterObservation {
+                status_success: false,
+                report: serde_json::from_value(report).expect("fixture report"),
+            };
+            valid_replay_linter(&observation, Path::new("/register.toml"), 1, &evidence)
+        };
+        assert!(accepts(report.clone()));
+        for (pointer, replacement) in [
+            ("/findings/0/code", serde_json::json!("malformed_label")),
+            ("/findings/0/path", serde_json::json!("public/new.txt")),
+            ("/findings/0/family", serde_json::json!("other family")),
+            (
+                "/burn/families/0/source_kind",
+                serde_json::json!("repository"),
+            ),
+            ("/burn/owed", serde_json::json!(1)),
+            ("/failures", serde_json::json!(2)),
+            ("/public_pack", serde_json::json!(false)),
+        ] {
+            let mut changed = report.clone();
+            *changed.pointer_mut(pointer).expect("fixture field") = replacement;
+            assert!(!accepts(changed), "{pointer}");
+        }
+    }
 }
