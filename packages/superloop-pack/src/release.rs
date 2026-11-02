@@ -785,7 +785,7 @@ mod signing_shape_tests {
     /// Signature removal retains every unsigned header and message byte.
     /// ´test:unit:release-unsigned-shape´
     #[test]
-    fn unsigned_shape() {
+    fn release_unsigned_shape() {
         let preview = b"tree pinned\nparent first\nparent second\nauthor pinned\ncommitter pinned\n\nmessage\n";
         let signed = b"tree pinned\nparent first\nparent second\nauthor pinned\ncommitter pinned\ngpgsig signature\n continuation\n\nmessage\n";
         assert_eq!(unsigned_commit(signed), preview);
