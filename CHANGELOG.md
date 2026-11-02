@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-02
+
 ### Fixed
 
 - Round launches retain the selected letter text beside the pointer brief for both driver backends, including resumed and threadless continuations; retries preserve the pointer input (`rule:workercontracts:letters-and-retention`).
@@ -101,7 +103,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/coraxloop/superloop-tools/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/coraxloop/superloop-tools/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/coraxloop/superloop-tools/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/coraxloop/superloop-tools/compare/v0.1.0...v0.2.0
