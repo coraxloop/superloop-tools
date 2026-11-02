@@ -9,6 +9,22 @@ owner = "ORCHESTRATION"
 registry = ".linter/imports/orchestration.toml"
 
 [[may_cite]]
+owner = "PERMISSIONTRIAGE"
+target = "TOOLS"
+
+[[may_cite]]
+owner = "SUPERLOOPCHATEXPORT"
+target = "TOOLS"
+
+[[may_cite]]
+owner = "SUPERLOOPPACK"
+target = "TOOLS"
+
+[[may_cite]]
+owner = "SUPERLOOPINSTALL"
+target = "TOOLS"
+
+[[may_cite]]
 owner = "LOOPHOME"
 target = "TOOLS"
 

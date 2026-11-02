@@ -974,6 +974,7 @@ fn verdict_fixture() -> super::LinterObservation {
     super::LinterObservation {
         status_success: true,
         report: super::LinterReport {
+            findings: Vec::new(),
             clean: true,
             failures: 0,
             public_pack: true,

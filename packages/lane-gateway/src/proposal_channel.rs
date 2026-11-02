@@ -246,7 +246,7 @@ fn bound_approval(
         answer: ReviewAnswer::Approve,
         adjudicator: text("authenticated common request channel".into())?,
         reason: text(format!(
-            "recorded reason sha256: {}",
+            "recorded reason sha256-prefix: {:.16}",
             request_core::request_id(decision.reason.as_bytes())
         ))?,
     };

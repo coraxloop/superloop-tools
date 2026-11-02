@@ -51,6 +51,10 @@ pub struct RetireArgs {
 #[serde(deny_unknown_fields)]
 struct Entry {
     destination: PathBuf,
+    /// Full SHA-256 binds the opened target to the independently reviewed
+    /// manifest against an actor able to replace the target and its sidecar.
+    /// The manifest's custody supplies the trusted reference
+    /// (´[TOOLS-req:deployment:reviewed-removal-digest]´).
     sha256: String,
     mode: u32,
 }

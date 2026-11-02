@@ -128,7 +128,7 @@ fn the_repository_snapshot_loads_as_one_exact_surface() {
 
     assert_eq!(snapshot.owners().len(), 28 + snapshot.imports().len());
     assert_eq!(snapshot.partitions().len(), 34);
-    assert_eq!(snapshot.may_cite().len(), 55);
+    assert_eq!(snapshot.may_cite().len(), 59);
     assert_eq!(snapshot.environments().len(), 349);
     assert_eq!(snapshot.environment_extensions().len(), 9);
     let list_keys = snapshot.list_keys();

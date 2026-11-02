@@ -270,6 +270,13 @@ fn the_repository_owner_surface_reconciles_in_both_directions() {
     assert_eq!(derived_reach, crate_reach);
     assert_eq!(imported_reach, expected_imported_reach);
     let expected_repository_reach = BTreeSet::from([
+        ("PERMISSIONTRIAGE".to_owned(), REPOSITORY_OWNER.to_owned()),
+        (
+            "SUPERLOOPCHATEXPORT".to_owned(),
+            REPOSITORY_OWNER.to_owned(),
+        ),
+        ("SUPERLOOPINSTALL".to_owned(), REPOSITORY_OWNER.to_owned()),
+        ("SUPERLOOPPACK".to_owned(), REPOSITORY_OWNER.to_owned()),
         ("LOOPHOME".to_owned(), REPOSITORY_OWNER.to_owned()),
         ("EXECUTECOMMAND".to_owned(), REPOSITORY_OWNER.to_owned()),
         ("BUILDSYNC".to_owned(), REPOSITORY_OWNER.to_owned()),

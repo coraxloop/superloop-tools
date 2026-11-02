@@ -75,6 +75,9 @@ pattern = "docs/spec/command-contracts.md"
 pattern = "docs/spec/deployment.md"
 
 [[include.rows]]
+pattern = "docs/spec/digests.md"
+
+[[include.rows]]
 pattern = "docs/spec/executable-contracts.md"
 
 [[include.rows]]

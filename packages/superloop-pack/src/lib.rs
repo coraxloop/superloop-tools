@@ -824,6 +824,16 @@ struct LinterReport {
     failures: usize,
     public_pack: bool,
     burn: LinterBurn,
+    #[serde(default)]
+    findings: Vec<LinterFinding>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinterFinding {
+    severity: String,
+    code: String,
+    family: Option<String>,
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -611,7 +611,7 @@ pub fn project_tree(
     manifest: &Manifest,
     included: Vec<String>,
 ) -> Result<Projection, CutError> {
-    project_tree_with_policy(request, commit, manifest, included, None, false)
+    project_tree_with_policy(request, commit, manifest, included, None)
 }
 
 pub fn project_tree_with_policy(
@@ -620,7 +620,6 @@ pub fn project_tree_with_policy(
     manifest: &Manifest,
     included: Vec<String>,
     policy_bytes: Option<&[u8]>,
-    readme_fallback: bool,
 ) -> Result<Projection, CutError> {
     let root = request.repository_root;
     let manifest_path = request.manifest;
@@ -637,11 +636,7 @@ pub fn project_tree_with_policy(
         }
         selected.insert(path, entry.clone());
     }
-    let readme_source = if readme_fallback {
-        "README.md"
-    } else {
-        &manifest.public.readme
-    };
+    let readme_source = manifest.public.readme.as_str();
     for required in [
         manifest.public.licence_code.as_str(),
         manifest.public.licence_docs.as_str(),
