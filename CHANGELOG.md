@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-02
+
 ### Added
 
 - The public-set manifest accepts an optional `[public] version = "X.Y.Z"`, the repository's release version, distinct from the manifest-format `version`; every manifest reader refuses a malformed declaration.
@@ -82,7 +84,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/coraxloop/superloop-tools/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/coraxloop/superloop-tools/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/coraxloop/superloop-tools/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/coraxloop/superloop-tools/releases/tag/v0.1.0
