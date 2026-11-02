@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn git(root: &Path, args: &[&str]) -> String {
@@ -571,6 +571,23 @@ fn stale_main() {
     );
 }
 
+struct SigningHome(PathBuf);
+
+impl Drop for SigningHome {
+    fn drop(&mut self) {
+        // Both operations must run even during unwinding or after partial key creation.
+        for args in [vec!["--kill", "gpg-agent"], vec!["--remove-socketdir"]] {
+            let result = Command::new("gpgconf")
+                .env("GNUPGHOME", &self.0)
+                .args(args)
+                .status();
+            if !result.is_ok_and(|status| status.success()) {
+                eprintln!("fixture GPG cleanup failed for {}", self.0.display());
+            }
+        }
+    }
+}
+
 fn signing_key(root: &Path) -> String {
     let output = Command::new("gpg")
         .env("GNUPGHOME", root.join(".git/gnupg"))
@@ -639,6 +656,7 @@ fn release_signing() {
     ] {
         let fixture = fixture("0.1.1");
         let root = fixture.path();
+        let _home = SigningHome(root.join(".git/gnupg"));
         let key = signing_key(root);
         git(
             root,
@@ -685,14 +703,6 @@ fn release_signing() {
         if tag_signing {
             git(root, &["verify-tag", "v0.1.1"]);
         }
-        assert!(
-            Command::new("gpgconf")
-                .env("GNUPGHOME", root.join(".git/gnupg"))
-                .args(["--kill", "gpg-agent"])
-                .status()
-                .expect("stop fixture agent")
-                .success()
-        );
     }
 }
 
@@ -710,7 +720,11 @@ fn release_signing_failure() {
             git(root, &["config", switch, "true"]);
             git(root, &["config", "user.signingkey", "fixture-only"]);
             let signer = root.join(".git/failing-signer");
-            fs::write(&signer, format!("#!/bin/sh\nexit {status}\n")).expect("failing signer");
+            fs::write(
+                &signer,
+                format!("#!/bin/sh\necho fixture-signer-failed >&2\nexit {status}\n"),
+            )
+            .expect("failing signer");
             fs::set_permissions(&signer, fs::Permissions::from_mode(0o700)).expect("signer mode");
             git(
                 root,
@@ -721,7 +735,8 @@ fn release_signing_failure() {
                 ],
             );
             success(release(root, "0.1.1", &["--check"]));
-            refusal(root, "0.1.1", &[], "reason=git");
+            let report = refusal(root, "0.1.1", &[], "reason=signing");
+            assert!(report.contains("fixture-signer-failed"));
         }
     }
 }

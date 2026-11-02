@@ -327,7 +327,14 @@ pub fn release(request: ReleaseRequest<'_>) -> Result<ReleaseReport, ReleaseErro
         },
     };
     if !request.check && !request.dry_run {
-        apply(root, &mut report, &subject, &ident, &message)?;
+        apply(
+            root,
+            &mut report,
+            &subject,
+            &ident,
+            &message,
+            (&commit_bytes, &tag_bytes),
+        )?;
     }
     Ok(report)
 }
@@ -417,6 +424,7 @@ fn apply(
     subject: &str,
     ident: &str,
     message: &str,
+    preview: (&str, &str),
 ) -> Result<(), ReleaseError> {
     let original = PathBuf::from(line(
         root,
@@ -450,6 +458,11 @@ fn apply(
         ident,
         message,
     )?;
+    verify_shapes(
+        || staged_command(root, &objects, &original),
+        report,
+        preview,
+    )?;
     commit_refs(root, report, &objects, &original, || {
         // Promote the exact staged bytes: signatures must never be generated twice.
         for (kind, oid) in [("commit", &report.commit), ("tag", &report.tag_object)] {
@@ -467,6 +480,14 @@ fn apply(
         }
         Ok(())
     })
+}
+
+fn object_error(error: ReleaseError, signing: bool) -> ReleaseError {
+    if signing {
+        refuse("signing", error.detail)
+    } else {
+        error
+    }
 }
 
 fn write_objects(
@@ -527,7 +548,8 @@ fn write_objects(
             report.signing_key.as_deref().unwrap_or(&author)
         ));
     }
-    let oid = run(&mut commit, Some(subject.as_bytes()))?;
+    let oid = run(&mut commit, Some(subject.as_bytes()))
+        .map_err(|error| object_error(error, report.signing.contains("commit")))?;
     let oid = crate::one_line(&oid).ok_or_else(|| refuse("object", "invalid commit identity"))?;
     if !report.signing.contains("commit") && oid != report.commit {
         return Err(refuse("object", "commit identity mismatch"));
@@ -551,7 +573,8 @@ fn write_objects(
             tag,
             &report.commit,
         ]);
-        run(&mut signer, Some(message.as_bytes()))?;
+        run(&mut signer, Some(message.as_bytes()))
+            .map_err(|error| refuse("signing", error.detail))?;
         let output = run(
             git()
                 .arg("--git-dir")
@@ -572,6 +595,73 @@ fn write_objects(
         return Err(refuse("object", "tag identity mismatch"));
     }
     report.tag_object = oid;
+    Ok(())
+}
+
+/// Remove only commit signature headers, never continuations of another header or message text.
+fn unsigned_commit(bytes: &[u8]) -> Vec<u8> {
+    let mut unsigned = Vec::new();
+    let mut headers = true;
+    let mut signature = false;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if headers {
+            if line == b"\n" {
+                headers = false;
+                signature = false;
+            } else if !line.starts_with(b" ") {
+                signature = line.starts_with(b"gpgsig ") || line.starts_with(b"gpgsig-sha256 ");
+            }
+        }
+        if !signature {
+            unsigned.extend_from_slice(line);
+        }
+    }
+    unsigned
+}
+
+fn tag_shape_matches(bytes: &[u8], expected: &[u8], signed: bool) -> bool {
+    if !signed {
+        return bytes == expected;
+    }
+    let Some(signature) = bytes.strip_prefix(expected) else {
+        return false;
+    };
+    // Git inserts a separator newline when verbatim tag text has no final newline.
+    let signature = signature.strip_prefix(b"\n").unwrap_or(signature);
+    [
+        b"-----BEGIN PGP SIGNATURE-----\n".as_slice(),
+        b"-----BEGIN SSH SIGNATURE-----\n",
+        b"-----BEGIN SIGNED MESSAGE-----\n",
+    ]
+    .iter()
+    .any(|marker| signature.starts_with(marker))
+}
+
+fn verify_shapes(
+    git: impl Fn() -> Command,
+    report: &ReleaseReport,
+    preview: (&str, &str),
+) -> Result<(), ReleaseError> {
+    let commit = run(git().args(["cat-file", "commit", &report.commit]), None)?;
+    if unsigned_commit(&commit) != preview.0.as_bytes() {
+        return Err(refuse(
+            "signing",
+            "commit differs from the preview unsigned shape",
+        ));
+    }
+    let tag = run(git().args(["cat-file", "tag", &report.tag_object]), None)?;
+    let (_, tag_body) = preview
+        .1
+        .split_once('\n')
+        .ok_or_else(|| refuse("object", "invalid preview tag"))?;
+    // The tag must target the final merge; all remaining unsigned bytes stay pinned.
+    let expected = format!("object {}\n{tag_body}", report.commit);
+    if !tag_shape_matches(&tag, expected.as_bytes(), report.signing.contains("tag")) {
+        return Err(refuse(
+            "signing",
+            "tag differs from the preview unsigned shape",
+        ));
+    }
     Ok(())
 }
 
@@ -685,5 +775,38 @@ pub fn write_release_report<W: io::Write>(
             )?;
             crate::write_terminal_report(output, "release", 3, wall, "refused")
         }
+    }
+}
+
+#[cfg(test)]
+mod signing_shape_tests {
+    use super::{tag_shape_matches, unsigned_commit};
+
+    /// Signature removal retains every unsigned header and message byte.
+    /// ´test:unit:release-unsigned-shape´
+    #[test]
+    fn unsigned_shape() {
+        let preview = b"tree pinned\nparent first\nparent second\nauthor pinned\ncommitter pinned\n\nmessage\n";
+        let signed = b"tree pinned\nparent first\nparent second\nauthor pinned\ncommitter pinned\ngpgsig signature\n continuation\n\nmessage\n";
+        assert_eq!(unsigned_commit(signed), preview);
+        assert_ne!(
+            unsigned_commit(
+                String::from_utf8_lossy(signed)
+                    .replace("parent second", "parent changed")
+                    .as_bytes()
+            ),
+            preview
+        );
+        assert_ne!(
+            unsigned_commit(b"tree pinned\n\ngpgsig message text\n"),
+            b"tree pinned\n\n"
+        );
+        let tag = b"object final\ntype commit\ntag v1\ntagger pinned\n\nnotes";
+        let mut signed_tag = tag.to_vec();
+        signed_tag.extend_from_slice(b"\n-----BEGIN PGP SIGNATURE-----\nsignature\n");
+        assert!(tag_shape_matches(&signed_tag, tag, true));
+        signed_tag[7] = b'X';
+        assert!(!tag_shape_matches(&signed_tag, tag, true));
+        assert!(!tag_shape_matches(b"changed notes", tag, true));
     }
 }

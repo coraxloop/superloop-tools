@@ -1307,6 +1307,11 @@ dependency_ledger += ['''
 
 ledger_configuration = configuration_data()
 dependency_ledger += ['''
+{"kind":"external-program","identity":"external:gpg","selector":"gpg","contract":"Generate and inspect throwaway OpenPGP signing keys in the release fixture home","callers":["superloop-pack"]}
+{"kind":"external-program","identity":"external:gpgconf","selector":"gpgconf","contract":"Stop the release fixture agent and remove its private socket directory on every exit path","callers":["superloop-pack"]}
+{"kind":"call","site":"packages/superloop-pack/tests/release.rs:\"gpg\"#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"gpg\"","callee":"external:gpg","lookup":"test-executable","contract":"Generate a disposable release signing key under the isolated GNUPGHOME"}
+{"kind":"call","site":"packages/superloop-pack/tests/release.rs:\"gpg\"#2","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"gpg\"","callee":"external:gpg","lookup":"test-executable","contract":"Read the disposable signing key fingerprint for explicit Git signing configuration"}
+{"kind":"call","site":"packages/superloop-pack/tests/release.rs:\"gpgconf\"#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"gpgconf\"","callee":"external:gpgconf","lookup":"test-executable","contract":"Stop the disposable agent and remove its socket directory from the fixture drop guard, including unwinding"}
 {"kind":"accountable-owner","package":"build-sync","owner":"BUILDSYNC"}
 {"kind":"accountable-owner","package":"execute-command","owner":"PERMISSIONTRIAGE"}
 {"kind":"accountable-owner","package":"superloop-chat-export","owner":"SUPERLOOPCHATEXPORT"}
