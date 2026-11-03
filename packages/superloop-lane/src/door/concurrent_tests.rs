@@ -521,64 +521,75 @@ fn door_exercise_retries_concurrent_admission() {
 /// ´test:unit:door-concurrent-request-admits-after-release´
 #[test]
 fn door_concurrent_request_admits_after_release() {
-    let fixture = Fixture::new();
-    let store = fixture.store();
-    let (runner, first_calls, _) = counting_runner(&fixture);
-    let (socket, first) = fixture_service(&fixture, runner, rubric(Some("allow")), 15000, None);
-    let mut client = send_probe(&socket, 15000);
-    let first_id = wait_filed(&store);
-    let (runner, second_calls, _) = counting_runner(&fixture);
-    let route = route_for(&fixture.home);
-    let home = fixture.home.clone();
-    let second_store = fixture.store();
-    let (mut second_client, mut second_server) = UnixStream::pair().expect("overlap pair");
-    second_client.shutdown(Shutdown::Write).expect("overlap EOF");
-    let (contended_tx, contended_rx) = std::sync::mpsc::channel();
-    let second = thread::spawn(move || {
-        super::ADMISSION_CONTENDED.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move || {
-                contended_tx.send(()).expect("overlap contended");
-            }));
+    // Exercise both an early release and a release in the final polling interval.
+    for last_interval in [false, true] {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let (runner, first_calls, _) = counting_runner(&fixture);
+        let (socket, first) = fixture_service(&fixture, runner, rubric(Some("allow")), 15000, None);
+        let mut client = send_probe(&socket, 15000);
+        let first_id = wait_filed(&store);
+        let (runner, second_calls, _) = counting_runner(&fixture);
+        let route = route_for(&fixture.home);
+        let home = fixture.home.clone();
+        let second_store = fixture.store();
+        let (mut second_client, mut second_server) = UnixStream::pair().expect("overlap pair");
+        second_client.shutdown(Shutdown::Write).expect("overlap EOF");
+        let (contended_tx, contended_rx) = std::sync::mpsc::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let second = thread::spawn(move || {
+            let hook = if last_interval {
+                &super::ADMISSION_LAST_POLL
+            } else {
+                &super::ADMISSION_CONTENDED
+            };
+            hook.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    contended_tx.send(()).expect("overlap contended");
+                    released_rx.recv_timeout(Duration::from_secs(5)).expect("first guard released");
+                }));
+            });
+            serve_request(
+                &mut second_server,
+                &concurrent_registration(3000),
+                3000,
+                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":5000}),
+                Some(&route),
+                Some(&runner),
+                Some(&home),
+                Some(&rubric(Some("allow"))),
+                Some(&second_store),
+                Instant::now(),
+            )
         });
-        serve_request(
-            &mut second_server,
-            &concurrent_registration(3000),
-            3000,
-            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":5000}),
-            Some(&route),
-            Some(&runner),
-            Some(&home),
-            Some(&rubric(Some("allow"))),
-            Some(&second_store),
-            Instant::now(),
-        )
-    });
-    contended_rx.recv_timeout(Duration::from_secs(5)).expect("overlap waiting");
-    assert_eq!(store.list_run("R").expect("before release").len(), 1);
-    label(&store, &first_id, "allow");
-    let first_reply = frame_read(&mut client).expect("first reply");
-    assert_eq!(first_reply["reason"], "door-complete");
-    first.join().expect("first handler").expect("first served");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let second_id = loop {
-        if let Some(record) = store.list_run("R").expect("admitted records")
-            .into_iter().find(|record| record.id() != first_id) {
-            break record.id().to_owned();
+        contended_rx.recv_timeout(Duration::from_secs(5)).expect("overlap waiting");
+        assert_eq!(store.list_run("R").expect("before release").len(), 1);
+        label(&store, &first_id, "allow");
+        let first_reply = frame_read(&mut client).expect("first reply");
+        assert_eq!(first_reply["reason"], "door-complete");
+        first.join().expect("first handler").expect("first served");
+        released_tx.send(()).expect("resume admission poll");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let second_id = loop {
+            if let Some(record) = store.list_run("R").expect("admitted records")
+                .into_iter().find(|record| record.id() != first_id) {
+                break record.id().to_owned();
+            }
+            assert!(Instant::now() < deadline, "overlap never admitted");
+            thread::sleep(Duration::from_millis(5));
+        };
+        label(&store, &second_id, "allow");
+        let reply = frame_read(&mut second_client).expect("overlap reply");
+        second.join().expect("second handler").expect("second served");
+        assert_eq!(reply["reason"], "door-complete");
+        assert_eq!(reply["status"], 0);
+        assert!(reply.get("waited_seconds").is_none());
+        assert_eq!(first_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(second_calls.load(Ordering::Relaxed), 1);
+        let records = store.list_run("R").expect("two complete records");
+        assert_eq!(records.len(), 2);
+        for record in records {
+            assert_eq!(record.value()["effect"]["state"], "completed");
         }
-        assert!(Instant::now() < deadline, "overlap never admitted");
-        thread::sleep(Duration::from_millis(5));
-    };
-    label(&store, &second_id, "allow");
-    let reply = frame_read(&mut second_client).expect("overlap reply");
-    second.join().expect("second handler").expect("second served");
-    assert_eq!(reply["reason"], "door-complete");
-    assert_eq!(reply["status"], 0);
-    assert!(reply.get("waited_seconds").is_none());
-    assert_eq!(first_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(second_calls.load(Ordering::Relaxed), 1);
-    let records = store.list_run("R").expect("two complete records");
-    assert_eq!(records.len(), 2);
-    for record in records {
-        assert_eq!(record.value()["effect"]["state"], "completed");
     }
 }

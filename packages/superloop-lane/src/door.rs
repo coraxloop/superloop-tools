@@ -123,10 +123,15 @@ impl RequestGuard {
             if remaining.is_zero() {
                 return Ok((None, began.elapsed()));
             }
-            thread::sleep(remaining.min(ADMISSION_POLL));
-            if began.elapsed() >= budget {
-                return Ok((None, began.elapsed()));
+            #[cfg(test)]
+            if remaining <= ADMISSION_POLL {
+                ADMISSION_LAST_POLL.with(|slot| {
+                    if let Some(action) = slot.borrow_mut().take() {
+                        action();
+                    }
+                });
             }
+            thread::sleep(remaining.min(ADMISSION_POLL));
         }
     }
 
@@ -172,6 +177,7 @@ impl RequestGuard {
 
 #[cfg(test)]
 thread_local! {
+    static ADMISSION_LAST_POLL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
