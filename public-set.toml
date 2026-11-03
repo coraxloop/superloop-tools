@@ -60,6 +60,9 @@ pattern = "README.md"
 pattern = "ci/test_docstring_carrier.py"
 
 [[include.rows]]
+pattern = "docs/backlog.md"
+
+[[include.rows]]
 pattern = "docs/meson.build"
 
 [[include.rows]]
