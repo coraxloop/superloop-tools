@@ -63,8 +63,10 @@ pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Opt
         ))
     } else if reason == "door-request-concurrent" {
         Some(format!(
-            "{reason}: waited={}s retry_after={}s; {ADMISSION_WINDOW}",
-            reply["waited_seconds"], reply["retry_after_seconds"]
+            "{reason}: waited={}s retry_after={}s; {}",
+            reply["waited_seconds"],
+            reply["retry_after_seconds"],
+            admission_window()
         ))
     } else if let Some(cause) = reply["request_record_error"].as_str() {
         Some(format!("{reason}: {cause}"))
@@ -182,7 +184,11 @@ thread_local! {
 }
 
 const RETRY_AFTER_SECONDS: u64 = 30;
-const ADMISSION_WINDOW: &str = "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds";
+fn admission_window() -> String {
+    format!(
+        "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after {RETRY_AFTER_SECONDS} seconds"
+    )
+}
 
 fn concurrent_refusal(
     stream: &mut UnixStream,
@@ -197,7 +203,7 @@ fn concurrent_refusal(
         registration.run
     );
     let mut reply = transport::refusal(registration, peer, "door-request-concurrent", started);
-    reply["admission_window"] = json!(ADMISSION_WINDOW);
+    reply["admission_window"] = json!(admission_window());
     reply["waited_seconds"] = json!((waited.as_secs_f64() * 1000.0).round() / 1000.0);
     reply["retry_after_seconds"] = json!(RETRY_AFTER_SECONDS);
     frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
@@ -4242,10 +4248,7 @@ mod tests {
             "waited_seconds":1.001,"retry_after_seconds":30});
         assert_eq!(
             super::final_line(&["fixture".into(), "git status --short".into()], &reply),
-            Some(format!(
-                "door-request-concurrent: waited=1.001s retry_after=30s; {}",
-                super::ADMISSION_WINDOW
-            ))
+            Some("door-request-concurrent: waited=1.001s retry_after=30s; the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds".to_owned())
         );
     }
 

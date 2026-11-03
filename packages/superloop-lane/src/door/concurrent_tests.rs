@@ -49,7 +49,7 @@ fn door_concurrent_request_refuses_before_record() {
         let reply = concurrent_process_request(&fixture, 3000, false);
         assert_eq!(reply["status"], 125);
         assert_eq!(reply["reason"], "door-request-concurrent");
-        assert_eq!(reply["admission_window"], super::ADMISSION_WINDOW);
+        assert_eq!(reply["admission_window"], "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds");
         let waited = reply["waited_seconds"].as_f64().expect("measured wait");
         assert!((0.9..1.5).contains(&waited), "waited={waited}");
         assert_eq!(reply["retry_after_seconds"], 30);
@@ -421,7 +421,7 @@ fn door_concurrent_allow_agent_publication_window() {
     );
     let overlap = concurrent_process_request(&fixture, 3000, false);
     assert_eq!(overlap["reason"], "door-request-concurrent");
-    assert_eq!(overlap["admission_window"], super::ADMISSION_WINDOW);
+    assert_eq!(overlap["admission_window"], "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds");
     assert_eq!(overlap["status"], 125);
     assert_eq!(overlap["retry_after_seconds"], 30);
     assert!((0.9..1.5).contains(&overlap["waited_seconds"].as_f64().expect("publication wait")));
