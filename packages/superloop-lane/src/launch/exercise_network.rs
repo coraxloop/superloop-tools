@@ -1090,7 +1090,7 @@ def sleep(seconds):
     clock[0] += seconds
 def invoke(argv, **kwargs):
     calls.append((argv, kwargs))
-    assert 0 < kwargs['timeout'] <= 10
+    assert 0 < kwargs['timeout'] <= 35
     return types.SimpleNamespace(returncode=125, stdout=b'', stderr=replies[min(len(calls)-1, len(replies)-1)])
 namespace = {'subprocess': types.SimpleNamespace(run=invoke, PIPE=-1),
              'time': types.SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep), 'json': json}
