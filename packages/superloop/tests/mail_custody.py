@@ -62,6 +62,11 @@ def main():
             if task['grant']:acl(replacement,service,4,6)
             else:os.chmod(replacement,0o600)
             os.replace(replacement,path)
+        elif task['op']=='config-lock-remove':(loop/'private/.config/mail/loop.lock').unlink()
+        elif task['op']=='config-lock-exists':print((loop/'private/.config/mail/loop.lock').exists())
+        elif task['op']=='config-stamps':
+            paths=[loop/'private',loop/'private/.config',loop/'private/.config/mail',loop/'private/.config/mail/loop.toml',loop/'private/.config/mail/loop.lock']
+            print(json.dumps([(str(path),info.st_ino,info.st_mode,info.st_uid,info.st_gid,info.st_mtime_ns,info.st_ctime_ns) for path in paths if path.exists() for info in [path.stat()]]))
         elif task['op']=='config-read':print((loop/'private/.config/mail/loop.toml').read_text(),end='')
         elif task['op']=='config-loss':
             for name in ['loop.toml','loop.toml.backup']:(loop/'private/.config/mail'/name).unlink(missing_ok=True)
@@ -83,7 +88,7 @@ def main():
         elif task['op']=='reason':print((mail/'outbox'/task['name']).read_text())
         elif task['op']=='withdraw':os.rename(mail/'outbox'/task['name'],mail/'draft'/task['name'])
         return
-    start=time.monotonic();events=[]
+    start=time.monotonic();events=[];coordinate_evidence='unmeasured; --loop-binary not supplied'
     def run(argv,body=None,expected=0):
         stamp=time.monotonic();r=subprocess.run(argv,input=None if body is None else json.dumps(body),text=True,capture_output=True,timeout=90)
         events.append({'argv':argv,'wall_seconds':round(time.monotonic()-stamp,3),'status':r.returncode,'stdout':r.stdout,'stderr':r.stderr})
@@ -158,6 +163,16 @@ def main():
                 worker_state('reserve',name,uid,reference)
                 worker_state('activate',name,uid,reference)
                 worker_state('verify',name,uid,reference)
+                before=who(a.loop_account,{'op':'config-stamps'})
+                worker_state('verify-only',name,uid,reference)
+                assert who(a.loop_account,{'op':'config-stamps'})==before
+                who(a.loop_account,{'op':'config-lock-remove'})
+                before=who(a.loop_account,{'op':'config-stamps'})
+                worker_state('verify-only',name,uid,reference,2)
+                assert who(a.loop_account,{'op':'config-lock-exists'}).strip()=='False'
+                assert who(a.loop_account,{'op':'config-stamps'})==before
+                run(['sudo','-n','-P','-u',a.loop_account,str(a.loop_binary),'_mail-configure',str(loop/'private'),str(service)])
+                worker_state('verify-only',name,uid,reference)
                 worker_state('reserve',name,uid,reference)
                 worker_state('retire',name,uid,reference)
                 worker_state('verify-retired',name,uid,reference)
@@ -170,6 +185,25 @@ def main():
             worker_state('retire','replacement',3010,'replacement')
             worker_state('verify-retired','replacement',3010,'replacement')
             assert tomllib.loads(who(a.loop_account,{'op':'config-read'}))['private_preference']=='preserved'
+            def coordinate(phase,expected=0):
+                return run([str(a.loop_binary),'_mail-worker-birth',str(home),'alpha',phase,'coordinate-preview','3030','fixture:coordinate-preview'],expected=expected)
+            if os.geteuid()==0:
+                coordinate('reserve');coordinate('finish')
+                roots=[loop/'.mail-births',loop/'workers',loop/'private']
+                def stamps():
+                    paths=[p for root in roots for p in [root,*root.rglob('*')]]
+                    return sorted((str(p),i.st_ino,i.st_mode,i.st_uid,i.st_gid,i.st_mtime_ns,i.st_ctime_ns) for p in paths for i in [p.lstat()])
+                before=stamps();coordinate('verify-only');assert stamps()==before
+                who(a.loop_account,{'op':'config-lock-remove'})
+                before=stamps();coordinate('verify-only',2);assert stamps()==before
+                assert who(a.loop_account,{'op':'config-lock-exists'}).strip()=='False'
+                run(['sudo','-n','-P','-u',a.loop_account,str(a.loop_binary),'_mail-configure',str(loop/'private'),str(service)])
+                coordinate('verify-only');coordinate('retire')
+                coordinate_evidence='positive and missing-lock refusal through namespace-root private entry'
+            else:
+                coordinate('verify-only',2)
+                assert 'namespace-root worker birth required' in events[-1]['stderr']
+                coordinate_evidence='unmeasured positive namespace-root path; node measures its refusal and the loop-identity verify-only child'
             private_program=home/'private-helper';shutil.copyfile(a.loop_binary,private_program);os.chmod(private_program,0o755)
             argv=['sudo','-n','-P','-u',a.loop_account,sys.executable,str(pathlib.Path(__file__).resolve()),'--root',str(root),'--binary',str(a.binary),'--service-account',a.service_account,'--loop-account',a.loop_account,'--mail-group',a.mail_group,'--actor','entered']
             stamp=time.monotonic();process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -192,7 +226,7 @@ def main():
     except BaseException:
         result='FAIL';raise
     finally:
-        report={'result':result,'wall_seconds':round(time.monotonic()-start,3),'events':events}
+        report={'result':result,'wall_seconds':round(time.monotonic()-start,3),'events':events,'coordinate_verify_only':coordinate_evidence}
         if a.report:a.report.write_text(json.dumps(report,indent=2))
         print(json.dumps({'result':result,'wall_seconds':report['wall_seconds']}))
 if __name__=='__main__':main()
