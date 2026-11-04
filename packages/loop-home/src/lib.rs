@@ -7,6 +7,7 @@ mod driver_launch;
 pub mod ensure;
 pub mod error;
 mod letters;
+pub mod mail;
 pub mod planner;
 pub mod registry;
 pub mod runner;

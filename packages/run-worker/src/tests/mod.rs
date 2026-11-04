@@ -1772,3 +1772,155 @@ fn an_unmapped_block_with_no_run_tree_is_refused_before_the_runner() {
     );
     assert_eq!(runner.commands, [] as [CommandSpec; 0]);
 }
+
+/// The registry, worker allocator and mail parser share the normative production.
+///
+/// ´claim:runworker:mail-identity-consumers-have-the-same-language´
+/// ´test:crate:mail-identity-consumers-have-the-same-language´
+#[test]
+fn mail_identity_consumers_have_the_same_language() {
+    use loop_home::mail::{Address, Outgoing};
+    let fixture = Fixture::new("mail-names");
+    let long = "a".repeat(512);
+    let cases = [
+        ("0", true),
+        ("0-worker", true),
+        ("a-", true),
+        ("a--b", true),
+        ("enter", true),
+        ("letters-private", true),
+        (&long, true),
+        ("", false),
+        ("-a", false),
+        ("-", false),
+        ("A", false),
+        ("a_b", false),
+        ("a.b", false),
+        ("a+b", false),
+        ("a/b", false),
+        ("é", false),
+        ("a b", false),
+        ("a\n", false),
+        ("a\0", false),
+    ];
+    for (name, expected) in cases {
+        let registry = fixture.path.join("mail-registry.toml");
+        let quoted = serde_json::to_string(name).expect("quoted name");
+        fs::write(&registry, format!(
+            "namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{ name = {quoted}, uid = 41001, launch = \"dev/fixture\" }}]\n"
+        )).expect("registry fixture");
+        match loop_home::load_registry(&registry) {
+            Ok(_) => assert!(expected, "registry admitted {name:?}"),
+            Err(failure) => {
+                assert!(
+                    !expected,
+                    "registry refused {name:?}: {}",
+                    failure.message()
+                );
+                assert!(
+                    failure.message().starts_with("bad loop name: "),
+                    "registry {name:?}: {}",
+                    failure.message()
+                );
+            }
+        }
+        let mut arguments = fixture.prepare_arguments();
+        arguments[2] = name.to_owned();
+        match parse_invocation(arguments) {
+            Ok(_) => assert!(expected, "allocator admitted {name:?}"),
+            Err(failure) => {
+                assert!(
+                    !expected,
+                    "allocator refused {name:?}: {}",
+                    failure.message()
+                );
+                assert!(
+                    failure.message().starts_with("bad lane name: "),
+                    "allocator {name:?}: {}",
+                    failure.message()
+                );
+            }
+        }
+        // A bare plus is valid address structure, but never part of an identity.
+        assert_eq!(
+            Address::parse(&format!("alpha+{name}")).is_ok(),
+            expected,
+            "worker {name:?}"
+        );
+        assert_eq!(
+            Address::parse(&format!("{name}+worker")).is_ok(),
+            expected,
+            "loop {name:?}"
+        );
+        assert_eq!(
+            Outgoing::parse(&format!("alpha+{name}.01.letter")).is_ok(),
+            expected,
+            "outgoing {name:?}"
+        );
+    }
+}
+
+/// A lexical name remains valid when its complete backing endpoint is unavailable.
+///
+/// ´claim:runworker:mail-storage-failures-are-distinct-from-name-refusals´
+/// ´test:crate:mail-storage-failures-are-distinct-from-name-refusals´
+#[test]
+fn mail_storage_failures_are_distinct_from_name_refusals() {
+    use loop_home::mail::Address;
+    let fixture = Fixture::new("mail-storage");
+    let root = fs::File::open(&fixture.path).expect("root descriptor");
+    let address = Address::parse(&format!("0-loop+{}", "w".repeat(512))).expect("valid identity");
+    fs::create_dir_all(fixture.path.join("0-loop/workers")).expect("ancestors");
+    let failure = address
+        .open_mailbox(&root)
+        .expect_err("unrepresentable endpoint");
+    assert!(failure.to_string().contains("unavailable endpoint"));
+    assert!(!failure.to_string().contains("invalid-name"));
+    let stored = Address::parse(&format!("0-loop+{}", "w".repeat(64))).expect("long name");
+    fs::create_dir_all(fixture.path.join(stored.relative_mailbox())).expect("endpoint");
+    stored.open_mailbox(&root).expect("representable endpoint");
+    let link = Address::parse("alias").expect("lexical identity");
+    std::os::unix::fs::symlink(fixture.path.join("0-loop"), fixture.path.join("alias"))
+        .expect("hostile alias");
+    assert!(link.open_mailbox(&root).is_err());
+}
+
+/// Slug limits do not become identity limits; addresses are exact and case sensitive.
+///
+/// ´claim:runworker:mail-address-boundaries-are-unambiguous´
+/// ´test:crate:mail-address-boundaries-are-unambiguous´
+#[test]
+fn mail_address_boundaries_are_unambiguous() {
+    use loop_home::mail::{Address, Outgoing};
+    for name in ["alpha", "0-loop+0-worker"] {
+        let address = Address::parse(name).expect("address");
+        assert_eq!(address.to_string(), name);
+    }
+    for name in [
+        "alpha+",
+        "+worker",
+        "alpha+w+x",
+        "Alpha",
+        "alpha/w",
+        "a.01.letter",
+    ] {
+        assert!(Address::parse(name).is_err(), "{name}");
+    }
+    for size in [1, 64] {
+        let parsed = Outgoing::parse(&format!("0-loop+0-worker.{}.letter", "-".repeat(size)))
+            .expect("inclusive slug limit");
+        assert_eq!(parsed.recipient.worker(), Some("0-worker"));
+        assert_eq!(parsed.recipient.loop_name(), "0-loop");
+    }
+    for size in [0, 65] {
+        assert!(Outgoing::parse(&format!("alpha.{}.letter", "a".repeat(size))).is_err());
+    }
+    for name in [
+        "alpha.a.LETTER",
+        "alpha.a.b.letter",
+        "alpha.A.letter",
+        "alpha.a/1.letter",
+    ] {
+        assert!(Outgoing::parse(name).is_err(), "{name}");
+    }
+}

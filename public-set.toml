@@ -3244,3 +3244,27 @@ licence_code = "LICENSE-CODE"
 licence_docs = "LICENSE-DOCS"
 name = "superloop-tools"
 readme = "README.md"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/mod.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/names.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/instant.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/journal.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/journal_tests.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/store.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/publication.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/publication_tests.rs"

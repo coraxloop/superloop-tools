@@ -723,13 +723,13 @@ fn json_report_selection_is_accepted_by_every_command_form() {
     }
 }
 
-/// Portable names exclude the public commands and private helper words.
+/// Identity names admit command words; command dispatch is a separate concern.
 ///
-/// ´claim:loophome:loop-names-are-lowercase-portable-and-reserve-command-words´
-/// ´test:crate:malformed-and-reserved-names-are-refused´
+/// ´claim:loophome:loop-names-use-the-mail-identity-production´
+/// ´test:crate:identity-names-follow-the-mail-production´
 #[test]
-fn malformed_and_reserved_names_are_refused() {
-    for name in ["", "Bad", "under_score"] {
+fn identity_names_follow_the_mail_production() {
+    for name in ["", "Bad", "under_score", "-leading", "a.b", "a+b", "é"] {
         let failure = validate_name(name).expect_err("invalid name");
         assert_eq!(failure.status(), 2);
         assert_eq!(failure.message(), format!("bad loop name: {name}"));
@@ -747,9 +747,7 @@ fn malformed_and_reserved_names_are_refused() {
         "letters-private",
         "letters-group",
     ] {
-        let failure = validate_name(name).expect_err("reserved name");
-        assert_eq!(failure.status(), 2);
-        assert_eq!(failure.message(), format!("bad loop name: {name}"));
+        validate_name(name).expect("command word is a lexical identity");
     }
 }
 

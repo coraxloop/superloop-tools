@@ -8,20 +8,6 @@ use crate::LoopError;
 use crate::verify::push_json_string;
 
 const NAMESPACE: &str = "org.superloop-tools.loophome.registry";
-const RESERVED_NAMES: [&str; 11] = [
-    "enter",
-    "provision",
-    "run-bridge",
-    "verify",
-    "bind-custody",
-    "show",
-    "ensure-roots",
-    "inspect-roots",
-    "driver-launch",
-    "letters-private",
-    "letters-group",
-];
-
 /// One loop's reserved run of worker UIDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkerBlock {
@@ -197,17 +183,13 @@ impl Row {
     }
 }
 
-/// Validate the portable loop-name grammar and reserved subcommands.
+/// Validate exactly the identity production in ``reg:mail:identity-names``.
 ///
 /// # Errors
 ///
-/// Returns a status-two refusal for a reserved or malformed name.
+/// Returns a status-two refusal for a malformed name.
 pub fn validate_name(name: &str) -> Result<(), LoopError> {
-    let valid = !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
-    if !valid || RESERVED_NAMES.contains(&name) {
+    if !crate::mail::valid_identity_name(name) {
         return Err(LoopError::refusal(format!("bad loop name: {name}")));
     }
     Ok(())

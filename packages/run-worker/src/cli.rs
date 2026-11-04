@@ -183,6 +183,7 @@ fn exhausted(parsed: &BTreeMap<String, String>) -> Result<(), WorkerError> {
     })
 }
 
+// Worker allocation shares ``reg:mail:identity-names`` with the registry and mail parser.
 fn lane_name(lane: String) -> Result<String, WorkerError> {
     loop_home::validate_name(&lane)
         .map_err(|_failure| WorkerError::usage(format!("bad lane name: {lane:?}")))?;
