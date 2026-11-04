@@ -107,6 +107,7 @@ def main():
         assert credential.stat().st_uid==3000 and credential.read_bytes()==key
         assert (private_config.stat().st_dev,private_config.stat().st_ino)==private_config_identity
         assert not any(p.is_file() and p.read_bytes()==key for p in state.rglob('*'))
+        assert any(p.is_file() and p.read_bytes()==b'configuration remains opaque\x00\xff' for p in state.rglob('*')), 'STATE scan must reach the preserved backup'
 
     (home/'.config/loops/registry.toml').write_text("namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[{name='alpha',uid=3000,launch='dev/alpha'}]\n")
     (home/'.config/loops/allocations.toml').write_text('[alpha]\nuids={base=4000,count=64}\n')
