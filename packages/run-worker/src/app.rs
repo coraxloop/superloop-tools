@@ -249,24 +249,34 @@ fn mail_birth<R: Runner>(
     runner: &mut R,
     environment: &Environment,
     loop_name: &str,
-    lane: &str,
-    uid: u32,
+    row: &table::Row,
     phase: &str,
 ) -> Result<(), WorkerError> {
     let executable = std::env::current_exe()
         .map_err(|error| WorkerError::runtime(format!("worker birth executable: {error}")))?;
-    let identity =
-        loop_home::mail::birth::Identity::for_reservation(uid, format!("worker-run:{lane}:{uid}"));
+    let uid = row.uid;
+    let identity = loop_home::mail::birth::Identity::for_reservation(
+        uid,
+        format!("worker-run:{}:{uid}:{}", row.lane, row.claimed),
+    );
     let command = CommandSpec {
         label: format!("mail-birth-{phase}"),
         argv: namespaced(
             &environment.podman,
             vec![
                 executable.to_string_lossy().into_owned(),
-                "_mail-worker-birth".into(),
+                if phase == "retire-home" {
+                    "_mail-worker-home".into()
+                } else {
+                    "_mail-worker-birth".into()
+                },
                 environment.caller_home.to_string_lossy().into_owned(),
                 loop_name.into(),
-                phase.into(),
+                if phase == "retire-home" {
+                    row.lane.clone()
+                } else {
+                    phase.into()
+                },
                 identity.name,
                 uid.to_string(),
                 identity.reservation,
@@ -448,7 +458,7 @@ fn prepare<R: Runner, W: io::Write>(
     })?;
     let uid = claimed.uid;
     // Preserve the row so an uncertain reservation remains explicitly closable.
-    mail_birth(runner, environment, &selected.name, lane, uid, "reserve")?;
+    mail_birth(runner, environment, &selected.name, &claimed, "reserve")?;
     let placement = placement(
         &Lane {
             selected: &selected,
@@ -476,7 +486,7 @@ fn prepare<R: Runner, W: io::Write>(
         }
     };
     let filled = table::fill_commit(&table_path, lane, &head)?;
-    mail_birth(runner, environment, &selected.name, lane, uid, "finish")?;
+    mail_birth(runner, environment, &selected.name, &filled, "finish")?;
     writeln!(
         output,
         "{} loop={} lane={lane} uid={uid} commit={} clone={}",
@@ -611,14 +621,7 @@ fn finish_prepared<R: Runner>(
     if prepared.commit.is_empty() {
         return Err(WorkerError::refusal("worker preparation is incomplete"));
     }
-    mail_birth(
-        runner,
-        environment,
-        loop_name,
-        &prepared.lane,
-        prepared.uid,
-        "finish",
-    )
+    mail_birth(runner, environment, loop_name, prepared, "finish")
 }
 
 fn launch<R: Runner, W: io::Write>(
@@ -906,7 +909,8 @@ fn close<R: Runner, W: io::Write>(
         .ok_or_else(|| WorkerError::refusal(format!("lane {lane} has no prepared row")))?;
     // The namespace coordinator verifies process absence and transfers custody
     // before making its receipt reusable. A crash before row removal is retryable.
-    mail_birth(runner, environment, &selected.name, lane, row.uid, "retire")?;
+    mail_birth(runner, environment, &selected.name, &row, "retire-home")?;
+    mail_birth(runner, environment, &selected.name, &row, "retire")?;
     table::remove_row(&table_path, lane)?;
     writeln!(
         output,

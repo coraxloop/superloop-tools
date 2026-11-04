@@ -3292,3 +3292,36 @@ pattern = "packages/superloop-lane/src/launch/steering.rs"
 
 [[include.rows]]
 pattern = "packages/lane-lifecycle/src/observation.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/migration.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/migration_metadata.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/migration_tree.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/migration_relocation.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/migration_inventory.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/migration_hold.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/migration_history.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/migration_inventory.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/migration_control.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/migration_cutover.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/mail_migration.py"

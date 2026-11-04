@@ -1087,6 +1087,7 @@ fn resume_with_program(
         &record,
         step,
         delivery,
+        request.dry_run,
         (host_root, root_uid, lane_bin),
     )?;
     if &verified != entry {

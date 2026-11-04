@@ -31,6 +31,19 @@ fn receipt_name(identity: &Identity) -> String {
 /// Implementation bound for protected receipt metadata, not a lexical name bound.
 const MAX_RECEIPT_BYTES: u64 = 4096;
 
+fn admit(prior: Option<&Receipt>, identity: &Identity, phase: &str) -> Result<()> {
+    if let Some(saved) = prior {
+        if saved.retired && phase != "retire" {
+            return Err(MailError::Invalid(
+                "retired-worker: this worker birth name is retired; prepare a fresh worker lifetime",
+            ));
+        }
+        if saved.identity != *identity {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
 const fn invalid() -> MailError {
     MailError::Invalid("unsafe-storage: worker birth receipt")
 }
@@ -238,7 +251,13 @@ fn existing(parent: &File, name: &str) -> Result<Option<File>> {
     }
 }
 
-fn verify_folders(worker: &File, identity: &Identity, service: u32, group: u32) -> Result<()> {
+fn verify_folders(
+    worker: &File,
+    identity: &Identity,
+    service: u32,
+    group: u32,
+    verify_only: bool,
+) -> Result<()> {
     metadata(worker, 0, 0o711, true)?;
     if worker.metadata()?.gid() != 0 {
         return Err(invalid());
@@ -246,7 +265,11 @@ fn verify_folders(worker: &File, identity: &Identity, service: u32, group: u32) 
     acl::transport(worker)?;
     // A published endpoint with missing state requires recovery, not fresh creation.
     io::child(worker, Path::new("mail"), true)?;
-    provision::tree(worker, "mail", identity.uid, service, group)?;
+    if verify_only {
+        provision::verify_tree(worker, "mail", identity.uid, service, group)?;
+    } else {
+        provision::tree(worker, "mail", identity.uid, service, group)?;
+    }
     let staging = io::child(worker, Path::new(".mail-staging"), true)?;
     metadata(&staging, service, 0o700, true)?;
     if staging.metadata()?.gid() != service {
@@ -285,7 +308,7 @@ fn folders(
         None => None,
     };
     if let Some(worker) = published {
-        verify_folders(&worker, identity, service, group)?;
+        verify_folders(&worker, identity, service, group, false)?;
     } else {
         let (worker, _) = provision::staged_directory(&staging, &identity.name, 0, 0, 0o711)?;
         let complete = existing(&worker, "mail")?.is_some();
@@ -331,7 +354,7 @@ fn folders(
     Ok(())
 }
 
-fn worker_quiet(proc_root: &Path, uid: u32) -> Result<()> {
+pub(super) fn worker_quiet(proc_root: &Path, uid: u32) -> Result<()> {
     for entry in std::fs::read_dir(proc_root)? {
         let entry = entry?;
         if entry
@@ -407,6 +430,43 @@ fn retire_folders(parent: &File, identity: &Identity, service: u32) -> Result<()
     Ok(())
 }
 
+/// Inspect the protected terminal receipt before resuming a historical migration mapping.
+///
+/// # Errors
+/// A name bound to another identity or an unsafe receipt refuses the mapping.
+pub(super) fn retired_identity(home: &Path, loop_name: &str, identity: &Identity) -> Result<bool> {
+    let row = registered(home, loop_name)?;
+    let Some(root) = existing(&io::absolute(&row.home, true)?, ".mail-births")? else {
+        return Ok(false);
+    };
+    let lock =
+        Flock::lock(root, FlockArg::LockShared).map_err(|(_, error)| MailError::from(error))?;
+    for receipt in read_receipts(&lock, 0)? {
+        if receipt.identity.name == identity.name {
+            if receipt.identity != *identity {
+                return Err(invalid());
+            }
+            return Ok(receipt.retired);
+        }
+    }
+    Ok(false)
+}
+/// Recheck both terminal receipt and loop-owned configuration through the common entry.
+///
+/// # Errors
+/// The namespace root cannot substitute an unchecked configuration projection.
+pub(super) fn verify_retired(home: &Path, loop_name: &str, identity: &Identity) -> Result<()> {
+    if !Uid::effective().is_root() || !retired_identity(home, loop_name, identity)? {
+        return Err(invalid());
+    }
+    let row = registered(home, loop_name)?;
+    let allocations =
+        Allocations::read(&home.join(".config/loops/allocations.toml")).map_err(failure)?;
+    let service = allocations.mail_uid().ok_or_else(invalid)?;
+    let group = allocations.mail_group(loop_name, None).map_err(failure)?;
+    configure(&row, service, group, "verify-retired", identity)
+}
+
 /// Reserve, finish or retire one immutable worker lifetime through the loop identity.
 ///
 /// The launcher invokes reserve before creating the worker home and finish only
@@ -420,12 +480,20 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
             "unsafe-storage: namespace-root worker birth required",
         ));
     }
-    if !["reserve", "finish", "retire", "verify"].contains(&phase) {
+    if !matches!(
+        phase,
+        "reserve" | "finish" | "retire" | "verify" | "verify-only"
+    ) {
         return Err(invalid());
     }
     crate::registry::validate_name(&identity.name)
         .map_err(|_| MailError::Invalid("invalid-name: worker birth name"))?;
     let row = registered(home, loop_name)?;
+    if existing(&io::absolute(&row.home, true)?, ".mail-migration-hold")?.is_some() {
+        return Err(MailError::Invalid(
+            "invalid-directory: retained migration history requires namespace reconciliation before worker birth",
+        ));
+    }
     let allocations =
         Allocations::read(&home.join(".config/loops/allocations.toml")).map_err(failure)?;
     if !allocations
@@ -445,18 +513,15 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
     if info.uid() != 0 || info.mode() & 0o022 != 0 {
         return Err(invalid());
     }
-    let (births, _) = provision::directory(&parent, ".mail-births", 0, 0, 0o700)?;
+    let births = birth_directory(&parent, phase == "verify-only")?;
     let lock = Flock::lock(births, FlockArg::LockExclusive)
         .map_err(|(_, error)| MailError::from(error))?;
     let receipts = read_receipts(&lock, 0)?;
     let prior = receipts
         .iter()
         .find(|saved| saved.identity.name == identity.name);
-    if let Some(saved) = prior {
-        if saved.identity != *identity || (saved.retired && phase != "retire") {
-            return Err(invalid());
-        }
-    } else {
+    admit(prior, identity, phase)?;
+    if prior.is_none() {
         if phase != "reserve"
             || receipts.iter().any(|saved| {
                 (!saved.retired && saved.identity.uid == identity.uid)
@@ -495,17 +560,16 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
         release_pins(home, loop_name, identity, service)?;
         return write_receipt(&lock, identity, true);
     }
-    if phase == "verify" {
-        let workers = io::child(&parent, Path::new("workers"), true)?;
-        let worker = io::child(&workers, Path::new(&identity.name), true)
-            .map_err(|error| unavailable(loop_name, identity, error))?;
-        metadata(&workers, 0, acl::preserved_mode(&workers, 0o711), true)?;
-        if workers.metadata()?.gid() != 0 {
-            return Err(invalid());
-        }
-        acl::grant_ancestor(&workers, service, 5, 0o711)?;
-        verify_folders(&worker, identity, service, group)?;
-        return configure(&row, service, loop_group, "verify", identity);
+    if matches!(phase, "verify" | "verify-only") {
+        verify_active_folders(
+            &parent,
+            loop_name,
+            identity,
+            service,
+            group,
+            phase == "verify-only",
+        )?;
+        return configure(&row, service, loop_group, phase, identity);
     }
     configure(&row, service, loop_group, "reserve", identity)?;
     folders(&parent, identity, service, group, phase)
@@ -516,6 +580,42 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
     Ok(())
 }
 
+fn verify_active_folders(
+    parent: &File,
+    loop_name: &str,
+    identity: &Identity,
+    service: u32,
+    group: u32,
+    verify_only: bool,
+) -> Result<()> {
+    let workers = io::child(parent, Path::new("workers"), true)?;
+    let worker = io::child(&workers, Path::new(&identity.name), true)
+        .map_err(|error| unavailable(loop_name, identity, error))?;
+    metadata(&workers, 0, acl::preserved_mode(&workers, 0o711), true)?;
+    if workers.metadata()?.gid() != 0 {
+        return Err(invalid());
+    }
+    if verify_only {
+        acl::verify_ancestor(&workers, service, 5, 0o711)?;
+    } else {
+        acl::grant_ancestor(&workers, service, 5, 0o711)?;
+    }
+    verify_folders(&worker, identity, service, group, verify_only)
+}
+
+fn birth_directory(parent: &File, verify_only: bool) -> Result<File> {
+    if verify_only {
+        let births = io::child(parent, Path::new(".mail-births"), true)?;
+        metadata(&births, 0, 0o700, true)?;
+        if births.metadata()?.gid() != 0 {
+            return Err(invalid());
+        }
+        Ok(births)
+    } else {
+        Ok(provision::directory(parent, ".mail-births", 0, 0, 0o700)?.0)
+    }
+}
+
 /// Keep the protected lifetime locked across service verification and pin publication.
 ///
 /// # Errors
@@ -524,8 +624,14 @@ pub(super) fn hold_active(
     home: &Path,
     loop_name: &str,
     identity: &Identity,
+    verify_only: bool,
 ) -> Result<Flock<File>> {
-    coordinate(home, loop_name, identity, "verify")?;
+    coordinate(
+        home,
+        loop_name,
+        identity,
+        if verify_only { "verify-only" } else { "verify" },
+    )?;
     let row = registered(home, loop_name)?;
     let parent = io::absolute(&row.home, true)?;
     let births = io::child(&parent, Path::new(".mail-births"), true)?;
@@ -545,7 +651,7 @@ pub(super) fn hold_active(
         &row,
         service,
         allocations.mail_group(loop_name, None).map_err(failure)?,
-        "verify",
+        if verify_only { "verify-only" } else { "verify" },
         identity,
     )?;
     Ok(guard)
@@ -561,6 +667,88 @@ fn release_pins(home: &Path, loop_name: &str, identity: &Identity, service: u32)
         OsString::from(&identity.reservation),
     ];
     provision::spawn_identity(service, service, None, &args)
+}
+
+fn retire_execution(home: &Path, loop_name: &str, lane: &str, identity: &Identity) -> Result<()> {
+    if !Uid::effective().is_root() || !super::valid_identity_name(lane) {
+        return Err(invalid());
+    }
+    let prefix = format!("worker-run:{lane}:{}:", identity.uid);
+    if !identity
+        .reservation
+        .strip_prefix(&prefix)
+        .is_some_and(|claim| !claim.is_empty() && claim.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(invalid());
+    }
+    let row = registered(home, loop_name)?;
+    let parent = io::absolute(&row.home, true)?;
+    let info = parent.metadata()?;
+    if info.uid() != 0 || info.mode() & 0o022 != 0 {
+        return Err(invalid());
+    }
+    let births = io::child(&parent, Path::new(".mail-births"), true)?;
+    metadata(&births, 0, 0o700, true)?;
+    let lock = Flock::lock(births, FlockArg::LockExclusive)
+        .map_err(|(_, error)| MailError::from(error))?;
+    if !read_receipts(&lock, 0)?
+        .iter()
+        .any(|receipt| receipt.identity == *identity)
+    {
+        return Err(invalid());
+    }
+    worker_quiet(Path::new("/proc"), identity.uid)?;
+    archive_execution(&parent, lane, identity, row.uid)
+}
+fn archive_execution(parent: &File, lane: &str, identity: &Identity, loop_uid: u32) -> Result<()> {
+    let owner = Uid::effective().as_raw();
+    let Some(homes) = existing(parent, "worker-homes")? else {
+        return Ok(());
+    };
+    metadata(&homes, loop_uid, 0o710, true)?;
+    let source = existing(&homes, lane)?;
+    let (history, _) = provision::directory(
+        parent,
+        ".worker-history",
+        owner,
+        Gid::effective().as_raw(),
+        0o700,
+    )?;
+    let prior = existing(&history, &identity.name)?;
+    if let Some(prior) = prior {
+        metadata(&prior, owner, 0o700, true)?;
+        if source.is_some() {
+            return Err(MailError::Invalid(
+                "changed-source: retired execution home and active lane both exist",
+            ));
+        }
+        return Ok(());
+    }
+    let Some(source) = source else { return Ok(()) };
+    let info = source.metadata()?;
+    if !(info.uid() == loop_uid && info.mode() & 0o7777 == 0o750
+        || info.uid() == owner && info.mode() & 0o7777 == 0o700)
+    {
+        return Err(invalid());
+    }
+    take_custody(&source, owner)?;
+    renameat2(
+        &homes,
+        lane,
+        &history,
+        identity.name.as_str(),
+        RenameFlags::RENAME_NOREPLACE,
+    )?;
+    homes.sync_all()?;
+    history.sync_all()?;
+    let moved = io::child(&history, Path::new(&identity.name), true)?;
+    let after = moved.metadata()?;
+    if (after.dev(), after.ino()) != (info.dev(), info.ino()) {
+        return Err(MailError::Invalid(
+            "changed-source: execution home changed during retirement",
+        ));
+    }
+    metadata(&moved, owner, 0o700, true)
 }
 
 fn text(value: &std::ffi::OsStr) -> Result<&str> {
@@ -580,6 +768,9 @@ pub fn entry(arguments: &[OsString], report: &mut dyn std::io::Write) -> u8 {
         };
         let path = PathBuf::from(path);
         let phase = text(phase)?;
+        if mode == "_mail-worker-home" {
+            return retire_execution(&path, text(scope)?, phase, &identity);
+        }
         if mode == "_mail-worker-birth" {
             return coordinate(&path, text(scope)?, &identity, phase);
         }
@@ -606,12 +797,17 @@ pub fn entry(arguments: &[OsString], report: &mut dyn std::io::Write) -> u8 {
         {
             return Err(invalid());
         }
-        let mut store = ConfigurationStore::open(&path, service)?;
+        let mut store = if phase == "verify-only" {
+            ConfigurationStore::open_existing(&path, service)?
+        } else {
+            ConfigurationStore::open(&path, service)?
+        };
         match phase {
             "reserve" => birth::reserve(&mut store, &identity),
             "activate" => birth::activate(&mut store, &identity),
             "retire" => birth::retire(&mut store, &identity),
-            "verify" => birth::verify(&store, &identity),
+            "verify" | "verify-only" => birth::verify(&store, &identity),
+            "verify-retired" => birth::verify_retired(&store, &identity),
             "unreserved" => birth::unreserved(&store, &identity),
             _ => Err(invalid()),
         }
@@ -628,6 +824,91 @@ pub fn entry(arguments: &[OsString], report: &mut dyn std::io::Write) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// ´claim:loophome:birth-preview-never-ensures-missing-or-drifted-receipts´
+    /// ´test:unit:birth-preview-never-ensures-missing-or-drifted-receipts´
+    #[test]
+    fn birth_preview_never_ensures_missing_or_drifted_receipts() {
+        let root = std::env::temp_dir().join(format!("birth-preview-{}", std::process::id()));
+        std::fs::create_dir(&root).expect("fixture");
+        let parent = File::open(&root).expect("parent");
+        assert!(birth_directory(&parent, true).is_err());
+        let path = root.join(".mail-births");
+        assert!(!path.exists());
+        std::fs::create_dir(&path).expect("drifted directory");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let before = std::fs::metadata(&path).expect("metadata");
+        assert!(birth_directory(&parent, true).is_err());
+        let after = std::fs::metadata(&path).expect("metadata");
+        assert_eq!(
+            (
+                before.uid(),
+                before.gid(),
+                before.mode(),
+                before.ctime(),
+                before.ctime_nsec()
+            ),
+            (
+                after.uid(),
+                after.gid(),
+                after.mode(),
+                after.ctime(),
+                after.ctime_nsec()
+            )
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// ´claim:loophome:closed-execution-home-is-sealed-before-uid-release´
+    /// ´test:unit:closed-execution-home-is-sealed-before-uid-release´
+    #[test]
+    fn closed_execution_home_is_sealed_before_uid_release() {
+        let root =
+            std::env::temp_dir().join(format!("execution-retirement-{}", std::process::id()));
+        std::fs::create_dir(&root).expect("fixture");
+        let parent = File::open(&root).expect("parent");
+        let owner = Uid::effective().as_raw();
+        let group = Gid::effective().as_raw();
+        let (homes, _) =
+            provision::directory(&parent, "worker-homes", owner, group, 0o710).expect("homes");
+        let (lane, _) = provision::directory(&homes, "lane", owner, group, 0o750).expect("lane");
+        std::fs::write(root.join("worker-homes/lane/evidence"), [0, 255]).expect("retained bytes");
+        drop(lane);
+        let identity = Identity::for_reservation(owner, "worker-run:lane:1:1".into());
+        archive_execution(&parent, "lane", &identity, owner).expect("retirement");
+        archive_execution(&parent, "lane", &identity, owner).expect("retry");
+        let retained = root.join(".worker-history").join(&identity.name);
+        assert_eq!(
+            std::fs::read(retained.join("evidence")).expect("bytes"),
+            [0, 255]
+        );
+        assert_eq!(
+            std::fs::metadata(&retained).expect("custody").mode() & 0o7777,
+            0o700
+        );
+        assert!(!root.join("worker-homes/lane").exists());
+        provision::directory(&homes, "lane", owner, group, 0o750).expect("next preparation");
+        assert!(archive_execution(&parent, "lane", &identity, owner).is_err());
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// ´claim:loophome:retired-birth-collision-names-the-refusal´
+    /// ´test:unit:retired-birth-collision-names-the-refusal´
+    #[test]
+    fn retired_birth_collision_names_the_refusal() {
+        let identity = Identity::for_reservation(4000, "worker-run:lane:4000:1".into());
+        let receipt = Receipt {
+            identity: identity.clone(),
+            retired: true,
+        };
+        assert!(
+            admit(Some(&receipt), &identity, "reserve")
+                .expect_err("retired name")
+                .to_string()
+                .starts_with("retired-worker:")
+        );
+        admit(Some(&receipt), &identity, "retire").expect("terminal retry");
+    }
+
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
     struct Fixture {

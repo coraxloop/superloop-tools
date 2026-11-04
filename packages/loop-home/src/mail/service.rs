@@ -46,21 +46,23 @@ impl Service {
             clock: Box::new(HostClock),
         }
     }
-    fn pins(&self, inventory: &Inventory) -> Result<Pins> {
-        let mut pins = Pins {
-            reservations: self.journal.reservation_pins()?,
-            ..Pins::default()
-        };
+    fn pins(inventory: &Inventory, records: &[Record]) -> Result<Pins> {
+        let mut pins = Pins::default();
+        let by_delivery = records
+            .iter()
+            .map(|record| (&record.delivery, record))
+            .collect::<BTreeMap<_, _>>();
         // Unavailability is not evidence that an active inbox is empty. Only
-        // explicit retirement in a fresh trusted configuration releases that pin.
-        for record in self.journal.records()? {
+        // explicit retirement or absence from the fresh registry releases that pin.
+        for record in records {
             let recipient = Address::parse(&record.recipient)
                 .map_err(|_| MailError::Invalid("invalid-directory: journal recipient"))?;
             if record.phase == Phase::Complete
+                && inventory.loops.contains(recipient.loop_name())
                 && !inventory.actors.contains_key(&recipient)
                 && !inventory.retired.contains(&recipient)
             {
-                pins.active_inboxes.insert(record.delivery);
+                pins.active_inboxes.insert(record.delivery.clone());
             }
         }
         for (address, actor) in &inventory.actors {
@@ -80,7 +82,7 @@ impl Service {
                 else {
                     continue;
                 };
-                if let Ok(record) = self.journal.record(&time)
+                if let Some(record) = by_delivery.get(&time)
                     && record.recipient == address.to_string()
                     && record.inbox_name == name
                 {
@@ -91,8 +93,8 @@ impl Service {
         Ok(pins)
     }
     fn prune(&mut self, inventory: &Inventory) -> Result<()> {
-        let pins = self.pins(inventory)?;
-        self.journal.prune(&Instant::now()?, &pins)?;
+        self.journal
+            .prune_projected(&Instant::now()?, |records| Self::pins(inventory, records))?;
         self.last_prune = Monotonic::now();
         Ok(())
     }

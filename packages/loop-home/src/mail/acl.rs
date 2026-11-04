@@ -229,6 +229,14 @@ fn write_acl(file: &File, attribute: &[u8], bytes: &[u8]) -> Result<()> {
 pub(super) fn grant_outbox(file: &File, service: u32) -> Result<()> {
     write_acl(file, XATTR, &entries(7, service, 7))
 }
+pub(super) fn verify_draft_default(file: &File, service: u32) -> Result<()> {
+    if read_attribute(file, b"system.posix_acl_default\0")? != entries(7, service, 4) {
+        return Err(MailError::Invalid(
+            "unsafe-storage: draft default ACL differs",
+        ));
+    }
+    Ok(())
+}
 pub(super) fn grant_draft_default(file: &File, service: u32) -> Result<()> {
     let attribute = b"system.posix_acl_default\0";
     let expected = entries(7, service, 4);
@@ -243,11 +251,23 @@ pub(super) fn grant_draft_default(file: &File, service: u32) -> Result<()> {
         Err(error) => Err(error),
     }
 }
-pub(crate) fn grant_ancestor(file: &File, service: u32, access: u16, nominal: u32) -> Result<()> {
+fn ancestor_entries(service: u32, access: u16, nominal: u32) -> Vec<u8> {
     let mut bytes = entries((nominal >> 6 & 7) as u16, service, access);
     bytes[22..24].copy_from_slice(&((nominal >> 3 & 7) as u16).to_le_bytes());
     bytes[38..40].copy_from_slice(&((nominal & 7) as u16).to_le_bytes());
     bytes[30..32].copy_from_slice(&(access | ((nominal >> 3 & 7) as u16)).to_le_bytes());
+    bytes
+}
+
+pub(crate) fn verify_ancestor(file: &File, service: u32, access: u16, nominal: u32) -> Result<()> {
+    if read(file)? != ancestor_entries(service, access, nominal) {
+        return Err(MailError::Invalid("unsafe-storage: ancestor ACL differs"));
+    }
+    Ok(())
+}
+
+pub(crate) fn grant_ancestor(file: &File, service: u32, access: u16, nominal: u32) -> Result<()> {
+    let bytes = ancestor_entries(service, access, nominal);
     match read(file) {
         Ok(mut previous) => {
             if previous == bytes {
@@ -302,4 +322,43 @@ pub(super) fn remove_grants(file: &File) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    /// ´claim:loophome:mail-ancestor-verification-never-repairs-drift´
+    /// ´test:unit:mail-ancestor-verification-never-repairs-drift´
+    #[test]
+    fn mail_ancestor_verification_never_repairs_drift() {
+        let path = std::env::temp_dir().join(format!("mail-ancestor-{}", std::process::id()));
+        std::fs::create_dir(&path).expect("fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o711)).expect("mode");
+        let file = File::open(&path).expect("ancestor");
+        let service = nix::unistd::geteuid().as_raw() + 1;
+        let before = file.metadata().expect("metadata");
+        assert!(verify_ancestor(&file, service, 5, 0o711).is_err());
+        let after = file.metadata().expect("metadata");
+        assert_eq!(
+            (before.ctime(), before.ctime_nsec(), before.mode()),
+            (after.ctime(), after.ctime_nsec(), after.mode())
+        );
+        assert!(read(&file).is_err());
+        grant_ancestor(&file, service, 5, 0o711).expect("install grant");
+        verify_ancestor(&file, service, 5, 0o711).expect("positive verification");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o711))
+            .expect("drift mask");
+        let bytes = read(&file).expect("drifted ACL");
+        let before = file.metadata().expect("metadata");
+        assert!(verify_ancestor(&file, service, 5, 0o711).is_err());
+        assert_eq!(read(&file).expect("retained ACL"), bytes);
+        let after = file.metadata().expect("metadata");
+        assert_eq!(
+            (before.ctime(), before.ctime_nsec(), before.mode()),
+            (after.ctime(), after.ctime_nsec(), after.mode())
+        );
+        std::fs::remove_dir(path).expect("cleanup");
+    }
 }

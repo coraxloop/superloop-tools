@@ -21,14 +21,11 @@ use monitor_lock::parse_lock;
 // Retain the capture's cost shape without scanning correspondence.
 #[derive(Default)]
 struct Cost {
-    scans: u64,
-    journal_bytes: u64,
-    receipt_names: u64,
     wall: Duration,
 }
 impl Cost {
     fn value(&self) -> Value {
-        json!({"scans":self.scans,"journal_bytes":self.journal_bytes,"receipt_names":self.receipt_names,"scan_wall_ms":u64::try_from(self.wall.as_millis()).unwrap_or(u64::MAX)})
+        json!({"scan_wall_ms":u64::try_from(self.wall.as_millis()).unwrap_or(u64::MAX)})
     }
 }
 
@@ -94,7 +91,6 @@ pub enum FeedError {
     /// The accepted event size could not be stored after a complete delta.
     OffsetState,
     /// The durable letter stream or its follower position is invalid.
-    LetterSource,
     /// The budget delivery cursor is malformed or cannot be stored safely.
     BudgetNotice,
 }
@@ -111,7 +107,6 @@ impl FeedError {
             Self::LastMessageRead => "last_message_read_failure",
             Self::Relay => "relay_failure",
             Self::OffsetState => "offset_state_failure",
-            Self::LetterSource => "letter_source_failure",
             Self::BudgetNotice => "budget_notice_failure",
         }
     }
@@ -138,9 +133,6 @@ impl FeedError {
             Self::Relay => "superloop-lane: relay_failure: feeder document publication failed\n",
             Self::OffsetState => {
                 "superloop-lane: offset_state_failure: accepted event offset could not be stored\n"
-            }
-            Self::LetterSource => {
-                "superloop-lane: letter_source_failure: durable letter stream or position is invalid\n"
             }
             Self::BudgetNotice => {
                 "superloop-lane: budget_notice_failure: budget delivery cursor is invalid\n"
@@ -211,7 +203,7 @@ where
     }
 
     let run_dir = run_dir.ok_or_else(usage_exit)?;
-    // Access failures belong to the runtime's named outbox refusal, not argv usage.
+    // Access failures belong to runtime evidence checks, not argv usage.
     match std::fs::metadata(&run_dir) {
         Ok(meta) if meta.is_dir() => {}
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}

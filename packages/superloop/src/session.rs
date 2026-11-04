@@ -87,8 +87,7 @@ struct HeartbeatInput {
 )]
 enum Letters {
     Empty,
-    Unread(String),
-    History(String),
+    Notice,
     Failed(String),
 }
 
@@ -96,8 +95,7 @@ impl Letters {
     fn listing(&self) -> Listing {
         match self {
             Self::Empty => Listing::Empty,
-            Self::Unread(text) => Listing::Unread(text.clone()),
-            Self::History(text) => Listing::History(text.clone()),
+            Self::Notice => Listing::Notice,
             Self::Failed(text) => Listing::Failed(text.clone()),
         }
     }

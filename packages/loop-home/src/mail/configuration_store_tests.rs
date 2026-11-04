@@ -189,3 +189,62 @@ fn mail_configuration_replacement_rechecks_ancestor_grants() {
     assert!(store.publish().is_err());
     assert_eq!(fs::read(fixture.path()).expect("unchanged source"), before);
 }
+
+/// ´claim:loophome:mail-configuration-preview-never-creates-or-repairs-state´
+/// ´test:unit:mail-configuration-preview-never-creates-or-repairs-state´
+#[test]
+fn mail_configuration_preview_never_creates_or_repairs_state() {
+    use std::os::unix::fs::MetadataExt as _;
+    let fixture = Fixture::new();
+    acl::install(
+        &File::open(&fixture.private).unwrap(),
+        fixture.service,
+        true,
+    )
+    .unwrap();
+    assert!(ConfigurationStore::open_existing(&fixture.private, fixture.service).is_err());
+    assert!(!fixture.private.join(".config").exists());
+    drop(fixture.open());
+    let paths = [
+        fixture.private.clone(),
+        fixture.private.join(".config"),
+        fixture.private.join(".config/mail"),
+        fixture.private.join(".config/mail/loop.lock"),
+        fixture.path(),
+    ];
+    let stamp = |path: &PathBuf| {
+        let info = fs::metadata(path).expect("metadata");
+        (
+            info.dev(),
+            info.ino(),
+            info.mode(),
+            info.ctime(),
+            info.ctime_nsec(),
+        )
+    };
+    let before = paths.each_ref().map(stamp);
+    let bytes = fs::read(fixture.path()).unwrap();
+    drop(
+        ConfigurationStore::open_existing(&fixture.private, fixture.service)
+            .expect("existing state"),
+    );
+    assert_eq!(paths.each_ref().map(stamp), before);
+    assert_eq!(fs::read(fixture.path()).unwrap(), bytes);
+    for path in [&paths[0], &paths[1], &paths[2], &paths[4]] {
+        let nominal = if path == &paths[4] { 0o600 } else { 0o700 };
+        fs::set_permissions(path, fs::Permissions::from_mode(nominal)).unwrap();
+        let before = stamp(path);
+        assert!(ConfigurationStore::open_existing(&fixture.private, fixture.service).is_err());
+        assert_eq!(stamp(path), before);
+        acl::install(
+            &File::open(path).unwrap(),
+            fixture.service,
+            path != &paths[4],
+        )
+        .unwrap();
+    }
+    fs::remove_file(&paths[3]).unwrap();
+    assert!(ConfigurationStore::open_existing(&fixture.private, fixture.service).is_err());
+    assert!(!paths[3].exists());
+    assert_eq!(fs::read(fixture.path()).unwrap(), bytes);
+}

@@ -84,6 +84,17 @@ pub(super) fn enter(home: &Path, settings: &Settings) -> Result<()> {
     Ok(())
 }
 fn service(home: &Path, settings: &Settings) -> Result<Service> {
+    let registry = crate::load_registry(&home.join(".config/loops/registry.toml"))
+        .map_err(|_| MailError::Invalid("invalid-directory: registry"))?;
+    for row in registry.rows(home) {
+        // Search is sufficient: the service cannot list the loop-owned ancestor.
+        // Unavailable actors are reported by inventory without stopping other loops.
+        if io::search_directory(&row.home.join(".mail-migration-hold")).is_ok() {
+            return Err(MailError::Invalid(
+                "invalid-directory: retained migration history requires reconciliation before mail service",
+            ));
+        }
+    }
     if !settings.crash_consistent_rename || !settings.durable_sync {
         return Err(MailError::Invalid(
             "unsafe-storage: durability is not established",
@@ -106,7 +117,52 @@ fn service(home: &Path, settings: &Settings) -> Result<Service> {
     let journal = Journal::open(io::absolute(&home.join(".var/loops/.mail-service"), true)?)?;
     Ok(Service::new(directory, journal))
 }
+fn migration_inventory(arguments: &[OsString]) -> Result<()> {
+    let [_, home, service] = arguments else {
+        return Err(MailError::Invalid(
+            "usage: private migration inventory HOME SERVICE",
+        ));
+    };
+    let home = PathBuf::from(home);
+    let service = service
+        .to_str()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(MailError::Invalid(
+            "unsafe-storage: migration service identity",
+        ))?;
+    let settings = settings(&home)?;
+    if Uid::effective().as_raw() != service || settings.uid != service {
+        return Err(MailError::Invalid(
+            "unsafe-storage: migration requires the service identity",
+        ));
+    }
+    let inventory = Directory {
+        owner: io::search_directory(&home)?.metadata()?.uid(),
+        home,
+        service,
+        durability: Durability {
+            crash_consistent_rename: settings.crash_consistent_rename,
+            durable_sync: settings.durable_sync,
+        },
+    }
+    .inventory()?;
+    if !inventory.failures.is_empty() {
+        return Err(MailError::Invalid(
+            "unsafe-storage: migration endpoint inventory has failures",
+        ));
+    }
+    Ok(())
+}
 fn run(arguments: &[OsString], report: &mut dyn std::io::Write) -> Result<()> {
+    if arguments
+        .first()
+        .is_some_and(|mode| mode == "_mail-migration-inventory")
+    {
+        return migration_inventory(arguments);
+    }
+    if arguments.first().is_some_and(|mode| mode == "migrate") {
+        return super::migration_cutover::run(&arguments[1..], report);
+    }
     let [mode, home] = arguments else {
         return Err(MailError::Invalid(
             "usage: superloop-mail {serve|scan|initialize} HOST_HOME",
@@ -160,6 +216,20 @@ fn run(arguments: &[OsString], report: &mut dyn std::io::Write) -> Result<()> {
 }
 /// Execute delivery or report an explicit refusal without enabling a unit.
 pub fn entry(arguments: &[OsString], report: &mut dyn std::io::Write) -> u8 {
+    if arguments.first().is_some_and(|mode| {
+        ["_mail-configure", "_mail-journal"]
+            .iter()
+            .any(|word| mode == *word)
+    }) {
+        return super::provision::entry(arguments, &mut std::io::sink(), report);
+    }
+    if arguments.first().is_some_and(|mode| {
+        ["_mail-worker-state", "_mail-worker-pins"]
+            .iter()
+            .any(|word| mode == *word)
+    }) {
+        return super::worker_provision::entry(arguments, report);
+    }
     match run(arguments, report) {
         Ok(()) => 0,
         Err(error) => {

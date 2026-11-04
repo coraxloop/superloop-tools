@@ -4190,3 +4190,72 @@ fn descriptor_run_path_stays_on_opened_ancestor_after_substitution() {
         fs::metadata(decoy.join("runs/R")).expect("decoy run").ino()
     );
 }
+
+/// ´claim:loophome:entry-command-inventory-has-no-mail-words´
+/// ´test:crate:entry-command-inventory-has-no-mail-words´
+#[test]
+fn entry_command_inventory_has_no_mail_words() {
+    let words = crate::app::INTERCEPTED_WORDS;
+    // Dispatch indexes this inventory; reordering must update and review both.
+    assert_eq!(
+        words,
+        [
+            "_supervise-command",
+            "bind-custody",
+            "_mail-worker-birth",
+            "_mail-worker-state",
+            "_mail-worker-pins",
+            "_mail-provision",
+            "_mail-configure",
+            "_mail-journal",
+            "_mail-group",
+            "ensure-roots",
+            "inspect-roots",
+            "lane-install-private",
+        ]
+    );
+    assert_eq!(
+        words
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        words.len()
+    );
+    assert!(words.iter().all(|word| !word.starts_with("letters")));
+}
+
+/// ´claim:loophome:words-outside-entry-inventory-reach-ordinary-execution´
+/// ´test:crate:words-outside-entry-inventory-reach-ordinary-execution´
+#[test]
+fn words_outside_entry_inventory_reach_ordinary_execution() {
+    let candidates = [
+        "letters",
+        "letters-private",
+        "letters-group",
+        "letters-list",
+        "provision",
+        "ls",
+        "cat",
+        "mv",
+        "arbitrary-command",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(
+        crate::app::INTERCEPTED_WORDS
+            .iter()
+            .map(|word| format!("{word}-ordinary")),
+    );
+    for command in candidates {
+        assert!(!crate::app::INTERCEPTED_WORDS.contains(&command.as_str()));
+        for settings in [false, true] {
+            let (_directory, plan) = ordinary_entry_fixture(settings, &[&command, "argument"]);
+            let execution = plan.inner_script.lines().last().expect("execution");
+            assert!(execution.starts_with("exec setpriv "), "{execution}");
+            assert!(
+                execution.ends_with(&format!("{command} argument")),
+                "{execution}"
+            );
+        }
+    }
+}

@@ -1697,14 +1697,15 @@ mod tests {
             fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700))
                 .expect("private entry mode");
             let executable = private.path().join("entry-test");
-            fs::copy(std::env::current_exe().expect("test image"), &executable)
-                .expect("pin fixture image");
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
-                .expect("private executable mode");
-            let output = std::process::Command::new(&executable)
-                .args(["--exact", "launch::retire::tests::ordinary_retirement_admits_measured_never_started_preparation", "--nocapture"])
-                .env("SUPERLOOP_RETIRE_MAIL_FIXTURE", "1")
-                .output().expect("private entry test");
+            let image =
+                fs::read(std::env::current_exe().expect("test image")).expect("read fixture image");
+            crate::fixture_exec::write_executable(&executable, &image)
+                .expect("close fixture image writer before exec");
+            let output = crate::fixture_exec::output(
+                std::process::Command::new(&executable)
+                    .args(["--exact", "launch::retire::tests::ordinary_retirement_admits_measured_never_started_preparation", "--nocapture"])
+                    .env("SUPERLOOP_RETIRE_MAIL_FIXTURE", "1"),
+            ).expect("private entry test");
             assert!(
                 output.status.success(),
                 "{}{}",

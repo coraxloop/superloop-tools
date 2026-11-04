@@ -339,7 +339,7 @@ fn parse_row(value: &toml::Value, index: usize) -> Result<Row, LoopError> {
 }
 
 /// Parse one bounded registry source after its reader has pinned the file.
-fn parse_registry(source: &str) -> Result<Registry, LoopError> {
+pub(crate) fn parse_registry(source: &str) -> Result<Registry, LoopError> {
     let parsed: toml::Value = toml::from_str(source).map_err(|_error| malformed())?;
     let root = table(&parsed, "loop registry")?;
     keys(root, &["namespace", "version", "loops"], "registry")?;

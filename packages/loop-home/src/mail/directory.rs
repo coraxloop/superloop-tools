@@ -16,6 +16,13 @@ use std::path::PathBuf;
 /// Implementation bound on loop mail configuration; the specification declares no maximum.
 pub(super) const MAX_CONFIGURATION_BYTES: u64 = 1_048_576;
 
+fn directory_bound(error: MailError, reason: &'static str) -> MailError {
+    match error {
+        MailError::Invalid(found) if found.starts_with("oversize:") => MailError::Invalid(reason),
+        error => error,
+    }
+}
+
 pub(super) struct Snapshot {
     pub config: Configuration,
     pub digest: String,
@@ -54,11 +61,11 @@ impl Snapshot {
                 MailError::from(error)
             }
         })?;
-        let bytes = io::bounded(&lock, MAX_CONFIGURATION_BYTES).map_err(|error| match error {
-            MailError::Invalid(reason) if reason.starts_with("oversize:") => {
-                MailError::Invalid("invalid-directory: mail configuration exceeds its bound")
-            }
-            error => error,
+        let bytes = io::bounded(&lock, MAX_CONFIGURATION_BYTES).map_err(|error| {
+            directory_bound(
+                error,
+                "invalid-directory: mail configuration exceeds its bound",
+            )
         })?;
         let info = lock.metadata()?;
         Ok(Self {
@@ -77,16 +84,14 @@ impl Snapshot {
         acl::verify(&file, self.service, false)?;
         if (info.dev(), info.ino()) != self.identity
             || info.uid() != self.owner
-            || digest(&io::bounded(&file, MAX_CONFIGURATION_BYTES).map_err(
-                |error| match error {
-                    MailError::Invalid(reason) if reason.starts_with("oversize:") => {
-                        MailError::Invalid(
-                            "invalid-directory: mail configuration exceeds its bound",
-                        )
-                    }
-                    error => error,
-                },
-            )?) != self.digest
+            || digest(
+                &io::bounded(&file, MAX_CONFIGURATION_BYTES).map_err(|error| {
+                    directory_bound(
+                        error,
+                        "invalid-directory: mail configuration exceeds its bound",
+                    )
+                })?,
+            ) != self.digest
         {
             return Err(MailError::Invalid(
                 "changed-source: configuration replaced before acceptance",
@@ -111,6 +116,8 @@ pub(super) struct Directory {
     pub durability: Durability,
 }
 pub(super) struct Inventory {
+    /// Loop names from this inventory's fresh trusted registry read.
+    pub loops: BTreeSet<String>,
     pub actors: BTreeMap<Address, Actor>,
     /// Endpoints excluded from this scan, each failing closed for itself only.
     pub failures: Vec<String>,
@@ -129,7 +136,9 @@ impl Decision {
         let info = file.metadata()?;
         if (info.dev(), info.ino()) != self.registry_identity
             || info.mode() & 0o022 != 0
-            || digest(&io::bounded(&file, 65_536)?) != self.registry_digest
+            || digest(&io::bounded(&file, 65_536).map_err(|error| {
+                directory_bound(error, "invalid-directory: loop registry exceeds its bound")
+            })?) != self.registry_digest
         {
             return Err(MailError::Invalid(
                 "changed-source: registry replaced before acceptance",
@@ -155,7 +164,9 @@ impl Directory {
         if info.uid() != self.owner || info.mode() & 0o022 != 0 {
             return Err(MailError::Invalid("unsafe-storage: registry custody"));
         }
-        let bytes = io::bounded(&file, 65_536)?;
+        let bytes = io::bounded(&file, 65_536).map_err(|error| {
+            directory_bound(error, "invalid-directory: loop registry exceeds its bound")
+        })?;
         let mut reader = io::absolute(&path, false)?;
         let registry = crate::registry::load_registry_from_file(&mut reader)
             .map_err(|_| MailError::Invalid("invalid-directory: global registry"))?;
@@ -201,7 +212,12 @@ impl Directory {
         {
             return Err(MailError::Invalid("unsafe-storage: allocation owner"));
         }
-        let allocation_bytes = io::bounded(&allocation_file, 65_536)?;
+        let allocation_bytes = io::bounded(&allocation_file, 65_536).map_err(|error| {
+            directory_bound(
+                error,
+                "invalid-directory: allocations ledger exceeds its bound",
+            )
+        })?;
         let allocations = Allocations::parse(
             std::str::from_utf8(&allocation_bytes)
                 .map_err(|_| MailError::Invalid("invalid-directory: allocation encoding"))?,
@@ -244,6 +260,7 @@ impl Directory {
         let allocations = self.allocations()?;
         let rows = registry.rows(&self.home);
         self.verify_credentials(&rows, &allocations)?;
+        let loops = rows.iter().map(|row| row.name.clone()).collect();
         let mut actors = BTreeMap::new();
         let mut identities = BTreeSet::from([self.service, self.owner]);
         let mut failures = Vec::new();
@@ -317,6 +334,7 @@ impl Directory {
             }
         }
         Ok(Inventory {
+            loops,
             actors,
             failures,
             retired,

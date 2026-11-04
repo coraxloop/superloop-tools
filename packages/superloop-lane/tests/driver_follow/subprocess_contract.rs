@@ -1273,6 +1273,11 @@ fn retired_mail_sidecars_do_not_enter_follow_output() {
     assert!(output.status.success());
     let capture = data_document(&output);
     let records = capture["records"].as_array().expect("records");
+    let state = records
+        .iter()
+        .find(|record| record["kind"] == "state")
+        .expect("state");
+    assert_eq!(state["cost"], serde_json::json!({"scan_wall_ms":0}));
     assert!(records.iter().any(|record| record["kind"] == "delta"));
     assert!(records.iter().any(|record| record["kind"] == "finished"));
     assert!(records.iter().all(|record| record["kind"] != "letter"));

@@ -29,6 +29,10 @@ pub const SUMMARY_MAX_BYTES: u64 = 4_096;
 /// Implementation constant bounding one delivery record, including exact paths.
 /// The specification does not declare this bound; reserved scratch uses it.
 pub const RECORD_MAX_BYTES: u64 = 65_536;
+/// Implementation bound for the protected reservation pin projection, which holds
+/// every live steering and reply binding of every active worker; retirement
+/// releases a worker's family.
+pub const RESERVATION_PINS_MAX_BYTES: u64 = 1_048_576;
 const ZERO_DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Transport error without letter contents.
@@ -503,8 +507,11 @@ impl Journal {
     }
 
     fn read_reservation_pins(&self) -> Result<ReservationPins> {
-        let pins: ReservationPins =
-            store::read(&self.root, "reservation-pins.toml", RECORD_MAX_BYTES)?;
+        let pins: ReservationPins = store::read(
+            &self.root,
+            "reservation-pins.toml",
+            RESERVATION_PINS_MAX_BYTES,
+        )?;
         if pins.version != 1 {
             return Err(MailError::Invalid("invalid reservation pin projection"));
         }
@@ -529,7 +536,7 @@ impl Journal {
         } else {
             pins.deliveries.remove(&key);
         }
-        if store::encode(&pins)?.len() as u64 > RECORD_MAX_BYTES {
+        if store::encode(&pins)?.len() as u64 > RESERVATION_PINS_MAX_BYTES {
             return Err(MailError::Capacity);
         }
         store::write(&self.root, &self.root, "reservation-pins.toml", &pins, true)
@@ -546,16 +553,30 @@ impl Journal {
                     match store::open(directory, target, false) {
                         Ok(_committed) => {
                             if records {
-                                let committed: Record =
-                                    store::read(directory, target, RECORD_MAX_BYTES)?;
+                                let committed: Record = store::read(
+                                    directory,
+                                    target,
+                                    if target == "reservation-pins.toml" {
+                                        RESERVATION_PINS_MAX_BYTES
+                                    } else {
+                                        RECORD_MAX_BYTES
+                                    },
+                                )?;
                                 committed.validate()?;
                             } else if target.starts_with("cleanup-")
                                 || target.starts_with("prepare-")
                                 || target.starts_with("refusal-")
                                 || target == "reservation-pins.toml"
                             {
-                                let _intent: toml::Value =
-                                    store::read(directory, target, RECORD_MAX_BYTES)?;
+                                let _intent: toml::Value = store::read(
+                                    directory,
+                                    target,
+                                    if target == "reservation-pins.toml" {
+                                        RESERVATION_PINS_MAX_BYTES
+                                    } else {
+                                        RECORD_MAX_BYTES
+                                    },
+                                )?;
                             } else if target != "state.toml" && target != "checkpoint.toml" {
                                 return Err(MailError::Invalid("unknown root replacement scratch"));
                             }
@@ -588,8 +609,15 @@ impl Journal {
                         {
                             // The adapter performs no restoration until this intent's
                             // atomic publication and directory sync have returned.
-                            let _intent: toml::Value =
-                                store::read(directory, &name, RECORD_MAX_BYTES)?;
+                            let _intent: toml::Value = store::read(
+                                directory,
+                                &name,
+                                if target == "reservation-pins.toml" {
+                                    RESERVATION_PINS_MAX_BYTES
+                                } else {
+                                    RECORD_MAX_BYTES
+                                },
+                            )?;
                             store::remove(directory, &name)?;
                         }
                         Err(error) => return Err(error),
@@ -694,7 +722,7 @@ impl Journal {
     /// # Errors
     /// Refuses backpressure without evicting pinned evidence or pending payloads.
     pub fn capacity(&self, staging_bytes: u64) -> Result<()> {
-        let scratch = 3 * RECORD_MAX_BYTES + 3 * SUMMARY_MAX_BYTES;
+        let scratch = 3 * RECORD_MAX_BYTES + 3 * SUMMARY_MAX_BYTES + RESERVATION_PINS_MAX_BYTES;
         if store::size(&self.root)?
             .checked_add(scratch)
             .is_none_or(|n| n > JOURNAL_MAX_BYTES)
@@ -968,6 +996,14 @@ impl Journal {
     /// # Errors
     /// Refuses corrupt metadata, changed compacted records and storage failure.
     pub fn prune(&mut self, now: &Instant, pins: &Pins) -> Result<u64> {
+        self.prune_projected(now, |_| Ok(pins.clone()))
+    }
+    /// Project inventory pins from the compactor's single record read under admission.
+    pub(super) fn prune_projected(
+        &mut self,
+        now: &Instant,
+        project: impl FnOnce(&[Record]) -> Result<Pins>,
+    ) -> Result<u64> {
         let _admission = reservation_admission(&self.root)?;
         let live_reservations = self.reservation_pins()?;
         self.finish_compaction()?;
@@ -984,7 +1020,9 @@ impl Journal {
         store::write(&self.root, &self.root, "state.toml", &observed, true)?;
         self.state = observed;
         let mut removed = 0;
-        for record in self.records()? {
+        let records = self.records()?;
+        let pins = project(&records)?;
+        for record in records {
             let Some(completed) = &record.completed else {
                 continue;
             };
@@ -1034,13 +1072,10 @@ impl Journal {
 }
 
 /// Serialize external reservation publication with compaction on the pinned
-/// service directory. Each acquisition opens a distinct file description.
+/// service directory. Holders are bounded critical sections, so acquisition waits.
 fn reservation_admission(root: &File) -> Result<Flock<File>> {
-    Flock::lock(
-        store::open(root, ".", true)?,
-        FlockArg::LockExclusiveNonblock,
-    )
-    .map_err(|(_, error)| MailError::from(error))
+    Flock::lock(store::open(root, ".", true)?, FlockArg::LockExclusive)
+        .map_err(|(_, error)| MailError::from(error))
 }
 
 /// Verify a terminal delivery and durably pin it before exposing its binding.
@@ -1055,6 +1090,31 @@ pub fn bind_reservation<T>(
     family: &str,
     reference: &str,
     instant: &Instant,
+    verify: impl FnOnce(&Record) -> Result<T>,
+) -> Result<T> {
+    reservation_binding(root, family, reference, instant, false, verify)
+}
+
+/// Verify an existing delivery pin without creating or replacing any evidence.
+///
+/// # Errors
+/// Refuses unavailable delivery evidence, an absent pin or a changed binding.
+pub fn verify_reservation<T>(
+    root: &File,
+    family: &str,
+    reference: &str,
+    instant: &Instant,
+    verify: impl FnOnce(&Record) -> Result<T>,
+) -> Result<T> {
+    reservation_binding(root, family, reference, instant, true, verify)
+}
+
+fn reservation_binding<T>(
+    root: &File,
+    family: &str,
+    reference: &str,
+    instant: &Instant,
+    verify_only: bool,
     verify: impl FnOnce(&Record) -> Result<T>,
 ) -> Result<T> {
     store::private(root, true)?;
@@ -1085,7 +1145,8 @@ pub fn bind_reservation<T>(
         ));
     }
     let verified = verify(&record)?;
-    let mut pins: ReservationPins = store::read(root, "reservation-pins.toml", RECORD_MAX_BYTES)?;
+    let mut pins: ReservationPins =
+        store::read(root, "reservation-pins.toml", RESERVATION_PINS_MAX_BYTES)?;
     if pins.version != 1 {
         return Err(MailError::Invalid("invalid reservation pin projection"));
     }
@@ -1103,8 +1164,16 @@ pub fn bind_reservation<T>(
             "invalid-directory: reservation delivery changed",
         ));
     }
+    if verify_only {
+        if pins.deliveries.get(&key) != Some(instant) {
+            return Err(MailError::Invalid(
+                "invalid-directory: reservation delivery is not pinned",
+            ));
+        }
+        return Ok(verified);
+    }
     pins.deliveries.insert(key, instant.clone());
-    if store::encode(&pins)?.len() as u64 > RECORD_MAX_BYTES {
+    if store::encode(&pins)?.len() as u64 > RESERVATION_PINS_MAX_BYTES {
         return Err(MailError::Capacity);
     }
     store::write(root, root, "reservation-pins.toml", &pins, true)?;
@@ -1119,7 +1188,7 @@ pub fn release_reservation_family(root: &File, family: &str) -> Result<()> {
     store::private(root, true)?;
     let _admission = reservation_admission(root)?;
     let mut pins: ReservationPins =
-        match store::read(root, "reservation-pins.toml", RECORD_MAX_BYTES) {
+        match store::read(root, "reservation-pins.toml", RESERVATION_PINS_MAX_BYTES) {
             Ok(pins) => pins,
             Err(MailError::Io(error))
                 if error.kind() == io::ErrorKind::NotFound && store::names(root)?.is_empty() =>

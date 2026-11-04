@@ -229,7 +229,7 @@ impl Fixture {
         fs::write(
             self.table(),
             format!(
-                "{}\n40000\trw1\tclaude\tabc123\t2023-11-14T22:13:20Z\n",
+                "{}\n40000\trw1\tclaude\tabc123\t2023-11-14T22:13:20Z\t1\n",
                 table::HEADER
             ),
         )
@@ -787,7 +787,10 @@ fn identity_and_launch_records_are_byte_stable() {
     ] {
         fs::write(
             fixture.table(),
-            format!("{}\n40000\trw1\tclaude\tabc123\t{stamp}\n", table::HEADER),
+            format!(
+                "{}\n40000\trw1\tclaude\tabc123\t{stamp}\t1\n",
+                table::HEADER
+            ),
         )
         .expect("write invalid table");
         let error = table::read_rows(&fixture.table()).expect_err("invalid start refused");
@@ -797,7 +800,10 @@ fn identity_and_launch_records_are_byte_stable() {
     for stamp in ["", "2024-02-29T00:00:00Z"] {
         fs::write(
             fixture.table(),
-            format!("{}\n40000\trw1\tclaude\tabc123\t{stamp}\n", table::HEADER),
+            format!(
+                "{}\n40000\trw1\tclaude\tabc123\t{stamp}\t1\n",
+                table::HEADER
+            ),
         )
         .expect("write valid table");
         let rows = table::read_rows(&fixture.table()).expect("valid start");
@@ -964,7 +970,11 @@ fn prepare_allocates_appends_the_row_and_clones_at_the_commit() {
     );
     assert_eq!(
         fs::read_to_string(fixture.table()).expect("run table"),
-        format!("{}\n40000\trw1\t\tabc123\t\n", table::HEADER)
+        format!(
+            "{}\n40000\trw1\t\tabc123\t\t{}\n",
+            table::HEADER,
+            table::read_rows(&fixture.table()).expect("claimed row")[0].claimed
+        )
     );
     let script = runner.script("layout-install");
     assert!(script.starts_with("set -e\nmkdir -p "));
@@ -1045,11 +1055,11 @@ fn prepare_retains_mail_uid_history_after_the_run_table_is_empty() {
             "reserve",
             &loop_home::mail::birth::Identity::for_reservation(
                 40001,
-                "worker-run:rw1:40001".into()
+                format!("worker-run:rw1:40001:{}", row.claimed)
             )
             .name,
             "40001",
-            "worker-run:rw1:40001"
+            &format!("worker-run:rw1:40001:{}", row.claimed)
         ]
     );
     assert!(receipt.exists());
@@ -1294,6 +1304,7 @@ fn sequential_prepares_take_ascending_slots_and_a_live_uid_is_refused() {
             driver: String::new(),
             commit: String::new(),
             started: String::new(),
+            claimed: "1".into(),
         },
     )
     .expect_err("a duplicate uid is refused");
@@ -1371,8 +1382,9 @@ fn launch_installs_its_rows_through_the_namespace_and_drops_last() {
     assert_eq!(
         fs::read_to_string(fixture.table()).expect("run table"),
         format!(
-            "{}\n40000\trw1\tclaude\tabc123\t2023-11-14T22:13:20Z\n",
-            table::HEADER
+            "{}\n40000\trw1\tclaude\tabc123\t2023-11-14T22:13:20Z\t{}\n",
+            table::HEADER,
+            table::read_rows(&fixture.table()).expect("claimed row")[0].claimed
         )
     );
     let drop_argv = runner.commands.last().expect("the drop").argv.join(" ");
@@ -2040,6 +2052,54 @@ fn close_releases_the_row_only_after_mail_retirement() {
             .expect("text")
             .contains("uid=released")
     );
+}
+
+/// ´claim:runworker:close-and-reprepare-reserve-distinct-worker-birth-names´
+/// ´test:crate:close-and-reprepare-reserve-distinct-worker-birth-names´
+#[test]
+fn close_and_reprepare_reserve_distinct_worker_birth_names() {
+    let fixture = Fixture::new("rebirth");
+    let prepare = parse_invocation(fixture.prepare_arguments()).expect("prepare");
+    let close = parse_invocation(["close", "alpha", "rw1"]).expect("close");
+    let mut runner = FakeNamespace::head("abc123\n");
+    execute(
+        &prepare,
+        &fixture.environment(),
+        &mut runner,
+        &mut Vec::new(),
+    )
+    .expect("first preparation");
+    let first = table::read_rows(&fixture.table())
+        .expect("first row")
+        .remove(0);
+    execute(&close, &fixture.environment(), &mut runner, &mut Vec::new()).expect("close");
+    runner.replies.push_back(b"abc123\n".to_vec());
+    execute(
+        &prepare,
+        &fixture.environment(),
+        &mut runner,
+        &mut Vec::new(),
+    )
+    .expect("second preparation");
+    let second = table::read_rows(&fixture.table())
+        .expect("second row")
+        .remove(0);
+    assert_eq!(first.uid, second.uid);
+    assert_ne!(first.claimed, second.claimed);
+    let names = runner
+        .commands
+        .iter()
+        .filter(|command| command.label == "mail-birth-reserve")
+        .map(|command| command.argv[command.argv.len() - 3].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), 2);
+    assert_ne!(names[0], names[1]);
+    let retired = runner
+        .commands
+        .iter()
+        .find(|command| command.label == "mail-birth-retire")
+        .expect("retirement command");
+    assert_eq!(retired.argv[retired.argv.len() - 3], names[0]);
 }
 
 /// ´claim:runworker:close-serializes-with-the-whole-launch-lifetime´

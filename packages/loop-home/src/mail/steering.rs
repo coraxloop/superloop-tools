@@ -29,7 +29,7 @@ pub fn bind(
     step: &str,
     delivery: &Instant,
 ) -> Result<(Record, Vec<u8>)> {
-    bind_direction(home, loop_name, identity, step, delivery, false)
+    bind_direction(home, loop_name, identity, step, delivery, false, false)
 }
 
 /// Bind a selected worker-to-loop reply as data, without granting steering authority.
@@ -43,7 +43,20 @@ pub fn reply(
     step: &str,
     delivery: &Instant,
 ) -> Result<(Record, Vec<u8>)> {
-    bind_direction(home, loop_name, identity, step, delivery, true)
+    bind_direction(home, loop_name, identity, step, delivery, true, false)
+}
+/// Verify an existing steering binding without publishing its pin again.
+///
+/// # Errors
+/// Refuses changed delivery evidence or an absent reservation pin.
+pub fn verify(
+    home: &Path,
+    loop_name: &str,
+    identity: &Identity,
+    step: &str,
+    delivery: &Instant,
+) -> Result<(Record, Vec<u8>)> {
+    bind_direction(home, loop_name, identity, step, delivery, false, true)
 }
 fn bind_direction(
     home: &Path,
@@ -52,6 +65,7 @@ fn bind_direction(
     step: &str,
     delivery: &Instant,
     reply: bool,
+    verify_only: bool,
 ) -> Result<(Record, Vec<u8>)> {
     if step.is_empty()
         || step.len() > 64
@@ -61,7 +75,7 @@ fn bind_direction(
     {
         return Err(MailError::Invalid("invalid-name: round step"));
     }
-    let _lifetime = worker_provision::hold_active(home, loop_name, identity)?;
+    let _lifetime = worker_provision::hold_active(home, loop_name, identity, verify_only)?;
     let settings = command::settings(home)?;
     command::enter(home, &settings)?;
     let directory = Directory {
@@ -73,7 +87,15 @@ fn bind_direction(
             durable_sync: settings.durable_sync,
         },
     };
-    bind_service(&directory, loop_name, identity, step, delivery, reply)
+    bind_service(
+        &directory,
+        loop_name,
+        identity,
+        step,
+        delivery,
+        reply,
+        verify_only,
+    )
 }
 fn bind_service(
     directory: &Directory,
@@ -82,6 +104,7 @@ fn bind_service(
     step: &str,
     delivery: &Instant,
     reply: bool,
+    verify_only: bool,
 ) -> Result<(Record, Vec<u8>)> {
     let worker = Address::parse(&format!("{loop_name}+{}", identity.name))
         .map_err(|_| MailError::Invalid("invalid-name: worker address"))?;
@@ -108,12 +131,17 @@ fn bind_service(
             "invalid-directory: recipient endpoint unavailable",
         ))?;
     let root = io::absolute(&directory.home.join(".var/loops/.mail-service"), true)?;
-    journal::bind_reservation(
+    let resolve = if verify_only {
+        journal::verify_reservation
+    } else {
+        journal::bind_reservation
+    };
+    resolve(
         &root,
         &identity.pin_family(loop_name),
         &format!("{}:{step}", if reply { "reply" } else { "steering" }),
         delivery,
-        |record| {
+        |record: &Record| {
             verified_payload(
                 actor,
                 directory.service,

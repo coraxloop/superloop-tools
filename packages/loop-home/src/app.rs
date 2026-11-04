@@ -1021,6 +1021,22 @@ pub fn lane_install_private_dispatch(
     Ok((lane_bin, forwarded))
 }
 
+/// Helper words intercepted before ordinary grammar; every other word is a command.
+pub(crate) const INTERCEPTED_WORDS: [&str; 12] = [
+    "_supervise-command",
+    "bind-custody",
+    "_mail-worker-birth",
+    "_mail-worker-state",
+    "_mail-worker-pins",
+    "_mail-provision",
+    "_mail-configure",
+    "_mail-journal",
+    "_mail-group",
+    "ensure-roots",
+    "inspect-roots",
+    "lane-install-private",
+];
+
 /// Run `superloop` with an injected external-command runner.
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -1039,10 +1055,12 @@ where
     E: io::Write,
 {
     let mut arguments: Vec<OsString> = arguments.into_iter().map(Into::into).collect();
-    if arguments
-        .first()
-        .is_some_and(|word| word == "_supervise-command")
-    {
+    let intercepted = arguments.first().and_then(|word| {
+        INTERCEPTED_WORDS
+            .iter()
+            .position(|candidate| word == *candidate)
+    });
+    if intercepted == Some(0) {
         arguments.remove(0);
         let argv = match strings(arguments) {
             Ok(argv) => argv,
@@ -1071,50 +1089,25 @@ where
             Err(failure) => publish_error(error, &LoopError::runtime(failure.detail)),
         };
     }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "bind-custody")
-    {
+    if intercepted == Some(1) {
         arguments.remove(0);
         return bind_custody_entry(arguments, error);
     }
-    if arguments.first().is_some_and(|argument| {
-        argument == "_mail-worker-birth"
-            || argument == "_mail-worker-state"
-            || argument == "_mail-worker-pins"
-    }) {
+    if matches!(intercepted, Some(2..=4)) {
         return crate::mail::worker_provision::entry(&arguments, error);
     }
-    if arguments.first().is_some_and(|argument| {
-        [
-            "_mail-provision",
-            "_mail-configure",
-            "_mail-journal",
-            "_mail-group",
-        ]
-        .iter()
-        .any(|mode| argument == *mode)
-    }) {
+    if matches!(intercepted, Some(5..=8)) {
         return crate::mail::provision::entry(&arguments, output, error);
     }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "ensure-roots")
-    {
+    if intercepted == Some(9) {
         arguments.remove(0);
         return ensure_roots_entry(arguments, error);
     }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "inspect-roots")
-    {
+    if intercepted == Some(10) {
         arguments.remove(0);
         return inspect_roots_entry(arguments, error);
     }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "lane-install-private")
-    {
+    if intercepted == Some(11) {
         let (lane_bin, forwarded) = match lane_install_private_dispatch(&arguments) {
             Ok(dispatch) => dispatch,
             Err(refusal) => return publish_error(error, &refusal),

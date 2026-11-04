@@ -42,6 +42,7 @@ pub mod harvest;
 pub mod imports;
 pub mod letters;
 pub mod matrix;
+mod migration_inventory;
 pub mod network_evidence;
 pub(crate) mod probe;
 pub mod reaping;
@@ -7020,6 +7021,54 @@ pub(crate) fn check_pins(
 
 #[cfg(test)]
 mod tests {
+    /// ´test:unit:mail-mount-roots-refuse-peer-source-and-read-only-access´
+    #[test]
+    fn mail_mount_roots_refuse_peer_source_and_read_only_access() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let home = fixture.path();
+        let root = home.join(".var/loops/alpha");
+        let settings = crate::settings::Settings {
+            runs_root: None,
+            backend_argv: std::collections::BTreeMap::default(),
+            driver_argv: Vec::new(),
+            entry_bin: None,
+            driver_bin: None,
+            image_digest: Some("sha256:abc".into()),
+            template_dir: Some(root.join("runner-templates/codex/abc")),
+            resources: None,
+            socket_dir: Some(root.join("sockets")),
+            vendor_hosts: std::collections::BTreeMap::default(),
+            sandbox_mode: "confined".into(),
+            context_threshold: None,
+            retention: "keep".into(),
+            source: String::new(),
+        };
+        for (worker, access, uid, accepted) in [
+            ("peer", "rw", 3000, false),
+            ("mine", "ro", 3000, false),
+            ("mine", "rw", 3000, true),
+            ("mine", "rw", 3001, false),
+        ] {
+            let plan = crate::plan::Plan {
+                home: root.join("worker-homes/R"),
+                driver_dir: root.join("runs/R"),
+                letter: home.join("briefing"),
+                document: serde_json::json!({"loop":"alpha", "worker_uid":uid,
+                    "mail":{"identity":{"name":"mine","uid":3000,"reservation":"test"}},
+                    "mounts":[{"kind":"bind", "source":root.join("workers").join(worker).join("mail"),
+                        "target":"/mail", "access":access}]}),
+            };
+            let result = super::check_mount_roots(&plan, &settings, home);
+            if accepted {
+                result.expect("own writable mail mount");
+                continue;
+            }
+            let error = result.expect_err("unsafe mail mount");
+            assert_eq!(error.kind, "mail-mount");
+            assert_eq!(error.detail, "mail source is not this worker's endpoint");
+        }
+    }
+
     /// # Panics
     /// Panics only if fixture creation fails or retirement accepts unsafe occupancy.
     /// ´test:unit:retirement-name-refuses-source-links-and-nonregular-occupants´

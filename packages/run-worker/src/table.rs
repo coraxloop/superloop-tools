@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
-use std::os::unix::fs::PermissionsExt as _;
+use std::io::{Read as _, Write as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
@@ -9,7 +9,7 @@ use crate::clock::epoch_from_stamp;
 use crate::error::WorkerError;
 
 /// The run table's header row.
-pub const HEADER: &str = "uid\tlane\tdriver\tcommit\tstarted";
+pub const HEADER: &str = "uid\tlane\tdriver\tcommit\tstarted\tclaimed";
 
 const LOCK_ATTEMPTS: u32 = 100;
 const LOCK_PAUSE: Duration = Duration::from_millis(20);
@@ -27,27 +27,33 @@ pub struct Row {
     pub commit: String,
     /// The launch instant in UTC, empty until the lane launches.
     pub started: String,
+    /// A durable per-preparation nanosecond claim stamp, retained across close.
+    pub claimed: String,
 }
 
 impl Row {
     fn line(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}",
-            self.uid, self.lane, self.driver, self.commit, self.started
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            self.uid, self.lane, self.driver, self.commit, self.started, self.claimed
         )
     }
 
     fn parse(source: &str) -> Option<Self> {
         let fields: Vec<_> = source.split('\t').collect();
-        let [uid, lane, driver, commit, started] = fields.as_slice() else {
+        let [uid, lane, driver, commit, started, claimed] = fields.as_slice() else {
             return None;
         };
+        if claimed.is_empty() || !claimed.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
         Some(Self {
             uid: uid.parse().ok()?,
             lane: (*lane).to_owned(),
             driver: (*driver).to_owned(),
             commit: (*commit).to_owned(),
             started: (*started).to_owned(),
+            claimed: (*claimed).to_owned(),
         })
     }
 }
@@ -91,16 +97,79 @@ fn validate_started(started: &str) -> Result<(), WorkerError> {
 }
 
 fn decode(source: &str) -> Result<Vec<Row>, WorkerError> {
-    for line in source.lines().filter(|line| *line != HEADER) {
-        if let Some(started) = line.split('\t').nth(4) {
-            validate_started(started)?;
-        }
+    let mut lines = source.lines();
+    let header = lines.next();
+    if header == Some("uid\tlane\tdriver\tcommit\tstarted") && lines.clone().next().is_none() {
+        return Ok(Vec::new());
     }
-    Ok(source
-        .lines()
-        .skip_while(|line| *line == HEADER)
-        .filter_map(Row::parse)
-        .collect())
+    if header != Some(HEADER) || !source.ends_with('\n') {
+        return Err(WorkerError::refusal(
+            "run table requires claimed-column reconciliation; close old prepared lanes with the retained deployment before cutover",
+        ));
+    }
+    lines
+        .map(|line| {
+            let row = Row::parse(line).ok_or_else(|| {
+                WorkerError::refusal(
+                    "run table row has no valid claimed preparation; reconcile retained history",
+                )
+            })?;
+            validate_started(&row.started)?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn reserve_claim(table: &Path, now: u128) -> Result<String, WorkerError> {
+    let result = (|| -> std::io::Result<String> {
+        let parent = table
+            .parent()
+            .ok_or_else(|| std::io::Error::other("run table parent absent"))?;
+        let path = parent.join("claimed");
+        let prior = match fs::symlink_metadata(&path) {
+            Ok(info) => {
+                if !info.is_file()
+                    || info.nlink() != 1
+                    || info.uid() != fs::metadata(parent)?.uid()
+                    || info.mode() & 0o7777 != 0o600
+                {
+                    return Err(std::io::Error::other("unsafe preparation claim watermark"));
+                }
+                let mut text = String::new();
+                fs::File::open(&path)?.take(128).read_to_string(&mut text)?;
+                text.trim_end()
+                    .parse::<u128>()
+                    .map_err(|_| std::io::Error::other("invalid preparation claim watermark"))?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error),
+        };
+        let next = now.max(
+            prior
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("preparation claims exhausted"))?,
+        );
+        // The table lock excludes another publisher; an interrupted temporary
+        // file never replaces the durable watermark until its bytes are synced.
+        let temporary = parent.join(".claimed.next");
+        match fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        writeln!(file, "{next}")?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, &path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(next.to_string())
+    })();
+    result.map_err(|error| WorkerError::runtime(format!("preparation claim: {error}")))
 }
 
 /// Read every live row, treating an absent table as an empty one.
@@ -196,6 +265,13 @@ where
         driver: String::new(),
         commit: String::new(),
         started: String::new(),
+        claimed: reserve_claim(
+            table,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| WorkerError::runtime(format!("preparation clock: {error}")))?
+                .as_nanos(),
+        )?,
     };
     guarded_push(&mut rows, &claimed)?;
     write_rows(table, &rows)?;
@@ -261,4 +337,37 @@ pub fn fill_launch(
     let filled = row.clone();
     write_rows(table, &rows)?;
     Ok(filled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// ´claim:runworker:preparation-claim-watermark-survives-clock-rollback´
+    /// ´test:unit:preparation-claim-watermark-survives-clock-rollback´
+    #[test]
+    fn preparation_claim_watermark_survives_clock_rollback() {
+        let root =
+            std::env::temp_dir().join(format!("worker-claim-watermark-{}", std::process::id()));
+        fs::create_dir(&root).expect("fixture");
+        let table = root.join("table.tsv");
+        assert_eq!(reserve_claim(&table, 100).expect("first claim"), "100");
+        assert_eq!(reserve_claim(&table, 1).expect("backward clock"), "101");
+        assert_eq!(reserve_claim(&table, 101).expect("equal clock"), "102");
+        fs::write(root.join(".claimed.next"), b"1").expect("interrupted temporary");
+        assert_eq!(fs::read_to_string(root.join("claimed")).unwrap(), "102\n");
+        assert_eq!(reserve_claim(&table, 1).expect("recover temporary"), "103");
+        assert!(!root.join(".claimed.next").exists());
+        assert_eq!(
+            fs::metadata(root.join("claimed")).unwrap().mode() & 0o7777,
+            0o600
+        );
+        fs::write(root.join("claimed"), b"").expect("corrupt watermark");
+        assert!(reserve_claim(&table, 103).is_err());
+        assert!(decode("uid\tlane\tdriver\tcommit\tstarted\n1\told\t\t\t\n").is_err());
+        assert_eq!(
+            decode("uid\tlane\tdriver\tcommit\tstarted\n").expect("empty migration table"),
+            [] as [Row; 0]
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 }

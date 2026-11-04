@@ -7,6 +7,15 @@ pkg_loop_home_rust = files(
   'src/error.rs',
   'src/lib.rs',
   'src/mail/mod.rs',
+  'src/mail/migration.rs',
+  'src/mail/migration_hold.rs',
+  'src/mail/migration_history.rs',
+  'src/mail/migration_inventory.rs',
+  'src/mail/migration_control.rs',
+  'src/mail/migration_cutover.rs',
+  'src/mail/migration_relocation.rs',
+  'src/mail/migration_tree.rs',
+  'src/mail/migration_metadata.rs',
   'src/mail/steering.rs',
   'src/mail/provision.rs',
   'src/mail/birth.rs',
@@ -95,4 +104,14 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/mail/provision.rs:\"/usr/bin/setpriv\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/setpriv\"","callee":"external:/usr/bin/setpriv","lookup":"configured-external","contract":"Namespace-root provisioning pins its executing image, enters the loop private cwd before dropping credentials, and invokes the same-image configuration or journal entry through an inherited descriptor with only the allocated mailbox group"}
+''']
+
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/mail/migration_tree.rs:\"/usr/bin/cp\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/cp\"","callee":"external:/usr/bin/cp","lookup":"configured-external","contract":"Copy a pinned legacy execution tree into a protected backup with archive metadata; independently compare every name, byte, link, mode, owner and extended attribute before accepting it"}
+''']
+
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/mail/migration_control.rs:& program#1","caller":"loop-home","owner":"LOOPHOME","selector":"& program","callee":"external:reviewed-mail-migration-controller","lookup":"configured-external","setting":"mail migration deployment artifact","contract":"Execute a digest-pinned namespace-root deployment controller or native lane census through its held executable inode with fixed migration arguments; retain output and refuse changed artifacts or failure"}
 ''']

@@ -60,11 +60,17 @@ fn temporary(parent: &File, prefix: &str) -> Result<(String, File)> {
     }
 }
 
-fn lock(parent: &File) -> Result<Flock<File>> {
-    let file = match create(parent, "loop.lock") {
+fn lock(parent: &File, create_missing: bool) -> Result<Flock<File>> {
+    let file = match if create_missing {
+        create(parent, "loop.lock")
+    } else {
+        io::child(parent, Path::new("loop.lock"), false)
+    } {
         Ok(file) => {
-            file.sync_all()?;
-            parent.sync_all()?;
+            if create_missing {
+                file.sync_all()?;
+                parent.sync_all()?;
+            }
             file
         }
         Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -101,7 +107,7 @@ impl ConfigurationStore {
             owned(&directory)?;
             acl::ensure_private(&directory, service, true)?;
         }
-        let writer = lock(&directory)?;
+        let writer = lock(&directory, true)?;
         let current = match io::child(&directory, Path::new("loop.toml"), false) {
             Ok(file) => {
                 owned(&file)?;
@@ -159,6 +165,36 @@ impl ConfigurationStore {
             store.publish()?;
         }
         Ok(store)
+    }
+    /// Open retained configuration without creating files or repairing grants.
+    ///
+    /// # Errors
+    /// Refuses missing state, unsafe custody or drifted ancestor and file ACLs.
+    pub(super) fn open_existing(private: &Path, service: u32) -> Result<Self> {
+        let mut directory = private_root(private)?;
+        owned(&directory)?;
+        acl::verify(&directory, service, true)?;
+        for name in [".config", "mail"] {
+            directory = io::child(&directory, Path::new(name), true)?;
+            owned(&directory)?;
+            acl::verify(&directory, service, true)?;
+        }
+        let writer = lock(&directory, false)?;
+        let file = io::child(&directory, Path::new("loop.toml"), false)?;
+        owned(&file)?;
+        let current = Flock::lock(file, FlockArg::LockExclusive)
+            .map_err(|(_, error)| MailError::from(error))?;
+        acl::verify(&current, service, false)?;
+        let configuration = Configuration::parse(&io::bounded(&current, MAX_CONFIGURATION_BYTES)?)?;
+        Ok(Self {
+            directory,
+            private: private.to_path_buf(),
+            _writer: writer,
+            current: Some(current),
+            configuration,
+            service,
+            failed: false,
+        })
     }
     /// Prevent an in-memory mutation from standing in for an uncertain durable write.
     pub(crate) const fn available(&self) -> Result<()> {

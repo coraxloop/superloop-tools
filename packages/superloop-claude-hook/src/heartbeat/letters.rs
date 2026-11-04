@@ -59,6 +59,7 @@ pub fn listing(_loop_name: &str, bytes: &[u8]) -> Listing {
     match bytes {
         b"" => Listing::Empty,
         b"1\n" => Listing::Notice,
+        b"unavailable\n" => failed("mail inbox is missing or unreadable"),
         _ => failed("unexpected inbox presence result"),
     }
 }

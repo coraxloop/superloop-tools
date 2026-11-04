@@ -4,7 +4,7 @@ use crate::{build, error::LaneError, home, plan::Plan};
 use nix::unistd::Uid;
 use serde_json::{Value, json};
 use std::fs::File;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
@@ -96,6 +96,7 @@ pub fn run(owner_home: &Path, request: &Request, reply: bool) -> Result<Value, L
         &request.step,
         &request.delivery,
         reply,
+        false,
         (Path::new("/"), 0, exe.as_path()),
     )?;
     let mail = record[if reply { "mail_replies" } else { "mail" }]
@@ -124,10 +125,21 @@ pub(super) fn verify(
     record: &Value,
     step: &str,
     delivery: &str,
+    verify_only: bool,
     host: (&Path, u32, &Path),
 ) -> Result<Value, LaneError> {
-    verify_kind(owner_home, plan, record, step, delivery, false, host)
+    verify_kind(
+        owner_home,
+        plan,
+        record,
+        step,
+        delivery,
+        false,
+        verify_only,
+        host,
+    )
 }
+#[allow(clippy::too_many_arguments)]
 fn verify_kind(
     owner_home: &Path,
     plan: &Plan,
@@ -135,6 +147,7 @@ fn verify_kind(
     step: &str,
     delivery: &str,
     reply: bool,
+    verify_only: bool,
     host: (&Path, u32, &Path),
 ) -> Result<Value, LaneError> {
     super::letters::valid_step(step)?;
@@ -152,29 +165,14 @@ fn verify_kind(
     let exe = crate::pinned::owner_executable_word(host.2, caller)?;
     let verified_home = home::verify_host_prefix_from(host.0, owner_home, caller, host.1)?;
     let verified_runs = home::verify_host_launch_root(host.0, owner_home, root, caller, host.1)?;
-    let argv = vec![
-        "unshare".into(),
+    let argv = binding_argv(
         exe,
-        if reply {
-            "_bind-reply".into()
-        } else {
-            "_bind-mail".into()
-        },
-        record["loop"]
-            .as_str()
-            .ok_or_else(|| failure("loop absent"))?
-            .into(),
-        record["run"]
-            .as_str()
-            .ok_or_else(|| failure("run absent"))?
-            .into(),
-        "--owner-home".into(),
-        crate::pinned::path_word(owner_home, "owner-home")?,
-        "--step".into(),
-        step.into(),
-        "--delivery".into(),
-        delivery.into(),
-    ];
+        record,
+        owner_home,
+        step,
+        delivery,
+        (reply, verify_only),
+    )?;
     let output = build::run_checked_with_private_launch(
         &podman,
         argv,
@@ -210,6 +208,44 @@ fn verify_kind(
     Ok(binding)
 }
 
+fn binding_argv(
+    exe: String,
+    record: &Value,
+    owner_home: &Path,
+    step: &str,
+    delivery: &str,
+    direction: (bool, bool),
+) -> Result<Vec<String>, LaneError> {
+    let (reply, verify_only) = direction;
+    let mut argv = vec![
+        "unshare".into(),
+        exe,
+        if reply {
+            "_bind-reply".into()
+        } else {
+            "_bind-mail".into()
+        },
+        record["loop"]
+            .as_str()
+            .ok_or_else(|| failure("loop absent"))?
+            .into(),
+        record["run"]
+            .as_str()
+            .ok_or_else(|| failure("run absent"))?
+            .into(),
+        "--owner-home".into(),
+        crate::pinned::path_word(owner_home, "owner-home")?,
+        "--step".into(),
+        step.into(),
+        "--delivery".into(),
+        delivery.into(),
+    ];
+    if verify_only {
+        argv.push("--verify-only".into());
+    }
+    Ok(argv)
+}
+
 /// Namespace-root production entry; verify the birth before dropping to service UID.
 ///
 /// The preopened evidence descriptor grants no access to other host files.
@@ -223,6 +259,7 @@ pub fn private_bind(
     step: &str,
     delivery: &str,
     reply: bool,
+    verify_only: bool,
 ) -> Result<Value, LaneError> {
     if !Uid::effective().is_root() {
         return Err(failure("namespace-root entry required"));
@@ -247,12 +284,18 @@ pub fn private_bind(
             format!("{}-{step}.txt", if reply { "reply" } else { "mail" }).as_str(),
             nix::fcntl::OpenHow::new()
                 .flags(
-                    nix::fcntl::OFlag::O_RDWR
-                        | nix::fcntl::OFlag::O_CREAT
-                        | nix::fcntl::OFlag::O_CLOEXEC
+                    (if verify_only {
+                        nix::fcntl::OFlag::O_RDONLY
+                    } else {
+                        nix::fcntl::OFlag::O_RDWR | nix::fcntl::OFlag::O_CREAT
+                    }) | nix::fcntl::OFlag::O_CLOEXEC
                         | nix::fcntl::OFlag::O_NONBLOCK,
                 )
-                .mode(nix::sys::stat::Mode::from_bits_truncate(0o600))
+                .mode(nix::sys::stat::Mode::from_bits_truncate(if verify_only {
+                    0
+                } else {
+                    0o600
+                }))
                 .resolve(
                     nix::fcntl::ResolveFlag::RESOLVE_BENEATH
                         | nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS,
@@ -268,25 +311,39 @@ pub fn private_bind(
     {
         return Err(failure("evidence custody differs"));
     }
-    nix::unistd::fchown(
-        &file,
-        Some(Uid::from_raw(loop_uid)),
-        Some(nix::unistd::Gid::from_raw(loop_uid)),
-    )
-    .map_err(failure)?;
+    if !verify_only {
+        nix::unistd::fchown(
+            &file,
+            Some(Uid::from_raw(loop_uid)),
+            Some(nix::unistd::Gid::from_raw(loop_uid)),
+        )
+        .map_err(failure)?;
+    }
     let instant = loop_home::mail::instant::Instant::parse(delivery).map_err(failure)?;
-    let resolve = if reply {
+    let resolve = if verify_only {
+        loop_home::mail::steering::verify
+    } else if reply {
         loop_home::mail::steering::reply
     } else {
         loop_home::mail::steering::bind
     };
     let (delivery, bytes) =
         resolve(owner_home, loop_name, &worker, step, &instant).map_err(failure)?;
-    file.set_len(0).map_err(failure)?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(failure)?;
-    nix::unistd::fsync(&directory).map_err(failure)?;
+    if verify_only {
+        let mut evidence = Vec::new();
+        file.take(loop_home::mail::journal::MAX_LETTER_BYTES + 1)
+            .read_to_end(&mut evidence)
+            .map_err(failure)?;
+        if evidence != bytes {
+            return Err(failure("retained evidence differs from verified delivery"));
+        }
+    } else {
+        file.set_len(0).map_err(failure)?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(failure)?;
+        nix::unistd::fsync(&directory).map_err(failure)?;
+    }
     let stopped = !reply && declarations(&bytes, &record)?;
     Ok(
         json!({"worker_uid":worker.uid,"sender":delivery.sender,"recipient":delivery.recipient,"delivery":delivery.delivery.to_string(),"journal_identity":format!("{}:{}",loop_home::mail::journal::digest(owner_home.as_os_str().as_encoded_bytes()),delivery.delivery),"inbox_name":delivery.inbox_name,"step":step,"evidence_digest":delivery.digest,"bytes":delivery.bytes,"stop":stopped}),
@@ -326,6 +383,29 @@ pub(super) fn stop_brief<'a>(record: &'a Value, step: &str) -> Option<&'a Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ´test:unit:mail-launcher-preview-appends-verify-only´
+    #[test]
+    fn mail_launcher_preview_appends_verify_only() {
+        let record = json!({"loop":"alpha", "run":"R"});
+        let argv = |verify_only| {
+            binding_argv(
+                "/entry".into(),
+                &record,
+                Path::new("/owner"),
+                "review",
+                "2026-01-01T00:00:00.000Z",
+                (false, verify_only),
+            )
+            .expect("private argv")
+        };
+        let ordinary = argv(false);
+        assert!(!ordinary.iter().any(|word| word == "--verify-only"));
+        let preview = argv(true);
+        assert_eq!(&preview[..ordinary.len()], &ordinary);
+        assert_eq!(preview.last().map(String::as_str), Some("--verify-only"));
+        assert_eq!(preview.len(), ordinary.len() + 1);
+    }
 
     /// ´test:unit:opaque-mail-does-not-require-text-declarations´
     #[test]

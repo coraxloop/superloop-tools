@@ -278,3 +278,57 @@ fn mail_configuration_contention_refuses_without_waiting() {
     drop(writer);
     assert!(Snapshot::open(&fixture.row, fixture.service).is_ok());
 }
+
+/// ´claim:loophome:mail-directory-overflow-names-host-metadata´
+/// ´test:unit:mail-directory-overflow-names-host-metadata´
+#[test]
+fn mail_directory_overflow_names_host_metadata() {
+    let fixture = Fixture::new();
+    let host = fixture.root.join(".config/loops");
+    fs::create_dir_all(&host).expect("host config");
+    let registry = host.join("registry.toml");
+    fs::write(
+        &registry,
+        b"namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[]\n",
+    )
+    .expect("registry");
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o600)).expect("mode");
+    let directory = Directory {
+        home: fixture.root.clone(),
+        service: fixture.service,
+        owner: nix::unistd::geteuid().as_raw(),
+        durability: Durability {
+            crash_consistent_rename: true,
+            durable_sync: true,
+        },
+    };
+    let (_, bytes, file) = directory.registry().expect("valid registry");
+    let info = file.metadata().expect("identity");
+    let decision = Decision {
+        registry_digest: digest(&bytes),
+        configs: Vec::new(),
+        registry_path: registry.clone(),
+        registry_identity: (info.dev(), info.ino()),
+    };
+    let oversized = format!("loops=[]\n#{}", "x".repeat(65_536));
+    fs::write(&registry, oversized.as_bytes()).expect("same inode overflow");
+    for error in [
+        directory.registry().expect_err("registry bound"),
+        decision.current().expect_err("recheck bound"),
+    ] {
+        assert_eq!(
+            error.to_string(),
+            "invalid-directory: loop registry exceeds its bound"
+        );
+    }
+    let allocations = host.join("allocations.toml");
+    fs::write(&allocations, oversized.as_bytes()).expect("allocation overflow");
+    fs::set_permissions(&allocations, fs::Permissions::from_mode(0o600)).expect("mode");
+    assert_eq!(
+        directory
+            .allocations()
+            .expect_err("allocation bound")
+            .to_string(),
+        "invalid-directory: allocations ledger exceeds its bound"
+    );
+}

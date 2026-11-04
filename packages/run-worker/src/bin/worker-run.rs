@@ -5,6 +5,7 @@ fn main() -> ExitCode {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     if arguments.first().is_some_and(|argument| {
         argument == "_mail-worker-birth"
+            || argument == "_mail-worker-home"
             || argument == "_mail-worker-state"
             || argument == "_mail-worker-pins"
     }) {

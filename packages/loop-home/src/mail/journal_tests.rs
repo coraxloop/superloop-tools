@@ -1,6 +1,6 @@
 use super::*;
 use std::fs;
-use std::os::unix::fs::{PermissionsExt as _, symlink};
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -451,7 +451,11 @@ fn journal_capacity_includes_scratch_and_never_evicts_pins() {
     let file = fs::File::create(&padding_path).expect("capacity fixture");
     fs::set_permissions(&padding_path, fs::Permissions::from_mode(0o600)).expect("private fixture");
     let current = store::size(&journal.root).expect("account journal bytes");
-    let room = JOURNAL_MAX_BYTES - current - 3 * RECORD_MAX_BYTES - 3 * SUMMARY_MAX_BYTES;
+    let room = JOURNAL_MAX_BYTES
+        - current
+        - 3 * RECORD_MAX_BYTES
+        - 3 * SUMMARY_MAX_BYTES
+        - RESERVATION_PINS_MAX_BYTES;
     file.set_len(room).expect("inclusive capacity fixture");
     journal
         .capacity(0)
@@ -800,9 +804,137 @@ fn reservation_admission_pins_before_exposure_and_blocks_pruning() {
         ))
         .is_err()
     );
+    drop(journal);
     let admission = reservation_admission(&root).expect("admission");
-    assert!(journal.prune(&later(), &Pins::default()).is_err());
+    let directory = fixture.directory();
+    let waiter = std::thread::spawn(move || {
+        let mut journal = Journal::open(directory).expect("open waits for admission");
+        journal.prune(&later(), &Pins::default())
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(!waiter.is_finished(), "service waits instead of failing");
     drop(admission);
+    assert_eq!(
+        waiter
+            .join()
+            .expect("waiter")
+            .expect("prune after admission"),
+        0
+    );
+    let mut journal = fixture.open();
     release_reservation_family(&root, "alpha:run").expect("release after reservation retired");
     assert_eq!(journal.prune(&later(), &Pins::default()).expect("prune"), 1);
+}
+
+/// ´claim:loophome:reservation-verification-is-read-only´
+/// ´test:unit:reservation-verification-is-read-only´
+#[test]
+fn reservation_verification_is_read_only() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    let record = record(&first());
+    journal.reserve(first()).expect("reserve");
+    journal.accept(&record).expect("accept");
+    complete(&mut journal, &record);
+    let root = fixture.directory();
+    bind_reservation(&root, "alpha:run", "review", &first(), |_| Ok(())).expect("bind");
+    let path = fixture.0.join("reservation-pins.toml");
+    let bytes = fs::read(&path).expect("bytes");
+    let metadata = fs::metadata(&path).expect("metadata");
+    verify_reservation(&root, "alpha:run", "review", &first(), |_| Ok(())).expect("verify");
+    assert_eq!(bytes, fs::read(&path).expect("unchanged bytes"));
+    assert_eq!(
+        metadata.modified().expect("mtime"),
+        fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime")
+    );
+    assert_eq!(metadata.ino(), fs::metadata(&path).expect("metadata").ino());
+    assert!(verify_reservation(&root, "alpha:run", "missing", &first(), |_| Ok(())).is_err());
+    assert_eq!(bytes, fs::read(&path).expect("refusal leaves bytes"));
+}
+
+/// ´claim:loophome:interrupted-binding-retries-the-same-pin-and-refuses-a-changed-delivery´
+/// ´test:unit:interrupted-binding-retries-the-same-pin-and-refuses-a-changed-delivery´
+#[test]
+fn interrupted_binding_retries_the_same_pin_and_refuses_a_changed_delivery() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    let second = instant("2026-01-01T00:00:00.001Z");
+    for time in [first(), second.clone()] {
+        let record = record(&time);
+        journal.reserve(time).expect("reserve");
+        journal.accept(&record).expect("accept");
+        complete(&mut journal, &record);
+    }
+    let root = fixture.directory();
+    for _ in 0..2 {
+        bind_reservation(&root, "alpha:run", "steering:review", &first(), |_| Ok(()))
+            .expect("pin then interrupted binding, retry");
+    }
+    assert!(
+        bind_reservation(&root, "alpha:run", "steering:review", &second, |_| Ok(()))
+            .expect_err("changed instant")
+            .to_string()
+            .starts_with("invalid-directory: reservation delivery changed")
+    );
+    let pins = Pins {
+        reservations: BTreeSet::from([second]),
+        ..Pins::default()
+    };
+    assert_eq!(journal.prune(&later(), &pins).expect("both pinned"), 0);
+    release_reservation_family(&root, "alpha:run").expect("retired family");
+    assert_eq!(
+        journal
+            .prune(&later(), &pins)
+            .expect("only unreferenced first"),
+        1
+    );
+}
+
+/// ´claim:loophome:reservation-projection-bound-preserves-existing-bindings´
+/// ´test:unit:reservation-projection-bound-preserves-existing-bindings´
+#[test]
+fn reservation_projection_bound_preserves_existing_bindings() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    let record = record(&first());
+    journal.reserve(first()).expect("reserve");
+    journal.accept(&record).expect("accept");
+    complete(&mut journal, &record);
+    let root = fixture.directory();
+    bind_reservation(&root, "alpha:run", "review", &first(), |_| Ok(())).expect("first pin");
+    let mut pins: ReservationPins =
+        store::read(&root, "reservation-pins.toml", RESERVATION_PINS_MAX_BYTES).expect("pins");
+    let initial_size = store::encode(&pins).expect("encode").len();
+    let key = |index: usize| {
+        format!(
+            "{}:{}",
+            digest(b"filler"),
+            digest(index.to_string().as_bytes())
+        )
+    };
+    pins.deliveries.insert(key(0), first());
+    let entry_size = store::encode(&pins).expect("encode").len() - initial_size;
+    let fillers =
+        (usize::try_from(RESERVATION_PINS_MAX_BYTES).expect("size") - initial_size) / entry_size;
+    for index in 1..fillers {
+        pins.deliveries.insert(key(index), first());
+    }
+    let size = store::encode(&pins).expect("encode").len() as u64;
+    assert!(
+        size <= RESERVATION_PINS_MAX_BYTES && size + entry_size as u64 > RESERVATION_PINS_MAX_BYTES
+    );
+    store::write(&root, &root, "reservation-pins.toml", &pins, true).expect("full projection");
+    assert!(matches!(
+        bind_reservation(&root, "alpha:run", "new", &first(), |_| Ok(())),
+        Err(MailError::Capacity)
+    ));
+    bind_reservation(&root, "alpha:run", "review", &first(), |_| Ok(()))
+        .expect("existing binding fits");
+    assert_eq!(
+        journal.reservation_pins().expect("large projection"),
+        BTreeSet::from([first()])
+    );
 }

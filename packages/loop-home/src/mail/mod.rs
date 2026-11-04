@@ -27,3 +27,21 @@ pub mod birth;
 pub mod worker_provision;
 
 pub mod steering;
+
+pub mod migration;
+
+mod migration_metadata;
+
+pub mod migration_tree;
+
+pub mod migration_relocation;
+
+pub mod migration_hold;
+
+pub mod migration_history;
+
+pub mod migration_inventory;
+
+pub mod migration_control;
+
+pub mod migration_cutover;

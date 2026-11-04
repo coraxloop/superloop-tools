@@ -189,6 +189,22 @@ pub fn verify(store: &ConfigurationStore, identity: &Identity) -> Result<()> {
     }
 }
 
+/// Verify the loop-owned terminal binding without recreating or replacing history.
+///
+/// # Errors
+/// Missing, changed or nonterminal history refuses migration recovery.
+pub fn verify_retired(store: &ConfigurationStore, identity: &Identity) -> Result<()> {
+    let births = bindings(store)?;
+    if births
+        .get(&identity.name)
+        .is_some_and(|binding| binding.identity == *identity && binding.phase == Phase::Retired)
+    {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
 /// Publish active state only after the trusted launcher verifies its complete endpoint.
 ///
 /// # Errors

@@ -39,7 +39,7 @@ pub fn run(home: &Path, loop_name: &str, inbox: &Path) -> Result<Output, String>
     // Inherit the hook's cwd. A distinct process group contains the entry chain.
     let mut child = Command::new(&path)
         .args(["enter", loop_name, "--", "/bin/sh", "-c",
-            "for entry in \"$1\"/* \"$1\"/.[!.]* \"$1\"/..?*; do if [ -e \"$entry\" ] || [ -L \"$entry\" ]; then printf '1\\n'; exit; fi; done",
+            "[ -d \"$1\" ] && [ -r \"$1\" ] && [ -x \"$1\" ] || { printf 'unavailable\\n'; exit; }; for entry in \"$1\"/* \"$1\"/.[!.]* \"$1\"/..?*; do if [ -e \"$entry\" ] || [ -L \"$entry\" ]; then printf '1\\n'; exit; fi; done",
             "mail-notice"])
         .arg(inbox)
         .process_group(0)

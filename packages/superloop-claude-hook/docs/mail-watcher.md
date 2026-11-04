@@ -6,6 +6,8 @@ The watcher hands back only `You've got mail.` and waits for the session to resu
 
 The watch arms before the first listing. Every event, including overflow, triggers a fresh listing; directory replacement stops the old watch before rearming. When inotify is unavailable or refuses the directory, bounded ordinary listings supply the fallback. The recipe observes only directory presence and filesystem identity, never letter contents, subjects, sender lists, timestamps or counts. It keeps no delivery receipt and ignores read history.
 
+A missing or unreadable inbox at start, or an unreadable one later, ends the recipe with status 3 and a stderr line, which the watcher hands back as a failure rather than as mail.
+
 ```bash
 #!/bin/bash
 # Ordinary filesystem waiting for a session-owned inbox watcher.
@@ -15,6 +17,10 @@ if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
     exit 2
 fi
 inbox=$1
+if [ ! -d "$inbox" ] || [ ! -r "$inbox" ] || [ ! -x "$inbox" ]; then
+    printf '%s\n' 'inbox-watch: inbox is missing or unreadable' >&2
+    exit 3
+fi
 case "$inbox" in /*) ;; *) exit 2;; esac
 interval=${2:-30}
 case "$interval" in ''|*[!0-9]*|0) exit 2;; esac
@@ -33,6 +39,10 @@ cleanup() { stop_watch; close_events; rm -rf -- "$scratch"; }
 trap cleanup EXIT
 trap 'exit 0' TERM INT HUP
 notice() {
+    if [ -e "$inbox" ] && { [ ! -r "$inbox" ] || [ ! -x "$inbox" ]; }; then
+        printf '%s\n' 'inbox-watch: inbox is unreadable' >&2
+        exit 3
+    fi
     if [ "$(find "$inbox" -mindepth 1 -maxdepth 1 -printf x -quit 2>/dev/null)" = x ]; then
         printf '%s\n' "You've got mail."
         exit 0

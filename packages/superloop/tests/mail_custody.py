@@ -108,6 +108,9 @@ def main():
         who(a.service_account,{'op':'service-finish'})
         os.chmod(home/'.var/loops',0o755);os.chmod(loop,0o711)
         scan('initialize')
+        held=loop/'.mail-migration-hold';held.mkdir(mode=0o700)
+        assert 'retained migration history requires reconciliation' in scan(expected=2)
+        held.rmdir()
         cases=[('alpha.01.letter',b''),('alpha.02.letter',bytes([0,255,128,10])),('alpha.03.letter',b'x'*1048576)]
         for name,body in cases:who(a.loop_account,{'op':'submit','name':name,'hex':body.hex()})
         assert 'beta:' in scan()
@@ -157,6 +160,7 @@ def main():
                 worker_state('verify',name,uid,reference)
                 worker_state('reserve',name,uid,reference)
                 worker_state('retire',name,uid,reference)
+                worker_state('verify-retired',name,uid,reference)
                 assert worker_state('reserve',name,uid,reference,2)
                 assert worker_state('reserve',name,uid+20,reference+'-replacement',2)
             for name in ['-alpha','a_b']:
@@ -164,6 +168,7 @@ def main():
             worker_state('reserve','replacement',3010,'replacement')
             worker_state('activate','replacement',3010,'replacement')
             worker_state('retire','replacement',3010,'replacement')
+            worker_state('verify-retired','replacement',3010,'replacement')
             assert tomllib.loads(who(a.loop_account,{'op':'config-read'}))['private_preference']=='preserved'
             private_program=home/'private-helper';shutil.copyfile(a.loop_binary,private_program);os.chmod(private_program,0o755)
             argv=['sudo','-n','-P','-u',a.loop_account,sys.executable,str(pathlib.Path(__file__).resolve()),'--root',str(root),'--binary',str(a.binary),'--service-account',a.service_account,'--loop-account',a.loop_account,'--mail-group',a.mail_group,'--actor','entered']

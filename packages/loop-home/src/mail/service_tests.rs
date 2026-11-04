@@ -392,6 +392,16 @@ fn mail_core_sleeps_through_equal_and_backward_utc_before_admission() {
 /// ´test:unit:unavailable-inbox-pins-until-trusted-retirement´
 #[test]
 fn unavailable_inbox_pins_until_trusted_retirement() {
+    unavailable_pin_transition(false);
+}
+/// ´claim:loophome:deregistered-loop-releases-unavailable-recipient-pins´
+/// ´test:unit:deregistered-loop-releases-unavailable-recipient-pins´
+#[test]
+fn deregistered_loop_releases_unavailable_recipient_pins() {
+    unavailable_pin_transition(true);
+}
+#[allow(clippy::too_many_lines)]
+fn unavailable_pin_transition(deregistered: bool) {
     let fixture = Fixture::new();
     let mut journal = fixture.journal();
     let instant = Instant::parse("2026-01-01T00:00:00.001Z").expect("instant");
@@ -440,18 +450,36 @@ fn unavailable_inbox_pins_until_trusted_retirement() {
         },
         journal,
     );
-    let mut unavailable = Inventory {
-        retired: BTreeSet::new(),
-        actors: BTreeMap::new(),
-        failures: vec!["alpha: unsafe-storage: endpoint unavailable".into()],
-    };
-    let pins = service.pins(&unavailable).expect("service pin projection");
+    let config = fixture.root.join(".config/loops");
+    fs::create_dir_all(&config).expect("registry directory");
+    let registry = "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[{name='alpha',uid=3000,launch='dev/alpha'}]\n";
+    fs::write(config.join("registry.toml"), registry).expect("registered loop");
+    fs::write(
+        config.join("allocations.toml"),
+        format!("mail_uid={}\n", nix::unistd::Uid::effective().as_raw()),
+    )
+    .expect("service allocation");
+    for name in ["registry.toml", "allocations.toml"] {
+        fs::set_permissions(config.join(name), fs::Permissions::from_mode(0o644))
+            .expect("trusted metadata");
+    }
+    let mut unavailable = service
+        .directory
+        .inventory()
+        .expect("fresh registry despite missing endpoint");
+    assert!(unavailable.loops.contains("alpha"));
+    assert_ne!(unavailable.failures, [] as [String; 0]);
+    let pins = Service::pins(
+        &unavailable,
+        &service.journal.records().expect("compactor records"),
+    )
+    .expect("service pin projection");
     assert!(pins.active_inboxes.contains(&record.delivery));
     let removed = service
         .journal
-        .prune(
+        .prune_projected(
             &Instant::parse("2026-02-01T00:00:00.001Z").expect("history elapsed"),
-            &pins,
+            |records| Service::pins(&unavailable, records),
         )
         .expect("compaction");
     assert_eq!(removed, 0);
@@ -459,19 +487,34 @@ fn unavailable_inbox_pins_until_trusted_retirement() {
         .journal
         .record(&record.delivery)
         .expect("unavailable active inbox remains verifiable");
-    unavailable
-        .retired
-        .insert(Address::parse("alpha").expect("trusted retirement projection"));
-    let pins = service
-        .pins(&unavailable)
-        .expect("trusted retirement pin projection");
+    if deregistered {
+        fs::write(
+            config.join("registry.toml"),
+            "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[]\n",
+        )
+        .expect("deregistered loop");
+        unavailable = service
+            .directory
+            .inventory()
+            .expect("fresh deregistered registry");
+        assert!(unavailable.loops.is_empty());
+    } else {
+        unavailable
+            .retired
+            .insert(Address::parse("alpha").expect("trusted retirement projection"));
+    }
+    let pins = Service::pins(
+        &unavailable,
+        &service.journal.records().expect("compactor records"),
+    )
+    .expect("trusted retirement pin projection");
     assert!(!pins.active_inboxes.contains(&record.delivery));
     assert!(
         service
             .journal
-            .prune(
+            .prune_projected(
                 &Instant::parse("2026-02-01T00:00:00.001Z").expect("history elapsed"),
-                &pins
+                |records| Service::pins(&unavailable, records)
             )
             .expect("retired compaction")
             > 0

@@ -9,7 +9,7 @@ use superloop_lane::{
     load_plan, prepare, repair, requests,
 };
 
-const USAGE_TEMPLATE: &str = "usage: superloop-lane {bound-roots --runs-root DIR PATH [PATH...]|render-routes --registry FILE --loop LOOP --owner-home PATH --output DIR|gateway {register|deregister|status|check-request|migrate-proposals|serve} ARGS|launch --host LOOP RUN HOST-ARGS...|prepare-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES] [--reconcile {--dry-run|--expect-digest HEX}]|check-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES]|driver {start|resume} --backend {claude|codex} ARGS|driver status RUN|driver follow RUN [--save-offset]|prepare LOOP [--dry-run]|plan LOOP RUN|make-home LOOP RUN --letter FILE|launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]|launch LOOP RUN --repin-door {--dry-run|--expect-digest HEX}|read-launch-report LOOP RUN [--round STEP]|rewrite-launch-reports LOOP [--dry-run]|settle LOOP RUN --round STEP {--dry-run|--expect-digest HEX}|checkpoint LOOP RUN [--dry-run]|checkout LOOP RUN --repo REPO --into DIR [--dry-run]|harvest LOOP RUN --gate-object HEX [--dry-run]|mark-imported LOOP RUN --object HEX|bind-mail|bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT|follow LOOP RUN [--round STEP] [--round-only]|rotate LOOP RUN [--dry-run] [--expect-digest HEX] [--force REASON] [--next FILE]|census LOOP|census rewrite LOOP RUN {--dry-run|--expect-digest HEX}|pause LOOP|resume LOOP|exercise LOOP [--dry-run]|exercise LOOP --run RUN --case {context-use|harvest|run-identity|home-layout|mounts|rotation|resources|reaping|network|door-shape|door-attribution|door-extensions|door-audit|door-allow|door-enforce|door-agent}|network-evidence LOOP RUN < HOST-OBSERVATION.json|retire LOOP RUN [--confirm-uncertain] [--dry-run|--expect-digest HEX]|retire LOOP RUN --node [--dry-run|--expect-digest HEX]|retire LOOP --generations [--dry-run]|retire rewrite-node LOOP {--dry-run|--expect-digest HEX} [--full-plan]|record-hosts LOOP RUN {--list|--host HOST [--host HOST...]} [--dry-run]|build LOOP --base-image REF --codex-bin FILE --codex-host-bin FILE --codex-version VERSION --codex-sha256 HEX --codex-host-sha256 HEX --codex-source URL [--podman-bin FILE] [--template-dir DIR] [--dry-run]|install [--pilot [--refresh-proxy]] LOOP [--dry-run] [--podman-bin FILE] [--data-dir DIR] [--proxy-bin FILE] [--unit-dir DIR]|register-door-node LOOP --alias ALIAS --address ADDRESS --port PORT --user USER --host-key KEY {--dry-run|--expect-digest HEX}|install-door LOOP [--dry-run] [--podman-bin FILE]|door-sign-in LOOP [--dry-run|--expect-digest HEX]|repair LOOP [--dry-run]|requests {<REQUESTS_USAGE>}|--help|--version}\nexercise LOOP --run RUN --case door-attribution requires a started run before settle\nrepin-door: only boxed runs with a registered door can be re-pinned; otherwise repin-door: this run has no door\nsettle: --expect-digest takes the dry run JSON field preview_sha256 (the recorded preview digest)";
+const USAGE_TEMPLATE: &str = "usage: superloop-lane {bound-roots --runs-root DIR PATH [PATH...]|render-routes --registry FILE --loop LOOP --owner-home PATH --output DIR|gateway {register|deregister|status|check-request|migrate-proposals|serve} ARGS|launch --host LOOP RUN HOST-ARGS...|prepare-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES] [--reconcile {--dry-run|--expect-digest HEX}]|check-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES]|driver {start|resume} --backend {claude|codex} ARGS|driver status RUN|driver follow RUN [--save-offset]|prepare LOOP [--dry-run]|plan LOOP RUN|make-home LOOP RUN --letter FILE|launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]|launch LOOP RUN --repin-door {--dry-run|--expect-digest HEX}|read-launch-report LOOP RUN [--round STEP]|rewrite-launch-reports LOOP [--dry-run]|settle LOOP RUN --round STEP {--dry-run|--expect-digest HEX}|checkpoint LOOP RUN [--dry-run]|checkout LOOP RUN --repo REPO --into DIR [--dry-run]|harvest LOOP RUN --gate-object HEX [--dry-run]|mark-imported LOOP RUN --object HEX|bind-mail|bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT|follow LOOP RUN [--round STEP] [--round-only]|rotate LOOP RUN [--dry-run] [--expect-digest HEX] [--force REASON] [--next FILE]|census LOOP [--mail-migration]|census rewrite LOOP RUN {--dry-run|--expect-digest HEX}|pause LOOP|resume LOOP|exercise LOOP [--dry-run]|exercise LOOP --run RUN --case {context-use|harvest|run-identity|home-layout|mounts|rotation|resources|reaping|network|door-shape|door-attribution|door-extensions|door-audit|door-allow|door-enforce|door-agent}|network-evidence LOOP RUN < HOST-OBSERVATION.json|retire LOOP RUN [--confirm-uncertain] [--dry-run|--expect-digest HEX]|retire LOOP RUN --node [--dry-run|--expect-digest HEX]|retire LOOP --generations [--dry-run]|retire rewrite-node LOOP {--dry-run|--expect-digest HEX} [--full-plan]|record-hosts LOOP RUN {--list|--host HOST [--host HOST...]} [--dry-run]|build LOOP --base-image REF --codex-bin FILE --codex-host-bin FILE --codex-version VERSION --codex-sha256 HEX --codex-host-sha256 HEX --codex-source URL [--podman-bin FILE] [--template-dir DIR] [--dry-run]|install [--pilot [--refresh-proxy]] LOOP [--dry-run] [--podman-bin FILE] [--data-dir DIR] [--proxy-bin FILE] [--unit-dir DIR]|register-door-node LOOP --alias ALIAS --address ADDRESS --port PORT --user USER --host-key KEY {--dry-run|--expect-digest HEX}|install-door LOOP [--dry-run] [--podman-bin FILE]|door-sign-in LOOP [--dry-run|--expect-digest HEX]|repair LOOP [--dry-run]|requests {<REQUESTS_USAGE>}|--help|--version}\nexercise LOOP --run RUN --case door-attribution requires a started run before settle\nrepin-door: only boxed runs with a registered door can be re-pinned; otherwise repin-door: this run has no door\nsettle: --expect-digest takes the dry run JSON field preview_sha256 (the recorded preview digest)";
 
 static USAGE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     USAGE_TEMPLATE.replace("<REQUESTS_USAGE>", requests::commands::REQUESTS_USAGE)
@@ -867,10 +867,18 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
                 .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
             return Ok(0);
         }
-        let [_, loop_name] = args else {
-            return Err(LaneError::input("census-usage", "census LOOP"));
+        let report = match args {
+            [_, loop_name] => launch::census::run(&caller_home()?, loop_name)?,
+            [_, loop_name, mode] if mode == "--mail-migration" => {
+                launch::census::mail_migration(&caller_home()?, loop_name)?
+            }
+            _ => {
+                return Err(LaneError::input(
+                    "census-usage",
+                    "census LOOP [--mail-migration]",
+                ));
+            }
         };
-        let report = launch::census::run(&caller_home()?, loop_name)?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
@@ -1328,6 +1336,7 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             step,
             delivery_flag,
             delivery,
+            rest @ ..,
         ] = args
         else {
             return Err(LaneError::input(
@@ -1341,6 +1350,16 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
                 "private delivery binding options differ",
             ));
         }
+        let verify_only = match rest {
+            [] => false,
+            [flag] if flag == "--verify-only" && args[0] == "_bind-mail" => true,
+            _ => {
+                return Err(LaneError::input(
+                    "mail-private",
+                    "private delivery binding options differ",
+                ));
+            }
+        };
         let report = launch::steering::private_bind(
             Path::new(owner_home),
             loop_name,
@@ -1348,6 +1367,7 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             step,
             delivery,
             args[0] == "_bind-reply",
+            verify_only,
         )?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;

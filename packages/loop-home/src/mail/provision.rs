@@ -50,6 +50,22 @@ pub(super) fn directory(
     }
     Ok((file, created))
 }
+fn verified_directory(
+    parent: &File,
+    name: &str,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+) -> Result<(File, bool)> {
+    let file = io::child(parent, Path::new(name), true)?;
+    let info = file.metadata()?;
+    if info.uid() != uid || info.gid() != gid || info.mode() & 0o7777 != mode {
+        return Err(MailError::Invalid(
+            "unsafe-storage: existing provisioned directory differs",
+        ));
+    }
+    Ok((file, false))
+}
 /// Finish only an empty directory left at a protected creation boundary.
 pub(super) fn staged_directory(
     parent: &File,
@@ -272,8 +288,35 @@ pub(super) fn tree(
     service: u32,
     group: u32,
 ) -> Result<File> {
-    let staged = name == ".mail-provisioning";
-    let ensure_directory = if staged { staged_directory } else { directory };
+    tree_with(parent, name, actor, service, group, false)
+}
+
+pub(super) fn verify_tree(
+    parent: &File,
+    name: &str,
+    actor: u32,
+    service: u32,
+    group: u32,
+) -> Result<File> {
+    tree_with(parent, name, actor, service, group, true)
+}
+
+fn tree_with(
+    parent: &File,
+    name: &str,
+    actor: u32,
+    service: u32,
+    group: u32,
+    verify_only: bool,
+) -> Result<File> {
+    let staged = !verify_only && name == ".mail-provisioning";
+    let ensure_directory = if verify_only {
+        verified_directory
+    } else if staged {
+        staged_directory
+    } else {
+        directory
+    };
     let (mail, created) = ensure_directory(parent, name, service, group, 0o750)?;
     let expected = ["draft", "inbox", "outbox", "read", "sent"].map(OsString::from);
     let mut names = io::names(&mail)?;
@@ -312,14 +355,20 @@ pub(super) fn tree(
         } else {
             acl::transport(&folder)?;
             if name == "draft" {
-                acl::grant_draft_default(&folder, service)?;
+                if verify_only {
+                    acl::verify_draft_default(&folder, service)?;
+                } else {
+                    acl::grant_draft_default(&folder, service)?;
+                }
             }
         }
     }
-    mail.sync_all()?;
+    if !verify_only {
+        mail.sync_all()?;
+    }
     Ok(mail)
 }
-fn provision(home: &Path, name: &str) -> Result<()> {
+pub(super) fn provision(home: &Path, name: &str) -> Result<()> {
     if Uid::effective().as_raw() != 0 {
         return Err(MailError::Invalid(
             "unsafe-storage: namespace-root provisioning required",
@@ -329,6 +378,14 @@ fn provision(home: &Path, name: &str) -> Result<()> {
     let registry =
         crate::load_registry(&home.join(".config/loops/registry.toml")).map_err(failure)?;
     let row = registry.row(name, home).map_err(failure)?;
+    if io::names(&io::absolute(&row.home, true)?)?
+        .iter()
+        .any(|name| name == ".mail-migration-hold")
+    {
+        return Err(MailError::Invalid(
+            "invalid-directory: retained migration history requires namespace reconciliation before provisioning",
+        ));
+    }
     let (service, group) = reserve(home, name)?;
     host_access(home, service)?;
     let root = io::absolute(&row.home, true)?;
@@ -485,6 +542,43 @@ mod tests {
         fn drop(&mut self) {
             let _removed = fs::remove_dir_all(&self.path);
         }
+    }
+
+    /// ´claim:loophome:mail-layout-preview-refuses-missing-default-grants-without-repair´
+    /// ´test:unit:mail-layout-preview-refuses-missing-default-grants-without-repair´
+    #[test]
+    fn mail_layout_preview_refuses_missing_default_grants_without_repair() {
+        let fixture = Fixture::new();
+        let verify = || {
+            verify_tree(
+                &fixture.parent,
+                "mail",
+                fixture.uid,
+                fixture.uid,
+                fixture.gid,
+            )
+        };
+        assert!(verify().is_err());
+        assert!(!fixture.path.join("mail").exists());
+        fixture.tree(".mail-provisioning").expect("fixture tree");
+        fs::rename(
+            fixture.path.join(".mail-provisioning"),
+            fixture.path.join("mail"),
+        )
+        .unwrap();
+        let draft = File::open(fixture.path.join("mail/draft")).unwrap();
+        let stamp = || {
+            let info = draft.metadata().unwrap();
+            (info.ino(), info.mode(), info.ctime(), info.ctime_nsec())
+        };
+        let before = stamp();
+        verify().expect("complete read-only tree");
+        assert_eq!(stamp(), before);
+        acl::remove_grants(&draft).expect("remove default grant");
+        let before = stamp();
+        assert!(verify().is_err());
+        assert_eq!(stamp(), before);
+        assert!(acl::verify_draft_default(&draft, fixture.uid).is_err());
     }
 
     /// ´claim:loophome:mail-layout-retry-preserves-queued-and-read-bytes´

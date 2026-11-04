@@ -20,6 +20,9 @@ def main():
         script.write_text(args.recipe.read_text().split('```bash\n', 1)[1].split('```', 1)[0])
         inbox = root / 'inbox'
         history = root / 'read'
+        missing = subprocess.run(['/bin/bash', str(script), str(inbox), '1'], capture_output=True, timeout=5)
+        assert missing.returncode == 3 and not missing.stdout
+        assert b'inbox is missing or unreadable' in missing.stderr
         inbox.mkdir()
         history.mkdir()
         (history / 'old').write_bytes(b'old envelope\0\xff')
@@ -77,6 +80,29 @@ def main():
             if process.poll() is None:
                 process.terminate()
                 process.communicate(timeout=3)
+        (inbox / 'fallback').unlink()
+        if os.geteuid() != 0:
+            # The marker proves startup accepted the readable inbox before access
+            # is removed, so exit 3 must come from notice(), not the startup guard.
+            marker = root / 'unreadable-armed'
+            environment['WATCH_MARKER'] = str(marker)
+            stub.write_text('#!/bin/sh\nprintf armed > "$WATCH_MARKER"\nexit 1\n')
+            process = subprocess.Popen(['/bin/bash', str(script), str(inbox), '1'], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 3
+                while not marker.exists() and time.monotonic() < deadline:
+                    assert process.poll() is None, 'watcher exits before arming'
+                    time.sleep(0.01)
+                assert marker.exists(), 'watcher entered after startup guard'
+                inbox.chmod(0o000)
+                output, error = process.communicate(timeout=5)
+                assert process.returncode == 3 and not output
+                assert error == b'inbox-watch: inbox is unreadable\n'
+            finally:
+                inbox.chmod(0o700)
+                if process.poll() is None:
+                    process.terminate()
+                    process.communicate(timeout=3)
     print(json.dumps({'result': 'PASS', 'wall_seconds': round(time.monotonic() - started, 3)}))
 
 
