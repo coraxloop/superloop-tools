@@ -362,29 +362,7 @@ fn preview(
     };
     let (_, letter_reconciliation) =
         super::letters::reconcile_run(plan, run, owner_home, owner_uid, false)?;
-    let worker = record["worker_uid"]
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| LaneError::input("settle-record", "worker UID is absent"))?;
-    let mut acknowledgments = Vec::new();
-    for letter in record["letters"]
-        .as_array()
-        .ok_or_else(|| LaneError::input("settle-record", "letters are absent"))?
-    {
-        if !readback.is_null()
-            && letter["step"] == step
-            && letter["in_round"] == true
-            && letter["state"] == "placed"
-        {
-            let name = letter["name"]
-                .as_str()
-                .ok_or_else(|| LaneError::input("settle-record", "letter name is absent"))?;
-            acknowledgments.push(super::inspect_readback(
-                &plan.home.join(".local/outbox").join(name),
-                worker,
-            )?);
-        }
-    }
+    let acknowledgments: Vec<Value> = Vec::new();
     let basis = json!({"reservation":record,"report_path":report_path,"report_archive":archive,"previous_report":previous_report,"report_line":report_line,"thread":thread,"readback":readback,"in_round_acknowledgments":acknowledgments,"letter_reconciliation":letter_reconciliation});
     let bytes = serde_json::to_vec(&basis)
         .map_err(|error| LaneError::input("settle-record", error.to_string()))?;
@@ -419,43 +397,28 @@ fn settlement_readback(
     owner: u32,
     record: &Value,
 ) -> Result<Value, LaneError> {
+    if record["mail_replies"].as_array().is_some_and(|bindings| {
+        bindings
+            .iter()
+            .any(|binding| binding["worker_uid"] != record["worker_uid"])
+    }) {
+        return Err(LaneError::input(
+            "readback",
+            "verified reply worker identity differs from reservation",
+        ));
+    }
     if super::reaping::recovery_verdict(record).is_ok() || completed_failed_round(record) {
         let step = record["active_round"]
             .as_str()
             .ok_or_else(|| LaneError::input("settle-record", "active round is absent"))?;
         super::letters::valid_step(step)?;
-        let worker = record["worker_uid"]
-            .as_u64()
-            .and_then(|uid| u32::try_from(uid).ok())
-            .ok_or_else(|| LaneError::input("settle-record", "worker UID is absent"))?;
-        let parent = home::pin_parent(&plan.home.join(".local"), owner)?;
-        let held = nix::fcntl::openat2(
-            &parent,
-            "outbox",
-            nix::fcntl::OpenHow::new()
-                .flags(
-                    nix::fcntl::OFlag::O_RDONLY
-                        | nix::fcntl::OFlag::O_DIRECTORY
-                        | nix::fcntl::OFlag::O_CLOEXEC,
-                )
-                .resolve(
-                    nix::fcntl::ResolveFlag::RESOLVE_BENEATH
-                        | nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS,
-                ),
-        )
-        .map_err(|error| LaneError::input("readback", error.to_string()))?;
-        let metadata = nix::sys::stat::fstat(&held)
-            .map_err(|error| LaneError::input("readback", error.to_string()))?;
-        if metadata.st_uid != worker || metadata.st_mode & 0o022 != 0 {
-            return Err(LaneError::input(
-                "readback",
-                format!(
-                    "outbox uid {} differs from worker {worker} or its mode permits replacement",
-                    metadata.st_uid
-                ),
-            ));
-        }
-        let name = format!("{step}.md");
+        let loop_uid = super::recorded_loop_uid(record)?;
+        let root = plan
+            .driver_dir
+            .parent()
+            .ok_or_else(|| LaneError::input("readback", "runs root absent"))?;
+        let held = home::pin_loop_round(root, &plan.driver_dir, owner, loop_uid)?;
+        let name = format!("reply-{step}.txt");
         match nix::fcntl::openat2(
             &held,
             name.as_str(),
@@ -826,7 +789,7 @@ fn private_recover_core(
         if current != readback {
             return Err(LaneError::input(
                 "settle-preview-refusal",
-                "outbox changed after preview",
+                "reply evidence changed after preview",
             ));
         }
         let (_, letter_reconciliation) =
@@ -842,7 +805,7 @@ fn private_recover_core(
         if actual != readback {
             return Err(LaneError::input(
                 "settle-preview-refusal",
-                "outbox changed after preview",
+                "reply evidence changed after preview",
             ));
         }
         if recovered || (actual.is_null() && completed_failed_round(&record)) {
@@ -910,15 +873,7 @@ fn finish_recovered_round(
     if !reply.is_null() {
         record["thread_id"] = json!(rounds::recovery_thread(plan, &record, &round)?);
     }
-    let worker = record["worker_uid"]
-        .as_u64()
-        .and_then(|uid| u32::try_from(uid).ok())
-        .ok_or_else(|| LaneError::input("settle-record", "worker UID is absent"))?;
-    let stopped = record["letters"].as_array().is_some_and(|letters| {
-        letters.iter().any(|letter| {
-            letter["step"] == request.step && letter["stop"] == true && letter["state"] == "placed"
-        })
-    });
+    let stopped = super::steering::stop_brief(&record, &request.step).is_some();
     let ended_by = report.as_str().map(|line| {
         if stopped && line.split_whitespace().any(|word| word == "exit=0") {
             "by-report-after-stop"
@@ -926,24 +881,7 @@ fn finish_recovered_round(
             "by-report"
         }
     });
-    let mut acknowledgments = Vec::new();
-    for letter in record["letters"]
-        .as_array()
-        .ok_or_else(|| LaneError::input("settle-record", "letters are absent"))?
-    {
-        if !reply.is_null()
-            && letter["step"] == request.step
-            && letter["in_round"] == true
-            && letter["state"] == "placed"
-        {
-            let name = letter["name"]
-                .as_str()
-                .ok_or_else(|| LaneError::input("settle-record", "letter name is absent"))?;
-            let acknowledgment =
-                super::inspect_readback(&plan.home.join(".local/outbox").join(name), worker)?;
-            acknowledgments.push(json!({"letter":name,"acknowledgment":acknowledgment}));
-        }
-    }
+    let acknowledgments: Vec<Value> = Vec::new();
     let round = record["rounds"]
         .as_array_mut()
         .and_then(|rows| rows.last_mut())
@@ -1094,7 +1032,7 @@ mod tests {
                 |saved| Ok(json!({"state":"collected","cgroup":saved["run_scope"]["cgroup"],"container_payload":{"state":"absent","by":"loop-and-run-label"}})), crate::launch::driver_report::fixture_read).expect("launch recovery entry");
             assert_eq!(recovered["state"], "completed-interrupted-settlement");
             if !has_reply {
-                std::fs::remove_file(plan.home.join(".local/outbox/work.md")).expect("no reply");
+                std::fs::remove_file(plan.driver_dir.join("reply-work.txt")).expect("no reply");
             }
             let bare = plan.home.join(".local/sources/tools.git");
             git_fixture(
@@ -1185,7 +1123,7 @@ mod tests {
             std::fs::remove_file(plan.driver_dir.join("20261007T043545Z-work/run-report.txt"))
                 .expect("launcher left no report");
             if !has_reply {
-                std::fs::remove_file(plan.home.join(".local/outbox/work.md")).expect("no reply");
+                std::fs::remove_file(plan.driver_dir.join("reply-work.txt")).expect("no reply");
             }
             let preview = private_recover_core(&plan, fixture.path(), &request, owner, |_, _| {
                 ProcessPresence::Absent
@@ -1231,7 +1169,7 @@ mod tests {
             assert!(
                 error
                     .detail
-                    .contains(&format!("outbox uid {owner} differs from worker {worker}")),
+                    .contains("verified reply worker identity differs from reservation"),
                 "{}",
                 error.line()
             );
@@ -1278,7 +1216,7 @@ mod tests {
         )
         .expect_err("completed by-report recovery names the new round");
         assert_eq!(error.kind, "launch-report");
-        assert!(error.detail.contains("send-letter LOOP RUN --step NEW"));
+        assert!(error.detail.contains("bind-mail LOOP RUN --step NEW"));
         assert!(!error.detail.contains("preview settle"));
         by_report["rounds"]
             .as_array_mut()
@@ -1499,7 +1437,7 @@ mod tests {
             std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o750))
                 .expect("private home ancestors");
         }
-        let reply = home_dir.join(".local/outbox/work.md");
+        let reply = driver_dir.join("reply-work.txt");
         std::fs::write(&reply, b"reply\n").expect("reply");
         std::fs::set_permissions(&reply, std::fs::Permissions::from_mode(0o600))
             .expect("reply mode");
@@ -1526,7 +1464,8 @@ mod tests {
         record["loop"] = json!("alpha");
         record["run"] = json!("R");
         record["plan"] = plan.document.clone();
-        record["letters"] = json!([]);
+        record["mail"] = json!([]);
+        record["mail_replies"] = json!([{"step":"work","worker_uid":owner,"sender":"alpha+worker-fixture","recipient":"alpha","evidence_digest":loop_home::mail::journal::digest(b"reply\n"),"bytes":6}]);
         record["thread_id"] = json!("thread-1");
         record["rounds"][0]["driver_dir"] = json!(step_dir);
         super::super::publish_reservation(
@@ -1626,7 +1565,7 @@ mod tests {
         std::fs::write(&letter, bytes).expect("letter");
         std::fs::set_permissions(&letter, std::fs::Permissions::from_mode(0o600))
             .expect("letter mode");
-        std::fs::remove_file(plan.home.join(".local/outbox/work.md")).expect("absent reply");
+        std::fs::remove_file(plan.driver_dir.join("reply-work.txt")).expect("absent reply");
         let directory = plan.driver_dir.join("20261007T043545Z-work-1");
         std::fs::rename(plan.driver_dir.join("20261007T043545Z-work"), &directory)
             .expect("fresh resumed directory");
@@ -1658,7 +1597,16 @@ mod tests {
             {"step":"dispatch","phase":"failed","ended_by":"by-report","reply":null,"settle_attempts":[{"phase":"complete","preview_sha256":"a".repeat(64),"detail":null}]},
             {"step":"work-1","phase":"running","driver_dir":directory,"fresh_thread":true,"ended_by":null,"letter":"work-1.md","placed_at_unix_ns":1,"budget_seconds":10800,"in_round_letters":[]}
         ]);
-        record["letters"] = json!([{"step":"work-1","name":"work-1.md","in_round":false,"stop":false,"bytes":bytes.len(),"sha256":build::sha256_bytes(bytes, h).expect("digest"),"placed_at_unix_ns":1,"state":"placed"}]);
+        record["mail_birth"] =
+            json!({"name":"fixture","uid":owner,"reservation":"superloop-lane:R"});
+        record["mail"] = json!([{"worker_uid":owner,"step":"work-1","sender":"alpha","recipient":"alpha+fixture","delivery":"2026-01-01T00:00:00.000Z","journal_identity":"fixture-journal","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter","stop":false,"bytes":bytes.len(),"evidence_digest":build::sha256_bytes(bytes,h).expect("digest")}]);
+        std::fs::write(super::super::steering::evidence(&plan, "work-1"), bytes)
+            .expect("retained mail");
+        std::fs::write(
+            h.join("binding.json"),
+            serde_json::to_vec(&record["mail"][0]).expect("binding JSON"),
+        )
+        .expect("private binding fixture");
         super::super::publish_reservation(&path, &record).expect("dead resume record");
         drop(super::super::lock_mailbox(h, "R", owner).expect("existing mailbox"));
         let request = super::super::LaunchRequest::parse(&[
@@ -2629,7 +2577,9 @@ elif args[0] == 'rm':
     if (root / 'remove-disappears').exists(): sys.exit(19)
     print(data['id'])
 elif args[0] == 'unshare':
-    if '_inspect-round' in args:
+    if '_bind-mail' in args:
+        print((root / 'binding.json').read_text())
+    elif '_inspect-round' in args:
         if '--record' in args:
             print('fixture-round-evidence-stop', file=sys.stderr)
             sys.exit(17)
@@ -2973,7 +2923,13 @@ else:
             crate::container_helper::process_presence,
         )
         .expect_err("outbox belongs to different worker");
-        assert!(error.line().contains("outbox uid"), "{}", error.line());
+        assert!(
+            error
+                .line()
+                .contains("verified reply worker identity differs from reservation"),
+            "{}",
+            error.line()
+        );
         super::super::publish_reservation(&path, &failed).expect("restore worker");
         // Step 6: production settlement preserves a failed outcome and null reply.
         let settlement = private_recover_core(
@@ -3002,7 +2958,7 @@ else:
         std::fs::write(&letter, "Continue after reboot.\n").expect("next letter");
         std::fs::set_permissions(&letter, std::fs::Permissions::from_mode(0o600))
             .expect("letter mode");
-        super::super::letters::private_send_with_owner(
+        place_verified_mail_fixture(
             h,
             "alpha",
             "R",
@@ -3097,7 +3053,7 @@ else:
         );
         super::super::publish_reservation(&path, &saved).expect("settled dispatch");
         crate::fixture_exec::write_executable(&request.podman_bin,
-            b"#!/bin/sh\nfor word do\n if [ \"$word\" = --record ]; then echo fixture-round-evidence-stop >&2; exit 17; fi\ndone\nprintf '{\"thread_id\":null}\\n'\n")
+            b"#!/bin/sh\nfor word do\n if [ \"$word\" = _bind-mail ]; then cat \"$HOME/binding.json\"; exit 0; fi\n if [ \"$word\" = --record ]; then echo fixture-round-evidence-stop >&2; exit 17; fi\ndone\nprintf '{\"thread_id\":null}\\n'\n")
             .expect("fake container entry");
         request.dry_run = false;
         let error = super::super::run_with_host_root_and_proxy(h, &request, h, owner, |_| {
@@ -3178,7 +3134,7 @@ else:
             ),
         )
         .expect("interrupted report");
-        std::fs::remove_file(plan.home.join(".local/outbox/work.md")).expect("no reply");
+        std::fs::remove_file(plan.driver_dir.join("reply-work.txt")).expect("no reply");
         request.step = "dispatch".into();
         if failed_dispatch {
             record["phase"] = json!("failed");
@@ -3273,6 +3229,7 @@ else:
             None,
         )
         .expect("model");
+        saved["mail"] = json!([{"step":"work-1","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter","evidence_digest":"a".repeat(64)},{"step":"work-2","inbox_name":"alpha.2026-01-01T00:00:00.001Z.letter","evidence_digest":"b".repeat(64)},{"step":"work-3","inbox_name":"alpha.2026-01-01T00:00:00.002Z.letter","evidence_digest":"c".repeat(64)}]);
         let (mut next_dir, argv) = rounds::continuation_argv(
             &plan,
             &saved,
@@ -3301,7 +3258,7 @@ else:
         rounds::publish_round_request(&plan, &saved, "work-1", 900).expect("round request");
         let requested = crate::container_helper::requested_thread(
             &plan.driver_dir,
-            b"Read /home/worker/.local/inbox/work-1.md.",
+            b"Read /mail/inbox/alpha.2026-01-01T00:00:00.000Z.letter. Step work-1.",
         )
         .expect("read request");
         assert!(requested.is_none());
@@ -3331,7 +3288,7 @@ else:
             let letter = inbox.join("work-1.md");
             let bytes = b"Continue.\n";
             std::fs::write(&letter, bytes).expect("placed letter");
-            saved["letters"] = json!([{"step":"work-1","name":"work-1.md","in_round":false,"stop":false,"bytes":bytes.len(),"sha256":build::sha256_bytes(bytes, fixture.path()).expect("letter digest"),"placed_at_unix_ns":1,"state":"placed"}]);
+            saved["mail"] = json!([{"step":"work-1","name":"work-1.md","in_round":false,"stop":false,"bytes":bytes.len(),"sha256":build::sha256_bytes(bytes, fixture.path()).expect("letter digest"),"placed_at_unix_ns":1,"state":"placed"}]);
             saved["phase"] = json!("started");
             saved["letter_source"] = json!(letter);
             saved["readback_end"] = Value::Null;
@@ -3391,8 +3348,8 @@ else:
             rounds::check_identity(&plan, &saved).expect("recovered work-1 permits continuation");
             let third_letter = inbox.join("work-2.md");
             std::fs::write(&third_letter, bytes).expect("next placed letter");
-            let entry = json!({"step":"work-2","name":"work-2.md","in_round":false,"stop":false,"bytes":bytes.len(),"sha256":build::sha256_bytes(bytes, fixture.path()).expect("next letter digest"),"placed_at_unix_ns":2,"state":"placed"});
-            saved["letters"]
+            let entry = json!({"step":"work-2","inbox_name":"alpha.2026-01-01T00:00:00.001Z.letter","stop":false,"bytes":bytes.len(),"evidence_digest":build::sha256_bytes(bytes, fixture.path()).expect("next letter digest")});
+            saved["mail"]
                 .as_array_mut()
                 .expect("letters")
                 .push(entry.clone());
@@ -3421,7 +3378,7 @@ else:
             rounds::publish_round_request(&plan, &saved, "work-2", 900).expect("third request");
             let requested = crate::container_helper::requested_thread(
                 &plan.driver_dir,
-                b"Read /home/worker/.local/inbox/work-2.md.",
+                b"Read /mail/inbox/alpha.2026-01-01T00:00:00.001Z.letter. Step work-2.",
             )
             .expect("third client request");
             assert!(requested.is_none());
@@ -3477,7 +3434,7 @@ else:
             .to_owned();
         let directory = record["rounds"][0]["driver_dir"].clone();
         record["rounds"] = json!([{"step":step,"budget_seconds":900,"letter":format!("{step}.md"),"phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":1,"in_round_letters":[]}]);
-        let reply = plan.home.join(format!(".local/outbox/{step}.md"));
+        let reply = plan.driver_dir.join(format!("reply-{step}.txt"));
         if reply.exists() {
             std::fs::remove_file(&reply).expect("absent reply");
         }
@@ -3626,7 +3583,7 @@ else:
         .expect("failed report");
         record["active_round"] = json!(step);
         record["rounds"] = json!([{"driver_dir":directory}]);
-        record["letters"] = json!([]);
+        record["mail"] = json!([]);
         record["driver_end"] = json!({"state":"completed","successful":report_case});
         record["helper_end"] = json!({"state":"completed"});
         record["pre_driver_failure"] = Value::Null;
@@ -3656,15 +3613,7 @@ else:
             .expect("letter mode");
         let digest = build::sha256_bytes(letter, h).expect("letter digest");
         let send = || {
-            super::super::letters::private_send_with_owner(
-                h,
-                "alpha",
-                "R",
-                &next_letter,
-                "report-2",
-                &digest,
-                owner,
-            )
+            place_verified_mail_fixture(h, "alpha", "R", &next_letter, "report-2", &digest, owner)
         };
         if report_case {
             let root = File::open(h).expect("fixture root");
@@ -3750,14 +3699,56 @@ else:
             send().expect("next letter placed by production writer");
             let placed = read_reservation(&path).expect("read").expect("placed");
             assert_eq!(placed["rounds"], saved["rounds"]);
-            assert_eq!(placed["letters"][0]["step"], "report-2");
-            assert_eq!(placed["letters"][0]["state"], "placed");
+            assert_eq!(placed["mail"][0]["step"], "report-2");
+            assert_eq!(placed["mail"][0]["evidence_digest"], digest);
             assert_eq!(
-                std::fs::read(plan.home.join(".local/inbox/report-2.md")).expect("inbox"),
+                std::fs::read(super::super::steering::evidence(&plan, "report-2"))
+                    .expect("retained delivery"),
                 letter
             );
             launch_after_public_settle(h, &plan, &saved);
         }
+    }
+
+    // The service publication/provenance path is measured by loop-home's fixtures.
+    // These settlement cases begin with a selected delivery as trusted fixture input.
+    #[allow(clippy::too_many_arguments)]
+    fn place_verified_mail_fixture(
+        h: &Path,
+        loop_name: &str,
+        run: &str,
+        source: &Path,
+        step: &str,
+        expected: &str,
+        owner: u32,
+    ) -> Result<Value, LaneError> {
+        let (plan, _) = crate::load_plan_for_record(h, loop_name, run, (0, 0))?;
+        let path =
+            super::super::reservation_path(plan.driver_dir.parent().expect("fixture runs"), run);
+        let mut record = read_reservation(&path)?.expect("fixture reservation");
+        if !["started", "settled"].contains(&record["phase"].as_str().unwrap_or_default()) {
+            return Err(LaneError::input(
+                "letter-run-state",
+                "preview settle LOOP RUN --round STEP --dry-run before binding a new delivery",
+            ));
+        }
+        let bytes = home::read_letter(source, owner)?;
+        let digest = loop_home::mail::journal::digest(&bytes);
+        assert_eq!(digest, expected, "fixture delivery bytes");
+        let binding = json!({"worker_uid":owner,"step":step,"sender":loop_name,"recipient":format!("{loop_name}+fixture"),"delivery":"2026-01-01T00:00:00.000Z","journal_identity":"fixture-journal","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter","evidence_digest":digest,"bytes":bytes.len(),"stop":false});
+        std::fs::write(super::super::steering::evidence(&plan, step), bytes)
+            .expect("fixture evidence");
+        std::fs::write(
+            h.join("binding.json"),
+            serde_json::to_vec(&binding).expect("binding JSON"),
+        )
+        .expect("private binding fixture");
+        record["mail"]
+            .as_array_mut()
+            .expect("fixture bindings")
+            .push(binding.clone());
+        super::super::publish_reservation(&path, &record)?;
+        Ok(binding)
     }
 
     fn public_settle_helper_child() {
@@ -3803,6 +3794,7 @@ shift
 entry=$1
 shift
 case "$1" in
+_bind-mail) cat "$HOME/binding.json";;
 _inspect-round) printf '{"thread_id":"thread-1"}\n';;
 _container-helper) SUPERLOOP_PUBLIC_SETTLE_FIXTURE=helper "$entry" --exact launch::settle::tests::completed_failed_dispatch_public_settle_entry --nocapture > "$HOME/helper-test.log" 2>&1;;
 _settle-evidence) printf '{}\n';;
@@ -3918,6 +3910,8 @@ esac
             None,
         )
         .expect("selection");
+        let mut saved = saved;
+        saved["mail"] = json!([{"step":"report","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter","evidence_digest":"a".repeat(64)}]);
         let (next, argv) = rounds::continuation_argv(
             &plan,
             &saved,
@@ -3961,7 +3955,7 @@ esac
             .line(),
             "settle-live-refusal: driver is still alive"
         );
-        let reply = plan.home.join(".local/outbox/work.md");
+        let reply = plan.driver_dir.join("reply-work.txt");
         std::fs::write(&reply, b"").expect("empty reply");
         std::fs::set_permissions(&reply, std::fs::Permissions::from_mode(0o600))
             .expect("protected reply");
@@ -3971,10 +3965,7 @@ esac
             })
             .expect_err("invalid existing reply")
             .line(),
-            format!(
-                "readback: {} has 0 bytes; expected 1 through 1048576",
-                reply.display()
-            )
+            "readback: retained reply differs from its verified service delivery"
         );
         std::fs::remove_file(&reply).expect("remove reply");
         let evidence = plan.driver_dir.join("readback-evidence-work.json");

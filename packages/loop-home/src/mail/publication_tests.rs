@@ -670,3 +670,126 @@ fn mail_private_temporaries_do_not_narrow_public_name_capacity() {
         b"long public names"
     );
 }
+
+/// ´claim:loophome:steering-binds-only-an-unchanged-own-loop-delivery´
+/// ´test:unit:steering-binds-only-an-unchanged-own-loop-delivery´
+#[test]
+fn steering_binds_only_an_unchanged_own_loop_delivery() {
+    use crate::mail::{directory::Actor, steering::verified_payload};
+    let fixture = Fixture::new();
+    let sender = fixture.endpoint("alpha", group());
+    let recipient = fixture.endpoint("alpha+worker", other_group());
+    let mut journal = fixture.journal();
+    let bytes = b"opaque\0\xffbrief";
+    let outgoing = source(&sender, &recipient, bytes);
+    let record = accepted(&mut journal, &sender, &recipient, &outgoing);
+    publish(&mut journal, &sender, &recipient, &record.delivery).expect("publication");
+    cleanup_source(
+        &sender,
+        &recipient,
+        &journal.record(&record.delivery).expect("record"),
+    )
+    .expect("cleanup");
+    journal
+        .advance(&record.delivery, Phase::Complete, &Witness::Absent, now())
+        .expect("complete");
+    let record = journal.record(&record.delivery).expect("terminal record");
+    let actor = Actor {
+        outbox: recipient.outbox.try_clone().expect("outbox"),
+        staging: recipient.staging.try_clone().expect("staging"),
+        inbox: recipient.inbox.try_clone().expect("inbox"),
+        uid: nix::unistd::geteuid().as_raw(),
+        group: recipient.group,
+        active: true,
+        endpoint: recipient,
+    };
+    let address = Address::parse("alpha+worker").expect("address");
+    let service = nix::unistd::geteuid().as_raw();
+    assert_eq!(
+        verified_payload(&actor, service, "alpha", &address, &record)
+            .expect("own-loop bytes")
+            .1,
+        bytes
+    );
+    assert!(
+        verified_payload(&actor, service, "beta", &address, &record).is_err(),
+        "peer sender remains data"
+    );
+    let inbox = actor
+        .endpoint
+        .mailbox_path
+        .join("inbox")
+        .join(&record.inbox_name);
+    fs::rename(&inbox, actor.endpoint.mailbox_path.join("read/moved")).expect("recipient read");
+    assert!(
+        verified_payload(&actor, service, "alpha", &address, &record).is_err(),
+        "moved inbox blocks resume"
+    );
+    fs::write(&inbox, bytes).expect("forged same bytes");
+    fs::set_permissions(&inbox, fs::Permissions::from_mode(0o640)).expect("forged mode");
+    nix::unistd::chown(&inbox, None, Some(Gid::from_raw(actor.group)))
+        .expect("matching forged group");
+    assert!(
+        verified_payload(&actor, service, "alpha", &address, &record).is_err(),
+        "digest and filename alone confer no provenance"
+    );
+}
+
+/// ´claim:loophome:retired-custody-finishes-pending-publication-with-mailbox-sealed´
+/// ´test:unit:retired-custody-finishes-pending-publication-with-mailbox-sealed´
+#[test]
+fn retired_custody_finishes_pending_publication_with_mailbox_sealed() {
+    for retire_sender in [false, true] {
+        let fixture = Fixture::new();
+        let sender = fixture.endpoint("alpha+sender", group());
+        let recipient = fixture.endpoint("alpha+recipient", other_group());
+        let mut journal = fixture.journal();
+        let outgoing = source(&sender, &recipient, b"retained pending bytes");
+        let record = accepted(&mut journal, &sender, &recipient, &outgoing);
+        let selected = if retire_sender { &sender } else { &recipient };
+        let root = File::open(&selected.mailbox_path).expect("retired root");
+        fchown(&root, None, Some(Gid::from_raw(geteuid().as_raw())))
+            .expect("service group custody");
+        fchmod(&root, Mode::from_bits_truncate(0o700)).expect("sealed root");
+        assert!(
+            Endpoint::open(
+                &fixture.root,
+                selected.address.clone(),
+                selected.group,
+                DURABLE
+            )
+            .is_err()
+        );
+        let retired = Endpoint::open_retired(
+            &fixture.root,
+            selected.address.clone(),
+            selected.group,
+            DURABLE,
+        )
+        .expect("service-only recovery endpoint");
+        let (sender, recipient) = if retire_sender {
+            (&retired, &recipient)
+        } else {
+            (&sender, &retired)
+        };
+        publish(&mut journal, sender, recipient, &record.delivery)
+            .expect("pending publication finishes");
+        let current = journal.record(&record.delivery).expect("published record");
+        cleanup_source(sender, recipient, &current).expect("source cleanup");
+        journal
+            .advance(&record.delivery, Phase::Complete, &Witness::Absent, now())
+            .expect("complete");
+        assert_eq!(
+            read(recipient, "inbox", &record.inbox_name),
+            b"retained pending bytes"
+        );
+        assert_eq!(
+            root.metadata().expect("sealed custody").mode() & 0o7777,
+            0o700
+        );
+        assert_eq!(
+            root.metadata().expect("sealed group").gid(),
+            geteuid().as_raw()
+        );
+    }
+}

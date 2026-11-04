@@ -95,6 +95,19 @@ fn mailbox_custody(mailbox: &File, actor_group: u32) -> Result<()> {
     Ok(())
 }
 
+fn retired_mailbox_custody(mailbox: &File) -> Result<()> {
+    let info = mailbox.metadata()?;
+    if info.uid() != geteuid().as_raw()
+        || info.gid() != geteuid().as_raw()
+        || info.mode() & 0o7777 != 0o700
+    {
+        return Err(MailError::Invalid(
+            "unsafe-storage: retired mailbox root custody",
+        ));
+    }
+    Ok(())
+}
+
 fn publication_custody(directory: &File, actor_group: u32, device: u64) -> Result<()> {
     let observed = directory.metadata()?;
     if observed.uid() != geteuid().as_raw()
@@ -115,6 +128,7 @@ fn publication_custody(directory: &File, actor_group: u32, device: u64) -> Resul
 /// allocation, ACL provisioning and directory registry freshness belong to the
 /// provisioner and admission service, not to a body or an outgoing filename.
 pub struct Endpoint {
+    retired: bool,
     address: Address,
     group: u32,
     mailbox_path: PathBuf,
@@ -136,6 +150,30 @@ impl Endpoint {
         actor_group: u32,
         durability: Durability,
     ) -> Result<Self> {
+        Self::open_with(loops_root, address, actor_group, durability, false)
+    }
+
+    pub(super) fn open_retired(
+        loops_root: &Path,
+        address: Address,
+        actor_group: u32,
+        durability: Durability,
+    ) -> Result<Self> {
+        if address.worker().is_none() {
+            return Err(MailError::Invalid(
+                "unsafe-storage: retired worker endpoint required",
+            ));
+        }
+        Self::open_with(loops_root, address, actor_group, durability, true)
+    }
+
+    fn open_with(
+        loops_root: &Path,
+        address: Address,
+        actor_group: u32,
+        durability: Durability,
+        retired: bool,
+    ) -> Result<Self> {
         if !durability.crash_consistent_rename || !durability.durable_sync {
             return Err(MailError::Invalid(
                 "unsafe-storage: durability is not established",
@@ -148,7 +186,11 @@ impl Endpoint {
             .ok_or(MailError::Invalid("endpoint parent"))?
             .join(".mail-staging");
         let mailbox = address.open_mailbox(&root)?;
-        mailbox_custody(&mailbox, actor_group)?;
+        if retired {
+            retired_mailbox_custody(&mailbox)?;
+        } else {
+            mailbox_custody(&mailbox, actor_group)?;
+        }
         let inbox = child(&mailbox, "inbox", true)?;
         let sent = child(&mailbox, "sent", true)?;
         let outbox = child(&mailbox, "outbox", true)?;
@@ -160,6 +202,7 @@ impl Endpoint {
         }
         staging.sync_all()?;
         Ok(Self {
+            retired,
             address,
             group: actor_group,
             mailbox_path,
@@ -173,7 +216,11 @@ impl Endpoint {
 
     fn fresh(&self) -> Result<()> {
         let mailbox = absolute_directory(&self.mailbox_path)?;
-        mailbox_custody(&mailbox, self.group)?;
+        if self.retired {
+            retired_mailbox_custody(&mailbox)?;
+        } else {
+            mailbox_custody(&mailbox, self.group)?;
+        }
         store::private(&self.staging, true)?;
         for directory in [&self.inbox, &self.sent] {
             publication_custody(directory, self.group, self.staging.metadata()?.dev())?;
@@ -332,6 +379,10 @@ pub struct Prepared {
     sender_temporary: Option<Temporary>,
 }
 impl Prepared {
+    pub(super) fn matches_source(&self, identity: &Identity, bytes: u64, digest: &str) -> bool {
+        self.source_identity == *identity && self.bytes == bytes && self.digest == digest
+    }
+
     /// Reserve actual UTC and durably accept metadata after both snapshots sync.
     ///
     /// # Errors

@@ -1,5 +1,6 @@
 [package]
 name = "superloop"
+default-run = "superloop"
 description = "Loop entry and neutral session commands"
 version.workspace = true
 authors.workspace = true

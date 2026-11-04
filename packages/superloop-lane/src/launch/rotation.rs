@@ -416,22 +416,11 @@ fn stop_for_last_round(record: &Value) -> Result<Value, LaneError> {
             "last round did not report after stop",
         ));
     }
-    record["letters"]
-        .as_array()
-        .and_then(|letters| {
-            letters.iter().rev().find(|letter| {
-                letter["step"] == last["step"]
-                    && letter["stop"] == true
-                    && letter["state"] == "placed"
-            })
-        })
+    last["step"]
+        .as_str()
+        .and_then(|step| super::steering::stop_brief(record, step))
         .cloned()
-        .ok_or_else(|| {
-            LaneError::input(
-                "rotate-stop",
-                format!("last round {} has no placed stop letter", last["step"]),
-            )
-        })
+        .ok_or_else(|| LaneError::input("rotate-stop", "last round has no verified stop brief"))
 }
 
 fn pending_message(intent: &Value) -> String {
@@ -485,10 +474,10 @@ fn validate_new_handover(
             "new reservation differs from rotation intent",
         ));
     }
-    if new["letters"][0]["name"] != "dispatch.md"
-        || new["letters"][0]["step"] != "dispatch"
-        || new["letters"][0]["state"] != "placed"
-        || new["letters"][0]["sha256"] != intent["letter_sha256"]
+    if new["initial_brief"]["name"] != "brief.txt"
+        || new["initial_brief"]["step"] != "dispatch"
+        || new["initial_brief"]["state"] != "placed"
+        || new["initial_brief"]["sha256"] != intent["letter_sha256"]
     {
         return Err(LaneError::input(
             "rotate-pending",
@@ -1424,13 +1413,9 @@ fn check_rotation(
         .and_then(|rounds| rounds.last())
         .ok_or_else(|| LaneError::input("rotate-live", "last round is absent"))?;
     if last["ended_by"] != "by-report-after-stop"
-        || !record["letters"].as_array().is_some_and(|letters| {
-            letters.iter().any(|letter| {
-                letter["step"] == last["step"]
-                    && letter["stop"] == true
-                    && letter["state"] == "placed"
-            })
-        })
+        || last["step"]
+            .as_str()
+            .is_none_or(|step| super::steering::stop_brief(record, step).is_none())
     {
         return Err(LaneError::input(
             "rotate-stop",
@@ -1494,7 +1479,7 @@ fn require_rotation_replies(record: &Value) -> Result<(), LaneError> {
         return Err(LaneError::input(
             "rotate-reply-absent",
             format!(
-                "settlement completed but a failed round has no reply for handover; use send-letter {} {} --step NEW --letter FILE then launch {} {} --round NEW to continue in the same home",
+                "settlement completed but a failed round has no reply for handover; use bind-mail {} {} --step NEW --delivery UTC_INSTANT then launch {} {} --round NEW to continue in the same home",
                 record["loop"].as_str().unwrap_or("LOOP"),
                 record["run"].as_str().unwrap_or("RUN"),
                 record["loop"].as_str().unwrap_or("LOOP"),
@@ -1612,86 +1597,6 @@ fn next_task(
     let body = String::from_utf8(bytes)
         .map_err(|_| LaneError::input("rotate-next", "next task is not UTF-8"))?;
     Ok(json!({"state":"present","sha256":digest,"bytes":size,"body":body,"body_truncated":false}))
-}
-
-fn read_inbox_entry(
-    inbox: &File,
-    step: &str,
-    entry: &Value,
-    owner: u32,
-    loop_uid: u32,
-    owner_home: &Path,
-) -> Result<Value, LaneError> {
-    let name = entry
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| LaneError::input("rotate-inbox", "placed inbox name is absent"))?;
-    let in_round = entry
-        .get("in_round")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| LaneError::input("rotate-inbox", format!("{name}: in_round is absent")))?;
-    let valid_name = if in_round {
-        name.strip_prefix(&format!("{step}-"))
-            .and_then(|tail| tail.strip_suffix(".md"))
-            .is_some_and(|number| number.parse::<u32>().is_ok_and(|value| value > 0))
-    } else {
-        name == format!("{step}.md")
-    };
-    if !valid_name {
-        return Err(LaneError::input(
-            "rotate-inbox",
-            format!("{name}: name differs from round"),
-        ));
-    }
-    let saved_bytes = entry
-        .get("bytes")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| LaneError::input("rotate-inbox", format!("{name}: size is absent")))?;
-    let saved_digest = entry
-        .get("sha256")
-        .and_then(Value::as_str)
-        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| LaneError::input("rotate-inbox", format!("{name}: digest is absent")))?;
-    let file = File::from(
-        openat2(
-            inbox,
-            name,
-            OpenHow::new()
-                .flags(OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)
-                .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
-        )
-        .map_err(|error| LaneError::input("rotate-inbox", format!("{name}: {error}")))?,
-    );
-    let meta = file
-        .metadata()
-        .map_err(|error| LaneError::input("rotate-inbox", format!("{name}: {error}")))?;
-    if !meta.is_file()
-        || meta.uid() != owner
-        || meta.gid() != loop_uid
-        || meta.permissions().mode() & 0o7777 != 0o640
-        || meta.len() > home::MAX_LETTER
-    {
-        return Err(LaneError::input(
-            "rotate-inbox",
-            format!("{name}: custody or size differs"),
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(home::MAX_LETTER + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| LaneError::input("rotate-inbox", format!("{name}: {error}")))?;
-    let digest = build::sha256_bytes(&bytes, owner_home)?;
-    if saved_bytes != bytes.len() as u64 || saved_digest != digest {
-        return Err(LaneError::input(
-            "rotate-inbox",
-            format!("{name}: bytes differ from placement"),
-        ));
-    }
-    let body = String::from_utf8(bytes)
-        .map_err(|_| LaneError::input("rotate-inbox", format!("{name}: body is not UTF-8")))?;
-    Ok(
-        json!({"step":step,"name":name,"sha256":digest,"bytes":saved_bytes,"body":body,"body_truncated":false}),
-    )
 }
 
 #[derive(Clone, Copy)]
@@ -1817,51 +1722,11 @@ pub fn private_handover(
             "old reservation names another home",
         ));
     }
-    let worker = record["worker_uid"]
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| LaneError::input("rotate-record", "worker UID is absent"))?;
     let loop_uid = super::recorded_loop_uid(&record)?;
-    let local = home::pin_parent(&plan.home.join(".local"), 0)?;
-    let how = OpenHow::new()
-        .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
-        .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS);
-    let outbox = File::from(
-        openat2(&local, "outbox", how)
-            .map_err(|error| LaneError::input("rotate-outbox", error.to_string()))?,
-    );
-    let meta = outbox
-        .metadata()
-        .map_err(|error| LaneError::input("rotate-outbox", error.to_string()))?;
-    if meta.uid() != worker || meta.gid() != loop_uid || meta.permissions().mode() & 0o7777 != 0o750
-    {
-        return Err(LaneError::input(
-            "rotate-outbox",
-            "outbox custody differs from the recorded worker and loop group",
-        ));
-    }
-    let inbox = File::from(
-        openat2(&local, "inbox", how)
-            .map_err(|error| LaneError::input("rotate-inbox", error.to_string()))?,
-    );
-    let inbox_meta = inbox
-        .metadata()
-        .map_err(|error| LaneError::input("rotate-inbox", error.to_string()))?;
-    if inbox_meta.uid() != 0
-        || inbox_meta.gid() != loop_uid
-        || inbox_meta.permissions().mode() & 0o7777 != 0o750
-    {
-        return Err(LaneError::input(
-            "rotate-inbox",
-            "inbox custody differs from recorded loop",
-        ));
-    }
+    let evidence = File::from(home::pin_loop_round(root, &plan.driver_dir, 0, loop_uid)?);
     let rounds = record["rounds"]
         .as_array()
         .ok_or_else(|| LaneError::input("rotate-record", "rounds are absent"))?;
-    let letters = record["letters"]
-        .as_array()
-        .ok_or_else(|| LaneError::input("rotate-record", "letters are absent"))?;
     let mut handover = json!({"schema":1,"loop":loop_name,"run":run,"context":null,"replies":[]});
     require_rotation_replies(&record)?;
     for round in rounds {
@@ -1873,7 +1738,13 @@ pub fn private_handover(
             .ok_or_else(|| LaneError::input("rotate-record", "round step is absent"))?;
         super::letters::valid_step(step)?;
         let name = format!("{step}.md");
-        let reply = read_reply(&outbox, &name, worker, &round["reply"], owner_home)?;
+        let reply = read_reply(
+            &evidence,
+            &format!("reply-{step}.txt"),
+            loop_uid,
+            &round["reply"],
+            owner_home,
+        )?;
         handover["replies"]
             .as_array_mut()
             .ok_or_else(|| LaneError::input("rotate-handover", "replies are absent"))?
@@ -1884,31 +1755,39 @@ pub fn private_handover(
             .ok_or_else(|| LaneError::input("rotate-handover", "replies are absent"))?
             .len()
             - 1;
-        let mut round_letter_seen = false;
-        for letter in letters
-            .iter()
-            .filter(|letter| letter["step"] == step && letter["state"] == "placed")
-        {
-            let entry = read_inbox_entry(&inbox, step, letter, 0, loop_uid, owner_home)?;
-            if entry["name"] == name {
-                round_letter_seen = true;
-            }
-            handover["replies"][index]["inbox"]
-                .as_array_mut()
-                .ok_or_else(|| LaneError::input("rotate-handover", "inbox names are absent"))?
-                .push(entry["name"].clone());
-            handover["replies"][index]["inbox_letters"]
-                .as_array_mut()
-                .ok_or_else(|| LaneError::input("rotate-handover", "inbox bodies are absent"))?
-                .push(entry);
-            bound_handover_output(&mut handover)?;
-        }
-        if !round_letter_seen {
-            return Err(LaneError::input(
-                "rotate-inbox",
-                format!("{step}: round letter is absent"),
-            ));
-        }
+        let binding = if step == "dispatch" {
+            &record["initial_brief"]
+        } else {
+            record["mail"]
+                .as_array()
+                .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
+                .ok_or_else(|| {
+                    LaneError::input("rotate-evidence", "round has no delivery binding")
+                })?
+        };
+        let directory = round["driver_dir"].as_str().ok_or_else(|| {
+            LaneError::input("rotate-evidence", "round evidence directory absent")
+        })?;
+        let held = File::from(home::pin_loop_round(
+            root,
+            Path::new(directory),
+            0,
+            loop_uid,
+        )?);
+        let name = format!("step-{step}.txt");
+        let expected = if step == "dispatch" {
+            &binding["sha256"]
+        } else {
+            &binding["evidence_digest"]
+        };
+        let saved = json!({"bytes":binding["bytes"],"sha256":expected});
+        let body = read_reply(&held, &name, loop_uid, &saved, owner_home)?;
+        handover["replies"][index]["inbox"]
+            .as_array_mut()
+            .ok_or_else(|| LaneError::input("rotate-evidence", "brief list absent"))?
+            .push(json!(name));
+        handover["replies"][index]["inbox_letters"].as_array_mut().ok_or_else(||LaneError::input("rotate-evidence","brief evidence list absent"))?.push(json!({"step":step,"name":name,"sha256":expected,"bytes":binding["bytes"],"body":body,"body_truncated":false}));
+        bound_handover_output(&mut handover)?;
     }
     let last = rounds
         .last()
@@ -3181,7 +3060,7 @@ mod tests {
             fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).expect("config mode");
         }
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("runs mode");
-        let old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"door_scope":"review","model_selection":{"model":"gpt-6-sol","effort":"high"},"rounds":[{"step":"review","phase":"settled","ended_by":"by-report-after-stop","reply":{"sha256":"first"}}],"letters":[{"step":"review","name":"review-1.md","stop":true,"state":"placed","placed_at_unix_ns":1}]});
+        let old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"door_scope":"review","model_selection":{"model":"gpt-6-sol","effort":"high"},"rounds":[{"step":"review","phase":"settled","ended_by":"by-report-after-stop","reply":{"sha256":"first"}}],"mail":[{"step":"review","name":"review-1.md","stop":true,"state":"placed","placed_at_unix_ns":1}]});
         super::publish_reservation(&super::reservation_path(&root, "R"), &old).expect("old run");
         let handover = json!({"context":{"state":"unknown","reason":"window-unreported"},"replies":[{"step":"review","outbox":"review.md","sha256":"first","bytes":12,"inbox":["review.md","review-1.md"],"inbox_letters":[{"step":"review","name":"review.md","sha256":"round","bytes":13,"body":"Round letter.","body_truncated":false},{"step":"review","name":"review-1.md","sha256":"later","bytes":14,"body":"In-round note.","body_truncated":false}],"body":"First reply.","body_truncated":false}]});
         (home, root, old, handover)
@@ -3801,7 +3680,7 @@ mod tests {
         let preview = entry_preview(home.path(), &root, old.clone(), handover.clone());
         let digest = preview["handover_sha256"].as_str().expect("digest");
         old["rounds"].as_array_mut().expect("rounds").push(json!({"step":"later","phase":"settled","ended_by":"by-report-after-stop","reply":{"sha256":"second"}}));
-        old["letters"].as_array_mut().expect("letters").push(json!({"step":"later","name":"later-1.md","stop":true,"state":"placed","placed_at_unix_ns":2}));
+        old["mail"].as_array_mut().expect("letters").push(json!({"step":"later","name":"later-1.md","stop":true,"state":"placed","placed_at_unix_ns":2}));
         handover["replies"].as_array_mut().expect("replies").push(json!({"step":"later","outbox":"later.md","sha256":"second","bytes":13,"inbox":["later.md","later-1.md"],"inbox_letters":[{"step":"later","name":"later.md","sha256":"round","bytes":3,"body":"abc","body_truncated":false},{"step":"later","name":"later-1.md","sha256":"extra","bytes":3,"body":"abc","body_truncated":false}],"body":"Second reply.","body_truncated":false}));
         super::publish_reservation(&super::reservation_path(&root, "R"), &old)
             .expect("intervening settled round");
@@ -4158,7 +4037,7 @@ mod tests {
         super::publish_reservation(&super::reservation_path(root.path(), "R"), &old)
             .expect("old reservation");
         if with_new {
-            let new = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R-rotation-1","worker_uid":3001,"letter_source":"/synthetic/handover.md","letters":[{"step":"dispatch","name":"dispatch.md","state":"placed","sha256":"digest"}],"rounds":[{"step":"dispatch","phase":"settled","reply":{"sha256":"new-digest"}}]});
+            let new = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R-rotation-1","worker_uid":3001,"letter_source":"/synthetic/handover.md","initial_brief":{"step":"dispatch","name":"brief.txt","state":"placed","sha256":"digest"},"mail":[],"rounds":[{"step":"dispatch","phase":"settled","reply":{"sha256":"new-digest"}}]});
             super::publish_reservation(&super::reservation_path(root.path(), "R-rotation-1"), &new)
                 .expect("new reservation");
         }
@@ -4238,7 +4117,7 @@ mod tests {
             .expect("read")
             .expect("new");
         new["letter_source"] = json!(source);
-        new["letters"][0]["sha256"] = json!(digest);
+        new["initial_brief"]["sha256"] = json!(digest);
         super::publish_reservation(&new_path, &new).expect("updated new");
         let preview = recover_pending_rotation(
             root.path(),
@@ -4258,7 +4137,7 @@ mod tests {
         let path = super::reservation_path(root.path(), "R-rotation-1");
         let mut new = super::read_reservation(&path).expect("read").expect("new");
         new["phase"] = json!("preparing");
-        new["letters"] = json!([]);
+        new["mail"] = json!([]);
         super::publish_reservation(&path, &new).expect("preparation before letter");
         let link = || {
             link_intent(
@@ -4269,7 +4148,7 @@ mod tests {
             )
         };
         assert_eq!(link().expect_err("letter absent").kind, "rotate-pending");
-        new["letters"] =
+        new["mail"] =
             json!([{"step":"dispatch","name":"dispatch.md","state":"placed","sha256":"digest"}]);
         new["phase"] = json!("started");
         new["rounds"][0]["phase"] = json!("running");
@@ -4431,14 +4310,14 @@ mod tests {
     /// ´test:unit:rotation-selects-stop-of-final-settled-step´
     #[test]
     fn rotation_selects_stop_of_final_settled_step() {
-        let record = json!({"rounds":[{"step":"review","phase":"settled","ended_by":"by-report-after-stop"}],"letters":[
+        let record = json!({"rounds":[{"step":"review","phase":"settled","ended_by":"by-report-after-stop"}],"mail":[
             {"step":"review","name":"review-1.md","stop":true,"state":"placed","placed_at_unix_ns":1},
             {"step":"later","name":"later.md","stop":true,"state":"placed","placed_at_unix_ns":2}]});
         assert_eq!(
             stop_for_last_round(&record).expect("last round stop")["name"],
             "review-1.md"
         );
-        let missing = json!({"rounds":record["rounds"],"letters":[record["letters"][1]]});
+        let missing = json!({"rounds":record["rounds"],"mail":[record["mail"][1]]});
         assert_eq!(
             stop_for_last_round(&missing)
                 .expect_err("later step is unrelated")
@@ -4450,7 +4329,7 @@ mod tests {
     /// ´test:unit:rotation-requires-settlement-and-measured-threshold-or-force´
     #[test]
     fn rotation_requires_settlement_and_measured_threshold_or_force() {
-        let record = json!({"phase":"settled","rounds":[{"step":"review","phase":"settled","ended_by":"by-report-after-stop"}],"letters":[{"step":"review","stop":true,"state":"placed"}]});
+        let record = json!({"phase":"settled","rounds":[{"step":"review","phase":"settled","ended_by":"by-report-after-stop"}],"mail":[{"step":"review","stop":true,"state":"placed"}]});
         assert_eq!(
             check_rotation(&record, &json!({"state":"unknown"}), Some(0.8), None)
                 .expect_err("unknown")
@@ -4554,42 +4433,36 @@ mod tests {
         assert!(letter.contains(&format!("whole SHA-256 {digest}]")));
     }
 
-    /// ´test:unit:rotation-inbox-reader-checks-whole-placement-digest´
+    /// ´test:unit:rotation-step-evidence-checks-whole-delivery-digest´
     #[test]
-    fn rotation_inbox_reader_checks_whole_placement_digest() {
-        let fixture = tempfile::TempDir::new_in("/tmp").expect("inbox fixture");
-        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
-            .expect("owner directory");
-        let path = fixture.path().join("dispatch-1.md");
-        fs::write(&path, b"abc").expect("placed body");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("placed mode");
-        let digest = crate::build::sha256_bytes(b"abc", fixture.path()).expect("digest");
-        let saved = json!({"step":"dispatch","name":"dispatch-1.md","in_round":true,"bytes":3,"sha256":digest});
-        let inbox = fs::File::open(fixture.path()).expect("held inbox");
-        let body = super::read_inbox_entry(
-            &inbox,
-            "dispatch",
-            &saved,
-            nix::unistd::Uid::effective().as_raw(),
-            nix::unistd::Gid::effective().as_raw(),
-            fixture.path(),
-        )
-        .expect("verified inbox body");
-        assert_eq!(body["body"], "abc");
-        assert_eq!(body["sha256"], digest);
-        fs::write(&path, b"abd").expect("changed body");
+    fn rotation_step_evidence_checks_whole_delivery_digest() {
+        let fixture = tempfile::tempdir().expect("evidence fixture");
+        let path = fixture.path().join("step-review.txt");
+        fs::write(&path, b"abc").expect("retained bytes");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("custody");
+        let saved = json!({"bytes":3,"sha256":crate::build::sha256_bytes(b"abc",fixture.path()).expect("digest")});
+        let held = fs::File::open(fixture.path()).expect("held evidence directory");
         assert_eq!(
-            super::read_inbox_entry(
-                &inbox,
-                "dispatch",
-                &saved,
+            super::read_reply(
+                &held,
+                "step-review.txt",
                 nix::unistd::Uid::effective().as_raw(),
-                nix::unistd::Gid::effective().as_raw(),
-                fixture.path(),
+                &saved,
+                fixture.path()
             )
-            .expect_err("changed placement refuses")
-            .kind,
-            "rotate-inbox"
+            .expect("exact evidence"),
+            "abc"
+        );
+        fs::write(&path, b"abd").expect("changed bytes");
+        assert!(
+            super::read_reply(
+                &held,
+                "step-review.txt",
+                nix::unistd::Uid::effective().as_raw(),
+                &saved,
+                fixture.path()
+            )
+            .is_err()
         );
     }
 

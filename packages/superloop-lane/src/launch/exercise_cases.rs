@@ -1326,7 +1326,7 @@ pub mod tests {
         Plan {
             home: PathBuf::from("~/lane-alpha-R"),
             driver_dir: PathBuf::from("~/runs/R"),
-            letter: PathBuf::from("~/lane-alpha-R/.local/inbox/dispatch.md"),
+            letter: PathBuf::from("~/lane-alpha-R/brief.txt"),
             document: json!({}),
         }
     }

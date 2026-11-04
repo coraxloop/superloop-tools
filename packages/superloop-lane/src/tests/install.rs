@@ -2701,3 +2701,16 @@ fn install_lock_serializes_one_loop() {
     drop(first);
     lock_loop_config(&loop_config, false).expect("lock released");
 }
+
+/// ´test:crate:install-lock-preserves-only-the-service-search-acl-shape´
+#[test]
+fn install_lock_preserves_only_the_service_search_acl_shape() {
+    let fixture = TempDir::new_in("/tmp").expect("fixture");
+    let path = fixture.path();
+    let directory = fs::File::open(path).expect("directory");
+    let service = nix::unistd::geteuid().as_raw() + 1;
+    loop_home::mail::acl::install(&directory, service, true).expect("search ACL");
+    drop(lock_loop_config(path, false).expect("service search preserves custody"));
+    fs::set_permissions(path, fs::Permissions::from_mode(0o730)).expect("widen mask");
+    assert!(lock_loop_config(path, false).is_err());
+}

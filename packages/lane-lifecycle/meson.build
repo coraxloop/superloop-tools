@@ -1,7 +1,7 @@
 pkg_lane_lifecycle_rust = files(
   'src/execution_settings.rs',
   'src/lib.rs',
-  'src/mailbox.rs',
+  'src/observation.rs',
   'src/monitor_lock.rs',
 )
 

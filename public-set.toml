@@ -393,9 +393,6 @@ pattern = "packages/lane-lifecycle/src/execution_settings.rs"
 pattern = "packages/lane-lifecycle/src/lib.rs"
 
 [[include.rows]]
-pattern = "packages/lane-lifecycle/src/mailbox.rs"
-
-[[include.rows]]
 pattern = "packages/lane-lifecycle/src/monitor_lock.rs"
 
 [[include.rows]]
@@ -424,30 +421,6 @@ pattern = "packages/loop-home/src/ensure.rs"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/error.rs"
-
-[[include.rows]]
-pattern = "packages/loop-home/src/letters/follow.rs"
-
-[[include.rows]]
-pattern = "packages/loop-home/src/letters/metadata.rs"
-
-[[include.rows]]
-pattern = "packages/loop-home/src/letters/mod.rs"
-
-[[include.rows]]
-pattern = "packages/loop-home/src/letters/record.rs"
-
-[[include.rows]]
-pattern = "packages/loop-home/src/letters/store.rs"
-
-[[include.rows]]
-pattern = "packages/loop-home/src/letters/tests.rs"
-
-[[include.rows]]
-pattern = "packages/loop-home/src/letters/tests/follow.rs"
-
-[[include.rows]]
-pattern = "packages/loop-home/src/letters/wake.rs"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/lib.rs"
@@ -1836,12 +1809,6 @@ pattern = "packages/superloop-lane/src/driver/follow/entry.rs"
 pattern = "packages/superloop-lane/src/driver/follow/mod.rs"
 
 [[include.rows]]
-pattern = "packages/superloop-lane/src/driver/follow/outbox.rs"
-
-[[include.rows]]
-pattern = "packages/superloop-lane/src/driver/follow/outbox/tests.rs"
-
-[[include.rows]]
 pattern = "packages/superloop-lane/src/driver/follow/tests/mod.rs"
 
 [[include.rows]]
@@ -1959,9 +1926,6 @@ pattern = "packages/superloop-lane/src/launch/imports.rs"
 pattern = "packages/superloop-lane/src/launch/letters.rs"
 
 [[include.rows]]
-pattern = "packages/superloop-lane/src/launch/letters_callback.rs"
-
-[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/matrix.rs"
 
 [[include.rows]]
@@ -1978,15 +1942,6 @@ pattern = "packages/superloop-lane/src/launch/repin_door.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/launch/repin_door_tests.rs"
-
-[[include.rows]]
-pattern = "packages/superloop-lane/src/launch/replies.rs"
-
-[[include.rows]]
-pattern = "packages/superloop-lane/src/launch/replies/exercise.rs"
-
-[[include.rows]]
-pattern = "packages/superloop-lane/src/launch/replies/tests.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/launch/report.rs"
@@ -3268,3 +3223,72 @@ pattern = "packages/loop-home/src/mail/publication.rs"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/mail/publication_tests.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/acl.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/io.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/configuration.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/directory.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/refusal.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/service.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/command.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/src/bin/superloop-mail.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/data/superloop-mail.service.in"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/service_tests.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/configuration_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/mail_custody.py"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/configuration_store.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/provision.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/configuration_store_tests.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/birth.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/birth_tests.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/worker_provision.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/docs/mail-watcher.md"
+
+[[include.rows]]
+pattern = "packages/superloop-claude-hook/tests/inbox_wait.py"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/steering.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/steering.rs"
+
+[[include.rows]]
+pattern = "packages/lane-lifecycle/src/observation.rs"

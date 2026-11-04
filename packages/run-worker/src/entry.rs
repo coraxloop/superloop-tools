@@ -1,6 +1,6 @@
 use loop_home::{CommandSpec, IoMode};
 
-/// The three credentials a dropped worker holds.
+/// The private identity and exact supplementary groups a dropped worker holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerCredentials {
     /// The loop whose block the UID came from.
@@ -9,8 +9,10 @@ pub struct WorkerCredentials {
     pub lane: String,
     /// The allocated UID, which is also the worker's primary GID.
     pub uid: u32,
-    /// The loop's GID, the worker's one supplementary group.
+    /// The loop's shared execution GID.
     pub loop_gid: u32,
+    /// The dedicated group that grants access only to this worker mailbox.
+    pub mail_gid: u32,
 }
 
 impl WorkerCredentials {
@@ -33,17 +35,23 @@ impl WorkerCredentials {
             String::from("setpriv"),
             format!("--reuid={}", self.uid),
             format!("--regid={}", self.gid()),
-            format!("--groups={}", self.loop_gid),
+            format!("--groups={},{}", self.loop_gid, self.mail_gid),
             String::from("--no-new-privs"),
         ]
     }
 
     /// Return the worker's own group line and the loop's group line naming it a member.
     #[must_use]
-    pub fn group_lines(&self) -> [String; 2] {
+    pub fn group_lines(&self) -> [String; 3] {
         [
             format!("{}:x:{}:", self.account(), self.gid()),
             format!("{}:x:{}:{}", self.loop_name, self.loop_gid, self.account()),
+            format!(
+                "{}-mail:x:{}:{}",
+                self.account(),
+                self.mail_gid,
+                self.account()
+            ),
         ]
     }
 
@@ -175,12 +183,13 @@ pub fn inner_script(request: &EntryRequest) -> String {
 }
 
 fn preamble(request: &EntryRequest) -> String {
-    let [own_group, loop_group] = request.credentials.group_lines();
+    let [own_group, loop_group, mail_group] = request.credentials.group_lines();
     format!(
-        "set -e\nt=$(mktemp -d /tmp/worker-run.XXXXXX)\ncleanup() {{\n    rm -rf \"$t\"\n}}\ntrap cleanup EXIT\ncat /etc/passwd > \"$t/passwd\"\nprintf '%s\\n' {} >> \"$t/passwd\"\ncat /etc/group > \"$t/group\"\nprintf '%s\\n' {} >> \"$t/group\"\nprintf '%s\\n' {} >> \"$t/group\"\nmkdir -p \"$t/ssh_config.d\"",
+        "set -e\nt=$(mktemp -d /tmp/worker-run.XXXXXX)\ncleanup() {{\n    rm -rf \"$t\"\n}}\ntrap cleanup EXIT\ncat /etc/passwd > \"$t/passwd\"\nprintf '%s\\n' {} >> \"$t/passwd\"\ncat /etc/group > \"$t/group\"\nprintf '%s\\n' {} >> \"$t/group\"\nprintf '%s\\n' {} >> \"$t/group\"\nprintf '%s\\n' {} >> \"$t/group\"\nmkdir -p \"$t/ssh_config.d\"",
         single_literal(&request.credentials.passwd_line(&request.home)),
         single_literal(&own_group),
         single_literal(&loop_group),
+        single_literal(&mail_group),
     )
 }
 

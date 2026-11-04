@@ -29,6 +29,51 @@ fn gate_fixture() -> serde_json::Value {
     .document
 }
 
+/// ´test:crate:worker-mail-group-is-part-of-the-attested-runtime-vector´
+#[test]
+fn worker_mail_group_is_part_of_the_attested_runtime_vector() {
+    let mut plan = Plan::build(
+        Path::new("/home/owner"),
+        "alpha",
+        "R",
+        &fixture_settings(Path::new("/opt/superloop/superloop")),
+        &fixture_row(),
+        fixture_block(),
+        (1000, 1000),
+    )
+    .expect("plan");
+    plan.select_mail_group(43001).expect("reserved mail group");
+    verify_box_attestation(&plan.document).expect("mail group attested");
+    assert!(
+        plan.document["runtime_argv"]
+            .as_array()
+            .expect("vector")
+            .iter()
+            .any(|word| word == "--group-add=43001")
+    );
+    plan.select_worker_uid(3001).expect("next worker");
+    plan.select_mail_group(43002).expect("next mailbox");
+    verify_box_attestation(&plan.document).expect("replacement group attested");
+    assert!(
+        !plan.document["runtime_argv"]
+            .as_array()
+            .expect("vector")
+            .iter()
+            .any(|word| word == "--group-add=43001")
+    );
+    let mut changed = plan.document.clone();
+    let vector = changed["runtime_argv"].as_array_mut().expect("vector");
+    let index = vector
+        .iter()
+        .position(|word| word == "--cap-drop=ALL")
+        .expect("option boundary");
+    vector.insert(index, json!("--group-add=43003"));
+    assert!(box_gate(&changed).is_err());
+    for invalid in [0, 999, 3001, 41001, 65534, 65536] {
+        assert!(plan.select_mail_group(invalid).is_err(), "{invalid}");
+    }
+}
+
 /// ´test:crate:second-worker-slot-rederives-the-mount-inventory´
 #[test]
 fn second_worker_slot_rederives_the_mount_inventory() {

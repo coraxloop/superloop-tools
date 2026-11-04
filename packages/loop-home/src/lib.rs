@@ -6,7 +6,6 @@ pub mod custody;
 mod driver_launch;
 pub mod ensure;
 pub mod error;
-mod letters;
 pub mod mail;
 pub mod planner;
 pub mod registry;
@@ -21,7 +20,6 @@ pub use ensure::{
     ensure_roots_entry, standard_roots,
 };
 pub use error::LoopError;
-pub use letters::{LetterMetadata, letter_metadata, parse_letter_metadata};
 pub use planner::{
     BridgeKind, CommandSpec, Custody, EntryPlan, IoMode, ProvisionPlan, custody_tier, entry_plan,
     provision_plan,

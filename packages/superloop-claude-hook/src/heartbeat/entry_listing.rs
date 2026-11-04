@@ -29,16 +29,19 @@ fn entry(home: &Path) -> PathBuf {
         .unwrap_or(deployed)
 }
 
-/// Obtain a bounded letters listing through the public loop entry command.
+/// Inspect inbox presence through an ordinary shell under the public loop entry.
 ///
 /// # Errors
 /// Returns a named failure when the entry cannot run or complete its listing.
-pub fn run(home: &Path, loop_name: &str) -> Result<Output, String> {
+pub fn run(home: &Path, loop_name: &str, inbox: &Path) -> Result<Output, String> {
     let path = entry(home);
     let started = Instant::now();
     // Inherit the hook's cwd. A distinct process group contains the entry chain.
     let mut child = Command::new(&path)
-        .args(["enter", loop_name, "--", "letters", "list"])
+        .args(["enter", loop_name, "--", "/bin/sh", "-c",
+            "for entry in \"$1\"/* \"$1\"/.[!.]* \"$1\"/..?*; do if [ -e \"$entry\" ] || [ -L \"$entry\" ]; then printf '1\\n'; exit; fi; done",
+            "mail-notice"])
+        .arg(inbox)
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -105,6 +108,9 @@ fn read_chunk(reader: &mut impl Read, bytes: &mut Vec<u8>) -> Result<bool, Strin
     match reader.read(&mut buffer) {
         Ok(0) => Ok(true),
         Ok(size) => {
+            if bytes.len() + size > 8192 {
+                return Err("inbox presence output exceeds its bound".into());
+            }
             bytes.extend_from_slice(&buffer[..size]);
             Ok(false)
         }

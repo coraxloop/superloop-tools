@@ -333,6 +333,13 @@ pub struct Pins {
     pub active_inboxes: BTreeSet<Instant>,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReservationPins {
+    version: u32,
+    deliveries: BTreeMap<String, Instant>,
+}
+
 /// Exclusive, descriptor-pinned service journal. Provisioning supplies a private
 /// directory; opening never invents missing recovery state.
 pub struct Journal {
@@ -385,6 +392,16 @@ impl Journal {
         };
         store::write(&root, &root, "state.toml", &state, false)?;
         store::write(&root, &root, "checkpoint.toml", &checkpoint, false)?;
+        store::write(
+            &root,
+            &root,
+            "reservation-pins.toml",
+            &ReservationPins {
+                version: 1,
+                deliveries: BTreeMap::new(),
+            },
+            false,
+        )?;
         Ok(Self {
             root,
             records,
@@ -452,8 +469,11 @@ impl Journal {
             checkpoint,
             uncommitted: BTreeMap::new(),
         };
-        journal.clean_scratch()?;
-        journal.finish_compaction()?;
+        {
+            let _admission = reservation_admission(&journal.root)?;
+            journal.clean_scratch()?;
+            journal.finish_compaction()?;
+        }
         for record in journal.records()? {
             if journal
                 .state
@@ -464,7 +484,55 @@ impl Journal {
                 return Err(MailError::Invalid("record exceeds durable watermark"));
             }
         }
+        journal.reservation_pins()?;
         Ok(journal)
+    }
+
+    /// Read the protected live-reservation projection under the admission lock.
+    /// The round transport records a pin before exposing a delivery binding and
+    /// releases it only after the reservation ceases to reference that delivery.
+    ///
+    /// # Errors
+    /// Refuses corrupt state or a pin whose individual record is missing.
+    pub fn reservation_pins(&self) -> Result<BTreeSet<Instant>> {
+        let pins = self.read_reservation_pins()?;
+        for delivery in pins.deliveries.values() {
+            self.record(delivery)?;
+        }
+        Ok(pins.deliveries.into_values().collect())
+    }
+
+    fn read_reservation_pins(&self) -> Result<ReservationPins> {
+        let pins: ReservationPins =
+            store::read(&self.root, "reservation-pins.toml", RECORD_MAX_BYTES)?;
+        if pins.version != 1 {
+            return Err(MailError::Invalid("invalid reservation pin projection"));
+        }
+        Ok(pins)
+    }
+
+    /// Persist or release a service-authenticated reservation's delivery binding.
+    /// This is a service-side interface, not an actor-writable file or authority.
+    ///
+    /// # Errors
+    /// Refuses an empty reference, missing record, capacity or unsafe storage.
+    pub fn pin_reservation(&mut self, reference: &str, delivery: Option<Instant>) -> Result<()> {
+        let _admission = reservation_admission(&self.root)?;
+        if reference.is_empty() {
+            return Err(MailError::Invalid("empty reservation reference"));
+        }
+        let mut pins = self.read_reservation_pins()?;
+        let key = digest(reference.as_bytes());
+        if let Some(delivery) = delivery {
+            self.record(&delivery)?;
+            pins.deliveries.insert(key, delivery);
+        } else {
+            pins.deliveries.remove(&key);
+        }
+        if store::encode(&pins)?.len() as u64 > RECORD_MAX_BYTES {
+            return Err(MailError::Capacity);
+        }
+        store::write(&self.root, &self.root, "reservation-pins.toml", &pins, true)
     }
 
     fn clean_scratch(&mut self) -> Result<()> {
@@ -483,6 +551,8 @@ impl Journal {
                                 committed.validate()?;
                             } else if target.starts_with("cleanup-")
                                 || target.starts_with("prepare-")
+                                || target.starts_with("refusal-")
+                                || target == "reservation-pins.toml"
                             {
                                 let _intent: toml::Value =
                                     store::read(directory, target, RECORD_MAX_BYTES)?;
@@ -511,7 +581,9 @@ impl Journal {
                         Err(MailError::Io(error))
                             if !records
                                 && (target.starts_with("cleanup-")
-                                    || target.starts_with("prepare-"))
+                                    || target.starts_with("prepare-")
+                                    || target.starts_with("refusal-")
+                                    || target == "reservation-pins.toml")
                                 && error.kind() == io::ErrorKind::NotFound =>
                         {
                             // The adapter performs no restoration until this intent's
@@ -563,6 +635,22 @@ impl Journal {
         &self.root
     }
 
+    /// Check actual UTC before preparing admission; the writer lock prevents races.
+    ///
+    /// # Errors
+    /// Returns `ClockWait` until actual UTC exceeds the durable watermark.
+    pub fn check_clock(&self, now: &Instant) -> Result<()> {
+        if self
+            .state
+            .greatest_reserved
+            .as_ref()
+            .is_some_and(|prior| now <= prior)
+        {
+            return Err(MailError::ClockWait);
+        }
+        Ok(())
+    }
+
     /// Persist an actual UTC millisecond strictly beyond every reserved instant.
     ///
     /// # Errors
@@ -581,14 +669,7 @@ impl Journal {
                 "unpublished sources require reconciliation",
             ));
         }
-        if self
-            .state
-            .greatest_reserved
-            .as_ref()
-            .is_some_and(|prior| &now <= prior)
-        {
-            return Err(MailError::ClockWait);
-        }
+        self.check_clock(&now)?;
         let next = State {
             version: 1,
             greatest_reserved: Some(now.clone()),
@@ -887,6 +968,8 @@ impl Journal {
     /// # Errors
     /// Refuses corrupt metadata, changed compacted records and storage failure.
     pub fn prune(&mut self, now: &Instant, pins: &Pins) -> Result<u64> {
+        let _admission = reservation_admission(&self.root)?;
+        let live_reservations = self.reservation_pins()?;
         self.finish_compaction()?;
         if self
             .state
@@ -911,6 +994,7 @@ impl Journal {
                     .millis()
                     .checked_sub(completed.millis())
                     .is_none_or(|age| age < JOURNAL_HISTORY_SECONDS * 1000)
+                || live_reservations.contains(&record.delivery)
                 || pins.reservations.contains(&record.delivery)
                 || pins.active_inboxes.contains(&record.delivery)
             {
@@ -947,6 +1031,110 @@ impl Journal {
         }
         Ok(removed)
     }
+}
+
+/// Serialize external reservation publication with compaction on the pinned
+/// service directory. Each acquisition opens a distinct file description.
+fn reservation_admission(root: &File) -> Result<Flock<File>> {
+    Flock::lock(
+        store::open(root, ".", true)?,
+        FlockArg::LockExclusiveNonblock,
+    )
+    .map_err(|(_, error)| MailError::from(error))
+}
+
+/// Verify a terminal delivery and durably pin it before exposing its binding.
+///
+/// The caller runs under the service identity; actors cannot access this root.
+/// Verification and pin publication share the compactor's admission lock.
+///
+/// # Errors
+/// Refuses unfinished, compacted, missing or unverifiable delivery evidence.
+pub fn bind_reservation<T>(
+    root: &File,
+    family: &str,
+    reference: &str,
+    instant: &Instant,
+    verify: impl FnOnce(&Record) -> Result<T>,
+) -> Result<T> {
+    store::private(root, true)?;
+    let _admission = reservation_admission(root)?;
+    let checkpoint: Checkpoint = store::read(root, "checkpoint.toml", SUMMARY_MAX_BYTES)?;
+    if family.is_empty()
+        || reference.is_empty()
+        || checkpoint.version != 1
+        || !valid_digest(&checkpoint.head)
+        || checkpoint
+            .pending
+            .as_ref()
+            .is_some_and(|pending| &pending.delivery == instant)
+    {
+        return Err(MailError::Invalid(
+            "invalid-directory: unavailable journal delivery",
+        ));
+    }
+    let records = store::open(root, "deliveries", true)?;
+    let record: Record = store::read(&records, &format!("{instant}.toml"), RECORD_MAX_BYTES)?;
+    record.validate()?;
+    if &record.delivery != instant
+        || record.phase != Phase::Complete
+        || record.pending_error.is_some()
+    {
+        return Err(MailError::Invalid(
+            "pending-delivery: steering delivery is not complete",
+        ));
+    }
+    let verified = verify(&record)?;
+    let mut pins: ReservationPins = store::read(root, "reservation-pins.toml", RECORD_MAX_BYTES)?;
+    if pins.version != 1 {
+        return Err(MailError::Invalid("invalid reservation pin projection"));
+    }
+    let key = format!(
+        "{}:{}",
+        digest(family.as_bytes()),
+        digest(reference.as_bytes())
+    );
+    if pins
+        .deliveries
+        .get(&key)
+        .is_some_and(|prior| prior != instant)
+    {
+        return Err(MailError::Invalid(
+            "invalid-directory: reservation delivery changed",
+        ));
+    }
+    pins.deliveries.insert(key, instant.clone());
+    if store::encode(&pins)?.len() as u64 > RECORD_MAX_BYTES {
+        return Err(MailError::Capacity);
+    }
+    store::write(root, root, "reservation-pins.toml", &pins, true)?;
+    Ok(verified)
+}
+
+/// Release a retired worker's pin family after custody and configuration retirement.
+///
+/// # Errors
+/// Requires service custody and exclusive admission; corrupt pin state refuses.
+pub fn release_reservation_family(root: &File, family: &str) -> Result<()> {
+    store::private(root, true)?;
+    let _admission = reservation_admission(root)?;
+    let mut pins: ReservationPins =
+        match store::read(root, "reservation-pins.toml", RECORD_MAX_BYTES) {
+            Ok(pins) => pins,
+            Err(MailError::Io(error))
+                if error.kind() == io::ErrorKind::NotFound && store::names(root)?.is_empty() =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+    if pins.version != 1 || family.is_empty() {
+        return Err(MailError::Invalid("invalid reservation pin projection"));
+    }
+    let prefix = format!("{}:", digest(family.as_bytes()));
+    pins.deliveries
+        .retain(|reference, _| !reference.starts_with(&prefix));
+    store::write(root, root, "reservation-pins.toml", &pins, true)
 }
 
 #[cfg(test)]

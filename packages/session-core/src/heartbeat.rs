@@ -781,7 +781,9 @@ impl<'a> Context<'a> {
             Guard::LettersEmpty => matches!(self.letters, crate::letters::Listing::Empty),
             Guard::LettersUnread => matches!(
                 self.letters,
-                crate::letters::Listing::Unread(_) | crate::letters::Listing::History(_)
+                crate::letters::Listing::Unread(_)
+                    | crate::letters::Listing::History(_)
+                    | crate::letters::Listing::Notice
             ),
             Guard::LettersFailed => matches!(self.letters, crate::letters::Listing::Failed(_)),
             Guard::NoLettersFeedback => {

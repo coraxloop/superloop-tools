@@ -321,7 +321,7 @@ fn run_with(
         result["node_retirement"] = node_record::finish(path, &node_plan, runner, budget)?;
     }
     Ok(
-        json!({"schema":1,"command":"retire","loop":request.loop_name,"run":run,"dry_run":request.dry_run,"preview_sha256":result["preview_sha256"],"worker_uid_released":if request.dry_run { Value::Null } else { json!(uid) },"retirement":result,"wall_seconds":begun.elapsed().as_secs_f64()}),
+        json!({"schema":1,"command":"retire","loop":request.loop_name,"run":run,"dry_run":request.dry_run,"preview_sha256":result["preview_sha256"],"worker_uid_released":if request.dry_run { Value::Null } else { json!(uid) },"worker_uid_retained":Value::Null,"retirement":result,"wall_seconds":begun.elapsed().as_secs_f64()}),
     )
 }
 
@@ -834,6 +834,53 @@ pub(crate) fn retire_record_with(
     )
 }
 
+fn retire_mail_identity(owner_home: &Path, record: &Value) -> Result<Option<Value>, LaneError> {
+    let Some(value) = record.get("mail_birth") else {
+        // Legacy runs have no mail binding; migration owns assigning their names.
+        return Ok(None);
+    };
+    let identity: loop_home::mail::birth::Identity = serde_json::from_value(value.clone())
+        .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
+    if record["worker_uid"] != identity.uid {
+        return Err(LaneError::input(
+            "mail-birth",
+            "retirement UID differs from birth binding",
+        ));
+    }
+    let loop_name = record["loop"]
+        .as_str()
+        .ok_or_else(|| LaneError::input("mail-birth", "loop name is absent"))?;
+    let runtime = record["plan"]["runtime_argv"][0]
+        .as_str()
+        .ok_or_else(|| LaneError::input("mail-birth", "namespace program is absent"))?;
+    let executable = std::env::current_exe()
+        .map_err(|error| LaneError::operation("mail-birth", error.to_string()))?;
+    let owner = Uid::effective().as_raw();
+    crate::pinned::owner_executable(Path::new(runtime), owner)?;
+    let executable = crate::pinned::owner_executable_word(&executable, owner)?;
+    build::run_checked(
+        Path::new(runtime),
+        vec![
+            "unshare".into(),
+            executable,
+            "_mail-worker-birth".into(),
+            crate::pinned::path_word(owner_home, "owner-home")?,
+            loop_name.into(),
+            "retire".into(),
+            identity.name.clone(),
+            identity.uid.to_string(),
+            identity.reservation.clone(),
+        ],
+        &launch_environment(owner_home)?,
+        owner_home,
+        30,
+        "mail-birth",
+    )?;
+    Ok(Some(
+        json!({"state":"retired","identity":identity,"mailbox":"retained","uid":"reserved-for-loop-lifetime"}),
+    ))
+}
+
 fn confirmed_uncertainty(saved: &Value, confirm: bool) -> Result<bool, LaneError> {
     let journal = &saved["current_retirement"];
     let retry = ["retiring", "retired"].contains(&saved["phase"].as_str().unwrap_or_default())
@@ -1170,6 +1217,11 @@ fn retire_record_confirmed_with(
             record["node_retirement"] = node.clone();
             publish_reservation(&reservation, &record)?;
         }
+    }
+    if record.get("mail_birth").is_some() {
+        record["mail_retirement"] =
+            retire_mail_identity(owner_home, &record)?.unwrap_or(Value::Null);
+        publish_reservation(&reservation, &record)?;
     }
     if record["current_retirement"]["observer_socket_disposition"].is_null() {
         let socket = remove_retired_observer_socket(&record)?;
@@ -1636,14 +1688,41 @@ mod tests {
     /// ´test:unit:ordinary-retirement-admits-measured-never-started-preparation´
     #[test]
     fn ordinary_retirement_admits_measured_never_started_preparation() {
+        if std::env::var_os("SUPERLOOP_RETIRE_MAIL_FIXTURE").is_none() {
+            // Production pins its own entry image. Build roots may be group writable;
+            // execute the test from a private fixture, as an installed entry must be.
+            let private = tempfile::Builder::new()
+                .tempdir_in("/tmp")
+                .expect("entry root");
+            fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700))
+                .expect("private entry mode");
+            let executable = private.path().join("entry-test");
+            fs::copy(std::env::current_exe().expect("test image"), &executable)
+                .expect("pin fixture image");
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+                .expect("private executable mode");
+            let output = std::process::Command::new(&executable)
+                .args(["--exact", "launch::retire::tests::ordinary_retirement_admits_measured_never_started_preparation", "--nocapture"])
+                .env("SUPERLOOP_RETIRE_MAIL_FIXTURE", "1")
+                .output().expect("private entry test");
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let (fixture, root, mut request) = public_fixture();
         let runtime = fixture.path().join("container-fixture");
         crate::fixture_exec::write_executable(
             &runtime,
-            b"#!/bin/sh\n[ \"$1\" = ps ] || exit 9\nexit 0\n",
+            b"#!/bin/sh\n[ \"$1\" = ps ] && exit 0\n[ \"$1\" = unshare ] && [ \"$3\" = _mail-worker-birth ] && [ \"$5\" = alpha ] && [ \"$6\" = retire ] && [ \"$7\" = worker-3000 ] && [ \"$8\" = 3000 ] && [ \"$9\" = superloop-lane:3000 ] || exit 9\nexit 0\n",
         )
         .expect("absent container");
         let mut record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"imports":[],"harvest_agreement":null,"collection":null,"plan":{"home":fixture.path().join(".cache/tmp/lane-alpha-R"),"driver_dir":root.join("R"),"runtime_argv":[runtime]},"launcher_pid":u32::MAX,"launcher_start":1,"observer_state":"not-started","helper_spawn_state":"not-started","probe_starts":[]});
+        record["mail_birth"] =
+            json!({"name":"worker-3000","uid":3000,"reservation":"superloop-lane:3000"});
         let scope = super::super::reaping::RetirementScopeFixture::new(&mut record);
         let path = reservation_path(&root, "R");
         publish_reservation(&path, &record).expect("current preparation");
@@ -1684,11 +1763,14 @@ mod tests {
         let done = run(fixture.path(), &request).expect("ordinary preparation retirement");
         assert_eq!(done["retirement"]["state"], "retired");
         assert_eq!(done["worker_uid_released"], 3000);
+        assert!(done["worker_uid_retained"].is_null());
         let archive = Path::new(done["retirement"]["record"].as_str().expect("archive"));
         let retired = read_reservation(archive)
             .expect("reader")
             .expect("retired record");
         assert_eq!(retired["current_retirement"]["prior_phase"], "failed");
+        assert_eq!(retired["mail_retirement"]["state"], "retired");
+        assert_eq!(retired["mail_retirement"]["identity"], record["mail_birth"]);
         assert!(retired["current_retirement"]["accepted_absences"].is_null());
         assert!(!path.exists());
     }
@@ -2270,7 +2352,7 @@ mod tests {
         fs::create_dir_all(&inbox).expect("inbox");
         fs::write(inbox.join("review.md"), b"four").expect("placed letter");
         let mut placed = stale.clone();
-        placed["letters"] = json!([{"step":"review","name":"review.md","state":"placed","bytes":4,"sha256":"fixture","placed_at_unix_ns":1}]);
+        placed["mail"] = json!([{"step":"review","name":"review.md","state":"placed","bytes":4,"sha256":"fixture","placed_at_unix_ns":1}]);
         publish_reservation(&reservation_path(&root, "R"), &placed)
             .expect("placement after retirement read");
         let result = retire_record_with(
@@ -2288,7 +2370,7 @@ mod tests {
         ))
         .expect("read")
         .expect("record");
-        assert_eq!(retired["letters"], placed["letters"]);
+        assert_eq!(retired["mail"], placed["mail"]);
         assert_eq!(retired["phase"], "retired");
         let moved_home = result["journal"]["planned_paths"]
             .as_array()

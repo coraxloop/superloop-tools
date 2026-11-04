@@ -291,7 +291,7 @@ pub(crate) fn lock_loop_config(path: &Path, dry_run: bool) -> Result<InstallGuar
         .map_err(|error| LaneError::input("install-lock", error.to_string()))?;
     if opened.dev() != config_meta.dev()
         || opened.ino() != config_meta.ino()
-        || opened.mode() & 0o7777 != 0o700
+        || opened.mode() & 0o7777 != loop_home::mail::acl::preserved_mode(&lock_file, 0o700)
     {
         return Err(LaneError::input(
             "install-lock",
@@ -444,7 +444,7 @@ pub(crate) fn lock_allocations(
     })?;
     if !metadata.is_file()
         || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-        || metadata.mode() & 0o7777 != 0o600
+        || metadata.mode() & 0o7777 != loop_home::mail::acl::preserved_mode(&file, 0o600)
     {
         return Err(LaneError::input(
             "allocations-read",
@@ -498,7 +498,7 @@ pub(crate) fn install_allocation(
             format!("missing worker uid allocation for loop: {loop_name}"),
         ));
     }
-    let _lock = lock_allocations(&path, pilot, dry_run)?;
+    let allocation_lock = lock_allocations(&path, pilot, dry_run)?;
     let mut allocations = Allocations::read_or_empty(&path)
         .map_err(|error| LaneError::input("allocations-read", error.message()))?;
     let (block, changed) = if let Some(block) = allocations.get(loop_name) {
@@ -533,6 +533,10 @@ pub(crate) fn install_allocation(
             LaneError::input("allocations-write", "allocations path has no parent")
         })?;
         let (temporary, mut file) = create_allocation_temporary(parent)?;
+        if let Some(previous) = &allocation_lock {
+            loop_home::mail::acl::copy_private_read(previous, &file)
+                .map_err(|error| LaneError::input("allocations-write", error.to_string()))?;
+        }
         let result = file
             .write_all(source.as_bytes())
             .and_then(|()| file.sync_all())

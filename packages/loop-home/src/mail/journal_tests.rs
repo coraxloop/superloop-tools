@@ -420,7 +420,13 @@ fn journal_compaction_recovery_folds_each_record_once() {
         );
         assert_eq!(
             store::names(&journal.root).expect("bounded state"),
-            ["checkpoint.toml", "deliveries", "state.toml", "writer.lock"]
+            [
+                "checkpoint.toml",
+                "deliveries",
+                "reservation-pins.toml",
+                "state.toml",
+                "writer.lock"
+            ]
         );
     }
 }
@@ -707,4 +713,96 @@ fn journal_record_growth_preserves_compaction_scratch() {
         1
     );
     assert!(store::size(&journal.root).expect("bounded journal") <= JOURNAL_MAX_BYTES);
+}
+
+/// ´claim:loophome:mail-reservation-pins-survive-service-restart-until-explicit-release´
+/// ´test:unit:mail-reservation-pins-survive-service-restart-until-explicit-release´
+#[test]
+fn mail_reservation_pins_survive_service_restart_until_explicit_release() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    let record = accept(&mut journal);
+    complete(&mut journal, &record);
+    journal
+        .pin_reservation("round-one", Some(record.delivery.clone()))
+        .expect("pin before exposing binding");
+    drop(journal);
+    let mut journal = fixture.open();
+    let pins = Pins {
+        reservations: journal.reservation_pins().expect("protected projection"),
+        ..Pins::default()
+    };
+    assert_eq!(journal.prune(&later(), &pins).expect("live reservation"), 0);
+    journal
+        .pin_reservation("round-one", None)
+        .expect("release ended reservation");
+    drop(journal);
+    let mut journal = fixture.open();
+    let pins = Pins {
+        reservations: journal.reservation_pins().expect("released projection"),
+        ..Pins::default()
+    };
+    assert_eq!(
+        journal
+            .prune(&later(), &pins)
+            .expect("unreferenced terminal record"),
+        1
+    );
+    assert!(
+        journal
+            .pin_reservation("invented", Some(record.delivery))
+            .is_err()
+    );
+}
+
+/// ´claim:loophome:missing-reservation-projection-never-means-no-live-references´
+/// ´test:unit:missing-reservation-projection-never-means-no-live-references´
+#[test]
+fn missing_reservation_projection_never_means_no_live_references() {
+    let fixture = Fixture::new();
+    drop(fixture.create());
+    fs::remove_file(fixture.0.join("reservation-pins.toml")).expect("lost protected projection");
+    assert!(Journal::open(fixture.directory()).is_err());
+    assert!(
+        release_reservation_family(&fixture.directory(), "alpha:run").is_err(),
+        "retirement cannot bless lost journal history"
+    );
+}
+
+/// ´claim:loophome:reservation-admission-pins-before-exposure-and-blocks-pruning´
+/// ´test:unit:reservation-admission-pins-before-exposure-and-blocks-pruning´
+#[test]
+fn reservation_admission_pins_before_exposure_and_blocks_pruning() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    let record = record(&first());
+    journal.reserve(first()).expect("instant");
+    journal.accept(&record).expect("accept");
+    complete(&mut journal, &record);
+    let root = fixture.directory();
+    let _binding = bind_reservation(&root, "alpha:run", "step", &first(), |record| {
+        Ok(record.digest.clone())
+    })
+    .expect("verified pin");
+    assert_eq!(journal.prune(&later(), &Pins::default()).expect("prune"), 0);
+    assert!(journal.record(&first()).is_ok());
+    drop(journal);
+    let mut journal = Journal::open(fixture.directory()).expect("pin survives restart");
+    assert_eq!(
+        journal
+            .prune(&later(), &Pins::default())
+            .expect("restart prune"),
+        0
+    );
+    assert!(
+        bind_reservation::<()>(&root, "alpha:run", "another", &first(), |_| Err(
+            MailError::Invalid("forged")
+        ))
+        .is_err()
+    );
+    let admission = reservation_admission(&root).expect("admission");
+    assert!(journal.prune(&later(), &Pins::default()).is_err());
+    drop(admission);
+    release_reservation_family(&root, "alpha:run").expect("release after reservation retired");
+    assert_eq!(journal.prune(&later(), &Pins::default()).expect("prune"), 1);
 }

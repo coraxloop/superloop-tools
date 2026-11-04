@@ -2016,7 +2016,7 @@ pub(crate) mod tests {
     }
 
     fn collection() -> Value {
-        json!({"checkpoint_index":1,"state":"removing","instant_unix_ns":2,"planned":[".local/inbox/dispatch.md",".local/inbox",".local","."],"writable_collected_first":null,"remaining":null,"refusal":null,"component":null,"token":"a".repeat(32),"parent_identity":{"device":1,"inode":2},"home_identity":{"device":1,"inode":3}})
+        json!({"checkpoint_index":1,"state":"removing","instant_unix_ns":2,"planned":["brief.txt",".local/inbox",".local","."],"writable_collected_first":null,"remaining":null,"refusal":null,"component":null,"token":"a".repeat(32),"parent_identity":{"device":1,"inode":2},"home_identity":{"device":1,"inode":3}})
     }
 
     /// ´test:unit:harvest-record-requires-present-keys-and-consistent-disposition´

@@ -5,11 +5,10 @@ use std::path::PathBuf;
 use crate::error::WorkerError;
 
 /// The command-line forms this binary accepts.
-pub const USAGE: &str = "usage: worker-run {prepare LOOP LANE COMMIT --hub PATH --brief PATH|launch LOOP LANE --driver claude --estate DIR [--budget SECONDS] [--model MODEL] [--effort EFFORT]|watch LOOP LANE [--stall SECONDS] [--budget SECONDS]}";
+pub const USAGE: &str = "usage: worker-run {prepare LOOP LANE COMMIT --hub PATH --brief PATH|launch LOOP LANE --driver claude --estate DIR [--budget SECONDS] [--model MODEL] [--effort EFFORT]|watch LOOP LANE [--stall SECONDS] [--budget SECONDS]|close LOOP LANE}";
 
 /// The second bite's refusal, naming what carries the two remaining subcommands.
-pub const SECOND_BITE: &str =
-    "fetch and close arrive in the second bite, with the loop-side paths they depend on";
+pub const SECOND_BITE: &str = "fetch arrives with the loop-side export path it depends on";
 
 /// The default seconds a lane may run before the monitor stops it.
 pub const DEFAULT_BUDGET: u64 = 3_600;
@@ -23,6 +22,13 @@ pub const DEFAULT_EFFORT: &str = "xhigh";
 /// One parsed subcommand.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// Retire a quiet worker lifetime and release its UID after mailbox custody transfer.
+    Close {
+        /// The loop whose worker retires.
+        loop_name: String,
+        /// The lane to close.
+        lane: String,
+    },
     /// Build a lane's tree at a freshly allocated slot.
     Prepare {
         /// The loop whose block the slot comes from.
@@ -73,7 +79,8 @@ impl Action {
         match self {
             Self::Prepare { loop_name, .. }
             | Self::Launch { loop_name, .. }
-            | Self::Watch { loop_name, .. } => loop_name,
+            | Self::Watch { loop_name, .. }
+            | Self::Close { loop_name, .. } => loop_name,
         }
     }
 
@@ -81,9 +88,10 @@ impl Action {
     #[must_use]
     pub fn lane(&self) -> &str {
         match self {
-            Self::Prepare { lane, .. } | Self::Launch { lane, .. } | Self::Watch { lane, .. } => {
-                lane
-            }
+            Self::Prepare { lane, .. }
+            | Self::Launch { lane, .. }
+            | Self::Watch { lane, .. }
+            | Self::Close { lane, .. } => lane,
         }
     }
 
@@ -94,6 +102,7 @@ impl Action {
             Self::Prepare { .. } => "PREPARE",
             Self::Launch { .. } => "LAUNCH",
             Self::Watch { .. } => "WATCH",
+            Self::Close { .. } => "CLOSE",
         }
     }
 }
@@ -277,7 +286,16 @@ where
         "prepare" => prepare_action(&mut arguments)?,
         "launch" => launch_action(&mut arguments)?,
         "watch" => watch_action(&mut arguments)?,
-        "fetch" | "close" => {
+        "close" => {
+            let [loop_name, lane]: [String; 2] = arguments
+                .try_into()
+                .map_err(|_| WorkerError::usage(USAGE))?;
+            Action::Close {
+                loop_name,
+                lane: lane_name(lane)?,
+            }
+        }
+        "fetch" => {
             return Err(WorkerError::usage(format!("{subcommand}: {SECOND_BITE}")));
         }
         _ => return Err(WorkerError::usage(USAGE)),

@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 
 pub enum Listing {
     Empty,
+    Notice,
     Unread(String),
     History(String),
     Failed(String),
@@ -12,6 +13,7 @@ impl Listing {
     pub fn feedback(&self, limit: usize) -> String {
         let text = match self {
             Self::Empty => "",
+            Self::Notice => "You've got mail.",
             Self::Unread(text) | Self::History(text) | Self::Failed(text) => text,
         };
         let lines = text.lines().collect::<Vec<_>>();

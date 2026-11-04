@@ -1261,52 +1261,12 @@ fn wait_usage_errors_keep_the_failure_envelope() {
     assert_failure(&output, 2, "usage_error", USAGE_DIAGNOSTIC, "usage_error");
 }
 
-/// ´test:integration:outbox-handback-keeps-stdout-json-and-names-ancestor-refusal´
+/// ´test:integration:retired-mail-sidecars-do-not-enter-follow-output´
 #[test]
-fn outbox_handback_keeps_stdout_json_and_names_ancestor_refusal() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let directory = TestDir::new("handback-entry");
-    directory.write(
-        "plan.json",
-        serde_json::json!({"home":directory.path().join("worker"),"driver_dir":directory.path()})
-            .to_string()
-            .as_bytes(),
-    );
-    let row = serde_json::json!({"box":"outbox","name":"reply.md","kind":"file","bytes":5,"revision":1,"at":"2026-01-01T00:00:01Z","identity":["outbox","reply.md",1,"2026-01-01T00:00:01Z"]});
-    directory.write("letters.jsonl", format!("{row}\n").as_bytes());
-    let result = run([
-        directory.path().as_os_str(),
-        OsStr::new("--wait"),
-        OsStr::new("1"),
-    ]);
-    assert!(result.status.success());
-    let capture: serde_json::Value = serde_json::from_slice(&result.stdout).expect("JSON capture");
-    assert_eq!(capture["schema"], 2);
-    assert_eq!(
-        result.stderr,
-        b"NEW MESSAGE name=reply.md at=2026-01-01T00:00:01Z revision=1\n"
-    );
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o600))
-        .expect("remove search");
-    let denied = run([
-        directory.path().as_os_str(),
-        OsStr::new("--wait"),
-        OsStr::new("1"),
-    ]);
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
-        .expect("restore search");
-    assert_eq!(denied.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&denied.stderr).contains("outbox-search"));
-    assert!(String::from_utf8_lossy(&denied.stderr).contains(
-        &lane_lifecycle::escape_mailbox_name(directory.path().as_os_str().as_encoded_bytes())
-    ));
-}
-
-/// ´test:integration:outbox-refusal-preserves-delta-finished-and-capture-failure´
-#[test]
-fn outbox_refusal_preserves_delta_finished_and_capture_failure() {
-    let directory = TestDir::new("outbox-capture-primary");
+fn retired_mail_sidecars_do_not_enter_follow_output() {
+    let directory = TestDir::new("retired-sidecars");
     directory.write("plan.json", b"{");
+    directory.write("letters.jsonl", b"malformed legacy metadata");
     directory.write("events.jsonl", b"{\"event\":1}\n");
     directory.write("run-report.txt", b"DONE\n");
     let output = run([directory.path().as_os_str()]);
@@ -1315,18 +1275,8 @@ fn outbox_refusal_preserves_delta_finished_and_capture_failure() {
     let records = capture["records"].as_array().expect("records");
     assert!(records.iter().any(|record| record["kind"] == "delta"));
     assert!(records.iter().any(|record| record["kind"] == "finished"));
-    let lines = String::from_utf8_lossy(&output.stderr);
-    assert!(lines.starts_with("OUTBOX REFUSAL kind=outbox-record detail="));
-    assert_eq!(lines.lines().count(), 1);
-    std::fs::remove_file(directory.path().join("events.jsonl")).expect("remove event source");
-    directory.mkdir("events.jsonl");
-    let output = run([directory.path().as_os_str()]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("OUTBOX REFUSAL kind=outbox-record detail=")
-    );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("outbox-record"));
+    assert!(records.iter().all(|record| record["kind"] != "letter"));
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
 
 /// ´test:integration:inaccessible-round-is-a-named-runtime-refusal-not-usage´
@@ -1346,12 +1296,6 @@ fn inaccessible_round_is_a_named_runtime_refusal_not_usage() {
         .expect("restore cleanup");
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).expect("stderr");
-    assert!(
-        stderr
-            .lines()
-            .any(|line| line.starts_with("OUTBOX REFUSAL kind=outbox-search ")),
-        "{stderr}"
-    );
     assert!(!stderr.contains("usage_error"), "{stderr}");
     let document: Value = serde_json::from_slice(&output.stdout).expect("failure capture");
     assert!(!document.to_string().contains("usage_error"));

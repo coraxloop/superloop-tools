@@ -29,6 +29,8 @@ pub struct Allocations {
     blocks: BTreeMap<String, WorkerBlock>,
     registry_uids: BTreeMap<String, u32>,
     letters_gid: Option<u32>,
+    mail_uid: Option<u32>,
+    mail_groups: BTreeMap<String, WorkerBlock>,
 }
 
 impl Allocations {
@@ -45,24 +47,32 @@ impl Allocations {
             toml::from_str(source).map_err(|_| LoopError::refusal("malformed allocations.toml"))?;
         let mut blocks = BTreeMap::new();
         let mut letters_gid = None;
+        let mut mail_uid = None;
+        let mut mail_groups = BTreeMap::new();
         for (name, value) in root {
-            if name == "letters_gid" {
-                letters_gid = Some(
-                    value
-                        .as_integer()
-                        .and_then(|n| u32::try_from(n).ok())
-                        .filter(|n| (1000..=65_535).contains(n) && *n != 65_534)
-                        .ok_or_else(|| {
-                            LoopError::refusal("malformed letters_gid in allocations.toml")
-                        })?,
-                );
+            if name == "letters_gid" || name == "mail_uid" {
+                let identity = value
+                    .as_integer()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| (1000..=65_535).contains(n) && *n != 65_534)
+                    .ok_or_else(|| {
+                        LoopError::refusal(format!("malformed {name} in allocations.toml"))
+                    })?;
+                if name == "letters_gid" {
+                    letters_gid = Some(identity);
+                } else {
+                    mail_uid = Some(identity);
+                }
                 continue;
             }
             validate_name(&name)?;
             let table = value.as_table().ok_or_else(|| {
                 LoopError::refusal(format!("malformed allocation for loop: {name}"))
             })?;
-            if let Some(key) = table.keys().find(|key| key.as_str() != "uids") {
+            if let Some(key) = table
+                .keys()
+                .find(|key| !["uids", "mail_gids"].contains(&key.as_str()))
+            {
                 return Err(LoopError::refusal(format!(
                     "unknown allocation key for loop {name}: {key}"
                 )));
@@ -100,6 +110,10 @@ impl Allocations {
                     "worker uids overlap for loops {other} and {name}"
                 )));
             }
+            if let Some(value) = table.get("mail_gids") {
+                let groups = parse_mail_groups(value, count)?;
+                mail_groups.insert(name.clone(), groups);
+            }
             blocks.insert(name, block);
         }
         if letters_gid.is_some_and(|gid| blocks.values().any(|block| block.contains(gid))) {
@@ -107,10 +121,20 @@ impl Allocations {
                 "letters group conflicts with a worker group",
             ));
         }
+        if mail_uid.is_some_and(|uid| {
+            letters_gid == Some(uid) || blocks.values().any(|block| block.contains(uid))
+        }) {
+            return Err(LoopError::refusal(
+                "mail service identity conflicts with a correspondence or worker identity",
+            ));
+        }
+        validate_mail_groups(&mail_groups, &blocks, letters_gid, mail_uid)?;
         Ok(Self {
             blocks,
             registry_uids: BTreeMap::new(),
             letters_gid,
+            mail_uid,
+            mail_groups,
         })
     }
 
@@ -145,7 +169,7 @@ impl Allocations {
         })?;
         if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFDIR
             || stat.st_uid != owner
-            || stat.st_mode & 0o7777 != 0o700
+            || stat.st_mode & 0o7777 != crate::mail::acl::preserved_mode(pinned_root, 0o700)
         {
             return Err(LoopError::refusal(format!(
                 "allocations directory must be owner-owned at mode 0700: {}",
@@ -175,6 +199,23 @@ impl Allocations {
     pub fn read_or_empty(path: &Path) -> Result<Self, LoopError> {
         let source = read_source(path, true)?;
         Self::parse(&source)?.with_registry_uids(path)
+    }
+
+    /// Read an optional loop mail group without requiring mail setup for an ordinary entry.
+    ///
+    /// # Errors
+    /// Refuses an unsafe or malformed ledger and validates registry collisions before granting a group.
+    pub fn read_mail_group(path: &Path, name: &str) -> Result<Option<u32>, LoopError> {
+        validate_name(name)?;
+        let source = read_source(path, true)?;
+        let allocations = Self::parse(&source)?;
+        if !allocations.mail_groups.contains_key(name) {
+            return Ok(None);
+        }
+        allocations
+            .with_registry_uids(path)?
+            .mail_group(name, None)
+            .map(Some)
     }
 
     fn with_registry_uids(mut self, path: &Path) -> Result<Self, LoopError> {
@@ -209,6 +250,24 @@ impl Allocations {
                 "letters group conflicts with a private group",
             ));
         }
+        if self.mail_uid.is_some_and(|uid| {
+            self.registry_uids
+                .values()
+                .any(|registered| *registered == uid)
+        }) {
+            return Err(LoopError::refusal(
+                "mail service identity conflicts with a private identity",
+            ));
+        }
+        if self
+            .mail_groups
+            .values()
+            .any(|block| self.registry_uids.values().any(|uid| block.contains(*uid)))
+        {
+            return Err(LoopError::refusal(
+                "mail groups conflict with a private identity",
+            ));
+        }
         Ok(self)
     }
 
@@ -235,30 +294,101 @@ impl Allocations {
         self.letters_gid
     }
 
-    /// Select or validate a group distinct from private and worker groups.
+    /// Reserved subordinate identity for the host-session mail service.
+    #[must_use]
+    pub const fn mail_uid(&self) -> Option<u32> {
+        self.mail_uid
+    }
+
+    /// Reserve an identity without overlap with loop, worker or legacy mail groups.
     ///
     /// # Errors
-    /// Refuses collisions and an exhausted subordinate group range.
-    pub(crate) fn ensure_letters_gid(&mut self, uids: &[u32]) -> Result<u32, LoopError> {
-        let available = |gid: u32| {
-            gid != 65_534
-                && !uids.contains(&gid)
-                && self.blocks.values().all(|block| !block.contains(gid))
+    /// Refuses a collision or exhaustion of the mapped subordinate range.
+    pub fn ensure_mail_uid(&mut self, uids: &[u32]) -> Result<u32, LoopError> {
+        let available = |uid: u32| {
+            uid != 65_534
+                && !uids.contains(&uid)
+                && self.letters_gid != Some(uid)
+                && !self
+                    .registry_uids
+                    .values()
+                    .any(|registered| *registered == uid)
+                && self.mail_groups.values().all(|block| !block.contains(uid))
+                && self.blocks.values().all(|block| !block.contains(uid))
         };
-        let gid = match self.letters_gid {
-            Some(gid) if available(gid) => gid,
-            Some(_) => {
-                return Err(LoopError::refusal(
-                    "letters group conflicts with a private or worker group",
-                ));
-            }
+        let uid = match self.mail_uid {
+            Some(uid) if available(uid) => uid,
+            Some(_) => return Err(LoopError::refusal("mail service identity collision")),
             None => (1000..=65_535)
                 .rev()
-                .find(|gid| available(*gid))
-                .ok_or_else(|| LoopError::refusal("letters group range exhausted"))?,
+                .find(|uid| available(*uid))
+                .ok_or_else(|| LoopError::refusal("mail service identity range exhausted"))?,
         };
-        self.letters_gid = Some(gid);
-        Ok(gid)
+        self.mail_uid = Some(uid);
+        Ok(uid)
+    }
+
+    /// Mapped mailbox groups, distinct from every actor's private group.
+    pub fn mail_group_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.mail_groups.values().flat_map(|block| block.uids())
+    }
+
+    /// Resolve a loop or worker's reserved mailbox group from its UID allocation.
+    ///
+    /// # Errors
+    /// Refuses unreserved groups or a worker outside its loop's UID range.
+    pub fn mail_group(&self, name: &str, worker_uid: Option<u32>) -> Result<u32, LoopError> {
+        let groups = self
+            .mail_groups
+            .get(name)
+            .ok_or_else(|| LoopError::refusal("mail groups are not reserved"))?;
+        let offset = match worker_uid {
+            None => 0,
+            Some(uid) => {
+                let workers = self.require(name)?;
+                if !workers.contains(uid) {
+                    return Err(LoopError::refusal("worker outside mail group allocation"));
+                }
+                uid - workers.base + 1
+            }
+        };
+        Ok(groups.base + offset)
+    }
+
+    /// Reserve one mailbox group per possible worker plus the loop's own group.
+    ///
+    /// # Errors
+    /// Refuses private-identity overlap or an exhausted mapped group range.
+    pub fn ensure_mail_groups(&mut self, name: &str, uids: &[u32]) -> Result<(), LoopError> {
+        let count = self.require(name)?.count + 1;
+        let available = |candidate: WorkerBlock| {
+            !candidate.contains(65_534)
+                && uids.iter().all(|uid| !candidate.contains(*uid))
+                && self
+                    .registry_uids
+                    .values()
+                    .all(|uid| !candidate.contains(*uid))
+                && self.letters_gid.is_none_or(|gid| !candidate.contains(gid))
+                && self.mail_uid.is_none_or(|uid| !candidate.contains(uid))
+                && self
+                    .blocks
+                    .values()
+                    .all(|block| !candidate.overlaps(*block))
+                && self
+                    .mail_groups
+                    .iter()
+                    .all(|(other, block)| other == name || !candidate.overlaps(*block))
+        };
+        let groups = match self.mail_groups.get(name) {
+            Some(groups) if groups.count == count && available(*groups) => *groups,
+            Some(_) => return Err(LoopError::refusal("mail group allocation collision")),
+            None => (1000..=65_536 - count)
+                .map(|base| WorkerBlock { base, count })
+                .find(|candidate| available(*candidate))
+                .ok_or_else(|| LoopError::refusal("mail group range exhausted"))?,
+        };
+        self.mail_groups.insert(name.to_owned(), groups);
+        Ok(())
     }
 
     /// Iterate all validated blocks.
@@ -282,6 +412,11 @@ impl Allocations {
                         .values()
                         .all(|uid| !candidate.contains(*uid))
                     && self.letters_gid.is_none_or(|gid| !candidate.contains(gid))
+                    && self.mail_uid.is_none_or(|uid| !candidate.contains(uid))
+                    && self
+                        .mail_groups
+                        .values()
+                        .all(|groups| !candidate.overlaps(*groups))
             })
     }
 
@@ -304,6 +439,11 @@ impl Allocations {
             || self.blocks.values().any(|other| block.overlaps(*other))
             || self.registry_uids.values().any(|uid| block.contains(*uid))
             || self.letters_gid.is_some_and(|gid| block.contains(gid))
+            || self.mail_uid.is_some_and(|uid| block.contains(uid))
+            || self
+                .mail_groups
+                .values()
+                .any(|groups| block.overlaps(*groups))
         {
             return Err(LoopError::refusal(format!(
                 "worker uid allocation conflicts for loop: {name}"
@@ -317,6 +457,10 @@ impl Allocations {
     #[must_use]
     pub fn to_toml(&self) -> String {
         let mut result = String::new();
+        if let Some(uid) = self.mail_uid {
+            use std::fmt::Write as _;
+            let _written = writeln!(&mut result, "mail_uid = {uid}");
+        }
         if let Some(gid) = self.letters_gid {
             use std::fmt::Write as _;
             let _written = writeln!(&mut result, "letters_gid = {gid}");
@@ -328,6 +472,13 @@ impl Allocations {
                 "[{name}]\nuids = {{ base = {}, count = {} }}\n",
                 block.base, block.count
             );
+            if let Some(groups) = self.mail_groups.get(name) {
+                let _written = writeln!(
+                    &mut result,
+                    "mail_gids = {{ base = {}, count = {} }}",
+                    groups.base, groups.count
+                );
+            }
         }
         result
     }
@@ -393,7 +544,9 @@ fn read_source(path: &Path, absent_ok: bool) -> Result<String, LoopError> {
     let stat = fstat(&pinned).map_err(|error| {
         LoopError::refusal(format!("could not inspect allocations directory: {error}"))
     })?;
-    if stat.st_uid != owner || stat.st_mode & 0o7777 != 0o700 {
+    if stat.st_uid != owner
+        || stat.st_mode & 0o7777 != crate::mail::acl::preserved_mode(&pinned, 0o700)
+    {
         return Err(LoopError::refusal(format!(
             "allocations directory must be owner-owned at mode 0700: {}",
             parent.display()
@@ -430,7 +583,10 @@ fn read_pinned_file(
             path.display()
         ))
     })?;
-    if !metadata.is_file() || metadata.uid() != owner || metadata.mode() & 0o7777 != 0o600 {
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.mode() & 0o7777 != crate::mail::acl::preserved_mode(&file, 0o600)
+    {
         return Err(LoopError::refusal(format!(
             "allocations must be an owner-owned regular file at mode 0600: {}",
             path.display()
@@ -458,4 +614,54 @@ fn read_pinned_file(
         )));
     }
     Ok(source)
+}
+
+fn parse_mail_groups(value: &toml::Value, workers: u32) -> Result<WorkerBlock, LoopError> {
+    let table = value
+        .as_table()
+        .ok_or_else(|| LoopError::refusal("malformed mail group allocation"))?;
+    if table
+        .keys()
+        .any(|key| !["base", "count"].contains(&key.as_str()))
+    {
+        return Err(LoopError::refusal("unknown mail group key"));
+    }
+    let number = |key| {
+        table
+            .get(key)
+            .and_then(toml::Value::as_integer)
+            .and_then(|number| u32::try_from(number).ok())
+            .ok_or_else(|| LoopError::refusal("malformed mail group range"))
+    };
+    let block = WorkerBlock {
+        base: number("base")?,
+        count: number("count")?,
+    };
+    if block.base < 1000
+        || block.count != workers + 1
+        || u64::from(block.base) + u64::from(block.count) > 65_536
+        || block.contains(65_534)
+    {
+        return Err(LoopError::refusal("mail group range is unavailable"));
+    }
+    Ok(block)
+}
+fn validate_mail_groups(
+    groups: &BTreeMap<String, WorkerBlock>,
+    workers: &BTreeMap<String, WorkerBlock>,
+    letters: Option<u32>,
+    service: Option<u32>,
+) -> Result<(), LoopError> {
+    for (name, block) in groups {
+        if workers.values().any(|workers| block.overlaps(*workers))
+            || letters.is_some_and(|gid| block.contains(gid))
+            || service.is_some_and(|uid| block.contains(uid))
+            || groups
+                .iter()
+                .any(|(other, groups)| other != name && block.overlaps(*groups))
+        {
+            return Err(LoopError::refusal("mail group identity collision"));
+        }
+    }
+    Ok(())
 }

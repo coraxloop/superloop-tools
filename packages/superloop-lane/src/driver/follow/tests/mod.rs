@@ -23,8 +23,7 @@ use super::{
     Config, DEFAULT_BOUNCE, DEFAULT_CAP, FeedError, HEARTBEAT_PROBE, ParsedInteger, PollResult,
     StoredOffset, delta_is_ready, emit_failure_document, line_is_heartbeat, parse_args,
     parse_integer, parse_lock, parse_monitor, parse_utc_instant, poll_once, poll_once_at,
-    read_offset, relay_records, relay_success, relay_success_with, run, sample_state,
-    tail_is_heartbeat, unread_letters, unread_tail_is_heartbeat, utc_instant,
+    read_offset, run, sample_state, tail_is_heartbeat, unread_tail_is_heartbeat, utc_instant,
 };
 
 #[path = "../../../../tests/driver_follow/support/mod.rs"]
@@ -1432,24 +1431,13 @@ fn monitor_parser_carries_optional_context_fields() {
     assert_eq!(context["at"], "2026-10-07T00:00:00Z");
 }
 
-/// ´test:unit:monitor-parser-carries-letter-count-and-refuses-bad-suffix´
+/// ´test:unit:monitor-parser-refuses-retired-letter-count´
 #[test]
-fn monitor_parser_carries_letter_count_and_refuses_bad_suffix() {
-    let prefix = b"quiet=3s wall=20s event_size=91 boot=300s awake=19s context_state=unknown context_used=unknown context_window=unknown context_fraction=unknown context_source=driver context_reason=field-absent context_turn=0 context_at=2026-10-07T00:00:00Z";
-    let mut valid = prefix.to_vec();
-    valid.extend_from_slice(b" letters_observed=3\n");
-    assert_eq!(
-        parse_monitor(&valid).expect("count").letters_observed,
-        Some(3)
+fn monitor_parser_refuses_retired_letter_count() {
+    assert!(
+        parse_monitor(b"quiet=3s wall=20s event_size=91 boot=300s awake=19s letters_observed=3\n")
+            .is_err()
     );
-    let mut invalid = prefix.to_vec();
-    invalid.extend_from_slice(b" letters_observed=bad\n");
-    assert_eq!(parse_monitor(&invalid).err(), Some("monitor-letters"));
-    let directory = TestDir::new("state-letter-count");
-    directory.write(".codex-lane.lock", b"4294967295\n");
-    directory.write(".monitor-4294967295-0", &valid);
-    let state: Value = serde_json::from_str(&sample_state(directory.path(), 0)).expect("state");
-    assert_eq!(state["monitor"]["letters_observed"], 3);
 }
 
 /// ´test:unit:budget-sidecar-parses-expiry-and-keeps-old-format´
@@ -1474,13 +1462,12 @@ fn budget_sidecar_parses_expiry_and_keeps_old_format() {
         (21, 91, 20, 1)
     );
     assert_eq!(expiry.state, "growing");
-    let combined = parse_monitor(b"quiet=4s wall=24s event_size=91 boot=300s awake=23s context_state=unknown context_used=unknown context_window=unknown context_fraction=unknown context_source=driver context_reason=field-absent context_turn=0 context_at=2026-10-07T00:00:00Z letters_observed=3 budget=20s last_growth=20s state=stalled expired_wall=21s expired_event_size=91 expired_last_growth=20s expired_quiet=1s expired_state=growing\n")
+    let combined = parse_monitor(b"quiet=4s wall=24s event_size=91 boot=300s awake=23s context_state=unknown context_used=unknown context_window=unknown context_fraction=unknown context_source=driver context_reason=field-absent context_turn=0 context_at=2026-10-07T00:00:00Z budget=20s last_growth=20s state=stalled expired_wall=21s expired_event_size=91 expired_last_growth=20s expired_quiet=1s expired_state=growing\n")
         .expect("context, letters, and budget on one line");
     assert_eq!(
         combined.context.as_ref().expect("context")["state"],
         "unknown"
     );
-    assert_eq!(combined.letters_observed, Some(3));
     assert_eq!(
         combined.budget.expect("budget").state.as_deref(),
         Some("stalled")
@@ -1581,141 +1568,6 @@ fn budget_expiry_and_state_records_publish_once_per_transition() {
     let (result, output) = poll(&directory, DEFAULT_CAP);
     assert_eq!(result, Ok(PollResult::Budget));
     assert_eq!(document(&output)["records"][1]["kind"], "budget_expired");
-}
-
-/// ´test:unit:letter-capture-precedes-event-delta-and-advances-once´
-#[test]
-fn letter_capture_precedes_event_delta_and_advances_once() {
-    let directory = TestDir::new("letter-capture-order");
-    directory.write("events.jsonl", b"{\"event\":1}\n");
-    directory.write("letters.jsonl", b"{\"round\":\"dispatch\",\"box\":\"inbox\",\"name\":\"dispatch.md\",\"bytes\":4,\"at\":\"2026-10-07T00:00:00Z\",\"kind\":\"file\",\"line\":\"LETTER box=inbox name=dispatch.md bytes=4 at=2026-10-07T00:00:00Z\\n\",\"identity\":[\"inbox\",\"dispatch.md\",4,\"2026-10-07T00:00:00Z\"],\"emitted\":true}\n");
-    let mut request = config(&directory, DEFAULT_CAP);
-    request.bounce = 0;
-    let mut output = Vec::new();
-    assert_eq!(
-        poll_once(&request, &mut output).expect("first poll"),
-        PollResult::Delta
-    );
-    let document: Value = serde_json::from_slice(&output).expect("capture");
-    assert_eq!(document["records"][1]["kind"], "letter");
-    assert_eq!(document["records"][1]["name"], "dispatch.md");
-    assert_eq!(document["records"][2]["kind"], "delta");
-    assert_eq!(directory.read(".letter-count"), b"1\n");
-    let mut later = Vec::new();
-    assert_eq!(
-        poll_once(&request, &mut later).expect("second poll"),
-        PollResult::Pending
-    );
-}
-
-/// ´test:unit:letter-delivery-survives-restart-before-count-publication´
-#[test]
-fn letter_delivery_survives_restart_before_count_publication() {
-    let directory = TestDir::new("letter-restart-before-count");
-    directory.write("letters.jsonl", b"{\"round\":\"dispatch\",\"box\":\"inbox\",\"name\":\"dispatch.md\",\"bytes\":4,\"at\":\"2026-10-07T00:00:00Z\",\"kind\":\"file\",\"line\":\"LETTER box=inbox name=dispatch.md bytes=4 at=2026-10-07T00:00:00Z\\n\",\"identity\":[\"inbox\",\"dispatch.md\",4,\"2026-10-07T00:00:00Z\"],\"emitted\":false}\n");
-    let request = config(&directory, DEFAULT_CAP);
-    let (records, _) = unread_letters(directory.path()).expect("unread letter");
-    let mut first = Vec::new();
-    relay_success(&request, &mut first, 0, &records).expect("flushed and marked capture");
-    let document: Value = serde_json::from_slice(&first).expect("flushed capture");
-    assert_eq!(document["records"][1]["kind"], "letter");
-    assert!(!directory.path().join(".letter-count").exists());
-    assert!(directory.path().join(".letter-delivered.json").is_file());
-    let mut restarted = Vec::new();
-    assert_eq!(
-        poll_once(&request, &mut restarted).expect("restart"),
-        PollResult::Pending
-    );
-    assert_eq!(restarted, Vec::<u8>::new());
-}
-
-/// ´test:unit:letter-capture-replays-after-failure-before-first-byte´
-#[test]
-fn letter_capture_replays_after_failure_before_first_byte() {
-    struct RefusingOutput;
-    impl Write for RefusingOutput {
-        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("capture not started"))
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let directory = TestDir::new("letter-before-first-byte");
-    directory.write("letters.jsonl", b"{\"round\":\"dispatch\",\"box\":\"inbox\",\"name\":\"dispatch.md\",\"bytes\":4,\"at\":\"2026-10-07T00:00:00Z\",\"kind\":\"file\",\"line\":\"LETTER box=inbox name=dispatch.md bytes=4 at=2026-10-07T00:00:00Z\\n\",\"identity\":[\"inbox\",\"dispatch.md\",4,\"2026-10-07T00:00:00Z\"],\"emitted\":true}\n");
-    let request = config(&directory, DEFAULT_CAP);
-    assert_eq!(
-        poll_once(&request, &mut RefusingOutput),
-        Err(FeedError::Relay)
-    );
-    assert!(directory.path().join(".letter-pending.json").is_file());
-    assert!(!directory.path().join(".letter-delivered.json").exists());
-    let mut replay = Vec::new();
-    assert_eq!(poll_once(&request, &mut replay), Ok(PollResult::Delta));
-    let document: Value = serde_json::from_slice(&replay).expect("replayed capture");
-    assert_eq!(document["records"][1]["kind"], "letter");
-    assert_eq!(document["records"][1]["replay"], 1);
-    assert_eq!(document["letters"]["delivery"], "at-least-once");
-    assert_eq!(document["letters"]["collapse_by"], "identity");
-    assert_eq!(document["records"].as_array().expect("records").len(), 2);
-    let mut after = Vec::new();
-    assert_eq!(poll_once(&request, &mut after), Ok(PollResult::Pending));
-    assert_eq!(after, Vec::<u8>::new());
-}
-
-/// ´test:unit:letter-capture-replays-after-flush-before-mark-ahead-of-delta´
-#[test]
-fn letter_capture_replays_after_flush_before_mark_ahead_of_delta() {
-    let directory = TestDir::new("letter-after-flush");
-    directory.write("events.jsonl", b"{\"event\":1}\n");
-    directory.write("letters.jsonl", b"{\"round\":\"dispatch\",\"box\":\"inbox\",\"name\":\"dispatch.md\",\"bytes\":4,\"at\":\"2026-10-07T00:00:00Z\",\"kind\":\"file\",\"line\":\"LETTER box=inbox name=dispatch.md bytes=4 at=2026-10-07T00:00:00Z\\n\",\"identity\":[\"inbox\",\"dispatch.md\",4,\"2026-10-07T00:00:00Z\"],\"emitted\":true}\n");
-    let mut request = config(&directory, DEFAULT_CAP);
-    request.bounce = 0;
-    let (records, _) = unread_letters(directory.path()).expect("unread letter");
-    let mut first = Vec::new();
-    assert_eq!(
-        relay_success_with(&request, &mut first, 0, &records, || Err(FeedError::Relay)),
-        Err(FeedError::Relay)
-    );
-    let first_document: Value = serde_json::from_slice(&first).expect("flushed capture");
-    assert_eq!(first_document["records"][1]["kind"], "letter");
-    assert_eq!(first_document["letters"]["delivery"], "at-least-once");
-    assert_eq!(first_document["letters"]["collapse_by"], "identity");
-    assert!(!directory.path().join(".letter-delivered.json").exists());
-    let mut replay = Vec::new();
-    assert_eq!(poll_once(&request, &mut replay), Ok(PollResult::Delta));
-    let document: Value = serde_json::from_slice(&replay).expect("replayed capture");
-    assert_eq!(document["records"][1]["replay"], 1);
-    assert_eq!(document["letters"], first_document["letters"]);
-    assert_eq!(document["records"][2]["kind"], "delta");
-    assert_eq!(
-        document["records"][1]["identity"],
-        first_document["records"][1]["identity"]
-    );
-    let mut reader_identities = std::collections::BTreeSet::new();
-    let mut shown = 0;
-    for capture in [&first_document, &document] {
-        for record in capture["records"].as_array().expect("records") {
-            if record["kind"] == "letter"
-                && reader_identities.insert(record["identity"].to_string())
-            {
-                shown += 1;
-            }
-        }
-    }
-    assert_eq!(shown, 1);
-    let mut duplicate = Vec::new();
-    relay_records(
-        &mut duplicate,
-        None,
-        &[records[0].clone(), records[0].clone()],
-    )
-    .expect("capture collapses its own identities");
-    let deduplicated: Value = serde_json::from_slice(&duplicate).expect("capture");
-    assert_eq!(
-        deduplicated["records"].as_array().expect("records").len(),
-        1
-    );
 }
 
 /// ´test:unit:monitor-parser-refuses-malformed-records´

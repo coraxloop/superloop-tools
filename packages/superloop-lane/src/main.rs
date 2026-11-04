@@ -9,7 +9,7 @@ use superloop_lane::{
     load_plan, prepare, repair, requests,
 };
 
-const USAGE_TEMPLATE: &str = "usage: superloop-lane {bound-roots --runs-root DIR PATH [PATH...]|render-routes --registry FILE --loop LOOP --owner-home PATH --output DIR|gateway {register|deregister|status|check-request|migrate-proposals|serve} ARGS|launch --host LOOP RUN HOST-ARGS...|prepare-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES] [--reconcile {--dry-run|--expect-digest HEX}]|check-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES]|driver {start|resume} --backend {claude|codex} ARGS|driver status RUN|driver follow RUN [--save-offset]|prepare LOOP [--dry-run]|plan LOOP RUN|make-home LOOP RUN --letter FILE|launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]|launch LOOP RUN --repin-door {--dry-run|--expect-digest HEX}|read-launch-report LOOP RUN [--round STEP]|rewrite-launch-reports LOOP [--dry-run]|settle LOOP RUN --round STEP {--dry-run|--expect-digest HEX}|checkpoint LOOP RUN [--dry-run]|checkout LOOP RUN --repo REPO --into DIR [--dry-run]|harvest LOOP RUN --gate-object HEX [--dry-run]|mark-imported LOOP RUN --object HEX|send-letter LOOP RUN --step STEP --letter FILE|withdraw-letter LOOP RUN --step STEP|follow LOOP RUN [--round STEP] [--round-only]|read-reply LOOP RUN NAME [--offset N --length M] [--dry-run]|rotate LOOP RUN [--dry-run] [--expect-digest HEX] [--force REASON] [--next FILE]|census LOOP|census rewrite LOOP RUN {--dry-run|--expect-digest HEX}|pause LOOP|resume LOOP|exercise LOOP [--dry-run]|exercise LOOP --run RUN --case {letters|reply-receipts|context-use|harvest|run-identity|home-layout|mounts|rotation|resources|reaping|network|door-shape|door-attribution|door-extensions|door-audit|door-allow|door-enforce|door-agent}|network-evidence LOOP RUN < HOST-OBSERVATION.json|retire LOOP RUN [--confirm-uncertain] [--dry-run|--expect-digest HEX]|retire LOOP RUN --node [--dry-run|--expect-digest HEX]|retire LOOP --generations [--dry-run]|retire rewrite-node LOOP {--dry-run|--expect-digest HEX} [--full-plan]|record-hosts LOOP RUN {--list|--host HOST [--host HOST...]} [--dry-run]|build LOOP --base-image REF --codex-bin FILE --codex-host-bin FILE --codex-version VERSION --codex-sha256 HEX --codex-host-sha256 HEX --codex-source URL [--podman-bin FILE] [--template-dir DIR] [--dry-run]|install [--pilot [--refresh-proxy]] LOOP [--dry-run] [--podman-bin FILE] [--data-dir DIR] [--proxy-bin FILE] [--unit-dir DIR]|register-door-node LOOP --alias ALIAS --address ADDRESS --port PORT --user USER --host-key KEY {--dry-run|--expect-digest HEX}|install-door LOOP [--dry-run] [--podman-bin FILE]|door-sign-in LOOP [--dry-run|--expect-digest HEX]|repair LOOP [--dry-run]|requests {<REQUESTS_USAGE>}|--help|--version}\nexercise LOOP --run RUN --case door-attribution requires a started run before settle\nsend-letter: a resumed letter may omit Model and Effort; missing values come from the recorded selection\nwithdraw-letter: keeps the placement record and removes its inbox file only before the round starts\nsend-letter: the worker's reply for step STEP is written to `outbox/STEP.md`; nothing else is read.\nrepin-door: only boxed runs with a registered door can be re-pinned; otherwise repin-door: this run has no door\nsettle: --expect-digest takes the dry run JSON field preview_sha256 (the recorded preview digest)";
+const USAGE_TEMPLATE: &str = "usage: superloop-lane {bound-roots --runs-root DIR PATH [PATH...]|render-routes --registry FILE --loop LOOP --owner-home PATH --output DIR|gateway {register|deregister|status|check-request|migrate-proposals|serve} ARGS|launch --host LOOP RUN HOST-ARGS...|prepare-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES] [--reconcile {--dry-run|--expect-digest HEX}]|check-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES]|driver {start|resume} --backend {claude|codex} ARGS|driver status RUN|driver follow RUN [--save-offset]|prepare LOOP [--dry-run]|plan LOOP RUN|make-home LOOP RUN --letter FILE|launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]|launch LOOP RUN --repin-door {--dry-run|--expect-digest HEX}|read-launch-report LOOP RUN [--round STEP]|rewrite-launch-reports LOOP [--dry-run]|settle LOOP RUN --round STEP {--dry-run|--expect-digest HEX}|checkpoint LOOP RUN [--dry-run]|checkout LOOP RUN --repo REPO --into DIR [--dry-run]|harvest LOOP RUN --gate-object HEX [--dry-run]|mark-imported LOOP RUN --object HEX|bind-mail|bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT|follow LOOP RUN [--round STEP] [--round-only]|rotate LOOP RUN [--dry-run] [--expect-digest HEX] [--force REASON] [--next FILE]|census LOOP|census rewrite LOOP RUN {--dry-run|--expect-digest HEX}|pause LOOP|resume LOOP|exercise LOOP [--dry-run]|exercise LOOP --run RUN --case {context-use|harvest|run-identity|home-layout|mounts|rotation|resources|reaping|network|door-shape|door-attribution|door-extensions|door-audit|door-allow|door-enforce|door-agent}|network-evidence LOOP RUN < HOST-OBSERVATION.json|retire LOOP RUN [--confirm-uncertain] [--dry-run|--expect-digest HEX]|retire LOOP RUN --node [--dry-run|--expect-digest HEX]|retire LOOP --generations [--dry-run]|retire rewrite-node LOOP {--dry-run|--expect-digest HEX} [--full-plan]|record-hosts LOOP RUN {--list|--host HOST [--host HOST...]} [--dry-run]|build LOOP --base-image REF --codex-bin FILE --codex-host-bin FILE --codex-version VERSION --codex-sha256 HEX --codex-host-sha256 HEX --codex-source URL [--podman-bin FILE] [--template-dir DIR] [--dry-run]|install [--pilot [--refresh-proxy]] LOOP [--dry-run] [--podman-bin FILE] [--data-dir DIR] [--proxy-bin FILE] [--unit-dir DIR]|register-door-node LOOP --alias ALIAS --address ADDRESS --port PORT --user USER --host-key KEY {--dry-run|--expect-digest HEX}|install-door LOOP [--dry-run] [--podman-bin FILE]|door-sign-in LOOP [--dry-run|--expect-digest HEX]|repair LOOP [--dry-run]|requests {<REQUESTS_USAGE>}|--help|--version}\nexercise LOOP --run RUN --case door-attribution requires a started run before settle\nrepin-door: only boxed runs with a registered door can be re-pinned; otherwise repin-door: this run has no door\nsettle: --expect-digest takes the dry run JSON field preview_sha256 (the recorded preview digest)";
 
 static USAGE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     USAGE_TEMPLATE.replace("<REQUESTS_USAGE>", requests::commands::REQUESTS_USAGE)
@@ -282,9 +282,6 @@ fn validate_bite_private_argv(args: &[String]) -> Result<(), LaneError> {
         Some("_follow-private") => {
             parse_follow_private_argv(args)?;
         }
-        Some("_read-reply-private") => {
-            launch::replies::PrivateRequest::parse(args)?;
-        }
         Some("_rotation-handover") => {
             launch::rotation::parse_private_handover_argv(args)?;
         }
@@ -319,11 +316,10 @@ fn bind_private_launch_args<'a>(
                 | "_harvest-recover"
                 | "_mark-imported"
                 | "_checkout"
-                | "_send-letter"
-                | "_withdraw-letter"
+                | "_bind-mail"
+                | "_bind-reply"
                 | "_inspect-round"
                 | "_follow-private"
-                | "_read-reply-private"
                 | "_exercise-context-private"
                 | "_rotation-handover"
                 | "_prepare-runtime"
@@ -338,7 +334,7 @@ fn bind_private_launch_args<'a>(
         && args[args.len() - 2] == "--verified-letter-source-fd";
     let suffix_len = if rotation_source {
         12
-    } else if args[0] == "_make-home" || args[0] == "_send-letter" || args[0] == "_checkout" {
+    } else if args[0] == "_make-home" || args[0] == "_checkout" {
         10
     } else {
         6
@@ -576,8 +572,8 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
         && matches!(
             command.as_str(),
             "launch"
-                | "send-letter"
-                | "withdraw-letter"
+                | "bind-mail"
+                | "bind-reply"
                 | "checkpoint"
                 | "checkout"
                 | "harvest"
@@ -755,40 +751,17 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
-    if args.first().is_some_and(|value| value == "send-letter") {
-        let request = launch::letters::SendLetterRequest::parse(&args[1..])?;
-        let report = launch::letters::run(&caller_home()?, &request)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "withdraw-letter") {
-        let request = launch::letters::WithdrawLetterRequest::parse(&args[1..])?;
-        let report = launch::letters::withdraw(&caller_home()?, &request)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "read-reply") {
-        let request = launch::replies::Request::parse(&args[1..])?;
-        launch::replies::run(
-            &caller_home()?,
-            &request,
-            &mut io::stdout().lock(),
-            &mut io::stderr().lock(),
-        )?;
-        return Ok(0);
-    }
     if args
         .first()
-        .is_some_and(|value| value == "_read-reply-private")
+        .is_some_and(|value| matches!(value.as_str(), "bind-mail" | "bind-reply"))
     {
-        let request = launch::replies::PrivateRequest::parse(args)?;
-        let response = launch::replies::private(&request)?;
-        writeln!(io::stdout().lock(), "{response}")
+        let request = launch::steering::Request::parse(&args[1..])?;
+        let report = launch::steering::run(&caller_home()?, &request, args[0] == "bind-reply")?;
+        writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
+
     if args.first().is_some_and(|value| value == "follow") {
         let [_, loop_name, run, rest @ ..] = args else {
             return Err(LaneError::input(
@@ -1341,75 +1314,41 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
-    if args.first().is_some_and(|value| value == "_send-letter") {
-        let [
-            _,
-            loop_name,
-            run,
-            letter_option,
-            letter,
-            home_option,
-            owner_home,
-            step_option,
-            step,
-            digest_option,
-            digest,
-        ] = args
-        else {
-            return Err(LaneError::input(
-                "letter-private",
-                "private letter form is incomplete",
-            ));
-        };
-        if letter_option != "--letter"
-            || home_option != "--owner-home"
-            || step_option != "--step"
-            || digest_option != "--expected-sha256"
-        {
-            return Err(LaneError::input(
-                "letter-private",
-                "private letter form has unexpected arguments",
-            ));
-        }
-        let report = launch::letters::private_send(
-            Path::new(owner_home),
-            loop_name,
-            run,
-            Path::new(letter),
-            step,
-            digest,
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
     if args
         .first()
-        .is_some_and(|value| value == "_withdraw-letter")
+        .is_some_and(|value| matches!(value.as_str(), "_bind-mail" | "_bind-reply"))
     {
         let [
             _,
             loop_name,
             run,
-            home_option,
+            home_flag,
             owner_home,
-            step_option,
+            step_flag,
             step,
+            delivery_flag,
+            delivery,
         ] = args
         else {
             return Err(LaneError::input(
-                "letter-private",
-                "private withdrawal form is incomplete",
+                "mail-private",
+                "private delivery binding form is incomplete",
             ));
         };
-        if home_option != "--owner-home" || step_option != "--step" {
+        if home_flag != "--owner-home" || step_flag != "--step" || delivery_flag != "--delivery" {
             return Err(LaneError::input(
-                "letter-private",
-                "private withdrawal form has unexpected arguments",
+                "mail-private",
+                "private delivery binding options differ",
             ));
         }
-        let report =
-            launch::letters::private_withdraw(Path::new(owner_home), loop_name, run, step)?;
+        let report = launch::steering::private_bind(
+            Path::new(owner_home),
+            loop_name,
+            run,
+            step,
+            delivery,
+            args[0] == "_bind-reply",
+        )?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
@@ -1689,6 +1628,16 @@ fn main() -> std::process::ExitCode {
         option_env!("SUPERLOOP_TOOLS_COMMIT"),
     );
     let raw = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if raw.first().is_some_and(|argument| {
+        argument == "_mail-worker-birth"
+            || argument == "_mail-worker-state"
+            || argument == "_mail-worker-pins"
+    }) {
+        return std::process::ExitCode::from(loop_home::mail::worker_provision::entry(
+            &raw,
+            &mut std::io::stderr().lock(),
+        ));
+    }
     if raw.first().is_some_and(|word| word == "bound-roots") {
         return launch::bound_roots::command(&raw[1..]);
     }

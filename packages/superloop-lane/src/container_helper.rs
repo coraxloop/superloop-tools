@@ -118,15 +118,32 @@ fn valid_thread(thread: &str) -> bool {
 pub(crate) fn requested_thread(run_dir: &Path, prompt: &[u8]) -> Result<Option<String>, LaneError> {
     let prompt = std::str::from_utf8(prompt)
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
-    let step = prompt
-        .trim_end_matches('\n')
-        .strip_prefix("Read /home/worker/.local/inbox/")
-        .and_then(|word| word.strip_suffix(".md."))
-        .ok_or_else(|| LaneError::input("round-thread", "round prompt does not name one letter"))?;
-    crate::launch::letters::valid_step(step)?;
-    if step == "dispatch" {
+    let prompt = prompt.trim_end_matches('\n');
+    if prompt == "Read /home/worker/brief.txt." {
         return Ok(None);
     }
+    let (inbox_name, step) = prompt
+        .strip_prefix("Read /mail/inbox/")
+        .and_then(|text| text.strip_suffix('.'))
+        .and_then(|text| text.split_once(". Step "))
+        .ok_or_else(|| {
+            LaneError::input(
+                "round-thread",
+                "round prompt does not name a mail delivery and step",
+            )
+        })?;
+    crate::launch::letters::valid_step(step)?;
+    let (sender, instant) = inbox_name
+        .split_once('.')
+        .ok_or_else(|| LaneError::input("round-thread", "mail name lacks sender"))?;
+    loop_home::mail::Address::parse(sender)
+        .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
+    loop_home::mail::instant::Instant::parse(
+        instant
+            .strip_suffix(".letter")
+            .ok_or_else(|| LaneError::input("round-thread", "mail suffix absent"))?,
+    )
+    .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
     let path = run_dir.join(format!("round-launch-{step}.json"));
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -154,7 +171,10 @@ pub(crate) fn requested_thread(run_dir: &Path, prompt: &[u8]) -> Result<Option<S
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
     let request: Value = serde_json::from_slice(&bytes)
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
-    if request["step"] != step || request["letter"] != format!("{step}.md") {
+    if request["step"] != step
+        || request["mail"]["inbox_name"] != inbox_name
+        || request["mail"]["step"] != step
+    {
         return Err(LaneError::input(
             "round-thread",
             "round request names another letter",
@@ -2488,8 +2508,11 @@ mod tests {
         fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("protected root");
         fs::write(home.join(".config/loops/registry.toml"), format!("namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{ name = \"alpha\", uid = 41001, launch = \"src\", runs_root = \"{}\" }}]\n", runs.display())).expect("registry");
         let allocations = home.join(".config/loops/allocations.toml");
-        fs::write(&allocations, "[alpha]\nuids = { base = 3000, count = 2 }\n")
-            .expect("allocation");
+        fs::write(
+            &allocations,
+            "mail_uid = 61000\n[alpha]\nuids = { base = 3000, count = 2 }\nmail_gids = { base = 43000, count = 3 }\n",
+        )
+        .expect("allocation");
         fs::set_permissions(&allocations, fs::Permissions::from_mode(0o600))
             .expect("allocation mode");
         let settings = format!(
@@ -2511,6 +2534,19 @@ mod tests {
         let selection = json!({"model":"gpt-6-sol","effort":"high","model_source":"launch-flag","effort_source":"launch-flag"});
         let (mut plan, _) = crate::load_plan(home, "alpha", "R", (0, 0)).expect("base plan");
         plan.select_worker_uid(3000).expect("worker UID");
+        let birth = loop_home::mail::birth::Identity::for_reservation(
+            3000,
+            format!("superloop-lane:{}", "R"),
+        );
+        plan.select_mailbox(
+            &home
+                .join(".var/loops/alpha/workers")
+                .join(&birth.name)
+                .join("mail"),
+            &birth,
+            61000,
+        )
+        .expect("mail mount");
         plan.select_container_program(Path::new("/usr/bin/podman"))
             .expect("container program");
         plan.select_launch_model(&selection).expect("flag model");
@@ -4133,14 +4169,14 @@ exit 0
         fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
             .expect("protected fixture");
         let path = fixture.path().join(".reservation-R.json");
-        let stale = json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"plan":{"home":"~/worker"},"letters":[]});
+        let stale = json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"plan":{"home":"~/worker"},"mail":[]});
         publish_reservation(&path, &stale).expect("seed reservation");
         let mut placed = stale.clone();
-        placed["letters"] = json!([{"step":"dispatch","name":"dispatch-1.md","state":"placed","bytes":4,"sha256":"fixture","placed_at_unix_ns":1}]);
+        placed["mail"] = json!([{"step":"dispatch","name":"dispatch-1.md","state":"placed","bytes":4,"sha256":"fixture","placed_at_unix_ns":1}]);
         publish_reservation(&path, &placed).expect("placement between helper read and write");
         start_after_reservation(&path, &stale, || Ok(())).expect("start from stale request");
         let saved = read_reservation(&path).expect("read").expect("present");
-        assert_eq!(saved["letters"], placed["letters"]);
+        assert_eq!(saved["mail"], placed["mail"]);
         assert_eq!(saved["phase"], "started");
     }
 

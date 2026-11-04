@@ -712,21 +712,15 @@ pub(crate) fn ordinary_entry_plan(
         let settings =
             crate::workers_settings::read_execution_settings(caller_home, record, runs_root, None)?;
         let root = crate::workers_settings::read_runs_root(caller_home, record, runs_root)?;
-        // letters-private establishes its own credentials and environment. Keep
-        // its public word visible to the planner rather than hiding it behind env.
-        if command.first().is_some_and(|word| word == "letters") {
-            command
-        } else {
-            configured_command = std::iter::once(String::from("/usr/bin/env"))
-                .chain(settings.environment())
-                .chain(std::iter::once(format!(
-                    "LANE_RUNS_ROOT={}",
-                    root.display()
-                )))
-                .chain(command.iter().cloned())
-                .collect::<Vec<_>>();
-            &configured_command
-        }
+        configured_command = std::iter::once(String::from("/usr/bin/env"))
+            .chain(settings.environment())
+            .chain(std::iter::once(format!(
+                "LANE_RUNS_ROOT={}",
+                root.display()
+            )))
+            .chain(command.iter().cloned())
+            .collect::<Vec<_>>();
+        &configured_command
     } else {
         command
     };
@@ -1066,7 +1060,7 @@ where
                 &LoopError::refusal("relay-stop: missing or invalid stop report path"),
             );
         }
-        // This relay runs as namespace root, before setpriv/letters-private
+        // This relay runs as namespace root, before setpriv
         // drops credentials, so it can signal the entire private process group.
         return match runner.run(&CommandSpec::new(
             "_supervise-command",
@@ -1079,36 +1073,29 @@ where
     }
     if arguments
         .first()
-        .is_some_and(|word| word == "letters-private" || word == "letters-group")
-    {
-        let mode = arguments.remove(0);
-        let arguments = match strings(arguments) {
-            Ok(arguments) => arguments,
-            Err(failure) => return publish_error(error, &failure),
-        };
-        let result = if mode == "letters-group" {
-            match arguments.as_slice() {
-                [home] => crate::letters::group(Path::new(home), false).and_then(|gid| {
-                    let gid =
-                        gid.ok_or_else(|| LoopError::refusal("letters group is not provisioned"))?;
-                    writeln!(output, "{gid}").map_err(|failure| publication_error(&failure))
-                }),
-                _ => Err(LoopError::refusal("letters-group needs owner home")),
-            }
-        } else {
-            crate::letters::private_entry(&arguments, output, error)
-        };
-        return match result {
-            Ok(()) => 0,
-            Err(failure) => publish_error(error, &failure),
-        };
-    }
-    if arguments
-        .first()
         .is_some_and(|argument| argument == "bind-custody")
     {
         arguments.remove(0);
         return bind_custody_entry(arguments, error);
+    }
+    if arguments.first().is_some_and(|argument| {
+        argument == "_mail-worker-birth"
+            || argument == "_mail-worker-state"
+            || argument == "_mail-worker-pins"
+    }) {
+        return crate::mail::worker_provision::entry(&arguments, error);
+    }
+    if arguments.first().is_some_and(|argument| {
+        [
+            "_mail-provision",
+            "_mail-configure",
+            "_mail-journal",
+            "_mail-group",
+        ]
+        .iter()
+        .any(|mode| argument == *mode)
+    }) {
+        return crate::mail::provision::entry(&arguments, output, error);
     }
     if arguments
         .first()

@@ -1563,7 +1563,7 @@ fn make_home_pinned_with_sources(
     let inbox_path = local_path.join("inbox");
     let inbox = make_dir(&local, &inbox_path, 0o750)?;
     report_dir(&mut reports, &inbox, &inbox_path, caller.0, loop_uid, 0o750)?;
-    let file = make_file(&inbox, &plan.letter, letter_bytes, 0o640)?;
+    let file = make_file(&h, &plan.letter, letter_bytes, 0o640)?;
     report_file(&mut reports, &file, &plan.letter, caller.0, loop_uid, 0o640)?;
     reports.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     Ok(

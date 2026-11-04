@@ -517,6 +517,7 @@ pub(crate) fn mount_inventory(
         } else if kind == "bind" {
             let role = match target {
                 "/home/worker" => "worker-home",
+                "/mail" => "worker-mail",
                 "/home/worker/.codex"
                 | "/home/worker/.cache/work"
                 | "/home/worker/.local/outbox"
@@ -726,7 +727,30 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
         let access = mount["access"]
             .as_str()
             .ok_or_else(|| LaneError::input("box-gate", "bind access is absent"))?;
-        if access == "rw" {
+        if target == "/mail" {
+            let mail = &document["mail"];
+            if access != "rw"
+                || mail["source"] != source
+                || mail["identity"]["uid"] != worker_uid
+                || mail["group"] != document["mail_gid"]
+                || mail["service_uid"] == worker_uid
+                || mail["service_uid"] == loop_uid(document)?
+                || document["environment"]["SUPERLOOP_MAIL"] != "/mail"
+                || !document["mount_sources"].as_array().is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row["path"] == source
+                            && row["uid"] == mail["service_uid"]
+                            && row["gid"] == mail["group"]
+                            && row["mode"] == "0750"
+                    })
+                })
+            {
+                return Err(LaneError::input(
+                    "box-gate",
+                    "mail mount differs from its worker binding",
+                ));
+            }
+        } else if access == "rw" {
             let leaf = leaves
                 .iter()
                 .find(|leaf| target == format!("/home/worker/{leaf}"))
@@ -768,6 +792,18 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
             ));
         }
         expected_mounts.push(format!("type=bind,src={source},dst={target},{access}"));
+    }
+    if document["mail"].is_object()
+        && mounts
+            .iter()
+            .filter(|mount| mount["target"] == "/mail")
+            .count()
+            != 1
+    {
+        return Err(LaneError::input(
+            "box-gate",
+            "one confined worker mail mount is required",
+        ));
     }
     if !mounts.iter().any(|mount| {
         mount["target"] == "/home/worker" && mount["source"] == home && mount["access"] == "ro"
@@ -886,6 +922,18 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
         format!("{worker_uid}:{worker_uid}"),
     );
     arg(&mut permitted, "--group-add", loop_uid.to_string());
+    if let Some(value) = document.get("mail_gid") {
+        let group = value
+            .as_u64()
+            .filter(|group| {
+                (1000..=65535).contains(group)
+                    && *group != 65534
+                    && *group != worker_uid
+                    && *group != loop_uid
+            })
+            .ok_or_else(|| LaneError::input("box-gate", "invalid dedicated mail group"))?;
+        arg(&mut permitted, "--group-add", group.to_string());
+    }
     permitted.extend(
         [
             "--cap-drop=ALL",
@@ -935,6 +983,9 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
             .as_str()
             .ok_or_else(|| LaneError::input("box-gate", format!("environment {key} is absent")))?;
         permitted.extend(["-e".into(), format!("{key}={value}")]);
+    }
+    if document["mail"].is_object() {
+        permitted.extend(["-e".into(), "SUPERLOOP_MAIL=/mail".into()]);
     }
     permitted.extend(
         [
@@ -1027,6 +1078,9 @@ impl Plan {
             .ok_or_else(|| LaneError::operation("plan-json", "worker --user is absent"))?;
         argv[position] = json!(replacement);
         self.document["worker_uid"] = json!(selected);
+        if self.document["mail"].is_object() {
+            self.document["mail"]["identity"]["uid"] = json!(selected);
+        }
         if self.document["door"].is_object() {
             self.document["door"]["peer_uid"] = json!(selected);
         }
@@ -1049,6 +1103,149 @@ impl Plan {
             self.document["mount_sources"]
                 .as_array()
                 .ok_or_else(|| LaneError::operation("plan-json", "mount sources are absent"))?,
+        )?;
+        if let Some(group) = self.document["mail_gid"].as_u64() {
+            let adjusted = i128::from(group) + i128::from(selected) - i128::from(original);
+            let adjusted = u32::try_from(adjusted).map_err(|_| {
+                LaneError::input(
+                    "mail-group",
+                    "mail group adjustment is outside the mapped range",
+                )
+            })?;
+            self.select_mail_group(adjusted)?;
+        } else {
+            self.document["box_gate"] = box_gate(&self.document)?;
+        }
+        Ok(())
+    }
+
+    /// Add the mailbox group selected from the protected allocation ledger.
+    ///
+    /// # Errors
+    /// Refuses invalid identities or a malformed runtime vector.
+    pub(crate) fn select_mail_group(&mut self, group: u32) -> Result<(), LaneError> {
+        if !(1000..=65535).contains(&group)
+            || group == 65534
+            || self.document["worker_uid"] == group
+            || u64::from(loop_uid(&self.document)?) == u64::from(group)
+        {
+            return Err(LaneError::input(
+                "mail-group",
+                "invalid dedicated mail group",
+            ));
+        }
+        let previous = self.document.get("mail_gid").and_then(Value::as_u64);
+        let argv = self.document["runtime_argv"]
+            .as_array_mut()
+            .ok_or_else(|| LaneError::input("mail-group", "runtime vector is absent"))?;
+        if let Some(previous) = previous {
+            let word = format!("--group-add={previous}");
+            let index = argv
+                .iter()
+                .position(|value| value == &word)
+                .ok_or_else(|| LaneError::input("mail-group", "recorded mail group is absent"))?;
+            argv.remove(index);
+        }
+        let index = argv
+            .iter()
+            .position(|value| value == "--cap-drop=ALL")
+            .ok_or_else(|| {
+                LaneError::input("mail-group", "runtime privilege boundary is absent")
+            })?;
+        argv.insert(index, json!(format!("--group-add={group}")));
+        self.document["mail_gid"] = json!(group);
+        if self.document["mail"].is_object() {
+            self.document["mail"]["group"] = json!(group);
+            let source = self.document["mail"]["source"].clone();
+            if let Some(rows) = self.document["mount_sources"].as_array_mut() {
+                for row in rows.iter_mut().filter(|row| row["path"] == source) {
+                    row["gid"] = json!(group);
+                }
+            }
+        }
+        self.document["box_gate"] = box_gate(&self.document)?;
+        Ok(())
+    }
+
+    /// Bind only this worker's separately provisioned mailbox at `/mail`.
+    ///
+    /// # Errors
+    /// Refuses a mismatched identity, a relative source, or a malformed confinement plan.
+    pub fn select_mailbox(
+        &mut self,
+        source: &Path,
+        identity: &loop_home::mail::birth::Identity,
+        service: u32,
+    ) -> Result<(), LaneError> {
+        loop_home::registry::validate_name(&identity.name)
+            .map_err(|error| LaneError::input("mail-mount", error.message()))?;
+        if self.document["worker_uid"] != identity.uid || !source.is_absolute() {
+            return Err(LaneError::input(
+                "mail-mount",
+                "mailbox identity or source differs",
+            ));
+        }
+        let source = path(source)?;
+        let group = self.document["mail_gid"].clone();
+        if self.document["mail"].is_object() {
+            if self.document["mail"]
+                != json!({"identity":identity,"source":source,"target":"/mail","service_uid":service,"group":group})
+            {
+                return Err(LaneError::input(
+                    "mail-mount",
+                    "mail binding cannot change within a worker lifetime",
+                ));
+            }
+            self.document["box_gate"] = box_gate(&self.document)?;
+            return Ok(());
+        }
+        self.document["mail"] = json!({"identity":identity,"source":source,"target":"/mail","service_uid":service,"group":group});
+        self.document["environment"]["SUPERLOOP_MAIL"] = json!("/mail");
+        self.document["mounts"]
+            .as_array_mut()
+            .ok_or_else(|| LaneError::input("mail-mount", "mounts absent"))?
+            .push(json!({"source":source,"target":"/mail","access":"rw","kind":"bind"}));
+        self.document["mount_sources"]
+            .as_array_mut()
+            .ok_or_else(|| LaneError::input("mail-mount", "source rows absent"))?
+            .push(
+                json!({"path":source,"uid":service,"gid":group,"mode":"0750","kind":"directory"}),
+            );
+        let argv = self.document["runtime_argv"]
+            .as_array_mut()
+            .ok_or_else(|| LaneError::input("mail-mount", "runtime vector absent"))?;
+        // Bind mounts precede the fixed runtime tmpfs and environment options.
+        let tmpfs = argv
+            .iter()
+            .position(|value| {
+                value == "type=tmpfs,dst=/run/worker,tmpfs-mode=0700,U=true,notmpcopyup"
+            })
+            .ok_or_else(|| LaneError::input("mail-mount", "runtime tmpfs absent"))?;
+        argv.splice(
+            tmpfs - 1..tmpfs - 1,
+            [
+                json!("--mount"),
+                json!(format!("type=bind,src={source},dst=/mail,rw")),
+            ],
+        );
+        let workdir = argv
+            .iter()
+            .position(|value| value == "--workdir")
+            .ok_or_else(|| LaneError::input("mail-mount", "workdir absent"))?;
+        argv.splice(
+            workdir..workdir,
+            [json!("-e"), json!("SUPERLOOP_MAIL=/mail")],
+        );
+        self.document["mount_inventory"] = mount_inventory(
+            self.document["mounts"]
+                .as_array()
+                .ok_or_else(|| LaneError::input("mail-mount", "mounts absent"))?,
+            self.document["paths"]
+                .as_array()
+                .ok_or_else(|| LaneError::input("mail-mount", "paths absent"))?,
+            self.document["mount_sources"]
+                .as_array()
+                .ok_or_else(|| LaneError::input("mail-mount", "sources absent"))?,
         )?;
         self.document["box_gate"] = box_gate(&self.document)?;
         Ok(())
@@ -1232,7 +1429,7 @@ impl Plan {
             .join(format!("lane-{loop_name}-{run}"));
         let driver_dir = runs_root.join(run);
         let identity_dir = protected_identity_dir(&driver_dir)?;
-        let letter = home.join(".local/inbox/dispatch.md");
+        let letter = home.join("brief.txt");
         let t = template_dir;
         let s = socket_dir;
         let mut rows = Vec::new();
@@ -1956,6 +2153,66 @@ mod tests {
             .expect_err("invalid byte cannot name the helper's program");
         assert_eq!(error.kind, "owner-program");
         assert_eq!(plan.document["runtime_argv"][0], "/usr/bin/podman");
+    }
+
+    /// ´claim:superlooplane:mail-mount-is-one-worker-bound-read-write-folder´
+    /// ´test:unit:mail-mount-is-one-worker-bound-read-write-folder´
+    #[test]
+    fn mail_mount_is_one_worker_bound_read_write_folder() {
+        let document: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/plan.json")).expect("plan");
+        let mut plan = Plan {
+            home: PathBuf::new(),
+            driver_dir: PathBuf::new(),
+            letter: PathBuf::new(),
+            document,
+        };
+        let uid =
+            u32::try_from(plan.document["worker_uid"].as_u64().expect("uid")).expect("mapped uid");
+        let identity =
+            loop_home::mail::birth::Identity::for_reservation(uid, "fixture:first".into());
+        let source = PathBuf::from("/owner/.var/loops/alpha/workers")
+            .join(&identity.name)
+            .join("mail");
+        plan.select_mail_group(43001).expect("mail group");
+        plan.select_mailbox(&source, &identity, 42001)
+            .expect("confined mail");
+        super::verify_box_attestation(&plan.document).expect("complete vector");
+        assert_eq!(plan.document["environment"]["SUPERLOOP_MAIL"], "/mail");
+        assert_eq!(
+            plan.document["mounts"]
+                .as_array()
+                .expect("mounts")
+                .iter()
+                .filter(|mount| mount["target"] == "/mail")
+                .count(),
+            1
+        );
+        let before = plan.document.clone();
+        plan.select_mailbox(&source, &identity, 42001)
+            .expect("same worker resume");
+        assert_eq!(before, plan.document);
+        let other =
+            loop_home::mail::birth::Identity::for_reservation(uid, "fixture:replacement".into());
+        assert!(plan.select_mailbox(&source, &other, 42001).is_err());
+        for access in ["ro", "rshared"] {
+            let mut changed = before.clone();
+            changed["mounts"]
+                .as_array_mut()
+                .expect("mounts")
+                .iter_mut()
+                .find(|mount| mount["target"] == "/mail")
+                .expect("mail")["access"] = json!(access);
+            assert!(super::box_gate(&changed).is_err());
+        }
+        let mut peer = before.clone();
+        peer["mail"]["identity"]["uid"] = json!(uid + 1);
+        assert!(super::box_gate(&peer).is_err());
+        let mut extra = before;
+        extra["mounts"].as_array_mut().expect("mounts").push(
+            json!({"source":"/owner/.var/loops","target":"/peer","access":"ro","kind":"bind"}),
+        );
+        assert!(super::box_gate(&extra).is_err());
     }
 
     /// ´test:unit:explicit-door-bind-keeps-version-one-for-repair-and-mounts´
