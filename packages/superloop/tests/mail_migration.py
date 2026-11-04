@@ -14,6 +14,10 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def controller_pin(path):
+    return {'path':str(path.absolute()), 'sha256':digest(path)}
+
+
 def run(argv):
     start = time.monotonic()
     result = subprocess.run(argv, capture_output=True, text=True, check=False)
@@ -59,16 +63,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--lane', type=Path)
+    parser.add_argument('--controller', type=Path, help='digest-pin this estate adapter instead of the fixture controller')
     parser.add_argument('--root', type=Path)
     parser.add_argument('--namespace-root', action='store_true')
     args = parser.parse_args()
+    selected_controller = controller_pin(args.controller) if args.controller else None
     if not args.namespace_root:
         if os.geteuid() == 0:
             raise SystemExit('explicit --namespace-root and a fresh fixture root are required')
         result, wall = run([str(args.binary), 'migrate', 'prepare', '/absent/migration-state', '/absent/migration-plan'])
         assert result.returncode == 2, result.stderr
         assert 'namespace-root migration required' in result.stderr, result.stderr
-        print(json.dumps({'result':'PASS','wall_seconds':wall,'measured':'public unprivileged refusal','namespace_root':'unmeasured; explicit host rehearsal required'}))
+        if args.controller:
+            assert controller_pin(args.controller) == selected_controller, 'controller changed during public refusal'
+        print(json.dumps({'result':'PASS','wall_seconds':wall,'measured':'public unprivileged refusal','namespace_root':'unmeasured; explicit host rehearsal required','controller':selected_controller}))
         return
     if os.geteuid() != 0 or args.root is None or args.lane is None:
         raise SystemExit('namespace root, --root and --lane are required')
@@ -121,10 +129,12 @@ def main():
         previous.write_text('#!/bin/sh\nexit 0 # previous fixture deployment\n')
         os.chmod(current,0o755);os.chmod(previous,0o755);shutil.copyfile(current,target);os.chmod(target,0o755)
         artifacts.append({'path':str(target),'current':{'path':str(current),'sha256':digest(current)},'previous':{'path':str(previous),'sha256':digest(previous)}})
-    controller=images/'controller';controller.write_text(CONTROLLER);os.chmod(controller,0o700)
+    if selected_controller is None:
+        controller=images/'controller';controller.write_text(CONTROLLER);os.chmod(controller,0o700)
+        selected_controller=controller_pin(controller)
     review=images/'retirement-review';review.write_text('Fixture reviewed entry and round retirement artifact projection.\n')
     projection=hashlib.sha256(json.dumps(artifacts,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
-    plan={'version':1,'home':str(home),'deployment':{'controller':{'path':str(controller),'sha256':digest(controller)},'native_lane':next(item['current'] for item in artifacts if Path(item['path']).name=='superloop-lane'),'artifacts':artifacts,'retirements':[{'requirement':requirement,'revision':'1'*40,'review':{'path':str(review),'sha256':digest(review)},'installed_digest':projection} for requirement in ['req:mail:legacy-entry-retirement','req:mail:round-transport']]}}
+    plan={'version':1,'home':str(home),'deployment':{'controller':selected_controller,'native_lane':next(item['current'] for item in artifacts if Path(item['path']).name=='superloop-lane'),'artifacts':artifacts,'retirements':[{'requirement':requirement,'revision':'1'*40,'review':{'path':str(review),'sha256':digest(review)},'installed_digest':projection} for requirement in ['req:mail:legacy-entry-retirement','req:mail:round-transport']]}}
     plan_path=root/'plan.json';plan_path.write_text(json.dumps(plan));os.chmod(plan_path,0o600)
     events=[]
     binary=images/'superloop-mail.current'
