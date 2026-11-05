@@ -89,7 +89,7 @@ impl Store {
             if stat.st_uid == self.owner
                 || stat.st_mode & 0o022 != 0
                 || identity.is_some_and(|expected| expected != current)
-                || name != "shared" && stat.st_mode & 0o7777 != 0o700
+                || name != "shared" && stat.st_mode & 0o7707 != 0o700
             {
                 return Err(refusal("shared, private and direct must have the same independent loop owner and group".into()));
             }
