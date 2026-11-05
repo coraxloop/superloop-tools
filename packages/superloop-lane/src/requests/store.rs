@@ -574,7 +574,7 @@ impl Store {
             .map_err(|error| problem("requests-record-refusal", error.to_string()))?;
         if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
             || stat.st_uid != owner
-            || stat.st_mode & 0o7777 != 0o600
+            || stat.st_mode & 0o7707 != 0o600
         {
             return Err(problem(
                 "requests-record-refusal",
