@@ -1837,6 +1837,100 @@ mod tests {
         }
     }
 
+    /// The probe shares its budget across calls and reports timeouts without inventing a door reply.
+    ///
+    /// # Panics
+    /// Panics only if the controlled clock fixture or the unmeasured classification differs.
+    /// ´test:unit:door-attribution-probe-shares-one-deadline´
+    #[test]
+    fn door_attribution_probe_shares_one_deadline() {
+        let output = Command::new("/usr/bin/python3")
+            .args(["-c", r"
+import contextlib, io, json, os, subprocess, sys, types
+probe = {'__name__': 'probe'}
+exec(sys.argv[1], probe)
+clock = [0.0]
+probe['time'] = types.SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda delay: clock.__setitem__(0, clock[0] + delay))
+budgets = []
+def timeout_run(argv, **options):
+    budgets.append(options['timeout'])
+    clock[0] += options['timeout']
+    raise subprocess.TimeoutExpired(argv, options['timeout'])
+probe['subprocess'] = types.SimpleNamespace(run=timeout_run, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired)
+for expected in [35, 20]:
+    try:
+        probe['invoke']('fixture', deadline=55)
+    except subprocess.TimeoutExpired:
+        assert budgets[-1] == expected, budgets
+    else:
+        raise AssertionError('timeout escaped')
+assert clock[0] == 55
+try:
+    probe['invoke']('fixture', deadline=55)
+except TimeoutError:
+    pass
+else:
+    raise AssertionError('exhausted budget admitted another call')
+assert budgets == [35, 20]
+clock[0] = 50
+try:
+    probe['invoke']('fixture', deadline=55, timeout=15)
+except subprocess.TimeoutExpired:
+    assert budgets[-1] == 5
+else:
+    raise AssertionError('receive cap ignored the shared budget')
+class Peer:
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def settimeout(self, value): assert 0 < value <= 5
+    def connect(self, path): clock[0] += 5
+    def sendall(self, data): raise AssertionError('socket budget restarted after connect')
+probe['socket'] = types.SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=lambda *args: Peer())
+clock[0] = 0
+try:
+    probe['raw_request']({}, deadline=55, disconnect=True)
+except TimeoutError:
+    pass
+else:
+    raise AssertionError('raw request exceeded its call budget')
+os.environ.update(SUPERLOOP_DOOR_RUN='R', SUPERLOOP_DOOR_REF='refs/heads/lane/R', SUPERLOOP_DOOR_ALIAS='fixture', SUPERLOOP_DOOR_MIRROR_ROOT='/fixture')
+reports = []
+for scope in ['review', 'work']:
+    clock[0] = 0
+    os.environ['SUPERLOOP_DOOR_SCOPE'] = scope
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured): probe['main']()
+    report = json.loads(captured.getvalue())
+    assert report['error'] == probe['TIMEOUT_REASON']
+    assert 'reply' not in report and 'review_reason' not in report
+    reports.append(report)
+print(json.dumps(reports))
+", PROBE])
+            .output()
+            .expect("controlled probe execution");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reports: Vec<serde_json::Value> =
+            serde_json::from_slice(&output.stdout).expect("probe reports");
+        for report in reports {
+            let (reasons, verdict, _) = evaluate(
+                &report,
+                "R",
+                "refs/heads/lane/R",
+                3000,
+                report["scope"].as_str().expect("scope"),
+                &HashMap::new(),
+            );
+            assert_eq!(verdict, "unmeasured");
+            assert!(reasons.iter().any(|reason| {
+                reason.contains("door-request-concurrent: attribution probe timed out")
+            }));
+        }
+    }
+
     /// ´test:unit:door-attribution-python-probe-derives-distinct-ref-and-requires-canaries´
     #[test]
     #[allow(clippy::too_many_lines)]
