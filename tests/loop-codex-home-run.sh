@@ -495,6 +495,21 @@ for node_list in node-a node-a,node-b node-a,node-b,node-c; do
   (cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha --nodes "$node_list" --home "$list_home" --hosts "$host_list" > "$TEST_ROOT/hosts.out" 2> "$TEST_ROOT/hosts.err") || fail "hosts $node_list creation"
   [[ $(readlink "$list_home/auth.json") == "$CANONICAL/auth.json" ]] || fail "new home canonical link"
   expect_line "$list_home/ssh_config" '  HostName 192.0.2.10' "label-based host mapping"
+  python3 - "$list_home/ssh_config" "$node_list" "$host_list" <<'PY_STANZAS'
+import pathlib, sys
+config = pathlib.Path(sys.argv[1]).read_text()
+stanzas = {}
+for line in config.splitlines():
+    words = line.split()
+    if words and words[0] == 'Host':
+        current = stanzas.setdefault(words[1], {})
+    elif words and words[0] in ('HostName', 'Port'):
+        current[words[0]] = words[1]
+expected = {node + '-worker': {'HostName': host, 'Port': port}
+            for node, host, port in (entry.split(':') for entry in sys.argv[3].split(','))}
+assert set(stanzas) == {node + '-worker' for node in sys.argv[2].split(',')}
+assert stanzas == expected, (stanzas, expected)
+PY_STANZAS
   (cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha --nodes "$node_list" --home "$list_home" --hosts "$host_list" --verify > "$TEST_ROOT/hosts-verify.out" 2> "$TEST_ROOT/hosts-verify.err") || fail "hosts $node_list verification"
   expect_line "$TEST_ROOT/hosts-verify.out" "{\"loop\":\"alpha\",\"home\":\"$list_home\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":true,\"missing\":[],\"varied\":[],\"varied_lines\":[]}" "hosts verification JSON"
 done
