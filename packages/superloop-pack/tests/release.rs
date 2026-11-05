@@ -142,7 +142,7 @@ fn assert_refusal(root: &Path, reason: &str, apply: impl FnOnce() -> Output) -> 
     String::from_utf8(output.stdout).expect("refusal text")
 }
 
-fn verify_release(version: &str, date: Option<&str>) {
+fn verify_release(version: &str, date: Option<&str>, epoch: i64, zone: &str) {
     let fixture = fixture(version);
     let root = fixture.path();
     git(root, &["config", "core.sharedRepository", "group"]);
@@ -169,15 +169,35 @@ fn verify_release(version: &str, date: Option<&str>) {
         ),
         "Publisher <publisher@example.com>|Publisher <publisher@example.com>"
     );
-    let expected_date = date.unwrap_or("2000-01-02T00:00:00+02:00");
     assert_eq!(
-        git(root, &["show", "-s", "--format=%aI|%cI", "main"]),
-        format!("{expected_date}|{expected_date}")
+        git(root, &["show", "-s", "--format=%at %ct", "main"])
+            .split_whitespace()
+            .map(|value| value.parse::<i64>().expect("epoch seconds"))
+            .collect::<Vec<_>>(),
+        [epoch; 2]
+    );
+    let stored = format!("{epoch} {zone}");
+    assert_eq!(
+        git(
+            root,
+            &["show", "-s", "--date=raw", "--format=%ad|%cd", "main"]
+        ),
+        format!("{stored}|{stored}")
     );
     let tag = format!("v{version}");
     assert_eq!(
         git(root, &["rev-parse", &format!("{tag}^{{commit}}")]),
         released
+    );
+    assert_eq!(
+        git(root, &["tag", "-l", "--format=%(taggerdate:unix)", &tag])
+            .parse::<i64>()
+            .expect("tag epoch"),
+        epoch
+    );
+    assert_eq!(
+        git(root, &["tag", "-l", "--format=%(taggerdate:raw)", &tag]),
+        stored
     );
     let tag_object = git(root, &["cat-file", "tag", &tag]);
     for oid in [&released, &git(root, &["rev-parse", &tag])] {
@@ -210,7 +230,18 @@ fn verify_release(version: &str, date: Option<&str>) {
 /// ´test:integration:patch-release´
 #[test]
 fn patch_release() {
-    verify_release("0.1.1", Some("2026-11-01T12:34:56+03:00"));
+    verify_release(
+        "0.1.1",
+        Some("2026-11-01T12:34:56+03:00"),
+        1_793_525_696,
+        "+0300",
+    );
+    verify_release(
+        "0.1.1",
+        Some("2026-11-01T09:34:56Z"),
+        1_793_525_696,
+        "+0000",
+    );
 }
 
 /// Minor releases default both dates to the development committer time.
@@ -220,7 +251,7 @@ fn patch_release() {
 /// ´test:integration:minor-release´
 #[test]
 fn minor_release() {
-    verify_release("0.2.0", None);
+    verify_release("0.2.0", None, 946_764_000, "+0200");
 }
 
 /// Documents releases read the declared version from committed development.

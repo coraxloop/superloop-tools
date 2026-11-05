@@ -249,11 +249,16 @@ fn public_tags_bind_reproducible_public_commits() {
             assert!(tag.ends_with("fixture-repository v0.1.0\n\n### Added\n\n- First fixture."));
             assert!(!tag.contains("BEGIN PGP SIGNATURE"));
             assert_eq!(
-                git(
-                    out,
-                    &["tag", "-l", "--format=%(taggerdate:iso-strict)", "v0.1.0"]
-                ),
-                git(out, &["show", "-s", "--format=%cI", "HEAD"])
+                git(out, &["tag", "-l", "--format=%(taggerdate:raw)", "v0.1.0"]),
+                git(out, &["show", "-s", "--date=raw", "--format=%cd", "HEAD"])
+            );
+            assert_eq!(
+                git(out, &["tag", "-l", "--format=%(taggerdate:unix)", "v0.1.0"])
+                    .parse::<i64>()
+                    .expect("tag epoch"),
+                git(out, &["show", "-s", "--format=%ct", "HEAD"])
+                    .parse::<i64>()
+                    .expect("commit epoch")
             );
         }
         assert_eq!(
@@ -433,7 +438,14 @@ fn publication_dates_apply_to_roots_and_later_commits() {
     let second = root.path().join("dated-second");
     let date = "2026-10-12T16:11:22Z";
     let report = success(cut_with_date(&source, &first, None, true, Some(date)));
-    assert!(report.contains(" date=2026-10-12T16:11:22+00:00 "));
+    assert!(report.contains(&format!(
+        " date={} ",
+        git(&first, &["show", "-s", "--format=%aI"])
+    )));
+    assert_eq!(
+        git(&first, &["show", "-s", "--date=raw", "--format=%ad|%cd"]),
+        "1791821482 +0000|1791821482 +0000"
+    );
     success(cut_with_date(&source, &second, None, true, Some(date)));
     for format in ["--format=%H", "--format=%T"] {
         assert_eq!(
@@ -442,8 +454,11 @@ fn publication_dates_apply_to_roots_and_later_commits() {
         );
     }
     assert_eq!(
-        git(&first, &["show", "-s", "--format=%aI %cI"]),
-        "2026-10-12T16:11:22+00:00 2026-10-12T16:11:22+00:00"
+        git(&first, &["show", "-s", "--format=%at %ct"])
+            .split_whitespace()
+            .map(|value| value.parse::<i64>().expect("epoch seconds"))
+            .collect::<Vec<_>>(),
+        [1_791_821_482; 2]
     );
     let parent = git(&first, &["rev-parse", "HEAD"]);
     let later = "2026-10-13T17:12:23.456+02:30";
@@ -456,8 +471,15 @@ fn publication_dates_apply_to_roots_and_later_commits() {
     ));
     assert_eq!(git(&first, &["rev-parse", "HEAD^"]), parent);
     assert_eq!(
-        git(&first, &["show", "-s", "--format=%aI %cI"]),
-        "2026-10-13T17:12:23+02:30 2026-10-13T17:12:23+02:30"
+        git(&first, &["show", "-s", "--date=raw", "--format=%ad|%cd"]),
+        "1791902543 +0230|1791902543 +0230"
+    );
+    assert_eq!(
+        git(&first, &["show", "-s", "--format=%at %ct"])
+            .split_whitespace()
+            .map(|value| value.parse::<i64>().expect("epoch seconds"))
+            .collect::<Vec<_>>(),
+        [1_791_902_543; 2]
     );
 }
 

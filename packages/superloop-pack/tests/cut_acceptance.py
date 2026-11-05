@@ -51,10 +51,12 @@ with tempfile.TemporaryDirectory(prefix='cut-acceptance-') as directory:
         original = run(['git', 'rev-parse', ref], public)
         assert original == run(['git', 'rev-parse', ref], recut)
         print(json.dumps({'recut_equal': ref, 'object': original}), flush=True)
-    assert run(['git', 'log', '-1', '--format=%aI %cI'], public) == (
-        '2026-10-12T16:11:22+00:00 2026-10-12T16:11:22+00:00')
-    assert run(['git', 'tag', '-l', '--format=%(objecttype) %(taggername) %(taggerdate:iso-strict) %(contents:subject)', 'v0.1.0'], public) == (
-        'tag Fixture Author 2026-10-12T16:11:22+00:00 superloop-tools v0.1.0')
+    assert [int(value) for value in run(
+        ['git', 'log', '-1', '--format=%at %ct'], public).split()] == [1791821482] * 2
+    assert run(['git', 'tag', '-l', '--format=%(objecttype) %(taggername) %(contents:subject)', 'v0.1.0'], public) == (
+        'tag Fixture Author superloop-tools v0.1.0')
+    assert int(run(['git', 'tag', '-l', '--format=%(taggerdate:unix)',
+                    'v0.1.0'], public)) == 1791821482
     assert not (public / 'Cargo.lock').exists(), 'public cut must omit Cargo.lock'
     run(['meson', 'setup', 'build'], public)
     assert not (public / 'docs/public/README.md').exists()
