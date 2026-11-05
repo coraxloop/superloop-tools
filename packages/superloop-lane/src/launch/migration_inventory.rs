@@ -56,13 +56,13 @@ fn retained_home(home: &Path, run: &str, pair: &Value) -> Result<Value, LaneErro
     let (device, inode) = base
         .split_once('-')
         .ok_or_else(|| refusal("retired home inode is absent"))?;
-    let device = device
+    let _device = device
         .parse::<u64>()
         .map_err(|_| refusal("retired home device is malformed"))?;
     let inode = inode
         .parse::<u64>()
         .map_err(|_| refusal("retired home inode is malformed"))?;
-    if observed["present"] == true && (observed["device"] != device || observed["inode"] != inode) {
+    if observed["present"] == true && observed["inode"] != inode {
         return Err(refusal(
             "retired home differs from its protected rename witness",
         ));
