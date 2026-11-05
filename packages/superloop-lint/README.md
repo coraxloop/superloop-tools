@@ -6,7 +6,7 @@ Copyright (c) 2026 Torrust project contributors. Licensed under GPL-3.0-or-later
 
 Declare the repository carrier explicitly at top level in `.linter/owners.toml` with `root_owner = "OWNER"`, replacing `OWNER` with a name registered in `owners`. A root-files partition alone does not declare the carrier; paths outside every partition use this explicit root owner for label attribution while partition coverage still reports them. Assembly publication checks use `assembly.publications-current`.
 
-An optional top-level `nested = [{ owner = "EXAMPLES", root = "docs/examples", reason = "Fictional instance tree checked as its own corpus" }]` row in `.linter/owners.toml` names a registered owner, a normalized relative directory inside its partitions containing a loadable `.linter/` snapshot, and a nonempty reason; the configuration report lists these rows.
+An optional top-level `nested = [{ owner = "EXAMPLES", root = "docs/examples", reason = "Fictional instance tree checked as its own corpus" }]` row in `.linter/owners.toml` names a registered owner, a normalized relative directory inside its partitions containing a tracked `.linter/owners.toml` and a loadable `.linter/` snapshot, and a nonempty reason; the configuration report lists these rows.
 
 ## Overview · `sec:indexlinter:readme-overview`
 

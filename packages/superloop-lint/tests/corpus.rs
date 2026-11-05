@@ -100,7 +100,7 @@
 //! | [`characterizes_assembly_bytes`] | harness | Assembly fixes both its report and the generated publication. |
 //! | [`characterizes_fix_bytes`] | harness | Both fix profiles refuse before writing over deliberately undeclared fixtures, freezing the refusal and the untouched sources. |
 //! | [`citation_sites_preserve_resolved_addresses`] | cli | The executable protocol preserves citations before the first mint and exposes no document text. # Panics Panics only if fixture IO fails or the command violates its versioned protocol. |
-//! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested containment ignores untracked files but refuses tracked foreign ownership. # Panics Panics only if fixture IO fails or the binary violates the containment contract. |
+//! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration. # Panics Panics only if fixture IO fails or the binary violates the containment contract. |
 //! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting catalogued lists preserves an intervening deferred table's bytes and position. # Panics Panics only if fixture IO fails or a rewrite changes opaque source. |
 //! | [`programme_outside_checkout_names_tracked_directory_requirement`] | cli | A programme outside Git names its row and its tracked-directory requirement. # Panics Panics only if fixture IO fails or the refusal loses its feature context. |
 
@@ -5230,7 +5230,7 @@ fn citation_sites_preserve_resolved_addresses() {
     );
 }
 
-/// Nested containment ignores untracked files but refuses tracked foreign ownership.
+/// Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration.
 ///
 /// # Panics
 /// Panics only if fixture IO fails or the binary violates the containment contract.
@@ -5255,6 +5255,19 @@ fn nested_root_containment_uses_tracked_paths() {
         DECLARED_LISTS,
     );
     write(root.path(), ".gitignore", "nested/scratch/\n");
+    assert_programme_refusal(
+        root.path(),
+        "nested[1] (owner PROJECTA, root nested): root must hold a tracked .linter/owners.toml",
+    );
+    let child_owners = root.path().join("nested/.linter/owners.toml");
+    let owners_bytes = fs::read(&child_owners).expect("child owners");
+    fs::remove_file(&child_owners).expect("temporarily remove child owners");
+    track(root.path());
+    fs::write(&child_owners, owners_bytes).expect("restore untracked child owners");
+    assert_programme_refusal(
+        root.path(),
+        "nested[1] (owner PROJECTA, root nested): root must hold a tracked .linter/owners.toml",
+    );
     track(root.path());
     write(root.path(), "nested/scratch/editor.tmp", "untracked\n");
     let output = programme_command(root.path(), &["report"]);
@@ -5268,6 +5281,11 @@ fn nested_root_containment_uses_tracked_paths() {
     assert_programme_refusal(
         root.path(),
         "nested[1] (owner PROJECTA, root nested): root must be a normalized relative directory inside the owner's partitions",
+    );
+    fs::remove_dir_all(root.path().join(".git")).expect("remove checkout metadata");
+    assert_programme_refusal(
+        root.path(),
+        "nested[1] (owner PROJECTA, root nested): cannot enumerate the repository's tracked paths for the nested root",
     );
 }
 

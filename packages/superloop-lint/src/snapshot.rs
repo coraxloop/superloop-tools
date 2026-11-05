@@ -4085,8 +4085,8 @@ fn nested_corpora(
     for (index, row) in rows.iter().enumerate() {
         let problem = if !registered.contains(&row.owner) {
             Some("owner is not registered")
-        } else if !nested_directory(root, row, partitions) {
-            Some("root must be a normalized relative directory inside the owner's partitions")
+        } else if let Err(problem) = nested_directory(root, row, partitions) {
+            Some(problem)
         } else if row.reason.trim().is_empty() {
             Some("reason must not be empty")
         } else if configuration(&root.join(&row.root)).snapshot().is_none() {
@@ -4111,7 +4111,13 @@ fn nested_corpora(
     nested
 }
 
-fn nested_directory(root: &Path, row: &NestedCorpus, partitions: &[OwnerRow]) -> bool {
+fn nested_directory(
+    root: &Path,
+    row: &NestedCorpus,
+    partitions: &[OwnerRow],
+) -> Result<(), &'static str> {
+    const DIRECTORY: &str =
+        "root must be a normalized relative directory inside the owner's partitions";
     if row.root.is_empty()
         || row
             .root
@@ -4119,24 +4125,37 @@ fn nested_directory(root: &Path, row: &NestedCorpus, partitions: &[OwnerRow]) ->
             .any(|part| part.is_empty() || part == "." || part == "..")
         || Path::new(&row.root).is_absolute()
     {
-        return false;
+        return Err(DIRECTORY);
     }
     let Ok(base) = root.canonicalize() else {
-        return false;
+        return Err(DIRECTORY);
     };
     let directory = base.join(&row.root);
     // Reject aliases to ancestors as well as escapes: recursive snapshot loading
     // must descend into a physical child, never return to an enclosing corpus.
     if !directory.is_dir() || directory.canonicalize().ok().as_ref() != Some(&directory) {
-        return false;
+        return Err(DIRECTORY);
     }
     let (tracked, findings) = crate::plan::git_tracked(&base);
     let prefix = format!("{}/", row.root);
-    findings.is_empty()
-        && tracked
-            .iter()
-            .filter(|path| path.as_bytes().starts_with(prefix.as_bytes()))
-            .all(|path| attributed_to(path, &row.owner, partitions))
+    if !findings.is_empty() {
+        return Err("cannot enumerate the repository's tracked paths for the nested root");
+    }
+    let owners = format!("{prefix}.linter/owners.toml");
+    if !tracked
+        .iter()
+        .any(|path| path.as_bytes() == owners.as_bytes())
+    {
+        return Err("root must hold a tracked .linter/owners.toml");
+    }
+    if !tracked
+        .iter()
+        .filter(|path| path.as_bytes().starts_with(prefix.as_bytes()))
+        .all(|path| attributed_to(path, &row.owner, partitions))
+    {
+        return Err(DIRECTORY);
+    }
+    Ok(())
 }
 
 /// Whether the inclusion relation attributes a declared path to exactly this owner.
