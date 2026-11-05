@@ -84,7 +84,7 @@ def main():
     root.mkdir(mode=0o711)  # Refuse any pre-existing fixture root.
     os.chmod(root,0o711)
     home = root/'home'; state = root/'state'
-    home.mkdir(mode=0o700); state.mkdir(mode=0o700)
+    home.mkdir(mode=0o711); state.mkdir(mode=0o700)
     for name in ['.config','.config/loops','.var','.var/loops','.var/loops/alpha','.var/loops/alpha/private']:
         path=home/name;path.mkdir();os.chmod(path,0o711 if name.startswith('.var') else 0o700)
     loop=home/'.var/loops/alpha'
@@ -112,6 +112,7 @@ def main():
     (home/'.config/loops/registry.toml').write_text("namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[{name='alpha',uid=3000,launch='dev/alpha'}]\n")
     (home/'.config/loops/allocations.toml').write_text('[alpha]\nuids={base=4000,count=64}\n')
     (home/'.config/loops/mail-service.toml').write_text('version=1\nuid=65535\ncrash_consistent_rename=true\ndurable_sync=true\n')
+    for name in ['registry.toml','allocations.toml']: os.chmod(home/'.config/loops'/name, 0o600)
     for leaf in ['inbox','inbox/new','inbox/cur','workers','workers/lane','runs']:
         path=loop/leaf;path.mkdir();os.chmod(path,0o755 if leaf=='runs' else 0o710)
         if leaf!='runs':os.chown(path,3000,3000)
