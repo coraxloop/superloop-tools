@@ -3060,6 +3060,7 @@ fn surface_parameters(
         for (owner, declared) in declaration.owners() {
             let prose = declared.datum(PROSE_DATUM);
             let code = declared.datum(CODE_DATUM);
+            let exclude = declared.datum(BURN_EXCLUDE_DATUM);
 
             if prose.is_none() && code.is_none() {
                 continue;
@@ -3076,11 +3077,13 @@ fn surface_parameters(
 
             let prose = surface_places(namespace, owner, PROSE_DATUM, prose, refusals);
             let code = surface_places(namespace, owner, CODE_DATUM, code, refusals);
+            let excluded =
+                excluded_patterns(namespace, owner, BURN_EXCLUDE_DATUM, exclude, refusals);
 
             if surfaces
                 .insert(
                     domain.to_owned(),
-                    BurnSurface::new(owner.clone(), prose, code),
+                    BurnSurface::new(owner.clone(), prose, code).with_excluded(excluded),
                 )
                 .is_some()
             {

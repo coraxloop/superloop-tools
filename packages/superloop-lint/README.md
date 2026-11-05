@@ -247,6 +247,8 @@ The ``unresolved_citation`` finding names the searched owner and registered pref
 
 The report's `burn.declared` counts the burn lists declared by activated migration policies, not the policies themselves, with one list per family and every family named in `burn.families`.
 
+Every catalogued burn family accepts an optional ``exclude`` ABNF pattern beside ``prose`` and ``code`` on its owner table, including the root owner's table for a corpus-spanning census. The census subtracts exactly the matching paths before reading either surface, retains its derived owner-share exclusions, and reports both in ``burn.families[].excluded``. An exclusion belongs only to that policy; omitting it preserves the existing census, and a malformed pattern refuses the declaration.
+
 A policy document copied from another corpus keeps that corpus's `prose`, `code`, and `exclude` surface paths until they are rewritten; when a burn policy censuses those paths, the report exposes them as `burn.families[].prose`, `burn.families[].code`, and `burn.families[].excluded`.
 
 **Section (retired)** · `sec:indexlinter:area-retired`

@@ -71,6 +71,7 @@
 //! | [`a_fixture_notice_tree_checks_and_then_fixes_clean`] | cli | cites (´claim:cli:check-then-sweep-then-check-leaves-a-tree-clean-and-settled´) |
 //! | [`the_todo_sweep_writes_nothing_on_a_dry_run`] | fix | cites (´claim:fix:a-dry-run-counts-what-it-would-do-and-writes-nothing´) |
 //! | [`a_burn_list_fails_on_growth_and_on_a_stale_row`] | burn | The ratchet binds in both directions: the census as found passes, one more reference fails as growth with the new occurrence named, and one fewer fails as a stale row until the list falls with it. A file losing its last reference leaves the list rather than standing at zero. |
+//! | [`catalogued_burns_subtract_declared_patterns`] | burn | Catalogued burns subtract exact policy-local patterns from prose and code, including root censuses. # Panics Panics only if fixture IO fails or the binary violates the exclusion contract. |
 //! | [`the_burn_command_emits_json_and_writes_nothing_by_default`] | cli | The burn command reports and writes nothing unless asked: every adopted family is registered at its census, none is rewritten, and the trees excluded from each census are named in the report rather than left to be remembered. |
 //! | [`kept_and_owed_counts_sum_across_families`] | cli | A family with kept and unkept rows retains their full registered count while reporting the two parts, and the check report sums each part across two families. # Panics Panics only if the temporary fixture cannot be read, written, executed, or parsed. |
 //! | [`the_burn_write_lowers_nothing_from_an_empty_declaration_and_keeps_growth`] | cli | A lowering write over empty declared lists has no ceiling to lower: growth in two files remains a finding for each file, and only append may record it. The declaration and the rest of the tree retain their bytes. |
@@ -3354,6 +3355,95 @@ fn a_burn_list_fails_on_growth_and_on_a_stale_row() {
     );
 }
 
+/// Catalogued burns subtract exact policy-local patterns from prose and code, including root censuses.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the binary violates the exclusion contract.
+///
+/// ´claim:burn:catalogued-burns-subtract-declared-patterns´
+/// ´test:integration:catalogued-burns-subtract-declared-patterns´
+#[test]
+fn catalogued_burns_subtract_declared_patterns() {
+    for (owner, policy, surface) in [
+        (
+            "PROJECTB",
+            "legacy.section-references",
+            r#"%s"content" [ "/" *VCHAR ]"#,
+        ),
+        ("PROJECTA", "legacy.section-references-repository", "*VCHAR"),
+    ] {
+        let root = tempfile::tempdir().expect("temporary directory");
+        declare(
+            root.path(),
+            "root_owner = \"PROJECTA\"\nowners = [\"PROJECTA\", \"PROJECTB\"]\n\
+             partitions = [{ name = \"config\", owner = \"PROJECTA\", pattern = '%s\".linter\" [ \"/\" *VCHAR ]' }, \
+             { name = \"content\", owner = \"PROJECTB\", pattern = '%s\"content\" [ \"/\" *VCHAR ]' }]\nmay_cite = []\n",
+            "environments = []\n",
+            &format!("policies = [{{ owner = \"{owner}\", policy = \"{policy}\" }}]\n"),
+            &format!("[{owner}.\"{policy}\"]\npath_counts = []\n"),
+        );
+        let path = root.path().join(".linter/policy-burn.toml");
+        let source = format!(
+            "namespace = \"class.linter.policy.{policy}\"\nversion = [1, 0, 0]\n\n[owners.{owner}]\nprose = '{surface}'\ncode = '{surface}'\n"
+        );
+        fs::write(&path, &source).expect("policy");
+        for (file, text) in [
+            ("content/omit/debt.md", "Per §1.\n"),
+            ("content/omit/debt.rs", "//! Per §2.\n"),
+            ("content/omit-neighbor.rs", "//! Per §3.\n"),
+            ("content/keep.md", "Per §4.\n"),
+        ] {
+            write(root.path(), file, text);
+        }
+        track(root.path());
+        let family_name = if policy.ends_with("-repository") {
+            "section-sign references (repository)"
+        } else {
+            "section-sign references"
+        };
+        let (status, report) = run(&["burn"], root.path());
+        assert_eq!(status, Some(3), "unregistered debt: {report}");
+        let family = report["families"]
+            .as_array()
+            .expect("families")
+            .iter()
+            .find(|family| family["family"] == family_name)
+            .expect("active family");
+        assert_eq!(family["occurrences"], 4, "{report}");
+        let exclude = r#"%s"content/omit" [ "/" *VCHAR ]"#;
+        fs::write(&path, format!("{source}exclude = '{exclude}'\n")).expect("exclude");
+        let (status, report) = run(&["burn"], root.path());
+        assert_eq!(status, Some(3), "remaining debt: {report}");
+        let family = report["families"]
+            .as_array()
+            .expect("families")
+            .iter()
+            .find(|family| family["family"] == family_name)
+            .expect("active family");
+        assert_eq!(family["occurrences"], 2, "{report}");
+        assert_eq!(family["files_scanned"], 2, "{report}");
+        assert_eq!(family["excluded"], serde_json::json!([exclude]));
+        let paths: Vec<_> = family["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["path"].as_str().expect("path"))
+            .collect();
+        assert_eq!(paths, ["content/keep.md", "content/omit-neighbor.rs"]);
+        for invalid in ["exclude = 7\n", "exclude = 'unknown-rule'\n"] {
+            fs::write(&path, format!("{source}{invalid}")).expect("invalid exclude");
+            let output = programme_command(root.path(), &["burn"]);
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(output.stdout, [] as [u8; 0]);
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains(&format!("owners.{owner}.exclude")),
+                "{error}"
+            );
+        }
+    }
+}
+
 /// The burn command reports and writes nothing unless asked: every adopted
 /// family is registered at its census, none is rewritten, and the trees excluded
 /// from each census are named in the report rather than left to be remembered.
@@ -3397,6 +3487,7 @@ fn the_burn_command_emits_json_and_writes_nothing_by_default() {
             }
         }
 
+        writeln!(text, "exclude = '%s\"omitted\" [ \"/\" *VCHAR ]'").expect("pattern");
         write(
             root.path(),
             &format!(".linter/policy-{}.toml", domain.replace('.', "-")),
@@ -3428,6 +3519,20 @@ fn the_burn_command_emits_json_and_writes_nothing_by_default() {
         assert_eq!(
             family["occurrences"], family["registered"],
             "{} is registered at its census",
+            family["family"]
+        );
+        assert!(
+            family["excluded"]
+                .as_array()
+                .expect("exclusions")
+                .contains(&serde_json::json!(r#"%s"omitted" [ "/" *VCHAR ]"#))
+        );
+        assert!(
+            family["excluded"]
+                .as_array()
+                .expect("exclusions")
+                .contains(&serde_json::json!("SUPERLOOPLINT")),
+            "{} keeps the checker's derived share beside the declared pattern",
             family["family"]
         );
         assert_eq!(family["kept"], 0);
