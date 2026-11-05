@@ -116,7 +116,7 @@ impl Reach {
     #[must_use]
     pub fn reaches(&self, citing: &Owner, cited: &Owner) -> bool {
         citing == cited
-            || (*cited == self.root && self.is_crate_bearing(&self.root))
+            || self.structural_root() == Some(cited)
             || self
                 .edges
                 .get(citing)
@@ -144,8 +144,8 @@ impl Reach {
         let mut reached: BTreeSet<Owner> = BTreeSet::new();
 
         reached.insert(citing.clone());
-        if self.is_crate_bearing(&self.root) {
-            reached.insert(self.root.clone());
+        if let Some(root) = self.structural_root() {
+            reached.insert(root.clone());
         }
 
         for target in self.declared(citing) {
@@ -198,6 +198,11 @@ impl Reach {
             .filter(|names| names.len() == 1)
             .and_then(|names| names.first())
             .map(String::as_str)
+    }
+
+    /// The root reached by every owner without a declared row.
+    pub(crate) fn structural_root(&self) -> Option<&Owner> {
+        self.is_crate_bearing(&self.root).then_some(&self.root)
     }
 
     /// Whether a workspace package supplies this owner's manifest.
@@ -556,12 +561,10 @@ fn declared_crateless_edge(
 /// citation, so the declaration a reader meets is the relation the check
 /// applies and not a subset of it standing in for one.
 ///
-/// One of those three is not spelled on the declared side and cannot be. Self
-/// reach is a consequence of an owner being its own corpus rather than a
-/// permission any row grants, so the surface refuses a row stating it and this
-/// comparison supplies it instead. The relation compared is therefore the same
-/// relation it always was; what changed is which half of it the file is asked to
-/// write down.
+/// Self and a crate-bearing root are structural and cannot be spelled on the
+/// declared side. The surface refuses rows restating either permission, and
+/// reconciliation supplies both before comparing the remaining manifest edges.
+/// A crateless root remains declaration-authoritative like any crateless owner.
 ///
 /// The comparison is made in the prefix spelling, because that is the spelling
 /// the owner file writes its rows in. A corpus registered against no prefix can
@@ -597,21 +600,7 @@ fn reconcile_declaration(reach: &Reach, adoption: &Adoption, rows: &[ReachRow]) 
             .map(|prefix| prefix.as_str().to_owned())
             .collect();
 
-        // Self reach is structural and is never spelled, so the declaration is
-        // read as carrying it whether or not a row says so — and under the
-        // ruling no row may. An owner reaching nothing beyond itself therefore
-        // states nothing and is complete, which is why the omission is asked of
-        // what the declaration still owes rather than of whether it wrote
-        // anything at all.
         let stated_targets = stated.get(prefix.as_str());
-
-        if stated_targets.is_none() && derived.len() > 1 {
-            findings.push(Finding::ReachDeclarationOmission {
-                corpus: prefix.as_str().to_owned(),
-                location: surface.clone(),
-            });
-            continue;
-        }
 
         let mut declared: BTreeSet<&str> = stated_targets
             .into_iter()
@@ -623,6 +612,25 @@ fn reconcile_declaration(reach: &Reach, adoption: &Adoption, rows: &[ReachRow]) 
             })
             .collect();
         declared.insert(prefix.as_str());
+        if let Some(root) = reach
+            .structural_root()
+            .and_then(|root| adoption.prefix_of_owner(root))
+        {
+            declared.insert(root.as_str());
+        }
+
+        // A rowless owner owes only its non-structural manifest edges.
+        if stated_targets.is_none()
+            && derived
+                .iter()
+                .any(|target| !declared.contains(target.as_str()))
+        {
+            findings.push(Finding::ReachDeclarationOmission {
+                corpus: prefix.as_str().to_owned(),
+                location: surface.clone(),
+            });
+            continue;
+        }
 
         if declared != derived.iter().map(String::as_str).collect::<BTreeSet<_>>() {
             findings.push(Finding::ReachDeclarationDivergence {

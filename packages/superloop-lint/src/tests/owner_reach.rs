@@ -30,7 +30,8 @@
 //! | [`refuses_an_import_of_a_registered_but_absent_owner`] | layers | A prefix registered against no workspace member is reachable by nobody: no manifest can declare a dependency on a crate the workspace does not build, so an import naming it is refused like any other unreached one. |
 //! | [`sees_nothing_at_a_displayed_import`] | layers | A displayed import commits nothing: an import form standing in a fenced block or a double-backtick span never reaches this pass, so a record may exhibit a violating label as evidence without committing one. |
 //! | [`reports_a_declared_row_set_that_diverges`] | layers | A declared may-cite row set disagreeing with the manifests fails, naming the owner and both sets, so the declaration is checked rather than believed. |
-//! | [`reports_a_member_the_declaration_heads_no_row_for`] | layers | A corpus the workspace builds and the may-cite rows pass over fails on its own terms, because a declaration that may quietly lose a member is not checked but skimmed. |
+//! | [`reconciles_structural_root_without_declared_rows`] | layers | Reconciliation supplies self and the crate-bearing root without rows; owners with no remaining manifest edges are complete without a source row. |
+//! | [`reports_a_member_the_declaration_heads_no_row_for`] | layers | A crate-bearing owner with a non-structural manifest edge and no source row fails as an omission; supplying self and root must not hide the edge. |
 //! | [`passes_over_an_owner_the_workspace_builds_no_member_for`] | layers | A registered owner with no workspace member may declare reach with no manifest edge behind it, so its rows are passed over rather than reported: the registration is the fact and the crate is merely not present yet. |
 //! | [`reconciles_nothing_where_the_surface_declares_no_reach`] | layers | A surface declaring no may-cite row at all is dormant rather than divergent: the reach rules still hold, and the reconciliation reports nothing about a relation nobody stated. |
 //! | [`derives_no_edge_for_a_package_the_workspace_does_not_build`] | layers | cites (´claim:layers:an-absent-owner-is-reachable-by-nobody´) |
@@ -1443,18 +1444,39 @@ fn reports_a_declared_row_set_that_diverges() {
     );
 }
 
-/// A corpus the workspace builds and the may-cite rows pass over fails on
-/// its own terms, because a declaration that may quietly lose a member is
-/// not checked but skimmed.
+/// Reconciliation supplies self and the crate-bearing root without rows;
+/// owners with no remaining manifest edges are complete without a source row.
+///
+/// ´claim:layers:reconciliation-supplies-structural-reach´
+/// ´test:crate:reconciles-structural-root-without-declared-rows´
+#[test]
+fn reconciles_structural_root_without_declared_rows() {
+    let root = fixture();
+    let (findings, _) = judge_declaring(root.path(), &[("PROJECTA", "ALPHA"), ("ALPHA", "BETA")]);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+/// A crate-bearing owner with a non-structural manifest edge and no source
+/// row fails as an omission; supplying self and root must not hide the edge.
 ///
 /// ´claim:layers:a-member-the-declaration-omits-fails´
 /// ´test:crate:reports-a-member-the-declaration-heads-no-row-for´
 #[test]
 fn reports_a_member_the_declaration_heads_no_row_for() {
     let root = fixture();
+    write(
+        root.path(),
+        "packages/gamma/Cargo.toml",
+        r#"[package]
+name = "example-gamma"
+version = "0.1.0"
+[dependencies]
+example-alpha = { path = "../alpha" }
+"#,
+    );
 
-    // GAMMA is built and stated nowhere; the other three state themselves
-    // whole, so the omission is the only thing left to report.
+    // GAMMA has a manifest edge to ALPHA and is stated nowhere. The other
+    // owners state their whole relation, leaving only that omission.
     let (findings, _counts) = judge_declaring(
         root.path(),
         &[

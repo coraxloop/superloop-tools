@@ -76,6 +76,35 @@ pub struct ExecutionPlan {
     dependencies: DependencyPlan,
 }
 
+/// Root reach can be classified only after workspace ownership is compiled.
+fn refuse_structural_root_rows(
+    root: &Path,
+    snapshot: &Snapshot,
+    workspace: &WorkspacePlan,
+    adoption: &Adoption,
+) -> Result<(), PlanError> {
+    let rows: Vec<_> = snapshot
+        .may_cite()
+        .iter()
+        .filter(|row| row.target == snapshot.root_owner())
+        .collect();
+    if rows.is_empty()
+        || crate::layers::derive_reach(root, workspace.packages(), adoption)
+            .structural_root()
+            .is_none()
+    {
+        return Ok(());
+    }
+    Err(PlanError::Configuration(
+        rows.into_iter()
+            .map(|row| Refusal::StructuralRootReach {
+                owner: row.owner.clone(),
+                root: row.target.clone(),
+            })
+            .collect(),
+    ))
+}
+
 impl ExecutionPlan {
     /// Compile every topology projection from one already-loaded configuration.
     ///
@@ -104,6 +133,7 @@ impl ExecutionPlan {
             &activations,
             &publications,
         );
+        refuse_structural_root_rows(root, &snapshot, &workspace, labels.adoption())?;
         let names = snapshot.declared_owner_names();
         let imported_packages: Vec<_> = snapshot
             .imports()

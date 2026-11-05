@@ -71,6 +71,7 @@
 //! | [`a_fixture_notice_tree_checks_and_then_fixes_clean`] | cli | cites (´claim:cli:check-then-sweep-then-check-leaves-a-tree-clean-and-settled´) |
 //! | [`the_todo_sweep_writes_nothing_on_a_dry_run`] | fix | cites (´claim:fix:a-dry-run-counts-what-it-would-do-and-writes-nothing´) |
 //! | [`a_burn_list_fails_on_growth_and_on_a_stale_row`] | burn | The ratchet binds in both directions: the census as found passes, one more reference fails as growth with the new occurrence named, and one fewer fails as a stale row until the list falls with it. A file losing its last reference leaves the list rather than standing at zero. |
+//! | [`structural_root_rows_are_refused`] | layers | Root rows are refused only when workspace ownership supplies structural reach, including a root-owned member under a virtual manifest. # Panics Panics only if fixture IO fails or the binary violates the root-reach contract. |
 //! | [`catalogued_burns_subtract_declared_patterns`] | burn | Catalogued burns subtract exact policy-local patterns from prose and code, including root censuses. # Panics Panics only if fixture IO fails or the binary violates the exclusion contract. |
 //! | [`the_burn_command_emits_json_and_writes_nothing_by_default`] | cli | The burn command reports and writes nothing unless asked: every adopted family is registered at its census, none is rewritten, and the trees excluded from each census are named in the report rather than left to be remembered. |
 //! | [`kept_and_owed_counts_sum_across_families`] | cli | A family with kept and unkept rows retains their full registered count while reporting the two parts, and the check report sums each part across two families. # Panics Panics only if the temporary fixture cannot be read, written, executed, or parsed. |
@@ -3353,6 +3354,97 @@ fn a_burn_list_fails_on_growth_and_on_a_stale_row() {
         Vec::<&str>::new(),
         "the emptied file leaves the list rather than standing at zero"
     );
+}
+
+/// Root rows are refused only when workspace ownership supplies structural
+/// reach, including a root-owned member under a virtual manifest.
+///
+/// # Panics
+///
+/// Panics only if fixture IO fails or the binary violates the root-reach contract.
+///
+/// ´claim:layers:structural-root-rows-are-refused´
+/// ´test:integration:structural-root-rows-are-refused´
+#[test]
+fn structural_root_rows_are_refused() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let owners = r#"root_owner = "ROOT"
+owners = ["ROOT", "LEAF"]
+may_cite = [{ owner = "LEAF", target = "ROOT" }]
+partitions = [
+  { name = "root", owner = "ROOT", pattern = '%s".linter" [ "/" *VCHAR ] / %s"Cargo.toml" / %s"src" [ "/" *VCHAR ]' },
+  { name = "leaf", owner = "LEAF", pattern = '%s"leaf" [ "/" *VCHAR ]' },
+]
+"#;
+    declare(
+        root.path(),
+        owners,
+        "environments = []\n",
+        "policies = []\n",
+        "",
+    );
+    let virtual_manifest = "[workspace]\nmembers = [\"leaf\"]\n";
+    write(
+        root.path(),
+        "Cargo.toml",
+        &format!(
+            "{}[package]\nname = \"example-root\"\nversion = \"0.1.0\"\n",
+            virtual_manifest.replace("[\"leaf\"]", "[\".\", \"leaf\"]")
+        ),
+    );
+    write(root.path(), "src/lib.rs", "");
+    write(
+        root.path(),
+        "leaf/Cargo.toml",
+        "[package]\nname = \"example-leaf\"\nversion = \"0.1.0\"\n",
+    );
+    write(root.path(), "leaf/src/lib.rs", "");
+    track(root.path());
+    let check = || programme_command(root.path(), &["check"]);
+    let refused = || {
+        let output = check();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stdout, [] as [u8; 0]);
+        let stderr = String::from_utf8(output.stderr).expect("diagnostic");
+        assert!(stderr.contains("may_cite: LEAF : ROOT"), "{stderr}");
+        assert!(
+            stderr.contains("crate-bearing root structurally"),
+            "{stderr}"
+        );
+    };
+    refused();
+    declare(
+        root.path(),
+        &owners.replace(
+            "may_cite = [{ owner = \"LEAF\", target = \"ROOT\" }]",
+            "may_cite = []",
+        ),
+        "environments = []\n",
+        "policies = []\n",
+        "",
+    );
+    let output = check();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    // With no root-owned package the explicit edge is a real permission.
+    write(root.path(), "Cargo.toml", virtual_manifest);
+    declare(
+        root.path(),
+        owners,
+        "environments = []\n",
+        "policies = []\n",
+        "",
+    );
+    let output = check();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    // A physical root package is not required: ownership of a member suffices.
+    declare(
+        root.path(),
+        &owners.replace("owner = \"LEAF\", pattern", "owner = \"ROOT\", pattern"),
+        "environments = []\n",
+        "policies = []\n",
+        "",
+    );
+    refused();
 }
 
 /// Catalogued burns subtract exact policy-local patterns from prose and code, including root censuses.

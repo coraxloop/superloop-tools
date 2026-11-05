@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The region-reader catalogue classifies a terminal `.j2` template by its inner file kind and treats a `LICENSE-AGPL_3_0` licence notice as opaque (``prob:linter:region-reader-catalogue-gains-j2-and-the-agpl-text``).
 
+- Reach reconciliation supplies self and the crate-bearing root without declared rows, refuses redundant structural-root rows, and preserves explicit reach to a crateless root (``prob:linter:reach-reconciliation-supplies-the-structural-root-like-self``).
+
 - Catalogued burn policies accept exact ABNF exclusions on their owner surfaces, retain derived share exclusions, and report the paths excluded from both prose and code censuses (``prob:linter:catalogued-burn-families-accept-an-exclude-relation``).
 
 - Pack verification declares and probes its unzip prerequisite, refusing ``unzip_unavailable`` before extraction when it cannot run; deployment names the prerequisite as a requirement independent of build placement (``prob:pack:stage-verify-declares-its-extraction-dependency``).

@@ -565,6 +565,13 @@ pub enum Refusal {
         /// The owner the row names on both sides.
         owner: String,
     },
+    /// A may-cite row restates universal reach to the crate-bearing root.
+    StructuralRootReach {
+        /// The owner stating the redundant row.
+        owner: String,
+        /// The crate-bearing root reached structurally.
+        root: String,
+    },
     /// A row states no name for the region it claims.
     NamelessRow {
         /// The file the row stands in.
@@ -862,6 +869,10 @@ impl fmt::Display for Refusal {
                     "{DIRECTORY}/{OWNERS_FILE}: may_cite: {owner} : {owner}: an owner reaches itself by being itself, and the row is not written"
                 )
             }
+            Self::StructuralRootReach { owner, root } => write!(
+                formatter,
+                "{DIRECTORY}/{OWNERS_FILE}: may_cite: {owner} : {root}: every owner reaches the crate-bearing root structurally, and the row is not written"
+            ),
             Self::NamelessRow {
                 file,
                 relation,
