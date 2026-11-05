@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 const ALLOW: &str = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\"}}\n";
 const DENY: &str = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"fixture denial\"}}\n";
-const LETTERS: &str = "LETTERS unread=0 loop=alpha refused=1";
+const LETTERS: &str = "You've got mail.";
 const RULEBOOK: &str = "ORCHESTRATION_SCOPE_MARKER v1 sha256=6ac9f156a3b4475ed2731f61db1381590b153ce9897d108506c62dd5aa7707a5 mtime=1700000000123456789\n# Fixture rules\n\nKeep evidence exact.\nORCHESTRATION_SCOPE_MARKER_END v1 sha256=6ac9f156a3b4475ed2731f61db1381590b153ce9897d108506c62dd5aa7707a5";
 
 struct Fixture {
@@ -496,10 +496,8 @@ fn main() {
     if args == ["hook"] {
         std::process::exit(helper());
     }
-    if args == ["enter", "alpha", "--", "letters", "list"] {
-        std::io::stdout()
-            .write_all(b"cur/retired refused reason=\"fixture history\"\n")
-            .expect("listing");
+    if args.len() == 8 && args[..5] == ["enter", "alpha", "--", "/bin/sh", "-c"] {
+        std::io::stdout().write_all(b"1\n").expect("listing");
         return;
     }
     mismatch_has_no_effects();

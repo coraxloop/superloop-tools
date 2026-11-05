@@ -62,7 +62,12 @@ pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Opt
                 .map_or_else(String::new, |cause| format!(": {cause}"))
         ))
     } else if reason == "door-request-concurrent" {
-        Some(format!("{reason}: {ADMISSION_WINDOW}"))
+        Some(format!(
+            "{reason}: waited={}s retry_after={}s; {}",
+            reply["waited_seconds"],
+            reply["retry_after_seconds"],
+            admission_window()
+        ))
     } else if let Some(cause) = reply["request_record_error"].as_str() {
         Some(format!("{reason}: {cause}"))
     } else if reason != "door-complete" {
@@ -83,6 +88,9 @@ const FRAME_LIMIT: usize = 65_536;
 pub const INPUT_LIMIT: usize = 16 * 1024 * 1024;
 const PEER_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_PEERS: usize = 16;
+const ADMISSION_WAIT: Duration = Duration::from_secs(30);
+const ADMISSION_POLL: Duration = Duration::from_millis(100);
+const ADMISSION_REPLY_MARGIN: Duration = Duration::from_secs(2);
 pub(crate) const FULL_STORE_REASON_PREFIX: &str = "door-requests-full-refusal: ";
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -92,6 +100,43 @@ struct RequestGuard {
 }
 
 impl RequestGuard {
+    fn acquire_wait(
+        home: &Path,
+        registration: &Registration,
+        request: &Value,
+        started: Instant,
+    ) -> io::Result<(Option<Self>, Duration)> {
+        let began = Instant::now();
+        let remaining = Duration::from_millis(request["deadline_ms"].as_u64().unwrap_or(0))
+            .saturating_sub(started.elapsed())
+            .saturating_sub(ADMISSION_REPLY_MARGIN);
+        let budget = remaining.min(ADMISSION_WAIT);
+        loop {
+            if let Some(guard) = Self::acquire(home, registration)? {
+                return Ok((Some(guard), began.elapsed()));
+            }
+            #[cfg(test)]
+            ADMISSION_CONTENDED.with(|slot| {
+                if let Some(action) = slot.borrow_mut().take() {
+                    action();
+                }
+            });
+            let remaining = budget.saturating_sub(began.elapsed());
+            if remaining.is_zero() {
+                return Ok((None, began.elapsed()));
+            }
+            #[cfg(test)]
+            if remaining <= ADMISSION_POLL {
+                ADMISSION_LAST_POLL.with(|slot| {
+                    if let Some(action) = slot.borrow_mut().take() {
+                        action();
+                    }
+                });
+            }
+            thread::sleep(remaining.min(ADMISSION_POLL));
+        }
+    }
+
     fn acquire(home: &Path, registration: &Registration) -> io::Result<Option<Self>> {
         use nix::fcntl::{Flock, FlockArg, OFlag, OpenHow, ResolveFlag, openat2};
         loop_home::validate_name(&registration.loop_name).map_err(io::Error::other)?;
@@ -132,13 +177,25 @@ impl RequestGuard {
     }
 }
 
-const ADMISSION_WINDOW: &str = "admission remains held through effect and agent publication, possibly after the final reply; retry after completion";
+#[cfg(test)]
+thread_local! {
+    static ADMISSION_LAST_POLL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static ADMISSION_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+const RETRY_AFTER_SECONDS: u64 = 30;
+fn admission_window() -> String {
+    format!(
+        "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after {RETRY_AFTER_SECONDS} seconds"
+    )
+}
 
 fn concurrent_refusal(
     stream: &mut UnixStream,
     registration: &Registration,
     peer: u32,
     started: Instant,
+    waited: Duration,
 ) -> io::Result<(Value, Vec<u8>)> {
     let _logged = writeln!(
         io::stderr().lock(),
@@ -146,7 +203,9 @@ fn concurrent_refusal(
         registration.run
     );
     let mut reply = transport::refusal(registration, peer, "door-request-concurrent", started);
-    reply["admission_window"] = json!(ADMISSION_WINDOW);
+    reply["admission_window"] = json!(admission_window());
+    reply["waited_seconds"] = json!((waited.as_secs_f64() * 1000.0).round() / 1000.0);
+    reply["retry_after_seconds"] = json!(RETRY_AFTER_SECONDS);
     frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
     Ok((reply, Vec::new()))
 }
@@ -945,9 +1004,11 @@ fn root_refusal(
     started: Instant,
 ) -> io::Result<()> {
     let (_request_guard, admission_error) = if peer == registration.worker_uid {
-        match RequestGuard::acquire(owner_home, registration) {
-            Ok(Some(guard)) => (Some(guard), None),
-            Ok(None) => return concurrent_refusal(stream, registration, peer, started).map(|_| ()),
+        match RequestGuard::acquire_wait(owner_home, registration, request, started) {
+            Ok((Some(guard), _)) => (Some(guard), None),
+            Ok((None, waited)) => {
+                return concurrent_refusal(stream, registration, peer, started, waited).map(|_| ());
+            }
             Err(error) => (None, Some(error)),
         }
     } else {
@@ -1015,9 +1076,11 @@ fn serve_request_with_agent(
     // and retain it through the final effect publication and reply.
     let (_request_guard, admission_error) =
         if let Some(home) = owner_home.filter(|_| peer == registration.worker_uid) {
-            match RequestGuard::acquire(home, registration) {
-                Ok(Some(guard)) => (Some(guard), None),
-                Ok(None) => return concurrent_refusal(stream, registration, peer, started),
+            match RequestGuard::acquire_wait(home, registration, request, started) {
+                Ok((Some(guard), _)) => (Some(guard), None),
+                Ok((None, waited)) => {
+                    return concurrent_refusal(stream, registration, peer, started, waited);
+                }
                 Err(error) => (None, Some(error)),
             }
         } else {
@@ -2944,7 +3007,8 @@ fn fixture_agent_call_once(
         reply
     });
     let mut id = None;
-    for _ in 0..300 {
+    let filed_deadline = Instant::now() + ADMISSION_WAIT + Duration::from_secs(3);
+    while Instant::now() < filed_deadline {
         let rows = store.list_run(&registration.run)?;
         if let Some(row) = rows.iter().find(|row| {
             !prior.contains(row.id()) && (answer.is_none() || row.value()["state"] == "waiting")
@@ -4172,6 +4236,19 @@ mod tests {
                 .list_run("R")
                 .expect("no execution or reservation")
                 .is_empty()
+        );
+    }
+
+    /// # Panics
+    /// Panics only if the concurrent refusal loses its worker-facing retry figures.
+    /// ´test:unit:door-concurrent-final-line-shows-wait-and-retry´
+    #[test]
+    fn door_concurrent_final_line_shows_wait_and_retry() {
+        let reply = json!({"reason":"door-request-concurrent","status":125,
+            "waited_seconds":1.001,"retry_after_seconds":30});
+        assert_eq!(
+            super::final_line(&["fixture".into(), "git status --short".into()], &reply),
+            Some("door-request-concurrent: waited=1.001s retry_after=30s; the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds".to_owned())
         );
     }
 

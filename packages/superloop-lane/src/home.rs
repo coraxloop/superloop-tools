@@ -447,13 +447,13 @@ pub(crate) fn trusted(
     owner: u32,
 ) -> Result<(), LaneError> {
     let mode = parent.st_mode & 0o7777;
-    if parent.st_uid != 0 && parent.st_uid != owner {
+    if parent.st_uid != 0 && parent.st_uid != 65534 && parent.st_uid != owner {
         return Err(reason(
             path,
             format!("replaceable ancestor uid {}", parent.st_uid),
         ));
     }
-    if mode & 0o022 != 0 && (mode & 0o1000 == 0 || (next.st_uid != 0 && next.st_uid != owner)) {
+    if mode & 0o022 != 0 && (mode & 0o1000 == 0 || (next.st_uid != 0 && next.st_uid != 65534 && next.st_uid != owner)) {
         return Err(reason(
             path,
             format!("replaceable ancestor mode {mode:04o}"),
@@ -1563,7 +1563,7 @@ fn make_home_pinned_with_sources(
     let inbox_path = local_path.join("inbox");
     let inbox = make_dir(&local, &inbox_path, 0o750)?;
     report_dir(&mut reports, &inbox, &inbox_path, caller.0, loop_uid, 0o750)?;
-    let file = make_file(&inbox, &plan.letter, letter_bytes, 0o640)?;
+    let file = make_file(&h, &plan.letter, letter_bytes, 0o640)?;
     report_file(&mut reports, &file, &plan.letter, caller.0, loop_uid, 0o640)?;
     reports.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     Ok(

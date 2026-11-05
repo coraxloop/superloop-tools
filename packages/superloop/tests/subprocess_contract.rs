@@ -388,7 +388,7 @@ fn execute_outer_command(directory: &TestDir, script: &str, run_command: bool) -
     let custody_stub = bin.join("entry-custody");
     support::write_executable(
         &custody_stub,
-        b"#!/bin/sh\nset -eu\nif [ \"$1\" = _supervise-command ]; then\n    exec \"$ENTER_LOOP_REAL_ENTRY\" \"$@\"\nelif [ \"$1\" = ensure-roots ]; then\n    if [ -f \"$ENTER_LOOP_ENSURE_FAIL_MARKER\" ]; then exit 2; fi\n    printf 'wall 10\\n' >> \"$5\"\nelif [ \"$1\" = letters-group ]; then\n    printf '65535\\n'\nelse\n    printf '%s\\n' \"$@\" > \"$ENTER_LOOP_CUSTODY_LOG\"\nfi\n",
+        b"#!/bin/sh\nset -eu\nif [ \"$1\" = _supervise-command ]; then\n    exec \"$ENTER_LOOP_REAL_ENTRY\" \"$@\"\nelif [ \"$1\" = ensure-roots ]; then\n    if [ -f \"$ENTER_LOOP_ENSURE_FAIL_MARKER\" ]; then exit 2; fi\n    printf 'wall 10\\n' >> \"$5\"\nelif [ \"$1\" = _mail-group ]; then\n    exit 0\nelif [ \"$1\" = letters-group ]; then\n    printf '65535\\n'\nelse\n    printf '%s\\n' \"$@\" > \"$ENTER_LOOP_CUSTODY_LOG\"\nfi\n",
         0o755,
     )
     .expect("write custody stub");
@@ -1367,7 +1367,8 @@ fn provision_accepts_an_existing_home_with_zero_created_rows() {
     assert_eq!(output.status.code(), Some(0));
     let stderr = std::str::from_utf8(&output.stderr).expect("report");
     assert!(stderr.ends_with(" created=0 corrected=0\n"));
-    assert_eq!(recorded_outer(&log).lines().count(), 1);
+    assert_eq!(recorded_outer(&log).lines().count(), 4);
+    assert!(recorded_outer(&log).contains("_mail-provision"));
 }
 
 /// The first private step's failure stops the outer script before its mount namespace.
@@ -1670,7 +1671,8 @@ fn verify_invocation_uses_only_fixed_system_programs() {
         assert!(!entry.contains(unqualified), "{unqualified}");
     }
     assert!(entry.contains("PATH=\"/usr/bin:/bin\""));
-    assert!(!entry.contains("--groups="));
+    assert!(entry.contains("_mail-group"));
+    assert!(entry.contains("group_option=--groups=$mail_group"));
     assert!(entry.contains("--clear-groups"));
 }
 
@@ -2063,10 +2065,10 @@ fn status_seven_is_propagated_and_reported() {
 ///
 /// # Panics
 /// Panics only if fixture setup fails or entry changes the forwarded command or status.
-/// ´claim:entry:letters-wall-reaches-private-dispatch-and-propagates-expiry´
-/// ´test:integration:letters-wall-reaches-private-dispatch-and-propagates-expiry´
+/// ´claim:entry:ordinary-entry-forwards-former-mail-word-and-status´
+/// ´test:integration:ordinary-entry-forwards-former-mail-word-and-status´
 #[test]
-fn letters_wall_reaches_private_dispatch_and_propagates_expiry() {
+fn ordinary_entry_forwards_former_mail_word_and_status() {
     let directory = TestDir::new("letters-wall-entry");
     let (root, stub) = directory.prepare();
     let log = directory.path().join("podman.log");
@@ -2081,7 +2083,8 @@ fn letters_wall_reaches_private_dispatch_and_propagates_expiry() {
     );
     assert_eq!(output.status.code(), Some(124));
     let recorded = fs::read_to_string(log).expect("forwarded private command");
-    assert!(recorded.contains("letters-private alpha"));
+    assert!(!recorded.contains("letters-private alpha"));
+    assert!(recorded.contains("letters follow --next --wall 1"));
     assert!(recorded.contains("follow --next --wall 1"));
     assert_report(&output.stderr, 124);
 }
@@ -2194,10 +2197,8 @@ fn ensure_roots_refuses_every_other_argument_form() {
         vec!["65536", "alpha", "/home", "/report"],
         vec!["word", "alpha", "/home", "/report"],
         vec!["41001", "Bad", "/home", "/report"],
+        vec!["41001", "-alpha", "/home", "/report"],
         vec!["41001", "invalid_name", "/home", "/report"],
-        vec!["41001", "provision", "/home", "/report"],
-        vec!["41001", "letters-private", "/home", "/report"],
-        vec!["41001", "letters-group", "/home", "/report"],
         vec!["41001", "alpha", "home", "/report"],
         vec!["41001", "alpha", "/home", "report"],
         vec!["41001", "alpha", "/home", "/report", "extra"],
@@ -2234,7 +2235,7 @@ fn ensure_roots_refuses_every_other_argument_form() {
     let output = enter_loop()
         .arg("ensure-roots")
         .arg("41001")
-        .arg("alpha")
+        .arg("provision")
         .arg(&home)
         .arg(&report)
         .output_serialized()

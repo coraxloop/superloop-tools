@@ -1,29 +1,17 @@
-use std::fmt::Write as _;
-
+/// Presence-only mail observation. Correspondence metadata is not an observation.
 pub enum Listing {
     Empty,
-    Unread(String),
-    History(String),
+    Notice,
     Failed(String),
 }
 
 impl Listing {
     #[must_use]
-    pub fn feedback(&self, limit: usize) -> String {
-        let text = match self {
-            Self::Empty => "",
-            Self::Unread(text) | Self::History(text) | Self::Failed(text) => text,
-        };
-        let lines = text.lines().collect::<Vec<_>>();
-        if lines.len() <= limit {
-            return text.to_owned();
+    pub fn feedback(&self, _limit: usize) -> String {
+        match self {
+            Self::Empty => String::new(),
+            Self::Notice => "You've got mail.".into(),
+            Self::Failed(text) => text.clone(),
         }
-        let mut result = lines[..limit - 1].join("\n");
-        let _written = write!(
-            result,
-            "\nMORE ENTRIES n={}; use letters list for the full listing",
-            lines.len() - (limit - 1)
-        );
-        result
     }
 }

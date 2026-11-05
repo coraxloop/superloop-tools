@@ -1,0 +1,14 @@
+[Unit]
+Description=Deliver superloop mail within the host session
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=@MAIL_PROGRAM@ serve %h
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

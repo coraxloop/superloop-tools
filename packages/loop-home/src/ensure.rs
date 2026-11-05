@@ -205,11 +205,14 @@ pub fn standard_roots(caller_home: &Path, name: &str) -> Vec<StandardRoot> {
         (loop_cache.join("tmp"), Loop, 0o700, Created),
     ];
     rows.into_iter()
-        .map(|(path, owner, mode, ensure)| StandardRoot {
-            path,
-            owner,
-            mode,
-            ensure,
+        .map(|(path, owner, mode, ensure)| {
+            let mode = crate::mail::acl::root_mode(&path, mode);
+            StandardRoot {
+                path,
+                owner,
+                mode,
+                ensure,
+            }
         })
         .collect()
 }
@@ -1042,7 +1045,14 @@ where
         }
     };
     let uid = parsed.unwrap_or_default();
-    match crate::letters::ensure_layout(Path::new(home), name, uid, &mut report) {
+    match ensure_roots(
+        &standard_roots(Path::new(home), name),
+        (0, 0),
+        (uid, uid),
+        &mut report,
+    )
+    .map(|_| ())
+    {
         Ok(()) => {
             if let Err(failure) = writeln!(report, "wall {}", started.elapsed().as_micros()) {
                 let _written = writeln!(
@@ -1096,40 +1106,9 @@ where
         let _written = writeln!(error, "usage: superloop inspect-roots UID NAME HOME REPORT");
         return 2;
     }
-    let mut rows = standard_roots(Path::new(home), name);
-    let grant_path = Path::new(home).join(".config/loops/allocations.toml:letters_gid");
-    let grant = match crate::letters::group(Path::new(home), false) {
-        Ok(Some(gid)) => {
-            crate::letters::add_roots(&mut rows, Path::new(home), name, gid);
-            RootObservation {
-                path: grant_path,
-                kind: "grant",
-                uid: Some(0),
-                gid: Some(gid),
-                mode: None,
-                action: RootAction::Nothing,
-                atime_may_have_changed: false,
-            }
-        }
-        Ok(None) => match crate::letters::planned_group(Path::new(home)) {
-            Ok(gid) => {
-                let gid = gid.unwrap_or_else(|| {
-                    if valid_uid == Some(65_535) {
-                        65_533
-                    } else {
-                        65_535
-                    }
-                });
-                crate::letters::add_roots(&mut rows, Path::new(home), name, gid);
-                RootObservation::missing(grant_path, RootAction::Create)
-            }
-            Err(failure) => RootObservation::unseen(grant_path, failure.message().to_owned()),
-        },
-        Err(failure) => RootObservation::unseen(grant_path, failure.message().to_owned()),
-    };
+    let rows = standard_roots(Path::new(home), name);
     let uid = valid_uid.unwrap_or_default();
-    let mut inspection = inspect_roots(&rows, (0, 0), (uid, uid));
-    inspection.observations.push(grant);
+    let inspection = inspect_roots(&rows, (0, 0), (uid, uid));
     let counts = inspection.would_counts();
     let status = inspection.status();
     let result = OpenOptions::new()

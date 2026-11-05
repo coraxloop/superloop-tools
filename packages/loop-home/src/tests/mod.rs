@@ -303,7 +303,10 @@ mount --bind "$t/ssh_config.d" /etc/ssh/ssh_config.d
 gpg_dir="$h"/.config/gpg-loops/alpha
 gpg_environment=
 if [ -d "$gpg_dir" ]; then gpg_environment="GNUPGHOME=$gpg_dir"; fi
-exec setpriv --reuid=41001 --regid=41001 --clear-groups env -i HOME="$h" USER=alpha LOGNAME=alpha SHELL=/bin/bash PATH="$h/.local/bin:/usr/local/bin:/usr/bin:/bin:/fixture" TERM=vt100 LANG=C.UTF-8 TMPDIR=/caller/.cache/loops/alpha/tmp XDG_RUNTIME_DIR="$h/.run" XDG_CONFIG_HOME="$h/.config" XDG_CACHE_HOME=/caller/.cache/loops/alpha XDG_DATA_HOME="$h/.local/share" XDG_STATE_HOME="$h/.local/state" ${gpg_environment:+"$gpg_environment"} printf ok"#;
+mail_group=$(/fixture/superloop _mail-group /caller alpha)
+group_option=--clear-groups
+if [ -n "$mail_group" ]; then group_option=--groups=$mail_group; fi
+exec setpriv --reuid=41001 --regid=41001 "$group_option" env -i HOME="$h" USER=alpha LOGNAME=alpha SHELL=/bin/bash PATH="$h/.local/bin:/usr/local/bin:/usr/bin:/bin:/fixture" TERM=vt100 LANG=C.UTF-8 TMPDIR=/caller/.cache/loops/alpha/tmp XDG_RUNTIME_DIR="$h/.run" XDG_CONFIG_HOME="$h/.config" XDG_CACHE_HOME=/caller/.cache/loops/alpha XDG_DATA_HOME="$h/.local/share" XDG_STATE_HOME="$h/.local/state" ${gpg_environment:+"$gpg_environment"} printf ok"#;
     let expected_outer = r#"set -e
 h=/srv/alpha
 /fixture/superloop ensure-roots 41001 alpha /caller /fixture/report
@@ -340,7 +343,10 @@ mount --bind "$t/ssh_config.d" /etc/ssh/ssh_config.d
 gpg_dir="$h"/.config/gpg-loops/alpha
 gpg_environment=
 if [ -d "$gpg_dir" ]; then gpg_environment="GNUPGHOME=$gpg_dir"; fi
-exec setpriv --reuid=41001 --regid=41001 --clear-groups env -i HOME="$h" USER=alpha LOGNAME=alpha SHELL=/bin/bash PATH="$h/.local/bin:/usr/local/bin:/usr/bin:/bin:/fixture" TERM=vt100 LANG=C.UTF-8 TMPDIR=/caller/.cache/loops/alpha/tmp XDG_RUNTIME_DIR="$h/.run" XDG_CONFIG_HOME="$h/.config" XDG_CACHE_HOME=/caller/.cache/loops/alpha XDG_DATA_HOME="$h/.local/share" XDG_STATE_HOME="$h/.local/state" ${gpg_environment:+"$gpg_environment"} printf ok' sh "$t" "$h" <&9 9<&- &
+mail_group=$(/fixture/superloop _mail-group /caller alpha)
+group_option=--clear-groups
+if [ -n "$mail_group" ]; then group_option=--groups=$mail_group; fi
+exec setpriv --reuid=41001 --regid=41001 "$group_option" env -i HOME="$h" USER=alpha LOGNAME=alpha SHELL=/bin/bash PATH="$h/.local/bin:/usr/local/bin:/usr/bin:/bin:/fixture" TERM=vt100 LANG=C.UTF-8 TMPDIR=/caller/.cache/loops/alpha/tmp XDG_RUNTIME_DIR="$h/.run" XDG_CONFIG_HOME="$h/.config" XDG_CACHE_HOME=/caller/.cache/loops/alpha XDG_DATA_HOME="$h/.local/share" XDG_STATE_HOME="$h/.local/state" ${gpg_environment:+"$gpg_environment"} printf ok' sh "$t" "$h" <&9 9<&- &
 child=$!
 exec 9<&-
 if [ -n "$signal" ]; then forward "$signal"; fi
@@ -457,7 +463,10 @@ h=$2
 mount --bind "$t/passwd" /etc/passwd
 mount --bind "$t/group" /etc/group
 mount --bind "$t/ssh_config.d" /etc/ssh/ssh_config.d
-exec setpriv --reuid=41001 --regid=41001 --clear-groups env -i HOME="$h" USER=alpha LOGNAME=alpha SHELL=/bin/bash PATH="$h/.local/bin:/usr/local/bin:/usr/bin:/bin:/fixture" TERM=vt100 LANG=C.UTF-8 TMPDIR=/caller/.cache/loops/alpha/tmp XDG_RUNTIME_DIR="$h/.run" XDG_CONFIG_HOME="$h/.config" XDG_CACHE_HOME=/caller/.cache/loops/alpha XDG_DATA_HOME="$h/.local/share" XDG_STATE_HOME="$h/.local/state" GNUPGHOME="$h/.config/custody/gpg" GH_CONFIG_DIR="$h/.config/custody/gh" /bin/sh -c 'if [ ! -x "$HOME/.config/custody" ]; then reason=forge-config-inaccessible; elif [ ! -e "$GH_CONFIG_DIR" ]; then reason=forge-config-absent; elif [ ! -d "$GH_CONFIG_DIR" ]; then reason=forge-config-not-directory; elif [ ! -r "$GH_CONFIG_DIR" ] || [ ! -w "$GH_CONFIG_DIR" ] || [ ! -x "$GH_CONFIG_DIR" ]; then reason=forge-config-inaccessible; else exec "$@"; fi; printf '\''superloop: %s: GH_CONFIG_DIR; run superloop provision LOOP\n'\'' "$reason" >&2; exit 1' forge-entry printf ok"#;
+mail_group=$(/fixture/superloop _mail-group /caller alpha)
+group_option=--clear-groups
+if [ -n "$mail_group" ]; then group_option=--groups=$mail_group; fi
+exec setpriv --reuid=41001 --regid=41001 "$group_option" env -i HOME="$h" USER=alpha LOGNAME=alpha SHELL=/bin/bash PATH="$h/.local/bin:/usr/local/bin:/usr/bin:/bin:/fixture" TERM=vt100 LANG=C.UTF-8 TMPDIR=/caller/.cache/loops/alpha/tmp XDG_RUNTIME_DIR="$h/.run" XDG_CONFIG_HOME="$h/.config" XDG_CACHE_HOME=/caller/.cache/loops/alpha XDG_DATA_HOME="$h/.local/share" XDG_STATE_HOME="$h/.local/state" GNUPGHOME="$h/.config/custody/gpg" GH_CONFIG_DIR="$h/.config/custody/gh" /bin/sh -c 'if [ ! -x "$HOME/.config/custody" ]; then reason=forge-config-inaccessible; elif [ ! -e "$GH_CONFIG_DIR" ]; then reason=forge-config-absent; elif [ ! -d "$GH_CONFIG_DIR" ]; then reason=forge-config-not-directory; elif [ ! -r "$GH_CONFIG_DIR" ] || [ ! -w "$GH_CONFIG_DIR" ] || [ ! -x "$GH_CONFIG_DIR" ]; then reason=forge-config-inaccessible; else exec "$@"; fi; printf '\''superloop: %s: GH_CONFIG_DIR; run superloop provision LOOP\n'\'' "$reason" >&2; exit 1' forge-entry printf ok"#;
     assert_eq!(plan.inner_script, expected_inner);
     assert!(!plan.inner_script.contains("gpg_dir="));
     let baseline = entry_plan(
@@ -582,6 +591,7 @@ fn entry_path_resolves_the_deployed_keygen_sibling() {
     fs::create_dir(&bin).expect("tool directory");
     for (name, script) in [
         ("mount", "#!/bin/sh\nexit 0\n"),
+        ("superloop", "#!/bin/sh\ntest \"$1\" = _mail-group\n"),
         ("setpriv", "#!/bin/sh\nshift 3\nexec \"$@\"\n"),
         (
             "fixture-sibling-tool",
@@ -723,13 +733,13 @@ fn json_report_selection_is_accepted_by_every_command_form() {
     }
 }
 
-/// Portable names exclude the public commands and private helper words.
+/// Identity names admit command words; command dispatch is a separate concern.
 ///
-/// ´claim:loophome:loop-names-are-lowercase-portable-and-reserve-command-words´
-/// ´test:crate:malformed-and-reserved-names-are-refused´
+/// ´claim:loophome:loop-names-use-the-mail-identity-production´
+/// ´test:crate:identity-names-follow-the-mail-production´
 #[test]
-fn malformed_and_reserved_names_are_refused() {
-    for name in ["", "Bad", "under_score"] {
+fn identity_names_follow_the_mail_production() {
+    for name in ["", "Bad", "under_score", "-leading", "a.b", "a+b", "é"] {
         let failure = validate_name(name).expect_err("invalid name");
         assert_eq!(failure.status(), 2);
         assert_eq!(failure.message(), format!("bad loop name: {name}"));
@@ -747,9 +757,7 @@ fn malformed_and_reserved_names_are_refused() {
         "letters-private",
         "letters-group",
     ] {
-        let failure = validate_name(name).expect_err("reserved name");
-        assert_eq!(failure.status(), 2);
-        assert_eq!(failure.message(), format!("bad loop name: {name}"));
+        validate_name(name).expect("command word is a lexical identity");
     }
 }
 
@@ -1857,7 +1865,7 @@ fn provision_plan_is_one_exact_ensure_command() {
             "unshare",
             "sh",
             "-c",
-            "/fixture/superloop ensure-roots 41001 alpha /caller /fixture/report"
+            "set -e\n\n/fixture/superloop ensure-roots 41001 alpha /caller /fixture/report\n/fixture/superloop _mail-provision /caller alpha"
         ]
         .map(String::from)
     );
@@ -2383,40 +2391,28 @@ fn run_fixture(rows: &[StandardRoot], uid: u32) -> (crate::ensure::EnsureCounts,
     (counts, String::from_utf8(report).expect("UTF-8 report"))
 }
 
-/// ´claim:entry:letters-roots-arrive-on-existing-homes-and-verify-idempotently´
-/// ´test:crate:letters-roots-arrive-on-existing-homes-and-verify-idempotently´
+/// ´claim:entry:ordinary-roots-preserve-inert-legacy-stores-without-provisioning-them´
+/// ´test:crate:ordinary-roots-preserve-inert-legacy-stores-without-provisioning-them´
 #[test]
-fn letters_roots_arrive_on_existing_homes_and_verify_idempotently() {
-    let (_directory, home, mut rows, uid) = ensure_fixture("letters-roots");
+fn ordinary_roots_preserve_inert_legacy_stores_without_provisioning_them() {
+    let (_directory, home, rows, uid) = ensure_fixture("ordinary roots");
     run_fixture(&rows, uid);
-    let gid = fs::metadata(&home).expect("owner group").gid();
-    crate::letters::add_roots(&mut rows, &home, "alpha", gid);
-    let inspection = inspect_roots(&rows, (uid, gid), (uid, gid));
-    assert_eq!(inspection.would_counts().created, 3);
-    let (counts, _report) = run_fixture(&rows, uid);
-    assert_eq!(counts.created, 3);
-    for (suffix, mode) in [("new", 0o1730), ("cur", 0o700)] {
-        assert_eq!(
-            fs::metadata(home.join(".var/loops/alpha/inbox").join(suffix))
-                .expect("inbox directory")
-                .mode()
-                & 0o7777,
-            mode
-        );
-    }
-    assert_eq!(inspect_roots(&rows, (uid, gid), (uid, gid)).status(), 0);
+    let old = home.join(".var/loops/alpha/inbox/new");
+    assert!(!old.exists());
+    fs::create_dir_all(&old).expect("inert migration source");
+    fs::write(old.join("retained"), b"opaque\0history").expect("history");
     assert_eq!(run_fixture(&rows, uid).0, crate::EnsureCounts::default());
-    let shared = fs::metadata(home.join(".var/loops/alpha/shared")).expect("worker shared tier");
     assert_eq!(
-        (shared.uid(), shared.gid(), shared.mode() & 0o7777),
-        (uid, gid, 0o750)
+        fs::read(old.join("retained")).expect("unchanged history"),
+        b"opaque\0history"
     );
+    assert!(!home.join(".config/loops/allocations.toml").exists());
 }
 
-/// ´claim:entry:letters-group-correction-reports-old-and-new-gid´
-/// ´test:crate:letters-group-correction-reports-old-and-new-gid´
+/// ´claim:entry:shared-group-correction-reports-old-and-new-gid´
+/// ´test:crate:shared-group-correction-reports-old-and-new-gid´
 #[test]
-fn letters_group_correction_reports_old_and_new_gid() {
+fn shared_group_correction_reports_old_and_new_gid() {
     assert_eq!(
         crate::ensure::correction_line(
             Path::new("/fixture/inbox"),
@@ -2432,7 +2428,12 @@ fn letters_group_correction_reports_old_and_new_gid() {
     );
     let (_directory, home, mut rows, uid) = ensure_fixture("group correction gid report");
     let gid = fs::metadata(&home).expect("owner metadata").gid();
-    crate::letters::add_roots(&mut rows, &home, "alpha", gid);
+    rows.push(StandardRoot {
+        path: home.join(".var/loops/alpha/inbox"),
+        owner: RootOwner::Shared(gid),
+        mode: 0o710,
+        ensure: EnsureClass::Created,
+    });
     run_fixture(&rows, uid);
     let inbox = home.join(".var/loops/alpha/inbox");
     let metadata = fs::metadata(&inbox).expect("inbox metadata");
@@ -3511,21 +3512,24 @@ fn ordinary_entry_fixture(settings_present: bool, words: &[&str]) -> (TestDir, c
     (directory, plan)
 }
 
-/// ´claim:loophome:ordinary-entry-settings-preserve-letters-private-dispatch´
-/// ´test:crate:ordinary-entry-with-settings-dispatches-letters-privately´
+/// ´claim:loophome:ordinary-entry-with-settings-does-not-intercept-former-mail-words´
+/// ´test:crate:ordinary-entry-with-settings-does-not-intercept-former-mail-words´
 #[test]
-#[allow(clippy::print_stdout)] // The printed execution line makes the settings case auditable.
-fn ordinary_entry_with_settings_dispatches_letters_privately() {
-    let (directory, plan) = ordinary_entry_fixture(true, &["letters", "list"]);
-    let execution = plan.inner_script.lines().last().expect("execution line");
-    assert_eq!(
-        execution,
-        format!(
-            "exec /fixture/superloop letters-private alpha {} list",
-            shell_word(&directory.path.to_string_lossy())
-        )
-    );
-    println!("WITH SETTINGS: {execution}");
+fn ordinary_entry_with_settings_does_not_intercept_former_mail_words() {
+    for command in ["letters", "letters-private", "letters-group"] {
+        let (_directory, plan) = ordinary_entry_fixture(true, &[command, "list"]);
+        let execution = plan
+            .inner_script
+            .lines()
+            .last()
+            .expect("ordinary execution");
+        assert!(execution.starts_with("exec setpriv "), "{execution}");
+        assert!(
+            execution.ends_with(&format!("{command} list")),
+            "{execution}"
+        );
+        assert!(!execution.contains("exec /fixture/superloop letters-private"));
+    }
 }
 
 /// ´claim:loophome:ordinary-entry-settings-preserve-the-command-environment´
@@ -3567,21 +3571,24 @@ fn ordinary_entry_with_settings_keeps_the_non_private_command() {
     assert_eq!(plan.command.argv, expected.command.argv);
 }
 
-/// ´claim:loophome:ordinary-entry-without-settings-preserves-letters-private-dispatch´
-/// ´test:crate:ordinary-entry-without-settings-dispatches-letters-privately´
+/// ´claim:loophome:ordinary-entry-without-settings-does-not-intercept-former-mail-words´
+/// ´test:crate:ordinary-entry-without-settings-does-not-intercept-former-mail-words´
 #[test]
-#[allow(clippy::print_stdout)] // The printed execution line makes the no-settings case auditable.
-fn ordinary_entry_without_settings_dispatches_letters_privately() {
-    let (directory, plan) = ordinary_entry_fixture(false, &["letters", "list"]);
-    let execution = plan.inner_script.lines().last().expect("execution line");
-    assert_eq!(
-        execution,
-        format!(
-            "exec /fixture/superloop letters-private alpha {} list",
-            shell_word(&directory.path.to_string_lossy())
-        )
-    );
-    println!("WITHOUT SETTINGS: {execution}");
+fn ordinary_entry_without_settings_does_not_intercept_former_mail_words() {
+    for command in ["letters", "letters-private", "letters-group"] {
+        let (_directory, plan) = ordinary_entry_fixture(false, &[command, "list"]);
+        let execution = plan
+            .inner_script
+            .lines()
+            .last()
+            .expect("ordinary execution");
+        assert!(execution.starts_with("exec setpriv "), "{execution}");
+        assert!(
+            execution.ends_with(&format!("{command} list")),
+            "{execution}"
+        );
+        assert!(!execution.contains("exec /fixture/superloop letters-private"));
+    }
 }
 
 /// ´claim:loophome:driver-launch-forwards-positional-words-without-reparsing´
@@ -4182,4 +4189,73 @@ fn descriptor_run_path_stays_on_opened_ancestor_after_substitution() {
         opened.st_ino,
         fs::metadata(decoy.join("runs/R")).expect("decoy run").ino()
     );
+}
+
+/// ´claim:loophome:entry-command-inventory-has-no-mail-words´
+/// ´test:crate:entry-command-inventory-has-no-mail-words´
+#[test]
+fn entry_command_inventory_has_no_mail_words() {
+    let words = crate::app::INTERCEPTED_WORDS;
+    // Dispatch indexes this inventory; reordering must update and review both.
+    assert_eq!(
+        words,
+        [
+            "_supervise-command",
+            "bind-custody",
+            "_mail-worker-birth",
+            "_mail-worker-state",
+            "_mail-worker-pins",
+            "_mail-provision",
+            "_mail-configure",
+            "_mail-journal",
+            "_mail-group",
+            "ensure-roots",
+            "inspect-roots",
+            "lane-install-private",
+        ]
+    );
+    assert_eq!(
+        words
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        words.len()
+    );
+    assert!(words.iter().all(|word| !word.starts_with("letters")));
+}
+
+/// ´claim:loophome:words-outside-entry-inventory-reach-ordinary-execution´
+/// ´test:crate:words-outside-entry-inventory-reach-ordinary-execution´
+#[test]
+fn words_outside_entry_inventory_reach_ordinary_execution() {
+    let candidates = [
+        "letters",
+        "letters-private",
+        "letters-group",
+        "letters-list",
+        "provision",
+        "ls",
+        "cat",
+        "mv",
+        "arbitrary-command",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(
+        crate::app::INTERCEPTED_WORDS
+            .iter()
+            .map(|word| format!("{word}-ordinary")),
+    );
+    for command in candidates {
+        assert!(!crate::app::INTERCEPTED_WORDS.contains(&command.as_str()));
+        for settings in [false, true] {
+            let (_directory, plan) = ordinary_entry_fixture(settings, &[&command, "argument"]);
+            let execution = plan.inner_script.lines().last().expect("execution");
+            assert!(execution.starts_with("exec setpriv "), "{execution}");
+            assert!(
+                execution.ends_with(&format!("{command} argument")),
+                "{execution}"
+            );
+        }
+    }
 }

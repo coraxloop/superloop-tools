@@ -27,10 +27,11 @@ def proxy_request(host, socket_path):
 def review_refusal():
     started = time.monotonic()
     while True:
+        # Follow door ADMISSION_WAIT: 30 s + 2 s reply margin + 3 s slack.
         result = subprocess.run(
             ["/home/worker/.local/libexec/superloop/ssh", "door-attribution-probe"],
             input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=max(0.001, 10 - (time.monotonic() - started)), check=False,
+            timeout=max(0.001, 35 - (time.monotonic() - started)), check=False,
         )
         reason = None
         for line in reversed(result.stderr.splitlines()):

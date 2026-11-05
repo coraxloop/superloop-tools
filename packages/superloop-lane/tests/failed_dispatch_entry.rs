@@ -152,7 +152,11 @@ fn fixture() -> Fixture {
     fs::write(&registry, format!("namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{ name = \"alpha\", uid = 41001, launch = \"src\", runs_root = \"{}\" }}]\n", runs.display())).expect("registry");
     fs::set_permissions(&registry, fs::Permissions::from_mode(0o600)).expect("registry mode");
     let allocations = home.join(".config/loops/allocations.toml");
-    fs::write(&allocations, "[alpha]\nuids = { base = 3000, count = 2 }\n").expect("allocation");
+    fs::write(
+        &allocations,
+        "mail_uid = 61000\n[alpha]\nuids = { base = 3000, count = 2 }\nmail_gids = { base = 43000, count = 3 }\n",
+    )
+    .expect("allocation");
     fs::set_permissions(&allocations, fs::Permissions::from_mode(0o600)).expect("allocation mode");
     let settings = custody.join("workers.toml");
     let source = format!(
@@ -185,6 +189,17 @@ fn fixture() -> Fixture {
     plan.select_container_program(&podman)
         .expect("container program");
     plan.select_worker_uid(3000).expect("worker");
+    let birth =
+        loop_home::mail::birth::Identity::for_reservation(3000, format!("superloop-lane:{}", "R"));
+    plan.select_mailbox(
+        &home
+            .join(".var/loops/alpha/workers")
+            .join(&birth.name)
+            .join("mail"),
+        &birth,
+        61000,
+    )
+    .expect("mail mount");
     let selection = json!({"model":"gpt-6-sol","effort":"high","model_source":"launch-flag","effort_source":"launch-flag"});
     plan.select_launch_model(&selection).expect("selection");
     for path in [
@@ -196,7 +211,7 @@ fn fixture() -> Fixture {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("retained mode");
     }
     let reservation = runs.join(".reservation-R.json");
-    let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":letter,"active_round":"dispatch","launcher_pid":4_000_000,"launcher_start":1,"driver_entry_pid":4_000_001,"driver_entry_start":1,"helper_pid":4_000_002,"helper_start":1,"helper_parent_pid":4_000_003,"helper_parent_start":1,"observer_state":"not-started","settlement_uncertain":false,"rounds":[{"step":"dispatch","phase":"failed","settlement_error":"settle-evidence: reply absent"}],"letters":[],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture"}});
+    let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":letter,"active_round":"dispatch","launcher_pid":4_000_000,"launcher_start":1,"driver_entry_pid":4_000_001,"driver_entry_start":1,"helper_pid":4_000_002,"helper_start":1,"helper_parent_pid":4_000_003,"helper_parent_start":1,"observer_state":"not-started","settlement_uncertain":false,"rounds":[{"step":"dispatch","phase":"failed","settlement_error":"settle-evidence: reply absent"}],"mail":[],"mail_replies":[],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture"}});
     fs::write(&reservation, serde_json::to_vec(&record).expect("JSON")).expect("reservation");
     fs::set_permissions(&reservation, fs::Permissions::from_mode(0o600)).expect("record mode");
     let mailbox = runs.join(".letter-R.lock");
@@ -628,225 +643,20 @@ fn exercise_door_queries_show_through_built_command() {
     assert!(!diagnostic.contains("registry-command"), "{diagnostic}");
 }
 
-fn completed_failed_fixture(report: bool) -> Fixture {
-    assert!(
-        nix::unistd::Uid::effective().is_root(),
-        "provisioned namespace root required"
-    );
+/// ´test:integration:retired-letter-commands-refuse-without-changing-reservations´
+#[test]
+fn retired_letter_commands_refuse_without_changing_reservations() {
     let fixture = fixture();
-    let registry = fixture.home.join(".config/loops/registry.toml");
-    let source = fs::read_to_string(&registry).expect("registry");
-    fs::write(&registry, source.replace("uid = 41001", "uid = 0")).expect("namespace loop owner");
-    let (mut plan, _) =
-        superloop_lane::load_plan(&fixture.home, "alpha", "R", (0, 0)).expect("plan");
-    plan.select_container_program(&fixture.podman)
-        .expect("runtime");
-    plan.select_worker_uid(3000).expect("worker");
-    let mut record: Value =
-        serde_json::from_slice(&fs::read(&fixture.reservation).expect("reservation"))
-            .expect("record");
-    plan.select_launch_model(&record["model_selection"])
-        .expect("selection");
-    plan.observe_vendor()
-        .expect("observing fixture needs no live service");
-    record["plan"] = plan.document.clone();
-    record["driver_end"] = json!({"state":"completed","successful":report});
-    record["helper_end"] = json!({"state":"completed","successful":true});
-    record["pre_driver_failure"] = Value::Null;
-    record["observation_end"] = json!("completed");
-    record["observer_end"] = json!({"state":"not-started","socket":{"state":"not-applicable"}});
-    record["reaping"] = json!({"state":"verified-empty","container_payload":{"state":"absent"}});
-    let step = if report { "report" } else { "dispatch" };
-    record["active_round"] = json!(step);
-    record["rounds"][0]["step"] = json!(step);
-    record["rounds"][0]["settlement_error"] = json!(format!(
-        "readback: {}/.local/outbox/{step}.md: No such file or directory (os error 2)",
-        plan.home.display()
-    ));
-    let directory = plan.driver_dir.join("20261023T030507Z-dispatch");
-    fs::create_dir(&directory).expect("driver round");
-    fs::write(
-        directory.join("run-report.txt"),
-        format!(
-            "RUN-REPORT lane={step} exit={} verdict={} dir={}\n",
-            i32::from(!report),
-            if report { "ok" } else { "FAILED" },
-            directory.display()
-        ),
-    )
-    .expect("failed driver verdict");
-    fs::write(directory.join("events.jsonl"), b"").expect("no thread");
-    fs::write(directory.join(".event-start"), b"0\n").expect("event boundary");
-    record["rounds"][0]["driver_dir"] = json!(directory);
-    assert!(record["rounds"][0].get("reply").is_none());
-    for (name, mode) in [
-        (".local", 0o750),
-        (".local/outbox", 0o700),
-        (".local/inbox", 0o750),
-    ] {
-        let path = plan.home.join(name);
-        fs::create_dir_all(&path).expect("mailbox");
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("mailbox mode");
+    let before = fs::read(&fixture.reservation).expect("reservation before");
+    for command in ["send-letter", "withdraw-letter"] {
+        let output = fixture.invoke(&[command, "alpha", "R", "--step", "review"]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("usage:"));
+        assert_eq!(
+            fs::read(&fixture.reservation).expect("reservation after"),
+            before
+        );
     }
-    nix::unistd::chown(
-        &plan.home.join(".local/outbox"),
-        Some(nix::unistd::Uid::from_raw(3000)),
-        None,
-    )
-    .expect("worker outbox");
-    executable(
-        &fixture.podman,
-        "#!/bin/sh\nif [ \"$1\" = unshare ]; then shift; exec \"$@\"; fi\nif [ \"$1\" = ps ]; then exit 0; fi\nexit 9\n",
-    );
-    if report {
-        record["thread_id"] = json!("thread-1");
-        fs::write(
-            directory.join("events.jsonl"),
-            b"{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\n",
-        )
-        .expect("retained thread event");
-        record["rounds"].as_array_mut().expect("rounds").insert(0,
-            json!({"step":"dispatch","driver_dir":directory,"phase":"settled","ended_by":"by-report","reply":{"bytes":6},"settle_attempts":[]}));
-    }
-    fs::write(
-        &fixture.reservation,
-        serde_json::to_vec(&record).expect("record JSON"),
-    )
-    .expect("record");
-    fixture
-}
-
-/// # Panics
-/// Panics only if fixture setup or the production settlement and continuation contract fails.
-/// ´test:integration:completed-failed-dispatch-settles-and-admits-report-letter´
-#[test]
-#[ignore = "main.rs::bind_private_launch_args binds descriptors as uid 0; launch/settle.rs::private_recover and launch/letters.rs::private_send require namespace root; fixture also maps worker uid 3000"]
-fn completed_failed_dispatch_settles_and_admits_report_letter() {
-    completed_failed_round_settles_and_admits_letter(false);
-}
-
-/// # Panics
-/// Panics only if the production report-readback recovery contract fails.
-/// ´test:integration:completed-successful-report-settles-and-admits-next-letter´
-#[test]
-#[ignore = "main.rs::bind_private_launch_args binds descriptors as uid 0; launch/settle.rs::private_recover and launch/letters.rs::private_send require namespace root; fixture also maps worker uid 3000"]
-fn completed_successful_report_settles_and_admits_next_letter() {
-    completed_failed_round_settles_and_admits_letter(true);
-}
-
-#[allow(clippy::too_many_lines)]
-fn completed_failed_round_settles_and_admits_letter(report: bool) {
-    let fixture = completed_failed_fixture(report);
-    let step = if report { "report" } else { "dispatch" };
-    let next = if report { "report-2" } else { "report" };
-    let round_index = usize::from(report);
-    let before = fs::read(&fixture.reservation).expect("before");
-    let preview = fixture.invoke(&["settle", "alpha", "R", "--round", step, "--dry-run"]);
-    assert!(
-        preview.status.success(),
-        "{}",
-        String::from_utf8_lossy(&preview.stderr)
-    );
-    let preview: Value = serde_json::from_slice(&preview.stdout).expect("preview JSON");
-    assert!(preview["readback"].is_null());
-    assert_eq!(
-        fs::read(&fixture.reservation).expect("after preview"),
-        before
-    );
-    let runs = fixture.reservation.parent().expect("runs root");
-    assert!(!runs.join(".report=R.json").exists());
-    assert!(!runs.join(".report=R=report.json").exists());
-    let original: Value = serde_json::from_slice(&before).expect("original record");
-    assert!(
-        !Path::new(
-            original["plan"]["driver_dir"]
-                .as_str()
-                .expect("driver directory")
-        )
-        .join(format!("readback-evidence-{step}.json"))
-        .exists()
-    );
-    let output = fixture.invoke(&[
-        "settle",
-        "alpha",
-        "R",
-        "--round",
-        step,
-        "--expect-digest",
-        preview["preview_sha256"].as_str().expect("digest"),
-    ]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let saved: Value =
-        serde_json::from_slice(&fs::read(&fixture.reservation).expect("settled record"))
-            .expect("JSON");
-    assert_eq!(saved["phase"], "settled");
-    assert_eq!(saved["rounds"][round_index]["phase"], "failed");
-    assert!(saved["rounds"][round_index]["reply"].is_null());
-    assert_eq!(
-        saved["rounds"][round_index]["settle_attempts"][0]["phase"],
-        "complete"
-    );
-    let report_letter = fixture.home.join("scratchpad/report-letter");
-    fs::write(&report_letter, b"Write the reply of record.\n").expect("report letter");
-    fs::set_permissions(&report_letter, fs::Permissions::from_mode(0o600)).expect("letter mode");
-    let output = fixture.invoke(&[
-        "send-letter",
-        "alpha",
-        "R",
-        "--step",
-        next,
-        "--letter",
-        report_letter.to_str().expect("path"),
-    ]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let after: Value =
-        serde_json::from_slice(&fs::read(&fixture.reservation).expect("after letter"))
-            .expect("JSON");
-    assert_eq!(after["rounds"], saved["rounds"]);
-    assert_eq!(after["letters"][0]["step"], next);
-    assert_eq!(after["letters"][0]["state"], "placed");
-    assert_eq!(after["plan"]["home"], saved["plan"]["home"]);
-    let output = fixture.invoke(&[
-        "launch",
-        "alpha",
-        "R",
-        "--round",
-        next,
-        "--dry-run",
-        "--podman-bin",
-        fixture.podman.to_str().expect("runtime path"),
-    ]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let launch: Value = serde_json::from_slice(&output.stdout).expect("launch JSON");
-    assert_eq!(
-        launch["thread_id"],
-        if report {
-            json!("thread-1")
-        } else {
-            Value::Null
-        }
-    );
-    assert_eq!(launch["home"], saved["plan"]["home"]);
-    assert_eq!(
-        launch["invocation"]["argv"]
-            .as_array()
-            .expect("argv")
-            .iter()
-            .any(|word| word == "-r"),
-        report
-    );
 }
 
 /// # Panics
@@ -889,10 +699,7 @@ fn failed_dispatch_second_recovery_refuses_occupied_report() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(2));
         assert!(stderr.contains("launch-report:"), "{stderr}");
-        assert!(
-            stderr.contains("send-letter LOOP RUN --step NEW"),
-            "{stderr}"
-        );
+        assert!(stderr.contains("bind-mail LOOP RUN --step NEW"), "{stderr}");
         assert!(!stderr.contains("preview settle"), "{stderr}");
         assert_eq!(
             fs::read(&fixture.reservation).expect("unchanged record"),

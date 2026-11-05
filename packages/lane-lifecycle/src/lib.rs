@@ -7,7 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -19,12 +19,8 @@ use nix::libc;
 use nix::sys::signal::{SigSet, Signal};
 
 pub mod execution_settings;
-mod mailbox;
-pub use mailbox::{
-    MailboxWatcher, ReplyObservation, RunReplyObservation, escape_name as escape_mailbox_name,
-    parse_utc_instant, reply_observation_key, reply_observations, reply_version_matches,
-    run_reply_observations,
-};
+mod observation;
+pub use observation::{escape_name as escape_mailbox_name, parse_utc_instant};
 
 /// Ratified no-growth window for a step that is already over budget.
 /// An approved or registered gateway run in flight is progress under this window.
@@ -602,6 +598,7 @@ pub struct UsageError {
     budget: u64,
     resume_refusal: Option<ResumeRefusal>,
     runs_root_refusal: Option<RootRefusal>,
+    step_letter_refusal: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -621,6 +618,9 @@ impl UsageError {
     /// Classed fresh-root or resume-boundary evidence.
     #[must_use]
     pub fn refusal_diagnostic(&self, backend_name: &str) -> Option<Vec<u8>> {
+        if let Some(detail) = &self.step_letter_refusal {
+            return Some(diagnostic_line(backend_name, "step-letter", detail));
+        }
         if let Some(refusal) = self.runs_root_refusal {
             let (kind, detail) = match refusal {
                 RootRefusal::Required => (
@@ -1032,11 +1032,14 @@ where
 {
     let arguments = arguments.into_iter().map(Into::into).collect::<Vec<_>>();
     let budget_hint = budget_hint(&arguments);
-    let config = parse_arguments(&arguments).ok_or(UsageError {
-        budget: budget_hint,
-        resume_refusal: None,
-        runs_root_refusal: None,
-    })?;
+    let mut step_letter_refusal = None;
+    let config =
+        parse_arguments_with_refusal(&arguments, &mut step_letter_refusal).ok_or(UsageError {
+            budget: budget_hint,
+            resume_refusal: None,
+            runs_root_refusal: None,
+            step_letter_refusal,
+        })?;
     if let Err(refusal) = validate_run_selection(
         &config,
         std::env::var_os("LANE_RUNS_ROOT").as_deref(),
@@ -1046,6 +1049,7 @@ where
             budget: config.budget,
             resume_refusal: None,
             runs_root_refusal: Some(refusal),
+            step_letter_refusal: None,
         });
     }
     Ok(config)
@@ -1065,6 +1069,7 @@ pub fn validate_resume(backend: &dyn Backend, config: &mut Config) -> Result<(),
                     budget: config.budget,
                     resume_refusal: Some(resume_refusal),
                     runs_root_refusal: None,
+                    step_letter_refusal: None,
                 });
             }
         }
@@ -1072,9 +1077,39 @@ pub fn validate_resume(backend: &dyn Backend, config: &mut Config) -> Result<(),
     Ok(())
 }
 
-// The child wait, monitor decision, and context capture share one poll boundary.
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 fn parse_arguments(arguments: &[OsString]) -> Option<Config> {
+    parse_arguments_with_refusal(arguments, &mut None)
+}
+
+fn read_step_letter(path: &Path) -> io::Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > 1_048_576 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected a regular file of at most 1 MiB",
+        ));
+    }
+    let mut body = Vec::new();
+    file.take(1_048_577).read_to_end(&mut body)?;
+    if body.len() > 1_048_576 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "letter exceeds 1 MiB",
+        ));
+    }
+    Ok(body)
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_arguments_with_refusal(
+    arguments: &[OsString],
+    step_letter_refusal: &mut Option<String>,
+) -> Option<Config> {
     let mut budget = None;
     let mut workdir = std::env::current_dir().ok()?;
     let mut sandbox = OsString::from(DEFAULT_SANDBOX);
@@ -1088,6 +1123,7 @@ fn parse_arguments(arguments: &[OsString]) -> Option<Config> {
     let mut ignore_pool = false;
     let mut gateway_lane = None;
     let mut step_letter = None;
+    let mut step_digest = None;
     let mut position = 0;
 
     while position < arguments.len() {
@@ -1113,21 +1149,43 @@ fn parse_arguments(arguments: &[OsString]) -> Option<Config> {
             position += 1;
             continue;
         }
+        if bytes == b"--step-letter-sha256" {
+            position += 1;
+            let digest = arguments.get(position)?.to_str()?;
+            if step_digest.is_some()
+                || digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                *step_letter_refusal = Some("invalid or repeated step evidence digest".into());
+                return None;
+            }
+            step_digest = Some(digest.to_owned());
+            position += 1;
+            continue;
+        }
         if bytes == b"--step-letter" {
             position += 1;
+            let Some(path) = arguments.get(position) else {
+                *step_letter_refusal = Some("--step-letter requires a path".into());
+                return None;
+            };
             if step_letter.is_some() {
+                *step_letter_refusal = Some(format!(
+                    "--step-letter {}: repeated option",
+                    Path::new(path).display()
+                ));
                 return None;
             }
-            let file = File::open(arguments.get(position)?).ok()?;
-            let metadata = file.metadata().ok()?;
-            if !metadata.is_file() || metadata.len() > 1_048_576 {
-                return None;
-            }
-            let mut body = Vec::new();
-            file.take(1_048_577).read_to_end(&mut body).ok()?;
-            if body.len() > 1_048_576 {
-                return None;
-            }
+            let body = read_step_letter(Path::new(path))
+                .map_err(|error| {
+                    *step_letter_refusal = Some(format!(
+                        "--step-letter {}: {error}",
+                        Path::new(path).display()
+                    ));
+                })
+                .ok()?;
             step_letter = Some(body);
             position += 1;
             continue;
@@ -1208,6 +1266,25 @@ fn parse_arguments(arguments: &[OsString]) -> Option<Config> {
     if session.is_some() {
         let directory = resume_dir.as_ref()?;
         if !directory.is_dir() || !valid_report_path(directory) {
+            return None;
+        }
+    }
+    if let Some(expected) = step_digest {
+        use sha2::{Digest as _, Sha256};
+        if step_letter.as_ref().is_none_or(|bytes| {
+            Sha256::digest(bytes)
+                .iter()
+                .flat_map(|byte| {
+                    let digits = b"0123456789abcdef";
+                    [
+                        digits[usize::from(byte >> 4)],
+                        digits[usize::from(byte & 15)],
+                    ]
+                })
+                .ne(expected.bytes())
+        }) {
+            *step_letter_refusal =
+                Some("step evidence differs from its verified mail delivery".into());
             return None;
         }
     }
@@ -1310,7 +1387,10 @@ fn budget_hint(arguments: &[OsString]) -> u64 {
             position += 2;
             continue;
         }
-        if bytes == GATEWAY_LANE_OPTION || bytes == b"--step-letter" {
+        if bytes == GATEWAY_LANE_OPTION
+            || bytes == b"--step-letter"
+            || bytes == b"--step-letter-sha256"
+        {
             position += 2;
             continue;
         }
@@ -3625,13 +3705,6 @@ fn run_child(
         .map_err(|error| format!("events file {}: {error}", events_path.display()))?;
     let mut context = ContextTracker::reconcile(backend, &events_path, run_dir)
         .map_err(|error| format!("context record: {error}"))?;
-    let mut mailbox = mailbox::MailboxWatcher::for_round(run_dir, config.name())
-        .map_err(|error| format!("mailbox watcher: {error}"))?;
-    if let Some(watcher) = mailbox.as_mut() {
-        watcher
-            .poll(&mut io::stdout().lock())
-            .map_err(|error| format!("mailbox watcher: {error}"))?;
-    }
     let diagnostics_path = run_dir.join("stderr.txt");
     let diagnostics = OpenOptions::new()
         .create(true)
@@ -3682,13 +3755,6 @@ fn run_child(
         let child_status = child
             .try_wait()
             .map_err(|error| format!("wait {program}: {error}"))?;
-        let mailbox_error = mailbox.as_mut().and_then(|watcher| {
-            if child_status.is_some() {
-                watcher.finish(&mut io::stdout().lock()).err()
-            } else {
-                watcher.poll(&mut io::stdout().lock()).err()
-            }
-        });
         let context_error = context
             .observe_durable(backend, &events_path, run_dir)
             .err();
@@ -3740,30 +3806,9 @@ fn run_child(
                     .map(|watch| (watch.lane.as_str(), seq))
             }),
             Some((context_state, context_turn, &context_at)),
-            mailbox.as_ref().map(mailbox::MailboxWatcher::count),
             Some((readings, expiry, decision)),
         );
         let _ignored = atomic_write(&monitor_file, &sidecar);
-        if let Some(error) = mailbox_error {
-            return Err(mailbox_failure_after_poll(
-                backend,
-                &mut child,
-                child_status.is_some(),
-                run_dir,
-                &mut context,
-                &monitor_file,
-                readings,
-                expiry,
-                decision,
-                now,
-                credited_seq.and_then(|seq| {
-                    gateway_watch
-                        .as_ref()
-                        .map(|watch| (watch.lane.as_str(), seq))
-                }),
-                &error,
-            ));
-        }
         if let Some(status) = child_status {
             if let Some(error) = context_error {
                 return Err(format!("context record: {error}"));
@@ -3774,9 +3819,6 @@ fn run_child(
         // already durable, still determines the result and last message.
         if forwarded_signal().is_some() {
             let raced = stop_child(&mut child);
-            let mailbox_error = mailbox
-                .as_mut()
-                .and_then(|watcher| watcher.finish(&mut io::stdout().lock()).err());
             let context_end = finish_context(
                 backend,
                 run_dir,
@@ -3792,12 +3834,6 @@ fn run_child(
                         .map(|watch| (watch.lane.as_str(), seq))
                 }),
             );
-            if let Some(error) = mailbox_error {
-                return Err(format!(
-                    "mailbox watcher: {error}; child=stopped-and-reaped; final-context={}",
-                    context_end.err().unwrap_or_else(|| "complete".to_owned())
-                ));
-            }
             context_end?;
             let raced = raced.map_err(|()| format!("stop {program}: child wait failed"))?;
             if let Some((_, result)) = transcript_terminal_result(backend, run_dir, true) {
@@ -3809,6 +3845,7 @@ fn run_child(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn mailbox_failure_after_poll(
     backend: &dyn Backend,
     child: &mut Child,
@@ -3870,7 +3907,6 @@ fn finish_context(
         sample,
         awaiting,
         Some((state, turn, &at)),
-        None,
         Some((readings, expiry, decision)),
     );
     let _ignored = atomic_write(monitor_file, &sidecar);
@@ -3913,7 +3949,7 @@ fn monitor_sidecar_bytes(
     sample: ClockSample,
     awaiting: Option<(&str, u64)>,
 ) -> Vec<u8> {
-    monitor_sidecar_with_context(quiet, wall, event_size, sample, awaiting, None, None, None)
+    monitor_sidecar_with_context(quiet, wall, event_size, sample, awaiting, None, None)
 }
 
 /// # Panics
@@ -3927,7 +3963,6 @@ fn monitor_sidecar_with_context(
     sample: ClockSample,
     awaiting: Option<(&str, u64)>,
     context: Option<(ContextUse, u64, &str)>,
-    letters_observed: Option<usize>,
     budget_observation: Option<(MonitorReadings, Option<BudgetExpiry>, MonitorDecision)>,
 ) -> Vec<u8> {
     let mut record = String::new();
@@ -3952,9 +3987,7 @@ fn monitor_sidecar_with_context(
             .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
         write!(&mut record, " context_state={} context_used={used} context_window={window} context_fraction={fraction} context_source={} context_reason={} context_turn={turn} context_at={at}", state.state(), state.source, state.reason).expect("writing to a String cannot fail");
     }
-    if let Some(count) = letters_observed {
-        write!(&mut record, " letters_observed={count}").expect("writing to a String cannot fail");
-    }
+
     if let Some((readings, expiry, decision)) = budget_observation {
         write!(
             &mut record,
@@ -5221,11 +5254,51 @@ mod tests {
         fs::write(&letter, vec![b'x'; 1_048_577]).expect("oversized letter");
         assert!(parse_arguments(&arguments).is_none());
         fs::write(&letter, b"letter").expect("valid letter");
+        let config = parse_arguments(&arguments).expect("single valid letter parses");
+        super::prepare_fresh(&config, b"pointer\n", &fixture.0).expect("save valid letter");
+        assert_eq!(
+            fs::read(fixture.0.join(format!("step-{}.txt", config.name)))
+                .expect("saved valid letter"),
+            b"letter"
+        );
         arguments.splice(
             4..4,
             [OsString::from("--step-letter"), letter.into_os_string()],
         );
         assert!(parse_arguments(&arguments).is_none());
+    }
+
+    /// ´claim:lifecycle:step-evidence-must-match-verified-mail-digest´
+    /// ´test:unit:step-evidence-must-match-verified-mail-digest´
+    #[test]
+    fn step_evidence_must_match_verified_mail_digest() {
+        let fixture = FreshRunFixture::new("mail-evidence-digest");
+        let letter = fixture.0.join("mail.txt");
+        fs::write(&letter, b"abc").expect("verified bytes");
+        let args = vec![
+            OsString::from("-t"),
+            OsString::from("60"),
+            OsString::from("--step-letter"),
+            letter.clone().into_os_string(),
+            OsString::from("--step-letter-sha256"),
+            OsString::from("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+            OsString::from("Read /mail/inbox/alpha.2026-01-01T00:00:00.000Z.letter."),
+        ];
+        let config = parse_arguments(&args).expect("matching delivery digest");
+        fs::write(&letter, b"changed").expect("race after parsing");
+        super::prepare_fresh(&config, b"pointer\n", &fixture.0)
+            .expect("retained verified snapshot");
+        assert_eq!(
+            fs::read(fixture.0.join(format!("step-{}.txt", config.name))).expect("evidence"),
+            b"abc"
+        );
+        assert!(
+            parse_arguments(&args).is_none(),
+            "changed source refuses another launch"
+        );
+        let mut repeated = args.clone();
+        repeated.splice(6..6, [args[4].clone(), args[5].clone()]);
+        assert!(parse_arguments(&repeated).is_none());
     }
 
     struct FreshRunFixture(PathBuf);
@@ -5536,7 +5609,6 @@ mod tests {
                 .latest
                 .as_ref()
                 .map(|(state, at)| (*state, tracker.turn, at.as_str())),
-            None,
             None,
         );
         assert!(String::from_utf8(sidecar).expect("monitor").contains(
@@ -6073,6 +6145,7 @@ mod tests {
             budget: 60,
             resume_refusal: None,
             runs_root_refusal: Some(RootRefusal::Required),
+            step_letter_refusal: None,
         };
         assert_eq!(
             error.refusal_diagnostic("copied-driver"),
@@ -6370,6 +6443,7 @@ mod tests {
             budget: 60,
             resume_refusal: Some(ResumeRefusal::MissingReport(report.clone())),
             runs_root_refusal: None,
+            step_letter_refusal: None,
         };
         let config = Config {
             budget: 60,
@@ -6572,7 +6646,6 @@ mod tests {
             ClockSample::new(9, 9),
             None,
             None,
-            None,
             Some((before, None, MonitorDecision::Continue)),
         );
         assert_eq!(
@@ -6600,7 +6673,6 @@ mod tests {
             later.wall,
             later.event_size,
             ClockSample::new(131, 131),
-            None,
             None,
             None,
             Some((later, Some(expiry), MonitorDecision::Stalled)),

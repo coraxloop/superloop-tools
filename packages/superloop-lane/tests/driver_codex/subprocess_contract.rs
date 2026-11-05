@@ -1606,6 +1606,123 @@ fn model_capacity_retries_and_records_each_attempt_before_success() {
 }
 
 /// # Panics
+/// Panics only if the launcher option order loses the letter or pointer input.
+/// ´test:integration:launcher-option-order-saves-threadless-and-resumed-letters´
+#[test]
+fn launcher_option_order_saves_threadless_and_resumed_letters() {
+    for resumed in [false, true] {
+        let harness = Harness::new("launcher-letter");
+        let run_dir = if resumed {
+            harness.seed_resume("prior", b"0\n")
+        } else {
+            harness.run_dir("review")
+        };
+        let letter = harness.root().join("review.md");
+        fs::create_dir_all(run_dir.parent().expect("round parent")).expect("runs directory");
+        let body = b"The complete review letter.\n\nRetain its bytes.\n";
+        fs::write(&letter, body).expect("letter");
+        let mut command = if resumed {
+            harness.resume_command()
+        } else {
+            harness.command()
+        };
+        command.args(["-t", "900", "-n", "review", "-C"]);
+        command.arg(harness.root()).args(["-s", "workspace-write"]);
+        if resumed {
+            command.args(["-r", "session-1"]);
+        }
+        command.arg("-d").arg(&run_dir);
+        if resumed {
+            command.args(["-m", "gpt-6-sol", "-e", "high"]);
+        }
+        let result = command
+            .arg("--step-letter")
+            .arg(&letter)
+            .arg("Read /home/worker/.local/inbox/review.md.")
+            .output_serialized()
+            .expect("driver launch");
+        assert_eq!(result.status.code(), Some(0), "{result:?}");
+        assert_eq!(
+            fs::read(run_dir.join("step-review.txt")).expect("letter"),
+            body
+        );
+        assert_eq!(
+            harness.read("stdin"),
+            b"Read /home/worker/.local/inbox/review.md.\n"
+        );
+    }
+}
+
+/// # Panics
+/// Panics only if a linked letter is followed or its refusal loses the option and path.
+/// ´test:integration:symlinked-step-letter-is-refused-by-name´
+#[test]
+fn symlinked_step_letter_is_refused_by_name() {
+    let harness = Harness::new("linked-letter");
+    let target = harness.root().join("letter.md");
+    let link = harness.root().join("linked-letter.md");
+    fs::write(&target, b"Letter body.\n").expect("letter");
+    std::os::unix::fs::symlink(&target, &link).expect("linked letter");
+    let result = harness
+        .command()
+        .args(["-t", "60", "--step-letter"])
+        .arg(&link)
+        .arg("pointer")
+        .output_serialized()
+        .expect("driver refusal");
+    assert_eq!(result.status.code(), Some(2));
+    let diagnostic = String::from_utf8_lossy(&result.stderr);
+    assert!(diagnostic.contains("--step-letter"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(link.to_str().expect("fixture path")),
+        "{diagnostic}"
+    );
+    assert!(!harness.run_dir("lane").exists());
+}
+
+/// # Panics
+/// Panics only if fixture setup fails or a FIFO letter blocks or loses its named refusal.
+/// ´test:integration:fifo-step-letter-is-refused-without-blocking´
+#[test]
+fn fifo_step_letter_is_refused_without_blocking() {
+    let harness = Harness::new("fifo-letter");
+    let fifo = harness.root().join("fifo-letter.md");
+    nix::unistd::mkfifo(
+        &fifo,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .expect("FIFO letter");
+    let mut child = harness
+        .command()
+        .args(["-t", "60", "--step-letter"])
+        .arg(&fifo)
+        .arg("pointer")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn_serialized()
+        .expect("driver refusal");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while child.try_wait().expect("driver status").is_none() {
+        if Instant::now() >= deadline {
+            child.kill().expect("kill blocked driver");
+            child.wait().expect("reap blocked driver");
+            panic!("--step-letter blocked on FIFO {}", fifo.display());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = child.wait_with_output().expect("driver output");
+    assert_eq!(result.status.code(), Some(2));
+    let diagnostic = String::from_utf8_lossy(&result.stderr);
+    assert!(diagnostic.contains("--step-letter"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(fifo.to_str().expect("fixture path")),
+        "{diagnostic}"
+    );
+    assert!(!harness.run_dir("lane").exists());
+}
+
+/// # Panics
 /// Panics only if fixture setup fails or the asserted retry contract is violated.
 /// ´test:integration:model-capacity-stops-at-the-fourth-attempt´
 #[test]

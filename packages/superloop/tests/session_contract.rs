@@ -55,6 +55,20 @@ fn neutral_heartbeat_decisions_agree_with_adapter_verdicts() {
         }
         let input = home.path().join("decision.json");
         fs::write(&input,serde_json::to_vec(&serde_json::json!({"schema":1,"cwd":home.path(),"session":"neutral","observations":transcript,"retry":false,"letters":{"kind":"empty"}})).expect("record")).expect("input");
+        for kind in ["unread", "history"] {
+            let legacy = home.path().join("legacy.json");
+            fs::write(&legacy, serde_json::to_vec(&serde_json::json!({"schema":1,"cwd":home.path(),"session":"legacy","observations":transcript,"retry":false,"letters":{"kind":kind,"text":"private correspondence metadata"}})).expect("legacy record")).expect("legacy input");
+            let refused = command(home.path())
+                .args(["heartbeat", "decide"])
+                .arg(&legacy)
+                .output()
+                .expect("retired metadata form");
+            assert!(
+                !refused.status.success(),
+                "retired {kind} metadata must not remain reachable"
+            );
+            assert!(!String::from_utf8_lossy(&refused.stdout).contains("private correspondence"));
+        }
         let output = command(home.path())
             .args(["heartbeat", "decide"])
             .arg(&input)

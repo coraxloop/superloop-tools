@@ -131,7 +131,7 @@ impl Placement {
     /// Return the lane's own tree.
     #[must_use]
     pub fn lane_dir(&self) -> PathBuf {
-        self.home.join("workers").join(&self.lane)
+        self.home.join("worker-homes").join(&self.lane)
     }
 
     /// Return the lane's clone.
@@ -251,7 +251,7 @@ fn prepare_rows(placement: &Placement) -> Vec<LayoutRow> {
     let worker_home = placement.worker_home();
     let mut rows = vec![
         row(
-            placement.home.join("workers"),
+            placement.home.join("worker-homes"),
             Node::Directory,
             Owner::Loop,
             Group::Loop,

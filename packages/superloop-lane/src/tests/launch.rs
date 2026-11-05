@@ -101,6 +101,21 @@ fn assert_resume_plan_pin(home: &std::path::Path, request: &mut LaunchRequest) {
     for worker in [3000, 3001] {
         let (mut plan, _) = crate::load_plan(home, "alpha", "R", (0, 0)).expect("current plan");
         plan.select_worker_uid(worker).expect("reserved identity");
+        plan.select_mail_group(43001 + worker - 3000)
+            .expect("mail group");
+        let birth = loop_home::mail::birth::Identity::for_reservation(
+            worker,
+            format!("superloop-lane:{}", "R"),
+        );
+        plan.select_mailbox(
+            &home
+                .join(".var/loops/alpha/workers")
+                .join(&birth.name)
+                .join("mail"),
+            &birth,
+            61000,
+        )
+        .expect("mail mount");
         plan.select_container_program(&request.podman_bin)
             .expect("runtime");
         plan.select_launch_model(&selection).expect("selection");
@@ -134,8 +149,10 @@ fn assert_resume_plan_pin(home: &std::path::Path, request: &mut LaunchRequest) {
                         error.kind, "plan-read",
                         "unchanged plan passes admission: {error:?}"
                     );
-                    fs::remove_file(path.parent().expect("runs").join(".letter-R.lock"))
-                        .expect("remove fixture mailbox lock");
+                    let lock = path.parent().expect("runs").join(".letter-R.lock");
+                    if lock.exists() {
+                        fs::remove_file(lock).expect("remove fixture mailbox lock");
+                    }
                 } else {
                     assert_eq!(error.kind, "plan-read");
                     let route = match keys {
@@ -180,6 +197,18 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
     let (mut plan, _) = crate::load_plan(home, "alpha", "R", (0, 0)).expect("configured plan");
     let selection = json!({"model":request.model,"effort":request.effort,"model_source":"launch-flag","effort_source":"launch-flag"});
     plan.select_worker_uid(3000).expect("worker");
+    plan.select_mail_group(43001).expect("mail group");
+    let birth =
+        loop_home::mail::birth::Identity::for_reservation(3000, format!("superloop-lane:{}", "R"));
+    plan.select_mailbox(
+        &home
+            .join(".var/loops/alpha/workers")
+            .join(&birth.name)
+            .join("mail"),
+        &birth,
+        61000,
+    )
+    .expect("mail mount");
     plan.select_container_program(&request.podman_bin)
         .expect("runtime");
     plan.select_launch_model(&selection).expect("model");
@@ -391,7 +420,11 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     fs::write(&registry, format!("namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{ name = \"alpha\", uid = 41001, launch = \"src\", runs_root = \"{}\" }}]\n", runs.display())).expect("registry");
     fs::set_permissions(&registry, fs::Permissions::from_mode(0o600)).expect("registry mode");
     let allocations = home.join(".config/loops/allocations.toml");
-    fs::write(&allocations, "[alpha]\nuids = { base = 3000, count = 2 }\n").expect("allocation");
+    fs::write(
+        &allocations,
+        "mail_uid = 61000\n[alpha]\nuids = { base = 3000, count = 2 }\nmail_gids = { base = 43000, count = 3 }\n",
+    )
+    .expect("allocation");
     fs::set_permissions(&allocations, fs::Permissions::from_mode(0o600)).expect("allocation mode");
     let settings = custody.join("workers.toml");
     let source = format!(
@@ -952,9 +985,7 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
             .as_array()
             .expect("entry words")
             .last(),
-        Some(&serde_json::json!(
-            "Read /home/worker/.local/inbox/dispatch.md."
-        ))
+        Some(&serde_json::json!("Read /home/worker/brief.txt."))
     );
     assert_eq!(
         preview["selection"]["method"],
@@ -1232,7 +1263,11 @@ fn proxy_refresh_preserves_live_helper_pins() {
     fs::write(&registry, format!("namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{ name = \"alpha\", uid = {}, launch = \"src\", runs_root = \"{}\" }}]\n", nix::unistd::Gid::effective().as_raw(), runs.display())).expect("registry");
     fs::set_permissions(&registry, fs::Permissions::from_mode(0o600)).expect("registry mode");
     let allocations = home.join(".config/loops/allocations.toml");
-    fs::write(&allocations, "[alpha]\nuids = { base = 3000, count = 2 }\n").expect("allocation");
+    fs::write(
+        &allocations,
+        "mail_uid = 61000\n[alpha]\nuids = { base = 3000, count = 2 }\nmail_gids = { base = 43000, count = 3 }\n",
+    )
+    .expect("allocation");
     fs::set_permissions(&allocations, fs::Permissions::from_mode(0o600)).expect("allocation mode");
     let settings = custody.join("workers.toml");
     let source = format!(
@@ -1337,6 +1372,21 @@ fn proxy_refresh_preserves_live_helper_pins() {
     for (name, uid, holder) in [("R", 3000, &first), ("S", 3001, &second)] {
         let (mut plan, _) = crate::load_plan(home, "alpha", name, (0, 0)).expect("plan");
         plan.select_worker_uid(uid).expect("worker");
+        plan.select_mail_group(43001 + uid - 3000)
+            .expect("mail group");
+        let birth = loop_home::mail::birth::Identity::for_reservation(
+            uid,
+            format!("superloop-lane:{name}"),
+        );
+        plan.select_mailbox(
+            &home
+                .join(".var/loops/alpha/workers")
+                .join(&birth.name)
+                .join("mail"),
+            &birth,
+            61000,
+        )
+        .expect("mail mount");
         plan.select_container_program(&podman).expect("podman");
         plan.observe_vendor().expect("observing");
         plan.select_launch_model(&selection).expect("selection");
@@ -1409,6 +1459,16 @@ fn proxy_refresh_preserves_live_helper_pins() {
     assert_eq!(refusal.kind, "install-busy");
     assert!(refusal.detail.contains("run R (started)"));
     assert!(refusal.detail.contains("run S (started)"));
+    for (run, uid) in [("R", 3000), ("S", 3001)] {
+        let birth =
+            loop_home::mail::birth::Identity::for_reservation(uid, format!("superloop-lane:{run}"));
+        fs::create_dir_all(
+            home.join(".var/loops/alpha/workers")
+                .join(&birth.name)
+                .join("mail"),
+        )
+        .expect("fixture mailbox source for pin reconstruction");
+    }
     let before = crate::container_helper::fixture_pinned_request(home, "R", &podman)
         .expect("helper before refresh");
     let mut install = crate::install::InstallRequest {
@@ -1684,6 +1744,8 @@ fn proxy_refresh_preserves_live_helper_pins() {
     drop(second);
     fs::remove_file(runs.join(".reservation-R.json")).expect("release R");
     fs::remove_file(runs.join(".reservation-S.json")).expect("release S");
+    fs::remove_dir_all(home.join(".var/loops/alpha/workers"))
+        .expect("reset synthetic pin sources with their synthetic reservations");
     refresh_during_changing_launch(home, &launch, &install, &lane_bin, &source, &private_report);
     pre_driver_save_failure_windows(home, &launch, &lane_bin);
     helper_start_failure_windows(home, &launch, &lane_bin);
@@ -1801,7 +1863,7 @@ elif '_prepare-runtime' in args:
     if (window, stage) in [('Runtime', ''), ('PublishPrimary', 'publish-primary'), ('Deferred', 'prepare-deferred'), ('PublishDeferred', 'publish-deferred')]:
         sys.exit(9)
     if not stage:
-        save(f['evidence'], {'runtime_argv': [] if window == 'Primary' else f['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'pending', 'rows': [{'name': 'letter', 'state': 'pending', 'target': '/home/worker/.local/inbox/dispatch.md', 'operation': 'read'}]}})
+        save(f['evidence'], {'runtime_argv': [] if window == 'Primary' else f['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'pending', 'rows': [{'name': 'letter', 'state': 'pending', 'target': '/home/worker/brief.txt', 'operation': 'read'}]}})
     if stage == 'prepare-deferred':
         save(f['evidence'], {'runtime_argv': f['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'measured', 'rows': [{'name': 'vendor-socket', 'state': 'deferred'}], 'deferred_source_row': {'name': 'vendor-socket', 'state': 'absent' if window == 'DeferredProbe' else 'pending', 'target': '/home/worker/.local/vendor/proxy.sock', 'operation': 'connect'}}})
     print('{}')
@@ -1918,7 +1980,7 @@ elif '_make-home' in args:
     print('{}')
 elif '_prepare-runtime' in args:
     if 'SUPERLOOP_MATRIX_STAGE' not in os.environ:
-        save(pathlib.Path(f['evidence']), {'runtime_argv': f['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'pending', 'rows': [{'name': 'letter', 'state': 'pending', 'target': '/home/worker/.local/inbox/dispatch.md', 'operation': 'read'}]}})
+        save(pathlib.Path(f['evidence']), {'runtime_argv': f['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'pending', 'rows': [{'name': 'letter', 'state': 'pending', 'target': '/home/worker/brief.txt', 'operation': 'read'}]}})
     elif f['before'] and os.environ['SUPERLOOP_MATRIX_STAGE'] == 'publish-primary':
         pathlib.Path(f['lane']).chmod(0o600)
     print('{}')
@@ -2048,6 +2110,13 @@ else:
         }
         if before_spawn {
             saved = resume_pre_spawn_failure(home, &request, lane_bin, &path, &saved);
+            // This fixture models private verification without provisioning a mailbox.
+            // Its synthetic binding must not turn the unborn retirement case into
+            // a namespace-root retirement rehearsal.
+            saved
+                .as_object_mut()
+                .expect("fixture reservation")
+                .remove("mail_birth");
         }
         crate::launch::census::run(home, "alpha").expect("census reads startup failure");
         // The real launcher is this test process; model its later exit for retirement.
@@ -2109,11 +2178,17 @@ fn resume_pre_spawn_failure(
         for field in ["driver_entry_start", "helper_start", "helper_parent_start"] {
             saved[field] = json!(1);
         }
-        saved["letters"].as_array_mut().expect("letters").push(json!({"step":"next","name":"next.md","state":"placed","in_round":false,"bytes":letter.len(),"sha256":sha256(&inbox.join("next.md")).expect("letter hash"),"stop":false,"placed_at_unix_ns":2}));
+        saved["mail_birth"] = json!({"name":"fixture","uid":saved["worker_uid"],"reservation":format!("superloop-lane:{}",request.run)});
+        let birth = &saved["mail_birth"];
+        let binding = json!({"worker_uid":birth["uid"],"step":"next","sender":"alpha","recipient":format!("alpha+{}",birth["name"].as_str().expect("birth name")),"delivery":"2026-01-01T00:00:00.000Z","journal_identity":"fixture-journal","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter","bytes":letter.len(),"evidence_digest":sha256(&inbox.join("next.md")).expect("letter hash"),"stop":false});
+        saved["mail"]
+            .as_array_mut()
+            .expect("mail")
+            .push(binding.clone());
         crate::launch::publish_reservation(path, &saved).expect("settled prior round");
         fs::write(
             home.join("resume-window.json"),
-            json!({"failure":failure,"lane":lane_bin}).to_string(),
+            json!({"failure":failure,"lane":lane_bin,"binding":binding}).to_string(),
         )
         .expect("resume fixture");
         executable(
@@ -2122,7 +2197,9 @@ fn resume_pre_spawn_failure(
 import json, pathlib, sys
 home = pathlib.Path.cwd()
 f = json.loads((home / 'resume-window.json').read_text())
-if '_inspect-round' in sys.argv:
+if '_bind-mail' in sys.argv:
+    print(json.dumps(f['binding']))
+elif '_inspect-round' in sys.argv:
     if '--record' in sys.argv:
         if f['failure'].startswith('inspect'):
             sys.exit(9)
@@ -2271,7 +2348,7 @@ elif '_make-home' in args:
     print('{}')
 elif '_prepare-runtime' in args:
     if 'SUPERLOOP_MATRIX_STAGE' not in os.environ:
-        save(pathlib.Path(fixture['evidence']), {'runtime_argv': fixture['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'pending', 'rows': [{'name': 'letter', 'state': 'pending', 'target': '/home/worker/.local/inbox/dispatch.md', 'operation': 'read'}]}})
+        save(pathlib.Path(fixture['evidence']), {'runtime_argv': fixture['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'pending', 'rows': [{'name': 'letter', 'state': 'pending', 'target': '/home/worker/brief.txt', 'operation': 'read'}]}})
     print('{}')
 elif '_container-helper' in args:
     transfer = socket.socket(fileno=0)

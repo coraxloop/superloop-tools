@@ -1,6 +1,5 @@
 #![doc = include_str!("README.md")]
 
-use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -19,7 +18,16 @@ mod tests;
 #[cfg(test)]
 use monitor_lock::parse_lock;
 
-pub mod outbox;
+// Retain the capture's cost shape without scanning correspondence.
+#[derive(Default)]
+struct Cost {
+    wall: Duration,
+}
+impl Cost {
+    fn value(&self) -> Value {
+        json!({"scan_wall_ms":u64::try_from(self.wall.as_millis()).unwrap_or(u64::MAX)})
+    }
+}
 
 const COMMAND_NAME: &str = "superloop-lane";
 
@@ -83,7 +91,6 @@ pub enum FeedError {
     /// The accepted event size could not be stored after a complete delta.
     OffsetState,
     /// The durable letter stream or its follower position is invalid.
-    LetterSource,
     /// The budget delivery cursor is malformed or cannot be stored safely.
     BudgetNotice,
 }
@@ -100,7 +107,6 @@ impl FeedError {
             Self::LastMessageRead => "last_message_read_failure",
             Self::Relay => "relay_failure",
             Self::OffsetState => "offset_state_failure",
-            Self::LetterSource => "letter_source_failure",
             Self::BudgetNotice => "budget_notice_failure",
         }
     }
@@ -127,9 +133,6 @@ impl FeedError {
             Self::Relay => "superloop-lane: relay_failure: feeder document publication failed\n",
             Self::OffsetState => {
                 "superloop-lane: offset_state_failure: accepted event offset could not be stored\n"
-            }
-            Self::LetterSource => {
-                "superloop-lane: letter_source_failure: durable letter stream or position is invalid\n"
             }
             Self::BudgetNotice => {
                 "superloop-lane: budget_notice_failure: budget delivery cursor is invalid\n"
@@ -200,7 +203,7 @@ where
     }
 
     let run_dir = run_dir.ok_or_else(usage_exit)?;
-    // Access failures belong to the runtime's named outbox refusal, not argv usage.
+    // Access failures belong to runtime evidence checks, not argv usage.
     match std::fs::metadata(&run_dir) {
         Ok(meta) if meta.is_dir() => {}
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
@@ -231,18 +234,10 @@ fn usage_exit() -> CliExit {
 /// offset.
 pub fn run<W: Write>(config: &Config, output: &mut W) -> Result<(), FeedError> {
     let invoked = Instant::now();
-    let mut letters = LetterCache::default();
-    let cost = outbox::Cost::default();
+    let cost = Cost::default();
     loop {
         let mut accepted = None;
-        let result = poll_once_measured(
-            config,
-            output,
-            SystemTime::now(),
-            &cost,
-            &mut letters,
-            &mut accepted,
-        )?;
+        let result = poll_once_measured(config, output, SystemTime::now(), &cost, &mut accepted)?;
         if let Some(offset) = accepted {
             write_offset(&config.run_dir, offset)?;
         }
@@ -270,11 +265,10 @@ pub fn run<W: Write>(config: &Config, output: &mut W) -> Result<(), FeedError> {
     }
 }
 
-/// Publish the JSON capture with scan cost and independent unread-reply hand-back lines.
+/// Publish driver event and budget evidence without inspecting correspondence.
 ///
 /// # Errors
-/// Returns the existing feeder failure without acknowledging replies. Outbox refusals
-/// are independent stderr lines and never replace the capture or its exit status.
+/// Returns the existing feeder failure; ordinary mail observation is independent.
 pub fn run_with_messages(
     config: &Config,
     output: &mut impl Write,
@@ -286,98 +280,31 @@ pub fn run_with_messages(
 fn run_with_messages_wait(
     config: &Config,
     output: &mut impl Write,
-    messages: &mut impl Write,
+    _messages: &mut impl Write,
     mut wait: impl FnMut(Duration),
 ) -> Result<(), FeedError> {
     let invoked = Instant::now();
-    let mut announcements = None;
-    let mut outbox_refused = false;
-    let mut scanner = outbox::Scanner::default();
-    let mut letters = LetterCache::default();
+    let cost = Cost::default();
     loop {
-        let (replies, receipt_arrived) = if outbox_refused {
-            (Vec::new(), false)
-        } else {
-            match scanner.poll(&config.run_dir).and_then(|replies| {
-                // Preserve the scanner's named ancestor and mailbox refusals first.
-                let announced = if let Some(announced) = &mut announcements {
-                    announced
-                } else {
-                    announcements.insert(outbox::Announcements::read(&config.run_dir)?)
-                };
-                let removed = announced.reconcile(&replies, false)?;
-                Ok((replies, removed))
-            }) {
-                Ok(sample) => sample,
-                Err(error) => {
-                    outbox_refusal(messages, &error);
-                    announcements = None;
-                    outbox_refused = true;
-                    (Vec::new(), false)
-                }
-            }
-        };
         let mut accepted = None;
-        let result = poll_once_measured(
-            config,
-            output,
-            SystemTime::now(),
-            &scanner.cost,
-            &mut letters,
-            &mut accepted,
-        )?;
-        let new_reply = announcements
-            .as_ref()
-            .is_some_and(|announced| replies.iter().any(|reply| !announced.contains(reply)));
+        let result = poll_once_measured(config, output, SystemTime::now(), &cost, &mut accepted)?;
+        if let Some(offset) = accepted {
+            write_offset(&config.run_dir, offset)?;
+        }
+        if result != PollResult::Pending {
+            return Ok(());
+        }
         let remaining = if config.wait == 0 {
             SLEEP_INTERVAL
         } else {
             Duration::from_secs(config.wait).saturating_sub(invoked.elapsed())
         };
-        if new_reply || receipt_arrived || result != PollResult::Pending || remaining.is_zero() {
-            if result == PollResult::Pending {
-                let offset = read_offset(&config.run_dir).for_source_size(u64::MAX)?;
-                relay_success_cost(config, output, offset, &[], &scanner.cost)?;
-            }
-            if let Some(announced) = &mut announcements {
-                for reply in &replies {
-                    if announced.contains(reply) {
-                        writeln!(
-                            messages,
-                            "announced-before name={} at={} revision={}",
-                            reply.name, reply.at, reply.revision
-                        )
-                        .map_err(|_| FeedError::Relay)?;
-                    } else {
-                        writeln!(messages, "{reply}").map_err(|_| FeedError::Relay)?;
-                    }
-                }
-                messages.flush().map_err(|_| FeedError::Relay)?;
-                if config.save_offset
-                    && let Err(error) = announced.announced(&replies)
-                {
-                    outbox_refusal(messages, &error);
-                }
-            }
-            if let Some(offset) = accepted {
-                write_offset(&config.run_dir, offset)?;
-            }
-            return Ok(());
+        if remaining.is_zero() {
+            let offset = read_offset(&config.run_dir).for_source_size(u64::MAX)?;
+            return relay_success_cost(config, output, offset, &[], &cost);
         }
         wait(SLEEP_INTERVAL.min(remaining));
     }
-}
-
-fn outbox_refusal(messages: &mut impl Write, error: &outbox::OutboxError) {
-    // A diagnostic must not change the capture's outcome, even if stderr closes.
-    let _ignored = writeln!(
-        messages,
-        "OUTBOX REFUSAL kind={} detail=path%3D{}%20reason%3D{}",
-        error.kind,
-        lane_lifecycle::escape_mailbox_name(error.path.as_os_str().as_encoded_bytes()),
-        lane_lifecycle::escape_mailbox_name(error.reason.as_bytes())
-    );
-    let _ignored = messages.flush();
 }
 
 /// Perform one nonblocking feeder poll.
@@ -397,63 +324,22 @@ fn poll_once_at<W: Write>(
     now: SystemTime,
 ) -> Result<PollResult, FeedError> {
     let mut accepted = None;
-    let result = poll_once_measured(
-        config,
-        output,
-        now,
-        &outbox::Cost::default(),
-        &mut LetterCache::default(),
-        &mut accepted,
-    )?;
+    let result = poll_once_measured(config, output, now, &Cost::default(), &mut accepted)?;
     if let Some(offset) = accepted {
         write_offset(&config.run_dir, offset)?;
     }
     Ok(result)
 }
 
-#[derive(Default)]
-struct LetterCache {
-    stamps: Option<Vec<Option<(u64, SystemTime)>>>,
-    letters: (Vec<Value>, usize),
-}
-impl LetterCache {
-    fn read(&mut self, run: &Path) -> Result<(Vec<Value>, usize), FeedError> {
-        let stamps = [
-            "letters.jsonl",
-            ".letter-count",
-            ".letter-delivered.json",
-            ".letter-pending.json",
-        ]
-        .iter()
-        .map(|name| match fs::metadata(run.join(name)) {
-            Ok(meta) => meta
-                .modified()
-                .map(|mtime| Some((meta.len(), mtime)))
-                .map_err(|_| FeedError::LetterSource),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(FeedError::LetterSource),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-        if self.stamps.as_ref() != Some(&stamps) {
-            self.letters = unread_letters(run)?;
-            self.stamps = Some(stamps);
-        }
-        Ok(self.letters.clone())
-    }
-}
-
 fn poll_once_measured<W: Write>(
     config: &Config,
     output: &mut W,
     now: SystemTime,
-    cost: &outbox::Cost,
-    cache: &mut LetterCache,
+    cost: &Cost,
     accepted: &mut Option<u64>,
 ) -> Result<PollResult, FeedError> {
-    let (letters, letter_count) = cache.read(&config.run_dir)?;
     let delivered = read_budget_cursor(&config.run_dir)?;
     let (notices, budget_cursor) = budget_records(&config.run_dir, delivered.as_ref());
-    let has_new_letters = !letters.is_empty();
     let offset = read_offset(&config.run_dir);
     let event_source = open_event_source(&config.run_dir)?;
 
@@ -476,24 +362,18 @@ fn poll_once_measured<W: Write>(
                     now,
                     || unread_tail_is_heartbeat(&mut source, offset, size),
                 ) {
-                    if letters.is_empty() && notices.is_empty() {
+                    if notices.is_empty() {
                         return Ok(PollResult::Pending);
                     }
-                    let mut records = letters;
-                    records.extend(notices);
+                    let records = notices;
                     relay_success_cost(config, output, offset, &records, cost)?;
-                    save_delivery(config, budget_cursor.as_ref(), letter_count)?;
+                    save_delivery(config, budget_cursor.as_ref())?;
 
-                    return Ok(if has_new_letters {
-                        PollResult::Delta
-                    } else {
-                        PollResult::Budget
-                    });
+                    return Ok(PollResult::Budget);
                 }
 
                 let delta = read_delta(config, &mut source, offset, size)?;
-                let mut records = letters;
-                records.extend(notices);
+                let mut records = notices;
                 records.push(delta);
                 let result = if let Some(report) = report {
                     records.push(finished_record(config, &report)?);
@@ -506,7 +386,7 @@ fn poll_once_measured<W: Write>(
                     ensure_offset_target(&config.run_dir)?;
                 }
                 relay_success_cost(config, output, offset, &records, cost)?;
-                save_delivery(config, budget_cursor.as_ref(), letter_count)?;
+                save_delivery(config, budget_cursor.as_ref())?;
 
                 if config.save_offset {
                     *accepted = Some(size);
@@ -522,178 +402,33 @@ fn poll_once_measured<W: Write>(
     }
 
     let accepted = offset.for_source_size(u64::MAX)?;
-    if !letters.is_empty() || !notices.is_empty() {
+    if !notices.is_empty() {
         let report = read_optional_file(
             &config.run_dir.join("run-report.txt"),
             FeedError::ReportRead,
         )?;
-        let mut records = letters;
-        records.extend(notices);
+        let mut records = notices;
         let result = if let Some(report) = report {
             records.push(finished_record(config, &report)?);
-            if has_new_letters {
-                PollResult::DeltaAndFinished
-            } else {
-                PollResult::Finished
-            }
-        } else if !has_new_letters {
-            PollResult::Budget
+            PollResult::Finished
         } else {
-            PollResult::Delta
+            PollResult::Budget
         };
         relay_success_cost(config, output, accepted, &records, cost)?;
-        save_delivery(config, budget_cursor.as_ref(), letter_count)?;
+        save_delivery(config, budget_cursor.as_ref())?;
 
         return Ok(result);
     }
     emit_finished_if_ready(config, output, accepted, cost)
 }
 
-fn save_delivery(
-    config: &Config,
-    budget: Option<&BudgetCursor>,
-    letters: usize,
-) -> Result<(), FeedError> {
+fn save_delivery(config: &Config, budget: Option<&BudgetCursor>) -> Result<(), FeedError> {
     if config.save_offset {
         mark_budget_delivered(&config.run_dir, budget)?;
-        if letters > 0 {
-            write_letter_count(&config.run_dir, letters)?;
-        }
     }
     Ok(())
 }
 
-fn unread_letters(run_dir: &Path) -> Result<(Vec<Value>, usize), FeedError> {
-    let path = run_dir.join("letters.jsonl");
-    let Some(bytes) = read_optional_file(&path, FeedError::LetterSource)? else {
-        return Ok((Vec::new(), 0));
-    };
-    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        return Err(FeedError::LetterSource);
-    }
-    let records: Vec<Value> = bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_slice(line).map_err(|_error| FeedError::LetterSource))
-        .collect::<Result<_, _>>()?;
-    let count = records.len();
-    let prior = read_trimmed(&run_dir.join(".letter-count"))
-        .map_or(Some(0), |raw| parse_decimal(&raw))
-        .and_then(|number| usize::try_from(number).ok())
-        .filter(|prior| *prior <= count)
-        .ok_or(FeedError::LetterSource)?;
-    let delivered = read_delivered_letters(run_dir)?;
-    let pending = read_letter_set(run_dir, ".letter-pending.json")?;
-    let mut seen = BTreeSet::new();
-    let mut unread = Vec::new();
-    for (index, mut record) in records.into_iter().enumerate() {
-        if record["identity"]
-            .as_array()
-            .is_none_or(|parts| parts.len() != 4)
-        {
-            return Err(FeedError::LetterSource);
-        }
-        let identity = record["identity"].to_string();
-        if seen.insert(identity.clone()) && index >= prior && !delivered.contains(&identity) {
-            record["file_kind"] = record["kind"].clone();
-            record["kind"] = json!("letter");
-            if pending.contains(&identity) {
-                record["replay"] = json!(1);
-            }
-            unread.push(record);
-        }
-    }
-    Ok((unread, count))
-}
-
-fn read_delivered_letters(run_dir: &Path) -> Result<BTreeSet<String>, FeedError> {
-    read_letter_set(run_dir, ".letter-delivered.json")
-}
-
-fn read_letter_set(run_dir: &Path, name: &str) -> Result<BTreeSet<String>, FeedError> {
-    let path = run_dir.join(name);
-    let Some(bytes) = read_optional_file(&path, FeedError::LetterSource)? else {
-        return Ok(BTreeSet::new());
-    };
-    if bytes.len() > 16_777_216 {
-        return Err(FeedError::LetterSource);
-    }
-    let identities: Vec<String> =
-        serde_json::from_slice(&bytes).map_err(|_error| FeedError::LetterSource)?;
-    Ok(identities.into_iter().collect())
-}
-
-fn mark_delivered_letters(run_dir: &Path, records: &[Value]) -> Result<(), FeedError> {
-    mark_letter_set(
-        run_dir,
-        records,
-        ".letter-delivered.json",
-        ".letter-delivered",
-    )
-}
-
-fn mark_pending_letters(run_dir: &Path, records: &[Value]) -> Result<(), FeedError> {
-    mark_letter_set(run_dir, records, ".letter-pending.json", ".letter-pending")
-}
-
-fn mark_letter_set(
-    run_dir: &Path,
-    records: &[Value],
-    name: &str,
-    temporary_prefix: &str,
-) -> Result<(), FeedError> {
-    let mut delivered = read_letter_set(run_dir, name)?;
-    let mut changed = false;
-    for record in records.iter().filter(|record| record["kind"] == "letter") {
-        record["identity"]
-            .as_array()
-            .filter(|parts| parts.len() == 4)
-            .ok_or(FeedError::LetterSource)?;
-        changed |= delivered.insert(record["identity"].to_string());
-    }
-    if !changed {
-        return Ok(());
-    }
-    let path = run_dir.join(name);
-    let temporary = run_dir.join(format!(
-        "{temporary_prefix}-{}-{}.tmp",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_error| FeedError::LetterSource)?
-            .as_nanos()
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|_error| FeedError::LetterSource)?;
-    serde_json::to_writer(&mut file, &delivered).map_err(|_error| FeedError::LetterSource)?;
-    file.write_all(b"\n")
-        .and_then(|()| file.sync_all())
-        .map_err(|_error| FeedError::LetterSource)?;
-    fs::rename(&temporary, &path).map_err(|_error| FeedError::LetterSource)?;
-    File::open(run_dir)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_error| FeedError::LetterSource)
-}
-
-fn write_letter_count(run_dir: &Path, count: usize) -> Result<(), FeedError> {
-    let path = run_dir.join(".letter-count");
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if !metadata.is_file() => return Err(FeedError::LetterSource),
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_error) => return Err(FeedError::LetterSource),
-    }
-    fs::write(path, format!("{count}\n")).map_err(|_error| FeedError::LetterSource)
-}
-
-/// Decide whether the unread region may be published on this poll.
-///
-/// The cap, completion, and timestamp conditions are settled first because they
-/// cost nothing. `heartbeat_tail` is consulted last and reads the event source,
-/// so it runs only for a hold the cheaper conditions did not already release.
 fn delta_is_ready(
     unread: u64,
     cap: u64,
@@ -956,7 +691,7 @@ fn emit_finished_if_ready<W: Write>(
     config: &Config,
     output: &mut W,
     offset: u64,
-    cost: &outbox::Cost,
+    cost: &Cost,
 ) -> Result<PollResult, FeedError> {
     let Some(report) = read_optional_file(
         &config.run_dir.join("run-report.txt"),
@@ -1023,42 +758,14 @@ pub fn emit_failure_document<W: Write>(
     )
 }
 
-#[cfg(test)]
-fn relay_success<W: Write>(
-    config: &Config,
-    output: &mut W,
-    offset: u64,
-    records: &[Value],
-) -> Result<(), FeedError> {
-    relay_success_with(config, output, offset, records, || Ok(()))
-}
-
 fn relay_success_cost<W: Write>(
     config: &Config,
     output: &mut W,
     offset: u64,
     records: &[Value],
-    cost: &outbox::Cost,
+    cost: &Cost,
 ) -> Result<(), FeedError> {
     relay_success_measured(config, output, offset, records, cost, || Ok(()))
-}
-
-#[cfg(test)]
-fn relay_success_with<W: Write>(
-    config: &Config,
-    output: &mut W,
-    offset: u64,
-    records: &[Value],
-    after_flush: impl FnOnce() -> Result<(), FeedError>,
-) -> Result<(), FeedError> {
-    relay_success_measured(
-        config,
-        output,
-        offset,
-        records,
-        &outbox::Cost::default(),
-        after_flush,
-    )
 }
 
 fn relay_success_measured<W: Write>(
@@ -1066,18 +773,12 @@ fn relay_success_measured<W: Write>(
     output: &mut W,
     offset: u64,
     records: &[Value],
-    cost: &outbox::Cost,
+    cost: &Cost,
     after_flush: impl FnOnce() -> Result<(), FeedError>,
 ) -> Result<(), FeedError> {
-    if config.save_offset {
-        mark_pending_letters(&config.run_dir, records)?;
-    }
     let state = sample_state_cost(&config.run_dir, offset, cost);
     relay_records(output, Some(&state), records)?;
     after_flush()?;
-    if config.save_offset {
-        mark_delivered_letters(&config.run_dir, records)?;
-    }
     Ok(())
 }
 
@@ -1094,23 +795,15 @@ fn relay_records<W: Write>(
             .write_all(state.as_bytes())
             .map_err(|_error| FeedError::Relay)?;
     }
-    let mut seen_letters = BTreeSet::new();
     let mut written = state.is_some();
     for record in records {
-        if record["kind"] == "letter" && !seen_letters.insert(record["identity"].to_string()) {
-            continue;
-        }
         if written {
             output.write_all(b",").map_err(|_error| FeedError::Relay)?;
         }
         serde_json::to_writer(&mut *output, record).map_err(|_error| FeedError::Relay)?;
         written = true;
     }
-    let suffix: &[u8] = if records.iter().any(|record| record["kind"] == "letter") {
-        b"],\"letters\":{\"delivery\":\"at-least-once\",\"collapse_by\":\"identity\"}}"
-    } else {
-        b"]}"
-    };
+    let suffix = b"]}";
     output
         .write_all(suffix)
         .map_err(|_error| FeedError::Relay)?;
@@ -1120,10 +813,10 @@ fn relay_records<W: Write>(
 
 #[cfg(test)]
 fn sample_state(run_dir: &Path, offset: u64) -> String {
-    sample_state_cost(run_dir, offset, &outbox::Cost::default())
+    sample_state_cost(run_dir, offset, &Cost::default())
 }
 
-fn sample_state_cost(run_dir: &Path, offset: u64, cost: &outbox::Cost) -> String {
+fn sample_state_cost(run_dir: &Path, offset: u64, cost: &Cost) -> String {
     let now = SystemTime::now();
     let epoch = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let step = read_trimmed(&run_dir.join(".step-name"));
@@ -1192,10 +885,6 @@ fn sample_state_cost(run_dir: &Path, offset: u64, cost: &outbox::Cost) -> String
             serde_json::to_string(&monitor.context).expect("serializing context cannot fail"),
         )
         .expect("writing to a String cannot fail");
-        if let Some(count) = monitor.letters_observed {
-            write!(&mut state, ",\"letters_observed\":{count}")
-                .expect("writing to a String cannot fail");
-        }
         if let Some(budget) = &monitor.budget {
             let expiry = budget.expiry.as_ref().map(|expiry| {
                 json!({"wall":expiry.wall,"event_size":expiry.event_size,"last_growth":expiry.last_growth,"quiet":expiry.quiet,"state":expiry.state})
@@ -1292,7 +981,6 @@ struct MonitorState {
     awake: u64,
     awaiting: Option<String>,
     context: Option<Value>,
-    letters_observed: Option<u64>,
     budget: Option<BudgetState>,
 }
 
@@ -1502,7 +1190,7 @@ fn read_budget_cursor(run_dir: &Path) -> Result<Option<BudgetCursor>, FeedError>
     }))
 }
 
-// One grammar validates the base line and optional context, letters, and budget sections.
+// One grammar validates the base line and optional context and budget sections.
 #[allow(clippy::too_many_lines)]
 fn parse_monitor(bytes: &[u8]) -> Result<MonitorState, &'static str> {
     let line = std::str::from_utf8(bytes.strip_suffix(b"\n").ok_or("monitor-line")?)
@@ -1597,13 +1285,6 @@ fn parse_monitor(bytes: &[u8]) -> Result<MonitorState, &'static str> {
     } else {
         None
     };
-    let letters_observed =
-        if let Some(value) = next.and_then(|field| field.strip_prefix("letters_observed=")) {
-            next = fields.next();
-            Some(parse_decimal(value).ok_or("monitor-letters")?)
-        } else {
-            None
-        };
     let budget = if let Some(field) = next {
         let seconds = field
             .strip_prefix("budget=")
@@ -1687,7 +1368,6 @@ fn parse_monitor(bytes: &[u8]) -> Result<MonitorState, &'static str> {
         awake,
         awaiting,
         context,
-        letters_observed,
         budget,
     })
 }

@@ -56,7 +56,7 @@ impl Fixture {
             .expect("secure test directory");
         let fixture = Self { path };
         fixture.write_registry();
-        fixture.write_allocations("[alpha]\nuids = { base = 40000, count = 4 }\n[beta]\nuids = { base = 42000, count = 4 }\n");
+        fixture.write_allocations("[alpha]\nuids = { base = 40000, count = 4 }\nmail_gids = { base = 43000, count = 5 }\n[beta]\nuids = { base = 42000, count = 4 }\n");
         let settings_dir = fixture.path.join(".config/loops/alpha");
         fs::create_dir_all(&settings_dir).expect("settings directory");
         fs::set_permissions(&settings_dir, fs::Permissions::from_mode(0o700))
@@ -201,7 +201,7 @@ impl Fixture {
     }
 
     fn lane_dir(&self) -> PathBuf {
-        self.home().join("workers").join("rw1")
+        self.home().join("worker-homes").join("rw1")
     }
 
     fn clone_dir(&self) -> PathBuf {
@@ -229,7 +229,7 @@ impl Fixture {
         fs::write(
             self.table(),
             format!(
-                "{}\n40000\trw1\tclaude\tabc123\t2023-11-14T22:13:20Z\n",
+                "{}\n40000\trw1\tclaude\tabc123\t2023-11-14T22:13:20Z\t1\n",
                 table::HEADER
             ),
         )
@@ -313,6 +313,7 @@ fn credentials() -> WorkerCredentials {
         lane: String::from("rw1"),
         uid: 40000,
         loop_gid: 41001,
+        mail_gid: 43001,
     }
 }
 
@@ -357,7 +358,7 @@ fn the_worker_drop_names_both_gids_and_forbids_new_privileges() {
             "setpriv",
             "--reuid=40000",
             "--regid=40000",
-            "--groups=41001",
+            "--groups=41001,43001",
             "--no-new-privs",
         ]
         .map(String::from)
@@ -367,18 +368,19 @@ fn the_worker_drop_names_both_gids_and_forbids_new_privileges() {
         [
             String::from("alpha-rw1:x:40000:"),
             String::from("alpha:x:41001:alpha-rw1"),
+            String::from("alpha-rw1-mail:x:43001:alpha-rw1"),
         ]
     );
     assert_eq!(
-        credentials.passwd_line("/srv/alpha/workers/rw1/home"),
-        "alpha-rw1:x:40000:40000:alpha lane rw1:/srv/alpha/workers/rw1/home:/bin/bash"
+        credentials.passwd_line("/srv/alpha/worker-homes/rw1/home"),
+        "alpha-rw1:x:40000:40000:alpha lane rw1:/srv/alpha/worker-homes/rw1/home:/bin/bash"
     );
-    let script = inner_script(&request("/srv/alpha/workers/rw1/home", &["true"]));
+    let script = inner_script(&request("/srv/alpha/worker-homes/rw1/home", &["true"]));
     assert!(!script.contains("--clear-groups"));
-    assert!(script.contains("--groups=41001 --no-new-privs env -i"));
+    assert!(script.contains("--groups=41001,43001 --no-new-privs env -i"));
 }
 
-/// The lowest free slot is taken, and a row removed by hand frees its slot again.
+/// The pure allocator excludes its supplied occupied set; production also supplies retained mail UIDs.
 ///
 /// ´claim:runworker:allocation-takes-the-lowest-free-slot-of-a-block´
 /// ´test:crate:the-lowest-free-slot-is-taken-and-freed-again´
@@ -529,22 +531,22 @@ fn the_account_and_its_subordinate_counts_are_read_from_fixture_files() {
 /// ´test:crate:a-worker-entry-produces-the-exact-outer-and-inner-scripts´
 #[test]
 fn a_worker_entry_produces_the_exact_outer_and_inner_scripts() {
-    let request = request("/srv/alpha/workers/rw1/home", &["printf", "ok"]);
+    let request = request("/srv/alpha/worker-homes/rw1/home", &["printf", "ok"]);
     let expected_inner = concat!(
         "set -e\nt=$1\n",
         "mount --bind \"$t/passwd\" /etc/passwd\n",
         "mount --bind \"$t/group\" /etc/group\n",
         "mount --bind \"$t/ssh_config.d\" /etc/ssh/ssh_config.d\n",
-        "exec setpriv --reuid=40000 --regid=40000 --groups=41001 --no-new-privs env -i ",
-        "HOME=/srv/alpha/workers/rw1/home USER=alpha-rw1 LOGNAME=alpha-rw1 SHELL=/bin/bash ",
-        "PATH=/srv/alpha/workers/rw1/home/.local/bin:/usr/local/bin:/usr/bin:/bin ",
-        "TERM=vt100 LANG=C.UTF-8 TMPDIR=/srv/alpha/workers/rw1/home/.cache/tmp ",
-        "XDG_RUNTIME_DIR=/srv/alpha/workers/rw1/home/.run ",
-        "XDG_CONFIG_HOME=/srv/alpha/workers/rw1/home/.config ",
-        "XDG_CACHE_HOME=/srv/alpha/workers/rw1/home/.cache ",
-        "XDG_DATA_HOME=/srv/alpha/workers/rw1/home/.local/share ",
-        "XDG_STATE_HOME=/srv/alpha/workers/rw1/home/.local/state ",
-        "CLAUDE_CONFIG_DIR=/srv/alpha/workers/rw1/home/.claude printf ok"
+        "exec setpriv --reuid=40000 --regid=40000 --groups=41001,43001 --no-new-privs env -i ",
+        "HOME=/srv/alpha/worker-homes/rw1/home USER=alpha-rw1 LOGNAME=alpha-rw1 SHELL=/bin/bash ",
+        "PATH=/srv/alpha/worker-homes/rw1/home/.local/bin:/usr/local/bin:/usr/bin:/bin ",
+        "TERM=vt100 LANG=C.UTF-8 TMPDIR=/srv/alpha/worker-homes/rw1/home/.cache/tmp ",
+        "XDG_RUNTIME_DIR=/srv/alpha/worker-homes/rw1/home/.run ",
+        "XDG_CONFIG_HOME=/srv/alpha/worker-homes/rw1/home/.config ",
+        "XDG_CACHE_HOME=/srv/alpha/worker-homes/rw1/home/.cache ",
+        "XDG_DATA_HOME=/srv/alpha/worker-homes/rw1/home/.local/share ",
+        "XDG_STATE_HOME=/srv/alpha/worker-homes/rw1/home/.local/state ",
+        "CLAUDE_CONFIG_DIR=/srv/alpha/worker-homes/rw1/home/.claude printf ok"
     );
     assert_eq!(inner_script(&request), expected_inner);
     assert!(!inner_script(&request).contains(".config/loops/"));
@@ -552,10 +554,11 @@ fn a_worker_entry_produces_the_exact_outer_and_inner_scripts() {
         concat!(
             "set -e\nt=$(mktemp -d /tmp/worker-run.XXXXXX)\ncleanup() {{\n    rm -rf \"$t\"\n}}\n",
             "trap cleanup EXIT\ncat /etc/passwd > \"$t/passwd\"\n",
-            "printf '%s\\n' 'alpha-rw1:x:40000:40000:alpha lane rw1:/srv/alpha/workers/rw1/home:/bin/bash' >> \"$t/passwd\"\n",
+            "printf '%s\\n' 'alpha-rw1:x:40000:40000:alpha lane rw1:/srv/alpha/worker-homes/rw1/home:/bin/bash' >> \"$t/passwd\"\n",
             "cat /etc/group > \"$t/group\"\n",
             "printf '%s\\n' 'alpha-rw1:x:40000:' >> \"$t/group\"\n",
             "printf '%s\\n' 'alpha:x:41001:alpha-rw1' >> \"$t/group\"\n",
+            "printf '%s\\n' 'alpha-rw1-mail:x:43001:alpha-rw1' >> \"$t/group\"\n",
             "mkdir -p \"$t/ssh_config.d\"\n",
             "set +e\nunshare -m sh -c '{expected_inner}' sh \"$t\"\nrc=$?\nset -e\n",
             "rm -rf \"$t\"\ntrap - EXIT\nexit \"$rc\""
@@ -581,9 +584,9 @@ fn a_worker_entry_produces_the_exact_outer_and_inner_scripts() {
 /// ´test:crate:the-monitored-outer-script-writes-both-pids-and-notifies-at-budget´
 #[test]
 fn the_monitored_outer_script_writes_both_pids_and_notifies_at_budget() {
-    let request = request("/srv/alpha/workers/rw1/home", &["true"]);
+    let request = request("/srv/alpha/worker-homes/rw1/home", &["true"]);
     let monitor = MonitorRequest {
-        lock: String::from("/srv/alpha/workers/rw1/monitor.lock"),
+        lock: String::from("/srv/alpha/worker-homes/rw1/monitor.lock"),
         evidence: String::from("/srv/alpha/runs/40000/budget-notice.txt"),
         lane: String::from("rw1"),
         budget_seconds: 1800,
@@ -591,11 +594,11 @@ fn the_monitored_outer_script_writes_both_pids_and_notifies_at_budget() {
     };
     let script = outer_script(&request, Some(&monitor));
     let expected_body = concat!(
-        "printf '%s\\n' \"$$\" > /srv/alpha/workers/rw1/monitor.lock\nset +e\n",
+        "printf '%s\\n' \"$$\" > /srv/alpha/worker-homes/rw1/monitor.lock\nset +e\n",
         "unshare -m sh -c '",
     );
     assert!(script.contains(expected_body));
-    assert!(script.contains("' sh \"$t\" &\nchild=$!\nprintf '%s\\n' \"$child\" >> /srv/alpha/workers/rw1/monitor.lock\n"));
+    assert!(script.contains("' sh \"$t\" &\nchild=$!\nprintf '%s\\n' \"$child\" >> /srv/alpha/worker-homes/rw1/monitor.lock\n"));
     assert!(script.contains(concat!(
         "( sleep 1800; ",
         "printf 'lane=%s\\nuid=%s\\nchild=%s\\nbudget=%s\\nstate=over-budget\\naction=notify\\nobserved=%s\\n' ",
@@ -633,11 +636,11 @@ fn every_layout_row_carries_its_stated_owner_group_and_mode() {
     let placement = fixture.placement(40000, None);
     let rows = layout_plan(&placement);
     let home = fixture.home();
-    let lane = home.join("workers").join("rw1");
+    let lane = home.join("worker-homes").join("rw1");
     let worker_home = lane.join("home");
     let expected: Vec<(PathBuf, Owner, Group, u32, Stage)> = vec![
         (
-            home.join("workers"),
+            home.join("worker-homes"),
             Owner::Loop,
             Group::Loop,
             0o710,
@@ -784,7 +787,10 @@ fn identity_and_launch_records_are_byte_stable() {
     ] {
         fs::write(
             fixture.table(),
-            format!("{}\n40000\trw1\tclaude\tabc123\t{stamp}\n", table::HEADER),
+            format!(
+                "{}\n40000\trw1\tclaude\tabc123\t{stamp}\t1\n",
+                table::HEADER
+            ),
         )
         .expect("write invalid table");
         let error = table::read_rows(&fixture.table()).expect_err("invalid start refused");
@@ -794,7 +800,10 @@ fn identity_and_launch_records_are_byte_stable() {
     for stamp in ["", "2024-02-29T00:00:00Z"] {
         fs::write(
             fixture.table(),
-            format!("{}\n40000\trw1\tclaude\tabc123\t{stamp}\n", table::HEADER),
+            format!(
+                "{}\n40000\trw1\tclaude\tabc123\t{stamp}\t1\n",
+                table::HEADER
+            ),
         )
         .expect("write valid table");
         let rows = table::read_rows(&fixture.table()).expect("valid start");
@@ -877,7 +886,7 @@ fn modes_precede_ownership_and_the_clone_is_owned_recursively() {
             "unshare",
             "chmod",
             "710",
-            &fixture.home().join("workers").to_string_lossy()
+            &fixture.home().join("worker-homes").to_string_lossy()
         ]
         .map(String::from)
     );
@@ -891,7 +900,7 @@ fn modes_precede_ownership_and_the_clone_is_owned_recursively() {
             "40000:40000",
             &fixture
                 .home()
-                .join("workers")
+                .join("worker-homes")
                 .join("rw1")
                 .join("clone")
                 .to_string_lossy()
@@ -929,6 +938,7 @@ fn prepare_allocates_appends_the_row_and_clones_at_the_commit() {
     assert_eq!(
         runner.labels(),
         [
+            "mail-birth-reserve",
             "layout-install",
             "clone",
             "checkout",
@@ -937,15 +947,16 @@ fn prepare_allocates_appends_the_row_and_clones_at_the_commit() {
             "config-signing",
             "remote-remove",
             "rev-parse",
+            "mail-birth-finish",
         ]
         .map(String::from)
     );
     assert_eq!(
-        runner.commands[2].argv[5..],
+        runner.commands[3].argv[5..],
         ["checkout", "--detach", "c0ffee"].map(String::from)
     );
     assert_eq!(
-        runner.commands[7].argv,
+        runner.commands[8].argv,
         [
             "podman",
             "unshare",
@@ -959,7 +970,11 @@ fn prepare_allocates_appends_the_row_and_clones_at_the_commit() {
     );
     assert_eq!(
         fs::read_to_string(fixture.table()).expect("run table"),
-        format!("{}\n40000\trw1\t\tabc123\t\n", table::HEADER)
+        format!(
+            "{}\n40000\trw1\t\tabc123\t\t{}\n",
+            table::HEADER,
+            table::read_rows(&fixture.table()).expect("claimed row")[0].claimed
+        )
     );
     let script = runner.script("layout-install");
     assert!(script.starts_with("set -e\nmkdir -p "));
@@ -1003,15 +1018,89 @@ fn the_row_records_the_runners_rev_parse_not_the_argument() {
     assert_ne!(rows[0].commit, "c0ffee");
 }
 
-/// A clone that fails frees the slot it claimed, because no later subcommand can.
-///
-/// ´claim:runworker:a-failed-clone-frees-the-slot-it-claimed´
-/// ´test:crate:a-failed-clone-leaves-no-row´
+/// ´claim:runworker:mail-uid-history-outlives-the-run-table´
+/// ´test:crate:prepare-retains-mail-uid-history-after-the-run-table-is-empty´
 #[test]
-fn a_failed_clone_leaves_no_row() {
+fn prepare_retains_mail_uid_history_after_the_run_table_is_empty() {
+    let fixture = Fixture::new("retained-mail-uid");
+    let root = fixture.home().join(".mail-births");
+    fs::create_dir_all(&root).expect("protected receipt root");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("receipt root mode");
+    let receipt = root.join(format!(
+        "name-{}.toml",
+        loop_home::mail::journal::digest(b"worker-40000")
+    ));
+    fs::write(
+        &receipt,
+        "retired=false\n[identity]\nname='worker-40000'\nuid=40000\nreservation='superloop-lane:40000'\n",
+    )
+    .expect("other harness receipt");
+    fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).expect("receipt mode");
+    let invocation = parse_invocation(fixture.prepare_arguments()).expect("prepare");
+    let mut runner = FakeNamespace::head("abc123\n");
+    execute(
+        &invocation,
+        &fixture.environment(),
+        &mut runner,
+        &mut Vec::new(),
+    )
+    .expect("allocate next lifetime");
+    let row = table::read_rows(&fixture.table()).expect("table").remove(0);
+    assert_eq!(row.uid, 40001);
+    let birth = &runner.commands[0];
+    assert_eq!(birth.label, "mail-birth-reserve");
+    assert_eq!(
+        &birth.argv[birth.argv.len() - 4..],
+        [
+            "reserve",
+            &loop_home::mail::birth::Identity::for_reservation(
+                40001,
+                format!("worker-run:rw1:40001:{}", row.claimed)
+            )
+            .name,
+            "40001",
+            &format!("worker-run:rw1:40001:{}", row.claimed)
+        ]
+    );
+    assert!(receipt.exists());
+}
+
+/// ´claim:runworker:birth-reservation-precedes-worker-home-effects´
+/// ´test:crate:failed-mail-reservation-does-not-create-or-remove-a-worker-home´
+#[test]
+fn failed_mail_reservation_does_not_create_or_remove_a_worker_home() {
+    let fixture = Fixture::new("failed-mail-reservation");
+    let invocation = parse_invocation(fixture.prepare_arguments()).expect("prepare");
+    let mut runner = FakeNamespace {
+        statuses: VecDeque::from([2]),
+        ..FakeNamespace::default()
+    };
+    let error = execute(
+        &invocation,
+        &fixture.environment(),
+        &mut runner,
+        &mut Vec::new(),
+    )
+    .expect_err("reservation conflict");
+    assert_eq!(error.message(), "mail-birth-reserve exited 2");
+    assert_eq!(runner.labels(), ["mail-birth-reserve"]);
+    assert_eq!(
+        table::read_rows(&fixture.table())
+            .expect("closable row")
+            .len(),
+        1
+    );
+}
+
+/// Failed clone cleanup retains a row for explicit retirement of the pending mail identity.
+///
+/// ´claim:runworker:failed-clone-retains-its-closable-run-table-row´
+/// ´test:crate:a-failed-clone-keeps-a-closable-row´
+#[test]
+fn a_failed_clone_keeps_a_closable_row() {
     let fixture = Fixture::new("failed-clone");
     let mut runner = FakeNamespace {
-        statuses: VecDeque::from([0, 3]),
+        statuses: VecDeque::from([0, 0, 3]),
         ..FakeNamespace::default()
     };
     let invocation = parse_invocation(fixture.prepare_arguments()).expect("prepare parses");
@@ -1025,8 +1114,10 @@ fn a_failed_clone_leaves_no_row() {
     assert_eq!(failure.status(), 1);
     assert_eq!(failure.message(), "clone exited 3");
     assert_eq!(
-        table::read_rows(&fixture.table()).expect("run table"),
-        [] as [table::Row; 0]
+        table::read_rows(&fixture.table())
+            .expect("closable row")
+            .len(),
+        1
     );
     let labels = runner.labels();
     assert_eq!(labels.last().map(String::as_str), Some("lane-remove"));
@@ -1051,7 +1142,7 @@ fn a_failed_clone_leaves_no_row() {
 fn a_failed_cleanup_keeps_the_clones_diagnostic() {
     let fixture = Fixture::new("failed-cleanup");
     let mut runner = FakeNamespace {
-        statuses: VecDeque::from([0, 3, 9]),
+        statuses: VecDeque::from([0, 0, 3, 9]),
         ..FakeNamespace::default()
     };
     let invocation = parse_invocation(fixture.prepare_arguments()).expect("prepare parses");
@@ -1213,6 +1304,7 @@ fn sequential_prepares_take_ascending_slots_and_a_live_uid_is_refused() {
             driver: String::new(),
             commit: String::new(),
             started: String::new(),
+            claimed: "1".into(),
         },
     )
     .expect_err("a duplicate uid is refused");
@@ -1249,7 +1341,10 @@ fn launch_installs_its_rows_through_the_namespace_and_drops_last() {
         )
     );
     let labels = runner.labels();
-    assert_eq!(labels.first().map(String::as_str), Some("layout-install"));
+    assert_eq!(
+        labels.first().map(String::as_str),
+        Some("mail-birth-finish")
+    );
     assert_eq!(labels.last().map(String::as_str), Some("drop"));
     let script = runner.script("layout-install");
     let lane_dir = fixture.lane_dir();
@@ -1287,8 +1382,9 @@ fn launch_installs_its_rows_through_the_namespace_and_drops_last() {
     assert_eq!(
         fs::read_to_string(fixture.table()).expect("run table"),
         format!(
-            "{}\n40000\trw1\tclaude\tabc123\t2023-11-14T22:13:20Z\n",
-            table::HEADER
+            "{}\n40000\trw1\tclaude\tabc123\t2023-11-14T22:13:20Z\t{}\n",
+            table::HEADER,
+            table::read_rows(&fixture.table()).expect("claimed row")[0].claimed
         )
     );
     let drop_argv = runner.commands.last().expect("the drop").argv.join(" ");
@@ -1681,10 +1777,11 @@ fn allocation_refusal_escapes_control_bytes() {
 /// The deferred half of the contract is visible in the grammar rather than absent from it.
 ///
 /// ´claim:runworker:the-second-bites-subcommands-parse-and-refuse´
-/// ´test:crate:fetch-and-close-are-refused-with-a-usage-status´
+/// ´test:crate:fetch-is-refused-with-a-usage-status´
 #[test]
-fn fetch_and_close_are_refused_with_a_usage_status() {
-    for subcommand in ["fetch", "close"] {
+fn fetch_is_refused_with_a_usage_status() {
+    {
+        let subcommand = "fetch";
         let failure =
             parse_invocation([subcommand, "alpha", "rw1"]).expect_err("a second-bite subcommand");
         assert_eq!(failure.status(), 2);
@@ -1771,4 +1868,288 @@ fn an_unmapped_block_with_no_run_tree_is_refused_before_the_runner() {
         "worker block 40000:4 tops 40003 beyond the subordinate uid count 30000"
     );
     assert_eq!(runner.commands, [] as [CommandSpec; 0]);
+}
+
+/// The registry, worker allocator and mail parser share the normative production.
+///
+/// ´claim:runworker:mail-identity-consumers-have-the-same-language´
+/// ´test:crate:mail-identity-consumers-have-the-same-language´
+#[test]
+fn mail_identity_consumers_have_the_same_language() {
+    use loop_home::mail::{Address, Outgoing};
+    let fixture = Fixture::new("mail-names");
+    let long = "a".repeat(512);
+    let cases = [
+        ("0", true),
+        ("0-worker", true),
+        ("a-", true),
+        ("a--b", true),
+        ("enter", true),
+        ("letters-private", true),
+        (&long, true),
+        ("", false),
+        ("-a", false),
+        ("-", false),
+        ("A", false),
+        ("a_b", false),
+        ("a.b", false),
+        ("a+b", false),
+        ("a/b", false),
+        ("é", false),
+        ("a b", false),
+        ("a\n", false),
+        ("a\0", false),
+    ];
+    for (name, expected) in cases {
+        let registry = fixture.path.join("mail-registry.toml");
+        let quoted = serde_json::to_string(name).expect("quoted name");
+        fs::write(&registry, format!(
+            "namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{ name = {quoted}, uid = 41001, launch = \"dev/fixture\" }}]\n"
+        )).expect("registry fixture");
+        match loop_home::load_registry(&registry) {
+            Ok(_) => assert!(expected, "registry admitted {name:?}"),
+            Err(failure) => {
+                assert!(
+                    !expected,
+                    "registry refused {name:?}: {}",
+                    failure.message()
+                );
+                assert!(
+                    failure.message().starts_with("bad loop name: "),
+                    "registry {name:?}: {}",
+                    failure.message()
+                );
+            }
+        }
+        let mut arguments = fixture.prepare_arguments();
+        arguments[2] = name.to_owned();
+        match parse_invocation(arguments) {
+            Ok(_) => assert!(expected, "allocator admitted {name:?}"),
+            Err(failure) => {
+                assert!(
+                    !expected,
+                    "allocator refused {name:?}: {}",
+                    failure.message()
+                );
+                assert!(
+                    failure.message().starts_with("bad lane name: "),
+                    "allocator {name:?}: {}",
+                    failure.message()
+                );
+            }
+        }
+        // A bare plus is valid address structure, but never part of an identity.
+        assert_eq!(
+            Address::parse(&format!("alpha+{name}")).is_ok(),
+            expected,
+            "worker {name:?}"
+        );
+        assert_eq!(
+            Address::parse(&format!("{name}+worker")).is_ok(),
+            expected,
+            "loop {name:?}"
+        );
+        assert_eq!(
+            Outgoing::parse(&format!("alpha+{name}.01.letter")).is_ok(),
+            expected,
+            "outgoing {name:?}"
+        );
+    }
+}
+
+/// A lexical name remains valid when its complete backing endpoint is unavailable.
+///
+/// ´claim:runworker:mail-storage-failures-are-distinct-from-name-refusals´
+/// ´test:crate:mail-storage-failures-are-distinct-from-name-refusals´
+#[test]
+fn mail_storage_failures_are_distinct_from_name_refusals() {
+    use loop_home::mail::Address;
+    let fixture = Fixture::new("mail-storage");
+    let root = fs::File::open(&fixture.path).expect("root descriptor");
+    let address = Address::parse(&format!("0-loop+{}", "w".repeat(512))).expect("valid identity");
+    fs::create_dir_all(fixture.path.join("0-loop/workers")).expect("ancestors");
+    let failure = address
+        .open_mailbox(&root)
+        .expect_err("unrepresentable endpoint");
+    assert!(failure.to_string().contains("unavailable endpoint"));
+    assert!(!failure.to_string().contains("invalid-name"));
+    let stored = Address::parse(&format!("0-loop+{}", "w".repeat(64))).expect("long name");
+    fs::create_dir_all(fixture.path.join(stored.relative_mailbox())).expect("endpoint");
+    stored.open_mailbox(&root).expect("representable endpoint");
+    let link = Address::parse("alias").expect("lexical identity");
+    std::os::unix::fs::symlink(fixture.path.join("0-loop"), fixture.path.join("alias"))
+        .expect("hostile alias");
+    assert!(link.open_mailbox(&root).is_err());
+}
+
+/// Slug limits do not become identity limits; addresses are exact and case sensitive.
+///
+/// ´claim:runworker:mail-address-boundaries-are-unambiguous´
+/// ´test:crate:mail-address-boundaries-are-unambiguous´
+#[test]
+fn mail_address_boundaries_are_unambiguous() {
+    use loop_home::mail::{Address, Outgoing};
+    for name in ["alpha", "0-loop+0-worker"] {
+        let address = Address::parse(name).expect("address");
+        assert_eq!(address.to_string(), name);
+    }
+    for name in [
+        "alpha+",
+        "+worker",
+        "alpha+w+x",
+        "Alpha",
+        "alpha/w",
+        "a.01.letter",
+    ] {
+        assert!(Address::parse(name).is_err(), "{name}");
+    }
+    for size in [1, 64] {
+        let parsed = Outgoing::parse(&format!("0-loop+0-worker.{}.letter", "-".repeat(size)))
+            .expect("inclusive slug limit");
+        assert_eq!(parsed.recipient.worker(), Some("0-worker"));
+        assert_eq!(parsed.recipient.loop_name(), "0-loop");
+    }
+    for size in [0, 65] {
+        assert!(Outgoing::parse(&format!("alpha.{}.letter", "a".repeat(size))).is_err());
+    }
+    for name in [
+        "alpha.a.LETTER",
+        "alpha.a.b.letter",
+        "alpha.A.letter",
+        "alpha.a/1.letter",
+    ] {
+        assert!(Outgoing::parse(name).is_err(), "{name}");
+    }
+}
+
+/// ´claim:runworker:close-releases-the-row-only-after-mail-retirement´
+/// ´test:crate:close-releases-the-row-only-after-mail-retirement´
+#[test]
+fn close_releases_the_row_only_after_mail_retirement() {
+    let fixture = Fixture::new("close");
+    let prepare = parse_invocation(fixture.prepare_arguments()).expect("prepare");
+    let mut runner = FakeNamespace::head("abc123\n");
+    execute(
+        &prepare,
+        &fixture.environment(),
+        &mut runner,
+        &mut Vec::new(),
+    )
+    .expect("prepared");
+    let close = parse_invocation(["close", "alpha", "rw1"]).expect("close grammar");
+    let mut output = Vec::new();
+    execute(&close, &fixture.environment(), &mut runner, &mut output).expect("retired");
+    assert_eq!(
+        table::read_rows(&fixture.table()).expect("table"),
+        [] as [table::Row; 0]
+    );
+    assert_eq!(
+        runner.commands.last().expect("retirement").label,
+        "mail-birth-retire"
+    );
+    assert!(
+        String::from_utf8(output)
+            .expect("text")
+            .contains("uid=released")
+    );
+}
+
+/// ´claim:runworker:close-and-reprepare-reserve-distinct-worker-birth-names´
+/// ´test:crate:close-and-reprepare-reserve-distinct-worker-birth-names´
+#[test]
+fn close_and_reprepare_reserve_distinct_worker_birth_names() {
+    let fixture = Fixture::new("rebirth");
+    let prepare = parse_invocation(fixture.prepare_arguments()).expect("prepare");
+    let close = parse_invocation(["close", "alpha", "rw1"]).expect("close");
+    let mut runner = FakeNamespace::head("abc123\n");
+    execute(
+        &prepare,
+        &fixture.environment(),
+        &mut runner,
+        &mut Vec::new(),
+    )
+    .expect("first preparation");
+    let first = table::read_rows(&fixture.table())
+        .expect("first row")
+        .remove(0);
+    execute(&close, &fixture.environment(), &mut runner, &mut Vec::new()).expect("close");
+    runner.replies.push_back(b"abc123\n".to_vec());
+    execute(
+        &prepare,
+        &fixture.environment(),
+        &mut runner,
+        &mut Vec::new(),
+    )
+    .expect("second preparation");
+    let second = table::read_rows(&fixture.table())
+        .expect("second row")
+        .remove(0);
+    assert_eq!(first.uid, second.uid);
+    assert_ne!(first.claimed, second.claimed);
+    let names = runner
+        .commands
+        .iter()
+        .filter(|command| command.label == "mail-birth-reserve")
+        .map(|command| command.argv[command.argv.len() - 3].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), 2);
+    assert_ne!(names[0], names[1]);
+    let retired = runner
+        .commands
+        .iter()
+        .find(|command| command.label == "mail-birth-retire")
+        .expect("retirement command");
+    assert_eq!(retired.argv[retired.argv.len() - 3], names[0]);
+}
+
+/// ´claim:runworker:close-serializes-with-the-whole-launch-lifetime´
+/// ´test:crate:close-serializes-with-the-whole-launch-lifetime´
+#[test]
+fn close_serializes_with_the_whole_launch_lifetime() {
+    let fixture = Fixture::new("close-lock");
+    let prepare = parse_invocation(fixture.prepare_arguments()).expect("prepare");
+    let mut runner = FakeNamespace::head("abc123\n");
+    execute(
+        &prepare,
+        &fixture.environment(),
+        &mut runner,
+        &mut Vec::new(),
+    )
+    .expect("prepared");
+    let lock =
+        fs::File::create(fixture.home().join("runs/.lifetime-rw1.lock")).expect("launch lock");
+    let _lock = loop_home::mail::birth::lock_lifetime(lock).expect("live launch");
+    let close = parse_invocation(["close", "alpha", "rw1"]).expect("close grammar");
+    let error = execute(&close, &fixture.environment(), &mut runner, &mut Vec::new())
+        .expect_err("launch busy");
+    assert!(error.message().contains("lifetime is busy"));
+    assert_eq!(
+        table::read_rows(&fixture.table()).expect("retained").len(),
+        1
+    );
+}
+
+/// ´claim:runworker:launch-and-watch-refuse-legacy-execution-homes´
+/// ´test:crate:launch-and-watch-refuse-legacy-execution-homes´
+#[test]
+fn launch_and_watch_refuse_legacy_execution_homes() {
+    let fixture = Fixture::new("legacy-home");
+    fs::create_dir_all(fixture.home().join("workers/rw1")).expect("legacy home");
+    for arguments in [fixture.launch_arguments(), Fixture::watch_arguments()] {
+        let invocation = parse_invocation(arguments).expect("command");
+        let mut runner = FakeNamespace::default();
+        let error = execute(
+            &invocation,
+            &fixture.environment(),
+            &mut runner,
+            &mut Vec::new(),
+        )
+        .expect_err("legacy layout");
+        assert!(
+            error
+                .message()
+                .contains("relocate workers/rw1 to worker-homes/rw1 through the mail migration")
+        );
+        assert_eq!(runner.commands, [] as [CommandSpec; 0]);
+    }
 }

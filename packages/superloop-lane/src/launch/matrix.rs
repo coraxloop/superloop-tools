@@ -61,7 +61,7 @@ for row in request['rows']:
         result['metadata_error'] = errno.errorcode.get(error.errno, 'UNKNOWN')
     results[row['name']] = result
 if request['role'] == 'worker' and request['full']:
-    guard = '/home/worker/.local/inbox/.matrix-guard'
+    guard = '/home/worker/.matrix-guard'
     renamed = guard + '.renamed'
     protected = {}
     def check_guard(label):
@@ -229,14 +229,9 @@ fn specifications(plan: &Plan) -> Vec<(&'static str, String, &'static str, u32)>
             "read",
             0o440,
         ),
-        ("inbox", "/home/worker/.local/inbox", "traverse", 0o750),
+        ("inbox", "/home/worker", "traverse", 0o750),
         ("outbox", "/home/worker/.local/outbox", "traverse", 0o750),
-        (
-            "letter",
-            "/home/worker/.local/inbox/dispatch.md",
-            "read",
-            0o640,
-        ),
+        ("letter", "/home/worker/brief.txt", "read", 0o640),
         (
             "vendor-directory",
             "/home/worker/.local/vendor",
@@ -619,7 +614,7 @@ pub(super) fn prepare(plan: &Plan) -> Result<Value, LaneError> {
             "sibling UID equals worker UID",
         ));
     }
-    let guard = plan.home.join(".local/inbox/.matrix-guard");
+    let guard = plan.home.join(".matrix-guard");
     let _guard = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1242,7 +1237,7 @@ exit "$status"
             document: json!({"worker_uid":3000,"image_digest":"sha256:fixture","runtime_argv":["/usr/bin/podman","run","--userns=host","--user=3000:3000","--group-add=41001","--workdir","/home/worker","--name=fixture","--cidfile=/tmp/fixture.id","sha256:fixture","ignored"]}),
         };
         let rows = vec![
-            json!({"name":"letter","state":"pending","target":"/home/worker/.local/inbox/dispatch.md","operation":"read"}),
+            json!({"name":"letter","state":"pending","target":"/home/worker/brief.txt","operation":"read"}),
         ];
         let worker = canary_vector(&plan, &rows, "worker", 3001, true).expect("worker vector");
         let sibling = canary_vector(&plan, &rows, "sibling", 3001, true).expect("sibling vector");
@@ -1513,39 +1508,18 @@ exit "$status"
             home: PathBuf::new(),
             driver_dir: PathBuf::new(),
             letter: PathBuf::new(),
-            document: json!({"home":"~/home-R","driver_dir":"~/runs/R","worker_uid":worker_uid,"paths":[{"path":"~/home-R","uid":owner_uid,"gid":loop_group},{"path":"~/runs/R","kind":"directory","uid":loop_group,"gid":loop_group}],"mounts":[{"target":"/home/worker/.local/inbox/dispatch.md","source":source,"kind":"bind","access":"ro"}]}),
+            document: json!({"home":"~/home-R","driver_dir":"~/runs/R","worker_uid":worker_uid,"paths":[{"path":"~/home-R","uid":owner_uid,"gid":loop_group},{"path":"~/runs/R","kind":"directory","uid":loop_group,"gid":loop_group}],"mounts":[{"target":"/home/worker/brief.txt","source":source,"kind":"bind","access":"ro"}]}),
         };
-        let row = bound_row(
-            &plan,
-            "letter",
-            "/home/worker/.local/inbox/dispatch.md",
-            "read",
-            0o640,
-        )
-        .expect("owner source");
+        let row = bound_row(&plan, "letter", "/home/worker/brief.txt", "read", 0o640)
+            .expect("owner source");
         assert_eq!(row["owner_uid"], owner_uid);
         assert_eq!(row["bind"], "ro");
-        assert!(
-            bound_row(
-                &plan,
-                "letter",
-                "/home/worker/.local/inbox/dispatch.md",
-                "read",
-                0o660
-            )
-            .is_err()
-        );
+        assert!(bound_row(&plan, "letter", "/home/worker/brief.txt", "read", 0o660).is_err());
         plan.document["paths"][1]["uid"] = json!(worker_uid);
         assert_eq!(
-            bound_row(
-                &plan,
-                "letter",
-                "/home/worker/.local/inbox/dispatch.md",
-                "read",
-                0o640,
-            )
-            .expect_err("conflicting driver owner")
-            .kind,
+            bound_row(&plan, "letter", "/home/worker/brief.txt", "read", 0o640,)
+                .expect_err("conflicting driver owner")
+                .kind,
             "loop-identity"
         );
     }
@@ -1563,16 +1537,10 @@ exit "$status"
             home: PathBuf::new(),
             driver_dir: PathBuf::new(),
             letter: PathBuf::new(),
-            document: json!({"worker_uid":worker_uid,"paths":[{"uid":owner_uid,"gid":group_gid}],"mounts":[{"target":"/home/worker/.local/inbox/dispatch.md","source":source,"kind":"bind","access":"ro"}]}),
+            document: json!({"worker_uid":worker_uid,"paths":[{"uid":owner_uid,"gid":group_gid}],"mounts":[{"target":"/home/worker/brief.txt","source":source,"kind":"bind","access":"ro"}]}),
         };
-        let error = bound_row(
-            &plan,
-            "letter",
-            "/home/worker/.local/inbox/dispatch.md",
-            "read",
-            0o640,
-        )
-        .expect_err("missing source");
+        let error = bound_row(&plan, "letter", "/home/worker/brief.txt", "read", 0o640)
+            .expect_err("missing source");
         assert_eq!(error.kind, "bound-source");
         assert!(error.line().contains("letter"));
         assert!(error.line().contains("NotFound"));

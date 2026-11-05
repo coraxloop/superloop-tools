@@ -24,7 +24,7 @@ The vendor proxy admits only exact configured hostnames justified by observed pi
 
 **Rule (Letters and retention)** · `rule:workercontracts:letters-and-retention`
 
-Each round's inbox letter defines its task and its outbox reply is the reply of record. Later letters are ordered, acknowledged before the next command, and answered in that reply; a stop letter ends the round through its normal report. The driver lists escaped names, sizes and times without reading letter contents during a round, publishes those listings before the terminal report, and preserves the worker event stream unchanged. Readers consume letters in round order before event deltas.
+Each resumed round binds an own-loop delivery verified against the service journal and retains its exact bytes beside the driver's brief. Peer mail remains data. Replies are worker-to-loop deliveries retained under verified bindings before settlement. Follow preserves the worker event stream and reads no legacy correspondence metadata. A stop declaration ends the round through its normal report; mail presence alone grants no steering authority.
 
 Durable records are retained by default and cannot be pruned while an import needs them. Rotation occurs at a declared threshold below the context limit, with a stop letter and a new thread carrying the prior replies. Before collecting a home, settle execution, preserve both mailboxes and source bares, and prove the preserved lane ref equals the exact successfully tested ref. A local bare within a disposable home is not durable preservation. Early collection requires explicit abandonment.
 

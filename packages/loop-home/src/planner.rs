@@ -285,31 +285,20 @@ fn entry_plan_inner(
     );
     let command_uid = record.uid;
     let command_name = &record.name;
-    let execution = if !direct_argv && command.first().is_some_and(|word| word == "letters") {
-        format!(
-            "exec {} letters-private {} {} {}",
-            shell_word(&executable.to_string_lossy()),
-            shell_word(&record.name),
-            shell_word(&caller_home.to_string_lossy()),
-            command[1..]
-                .iter()
-                .map(|word| shell_word(word))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
-    } else {
-        format!(
-            "exec {setpriv} --reuid={} --regid={} --clear-groups {env_program} -i HOME=\"$h\" USER={} LOGNAME={} SHELL=/bin/bash PATH=\"{entered_path}\" TERM={} LANG={} TMPDIR={cache_home}/tmp XDG_RUNTIME_DIR=\"$h/.run\" XDG_CONFIG_HOME=\"$h/.config\" XDG_CACHE_HOME={cache_home} XDG_DATA_HOME=\"$h/.local/share\" XDG_STATE_HOME=\"$h/.local/state\" {}{}",
-            command_uid,
-            command_uid,
-            shell_word(command_name),
-            shell_word(command_name),
-            shell_word(term),
-            shell_word(lang),
-            custody_environment,
-            command_line
-        )
-    };
+    let execution = format!(
+        "mail_group=$({} _mail-group {} {})\ngroup_option=--clear-groups\nif [ -n \"$mail_group\" ]; then group_option=--groups=$mail_group; fi\nexec {setpriv} --reuid={} --regid={} \"$group_option\" {env_program} -i HOME=\"$h\" USER={} LOGNAME={} SHELL=/bin/bash PATH=\"{entered_path}\" TERM={} LANG={} TMPDIR={cache_home}/tmp XDG_RUNTIME_DIR=\"$h/.run\" XDG_CONFIG_HOME=\"$h/.config\" XDG_CACHE_HOME={cache_home} XDG_DATA_HOME=\"$h/.local/share\" XDG_STATE_HOME=\"$h/.local/state\" {}{}",
+        shell_word(&executable.to_string_lossy()),
+        shell_word(&caller_home.to_string_lossy()),
+        shell_word(&record.name),
+        command_uid,
+        command_uid,
+        shell_word(command_name),
+        shell_word(command_name),
+        shell_word(term),
+        shell_word(lang),
+        custody_environment,
+        command_line
+    );
     let inner_script = format!(
         "set -e\nt=$1\nh=$2\n{argv_setup}{custody_step}{mount} --bind \"$t/passwd\" /etc/passwd\n{mount} --bind \"$t/group\" /etc/group\n{mount} --bind \"$t/ssh_config.d\" /etc/ssh/ssh_config.d\n{pre_custody_selection}{execution}"
     );
@@ -390,12 +379,15 @@ pub fn provision_plan(
     podman: &[String],
 ) -> ProvisionPlan {
     let script = format!(
-        "{} ensure-roots {} {} {} {}",
+        "set -e\n\n{} ensure-roots {} {} {} {}\n{} _mail-provision {} {}",
         shell_word(&executable.to_string_lossy()),
         record.uid,
         shell_word(&record.name),
         shell_word(&caller_home.to_string_lossy()),
         shell_word(&report_path.to_string_lossy()),
+        shell_word(&executable.to_string_lossy()),
+        shell_word(&caller_home.to_string_lossy()),
+        shell_word(&record.name),
     );
     ProvisionPlan {
         command: CommandSpec::new(

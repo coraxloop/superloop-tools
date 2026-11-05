@@ -1,6 +1,6 @@
-//! Read each round's owner record and mailbox observations before its event region.
+//! Read each round's owner record before its event region.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{Read as _, Write};
@@ -49,41 +49,6 @@ pub fn run(
         owner_home, loop_name, run, selected, round_only, &plan, root, &runs_fd, &record,
         &identity, writer,
     )
-}
-
-/// Render one bound reservation without reopening its pathname.
-///
-/// # Errors
-///
-/// Refuses a changed identity, invalid round, or failed private evidence read.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn run_bound(
-    owner_home: &Path,
-    loop_name: &str,
-    run: &str,
-    selected: Option<&str>,
-    plan: &Plan,
-    root: &Path,
-    runs_fd: &OwnedFd,
-    record: &Value,
-    identity: &str,
-) -> Result<String, LaneError> {
-    let mut output = Vec::new();
-    run_bound_to_writer(
-        owner_home,
-        loop_name,
-        run,
-        selected,
-        false,
-        plan,
-        root,
-        runs_fd,
-        record,
-        identity,
-        &mut output,
-    )?;
-    String::from_utf8(output)
-        .map_err(|error| LaneError::operation("follow-output", error.to_string()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -626,13 +591,8 @@ fn read_private_record_with(
     }
     let pinned = home::pin_loop_round_at(&pinned_run, &plan.driver_dir, &directory, loop_uid)?;
     let pinned = File::from(pinned);
-    let letters = open_regular_at(&pinned, "letters.jsonl", "follow-letters", true)?;
     let events = open_regular_at(&pinned, "events.jsonl", "follow-events", false)?
         .ok_or_else(|| LaneError::input("follow-events", "events.jsonl is absent"))?;
-    let observations = letters.map_or_else(
-        || Ok(Vec::new()),
-        |file| parse_observations(&read_regular(file, "follow-letters")?),
-    )?;
     let events = read_regular(events, "follow-events")?;
     let group = rounds
         .iter()
@@ -641,7 +601,7 @@ fn read_private_record_with(
         .collect::<Vec<_>>();
     let validated = validate(&pinned, events.len(), loop_uid)?;
     let boundaries = boundaries_for_rounds(&validated, &group, events.len())?;
-    render(record, &observations, &events, &boundaries, Some(step))
+    render(record, &[], &events, &boundaries, Some(step))
 }
 
 fn boundaries_for_rounds(
@@ -732,47 +692,6 @@ pub(super) fn read_regular(mut file: File, kind: &'static str) -> Result<Vec<u8>
     Ok(bytes)
 }
 
-fn parse_observations(bytes: &[u8]) -> Result<Vec<Value>, LaneError> {
-    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        return Err(LaneError::input(
-            "follow-letters",
-            "durable letter stream ends in a partial line",
-        ));
-    }
-    let records: Vec<Value> = bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            serde_json::from_slice::<Value>(line)
-                .map_err(|error| LaneError::input("follow-letters", error.to_string()))
-        })
-        .collect::<Result<_, _>>()?;
-    let mut seen = BTreeSet::new();
-    let mut unique = Vec::new();
-    for record in records {
-        let identity = record["identity"]
-            .as_array()
-            .filter(|parts| parts.len() == 4)
-            .ok_or_else(|| LaneError::input("follow-letters", "letter identity is absent"))?;
-        if seen.insert(json!(identity).to_string()) {
-            unique.push(record);
-        }
-    }
-    Ok(unique)
-}
-
-fn order(name: &str, step: &str) -> (u64, String) {
-    if name == format!("{step}.md") {
-        return (0, name.to_owned());
-    }
-    let number = name
-        .strip_prefix(&format!("{step}-"))
-        .and_then(|tail| tail.strip_suffix(".md"))
-        .and_then(|tail| tail.parse::<u64>().ok())
-        .unwrap_or(u64::MAX);
-    (number, name.to_owned())
-}
-
 fn append_private_line(output: &mut String, value: &Value) -> Result<(), LaneError> {
     let line = serde_json::to_string(value)
         .map_err(|error| LaneError::operation("follow-output", error.to_string()))?;
@@ -829,7 +748,7 @@ fn newest_events(region: &[u8], start: u64) -> Result<(u64, usize, usize, Vec<Va
 #[allow(clippy::too_many_lines)]
 fn render(
     record: &Value,
-    observations: &[Value],
+    _observations: &[Value],
     events: &[u8],
     boundaries: &BTreeMap<String, (u64, u64)>,
     selected: Option<&str>,
@@ -837,9 +756,6 @@ fn render(
     let rounds = record["rounds"]
         .as_array()
         .ok_or_else(|| LaneError::input("follow-record", "round list is absent"))?;
-    let letters = record["letters"]
-        .as_array()
-        .ok_or_else(|| LaneError::input("follow-record", "letter list is absent"))?;
     let mut output = String::new();
     let mut found = false;
     for round in rounds {
@@ -850,77 +766,6 @@ fn render(
             continue;
         }
         found = true;
-        let mut observed = observations
-            .iter()
-            .filter(|item| item["round"] == step)
-            .cloned()
-            .collect::<Vec<_>>();
-        for letter in letters
-            .iter()
-            .filter(|letter| letter["step"] == step && letter["state"] != "withdrawn")
-        {
-            if let Some(name) = letter["name"].as_str()
-                && !observed
-                    .iter()
-                    .any(|item| item["box"] == "inbox" && item["name"] == name)
-            {
-                observed.push(json!({"round":step,"box":"inbox","name":name,"bytes":letter["bytes"],"at":null,"line":null}));
-            }
-        }
-        if let Some(acks) = round["in_round_letters"].as_array() {
-            for ack in acks {
-                if let Some(name) = ack["letter"].as_str()
-                    && !ack["acknowledgment"].is_null()
-                    && !observed
-                        .iter()
-                        .any(|item| item["box"] == "outbox" && item["name"] == name)
-                {
-                    observed.push(json!({"round":step,"box":"outbox","name":name,"bytes":ack["acknowledgment"]["bytes"],"at":null,"line":null}));
-                }
-            }
-        }
-        let reply_name = format!("{step}.md");
-        if round["phase"] == "settled"
-            && !round["reply"].is_null()
-            && !observed
-                .iter()
-                .any(|item| item["box"] == "outbox" && item["name"] == reply_name)
-        {
-            observed.push(json!({"round":step,"box":"outbox","name":reply_name,"bytes":round["reply"]["bytes"],"at":null,"line":null}));
-        }
-        observed.sort_by_key(|item| {
-            (
-                u8::from(item["box"] != "inbox"),
-                order(item["name"].as_str().unwrap_or_default(), step),
-                item["revision"].as_u64().unwrap_or_default(),
-            )
-        });
-        let ack_times = observed
-            .iter()
-            .filter(|item| item["box"] == "outbox" && item["state"] == "complete")
-            .filter_map(|item| {
-                Some((
-                    item["name"].as_str()?.to_owned(),
-                    item["at"].as_str()?.to_owned(),
-                ))
-            })
-            .collect::<BTreeMap<_, _>>();
-        for item in &observed {
-            let box_name = item["box"]
-                .as_str()
-                .ok_or_else(|| LaneError::input("follow-letters", "box is absent"))?;
-            let name = item["name"]
-                .as_str()
-                .ok_or_else(|| LaneError::input("follow-letters", "name is absent"))?;
-            let placed = letters.iter().find(|letter| {
-                letter["step"] == step && letter["name"] == name && letter["state"] != "withdrawn"
-            });
-            let line = json!({"kind":"letter","round":step,"box":box_name,"name":name,"bytes":item["bytes"],"state":item["state"],"revision":item["revision"],
-                "placement_at_unix_ns":placed.map_or(Value::Null, |letter| letter["placed_at_unix_ns"].clone()),
-                "observed_at":item["at"],"acknowledged_at":if box_name == "inbox" { ack_times.get(name).map_or(Value::Null, |at| json!(at)) } else if name != reply_name && item["state"] == "complete" { item["at"].clone() } else { Value::Null },
-                "line":item["line"]});
-            append_private_line(&mut output, &line)?;
-        }
         if round["phase"] == "failed" {
             let status = json!({"kind":"round-status","round":step,"phase":"failed","error":round["settlement_error"]});
             append_private_line(&mut output, &status)?;
@@ -954,6 +799,7 @@ fn render(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::collections::BTreeSet;
     use std::fs;
     use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::PermissionsExt as _;
@@ -1015,7 +861,7 @@ mod tests {
     /// ´test:unit:follow-renders-wrong-thread-failure-without-reply-of-record´
     #[test]
     fn follow_renders_wrong_thread_failure_without_reply_of_record() {
-        let record = json!({"rounds":[{"step":"review","phase":"failed","reply":{"bytes":4,"sha256":"digest"},"settlement_error":"round-thread: step thread thread-2 differs from reservation thread-1"}],"letters":[]});
+        let record = json!({"rounds":[{"step":"review","phase":"failed","reply":{"bytes":4,"sha256":"digest"},"settlement_error":"round-thread: step thread thread-2 differs from reservation thread-1"}],"mail":[]});
         let bounds = BTreeMap::from([("review".to_owned(), (0, 3))]);
         let output = render(&record, &[], b"{}\n", &bounds, None).expect("failed round");
         let lines = output
@@ -1028,164 +874,6 @@ mod tests {
         assert_eq!(lines[0]["error"], record["rounds"][0]["settlement_error"]);
         assert_eq!(lines[1]["kind"], "event-delta");
         assert!(!output.contains("\"kind\":\"letter\""));
-    }
-
-    /// ´test:unit:follow-collapses-replayed-letter-identity´
-    #[test]
-    fn follow_collapses_replayed_letter_identity() {
-        let fixture = tempfile::tempdir_in("/tmp").expect("fixture");
-        let path = fixture.path().join("letters.jsonl");
-        let letter = json!({"round":"dispatch","box":"inbox","name":"dispatch.md","bytes":4,
-            "at":"2026-10-07T00:00:00Z","identity":["inbox","dispatch.md",4,"2026-10-07T00:00:00Z"],
-            "line":"LETTER box=inbox name=dispatch.md bytes=4 at=2026-10-07T00:00:00Z id=1\n"});
-        let mut replay = letter.clone();
-        replay["line"] = json!(
-            "LETTER box=inbox name=dispatch.md bytes=4 at=2026-10-07T00:00:00Z id=1 replay=1\n"
-        );
-        fs::write(&path, format!("{letter}\n{replay}\n")).expect("durable records");
-        let observations = parse_observations(&fs::read(&path).expect("durable bytes"))
-            .expect("deduplicated observations");
-        assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0]["identity"], letter["identity"]);
-    }
-
-    /// ´test:unit:follow-renders-the-pinned-letter-after-a-rename-replacement´
-    #[test]
-    fn follow_renders_the_pinned_letter_after_a_rename_replacement() {
-        let fixture = tempfile::tempdir_in("/tmp").expect("fixture");
-        let directory = File::open(fixture.path()).expect("pinned step");
-        let old = json!({"round":"dispatch","box":"inbox","name":"dispatch.md","bytes":3,
-            "state":"complete","revision":1,"at":"2026-10-07T00:00:00Z",
-            "identity":["inbox","dispatch.md",3,"2026-10-07T00:00:00Z"],"line":"old pinned letter"});
-        fs::write(fixture.path().join("letters.jsonl"), format!("{old}\n"))
-            .expect("first letters file");
-        let held = open_regular_at(&directory, "letters.jsonl", "follow-letters", false)
-            .expect("open letters")
-            .expect("held letters");
-        let replacement = json!({"round":"dispatch","box":"inbox","name":"other.md","bytes":3,
-            "state":"complete","revision":1,"at":"2026-10-07T00:00:01Z",
-            "identity":["inbox","other.md",3,"2026-10-07T00:00:01Z"],"line":"new pathname"});
-        fs::write(
-            fixture.path().join("replacement"),
-            format!("{replacement}\n"),
-        )
-        .expect("replacement bytes");
-        fs::rename(
-            fixture.path().join("replacement"),
-            fixture.path().join("letters.jsonl"),
-        )
-        .expect("replace after pin");
-        let observations = parse_observations(
-            &read_regular(held, "follow-letters").expect("read held descriptor"),
-        )
-        .expect("pinned observations");
-        let record = json!({"rounds":[{"step":"dispatch"}],"letters":[]});
-        let boundaries = BTreeMap::from([("dispatch".to_owned(), (0, 3))]);
-        let rendered = render(&record, &observations, b"{}\n", &boundaries, None)
-            .expect("render pinned letter");
-        assert!(rendered.contains("old pinned letter"));
-        assert!(!rendered.contains("new pathname"));
-    }
-
-    /// ´test:unit:follow-renders-replacement-after-withdrawal´
-    #[test]
-    fn follow_renders_replacement_after_withdrawal() {
-        let record = json!({"rounds":[{"step":"verify-1"}],"letters":[
-            {"step":"verify-1","name":"verify-1.md","state":"withdrawn","bytes":3,"placed_at_unix_ns":11},
-            {"step":"verify-1","name":"verify-1.md","state":"placed","bytes":12,"placed_at_unix_ns":22}
-        ]});
-        let boundaries = BTreeMap::from([("verify-1".to_owned(), (0, 3))]);
-        let output = render(&record, &[], b"{}\n", &boundaries, Some("verify-1"))
-            .expect("replacement render");
-        let letters = output
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).expect("record"))
-            .filter(|line| line["kind"] == "letter")
-            .collect::<Vec<_>>();
-        assert_eq!(letters.len(), 1);
-        assert_eq!(letters[0]["bytes"], 12);
-        assert_eq!(letters[0]["placement_at_unix_ns"], 22);
-    }
-
-    /// ´test:unit:follow-orders-two-rounds-and-numbered-letter-before-events´
-    #[test]
-    fn follow_orders_two_rounds_and_numbered_letter_before_events() {
-        let record = json!({"rounds":[{"step":"dispatch"},{"step":"review"}],"letters":[
-            {"step":"dispatch","name":"dispatch.md","placed_at_unix_ns":1},
-            {"step":"review","name":"review.md","placed_at_unix_ns":2},
-            {"step":"review","name":"review-1.md","placed_at_unix_ns":3}]});
-        let observations = [
-            json!({"round":"review","box":"outbox","name":"review-1.md","bytes":2,"state":"complete","at":"2026-10-07T00:00:04Z","line":"ack"}),
-            json!({"round":"review","box":"inbox","name":"review-1.md","bytes":3,"at":"2026-10-07T00:00:03Z","line":"numbered"}),
-            json!({"round":"dispatch","box":"inbox","name":"dispatch.md","bytes":4,"at":"2026-10-07T00:00:01Z","line":"first"}),
-            json!({"round":"review","box":"inbox","name":"review.md","bytes":5,"at":"2026-10-07T00:00:02Z","line":"second"}),
-        ];
-        let events = b"{\"event\":1}\n{\"event\":2}\n";
-        let bounds = BTreeMap::from([
-            ("dispatch".to_owned(), (0, 12)),
-            ("review".to_owned(), (12, 24)),
-        ]);
-        let lines = render(&record, &observations, events, &bounds, None).expect("follow");
-        let kinds = lines
-            .lines()
-            .map(|line| {
-                let value: Value = serde_json::from_str(line).expect("record");
-                (
-                    value["kind"].as_str().unwrap_or_default().to_owned(),
-                    value["round"].as_str().unwrap_or_default().to_owned(),
-                    value["name"].as_str().unwrap_or_default().to_owned(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            kinds,
-            vec![
-                ("letter".into(), "dispatch".into(), "dispatch.md".into()),
-                ("event-delta".into(), "dispatch".into(), String::new()),
-                ("letter".into(), "review".into(), "review.md".into()),
-                ("letter".into(), "review".into(), "review-1.md".into()),
-                ("letter".into(), "review".into(), "review-1.md".into()),
-                ("event-delta".into(), "review".into(), String::new())
-            ]
-        );
-        let numbered: Value = serde_json::from_str(lines.lines().nth(3).expect("numbered letter"))
-            .expect("numbered record");
-        assert_eq!(numbered["acknowledged_at"], "2026-10-07T00:00:04Z");
-    }
-
-    /// ´test:unit:follow-acknowledges-only-a-complete-outbox-record´
-    #[test]
-    fn follow_acknowledges_only_a_complete_outbox_record() {
-        let record = json!({"rounds":[{"step":"review"}],"letters":[{"step":"review","name":"review-1.md","placed_at_unix_ns":1}]});
-        let mut observations = vec![
-            json!({"round":"review","box":"inbox","name":"review-1.md","bytes":4,"state":"complete","at":"2026-10-07T00:00:01Z"}),
-            json!({"round":"review","box":"outbox","name":"review-1.md","bytes":2,"state":"observed","revision":1,"at":"2026-10-07T00:00:02Z"}),
-        ];
-        let boundaries = BTreeMap::from([("review".to_owned(), (0, 3))]);
-        let partial =
-            render(&record, &observations, b"{}\n", &boundaries, None).expect("observation");
-        let partial_records = partial
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).expect("line"))
-            .collect::<Vec<_>>();
-        assert_eq!(partial_records[0]["acknowledged_at"], Value::Null);
-        assert_eq!(partial_records[1]["acknowledged_at"], Value::Null);
-        observations.push(json!({"round":"review","box":"outbox","name":"review-1.md","bytes":4,"state":"complete","revision":2,"at":"2026-10-07T00:00:03Z"}));
-        let complete =
-            render(&record, &observations, b"{}\n", &boundaries, None).expect("completion");
-        let complete_records = complete
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).expect("line"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            complete_records[0]["acknowledged_at"],
-            "2026-10-07T00:00:03Z"
-        );
-        assert_eq!(complete_records[1]["acknowledged_at"], Value::Null);
-        assert_eq!(
-            complete_records[2]["acknowledged_at"],
-            "2026-10-07T00:00:03Z"
-        );
     }
 
     /// ´test:unit:public-follow-renders-running-round-from-recorded-directory´
@@ -1223,7 +911,7 @@ mod tests {
         };
         let loop_uid = Uid::effective().as_raw();
         let worker_uid = if loop_uid == 3000 { 3001 } else { 3000 };
-        let reservation = json!({"schema":1,"phase":"preparing","worker_uid":worker_uid,"loop":"alpha","run":"R","plan":{"home":plan.home,"driver_dir":run_root,"paths":[{"path":plan.home,"uid":loop_uid,"gid":loop_uid},{"path":run_root,"kind":"directory","uid":loop_uid,"gid":loop_uid}]},"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}],"letters":[{"step":"dispatch","name":"dispatch.md","placed_at_unix_ns":1}]});
+        let reservation = json!({"schema":1,"phase":"preparing","worker_uid":worker_uid,"loop":"alpha","run":"R","plan":{"home":plan.home,"driver_dir":run_root,"paths":[{"path":plan.home,"uid":loop_uid,"gid":loop_uid},{"path":run_root,"kind":"directory","uid":loop_uid,"gid":loop_uid}]},"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}],"mail":[{"step":"dispatch","name":"dispatch.md","placed_at_unix_ns":1}]});
         let reservation_path = super::super::reservation_path(&reservation_root, "R");
         super::super::publish_reservation(&reservation_path, &reservation).expect("reservation");
         let bound_runs: OwnedFd = File::open(&reservation_root)
@@ -1301,10 +989,9 @@ mod tests {
         assert_eq!(lines[0]["round"], "dispatch");
         assert_eq!(lines[0]["driver_dir"], json!(step_dir));
         assert_eq!(lines[0]["phase"], "running");
-        assert_eq!(lines[1]["kind"], "letter");
-        assert_eq!(lines[1]["name"], "dispatch.md");
-        assert_eq!(lines[2]["kind"], "event-delta");
-        assert_eq!(lines[2]["events"][0]["thread_id"], "thread-1");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["kind"], "event-delta");
+        assert_eq!(lines[1]["events"][0]["thread_id"], "thread-1");
         let large_events = format!(
             "{}{{\"seq\":\"newest\"}}\n",
             "{\"seq\":\"old\",\"data\":\"xxxxxxxxxxxxxxxx\"}\n".repeat(20_000)
@@ -1331,57 +1018,46 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).expect("bounded record"))
             .collect::<Vec<_>>();
-        assert_eq!(bounded_lines.len(), 3);
+        assert_eq!(bounded_lines.len(), 2);
         assert_eq!(bounded_lines[0]["kind"], "round");
-        assert_eq!(bounded_lines[1]["kind"], "letter");
-        assert_eq!(bounded_lines[2]["kind"], "event-delta");
+        assert_eq!(bounded_lines[1]["kind"], "event-delta");
         assert_eq!(
-            bounded_lines[2]["events"]
+            bounded_lines[1]["events"]
                 .as_array()
                 .expect("events")
                 .last()
                 .expect("newest")["seq"],
             "newest"
         );
-        let omitted_events = bounded_lines[2]["omitted_events"].as_u64().expect("count");
-        let kept_events = bounded_lines[2]["events"].as_array().expect("events");
+        let omitted_events = bounded_lines[1]["omitted_events"].as_u64().expect("count");
+        let kept_events = bounded_lines[1]["events"].as_array().expect("events");
         assert!(omitted_events > 0);
         assert_eq!(
             usize::try_from(omitted_events).expect("count fits") + kept_events.len(),
             20_001
         );
-        assert_eq!(bounded_lines[2]["omitted_bytes"], 40 * omitted_events);
+        assert_eq!(bounded_lines[1]["omitted_bytes"], 40 * omitted_events);
         assert!(
             serde_json::to_string(kept_events)
                 .expect("events array")
                 .len()
                 <= MAX_EVENT_DELTA_BYTES
         );
-        assert_eq!(bounded_lines[2]["start"], bounded_lines[2]["omitted_bytes"]);
-        assert_eq!(bounded_lines[2]["end"], large_events.len());
+        assert_eq!(bounded_lines[1]["start"], bounded_lines[1]["omitted_bytes"]);
+        assert_eq!(bounded_lines[1]["end"], large_events.len());
         assert!(bounded.len() < MAX_PRIVATE_RESPONSE_BYTES);
-        let mut oversized_letter = observation.clone();
-        oversized_letter["line"] = json!("x".repeat(MAX_PRIVATE_RESPONSE_BYTES));
-        fs::write(
-            step_dir.join("letters.jsonl"),
-            format!("{oversized_letter}\n"),
-        )
-        .expect("oversized letter observation");
-        let mut refused = Vec::new();
-        let error = run_from_record(
+        fs::write(step_dir.join("letters.jsonl"), b"not legacy metadata").expect("inert sidecar");
+        let mut ignored = Vec::new();
+        run_from_record(
             &plan,
             &saved,
             Some("dispatch"),
-            &mut refused,
+            &mut ignored,
             false,
             |step, directory| read_private_record(&plan, &saved, step, directory),
         )
-        .expect_err("letter line exceeds private response cap");
-        assert_eq!(error.kind, "follow-output");
-        assert!(error.detail.contains("1572864"));
-        assert!(String::from_utf8_lossy(&refused).contains("\"kind\":\"round\""));
-        fs::write(step_dir.join("letters.jsonl"), format!("{observation}\n"))
-            .expect("restore letter observation");
+        .expect("legacy metadata is never read");
+        assert_eq!(ignored, bounded.as_bytes());
         let before_driver = saved.clone();
         assert_link_refusals(&plan, &saved, &step_dir);
         let mut foreign = saved.clone();
@@ -1624,7 +1300,7 @@ mod tests {
             document: json!({}),
         };
         let loop_uid = Uid::effective().as_raw();
-        let record = json!({"loop":"alpha","run":"R","plan":{"home":plan.home,"driver_dir":root,"paths":[{"path":plan.home,"uid":loop_uid,"gid":loop_uid},{"path":root,"kind":"directory","uid":loop_uid,"gid":loop_uid}]},"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}],"letters":[]});
+        let record = json!({"loop":"alpha","run":"R","plan":{"home":plan.home,"driver_dir":root,"paths":[{"path":plan.home,"uid":loop_uid,"gid":loop_uid},{"path":root,"kind":"directory","uid":loop_uid,"gid":loop_uid}]},"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}],"mail":[]});
         let home_anchor = File::open(fixture.path()).expect("home anchor");
         let runs_anchor = File::open(&runs).expect("runs anchor");
         let _private = home::activate_private_launch(
@@ -1683,31 +1359,6 @@ mod tests {
             .expect_err("writable archive refuses by real metadata");
         assert_eq!(error.kind, "follow-boundary");
         assert!(error.detail.contains("mode 0777"));
-    }
-
-    /// ´test:unit:follow-renders-observation-revisions-before-completion-and-events´
-    #[test]
-    fn follow_renders_observation_revisions_before_completion_and_events() {
-        let record = json!({"rounds":[{"step":"dispatch","reply":{"bytes":12}}],"letters":[]});
-        let observations = [
-            json!({"round":"dispatch","box":"outbox","name":"dispatch.md","bytes":12,"revision":3,"state":"complete","at":"2026-10-07T00:00:03Z","line":"complete"}),
-            json!({"round":"dispatch","box":"outbox","name":"dispatch.md","bytes":5,"revision":1,"state":"observed","at":"2026-10-07T00:00:01Z","line":"first"}),
-            json!({"round":"dispatch","box":"outbox","name":"dispatch.md","bytes":12,"revision":2,"state":"observed","at":"2026-10-07T00:00:02Z","line":"growth"}),
-        ];
-        let bounds = BTreeMap::from([("dispatch".to_owned(), (0, 3))]);
-        let rendered = render(&record, &observations, b"{}\n", &bounds, None).expect("follow");
-        let lines = rendered
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).expect("record"))
-            .collect::<Vec<_>>();
-        assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0]["revision"], 1);
-        assert_eq!(lines[0]["state"], "observed");
-        assert_eq!(lines[1]["revision"], 2);
-        assert_eq!(lines[1]["state"], "observed");
-        assert_eq!(lines[2]["revision"], 3);
-        assert_eq!(lines[2]["state"], "complete");
-        assert_eq!(lines[3]["kind"], "event-delta");
     }
 
     /// ´test:unit:follow-refuses-a-broken-archived-boundary-chain´

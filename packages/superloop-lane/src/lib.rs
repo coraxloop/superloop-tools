@@ -265,10 +265,11 @@ fn load_plan_with_door(
         &row.to_registry_json_with_runs_root(registry_file.runs_root(loop_name)),
     )
     .map_err(|error| LaneError::input("registry-row", error.to_string()))?;
-    let worker_block = home::read_allocations(home)?
+    let allocations = home::read_allocations(home)?;
+    let worker_block = allocations
         .require(loop_name)
         .map_err(|error| LaneError::input("allocations", error.message()))?;
-    let plan = if include_door {
+    let mut plan = if include_door {
         Plan::build(
             home,
             loop_name,
@@ -289,6 +290,24 @@ fn load_plan_with_door(
             caller,
         )?
     };
+    // Read-only legacy plans remain inspectable before mail provisioning.
+    if allocations.mail_group(loop_name, None).is_ok() {
+        let group = allocations
+            .mail_group(loop_name, Some(worker_block.base))
+            .map_err(|error| LaneError::input("mail-group", error.message()))?;
+        plan.select_mail_group(group)?;
+        if let Some(service) = allocations.mail_uid() {
+            let identity = loop_home::mail::birth::Identity::for_reservation(
+                worker_block.base,
+                format!("superloop-lane:{run}"),
+            );
+            plan.select_mailbox(
+                &row.home.join("workers").join(&identity.name).join("mail"),
+                &identity,
+                service,
+            )?;
+        }
+    }
     Ok((plan, settings))
 }
 

@@ -2215,3 +2215,64 @@ fn assert_census_refusal(fixture: &Fixture, detail: &str) {
     assert!(!error.contains("census rewrite"), "{error}");
     assert!(!error.contains("recovery:"), "{error}");
 }
+
+/// ´claim:superlooplane:mail-migration-census-exposes-retained-home-custody-through-entry´
+/// ´test:integration:mail-migration-census-exposes-retained-home-custody-through-entry´
+#[test]
+fn mail_migration_census_exposes_retained_home_custody_through_entry() {
+    let fixture = Fixture::new();
+    let parent = fixture.home.path().join(".cache/tmp");
+    directory(&parent);
+    for run in ["R", "S"] {
+        let record_path = fixture.runs.join(format!(".reservation-{run}.json"));
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&record_path).expect("record")).expect("JSON");
+        let home = parent.join(format!("lane-alpha-{run}"));
+        directory(&home);
+        record["plan"] = json!({"home":home,"driver_dir":fixture.runs.join(run)});
+        write(&record_path, record.to_string());
+    }
+    let archived = parent.join("archived");
+    directory(&archived);
+    directory(&archived.join(".local/inbox"));
+    write(&archived.join(".local/inbox/opaque"), [0, 255, 10]);
+    let info = fs::metadata(&archived).expect("retained identity");
+    let target = parent.join(format!(".retired-R-1-{}-{}", info.dev(), info.ino()));
+    fs::rename(archived, &target).expect("recorded move");
+    let record_path = fixture.runs.join(".retired-R-20-1-2");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&record_path).expect("record")).expect("JSON");
+    record["plan"] =
+        json!({"home":parent.join("lane-alpha-R"),"driver_dir":fixture.runs.join("R")});
+    record["current_retirement"]["planned_paths"] =
+        json!([{"source":parent.join("lane-alpha-R"),"target":target}]);
+    write(&record_path, record.to_string());
+    let report = success(&fixture.invoke(&["census", "alpha", "--mail-migration"]));
+    let rows = report["mail_migration"]["records"]
+        .as_array()
+        .expect("inventory rows");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(report["mail_migration"]["activation_verified"], false);
+    let archived = rows
+        .iter()
+        .find(|row| row["record"] == record_path.to_string_lossy().as_ref())
+        .expect("retired row");
+    assert_eq!(
+        archived["homes"][0]["path"],
+        target.to_string_lossy().as_ref()
+    );
+    assert_eq!(archived["homes"][0]["required"], true);
+    assert_eq!(
+        archived["homes"][0]["stores"],
+        json!([target.join(".local/inbox"), target.join(".local/outbox")])
+    );
+    assert_eq!(
+        fs::read(target.join(".local/inbox/opaque")).expect("unread opaque bytes"),
+        [0, 255, 10]
+    );
+    fs::rename(&target, parent.join("retained-but-missing-from-name")).expect("replace witness");
+    directory(&target);
+    let refused = fixture.invoke(&["census", "alpha", "--mail-migration"]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("protected rename witness"));
+}

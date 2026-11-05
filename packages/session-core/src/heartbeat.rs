@@ -684,38 +684,16 @@ impl<'a> Context<'a> {
             | State::ComposeViolation
             | State::ComposeViolationAndPrompt
             | State::ComposeLapse
-            | State::ComposeLapseAndViolation => self.prepare_composition(state),
+            | State::ComposeLapseAndViolation => {
+                self.failure.take();
+                self.letters_may_block = false;
+                Ok(())
+            }
             State::Toggle if self.flag == FlagState::Unknown => self.prepare_toggle(),
             State::Transcript => self.prepare_transcript(),
             State::Resolve if self.resolution == Resolution::Unknown => self.prepare_resolution(),
             _ => Ok(()),
         }
-    }
-
-    fn prepare_composition(&mut self, state: State) -> Result<(), FailureClass> {
-        self.prepare_letters_block(state)
-    }
-
-    fn prepare_letters_block(&mut self, state: State) -> Result<(), FailureClass> {
-        let heartbeat_failed = self.failure.take().is_some();
-        self.letters_may_block = false;
-        if heartbeat_failed
-            || !matches!(self.letters, crate::letters::Listing::Unread(_))
-            || matches!(state, State::ComposeLapse | State::ComposeLapseAndViolation)
-        {
-            return Ok(());
-        }
-        // An OFF heartbeat never needed the transcript or counter. A letters
-        // block does: use the same session/turn key, never a second counter.
-        if self.resolution == Resolution::Unknown {
-            self.prepare_payload_fields()?;
-            self.entries = self.observations.load(&self.transcript_path)?;
-            self.marker = user_turn_marker(&self.entries)?;
-            self.count = read_count(self.state_dir, self.session_key(), &self.marker)?;
-        }
-        self.letters_may_block =
-            self.retry_phase == RetryPhase::Inactive && self.count < MAX_BLOCKS_PER_TURN;
-        Ok(())
     }
 
     fn prepare_toggle(&mut self) -> Result<(), FailureClass> {
@@ -779,10 +757,7 @@ impl<'a> Context<'a> {
             Guard::Malformed => self.classification == Classification::Malformed,
             Guard::Accepted => self.classification == Classification::Accepted,
             Guard::LettersEmpty => matches!(self.letters, crate::letters::Listing::Empty),
-            Guard::LettersUnread => matches!(
-                self.letters,
-                crate::letters::Listing::Unread(_) | crate::letters::Listing::History(_)
-            ),
+            Guard::LettersUnread => matches!(self.letters, crate::letters::Listing::Notice),
             Guard::LettersFailed => matches!(self.letters, crate::letters::Listing::Failed(_)),
             Guard::NoLettersFeedback => {
                 self.failure.is_none() && matches!(self.letters, crate::letters::Listing::Empty)
@@ -1106,11 +1081,6 @@ fn read_warning(state_dir: &Path, session: &str, marker: &str) -> Result<bool, F
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err(FailureClass::StateRead),
     }
-}
-
-fn user_turn_marker(entries: &[Entry]) -> Result<String, FailureClass> {
-    Ok(last_user_turn_index(entries)?
-        .map_or_else(|| String::from("None"), |index| index.to_string()))
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), FailureClass> {

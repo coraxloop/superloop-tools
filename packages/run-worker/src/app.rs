@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -245,6 +245,48 @@ fn namespaced(podman: &[String], words: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+fn mail_birth<R: Runner>(
+    runner: &mut R,
+    environment: &Environment,
+    loop_name: &str,
+    row: &table::Row,
+    phase: &str,
+) -> Result<(), WorkerError> {
+    let executable = std::env::current_exe()
+        .map_err(|error| WorkerError::runtime(format!("worker birth executable: {error}")))?;
+    let uid = row.uid;
+    let identity = loop_home::mail::birth::Identity::for_reservation(
+        uid,
+        format!("worker-run:{}:{uid}:{}", row.lane, row.claimed),
+    );
+    let command = CommandSpec {
+        label: format!("mail-birth-{phase}"),
+        argv: namespaced(
+            &environment.podman,
+            vec![
+                executable.to_string_lossy().into_owned(),
+                if phase == "retire-home" {
+                    "_mail-worker-home".into()
+                } else {
+                    "_mail-worker-birth".into()
+                },
+                environment.caller_home.to_string_lossy().into_owned(),
+                loop_name.into(),
+                if phase == "retire-home" {
+                    row.lane.clone()
+                } else {
+                    phase.into()
+                },
+                identity.name,
+                uid.to_string(),
+                identity.reservation,
+            ],
+        ),
+        io: IoMode::Inherit,
+    };
+    run_one(runner, &command).map(|_| ())
+}
+
 fn git(label: &str, podman: &[String], words: Vec<String>) -> CommandSpec {
     CommandSpec {
         label: String::from(label),
@@ -403,12 +445,20 @@ fn prepare<R: Runner, W: io::Write>(
         &environment.caller_home,
         &allocations,
     );
-    allocation(worker_block, &[], &reservations, account.uid, limits)?;
+    let retained =
+        loop_home::mail::worker_provision::reserved_uids(&environment.caller_home, &selected.name)
+            .map_err(|error| WorkerError::refusal(format!("worker birth history: {error}")))?;
+    let retained = retained.into_iter().collect::<Vec<_>>();
+    allocation(worker_block, &retained, &reservations, account.uid, limits)?;
     let table_path = ensure_run_tree(runner, environment, &selected.home, account.uid)?;
     let claimed = table::claim_slot(&table_path, lane, |taken| {
-        allocation(worker_block, taken, &reservations, account.uid, limits)
+        let mut occupied = retained.clone();
+        occupied.extend_from_slice(taken);
+        allocation(worker_block, &occupied, &reservations, account.uid, limits)
     })?;
     let uid = claimed.uid;
+    // Preserve the row so an uncertain reservation remains explicitly closable.
+    mail_birth(runner, environment, &selected.name, &claimed, "reserve")?;
     let placement = placement(
         &Lane {
             selected: &selected,
@@ -432,16 +482,11 @@ fn prepare<R: Runner, W: io::Write>(
     let head = match cloned {
         Ok(head) => head,
         Err(failure) => {
-            return Err(unwind(
-                runner,
-                environment,
-                &table_path,
-                &placement,
-                &failure,
-            ));
+            return Err(unwind(runner, environment, &placement, &failure));
         }
     };
     let filled = table::fill_commit(&table_path, lane, &head)?;
+    mail_birth(runner, environment, &selected.name, &filled, "finish")?;
     writeln!(
         output,
         "{} loop={} lane={lane} uid={uid} commit={} clone={}",
@@ -454,24 +499,15 @@ fn prepare<R: Runner, W: io::Write>(
     Ok(0)
 }
 
-/// Give a failed preparation's slot and tree back, carrying the original cause.
-///
-/// A retry has to start clean: a row left claimed blocks the lane name, and a
-/// half-installed tree makes the next clone fail against a directory that is not
-/// empty. Both cleanups are reported beside the failure that caused them rather
-/// than in place of it, because the cause is what a reader needs first.
+/// Remove a failed preparation's execution tree while retaining its closable row.
+/// A pending mail receipt keeps the UID reserved until explicit close transfers custody.
 fn unwind<R: Runner>(
     runner: &mut R,
     environment: &Environment,
-    table_path: &Path,
     placement: &Placement,
     failure: &WorkerError,
 ) -> WorkerError {
     let mut message = String::from(failure.message());
-    if let Err(row) = table::remove_row(table_path, &placement.lane) {
-        message.push_str("; the row could not be freed: ");
-        message.push_str(row.message());
-    }
     let removal = CommandSpec {
         label: String::from("lane-remove"),
         argv: namespaced(
@@ -562,6 +598,32 @@ fn driver_command(
     Ok(vec![String::from("sh"), String::from("-c"), line])
 }
 
+fn refuse_legacy_home(home: &Path, lane: &str) -> Result<(), WorkerError> {
+    let old = home.join("workers").join(lane);
+    match fs::symlink_metadata(&old) {
+        Ok(_) => Err(WorkerError::refusal(format!(
+            "worker-run execution home {} requires reconciliation: relocate workers/{lane} to worker-homes/{lane} through the mail migration before launch or watch",
+            old.display(),
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(WorkerError::refusal(format!(
+            "legacy worker home inspection: {error}"
+        ))),
+    }
+}
+
+fn finish_prepared<R: Runner>(
+    runner: &mut R,
+    environment: &Environment,
+    loop_name: &str,
+    prepared: &table::Row,
+) -> Result<(), WorkerError> {
+    if prepared.commit.is_empty() {
+        return Err(WorkerError::refusal("worker preparation is incomplete"));
+    }
+    mail_birth(runner, environment, loop_name, prepared, "finish")
+}
+
 fn launch<R: Runner, W: io::Write>(
     invocation: &Invocation,
     environment: &Environment,
@@ -582,6 +644,7 @@ fn launch<R: Runner, W: io::Write>(
     let lane = invocation.action.lane();
     let registry = registry(environment)?;
     let selected = record(&registry, environment, invocation.action.loop_name())?;
+    refuse_legacy_home(&selected.home, lane)?;
     let settings = loop_home::workers_settings::read_execution_settings(
         &environment.caller_home,
         &selected,
@@ -604,12 +667,14 @@ fn launch<R: Runner, W: io::Write>(
             .join("domain.md"),
         "worker rubric",
     )?;
+    let _lifetime = lifetime_lock(invocation, environment)?;
     let table_path = selected.home.join("runs").join("table.tsv");
     let rows = table::read_rows(&table_path)?;
     let prepared = rows
         .iter()
         .find(|row| row.lane == lane)
         .ok_or_else(|| WorkerError::refusal(format!("lane {lane} has no prepared row")))?;
+    finish_prepared(runner, environment, &selected.name, prepared)?;
     let started = utc_stamp(environment.now);
     let account = deployment_account(&environment.proc_self, &environment.passwd)?;
     let placement = placement(
@@ -675,6 +740,11 @@ fn drop_plan(
                 lane: placement.lane.clone(),
                 uid: placement.uid,
                 loop_gid: placement.loop_uid,
+                mail_gid: Allocations::read(&allocations_path(&environment.caller_home))
+                    .and_then(|allocations| {
+                        allocations.mail_group(&placement.loop_name, Some(placement.uid))
+                    })
+                    .map_err(|error| refused(&error))?,
             },
             home: home.to_string_lossy().into_owned(),
             command: driver_command(placement, action, settings)?,
@@ -775,6 +845,7 @@ fn watch<W: io::Write>(
     let lane = invocation.action.lane();
     let registry = registry(environment)?;
     let selected = record(&registry, environment, invocation.action.loop_name())?;
+    refuse_legacy_home(&selected.home, lane)?;
     let table_path = selected.home.join("runs").join("table.tsv");
     let row = table::read_rows(&table_path)?
         .into_iter()
@@ -821,6 +892,64 @@ fn watch<W: io::Write>(
     Ok(outcome.status())
 }
 
+fn close<R: Runner, W: io::Write>(
+    invocation: &Invocation,
+    environment: &Environment,
+    runner: &mut R,
+    output: &mut W,
+) -> Result<u8, WorkerError> {
+    let registry = registry(environment)?;
+    let selected = record(&registry, environment, invocation.action.loop_name())?;
+    let lane = invocation.action.lane();
+    let _lifetime = lifetime_lock(invocation, environment)?;
+    let table_path = selected.home.join("runs/table.tsv");
+    let row = table::read_rows(&table_path)?
+        .into_iter()
+        .find(|row| row.lane == lane)
+        .ok_or_else(|| WorkerError::refusal(format!("lane {lane} has no prepared row")))?;
+    // The namespace coordinator verifies process absence and transfers custody
+    // before making its receipt reusable. A crash before row removal is retryable.
+    mail_birth(runner, environment, &selected.name, &row, "retire-home")?;
+    mail_birth(runner, environment, &selected.name, &row, "retire")?;
+    table::remove_row(&table_path, lane)?;
+    writeln!(
+        output,
+        "CLOSE loop={} lane={lane} uid={} mail=retired uid=released",
+        selected.name, row.uid
+    )
+    .map_err(|error| publication(&error))?;
+    Ok(0)
+}
+
+fn lifetime_lock(
+    invocation: &Invocation,
+    environment: &Environment,
+) -> Result<Option<loop_home::mail::birth::LifetimeLock>, WorkerError> {
+    if !matches!(
+        invocation.action,
+        Action::Launch { .. } | Action::Close { .. }
+    ) {
+        return Ok(None);
+    }
+    let registry = registry(environment)?;
+    let selected = record(&registry, environment, invocation.action.loop_name())?;
+    let path = selected
+        .home
+        .join("runs")
+        .join(format!(".lifetime-{}.lock", invocation.action.lane()));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| WorkerError::refusal(format!("worker lifetime lock: {error}")))?;
+    let file = loop_home::mail::birth::lock_lifetime(file)
+        .map_err(|error| WorkerError::refusal(format!("worker lifetime is busy: {error}")))?;
+    Ok(Some(file))
+}
+
 fn publication(error: &io::Error) -> WorkerError {
     WorkerError::runtime(format!("output failure: {error}"))
 }
@@ -859,6 +988,7 @@ pub fn execute<R: Runner, W: io::Write>(
     output: &mut W,
 ) -> Result<u8, WorkerError> {
     match invocation.action {
+        Action::Close { .. } => close(invocation, environment, runner, output),
         Action::Prepare { .. } => prepare(invocation, environment, runner, output),
         Action::Launch { .. } => launch(invocation, environment, runner, output),
         Action::Watch { .. } => watch(invocation, environment, output),

@@ -644,7 +644,7 @@ impl Fixture {
         file(&h.join(".config/loops/registry.toml"), format!("namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{ name = \"alpha\", uid = 41001, launch = \"src\", runs_root = \"{}\" }}]\n", root.display()).as_bytes(), 0o600);
         file(
             &h.join(".config/loops/allocations.toml"),
-            b"[alpha]\nuids = { base = 3000, count = 2 }\n",
+            b"mail_uid = 61000\n[alpha]\nuids = { base = 3000, count = 2 }\nmail_gids = { base = 43000, count = 3 }\n",
             0o600,
         );
         crate::door_node::fixture(&config);
@@ -688,6 +688,18 @@ impl Fixture {
         .expect("model")
         .record();
         plan.select_worker_uid(worker).expect("worker");
+        let birth = loop_home::mail::birth::Identity::for_reservation(
+            worker,
+            format!("superloop-lane:{}", "R"),
+        );
+        plan.select_mailbox(
+            &h.join(".var/loops/alpha/workers")
+                .join(&birth.name)
+                .join("mail"),
+            &birth,
+            61000,
+        )
+        .expect("mail mount");
         plan.select_container_program(&runtime).expect("runtime");
         plan.select_launch_model(&selection).expect("selection");
         directory(&plan.home, 0o750);

@@ -712,21 +712,15 @@ pub(crate) fn ordinary_entry_plan(
         let settings =
             crate::workers_settings::read_execution_settings(caller_home, record, runs_root, None)?;
         let root = crate::workers_settings::read_runs_root(caller_home, record, runs_root)?;
-        // letters-private establishes its own credentials and environment. Keep
-        // its public word visible to the planner rather than hiding it behind env.
-        if command.first().is_some_and(|word| word == "letters") {
-            command
-        } else {
-            configured_command = std::iter::once(String::from("/usr/bin/env"))
-                .chain(settings.environment())
-                .chain(std::iter::once(format!(
-                    "LANE_RUNS_ROOT={}",
-                    root.display()
-                )))
-                .chain(command.iter().cloned())
-                .collect::<Vec<_>>();
-            &configured_command
-        }
+        configured_command = std::iter::once(String::from("/usr/bin/env"))
+            .chain(settings.environment())
+            .chain(std::iter::once(format!(
+                "LANE_RUNS_ROOT={}",
+                root.display()
+            )))
+            .chain(command.iter().cloned())
+            .collect::<Vec<_>>();
+        &configured_command
     } else {
         command
     };
@@ -1027,6 +1021,22 @@ pub fn lane_install_private_dispatch(
     Ok((lane_bin, forwarded))
 }
 
+/// Helper words intercepted before ordinary grammar; every other word is a command.
+pub(crate) const INTERCEPTED_WORDS: [&str; 12] = [
+    "_supervise-command",
+    "bind-custody",
+    "_mail-worker-birth",
+    "_mail-worker-state",
+    "_mail-worker-pins",
+    "_mail-provision",
+    "_mail-configure",
+    "_mail-journal",
+    "_mail-group",
+    "ensure-roots",
+    "inspect-roots",
+    "lane-install-private",
+];
+
 /// Run `superloop` with an injected external-command runner.
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -1045,10 +1055,12 @@ where
     E: io::Write,
 {
     let mut arguments: Vec<OsString> = arguments.into_iter().map(Into::into).collect();
-    if arguments
-        .first()
-        .is_some_and(|word| word == "_supervise-command")
-    {
+    let intercepted = arguments.first().and_then(|word| {
+        INTERCEPTED_WORDS
+            .iter()
+            .position(|candidate| word == *candidate)
+    });
+    if intercepted == Some(0) {
         arguments.remove(0);
         let argv = match strings(arguments) {
             Ok(argv) => argv,
@@ -1066,7 +1078,7 @@ where
                 &LoopError::refusal("relay-stop: missing or invalid stop report path"),
             );
         }
-        // This relay runs as namespace root, before setpriv/letters-private
+        // This relay runs as namespace root, before setpriv
         // drops credentials, so it can signal the entire private process group.
         return match runner.run(&CommandSpec::new(
             "_supervise-command",
@@ -1077,57 +1089,25 @@ where
             Err(failure) => publish_error(error, &LoopError::runtime(failure.detail)),
         };
     }
-    if arguments
-        .first()
-        .is_some_and(|word| word == "letters-private" || word == "letters-group")
-    {
-        let mode = arguments.remove(0);
-        let arguments = match strings(arguments) {
-            Ok(arguments) => arguments,
-            Err(failure) => return publish_error(error, &failure),
-        };
-        let result = if mode == "letters-group" {
-            match arguments.as_slice() {
-                [home] => crate::letters::group(Path::new(home), false).and_then(|gid| {
-                    let gid =
-                        gid.ok_or_else(|| LoopError::refusal("letters group is not provisioned"))?;
-                    writeln!(output, "{gid}").map_err(|failure| publication_error(&failure))
-                }),
-                _ => Err(LoopError::refusal("letters-group needs owner home")),
-            }
-        } else {
-            crate::letters::private_entry(&arguments, output, error)
-        };
-        return match result {
-            Ok(()) => 0,
-            Err(failure) => publish_error(error, &failure),
-        };
-    }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "bind-custody")
-    {
+    if intercepted == Some(1) {
         arguments.remove(0);
         return bind_custody_entry(arguments, error);
     }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "ensure-roots")
-    {
+    if matches!(intercepted, Some(2..=4)) {
+        return crate::mail::worker_provision::entry(&arguments, error);
+    }
+    if matches!(intercepted, Some(5..=8)) {
+        return crate::mail::provision::entry(&arguments, output, error);
+    }
+    if intercepted == Some(9) {
         arguments.remove(0);
         return ensure_roots_entry(arguments, error);
     }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "inspect-roots")
-    {
+    if intercepted == Some(10) {
         arguments.remove(0);
         return inspect_roots_entry(arguments, error);
     }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "lane-install-private")
-    {
+    if intercepted == Some(11) {
         let (lane_bin, forwarded) = match lane_install_private_dispatch(&arguments) {
             Ok(dispatch) => dispatch,
             Err(refusal) => return publish_error(error, &refusal),

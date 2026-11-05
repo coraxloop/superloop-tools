@@ -233,6 +233,17 @@ fn historical_measurement(evidence: &Value, original: &Value) -> Value {
 /// Refuses an unsafe or malformed protected record and an unreadable runs root.
 #[allow(clippy::too_many_lines)]
 pub fn run(owner_home: &Path, loop_name: &str) -> Result<Value, LaneError> {
+    run_with(owner_home, loop_name, false)
+}
+/// Inventory protected home generations for the held mail cutover.
+///
+/// # Errors
+/// Refuses unsafe or inconsistent protected history under the ordinary census locks.
+pub fn mail_migration(owner_home: &Path, loop_name: &str) -> Result<Value, LaneError> {
+    run_with(owner_home, loop_name, true)
+}
+#[allow(clippy::too_many_lines)]
+fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value, LaneError> {
     loop_home::validate_name(loop_name)
         .map_err(|error| LaneError::input("loop-name", error.message()))?;
     let begun = Instant::now();
@@ -247,6 +258,7 @@ pub fn run(owner_home: &Path, loop_name: &str) -> Result<Value, LaneError> {
     })?;
     let runs = lock_runs_root(root, false, owner)?;
     let (base, count) = worker_range(owner_home, loop_name)?;
+    let mut migration_rows = Vec::new();
     let mut reservations = Vec::new();
     let mut retired = Vec::new();
     let mut skipped_names = Vec::new();
@@ -283,6 +295,11 @@ pub fn run(owner_home: &Path, loop_name: &str) -> Result<Value, LaneError> {
                     format!("{} names another run", path.display()),
                 ));
             }
+            if migration {
+                migration_rows.push(super::migration_inventory::row(
+                    owner_home, root, loop_name, &path, &record,
+                )?);
+            }
             let due = credential_refresh(&runs, run, owner)?;
             reservations.push(row(
                 loop_name,
@@ -307,6 +324,11 @@ pub fn run(owner_home: &Path, loop_name: &str) -> Result<Value, LaneError> {
                     "census-record",
                     format!("{} is not a recorded retirement", path.display()),
                 ));
+            }
+            if migration {
+                migration_rows.push(super::migration_inventory::row(
+                    owner_home, root, loop_name, &path, &record,
+                )?);
             }
             let due = unavailable("unmeasured", "retired");
             retired.push(row(
@@ -351,9 +373,11 @@ pub fn run(owner_home: &Path, loop_name: &str) -> Result<Value, LaneError> {
         .collect::<std::collections::BTreeSet<_>>();
     skipped_names.retain(|name| !attributed.contains(name.as_str()));
     skipped_names.sort();
-    Ok(
-        json!({"schema":1,"command":"census","loop":loop_name,"admission":admission,"allocation":{"base":base,"count":count},"reservations":reservations,"retired_records":retired,"skipped_names":skipped_names,"wall_seconds":begun.elapsed().as_secs_f64()}),
-    )
+    let mut result = json!({"schema":1,"command":"census","loop":loop_name,"admission":admission,"allocation":{"base":base,"count":count},"reservations":reservations,"retired_records":retired,"skipped_names":skipped_names,"wall_seconds":begun.elapsed().as_secs_f64()});
+    if migration {
+        result["mail_migration"] = json!({"records":migration_rows,"unattributed_names":skipped_names,"activation_verified":false});
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

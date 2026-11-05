@@ -42,17 +42,18 @@ pub mod harvest;
 pub mod imports;
 pub mod letters;
 pub mod matrix;
+mod migration_inventory;
 pub mod network_evidence;
 pub(crate) mod probe;
 pub mod reaping;
 pub mod repin_door;
-pub mod replies;
 pub mod report;
 pub mod retire;
 pub mod rotation;
 pub mod rounds;
 pub(crate) mod seed;
 pub mod settle;
+pub mod steering;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeclaredSource {
@@ -128,23 +129,6 @@ pub(crate) fn declared_sources(letter: &[u8]) -> Result<Vec<DeclaredSource>, Lan
         sources = Some(parsed);
     }
     Ok(sources.unwrap_or_default())
-}
-
-fn driver_report_for_reader(output: &str) -> String {
-    let mut delivered = BTreeSet::new();
-    let mut shown = String::new();
-    for line in output.split_inclusive('\n') {
-        if line.starts_with("LETTER ")
-            && let Some(id) = line
-                .split_ascii_whitespace()
-                .find_map(|field| field.strip_prefix("id="))
-            && !delivered.insert(id.to_owned())
-        {
-            continue;
-        }
-        shown.push_str(line);
-    }
-    shown
 }
 
 #[derive(Debug)]
@@ -710,6 +694,56 @@ pub(crate) fn private_podman_environment(
     )
 }
 
+fn select_worker_identity(
+    plan: &mut Plan,
+    owner_home: &Path,
+    loop_name: &str,
+    uid: u32,
+) -> Result<(), LaneError> {
+    let group = home::read_allocations(owner_home)?
+        .mail_group(loop_name, Some(uid))
+        .map_err(|error| {
+            LaneError::input(
+                "mail-group",
+                format!(
+                    "{}; provision this loop's mail before launching boxed workers",
+                    error.message()
+                ),
+            )
+        })?;
+    plan.select_worker_uid(uid)?;
+    plan.select_mail_group(group)?;
+    let run = plan.document["run"]
+        .as_str()
+        .ok_or_else(|| LaneError::input("mail-mount", "run is absent"))?;
+    let root = plan
+        .driver_dir
+        .parent()
+        .ok_or_else(|| LaneError::input("mail-mount", "run root is absent"))?;
+    let saved = read_reservation(&reservation_path(root, run))?;
+    let identity = if let Some(binding) = saved.as_ref().and_then(|record| record.get("mail_birth"))
+    {
+        serde_json::from_value(binding.clone()).map_err(|error| {
+            LaneError::input(
+                "mail-mount",
+                format!("worker binding requires reconciliation: {error}"),
+            )
+        })?
+    } else {
+        loop_home::mail::birth::Identity::for_reservation(uid, format!("superloop-lane:{run}"))
+    };
+    let service = home::read_allocations(owner_home)?
+        .mail_uid()
+        .ok_or_else(|| LaneError::input("mail-mount", "mail service identity is absent"))?;
+    let source = owner_home
+        .join(".var/loops")
+        .join(loop_name)
+        .join("workers")
+        .join(&identity.name)
+        .join("mail");
+    plan.select_mailbox(&source, &identity, service)
+}
+
 pub(crate) fn worker_range(owner_home: &Path, loop_name: &str) -> Result<(u32, u32), LaneError> {
     let block = home::read_allocations(owner_home)?
         .require(loop_name)
@@ -1237,6 +1271,7 @@ fn retire_partial(path: &Path, label: &str) -> Result<Option<PathBuf>, LaneError
     Ok(Some(retired))
 }
 
+#[cfg(test)]
 pub(crate) fn select_free_uid(
     root: &Path,
     run: &str,
@@ -1255,11 +1290,33 @@ fn census_reservation(path: &Path) -> Result<Option<Value>, LaneError> {
     })
 }
 
+#[cfg(test)]
 fn select_free_uid_with_census(
     root: &Path,
     run: &str,
     base: u32,
     count: u32,
+) -> Result<(u32, Vec<String>), LaneError> {
+    select_free_uid_with_history(root, run, base, count, &std::collections::BTreeSet::new())
+}
+fn select_registered_worker_uid(
+    owner_home: &Path,
+    loop_name: &str,
+    root: &Path,
+    run: &str,
+    base: u32,
+    count: u32,
+) -> Result<(u32, Vec<String>), LaneError> {
+    let reserved = loop_home::mail::worker_provision::reserved_uids(owner_home, loop_name)
+        .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
+    select_free_uid_with_history(root, run, base, count, &reserved)
+}
+fn select_free_uid_with_history(
+    root: &Path,
+    run: &str,
+    base: u32,
+    count: u32,
+    reserved: &std::collections::BTreeSet<u32>,
 ) -> Result<(u32, Vec<String>), LaneError> {
     let own_reservation = census_reservation(&reservation_path(root, run))?;
     let pending_uid = if let Some(record) = &own_reservation
@@ -1300,7 +1357,7 @@ fn select_free_uid_with_census(
             format!("{} has protected launch inputs", driver_dir.display()),
         ));
     }
-    let mut used = std::collections::BTreeSet::new();
+    let mut used = reserved.clone();
     let mut skipped = Vec::new();
     for entry in fs::read_dir(root)
         .map_err(|error| LaneError::input("runs-root", format!("{}: {error}", root.display())))?
@@ -1369,7 +1426,7 @@ pub fn choose_worker_uid(owner_home: &Path, loop_name: &str, run: &str) -> Resul
         .ok_or_else(|| LaneError::input("runs-root", "run has no parent"))?;
     let _lock = lock_runs_root(root, false, nix::unistd::Uid::effective().as_raw())?;
     let (base, count) = worker_range(owner_home, loop_name)?;
-    select_free_uid(root, run, base, count)
+    select_registered_worker_uid(owner_home, loop_name, root, run, base, count).map(|(uid, _)| uid)
 }
 
 fn parse_observation(
@@ -1723,6 +1780,23 @@ pub(crate) fn check_mount_roots(
             .as_str()
             .ok_or_else(|| LaneError::operation("plan-json", "mount source is absent"))?;
         let source = Path::new(source);
+        if mount["target"] == "/mail" {
+            let identity: loop_home::mail::birth::Identity =
+                serde_json::from_value(plan.document["mail"]["identity"].clone())
+                    .map_err(|error| LaneError::input("mail-mount", error.to_string()))?;
+            loop_home::registry::validate_name(&identity.name)
+                .map_err(|error| LaneError::input("mail-mount", error.message()))?;
+            if source != loop_root.join("workers").join(&identity.name).join("mail")
+                || plan.document["worker_uid"] != identity.uid
+                || mount["access"] != "rw"
+            {
+                return Err(LaneError::input(
+                    "mail-mount",
+                    "mail source is not this worker's endpoint",
+                ));
+            }
+            continue;
+        }
         if !source.is_absolute()
             || source.components().any(|part| {
                 matches!(
@@ -1863,6 +1937,7 @@ fn entry_argv(
         request.budget,
         Some(directory),
         None,
+        None,
     )
 }
 
@@ -1876,6 +1951,7 @@ fn entry_argv_round(
     budget: u64,
     fresh_dir: Option<&Path>,
     resume: Option<(&str, &Path, &LaunchModel)>,
+    mail: Option<&Value>,
 ) -> Result<Vec<String>, LaneError> {
     let run_dir = crate::pinned::path_word(&plan.driver_dir, "run-directory")?;
     let mut argv = vec![
@@ -1914,14 +1990,43 @@ fn entry_argv_round(
             selection.effort.clone(),
         ]);
     }
+    let (source, prompt) = if step == "dispatch" && mail.is_none() {
+        (
+            plan.home.join("brief.txt"),
+            "Read /home/worker/brief.txt.".to_owned(),
+        )
+    } else {
+        let binding = mail.ok_or_else(|| {
+            LaneError::input("mail-delivery", "round lacks a verified delivery binding")
+        })?;
+        let name = binding["inbox_name"]
+            .as_str()
+            .ok_or_else(|| LaneError::input("mail-delivery", "delivered inbox name absent"))?;
+        if name.contains('/') || binding["step"] != step {
+            return Err(LaneError::input(
+                "mail-delivery",
+                "delivery binding names another step",
+            ));
+        }
+        (
+            steering::evidence(plan, step),
+            format!("Read /mail/inbox/{name}. Step {step}."),
+        )
+    };
     argv.extend([
         "--step-letter".into(),
-        crate::pinned::path_word(
-            &plan.home.join(".local/inbox").join(format!("{step}.md")),
-            "letter-path",
-        )?,
-        format!("Read /home/worker/.local/inbox/{step}.md."),
+        crate::pinned::path_word(&source, "letter-path")?,
     ]);
+    if let Some(binding) = mail {
+        argv.extend([
+            "--step-letter-sha256".into(),
+            binding["evidence_digest"]
+                .as_str()
+                .ok_or_else(|| LaneError::input("mail-delivery", "evidence digest absent"))?
+                .into(),
+        ]);
+    }
+    argv.push(prompt);
     Ok(argv)
 }
 
@@ -2833,7 +2938,7 @@ fn completed_recovery_guidance(record: &Value) -> &'static str {
         .and_then(|rounds| rounds.last())
         .is_some_and(|round| round["phase"] == "settled")
     {
-        "place send-letter LOOP RUN --step NEW --letter FILE, then launch LOOP RUN --round NEW"
+        "place bind-mail LOOP RUN --step NEW --delivery UTC_INSTANT, then launch LOOP RUN --round NEW"
     } else {
         "preview settle LOOP RUN --round STEP --dry-run, then place a new letter and launch --round NEW"
     }
@@ -3735,7 +3840,7 @@ fn run_with_program(
             .ok_or_else(|| {
                 LaneError::input("launch-reservation", "started worker UID is invalid")
             })?;
-        plan.select_worker_uid(selected_uid)?;
+        select_worker_identity(&mut plan, owner_home, &request.loop_name, selected_uid)?;
         plan.retain_attempt_wall(&saved["plan"])?;
         let preview = interrupted_recovery_preview(
             &saved,
@@ -3777,11 +3882,18 @@ fn run_with_program(
     let (worker_uid, skipped_runs) = {
         let _lock = lock_runs_root(&root, false, caller.0)?;
         let (base, count) = worker_range(owner_home, &request.loop_name)?;
-        select_free_uid_with_census(&root, &request.run, base, count)?
+        select_registered_worker_uid(
+            owner_home,
+            &request.loop_name,
+            &root,
+            &request.run,
+            base,
+            count,
+        )?
     };
     let reservation_census =
         json!({"skipped_count":skipped_runs.len(),"skipped_names":skipped_runs});
-    plan.select_worker_uid(worker_uid)?;
+    select_worker_identity(&mut plan, owner_home, &request.loop_name, worker_uid)?;
     crate::plan::verify_box_attestation(&plan.document)?;
     let box_gate = plan.document["box_gate"].clone();
     let dry_recovery = if request.dry_run {
@@ -4388,7 +4500,7 @@ fn run_with_program(
     let observed = observed?;
     let settlement = settlement_document(&settlement?)?;
     let publication = report::credential_publication(&record)?;
-    let report = json!({"schema":1,"command":"launch","dry_run":false,"observe":request.observe,"enforcing":!request.observe,"observed":observed,"home":plan.home,"driver_dir":plan.driver_dir,"round_dir":round_dir,"preparation":preparation.trim_end(),"driver_report":driver_report_for_reader(output.trim_end()),"settlement":settlement,"credential_publication":publication,"evidence":"driver directory outside home","wall_seconds":started.elapsed().as_secs_f64()});
+    let report = json!({"schema":1,"command":"launch","dry_run":false,"observe":request.observe,"enforcing":!request.observe,"observed":observed,"home":plan.home,"driver_dir":plan.driver_dir,"round_dir":round_dir,"preparation":preparation.trim_end(),"driver_report":output.trim_end(),"settlement":settlement,"credential_publication":publication,"evidence":"driver directory outside home","wall_seconds":started.elapsed().as_secs_f64()});
     report::finish_with_fallback(&verified_runs, &request.run, None, report, on_failure)
 }
 
@@ -4574,10 +4686,23 @@ fn record_readback_with_owner(
         .as_str()
         .ok_or_else(|| LaneError::input("round-record", "active round is absent"))?;
     letters::valid_step(step)?;
+    let delivery = saved["mail_replies"].as_array().and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
+        .ok_or_else(|| LaneError::input("readback", "reply has no verified mail binding; bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT before settlement"))?;
     let mut readback = inspect_readback(
-        &plan.home.join(format!(".local/outbox/{step}.md")),
-        worker_uid,
+        &plan.driver_dir.join(format!("reply-{step}.txt")),
+        recorded_loop_uid(&saved)?,
     )?;
+    if delivery["worker_uid"] != worker_uid
+        || readback["bytes"] != delivery["bytes"]
+        || readback["sha256"] != delivery["evidence_digest"]
+    {
+        return Err(LaneError::input(
+            "readback",
+            "retained reply differs from its verified service delivery",
+        ));
+    }
+    readback["worker_uid"] = json!(worker_uid);
+    readback["mail"] = delivery.clone();
     let launch_evidence_path =
         protected_identity_dir(&plan.driver_dir)?.join("launch-evidence.json");
     let launch_evidence: Value = serde_json::from_slice(&crate::pinned::read_private(
@@ -4672,11 +4797,11 @@ fn inspect_readback(path: &Path, worker_uid: u32) -> Result<Value, LaneError> {
             ),
         ));
     }
-    if meta.len() == 0 || meta.len() > 1_048_576 {
+    if meta.len() > 1_048_576 {
         return Err(LaneError::input(
             "readback",
             format!(
-                "{} has {} bytes; expected 1 through 1048576",
+                "{} has {} bytes; expected 0 through 1048576",
                 path.display(),
                 meta.len()
             ),
@@ -5151,7 +5276,7 @@ fn recovery_record_with(
     if prior_attempt_started(driver_dir)? {
         return Err(LaneError::input(
             "launch-reservation",
-            "an earlier container attempt may have started; the run is retained; for a dead resumed round retry launch LOOP RUN --round STEP --dry-run with its active step, then apply that recovery; after a by-report settlement place send-letter LOOP RUN --step NEW --letter FILE and launch LOOP RUN --round NEW; use settle LOOP RUN --round STEP --dry-run only while the selected round remains failed",
+            "an earlier container attempt may have started; the run is retained; for a dead resumed round retry launch LOOP RUN --round STEP --dry-run with its active step, then apply that recovery; after a by-report settlement place bind-mail LOOP RUN --step NEW --delivery UTC_INSTANT and launch LOOP RUN --round NEW; use settle LOOP RUN --round STEP --dry-run only while the selected round remains failed",
         ));
     }
     let observer_state = record["observer_state"].as_str().ok_or_else(|| {
@@ -6065,7 +6190,9 @@ fn record_dispatch_letter(
 ) -> Result<(), LaneError> {
     record["active_round"] = json!("dispatch");
     record["rounds"] = json!([{"step":"dispatch","budget_seconds":budget,"letter":"dispatch.md","phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":placed_at,"in_round_letters":[]}]);
-    record["letters"] = json!([{"step":"dispatch","name":"dispatch.md","in_round":false,"stop":stop,"bytes":letter.len(),"sha256":build::sha256_bytes(letter, owner_home)?,"placed_at_unix_ns":placed_at,"state":"placed"}]);
+    record["initial_brief"] = json!({"step":"dispatch","name":"brief.txt","in_round":false,"stop":stop,"bytes":letter.len(),"sha256":build::sha256_bytes(letter, owner_home)?,"placed_at_unix_ns":placed_at,"state":"placed"});
+    record["mail"] = json!([]);
+    record["mail_replies"] = json!([]);
     Ok(())
 }
 
@@ -6098,7 +6225,8 @@ pub fn private_make(
     let _lock = lock_runs_root(&root, true, 0)?;
     let (base, count) = worker_range(owner_home, loop_name)?;
     exercise_resources::verify_worker_block(base, count)?;
-    let (available, skipped_runs) = select_free_uid_with_census(&root, run, base, count)?;
+    let (available, skipped_runs) =
+        select_registered_worker_uid(owner_home, loop_name, &root, run, base, count)?;
     if available != requested_uid {
         return Err(LaneError::input(
             "uid-race",
@@ -6107,7 +6235,7 @@ pub fn private_make(
             ),
         ));
     }
-    plan.select_worker_uid(requested_uid)?;
+    select_worker_identity(&mut plan, owner_home, loop_name, requested_uid)?;
     if observe {
         plan.observe_vendor()?;
     }
@@ -6143,6 +6271,29 @@ pub fn private_make(
     check_backend_image_program(&settings, &installed_generation(owner_home, loop_name)?)?;
     crate::credential::preflight(owner_home, loop_name)?;
     let reservation = reservation_path(&root, run);
+    let prior_birth = read_reservation(&reservation)?;
+    let birth = if let Some(record) = &prior_birth {
+        serde_json::from_value::<loop_home::mail::birth::Identity>(record["mail_birth"].clone())
+            .map_err(|_| {
+                LaneError::input(
+                    "mail-birth",
+                    "existing worker requires a reconciled birth identity",
+                )
+            })?
+    } else {
+        loop_home::mail::birth::Identity::for_reservation(
+            requested_uid,
+            format!("superloop-lane:{run}"),
+        )
+    };
+    if birth.uid != requested_uid {
+        return Err(LaneError::input(
+            "mail-birth",
+            "reserved worker identity differs",
+        ));
+    }
+    loop_home::mail::worker_provision::coordinate(owner_home, loop_name, &birth, "reserve")
+        .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
     let mut next = initial_reservation(
         &plan,
         loop_name,
@@ -6155,7 +6306,9 @@ pub fn private_make(
         &skipped_runs,
         door_scope,
     );
-    let prior = read_reservation(&reservation)?;
+    next["mail_birth"] = serde_json::to_value(&birth)
+        .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
+    let prior = prior_birth;
     let retired = if let Some(record) = prior {
         replace_preparation_with(
             &record,
@@ -6183,10 +6336,12 @@ pub fn private_make(
                 return Err(error);
             }
         };
+    loop_home::mail::worker_provision::coordinate(owner_home, loop_name, &birth, "finish")
+        .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
     next["declared_sources"] = result["declared_sources"].clone();
     publish_reservation(&reservation, &next)?;
     if let Some(expected) = rotation_digest {
-        let inbox = plan.home.join(".local/inbox/dispatch.md");
+        let inbox = plan.home.join("brief.txt");
         let placed = home::read_letter(&inbox, Uid::effective().as_raw())?;
         let actual = build::sha256_bytes(&placed, owner_home)?;
         if actual != expected {
@@ -6401,7 +6556,7 @@ pub(crate) fn pinned_plan_from_record(
             "worker UID is outside the allocation range",
         ));
     }
-    plan.select_worker_uid(worker_uid)?;
+    select_worker_identity(&mut plan, owner_home, loop_name, worker_uid)?;
     plan.select_container_program(podman)?;
     if record["plan"]["vendor_mode"].is_string() {
         plan.observe_vendor()?;
@@ -6410,7 +6565,7 @@ pub(crate) fn pinned_plan_from_record(
         .as_str()
         .ok_or_else(|| LaneError::input("letter-model", "recorded letter source is absent"))?;
     let bytes = if let Some(expected) = record["rotation_source_sha256"].as_str() {
-        let inbox = plan.home.join(".local/inbox/dispatch.md");
+        let inbox = plan.home.join("brief.txt");
         let bytes = home::read_letter(&inbox, Uid::effective().as_raw())?;
         let actual = build::sha256_bytes(&bytes, owner_home)?;
         if actual != expected {
@@ -6501,6 +6656,21 @@ pub fn private_prepare_runtime(
             "vendor_hosts.codex is already set",
         ));
     }
+    let birth: loop_home::mail::birth::Identity =
+        serde_json::from_value(record["mail_birth"].clone()).map_err(|error| {
+            LaneError::input(
+                "mail-birth",
+                format!("worker birth requires reconciliation: {error}"),
+            )
+        })?;
+    if record["worker_uid"] != birth.uid {
+        return Err(LaneError::input(
+            "mail-birth",
+            "birth UID differs from protected reservation",
+        ));
+    }
+    loop_home::mail::worker_provision::coordinate(owner_home, loop_name, &birth, "verify")
+        .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
     crate::plan::verify_box_attestation(&plan.document)?;
     check_mount_roots(&plan, &settings, owner_home)?;
     check_pins(&plan, &settings, owner_home, observed, true)?;
@@ -6804,6 +6974,11 @@ pub(crate) fn check_pins(
                 .as_str()
                 .ok_or_else(|| LaneError::input("plan-read", "mount source is absent"))?,
         );
+        // Birth creates mail after the pre-creation pin pass. Runtime preparation
+        // verifies its custody and calls this again with identity_created=true.
+        if mount["target"] == "/mail" && !identity_created && !source.exists() {
+            continue;
+        }
         if !source.exists() && (source.starts_with(&plan.home) || source.starts_with(&identity_dir))
         {
             continue;
@@ -6846,6 +7021,54 @@ pub(crate) fn check_pins(
 
 #[cfg(test)]
 mod tests {
+    /// ´test:unit:mail-mount-roots-refuse-peer-source-and-read-only-access´
+    #[test]
+    fn mail_mount_roots_refuse_peer_source_and_read_only_access() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let home = fixture.path();
+        let root = home.join(".var/loops/alpha");
+        let settings = crate::settings::Settings {
+            runs_root: None,
+            backend_argv: std::collections::BTreeMap::default(),
+            driver_argv: Vec::new(),
+            entry_bin: None,
+            driver_bin: None,
+            image_digest: Some("sha256:abc".into()),
+            template_dir: Some(root.join("runner-templates/codex/abc")),
+            resources: None,
+            socket_dir: Some(root.join("sockets")),
+            vendor_hosts: std::collections::BTreeMap::default(),
+            sandbox_mode: "confined".into(),
+            context_threshold: None,
+            retention: "keep".into(),
+            source: String::new(),
+        };
+        for (worker, access, uid, accepted) in [
+            ("peer", "rw", 3000, false),
+            ("mine", "ro", 3000, false),
+            ("mine", "rw", 3000, true),
+            ("mine", "rw", 3001, false),
+        ] {
+            let plan = crate::plan::Plan {
+                home: root.join("worker-homes/R"),
+                driver_dir: root.join("runs/R"),
+                letter: home.join("briefing"),
+                document: serde_json::json!({"loop":"alpha", "worker_uid":uid,
+                    "mail":{"identity":{"name":"mine","uid":3000,"reservation":"test"}},
+                    "mounts":[{"kind":"bind", "source":root.join("workers").join(worker).join("mail"),
+                        "target":"/mail", "access":access}]}),
+            };
+            let result = super::check_mount_roots(&plan, &settings, home);
+            if accepted {
+                result.expect("own writable mail mount");
+                continue;
+            }
+            let error = result.expect_err("unsafe mail mount");
+            assert_eq!(error.kind, "mail-mount");
+            assert_eq!(error.detail, "mail source is not this worker's endpoint");
+        }
+    }
+
     /// # Panics
     /// Panics only if fixture creation fails or retirement accepts unsafe occupancy.
     /// ´test:unit:retirement-name-refuses-source-links-and-nonregular-occupants´
@@ -7090,7 +7313,7 @@ mod tests {
         fs::write(directory.join("events.jsonl"), b"").expect("events");
         fs::write(directory.join(".event-start"), b"0\n").expect("event boundary");
         record["active_round"] = json!("dispatch");
-        record["letters"] = json!([]);
+        record["mail"] = json!([]);
         record["rounds"] = json!([{"step":"dispatch","phase":"running","budget_seconds":1,"driver_dir":directory}]);
         let path = super::reservation_path(fixture.path(), "R");
         super::publish_reservation(&path, &record).expect("reservation");
@@ -7405,15 +7628,6 @@ mod tests {
             assert!(refusal.detail.contains(&actual));
             assert!(!refusal.detail.contains("wall_seconds"));
         }
-    }
-
-    /// ´test:unit:launch-report-collapses-replayed-letter-identity´
-    #[test]
-    fn launch_report_collapses_replayed_letter_identity() {
-        let output = "LETTER box=inbox name=dispatch.md bytes=4 at=2026-10-07T00:00:00Z id=AB\nLETTER box=inbox name=dispatch.md bytes=4 at=2026-10-07T00:00:00Z id=AB replay=1\nRUN-REPORT lane=dispatch exit=0\n";
-        let shown = super::driver_report_for_reader(output);
-        assert_eq!(shown.matches("LETTER box=").count(), 1);
-        assert!(shown.contains("RUN-REPORT lane=dispatch exit=0"));
     }
 
     fn prove_empty_probe_journal(record: &mut Value) {
@@ -7790,6 +8004,7 @@ mod tests {
             3600,
             Some(&directory),
             None,
+            None,
         )
         .expect("driver arguments");
         super::record_dispatch_letter(
@@ -7955,7 +8170,7 @@ mod tests {
         for changed in [None, Some(false), Some(true)] {
             let (fixture, plan, letter, mut record) = settlement_fixture(false);
             record["active_round"] = json!("dispatch");
-            record["letters"] = json!([]);
+            record["mail"] = json!([]);
             let directory = plan.driver_dir.join("20261007T043545Z-dispatch");
             record["rounds"] =
                 json!([{"step":"dispatch","phase":"running","driver_dir":directory}]);
@@ -8068,10 +8283,10 @@ mod tests {
         let (fixture, _plan, _letter, mut stale) = settlement_fixture(false);
         let path = super::reservation_path(fixture.path(), "R");
         stale["observer_end"] = json!({"state":"not-started","socket":{"state":"not-applicable"}});
-        stale["letters"] = json!([]);
+        stale["mail"] = json!([]);
         publish_reservation(&path, &stale).expect("last end update");
         let mut placed = stale.clone();
-        placed["letters"] = json!([{"step":"review","name":"review.md","state":"placed","bytes":4,"sha256":"fixture","placed_at_unix_ns":1}]);
+        placed["mail"] = json!([{"step":"review","name":"review.md","state":"placed","bytes":4,"sha256":"fixture","placed_at_unix_ns":1}]);
         publish_reservation(&path, &placed).expect("placement after last end update");
         let final_record = super::publish_interrupted_phase(
             &path,
@@ -8082,12 +8297,12 @@ mod tests {
         )
         .expect("locked terminal update");
         assert_eq!(final_record["phase"], "settled");
-        assert_eq!(final_record["letters"], placed["letters"]);
+        assert_eq!(final_record["mail"], placed["mail"]);
         assert_eq!(
             super::read_reservation(&path)
                 .expect("read")
-                .expect("record")["letters"],
-            placed["letters"]
+                .expect("record")["mail"],
+            placed["mail"]
         );
     }
 

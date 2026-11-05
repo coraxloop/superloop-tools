@@ -8,13 +8,6 @@ pub struct LoopError {
 }
 
 impl LoopError {
-    pub(crate) fn deadline(message: impl Into<String>) -> Self {
-        Self {
-            status: 124,
-            message: message.into(),
-        }
-    }
-
     pub(crate) fn refusal(message: impl Into<String>) -> Self {
         Self {
             status: 2,

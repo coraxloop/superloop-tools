@@ -11,9 +11,10 @@ import time
 def invoke_stub(stub, run):
     started = time.monotonic()
     while True:
+        # Follow door ADMISSION_WAIT: 30 s + 2 s reply margin + 3 s slack.
         reply = subprocess.run(
             [stub, "door-shape-probe", run], input=b"", capture_output=True,
-            timeout=max(0.001, 8 - (time.monotonic() - started)), check=False,
+            timeout=max(0.001, 35 - (time.monotonic() - started)), check=False,
         )
         reason = reply.stderr.decode("utf-8", "replace").strip()
         if not (reason == "door-request-concurrent" or reason.startswith("door-request-concurrent:")):

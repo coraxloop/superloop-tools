@@ -73,6 +73,20 @@ fn prepare_seeds_empty_configuration_and_repeats_without_writing() {
             & 0o7777,
         0o600
     );
+    // Provisioning adds service search to the shared host configuration roots.
+    let service = nix::unistd::geteuid().as_raw() + 1;
+    for path in [
+        home.to_path_buf(),
+        home.join(".config"),
+        home.join(".config/loops"),
+    ] {
+        loop_home::mail::acl::install(&fs::File::open(path).expect("root"), service, true)
+            .expect("provisioning search grant");
+    }
+    for path in [&ledger, &home.join(".config/loops/registry.toml")] {
+        loop_home::mail::acl::install(&fs::File::open(path).expect("file"), service, false)
+            .expect("provisioning read grant");
+    }
     let before = fs::read(&ledger).expect("ledger bytes");
     let settings_before = fs::read(&settings).expect("settings bytes");
     let second = run_with_entry_bin(home, "alpha", false, &entry).expect("repeat prepare");
@@ -660,6 +674,17 @@ fn installed_seed_requires_recorded_image_program_and_repeats() {
         fs::read(&settings_path).expect("settings still seeded"),
         seeded_settings
     );
+    let allocations_path = home.join(".config/loops/allocations.toml");
+    let mut allocations = loop_home::allocations::Allocations::read(&allocations_path)
+        .expect("installed allocations");
+    allocations
+        .ensure_mail_groups("alpha", &[41001])
+        .expect("fixture mail allocation");
+    fs::write(
+        &allocations_path,
+        format!("mail_uid = 61000\n{}", allocations.to_toml()),
+    )
+    .expect("provisioned fixture allocation");
     let (plan, _) = crate::load_plan(
         home,
         "alpha",
