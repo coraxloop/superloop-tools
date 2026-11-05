@@ -287,7 +287,7 @@ pub fn read_private_optional(
     let stat = fstat(&fd).map_err(|error| LaneError::input("protected-file", error.to_string()))?;
     if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
         || stat.st_uid != owner_uid
-        || stat.st_mode & 0o7707 != mode & 0o7707
+        || stat.st_mode & 0o7777 != mode
         || usize::try_from(stat.st_size)
             .ok()
             .is_none_or(|size| size > limit)
