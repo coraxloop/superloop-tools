@@ -95,11 +95,13 @@ linter_version = "registered version text"
 
 ## Verification · `sec:publicpack:verification`
 
+The deployment prerequisites are Git and an executable `unzip` on PATH, plus the explicitly supplied linter. The node image or its package layer supplies `unzip` before the verifier or release consumer gate runs; bsdtar does not satisfy this prerequisite because the verifier executes the program named `unzip` from PATH. The extraction stage probes `unzip -v` without an archive and refuses `unzip_unavailable` with status 5 if the program cannot run successfully, before attempting extraction or writing staging contents.
+
 Verification performs these checks in order and prints every outcome and wall duration. When one refuses, every later check is printed as skipped.
 
 1. `staging` (status 4) requires an absolute, existing, empty directory whose complete component chain contains no symlink. Its filesystem device ID must equal the device ID of the process temporary root. The report prints both IDs and `same_mount=yes`; the registered temporary root is the disk-backed storage-class reference.
 2. `archive_members` (status 5) parses the ZIP end record, central directory, and every corresponding local header before extraction. It rejects ZIP64, split, encrypted, non-UTF-8, duplicate, escaping, absolute, backslash, symlink, special-file, `local/`, and `.git/` members, plus local/central name disagreement and file/descendant collisions.
-3. `extraction` (status 5) invokes `unzip` directly with typed arguments, then proves the extracted regular-file/directory tree exactly equals the audited member tree and contains no symlink or special file.
+3. `extraction` (status 5) checks the `unzip` prerequisite, invokes it directly with typed arguments, then proves the extracted regular-file/directory tree exactly equals the audited member tree and contains no symlink or special file.
 4. `manifest` (status 6) reads the strict provenance member and validates its format, object IDs, digests, non-zero register count, and non-empty fields.
 5. `burn_register` (status 7) requires the supplied register to resolve outside staging, parses the same strict non-empty shape, and matches its raw-byte SHA-256 and entry count against the manifest.
 6. `inert_index` (status 8) runs typed `git init -q` and `git add -A` in staging. It creates no commit and imports no history.

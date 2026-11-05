@@ -653,6 +653,7 @@ pub enum VerifyRefusal {
     ArchiveFormat,
     ForbiddenMember,
     UnsafeMember,
+    UnzipUnavailable,
     Extraction,
     ManifestMissing,
     ManifestInvalid,
@@ -682,6 +683,7 @@ impl VerifyRefusal {
             Self::ArchiveFormat => "archive_format",
             Self::ForbiddenMember => "forbidden_member",
             Self::UnsafeMember => "unsafe_member",
+            Self::UnzipUnavailable => "unzip_unavailable",
             Self::Extraction => "extraction",
             Self::ManifestMissing => "manifest_missing",
             Self::ManifestInvalid => "manifest_invalid",
@@ -709,7 +711,7 @@ impl VerifyRefusal {
             | Self::ArchiveFormat
             | Self::ForbiddenMember
             | Self::UnsafeMember => VerifyCheck::ArchiveMembers,
-            Self::Extraction => VerifyCheck::Extraction,
+            Self::UnzipUnavailable | Self::Extraction => VerifyCheck::Extraction,
             Self::ManifestMissing | Self::ManifestInvalid => VerifyCheck::Manifest,
             Self::BurnRegisterInvalid
             | Self::BurnRegisterMismatch
@@ -1305,6 +1307,17 @@ fn validate_member_relationships(paths: &BTreeMap<PathBuf, bool>) -> Result<(), 
 }
 
 fn extract_archive(pack: &Path, staging: &Path, audit: &ArchiveAudit) -> Result<(), VerifyRefusal> {
+    // The version probe accepts no archive and cannot begin extraction.
+    let available = Command::new("unzip")
+        .arg("-v")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_error| VerifyRefusal::UnzipUnavailable)?;
+    if !available.success() {
+        return Err(VerifyRefusal::UnzipUnavailable);
+    }
     let output = Command::new("unzip")
         .arg("-qq")
         .arg(pack)
