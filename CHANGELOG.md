@@ -6,8 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-- Folder-matrix comparison refuses tabs anywhere in a delimiter row, matching the formatter’s space-only delimiter grammar; empty delimiter cells also remain stale (``prob:linter:matrix-comparison-normalises-cell-layout``).
-
 ### Changed
 
 - Real-Git regression coverage verifies repeated no-op pushes through the door stub and handler, including completion, unchanged mirror refs and recorded no-ref outcomes around a push carrying new objects, while the historical mixed-version refusal is not reproduced by this fixture (``proto:superlooplane:registered-ssh-transport``).
@@ -40,7 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Deferred list rewrites remove complete dotted stale-family and singleton assignments; rendered TOML is parsed before replacement, so active dotted-singleton duplication refuses without changing the source (``prob:linter:deferred-writer-parses-its-output-before-replacing``; ``prob:linter:deferred-mode-rewrite-keeps-a-stale-catalogued-table``).
 
-- Folder-matrix checks and writes ignore cell padding and valid table delimiter layout while preserving exact cell content, row identity, order and count; equivalent layouts remain unchanged (``prob:linter:matrix-comparison-normalises-cell-layout``).
+- Folder-matrix checks and writes ignore cell padding and valid table delimiter layout while preserving exact cell content, row identity, order and count; equivalent layouts remain unchanged, while a tab anywhere in a delimiter row and an empty delimiter cell remain stale, matching the formatter’s space-only delimiter grammar (``prob:linter:matrix-comparison-normalises-cell-layout``).
 
 - Claim projections stop the introductory gloss at the first trimmed level-one rustdoc heading, leaving section headings and bodies out of test-index and folder-matrix cells (``prob:linter:claim-extractor-stops-at-rustdoc-sections``).
 
@@ -49,6 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The door rubric check admits the caller’s service uid alongside root and the loop uid at install and runtime; a mapped non-root service fixture verifies distinct loop custody and foreign-owner refusal (``proto:superlooplane:bounded-rubric-judgement``).
 
 - The shared request reader rejects upload bounds and output counts on preflight refusal records (``conv:superlooplane:door-transport-compatibility``).
+
+- Tools packs classify their generated provenance as an optional exact publication member; a fresh pack audit against the supplied 41-entry estate register measures zero occurrences and zero owed debt (``prob:pack:tools-tree-burn-register-matches``).
 
 ## [0.4.1] - 2026-11-06
 
