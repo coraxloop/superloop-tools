@@ -1307,6 +1307,38 @@ fn manifest_register_absence_is_explicit() {
         toml::from_str(&fs::read_to_string(out.join(".linter/owners.toml")).expect("owners"))
             .expect("owner TOML");
     assert!(owners.get("unpublished").is_none());
+    let owner_path = fixture.source.join(".linter/owners.toml");
+    let original_owners = fs::read_to_string(&owner_path).expect("source owners");
+    for (register, policy) in [
+        ("docs/source-register.toml", manifest.clone()),
+        (
+            "private-register.toml",
+            manifest.replace(
+                "[exclude]\nrows = [",
+                "[exclude]\nrows = [{pattern = \"private-register.toml\", reason = \"Private register.\"}, ",
+            ),
+        ),
+    ] {
+        fs::write(
+            &owner_path,
+            format!("unpublished = {register:?}\n{original_owners}"),
+        )
+        .expect("source register declaration");
+        fs::write(
+            fixture.source.join(register),
+            "namespace = \"class.linter.unpublished-labels\"\nversion = [1, 0, 0]\nlabels = []\n",
+        )
+        .expect("source register");
+        fixture.commit("public-set.toml", &policy, "Source register without manifest declaration\n");
+        let refused = fixture.scratch.join(format!("source-register-refused-{}", register.starts_with("docs/")));
+        let result = manifest_cut(&fixture, &refused);
+        assert_eq!(result.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&result.stdout)
+            .contains("owner snapshot unpublished field requires public.unpublished"));
+        assert!(!refused.exists());
+        fs::remove_file(fixture.source.join(register)).expect("remove source register");
+    }
+    fs::write(&owner_path, original_owners).expect("restore owners");
     fs::write(
         fixture.source.join("public-set.toml"),
         manifest.replace(

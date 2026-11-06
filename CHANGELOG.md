@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Cuts refuse a selected owner snapshot carrying an `unpublished` field when the publication manifest has no register declaration, preventing unaudited register publication and dangling snapshot references (``prob:pack:manifest-declares-the-unpublished-register``).
+
 - Runtime rubric admission compares the effective uid with the real entered uid, restoring refusal of entries that change only the effective uid (``proto:superlooplane:bounded-rubric-judgement``).
 
 - Custody readers compare the complete mode with the named read/search ACL mask for private files, the registry, loop tiers, settings and transferred configuration locks, refusing ordinary group grants and widened masks; fixtures also preserve the ledger readers’ ACL contract (``prob:homes:exact-mode-readers-reason-about-the-acl-mask``).

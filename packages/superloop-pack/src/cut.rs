@@ -829,6 +829,18 @@ fn unpublished_register<'a>(
         }
         return Ok(generated);
     }
+    if manifest.public.unpublished.is_none() {
+        let content = git(root, &["show", &format!("{commit}:.linter/owners.toml")])?;
+        let owners: toml::Value = toml::from_str(
+            std::str::from_utf8(&content).map_err(|_| refuse("owners must be UTF-8"))?,
+        )
+        .map_err(|error| CutError(error.to_string()))?;
+        if owners.get("unpublished").is_some() {
+            return Err(refuse(
+                "owner snapshot unpublished field requires public.unpublished",
+            ));
+        }
+    }
     let register_input = manifest
         .public
         .unpublished
