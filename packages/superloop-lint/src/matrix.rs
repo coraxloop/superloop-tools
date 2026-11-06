@@ -686,13 +686,14 @@ fn same_region(actual: &[String], expected: &[String]) -> bool {
             if !expected.starts_with('|') {
                 return actual == expected;
             }
+            let delimiter_has_tab = actual.contains('\t');
             let (Some(actual), Some(expected)) = (table_cells(actual), table_cells(expected))
             else {
                 return false;
             };
             actual.len() == expected.len()
                 && if expected.iter().all(|cell| delimiter_cell(cell)) {
-                    actual.iter().all(|cell| delimiter_cell(cell))
+                    !delimiter_has_tab && actual.iter().all(|cell| delimiter_cell(cell))
                 } else {
                     actual == expected
                 }
@@ -1286,6 +1287,9 @@ mod tests {
             canonical.replace(rows[0], &format!("{}|", rows[0])),
             canonical.replace("|----|----|-----|", "|:-x|----|-----|"),
             canonical.replace("|----|----|-----|", "|:|----|-----|"),
+            canonical.replace("|----|----|-----|", "||----|-----|"),
+            canonical.replace("|----|----|-----|", "|----\t|----|-----|"),
+            canonical.replace("|----|----|-----|", "|----|----|-----|\t"),
             indented,
         ];
         let (root, packages, _) = root_with(None);
