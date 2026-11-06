@@ -1113,6 +1113,50 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         [record, result.exercise_observation(10000, None)]
     }
 
+    /// The PATH-alias warning is derived from the recorded hrestore probe of
+    /// 2026-10-23; this stand-in checks the temporary-root policy, not vendor execution.
+    /// ´test:unit:agent-codex-home-outside-child-temporary-root´
+    #[test]
+    fn agent_codex_home_outside_child_temporary_root() {
+        let script = r"#!/usr/bin/python3
+import os, pathlib, sys
+sys.stdin.buffer.read()
+config = pathlib.Path(os.environ['CODEX_HOME']).resolve()
+temporary = pathlib.Path(os.environ['TMPDIR']).resolve()
+if config.is_relative_to(temporary):
+    sys.stderr.write('WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir\n')
+else:
+    assert config.parent == temporary.parent
+    assert config != temporary
+    assert os.stat(config).st_mode & 0o777 == 0o700
+    assert os.stat(temporary).st_mode & 0o777 == 0o700
+    assert list(temporary.iterdir()) == []
+    assert (config / 'auth.json').is_symlink()
+    sys.stderr.write('fixture: separate private roots\n')
+sys.exit(7)
+";
+        let (root, mut runner, input) = fixture(script);
+        runner.cap_ms = 10000;
+        for _ in 0..2 {
+            let result = runner.judge(
+                &input.encode().expect("bounded fixture input"),
+                Duration::from_secs(10),
+            );
+            assert_eq!(result.status, "failure", "{result:?}");
+            assert!(matches!(result.runner_exit, Some(RunnerExit::Code(7))));
+            assert_eq!(
+                result.runner_stderr_tail.as_deref(),
+                Some("fixture: separate private roots\n")
+            );
+            assert_eq!(
+                std::fs::read_dir(root.path().join("tmp/door-agent"))
+                    .expect("private root")
+                    .count(),
+                0
+            );
+        }
+    }
+
     /// ´test:unit:agent-runner-nonzero-retains-bounded-stderr-suffix´
     #[test]
     fn agent_runner_nonzero_retains_bounded_stderr_suffix() {

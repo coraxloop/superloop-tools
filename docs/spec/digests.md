@@ -350,7 +350,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/loop-home/README.md:84``|D186; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/loop-home/meson.build:72,73``|D210; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/loop-home/src/allocations.rs:159``|D016; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
-|``packages/loop-home/src/runner/agent_runner.py:93,97,99,105,129,232,262,264,266,271,300,312``|D017; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
+|``packages/loop-home/src/runner/agent_runner.py:93,97,99,105,129,234,264,266,268,273,302,314``|D017; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/loop-home/src/runner/sign_in_policy.py:79``|D018; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/loop-home/src/workers_settings.rs:338,375,378,380,387``|D015; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/permission-triage/README.md:3,5,13,56,62,64,141,157,163,169,171,175,187,203,205,209,211``|D187; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
