@@ -4,6 +4,39 @@ use super::*;
 use execute_command::snapshot::{PolicySnapshot, Source};
 use nix::sys::stat::fchmod;
 
+fn observed_tier_identity(root: &OwnedFd, owner: u32) -> Result<(u32, u32), LaneError> {
+    let refusal = |detail: String| problem("execute-command-snapshot-custody", detail);
+    let mut identity = None;
+    for name in ["shared", "private", "direct"] {
+        let fd = nix::fcntl::openat2(
+            root,
+            name,
+            nix::fcntl::OpenHow::new()
+                .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+                .resolve(
+                    nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS
+                        | nix::fcntl::ResolveFlag::RESOLVE_BENEATH,
+                ),
+        )
+        .map_err(|error| refusal(error.to_string()))?;
+        let stat = fstat(&fd).map_err(|error| refusal(error.to_string()))?;
+        let current = (stat.st_uid, stat.st_gid);
+        if stat.st_uid == owner
+            || stat.st_mode & 0o022 != 0
+            || identity.is_some_and(|expected| expected != current)
+            || name != "shared"
+                && stat.st_mode & 0o7777 != loop_home::mail::acl::preserved_mode(&fd, 0o700)
+        {
+            return Err(refusal(
+                "shared, private and direct must have the same independent loop owner and group"
+                    .into(),
+            ));
+        }
+        identity = Some(current);
+    }
+    identity.ok_or_else(|| refusal("loop identity tiers are absent".into()))
+}
+
 impl Store {
     pub(crate) fn report_snapshot_failure(error: &LaneError) -> Value {
         let report = json!({"published":false,"rule":error.kind,"detail":error.detail});
@@ -71,31 +104,7 @@ impl Store {
                 "snapshot writer differs from the effective owner".into(),
             ));
         }
-        let mut identity = None;
-        for name in ["shared", "private", "direct"] {
-            let fd = nix::fcntl::openat2(
-                root,
-                name,
-                nix::fcntl::OpenHow::new()
-                    .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
-                    .resolve(
-                        nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS
-                            | nix::fcntl::ResolveFlag::RESOLVE_BENEATH,
-                    ),
-            )
-            .map_err(|error| refusal(error.to_string()))?;
-            let stat = fstat(&fd).map_err(|error| refusal(error.to_string()))?;
-            let current = (stat.st_uid, stat.st_gid);
-            if stat.st_uid == self.owner
-                || stat.st_mode & 0o022 != 0
-                || identity.is_some_and(|expected| expected != current)
-                || name != "shared" && stat.st_mode & 0o7707 != 0o700
-            {
-                return Err(refusal("shared, private and direct must have the same independent loop owner and group".into()));
-            }
-            identity = Some(current);
-        }
-        identity.ok_or_else(|| refusal("loop identity tiers are absent".into()))
+        observed_tier_identity(root, self.owner)
     }
 
     pub(super) fn invalidate_snapshot(&self) -> Result<(), LaneError> {
@@ -382,6 +391,36 @@ mod tests {
         let fixture = super::super::tests::Fixture::new();
         let store = fixture.snapshot_store();
         (fixture, store)
+    }
+
+    /// ´test:unit:observed-loop-tiers-validate-search-acl-masks´
+    #[test]
+    fn observed_loop_tiers_validate_search_acl_masks() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = File::open(fixture.path()).expect("root");
+        let owner = nix::unistd::Uid::effective().as_raw() + 1;
+        for name in ["shared", "private", "direct"] {
+            let path = fixture.path().join(name);
+            fs::create_dir(&path).expect("tier");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("private mode");
+            loop_home::mail::acl::install(&File::open(path).expect("tier"), owner + 1, true)
+                .expect("real search ACL");
+        }
+        let fd: OwnedFd = root.into();
+        observed_tier_identity(&fd, owner).expect("search grants");
+        for name in ["private", "direct"] {
+            let path = fixture.path().join(name);
+            // Read-only widening was accepted by the group-bit hotfix too.
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).expect("widen mask");
+            assert_eq!(
+                observed_tier_identity(&fd, owner)
+                    .expect_err("widened mask")
+                    .kind,
+                "execute-command-snapshot-custody"
+            );
+            fs::set_permissions(path, fs::Permissions::from_mode(0o710)).expect("restore mask");
+        }
+        observed_tier_identity(&fd, owner).expect("restored grants");
     }
 
     /// ´test:unit:direct-policy-writer-compares-policy-group-with-observed-loop-tiers´

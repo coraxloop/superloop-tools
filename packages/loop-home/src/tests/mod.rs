@@ -4259,3 +4259,66 @@ fn words_outside_entry_inventory_reach_ordinary_execution() {
         }
     }
 }
+
+/// ´claim:loophome:driver-settings-reader-validates-directory-and-file-acl-masks´
+/// ´test:crate:driver-settings-reader-validates-directory-and-file-acl-masks´
+#[test]
+fn driver_settings_reader_validates_directory_and_file_acl_masks() {
+    let fixture = TestDir::new_safe("settings-acl");
+    let root = &fixture.path;
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700)).expect("private root");
+    let path = root.join("workers.toml");
+    fs::write(&path, "driver_argv = []\n").expect("settings");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private settings");
+    let owner = nix::unistd::Uid::effective().as_raw();
+    for (target, directory) in [(root.as_path(), true), (path.as_path(), false)] {
+        crate::mail::acl::install(
+            &fs::File::open(target).expect("descriptor"),
+            owner + 1,
+            directory,
+        )
+        .expect("real ACL");
+        crate::driver_launch::read_driver_setting(&path, owner).expect("accepted ACL");
+    }
+    for (target, widened, restored) in [
+        (root.as_path(), 0o730, 0o710),
+        (path.as_path(), 0o660, 0o640),
+    ] {
+        fs::set_permissions(target, fs::Permissions::from_mode(widened)).expect("widen mask");
+        assert!(crate::driver_launch::read_driver_setting(&path, owner).is_err());
+        fs::set_permissions(target, fs::Permissions::from_mode(restored)).expect("restore mask");
+    }
+    crate::driver_launch::read_driver_setting(&path, owner).expect("restored grants");
+}
+
+/// ´claim:loophome:allocations-readers-validate-parent-and-ledger-acl-masks´
+/// ´test:crate:allocations-readers-validate-parent-and-ledger-acl-masks´
+#[test]
+fn allocations_readers_validate_parent_and_ledger_acl_masks() {
+    use crate::allocations::{Allocations, allocations_path};
+    let fixture = TestDir::new_safe("allocation-acl");
+    write_allocation(
+        &fixture.path,
+        "[alpha]\nuids = { base = 3000, count = 64 }\n",
+    );
+    let path = allocations_path(&fixture.path);
+    let parent = path.parent().expect("parent");
+    let service = nix::unistd::Uid::effective().as_raw() + 1;
+    for (target, directory) in [(parent, true), (path.as_path(), false)] {
+        crate::mail::acl::install(
+            &fs::File::open(target).expect("descriptor"),
+            service,
+            directory,
+        )
+        .expect("real ACL");
+    }
+    let fd = fs::File::open(parent).expect("parent descriptor").into();
+    Allocations::read(&path).expect("absolute reader");
+    Allocations::read_beneath(&path, parent, &fd).expect("anchored reader");
+    for (target, widened, restored) in [(parent, 0o730, 0o710), (path.as_path(), 0o660, 0o640)] {
+        fs::set_permissions(target, fs::Permissions::from_mode(widened)).expect("widen mask");
+        assert!(Allocations::read(&path).is_err());
+        assert!(Allocations::read_beneath(&path, parent, &fd).is_err());
+        fs::set_permissions(target, fs::Permissions::from_mode(restored)).expect("restore mask");
+    }
+}

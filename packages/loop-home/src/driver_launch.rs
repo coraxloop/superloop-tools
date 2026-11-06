@@ -96,7 +96,9 @@ fn pin_settings_parent(path: &Path, owner: u32) -> Result<OwnedFd, LoopError> {
         previous = stat;
         fd = next;
     }
-    if previous.st_uid != owner || previous.st_mode & 0o7777 != 0o700 {
+    if previous.st_uid != owner
+        || previous.st_mode & 0o7777 != crate::mail::acl::preserved_mode(&fd, 0o700)
+    {
         return Err(LoopError::refusal(format!(
             "workers settings directory must be owner-owned at mode 0700: {}",
             one_line_path(path)
@@ -143,7 +145,9 @@ pub fn read_driver_setting(path: &Path, owner: u32) -> Result<String, LoopError>
             one_line_path(path)
         )));
     }
-    if metadata.uid() != owner || metadata.mode() & 0o7777 != 0o600 {
+    if metadata.uid() != owner
+        || metadata.mode() & 0o7777 != crate::mail::acl::preserved_mode(&file, 0o600)
+    {
         return Err(LoopError::refusal(format!(
             "workers settings must be owner-owned at mode 0600: {}",
             one_line_path(path)

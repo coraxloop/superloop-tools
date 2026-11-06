@@ -328,7 +328,7 @@ impl Settings {
                 format!("{}: {error}", parent_path.display()),
             )
         })?;
-        if parent_stat.st_mode & 0o7777 != 0o700 {
+        if parent_stat.st_mode & 0o7777 != loop_home::mail::acl::preserved_mode(&parent, 0o700) {
             return Err(LaneError::input(
                 "settings-owner",
                 format!("{}: expected mode 0700", parent_path.display()),
@@ -364,7 +364,9 @@ impl Settings {
                 format!("{} is not a regular file", path.display()),
             ));
         }
-        if meta.uid() != owner || meta.mode() & 0o7777 != 0o600 {
+        if meta.uid() != owner
+            || meta.mode() & 0o7777 != loop_home::mail::acl::preserved_mode(&file, 0o600)
+        {
             return Err(LaneError::input(
                 "settings-owner",
                 format!(
@@ -517,6 +519,36 @@ fn configured_driver(table: &toml::Table) -> Result<Vec<String>, LaneError> {
 #[cfg(test)]
 mod tests {
     use super::{Resources, bounded_cpu_shares, page_aligned_memory, split_local_policies};
+
+    /// ´test:unit:settings-reader-validates-directory-and-file-acl-masks´
+    #[test]
+    fn settings_reader_validates_directory_and_file_acl_masks() {
+        use std::fs::{self, File};
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = fixture.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).expect("root mode");
+        let path = root.join("workers.toml");
+        fs::write(&path, "driver_argv = [\"/bin/true\"]\n").expect("settings");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("file mode");
+        let service = nix::unistd::Uid::effective().as_raw() + 1;
+        for (target, directory) in [(root, true), (path.as_path(), false)] {
+            loop_home::mail::acl::install(
+                &File::open(target).expect("descriptor"),
+                service,
+                directory,
+            )
+            .expect("real ACL");
+            super::Settings::read(&path).expect("accepted grant");
+        }
+        for (target, widened, restored) in [(root, 0o730, 0o710), (path.as_path(), 0o660, 0o640)] {
+            fs::set_permissions(target, fs::Permissions::from_mode(widened)).expect("widen mask");
+            assert!(super::Settings::read(&path).is_err(), "widened {target:?}");
+            fs::set_permissions(target, fs::Permissions::from_mode(restored))
+                .expect("restore mask");
+        }
+        super::Settings::read(&path).expect("restored grants");
+    }
 
     /// ´test:unit:cpu-weight-conversion-preserves-runtime-boundaries´
     #[test]

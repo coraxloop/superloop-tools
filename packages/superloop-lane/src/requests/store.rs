@@ -592,7 +592,7 @@ impl Store {
             .map_err(|error| problem("requests-record-refusal", error.to_string()))?;
         if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
             || stat.st_uid != owner
-            || stat.st_mode & 0o7707 != 0o600
+            || stat.st_mode & 0o7777 != loop_home::mail::acl::preserved_mode(&registry_fd, 0o600)
         {
             return Err(problem(
                 "requests-record-refusal",
@@ -2598,6 +2598,28 @@ pub(crate) mod tests {
 
     pub fn arm_mode_write_failure() {
         FAIL_MODE_WRITE.with(|fail| fail.set(true));
+    }
+
+    /// ´test:unit:requests-registry-reader-validates-the-named-acl-mask´
+    #[test]
+    fn requests_registry_reader_validates_the_named_acl_mask() {
+        let fixture = Fixture::new();
+        let path = fixture.home.join(".config/loops/registry.toml");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("group read");
+        assert!(Store::open(&fixture.home, "alpha", false).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private mode");
+        loop_home::mail::acl::install(
+            &File::open(&path).expect("registry"),
+            nix::unistd::Uid::effective().as_raw() + 1,
+            false,
+        )
+        .expect("real read ACL");
+        Store::open(&fixture.home, "alpha", false).expect("named read grant");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).expect("widen mask");
+        let error = Store::open(&fixture.home, "alpha", false)
+            .err()
+            .expect("widened mask refuses");
+        assert_eq!(error.kind, "requests-record-refusal");
     }
 
     /// # Panics
