@@ -417,7 +417,10 @@ impl Settings {
         if parent_stat.st_mode & 0o7777 != loop_home::mail::acl::preserved_mode(&parent, 0o700) {
             return Err(LaneError::input(
                 "settings-owner",
-                format!("{}: expected mode 0700", parent_path.display()),
+                format!(
+                    "{}: expected nominal mode 0700 with a validated named ACL",
+                    parent_path.display()
+                ),
             ));
         }
         let name = path.file_name().ok_or_else(|| {
@@ -456,7 +459,7 @@ impl Settings {
             return Err(LaneError::input(
                 "settings-owner",
                 format!(
-                    "{}: uid {} mode {:04o}; expected uid {owner} mode 0600",
+                    "{}: uid {} mode {:04o}; expected uid {owner}, nominal mode 0600 with a validated named ACL",
                     path.display(),
                     meta.uid(),
                     meta.mode() & 0o7777
@@ -627,9 +630,13 @@ mod tests {
             .expect("real ACL");
             super::Settings::read(&path).expect("accepted grant");
         }
-        for (target, widened, restored) in [(root, 0o730, 0o710), (path.as_path(), 0o660, 0o640)] {
+        for (target, widened, restored) in [(root, 0o750, 0o710), (path.as_path(), 0o660, 0o640)] {
             fs::set_permissions(target, fs::Permissions::from_mode(widened)).expect("widen mask");
-            assert!(super::Settings::read(&path).is_err(), "widened {target:?}");
+            assert_eq!(
+                super::Settings::read(&path).expect_err("widened mask").kind,
+                "settings-owner",
+                "widened {target:?}"
+            );
             fs::set_permissions(target, fs::Permissions::from_mode(restored))
                 .expect("restore mask");
         }

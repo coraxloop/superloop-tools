@@ -2226,28 +2226,26 @@ mod tests {
         let owner = nix::unistd::Uid::effective().as_raw();
         loop_home::mail::acl::install(&fs::File::open(path).expect("directory"), owner + 1, true)
             .expect("real search ACL");
-        for mode in [0o710, 0o730] {
+        for mode in [0o710, 0o750] {
             fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("mask");
-            let expected = mode == 0o710;
-            assert_eq!(super::lock_loop_config(path, false).is_ok(), expected);
-            assert_eq!(
-                super::InstallGuard::from_transferred(
-                    path,
-                    fs::File::open(path).expect("lock").into()
-                )
-                .is_ok(),
-                expected
-            );
-            assert_eq!(
-                super::InstallGuard::from_handed(
-                    path,
-                    path,
-                    owner,
-                    fs::File::open(path).expect("lock").into()
-                )
-                .is_ok(),
-                expected
-            );
+            let check = |result: Result<super::InstallGuard, crate::error::LaneError>| {
+                if mode == 0o710 {
+                    assert!(result.is_ok(), "named search grant");
+                } else {
+                    assert_eq!(result.expect_err("widened mask").kind, "install-lock");
+                }
+            };
+            check(super::lock_loop_config(path, false));
+            check(super::InstallGuard::from_transferred(
+                path,
+                fs::File::open(path).expect("lock").into(),
+            ));
+            check(super::InstallGuard::from_handed(
+                path,
+                path,
+                owner,
+                fs::File::open(path).expect("lock").into(),
+            ));
         }
     }
 
