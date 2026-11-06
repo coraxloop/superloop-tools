@@ -69,6 +69,7 @@
 //! | [`the_fix_command_writes_nothing_on_a_dry_run`] | fix | cites (´claim:fix:a-dry-run-counts-what-it-would-do-and-writes-nothing´) |
 //! | [`the_fix_command_refuses_a_dirty_tree`] | cli | The sweep refuses to run over a tree carrying uncommitted changes and writes nothing, so its edits always arrive as a diff a reviewer can read against a clean baseline. |
 //! | [`a_fixture_notice_tree_checks_and_then_fixes_clean`] | cli | cites (´claim:cli:check-then-sweep-then-check-leaves-a-tree-clean-and-settled´) |
+//! | [`todo_ownership_survives_check_and_fix`] | todo | A notice's ownership citation remains resolvable through check and fix while neither its target nor its owner becomes part of the derived notice name. # Panics Panics only if fixture IO fails or the executable violates the ownership slot. |
 //! | [`the_todo_sweep_writes_nothing_on_a_dry_run`] | fix | cites (´claim:fix:a-dry-run-counts-what-it-would-do-and-writes-nothing´) |
 //! | [`a_burn_list_fails_on_growth_and_on_a_stale_row`] | burn | The ratchet binds in both directions: the census as found passes, one more reference fails as growth with the new occurrence named, and one fewer fails as a stale row until the list falls with it. A file losing its last reference leaves the list rather than standing at zero. |
 //! | [`structural_root_rows_are_refused`] | layers | Root rows are refused only when workspace ownership supplies structural reach, including a root-owned member under a virtual manifest. # Panics Panics only if fixture IO fails or the binary violates the root-reach contract. |
@@ -3190,6 +3191,54 @@ fn a_fixture_notice_tree_checks_and_then_fixes_clean() {
     assert_eq!(again["inserted"], 0, "the sweep is idempotent");
     assert_eq!(again["repaired"], 0);
     assert_eq!(again["unchanged"], 4);
+    assert_eq!(again["files_changed"], 0);
+}
+
+/// A notice's ownership citation remains resolvable through check and fix while
+/// neither its target nor its owner becomes part of the derived notice name.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the executable violates the ownership slot.
+///
+/// ´claim:todo:ownership-survives-check-and-fix´
+/// ´test:integration:todo-ownership-survives-check-and-fix´
+#[test]
+fn todo_ownership_survives_check_and_fix() {
+    let root = tempfile::tempdir().expect("fixture");
+    notice_workspace(root.path());
+    let relative = "packages/demo/src/lib.rs";
+    write(
+        root.path(),
+        relative,
+        "// TODO ´todo:code:already-right´ (´todo:code:already-right´): already right\n// TODO (´todo:code:already-right´): repair the reader\n",
+    );
+    track(root.path());
+    declare_fixture_profile(root.path(), "profile.todos-conform");
+    let (code, before) = run(&["check"], root.path());
+    assert_eq!(code, Some(3));
+    assert_eq!(
+        before["todo"]["wrong"], 1,
+        "only the existing stale fixture: {before}"
+    );
+    let (code, swept) = run(
+        &["fix", "--profile", "todo", "--write", "--allow-dirty"],
+        root.path(),
+    );
+    assert_eq!(code, Some(0), "{swept}");
+    let source = fs::read_to_string(root.path().join(relative)).expect("rewritten notice");
+    // Exact output recorded by the c-a08-probe node round.
+    assert_eq!(
+        source,
+        "// TODO ´todo:code:already-right´ (´todo:code:already-right´): already right\n// TODO ´todo:code:repair-the-reader´ (´todo:code:already-right´): repair the reader\n"
+    );
+    let (code, after) = run(&["check"], root.path());
+    assert_eq!(code, Some(0), "{after}");
+    assert_eq!(after["todo"]["wrong"], 0);
+    let (code, again) = run(
+        &["fix", "--profile", "todo", "--write", "--allow-dirty"],
+        root.path(),
+    );
+    assert_eq!(code, Some(0), "{again}");
     assert_eq!(again["files_changed"], 0);
 }
 

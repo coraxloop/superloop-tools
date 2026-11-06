@@ -53,6 +53,8 @@
 //! | [`reads_no_marker_a_string_literal_carries`] | comment | cites (´claim:comment:a-string-literal-is-never-read-as-commentary´) |
 //! | [`takes_the_first_six_words_of_the_summary`] | todo | A notice's name is its opening words, bounded so a long summary yields a short label and a short one yields all of it. Punctuation separates words rather than entering them, so a summary naming a function in code font still derives a well-formed name. |
 //! | [`keeps_the_qualifier_out_of_the_derivation`] | todo | A qualifier in parentheses after the marker — a record reference, a date — is not part of the summary and so not part of the derived name, so a notice can be annotated without changing what it is called. |
+//! | [`ownership_citations_do_not_name_notices`] | todo | Ownership citations occupy a header slot independent of the summary, survive insertion and repair, and remain visible to the citation reader. # Panics Panics only if these fixture notices fail their derivation or placement. |
+//! | [`ownership_recognition_stops_at_the_summary`] | todo | Only a well-formed citation before the summary colon is an ownership slot; summary citations and ordinary parentheses still contribute words. |
 //! | [`derives_the_records_worked_example`] | todo | A notice's label is derived rather than chosen: the area it stands in and the words of its summary determine the whole label, kind included, so nobody names a notice by hand. |
 //! | [`refuses_a_summary_that_carries_no_word`] | todo | A summary carrying no word at all derives nothing: an empty one and one of bare punctuation both refuse, because a label needs a name and no name can be made from nothing. |
 //! | [`accepts_a_notices_derived_label_at_the_standard_place`] | todo | A notice carrying its own derived label at the standard place is clean, counted as covered and labelled and tallied under its area. This is what a migrated notice looks like. |
@@ -267,38 +269,68 @@ fn marker_of(line: &str) -> Option<(&'static str, &str)> {
     })
 }
 
-/// Read a marker's line into its qualifier, its standard place, and its summary.
-///
-/// The line is read as the marker, then an optional parenthesized qualifier,
-/// then the standard place, then an optional colon, then the summary. The
-/// qualifier is the shape this corpus already writes where a notice names the
-/// record whose work it awaits; ADR-T-016 lets it stand and keeps it out of
-/// every derivation. It is handed back here — without its parentheses — only so
-/// that a sweep rewriting the line can put it back where it stood, which is the
-/// whole of what "neither requires it nor retires it" costs in code.
-fn read_notice(rest: &str) -> (Option<&str>, Option<Label>, String) {
+/// The independent slots of a notice header and its authored summary.
+struct NoticeParts<'a> {
+    qualifier: Option<&'a str>,
+    carried: Option<Label>,
+    ownership: Option<&'a str>,
+    summary: String,
+}
+
+/// Read marker, optional qualifier, derived label, optional ownership citation,
+/// optional colon and summary. The ownership citation is preserved as source,
+/// never folded into the words from which the notice's identity derives. A
+/// citation already in the qualifier position before the label keeps the same
+/// meaning; rendering places it after the label.
+fn read_notice(rest: &str) -> NoticeParts<'_> {
     let mut tail = rest.trim_start();
     let mut qualifier = None;
 
-    if let Some(after) = tail.strip_prefix('(')
+    if leading_ownership(tail).is_none()
+        && let Some(after) = tail.strip_prefix('(')
         && let Some(close) = after.find(')')
     {
         qualifier = Some(&after[..close]);
         tail = after[close + 1..].trim_start();
     }
 
+    let mut ownership = leading_ownership(tail);
+    if let Some(ownership) = ownership {
+        tail = tail[ownership.len()..].trim_start();
+    }
     let carried = match leading_label(tail) {
         Some((label, width)) => {
             tail = tail[width..].trim_start();
-
             Some(label)
         }
         None => None,
     };
-
+    if ownership.is_none() {
+        ownership = leading_ownership(tail);
+        if let Some(ownership) = ownership {
+            tail = tail[ownership.len()..].trim_start();
+        }
+    }
     let summary = tail.strip_prefix(':').unwrap_or(tail).trim();
 
-    (qualifier, carried, summary.to_owned())
+    NoticeParts {
+        qualifier,
+        carried,
+        ownership,
+        summary: summary.to_owned(),
+    }
+}
+
+/// One well-formed citation at the header boundary, including its delimiters.
+fn leading_ownership(tail: &str) -> Option<&str> {
+    let span = code_spans(tail).into_iter().next()?;
+    if span.start != 1 || !span.parenthesized {
+        return None;
+    }
+    match crate::occurrence::read_span(span.interior, true) {
+        crate::occurrence::Reading::Occurrence { .. } => Some(&tail[..=span.end]),
+        _ => None,
+    }
 }
 
 /// The label opening a text as a bare acute span, with the bytes it occupies.
@@ -330,7 +362,9 @@ pub fn scan_todos(package: &str, path: &Path, source: &str) -> (Vec<TodoNotice>,
 
             match marker_of(trimmed) {
                 Some((marker, rest)) => {
-                    let (_qualifier, carried, summary) = read_notice(rest);
+                    let NoticeParts {
+                        carried, summary, ..
+                    } = read_notice(rest);
                     let marker_offset = offset + (trimmed.len() - rest.len() - marker.len());
 
                     notices.push(TodoNotice {
@@ -392,11 +426,11 @@ pub enum Placement {
 ///
 /// The line is rebuilt rather than patched: everything before the marker is kept
 /// byte for byte — a comment's leaders, its indentation, and any code standing
-/// before a trailing comment — and everything after it is re-emitted in the
-/// order (ADR-T-016, The TODO label profile) fixes, which is marker, qualifier, label, colon,
-/// summary. Rebuilding is what makes the sweep idempotent by construction: the
-/// line it writes is the line its own reader parses back to the same three
-/// parts, so a second sweep reaches [`Placement::Kept`] and stops.
+/// before a trailing comment — and everything after it is re-emitted as marker,
+/// qualifier, label, ownership citation, colon and summary. Rebuilding makes
+/// the sweep idempotent by construction: the
+/// line it writes is the line its own reader parses back to the same header
+/// slots, so a second sweep reaches [`Placement::Kept`] and stops.
 ///
 /// Only the marker's own line is touched. A notice wrapping over several comment
 /// lines keeps its continuation exactly as it stands, because the continuation is
@@ -447,15 +481,21 @@ pub fn place_label(
         .map_or(0, |index| index + 1);
     let prefix = &source[line_start..offset];
 
-    let (qualifier, carried, summary) = read_notice(after_marker);
+    let NoticeParts {
+        qualifier,
+        carried,
+        ownership,
+        summary,
+    } = read_notice(after_marker);
 
     if summary.is_empty() {
         return Err("its summary is empty, so no name derives from it".to_owned());
     }
 
     let qualifier = qualifier.map_or_else(String::new, |text| format!("({text})"));
+    let ownership = ownership.map_or_else(String::new, |text| format!(" {text}"));
     let rendered = format!(
-        "{marker}{qualifier} {}: {summary}",
+        "{marker}{qualifier} {}{ownership}: {summary}",
         standard_place_text(label)
     );
 
@@ -980,6 +1020,90 @@ mod tests {
                 .to_string(),
             "todo:code:accept-the-policy"
         );
+    }
+
+    /// Ownership citations occupy a header slot independent of the summary,
+    /// survive insertion and repair, and remain visible to the citation reader.
+    ///
+    /// # Panics
+    /// Panics only if these fixture notices fail their derivation or placement.
+    ///
+    /// ´claim:todo:ownership-citations-do-not-name-notices´
+    /// ´test:unit:ownership-citations-do-not-name-notices´
+    #[test]
+    fn ownership_citations_do_not_name_notices() {
+        let path = Path::new("packages/demo/src/a.rs");
+        let expected = derive_todo(TodoArea::Code, "repair the reader").expect("label");
+        for marker in super::TODO_MARKERS {
+            for ownership in ["(´prob:fixture:repair´)", "(´[OTHER-prob:fixture:repair]´)"] {
+                for carried in ["", "´todo:code:stale´ ", "´todo:code:repair-the-reader´ "] {
+                    for header in [
+                        format!("{carried}{ownership}"),
+                        format!("{ownership} {carried}"),
+                    ] {
+                        let source = format!("// {marker}(review) {header}: repair the reader\n");
+                        let (notices, findings) = scan_todos("example-demo", path, &source);
+                        assert!(findings.is_empty(), "{findings:?}");
+                        assert_eq!(notices.len(), 1);
+                        assert_eq!(notices[0].summary(), "repair the reader");
+                        assert_eq!(
+                            derive_todo(TodoArea::Code, notices[0].summary()),
+                            Some(expected.clone())
+                        );
+                        let placed =
+                            super::place_label(&source, 3, marker, &expected).expect("place");
+                        let line = match placed {
+                            super::Placement::Written(line) | super::Placement::Rewritten(line) => {
+                                line
+                            }
+                            super::Placement::Kept => source.trim_end().to_owned(),
+                        };
+                        assert!(line.contains(ownership));
+                        assert_eq!(
+                            super::place_label(&line, 3, marker, &expected).expect("repeat"),
+                            super::Placement::Kept
+                        );
+                        let (citations, _) = crate::code::scan_code_citations(path, &line, &[]);
+                        assert_eq!(citations.len(), 1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Only a well-formed citation before the summary colon is an ownership
+    /// slot; summary citations and ordinary parentheses still contribute words.
+    ///
+    /// ´claim:todo:ownership-recognition-stops-at-the-summary´
+    /// ´test:unit:ownership-recognition-stops-at-the-summary´
+    #[test]
+    fn ownership_recognition_stops_at_the_summary() {
+        for summary in [
+            "(review) repair the reader",
+            "(´not-a-label´) repair the reader",
+            "´prob:fixture:repair´ repair the reader",
+            "(´prob:fixture:repair´) repair the reader",
+        ] {
+            let source = format!("// TODO ´todo:code:old´: {summary}\n");
+            let (notices, _) =
+                scan_todos("example-demo", Path::new("packages/demo/src/a.rs"), &source);
+            assert_eq!(notices[0].summary(), summary);
+        }
+        for summary in [
+            "(review) repair the reader",
+            "(´not-a-label´) repair the reader",
+        ] {
+            let source = format!("// TODO ´todo:code:old´ {summary}\n");
+            let (notices, _) =
+                scan_todos("example-demo", Path::new("packages/demo/src/a.rs"), &source);
+            assert_eq!(notices[0].summary(), summary);
+        }
+        let (notices, _) = scan_todos(
+            "example-demo",
+            Path::new("packages/demo/src/a.rs"),
+            "// TODO ´todo:code:old´ (´prob:fixture:repair´):\n",
+        );
+        assert_eq!(derive_todo(TodoArea::Code, notices[0].summary()), None);
     }
 
     /// A notice's label is derived rather than chosen: the area it stands in
