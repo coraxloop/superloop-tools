@@ -7,20 +7,29 @@ import subprocess
 import sys
 
 
+def source_ancestor(info, owners):
+    owners.check(info.st_uid)
+    sticky = owners.parent_uid(info.st_uid) == 0 and stat.S_IMODE(info.st_mode) == 0o1777
+    if info.st_mode & 0o022 and not sticky:
+        raise ValueError('door-sign-in-source-parent')
+
+
 def source_parent(path):
+    owners = AncestorOwners.current(os.geteuid())
+    if owners.ranges != [(0, 0, 2**32 - 1)]:
+        raise ValueError('door-sign-in-source-map: initial namespace required')
     if not path.startswith('/') or any(p in ('', '.', '..') for p in path.split('/')[1:]):
         raise ValueError('door-sign-in-source-path')
     parts = path.split('/')[1:]
     parent = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     try:
+        source_ancestor(os.fstat(parent), owners)
         for part in parts[:-1]:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             os.close(parent)
             parent = child
             info = os.fstat(parent)
-            sticky = info.st_uid in (0, 65534) and stat.S_IMODE(info.st_mode) == 0o1777
-            if info.st_uid not in (0, 65534, os.geteuid()) or (info.st_mode & 0o022 and not sticky):
-                raise ValueError('door-sign-in-source-parent')
+            source_ancestor(info, owners)
         info = os.fstat(parent)
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
             raise ValueError('door-sign-in-canonical-directory-owner-mode')
