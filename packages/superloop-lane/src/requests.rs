@@ -226,10 +226,10 @@ impl RequestRecord {
     /// Refuses a malformed or older record before any mutation.
     #[allow(clippy::too_many_lines)]
     pub fn decode(value: Value) -> Result<Self, LaneError> {
-        if value["schema"] == 3 {
+        if matches!(value["schema"].as_u64(), Some(3 | 4)) {
             return Err(refusal(
                 "requests-rewrite-required",
-                "schema three requires requests rewrite LOOP --dry-run",
+                "schema three or four requires requests rewrite LOOP --dry-run",
             ));
         }
         let mut keys: Vec<_> = RECORD_KEYS
@@ -246,8 +246,8 @@ impl RequestRecord {
                 keys.push(key);
             }
         }
-        if value["schema"] != 4 {
-            return Err(refusal("requests-record-refusal", "schema must equal 4"));
+        if value["schema"] != 5 {
+            return Err(refusal("requests-record-refusal", "schema must equal 5"));
         }
         if !exact(&value, &keys) {
             let missing = keys
@@ -1063,8 +1063,8 @@ pub(crate) mod tests {
             .remove("ref_check");
         let refusal = RequestRecord::decode(old.clone()).expect_err("old schema");
         assert_eq!(refusal.kind, "requests-record-refusal");
-        assert_eq!(refusal.detail, "schema must equal 4");
-        old["schema"] = json!(4);
+        assert_eq!(refusal.detail, "schema must equal 5");
+        old["schema"] = json!(5);
         let refusal = RequestRecord::decode(old.clone()).expect_err("missing ref check");
         assert_eq!(refusal.kind, "requests-record-refusal");
         assert_eq!(refusal.detail, "effect shape differs");

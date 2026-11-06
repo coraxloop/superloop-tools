@@ -1,4 +1,4 @@
-//! Digest-bound, resumable schema-three conversion. No live reader accepts it.
+//! Digest-bound, resumable schema-three/four conversion. No live reader accepts it.
 
 use super::*;
 use sha2::{Digest as _, Sha256};
@@ -15,31 +15,46 @@ fn digest(bytes: &[u8]) -> String {
     result
 }
 
+pub(super) fn convert_record(before: &Value) -> Result<RequestRecord, LaneError> {
+    let mut row = before.clone();
+    if row["schema"] == 3 {
+        if !super::super::exact(&row, &super::super::RECORD_KEYS) {
+            return Err(problem(
+                "requests-rewrite-refusal",
+                "schema-three keys differ",
+            ));
+        }
+        if !matches!(
+            row["would_do"]["decision"].as_str(),
+            Some("allow" | "refuse" | "undecided")
+        ) {
+            return Err(problem(
+                "requests-rewrite-refusal",
+                "schema-three would-do differs",
+            ));
+        }
+        super::super::judgement::initialize(&mut row);
+    } else if row["schema"] == 4 {
+        if row.get("agent_observations").is_some() {
+            return Err(problem(
+                "requests-rewrite-refusal",
+                "schema-four observations key differs",
+            ));
+        }
+        // Preserve every historical judgement and runner field verbatim.
+        row["schema"] = json!(5);
+        row["agent_observations"] = Value::Null;
+    }
+    RequestRecord::decode(row)
+}
+
 fn convert(before: &Value) -> Result<Value, LaneError> {
     let mut after = before.clone();
     let rows = after["requests"]
         .as_array_mut()
         .ok_or_else(|| problem("requests-rewrite-refusal", "requests array absent"))?;
     for row in rows {
-        if row["schema"] == 3 {
-            if !super::super::exact(row, &super::super::RECORD_KEYS) {
-                return Err(problem(
-                    "requests-rewrite-refusal",
-                    "schema-three keys differ",
-                ));
-            }
-            if !matches!(
-                row["would_do"]["decision"].as_str(),
-                Some("allow" | "refuse" | "undecided")
-            ) {
-                return Err(problem(
-                    "requests-rewrite-refusal",
-                    "schema-three would-do differs",
-                ));
-            }
-            super::super::judgement::initialize(row);
-        }
-        let _validated = RequestRecord::decode(row.clone())?;
+        *row = convert_record(row)?.into_value();
     }
     let bytes = serde_json::to_vec(&after)
         .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
@@ -95,7 +110,7 @@ impl Store {
         json!({"state":state,"reason":reason,"shapes":shapes,"limit":limit,
             "rebuild":if limit.is_null() {json!(format!("requests rebuild-index {}", self.loop_name))} else {Value::Null},
             "remedy":if limit.is_null() {Value::Null} else {json!("index capacity exhausted; rebuilding unchanged custody cannot reduce this limit")},
-            "precondition":"stop the door service before rebuilding; schema four only; older records require requests rewrite with the service stopped"})
+            "precondition":"stop the door service before rebuilding; schema five only; older records require requests rewrite with the service stopped"})
     }
 
     /// Rebuild derived labels without migrating or changing request custody.
@@ -264,7 +279,9 @@ impl Store {
             }
             files.push(json!({"custody":name,"before_sha256":digest(&bytes),"before":before,"after":after}));
         }
-        Ok(json!({"schema":1,"loop":self.loop_name,"files":files}))
+        Ok(
+            json!({"schema":1,"loop":self.loop_name,"files":files,"channel":self.rewrite_channel_plan()?}),
+        )
     }
 
     /// List the whole conversion or apply exactly its supplied digest.
@@ -287,12 +304,22 @@ impl Store {
         } else {
             self.rewrite_plan()?
         };
+        if plan.get("channel").is_none() {
+            plan["channel"] = self.rewrite_channel_plan()?;
+        }
+        let previous_targets: Vec<_> = plan["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|file| file["after"].clone())
+            .collect();
         // Keep the full custody inventory for resume validation. Mark image
         // changes before hashing so the displayed flags are bound by the digest.
         for file in plan["files"]
             .as_array_mut()
             .ok_or_else(|| problem("requests-rewrite-refusal", "journal files absent"))?
         {
+            file["after"] = convert(&file["before"])?;
             let changed = file["before"] != file["after"];
             file.as_object_mut()
                 .ok_or_else(|| {
@@ -309,7 +336,7 @@ impl Store {
         if expected.is_none() {
             return Ok(
                 json!({"dry_run":true,"preview_sha256":plan_digest,"plan":plan,"resuming":pending,
-                "changed":changed_records(&plan),"fixed_schema_pair":{"predecessor":3,"target":4}}),
+                "changed":changed_records(&plan),"fixed_schema_pair":{"predecessors":[3,4],"target":5}}),
             );
         }
         if expected != Some(plan_digest.as_str()) {
@@ -325,7 +352,7 @@ impl Store {
         if changed == 0 && !pending {
             return Ok(
                 json!({"dry_run":false,"preview_sha256":plan_digest,"plan":plan,
-                "complete":true,"changed":0,"fixed_schema_pair":{"predecessor":3,"target":4}}),
+                "complete":true,"changed":0,"fixed_schema_pair":{"predecessors":[3,4],"target":5}}),
             );
         }
         if pending {
@@ -346,7 +373,7 @@ impl Store {
         }
         // Check every file before the first mutation. Resume accepts only the
         // original bytes or the exact already-published target bytes.
-        for file in files {
+        for (index, file) in files.iter().enumerate() {
             let name = file["custody"]
                 .as_str()
                 .ok_or_else(|| problem("requests-rewrite-refusal", "custody absent"))?;
@@ -356,13 +383,18 @@ impl Store {
                 .ok_or_else(|| problem("requests-rewrite-refusal", "record disappeared"))?;
             let target = serde_json::to_vec(&file["after"])
                 .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
-            if digest(&current) != file["before_sha256"] && !(pending && current == target) {
+            let previous = serde_json::to_vec(&previous_targets[index])
+                .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
+            if digest(&current) != file["before_sha256"]
+                && !(pending && (current == target || current == previous))
+            {
                 return Err(problem(
                     "requests-rewrite-digest",
                     "record changed since the bound plan",
                 ));
             }
         }
+        self.rewrite_channel_check(&plan["channel"])?;
         journal = json!({"schema":1,"phase":"pending","digest":plan_digest,"plan":plan});
         replace_leaf(
             &self.state,
@@ -379,6 +411,7 @@ impl Store {
                 .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
             replace_leaf(&custody, RUN_FILE, &target, self.owner, MAX_RUN_BYTES)?;
         }
+        self.rewrite_channel_apply(&plan["channel"])?;
         self.repair_shapes(&self.all_runs(None)?)?;
         let mut learned = json!({"schema":1,"groups":{}});
         let mut indexed = HashSet::new();
@@ -401,13 +434,13 @@ impl Store {
         )?;
         Ok(
             json!({"dry_run":false,"preview_sha256":plan_digest,"plan":plan,"complete":true,
-            "changed":changed,"fixed_schema_pair":{"predecessor":3,"target":4}}),
+            "changed":changed,"fixed_schema_pair":{"predecessors":[3,4],"target":5}}),
         )
     }
 }
 
 fn changed_records(plan: &Value) -> usize {
-    plan["files"]
+    let custody: usize = plan["files"]
         .as_array()
         .into_iter()
         .flatten()
@@ -416,10 +449,15 @@ fn changed_records(plan: &Value) -> usize {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|row| row["schema"] == 3)
+                .filter(|row| matches!(row["schema"].as_u64(), Some(3 | 4)))
                 .count()
         })
-        .sum()
+        .sum();
+    custody
+        + plan["channel"]["changed"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -464,7 +502,7 @@ mod tests {
         );
         assert_eq!(
             preview["plan"]["files"][0]["after"]["requests"][0]["schema"],
-            4
+            5
         );
         assert_eq!(
             store.rewrite(Some("wrong")).expect_err("digest").kind,
@@ -516,7 +554,7 @@ mod tests {
         assert_eq!(preview["changed"], 1);
         assert_eq!(
             preview["fixed_schema_pair"],
-            json!({"predecessor":3,"target":4})
+            json!({"predecessors":[3,4],"target":5})
         );
         assert!(preview.get("predecessor_schema").is_none());
         assert!(preview.get("target_schema").is_none());
@@ -576,6 +614,59 @@ mod tests {
             std::fs::read(&current).expect("no-op leaves current"),
             current_bytes
         );
+    }
+
+    /// ´test:unit:rewrite-schema-four-preserves-judgement-with-unmeasured-observations´
+    #[test]
+    fn rewrite_schema_four_preserves_judgement_with_unmeasured_observations() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let mut record = waiting("R", "1a", 3000, Mode::Audit).into_value();
+        let result = crate::door::agent::RunnerOutcome::referral(
+            "failure",
+            "historical failure",
+            std::time::Instant::now(),
+        );
+        judgement::apply(&mut record, &result, None, Some("historical-model"));
+        store
+            .file(RequestRecord::decode(record).expect("current record"))
+            .expect("file");
+        let path = fixture.home.join("runs/.launch-R/door-requests.json");
+        let mut file: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("bytes")).expect("file");
+        file["requests"][0]["schema"] = json!(4);
+        file["requests"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("agent_observations");
+        let original = serde_json::to_vec(&file).expect("historical bytes");
+        std::fs::write(&path, &original).expect("historical file");
+        assert_eq!(
+            store.list_run("R").expect_err("strict live reader").kind,
+            "requests-rewrite-required"
+        );
+        assert_eq!(std::fs::read(&path).expect("reader leaves bytes"), original);
+        let preview = store.rewrite(None).expect("preview");
+        assert_eq!(preview["changed"], 1);
+        let mut expected = file["requests"][0].clone();
+        expected["schema"] = json!(5);
+        expected["agent_observations"] = Value::Null;
+        assert_eq!(
+            preview["plan"]["files"][0]["after"]["requests"][0],
+            expected
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("preview leaves bytes"),
+            original
+        );
+        store
+            .rewrite(preview["preview_sha256"].as_str())
+            .expect("apply");
+        assert_eq!(
+            store.list_run("R").expect("converted")[0].value(),
+            &expected
+        );
+        assert_eq!(store.rewrite(None).expect("one time")["changed"], 0);
     }
 
     /// ´test:unit:rewrite-preserves-reviewed-label-and-superloop-tier´
@@ -638,6 +729,19 @@ mod tests {
         for file in saved_plan["files"].as_array_mut().expect("saved files") {
             file.as_object_mut().expect("saved file").remove("changed");
         }
+        for file in saved_plan["files"].as_array_mut().expect("saved files") {
+            for record in file["after"]["requests"]
+                .as_array_mut()
+                .expect("saved rows")
+            {
+                record["schema"] = json!(4);
+                record
+                    .as_object_mut()
+                    .expect("saved row")
+                    .remove("agent_observations");
+            }
+        }
+        let previous_target = saved_plan["files"][0]["after"].clone();
         let saved_digest = digest(&serde_json::to_vec(&saved_plan).expect("saved bytes"));
         let journal = json!({"schema":1,"phase":"pending","digest":saved_digest,"plan":saved_plan});
         replace_leaf(
@@ -650,7 +754,7 @@ mod tests {
         .expect("interrupted journal");
         std::fs::write(
             &path,
-            serde_json::to_vec(&preview["plan"]["files"][0]["after"]).expect("after"),
+            serde_json::to_vec(&previous_target).expect("previous target"),
         )
         .expect("first file installed");
         assert_eq!(
@@ -670,7 +774,7 @@ mod tests {
         let value: Value =
             serde_json::from_slice(&std::fs::read(retired.join(RUN_FILE)).expect("retired"))
                 .expect("JSON");
-        assert_eq!(value["requests"][0]["schema"], 4);
+        assert_eq!(value["requests"][0]["schema"], 5);
         assert_eq!(store.list_run("R").expect("active").len(), 1);
     }
 }

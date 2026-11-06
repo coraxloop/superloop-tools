@@ -428,7 +428,7 @@ fn install_refusals(fixture: &Fixture) {
 #[test]
 #[ignore = "requires namespace root with UID/GID 0, 3000, 3001, 41001, 41002 and 41003 mapped"]
 fn rubric_failure_survives_request_record_and_rewrite() {
-    // The approved historical test name is retained; this lane deliberately adds no record rewrite.
+    // The mapped failure evidence survives the current strict record decoder.
     namespace();
     for uid in [41001, 41002] {
         let fixture = Fixture::new(uid);
@@ -452,7 +452,7 @@ fn rubric_failure_survives_request_record_and_rewrite() {
                 "1",
             )
             .expect("setting");
-            let mut record = json!({"schema":4,"id":"R:1a","loop":"alpha","run":"R",
+            let mut record = json!({"schema":5,"id":"R:1a","loop":"alpha","run":"R",
                 "worker_uid":worker,"class":"git","shape_key":"git:upload","operation":"git-upload",
                 "mirror_ref":"refs/heads/lane/alpha","mode":"audit","floor":"audit",
                 "class_setting":setting.value(),"loop_setting":setting.value(),
@@ -463,8 +463,9 @@ fn rubric_failure_survives_request_record_and_rewrite() {
             superloop_lane::requests::judgement::initialize(&mut record);
             superloop_lane::requests::judgement::apply(&mut record, &result, None, Some("fixture"));
             let decoded = superloop_lane::requests::RequestRecord::decode(record)
-                .expect("unchanged record schema");
-            assert_eq!(decoded.value()["schema"], 4);
+                .expect("current record schema");
+            assert_eq!(decoded.value()["schema"], 5);
+            assert_eq!(decoded.value()["agent_observations"], result.observations);
             assert!(decoded.value().get("agent_evidence").is_none());
             assert!(decoded.value().get("rubric_failure").is_none());
         }
@@ -608,7 +609,7 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
     )
     .expect("setting");
     for (nonce, worker) in [("1a", fixture.uid + 10), ("1b", fixture.uid + 11)] {
-        let mut record = json!({"schema":4,"id":format!("R:{nonce}"),"loop":"alpha","run":"R",
+        let mut record = json!({"schema":5,"id":format!("R:{nonce}"),"loop":"alpha","run":"R",
             "worker_uid":worker,"class":"git","shape_key":"git:upload","operation":"git-upload",
             "mirror_ref":"refs/heads/lane/alpha","mode":"audit","floor":"audit",
             "class_setting":setting.value(),"loop_setting":setting.value(),
@@ -617,7 +618,7 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
                 "stdout_bytes":0,"stderr_bytes":0,"queue_wall_seconds":null,"mediation_wall_seconds":0.0,"compute_wall_seconds":0.0},
             "state":"waiting","mark_reason":null,"review":null,"label":null,"filed_at":"1"});
         superloop_lane::requests::judgement::initialize(&mut record);
-        let mut record = RequestRecord::decode(record).expect("schema four");
+        let mut record = RequestRecord::decode(record).expect("schema five");
         record.mark("fixture review").expect("mark for review");
         store.file(record).expect("file request");
         store
@@ -625,10 +626,14 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
             .expect("production agent writer");
     }
     for row in store.list_run("R").expect("exercise run reader") {
-        assert_eq!(row.value()["schema"], 4);
+        assert_eq!(row.value()["schema"], 5);
         assert_eq!(row.value()["agent_reason"], "door-rubric-unavailable");
         assert!(row.value().get("rubric_failure").is_none());
-        assert!(row.value().get("agent_evidence").is_none());
+        assert_eq!(row.value()["agent_observations"], result.observations);
+        assert_eq!(
+            row.value()["agent_observations"]["rubric_failure"],
+            result.observations["rubric_failure"]
+        );
         assert_eq!(
             store.request(row.id()).expect("single reader").value(),
             row.value()
@@ -642,6 +647,7 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
         vec!["review", "alpha", "R:1a"],
         vec!["rewrite", "alpha", "--dry-run"],
     ] {
+        let action = args[0];
         let output = Command::new(env!("CARGO_BIN_EXE_superloop-lane"))
             .arg("requests")
             .args(args)
@@ -658,6 +664,13 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
             String::from_utf8_lossy(&output.stderr)
         );
         let report: Value = serde_json::from_slice(&output.stdout).expect("reader JSON");
-        assert!(!report.to_string().contains("rubric_failure"));
+        match action {
+            "review" => assert_eq!(report["agent_observations"], result.observations),
+            "rewrite" => assert_eq!(
+                report["plan"]["files"][0]["after"]["requests"][0]["agent_observations"],
+                result.observations
+            ),
+            _ => assert!(!report.to_string().contains("rubric_failure")),
+        }
     }
 }

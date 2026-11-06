@@ -2013,7 +2013,7 @@ impl Store {
         if index["schema"] != 1 || !index["groups"].is_object() {
             return Err(problem(
                 "requests-learned-index",
-                "index unavailable; requests rebuild-index LOOP rebuilds schema-four custody; older records need requests rewrite",
+                "index unavailable; requests rebuild-index LOOP rebuilds schema-five custody; older records need requests rewrite",
             ));
         }
         let key = json!([class, operation, shape]).to_string();
@@ -2777,6 +2777,104 @@ pub(crate) mod tests {
         );
     }
 
+    /// ´test:unit:rewrite-upgrades-helper-copies-and-resumes-after-custody-publication´
+    #[test]
+    fn rewrite_upgrades_helper_copies_and_resumes_after_custody_publication() {
+        use serde_json::Value;
+        use std::fmt::Write as _;
+        fn older(record: &mut Value) {
+            record["schema"] = json!(4);
+            record
+                .as_object_mut()
+                .expect("record")
+                .remove("agent_observations");
+        }
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store
+            .file(waiting("R", "1a", 3000, Mode::Audit))
+            .expect("file");
+        fixture
+            .command(
+                &["triage", "alpha", "R"],
+                br#"[{"id":"R:1a","action":"mark","reason":"fixture"}]"#,
+            )
+            .expect("publish helper copy");
+        let path = fixture.run_file("R");
+        let mut custody: Value =
+            serde_json::from_slice(&fs::read(&path).expect("custody")).expect("JSON");
+        older(&mut custody["requests"][0]);
+        let before = serde_json::to_vec(&custody).expect("old custody");
+        fs::write(&path, &before).expect("downgrade fixture");
+        let journal = fixture
+            .permission_registry
+            .parent()
+            .expect("root")
+            .join("permission-state/escalations.jsonl");
+        let mut old_journal = String::new();
+        for line in fs::read_to_string(&journal).expect("journal").lines() {
+            let mut value: Value = serde_json::from_str(line).expect("journal JSON");
+            if let Some(rows) = value["collection"]["requests"].as_array_mut() {
+                for row in rows {
+                    older(&mut row["body"]["record"]);
+                }
+            }
+            writeln!(old_journal, "{value}").expect("fixture line");
+        }
+        fs::write(&journal, &old_journal).expect("old helper copy");
+        assert_eq!(
+            fixture
+                .command(&["list", "alpha"], b"")
+                .expect_err("strict helper reader")
+                .kind,
+            "requests-rewrite-required"
+        );
+        let preview = store.rewrite(None).expect("complete preview");
+        assert_eq!(preview["changed"], 2);
+        assert_eq!(preview["plan"]["channel"]["changed"], 1);
+        assert_eq!(fs::read(&path).expect("preview custody"), before);
+        assert_eq!(
+            fs::read_to_string(&journal).expect("preview helper"),
+            old_journal
+        );
+        assert!(store.rewrite(Some("wrong")).is_err());
+        assert_eq!(
+            fs::read_to_string(&journal).expect("refused helper"),
+            old_journal
+        );
+        let pending = json!({"schema":1,"phase":"pending","digest":preview["preview_sha256"],"plan":preview["plan"]});
+        super::replace_leaf(
+            &store.state,
+            "door-rewrite.json",
+            &serde_json::to_vec(&pending).expect("pending"),
+            store.owner,
+            64 * 1_048_576,
+        )
+        .expect("pending journal");
+        fs::write(
+            &path,
+            serde_json::to_vec(&preview["plan"]["files"][0]["after"]).expect("published custody"),
+        )
+        .expect("partial publication");
+        store
+            .rewrite(preview["preview_sha256"].as_str())
+            .expect("resume helper publication");
+        let row = store.request("R:1a").expect("read converted");
+        assert_eq!(row.value()["schema"], 5);
+        assert_eq!(row.value()["state"], "marked");
+        assert!(row.value()["agent_observations"].is_null());
+        fixture
+            .command(&["list", "alpha"], b"")
+            .expect("converted helper reader");
+        let after = fs::read(&journal).expect("converted helper bytes");
+        let repeat = store.rewrite(None).expect("repeat");
+        assert_eq!(repeat["changed"], 0);
+        store
+            .rewrite(repeat["preview_sha256"].as_str())
+            .expect("no-op");
+        assert_eq!(fs::read(&journal).expect("no-op helper"), after);
+    }
+
     /// ´test:unit:agent-merge-preserves-effect-and-supervisory-label´
     #[test]
     fn agent_merge_preserves_effect_and_supervisory_label() {
@@ -2789,11 +2887,12 @@ pub(crate) mod tests {
         effect["exit_status"] = json!(0);
         effect["ref_check"] = json!("not-applicable");
         store.file(request).expect("intent");
-        let result = crate::door::agent::RunnerOutcome::referral(
+        let mut result = crate::door::agent::RunnerOutcome::referral(
             "timeout",
             "deadline",
             std::time::Instant::now(),
         );
+        result.observations = json!({"children_reaped":true,"agent_calls":1});
         std::thread::scope(|scope| {
             let judgement =
                 scope.spawn(|| store.record_agent("R:1a", &result, None, Some("configured")));
@@ -2816,6 +2915,7 @@ pub(crate) mod tests {
         assert_eq!(record["decision_tier"], "superloop");
         assert_eq!(record["would_do_source"], "agent");
         assert_eq!(record["agent_status"], "timeout");
+        assert_eq!(record["agent_observations"], result.observations);
     }
 
     /// ´test:unit:learned-rubric-keeps-retired-conflicts-and-citations´
@@ -3258,7 +3358,7 @@ pub(crate) mod tests {
         );
         let converted: Value =
             serde_json::from_slice(&fs::read(&request_path).expect("converted")).expect("JSON");
-        assert_eq!(converted["requests"][0]["schema"], 4);
+        assert_eq!(converted["requests"][0]["schema"], 5);
         assert_eq!(
             fs::read(&archive).expect("archive unchanged"),
             archive_bytes

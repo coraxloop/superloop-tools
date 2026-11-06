@@ -106,6 +106,21 @@ fn merge(collection: &mut Collection, records: Vec<Request>) -> Result<(), Error
 }
 
 fn apply(collection: &mut Collection, action: &str, input: &OwnerInput) -> Result<Value, Error> {
+    if action == "rewrite-door" {
+        if input.pending
+            || input.id.is_some()
+            || input.document.is_some()
+            || !input.records.is_empty()
+            || (input.expected.is_some() && input.publication.is_none())
+        {
+            return Err(failure("door rewrite envelope fields"));
+        }
+        collection.revision = collection
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| failure("revision exhausted"))?;
+        return Ok(json!({"rewritten":true}));
+    }
     if action == "file" {
         if input.pending
             || input.id.is_some()
