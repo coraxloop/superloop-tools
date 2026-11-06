@@ -329,12 +329,11 @@ impl OwnerFixture {
 
 /// ´test:integration:request-helper-refuses-foreign-registry-and-state-owners´
 #[test]
-#[ignore = "requires provisioned namespace root with UIDs 41001 and 41002 mapped"]
+#[ignore = "requires privileged namespace root with UID/GID 0, 41001 and 41002 mapped and dac_override for caller fixtures; podman unshare supplies the map"]
 fn request_helper_refuses_foreign_registry_and_state_owners() {
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use nix::unistd::{Uid, chown};
     use std::os::fd::AsRawFd as _;
-    use std::os::unix::process::CommandExt as _;
     assert!(
         Uid::effective().is_root(),
         "provisioned namespace root required"
@@ -346,16 +345,24 @@ fn request_helper_refuses_foreign_registry_and_state_owners() {
     fcntl(&binary, FcntlArg::F_SETFD(FdFlag::empty())).expect("inherit executable descriptor");
     std::fs::set_permissions(&fixture.0, std::fs::Permissions::from_mode(0o711))
         .expect("searchable fixture");
+    // Fixture-only DAC override reaches the application owner check through
+    // foreign 0700 directories; an unprivileged caller can fail earlier in the kernel.
     let run = |uid, action: &str| {
-        Command::new(format!("/proc/self/fd/{}", binary.as_raw_fd()))
+        Command::new("/usr/bin/setpriv")
+            .args([
+                format!("--reuid={uid}"),
+                format!("--regid={uid}"),
+                "--clear-groups".into(),
+                "--inh-caps=-all,+dac_override".into(),
+                "--ambient-caps=-all,+dac_override".into(),
+            ])
+            .arg(format!("/proc/self/fd/{}", binary.as_raw_fd()))
             .args([action, "--loop", "fixture"])
             .env_clear()
             .env(
                 "PERMISSION_TRIAGE_LOOP_REGISTRY",
                 fixture.0.join("registry"),
             )
-            .uid(uid)
-            .gid(uid)
             .output()
             .expect("helper under mapped uid")
     };
@@ -368,21 +375,26 @@ fn request_helper_refuses_foreign_registry_and_state_owners() {
         own("registry/fixture.env", caller);
         own("state", caller);
         for action in ["status", "list"] {
+            let accepted = run(caller, action);
             assert!(
-                run(caller, action).status.success(),
-                "same-account acceptance"
+                accepted.status.success(),
+                "same-account acceptance: {accepted:?}"
             );
             own("state", other);
             let refusal = run(caller, action);
             assert_eq!(refusal.status.code(), Some(2));
             assert_eq!(refusal.stdout, b"");
-            assert_ne!(refusal.stderr, b"");
+            let detail = String::from_utf8_lossy(&refusal.stderr);
+            let expected = format!("owner uid is {other}, not process effective uid {caller}");
+            assert!(detail.contains(&expected), "{action}: {detail}");
             own("state", caller);
             own("registry", other);
             let refusal = run(caller, action);
             assert_eq!(refusal.status.code(), Some(2));
             assert_eq!(refusal.stdout, b"");
-            assert_ne!(refusal.stderr, b"");
+            let detail = String::from_utf8_lossy(&refusal.stderr);
+            let expected = format!("owner uid is {other}, not process effective uid {caller}");
+            assert!(detail.contains(&expected), "{action}: {detail}");
             own("registry", caller);
         }
     }
