@@ -133,6 +133,7 @@ fn rendered_routes_pass_signin_check_and_reconcile() {
     assert!(signin("check-signin-home", &[]).status.success());
     reconcile_both_orders(home, signin);
     assert_registry_selection(home, &signin);
+    assert_single_generated_header(home, &signin);
     assert_route_retirement(home, &signin);
     for status in ["active", "retired"] {
         let bad = registry()
@@ -157,6 +158,39 @@ fn rendered_routes_pass_signin_check_and_reconcile() {
             assert!(!output.contains("/home/alpha/private-key"), "{output}");
         }
     }
+}
+
+/// # Panics
+/// Panics if reconciliation retains a repeated generated header or changes owner data.
+fn assert_single_generated_header(
+    home: &std::path::Path,
+    signin: &impl Fn(&str, &[&str]) -> std::process::Output,
+) {
+    let path = home.join(".config/loops/alpha/codex/ssh_config");
+    let original = fs::read_to_string(&path).expect("rendered SSH config");
+    let header = original.split_inclusive('\n').take(5).collect::<String>();
+    assert!(header.lines().all(|line| line.starts_with('#')));
+    fs::write(&path, header.clone() + &original).expect("duplicate generated header");
+    let preview = signin("prepare-signin-home", &["--reconcile", "--dry-run"]);
+    assert!(preview.status.success(), "{preview:?}");
+    let plan: serde_json::Value = serde_json::from_slice(&preview.stdout).expect("preview");
+    assert_eq!(plan["changed"], 1);
+    let apply = signin(
+        "prepare-signin-home",
+        &[
+            "--reconcile",
+            "--expect-digest",
+            plan["digest"].as_str().expect("digest"),
+        ],
+    );
+    assert!(apply.status.success(), "{apply:?}");
+    let after = fs::read_to_string(&path).expect("single generated header");
+    assert_eq!(after, original);
+    assert_eq!(after.matches(&header).count(), 1);
+    let preview = signin("prepare-signin-home", &["--reconcile", "--dry-run"]);
+    assert!(preview.status.success(), "{preview:?}");
+    let plan: serde_json::Value = serde_json::from_slice(&preview.stdout).expect("repeat preview");
+    assert_eq!(plan["changed"], 0);
 }
 
 /// # Panics

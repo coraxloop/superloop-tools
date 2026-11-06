@@ -164,7 +164,7 @@ pub(super) fn header_nodes(text: &str) -> Result<Vec<&str>> {
             })
         })
         .collect::<Vec<_>>();
-    if headers.len() != 1 {
+    if headers.is_empty() || headers.iter().any(|header| *header != headers[0]) {
         return Err("reconcile requires the generated Codex node header".into());
     }
     Ok(if headers[0].is_empty() {
@@ -189,23 +189,35 @@ fn owner_leading(text: &str, settings: &Settings) -> Result<String> {
         .filter(|(_, line)| marker(line))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    if markers.len() > 1 {
+    let mut generated_runs = parts[0]
+        .windows(generated.len())
+        .enumerate()
+        .filter(|(_, window)| {
+            window.iter().zip(&generated).all(|(line, expected)| {
+                line.trim_end() == *expected || (marker(line) && marker(expected))
+            })
+        })
+        .map(|(start, _)| start..start + generated.len())
+        .collect::<Vec<_>>();
+    if markers.len() > 1
+        && (markers
+            .iter()
+            .any(|&at| parts[0][at] != parts[0][markers[0]])
+            || markers
+                .iter()
+                .any(|at| !generated_runs.iter().any(|run| run.contains(at))))
+    {
         return Err("ambiguous generated Codex node header".into());
     }
-    let complete = parts[0].windows(generated.len()).position(|window| {
-        window.iter().zip(&generated).all(|(line, expected)| {
-            line.trim_end() == *expected || (marker(line) && marker(expected))
-        })
-    });
-    let generated_run = match (complete, markers.first()) {
-        (Some(start), _) => start..start + generated.len(),
-        (None, Some(&at)) => partial_run(&parts[0], at, &generated, marker)?,
-        (None, None) => 0..0,
-    };
+    if generated_runs.is_empty()
+        && let Some(&at) = markers.first()
+    {
+        generated_runs.push(partial_run(&parts[0], at, &generated, marker)?);
+    }
     Ok(parts[0]
         .iter()
         .enumerate()
-        .filter(|(index, _)| !generated_run.contains(index))
+        .filter(|(index, _)| !generated_runs.iter().any(|run| run.contains(index)))
         .map(|(_, line)| line.clone())
         .collect())
 }
@@ -719,6 +731,48 @@ pub(super) mod tests {
             .skip(7)
             .collect::<String>();
         (header[1..].concat() + &owner + &stanzas, owner)
+    }
+
+    /// # Panics
+    /// Panics if complete repeated headers survive, owner comments disappear or conflicting markers pass.
+    /// ´claim:superlooplane:codex-reconcile-writes-one-generated-header´
+    /// ´test:unit:codex-reconcile-writes-one-generated-header´
+    #[test]
+    fn codex_reconcile_writes_one_generated_header() {
+        let settings = super::super::repair::tests::fixture(std::path::Path::new("/owner"));
+        let header = super::super::header(&settings);
+        let owner = "# owner note\n# key, opening only the loop's own confined account.\n";
+        let source =
+            format!("{header}{owner}{header}{header}Host personal\n  HostName personal.invalid\n");
+        let nodes = header_nodes(&source).expect("identical node markers");
+        let rewritten =
+            rewrite(&source, &nodes, &settings, true).expect("collapse repeated headers");
+        assert_eq!(rewritten.matches(&header).count(), 1);
+        assert!(rewritten.starts_with(&(header.clone() + owner)));
+        assert!(rewritten.contains("Host personal\n  HostName personal.invalid\n"));
+        assert_eq!(
+            details(&source, &settings).expect("owner count")["retained_leading_comment_lines"],
+            2
+        );
+        assert_eq!(
+            rewrite(&rewritten, &nodes, &settings, true).expect("fixpoint"),
+            rewritten
+        );
+        let conflicting = source.replacen("(node);", "(other);", 1);
+        assert!(header_nodes(&conflicting).is_err());
+        assert!(rewrite(&conflicting, &nodes, &settings, true).is_err());
+        let marker = header
+            .lines()
+            .find(|line| line.starts_with(NODE_HEADERS[1]))
+            .expect("marker");
+        let partial_duplicate = format!("{source}{marker}\n");
+        // A marker after a Host is part of that stanza and is not a leading header.
+        assert_eq!(
+            header_nodes(&partial_duplicate).expect("stanza comment"),
+            nodes
+        );
+        let partial_duplicate = format!("{marker}\n{source}");
+        assert!(rewrite(&partial_duplicate, &nodes, &settings, true).is_err());
     }
 
     /// # Panics
