@@ -1453,7 +1453,7 @@ mod tests {
         .expect("launch evidence");
         std::fs::set_permissions(&evidence, std::fs::Permissions::from_mode(0o600))
             .expect("evidence mode");
-        let document = json!({"loop":"alpha","home":home_dir,"driver_dir":driver_dir,"worker_uid":owner,"paths":[{"path":home_dir,"gid":owner},{"path":driver_dir,"uid":owner,"gid":owner,"kind":"directory"}]});
+        let document = json!({"backend":"codex","loop":"alpha","home":home_dir,"driver_dir":driver_dir,"worker_uid":owner,"paths":[{"path":home_dir,"gid":owner},{"path":driver_dir,"uid":owner,"gid":owner,"kind":"directory"}]});
         let plan = crate::plan::Plan {
             home: home_dir,
             driver_dir,

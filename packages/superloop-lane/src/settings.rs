@@ -44,6 +44,17 @@ impl BoxBackend {
         }
     }
 
+    /// Read an explicit backend from a protected plan, never from current defaults.
+    ///
+    /// # Errors
+    /// Refuses absent, non-string or unknown backend bindings.
+    pub fn from_plan(plan: &serde_json::Value) -> Result<Self, LaneError> {
+        let name = plan["backend"].as_str().ok_or_else(|| {
+            LaneError::input("backend-selection", "protected plan backend is absent or invalid; retire the old run before launching again")
+        })?;
+        Self::parse(name)
+    }
+
     /// Refuse a vendor whose boxed runtime and credential adapter are not ready.
     ///
     /// # Errors

@@ -20,6 +20,123 @@ fn backend_settings(vendors: &[&str]) -> crate::settings::Settings {
     settings
 }
 
+/// ´test:crate:boxed-backend-protected-plan-refuses-missing-or-changed-vendor´
+#[test]
+fn boxed_backend_protected_plan_refuses_missing_or_changed_vendor() {
+    let plan = super::gate_fixture();
+    assert_eq!(plan["backend"], "codex");
+    crate::plan::box_gate(&plan).expect("Codex control");
+    for value in [json!(null), json!(4), json!("other"), json!("claude")] {
+        let mut changed = plan.clone();
+        changed["backend"] = value.clone();
+        let error = crate::plan::box_gate(&changed).expect_err("backend must be bound");
+        assert_eq!(
+            error.kind,
+            if value == "claude" {
+                "backend-unavailable"
+            } else {
+                "backend-selection"
+            }
+        );
+        let record = json!({"plan": changed});
+        let error = crate::launch::pinned_plan_from_record(
+            std::path::Path::new("/absent-owner"),
+            "alpha",
+            "R",
+            std::path::Path::new("/absent-container"),
+            &record,
+        )
+        .expect_err("never silently select Codex");
+        assert_eq!(
+            error.kind,
+            if value == "claude" {
+                "backend-unavailable"
+            } else {
+                "backend-selection"
+            }
+        );
+    }
+    let mut absent = plan;
+    absent
+        .as_object_mut()
+        .expect("plan object")
+        .remove("backend");
+    assert_eq!(
+        crate::plan::box_gate(&absent)
+            .expect_err("old plans need retirement")
+            .kind,
+        "backend-selection"
+    );
+}
+
+/// ´test:crate:boxed-backend-home-refuses-before-writing-any-path´
+#[test]
+fn boxed_backend_home_refuses_before_writing_any_path() {
+    let fixture = TempDir::new().expect("fixture");
+    let parent: std::os::fd::OwnedFd = fs::File::open(fixture.path())
+        .expect("fixture parent")
+        .into();
+    let caller = (
+        nix::unistd::Uid::effective().as_raw(),
+        nix::unistd::Gid::effective().as_raw(),
+    );
+    for value in [json!(null), json!("claude"), json!("other")] {
+        let mut document = super::gate_fixture();
+        document["backend"] = value.clone();
+        let plan = crate::plan::Plan {
+            home: fixture.path().join("home"),
+            driver_dir: fixture.path().join("run"),
+            letter: fixture.path().join("letter"),
+            document,
+        };
+        let error = crate::home::make_home_pinned(
+            &plan,
+            &backend_settings(&["codex", "claude"]),
+            b"",
+            caller,
+            &parent,
+            &parent,
+        )
+        .expect_err("unsupported or unbound backend");
+        assert_eq!(
+            error.kind,
+            if value == "claude" {
+                "backend-unavailable"
+            } else {
+                "backend-selection"
+            }
+        );
+        assert_eq!(
+            fs::read_dir(fixture.path()).expect("empty fixture").count(),
+            0
+        );
+    }
+}
+
+/// ´test:crate:boxed-backend-credential-refusal-precedes-custody-access´
+#[test]
+fn boxed_backend_credential_refusal_precedes_custody_access() {
+    let fixture = TempDir::new().expect("fixture");
+    let missing = fixture.path().join("absent-owner");
+    let run = fixture.path().join("absent-run");
+    assert_eq!(
+        crate::credential::preflight(&missing, "alpha", BoxBackend::Claude)
+            .expect_err("no Claude credential adapter")
+            .kind,
+        "backend-unavailable"
+    );
+    let error = crate::credential::prepare_run(&missing, "alpha", &run, 3000, BoxBackend::Claude)
+        .expect_err("Claude has no adapter");
+    assert_eq!(error.kind, "backend-unavailable");
+    let mut record = json!({"plan":{"backend":"claude","home":run},"worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch"}]});
+    let error = crate::container_helper::publish_round_credential(&missing, "alpha", &mut record)
+        .expect_err("wrong credential adapter");
+    assert_eq!(error.kind, "backend-unavailable");
+    assert!(record["rounds"][0]["credential_publication"].is_null());
+    assert!(!missing.exists());
+    assert!(!run.exists());
+}
+
 /// ´test:crate:boxed-backend-codex-only-selects-its-own-program´
 #[test]
 fn boxed_backend_codex_only_selects_its_own_program() {

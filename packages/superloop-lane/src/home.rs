@@ -1408,6 +1408,8 @@ fn make_home_pinned_with_sources(
     driver_parent: &OwnedFd,
     held_sources: &mut Option<OwnedFd>,
 ) -> Result<serde_json::Value, LaneError> {
+    let backend = crate::settings::BoxBackend::from_plan(&plan.document)?;
+    settings.launch_backend(Some(backend))?.require_runtime()?;
     let declared_sources = crate::launch::declared_sources(letter_bytes)?;
     require_absent(home_parent, &plan.home)?;
     require_absent(driver_parent, &plan.driver_dir)?;

@@ -613,6 +613,7 @@ fn arg(args: &mut Vec<String>, option: &str, value: impl AsRef<str>) {
 /// Refuses a missing or expanded runtime confinement option or writable mount.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
+    crate::settings::BoxBackend::from_plan(document)?.require_runtime()?;
     let argv = document["runtime_argv"]
         .as_array()
         .ok_or_else(|| LaneError::input("box-gate", "runtime argument vector is absent"))?;
@@ -1305,6 +1306,7 @@ impl Plan {
             worker_block,
             caller,
             true,
+            None,
         )
     }
 
@@ -1331,11 +1333,12 @@ impl Plan {
             worker_block,
             caller,
             false,
+            None,
         )
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    fn build_with_door(
+    pub(crate) fn build_with_door(
         home_root: &Path,
         loop_name: &str,
         run: &str,
@@ -1344,6 +1347,7 @@ impl Plan {
         worker_block: loop_home::registry::WorkerBlock,
         caller: (u32, u32),
         include_door: bool,
+        requested_backend: Option<crate::settings::BoxBackend>,
     ) -> Result<Self, LaneError> {
         let entry_bin = settings.entry_bin.as_ref().ok_or_else(|| {
             LaneError::input("missing-setting", "entry_bin is absent in workers.toml")
@@ -1351,12 +1355,9 @@ impl Plan {
         let driver_bin = settings.driver_bin.as_ref().ok_or_else(|| {
             LaneError::input("missing-setting", "driver_argv is absent in workers.toml")
         })?;
-        let backend_argv = settings.backend_argv.get("codex").ok_or_else(|| {
-            LaneError::input(
-                "missing-setting",
-                "backend_argv.codex is absent in workers.toml",
-            )
-        })?;
+        let backend = settings.launch_backend(requested_backend)?;
+        backend.require_runtime()?;
+        let backend_argv = &settings.backend_argv[backend.name()];
         let template_dir = settings.template_dir.as_ref().ok_or_else(|| {
             LaneError::input("missing-setting", "template_dir is absent in workers.toml")
         })?;
@@ -1930,7 +1931,7 @@ impl Plan {
         let inventory = mount_inventory(&mounts, &rows, &mount_source_rows)?;
         let vendor_hosts = settings
             .vendor_hosts
-            .get("codex")
+            .get(backend.name())
             .cloned()
             .unwrap_or_default();
         let installed_roots = image_digest.strip_prefix("sha256:").is_some_and(|digest| {
@@ -1948,7 +1949,7 @@ impl Plan {
                         .join("sockets")
                         .as_path()
         });
-        let mut document = json!({"door_floor":door_floor,"driver_bin": path(driver_bin)?, "driver_argv": settings.driver_argv, "driver_dir": path(&driver_dir)?, "entry_bin": path(entry_bin)?, "environment": env, "home": path(&home)?, "image_digest": image_digest, "letter": path(&letter)?, "loop": loop_name, "mounts": mounts, "mount_sources":mount_source_rows, "mount_inventory": inventory, "owner_refresh_hosts": [crate::credential::REFRESH_HOST], "path_measurement": "provisional; make-home reports actual", "paths": rows, "resources":{"memory_bytes":resources.memory_bytes,"pids_max":resources.pids_max,"cpu_shares":resources.cpu_shares,"cpu_weight_requested":resources.cpu_weight_requested()}, "run": run, "runtime_argv": args, "runtime_measurement": "provisional; launch must probe", "sandbox_mode":settings.sandbox_mode,"source_measurement": "provisional; owner install and launch must verify image, driver, template and sockets", "template_measurement": "provisional; owner install must verify", "vendor_hosts":vendor_hosts,"worker_uid": worker_uid, "worker_uid_allocation": "provisional-first-slot; launch must reserve"});
+        let mut document = json!({"backend":backend.name(),"door_floor":door_floor,"driver_bin": path(driver_bin)?, "driver_argv": settings.driver_argv, "driver_dir": path(&driver_dir)?, "entry_bin": path(entry_bin)?, "environment": env, "home": path(&home)?, "image_digest": image_digest, "letter": path(&letter)?, "loop": loop_name, "mounts": mounts, "mount_sources":mount_source_rows, "mount_inventory": inventory, "owner_refresh_hosts": [crate::credential::REFRESH_HOST], "path_measurement": "provisional; make-home reports actual", "paths": rows, "resources":{"memory_bytes":resources.memory_bytes,"pids_max":resources.pids_max,"cpu_shares":resources.cpu_shares,"cpu_weight_requested":resources.cpu_weight_requested()}, "run": run, "runtime_argv": args, "runtime_measurement": "provisional; launch must probe", "sandbox_mode":settings.sandbox_mode,"source_measurement": "provisional; owner install and launch must verify image, driver, template and sockets", "template_measurement": "provisional; owner install must verify", "vendor_hosts":vendor_hosts,"worker_uid": worker_uid, "worker_uid_allocation": "provisional-first-slot; launch must reserve"});
         if let Some(seconds) = settings.attempt_wall_seconds()? {
             document["attempt_wall_seconds"] = json!(seconds);
         }

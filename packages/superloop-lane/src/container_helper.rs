@@ -1846,6 +1846,8 @@ pub(crate) fn publish_round_credential(
     loop_name: &str,
     record: &mut Value,
 ) -> Result<(), LaneError> {
+    let backend = crate::settings::BoxBackend::from_plan(&record["plan"])?;
+    backend.require_runtime()?;
     let home = record["plan"]["home"]
         .as_str()
         .ok_or_else(|| LaneError::input("credential-publish", "run home is absent"))?;
@@ -1864,7 +1866,7 @@ pub(crate) fn publish_round_credential(
         .filter(|round| round["step"] == step)
         .ok_or_else(|| LaneError::input("credential-publish", "active round differs"))?;
     round["credential_publication"] =
-        crate::credential::publish_round(owner_home, loop_name, &home, uid)?;
+        crate::credential::publish_round(owner_home, loop_name, &home, uid, backend)?;
     Ok(())
 }
 
@@ -1912,7 +1914,7 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
         .parent()
         .ok_or_else(|| LaneError::input("helper-pin", "runs root absent"))?;
     let reservation = reservation_path(root, &run);
-    {
+    let backend = {
         let _lock = crate::launch::lock_runs_root(root, true, 0)?;
         let _mailbox = crate::launch::lock_mailbox(root, &run, 0)?;
         let mut record = crate::launch::read_reservation(&reservation)?
@@ -1923,12 +1925,15 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
                 "reservation names another run",
             ));
         }
+        let backend = crate::settings::BoxBackend::from_plan(&record["plan"])?;
+        backend.require_runtime()?;
         let pid = std::process::id();
         record["helper_pid"] = json!(pid);
         record["helper_start"] = json!(process_start(pid)?);
         publish_round_credential(&owner_home, &loop_name, &mut record)?;
         crate::launch::publish_reservation(&reservation, &record)?;
-    }
+        backend
+    };
     let listener = UnixListener::bind(socket_slot.address())
         .map_err(|error| LaneError::operation("helper-socket", error.to_string()))?;
     socket_slot
@@ -1964,6 +1969,7 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
                     &refresh_loop,
                     &refresh_root,
                     &mut published,
+                    backend,
                 );
                 if let Some(evidence) = crate::credential::evidence_for_check(&result, !checked)
                     && let Err(error) =

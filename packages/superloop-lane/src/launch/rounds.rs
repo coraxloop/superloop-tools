@@ -1701,7 +1701,7 @@ mod tests {
             home: PathBuf::from("/home/worker"),
             driver_dir: PathBuf::from("/runs/R"),
             letter: PathBuf::new(),
-            document: json!({}),
+            document: json!({"backend":"codex"}),
         };
         let selection = super::super::LaunchModel::select(
             b"Model: gpt-6-sol\nEffort: high\nReview this round.\n",
@@ -1774,7 +1774,7 @@ mod tests {
             home: PathBuf::from("/home/worker"),
             driver_dir: PathBuf::from("/runs/R"),
             letter: PathBuf::new(),
-            document: json!({}),
+            document: json!({"backend":"codex"}),
         };
         let words = entry_argv_round(
             Path::new("/bin/driver"),
@@ -1830,7 +1830,7 @@ mod tests {
             home: PathBuf::from("/home/worker"),
             driver_dir: fixture.path().join("R"),
             letter: PathBuf::new(),
-            document: json!({}),
+            document: json!({"backend":"codex"}),
         };
         let record = json!({
             "phase":"settled", "thread_id":null, "readback_end":"completed",

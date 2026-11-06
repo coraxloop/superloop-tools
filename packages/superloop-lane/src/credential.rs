@@ -925,7 +925,9 @@ pub fn prepare_run(
     loop_name: &str,
     run_home: &Path,
     worker_uid: u32,
+    backend: crate::settings::BoxBackend,
 ) -> Result<(), LaneError> {
+    backend.require_runtime()?;
     let _guard = lock(owner_home, loop_name)?;
     let source = refresh_if_due(owner_home, loop_name, AUTH_ENDPOINT, now_seconds()?)?;
     write_run(run_home, worker_uid, &source)
@@ -941,7 +943,9 @@ pub(crate) fn publish_round(
     loop_name: &str,
     run_home: &Path,
     worker_uid: u32,
+    backend: crate::settings::BoxBackend,
 ) -> Result<Value, LaneError> {
+    backend.require_runtime()?;
     let _guard = lock(owner_home, loop_name)?;
     let _refreshed = refresh_if_due(owner_home, loop_name, AUTH_ENDPOINT, now_seconds()?)?;
     // Reopen after a refresh so the evidence identifies the published owner inode.
@@ -963,7 +967,12 @@ pub(crate) fn publish_round(
 /// # Errors
 ///
 /// Refuses absent, unreadable or malformed sign-in data.
-pub fn preflight(owner_home: &Path, loop_name: &str) -> Result<(), LaneError> {
+pub fn preflight(
+    owner_home: &Path,
+    loop_name: &str,
+    backend: crate::settings::BoxBackend,
+) -> Result<(), LaneError> {
+    backend.require_runtime()?;
     preflight_at(owner_home, loop_name, AUTH_ENDPOINT, now_seconds()?)
 }
 
@@ -1054,7 +1063,9 @@ pub(crate) fn refresh_live(
     loop_name: &str,
     runs_root: &Path,
     published: &mut BTreeMap<PathBuf, Vec<u8>>,
+    backend: crate::settings::BoxBackend,
 ) -> Result<RefreshReport, LaneError> {
+    backend.require_runtime()?;
     refresh_live_at(
         owner_home,
         loop_name,
@@ -1129,6 +1140,12 @@ fn refresh_live_at(
         };
         if crate::container_helper::process_presence(pid, start)
             != crate::container_helper::ProcessPresence::Present
+        {
+            continue;
+        }
+        // A Codex refresh must never publish its token into a different vendor's home.
+        if crate::settings::BoxBackend::from_plan(&record["plan"])?
+            != crate::settings::BoxBackend::Codex
         {
             continue;
         }
@@ -1281,7 +1298,7 @@ mod tests {
         let first_inode = fs::metadata(&source_path)
             .expect("synthetic metadata")
             .ino();
-        let mut record = json!({"worker_uid":Uid::effective().as_raw(),"plan":{"home":run_home},"active_round":"dispatch","rounds":[{"step":"dispatch"}]});
+        let mut record = json!({"worker_uid":Uid::effective().as_raw(),"plan":{"backend":"codex","home":run_home},"active_round":"dispatch","rounds":[{"step":"dispatch"}]});
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -1410,7 +1427,7 @@ mod tests {
             "worker_uid": uid,
             "helper_pid": pid,
             "helper_start": crate::container_helper::process_start(pid).expect("fixture process start"),
-            "plan": {"home": runs.join(format!("home-{run}"))}
+            "plan": {"backend":"codex","home": runs.join(format!("home-{run}"))}
         });
         crate::launch::publish_reservation(&crate::launch::reservation_path(runs, run), &record)
             .expect("synthetic reservation");
@@ -1498,6 +1515,39 @@ mod tests {
         assert_eq!(reloaded["auth_mode"], "chatgptAuthTokens");
         assert_eq!(reloaded["tokens"]["refresh_token"], "");
         assert_eq!(reloaded["tokens"]["access_token"], token(now + 3600));
+    }
+
+    /// ´test:unit:boxed-backend-codex-refresh-skips-claude-run´
+    #[test]
+    fn boxed_backend_codex_refresh_skips_claude_run() {
+        let temp = fixture_root();
+        let now = 1_800_000_000;
+        fixture_sign_in(temp.path(), &source(now + 3600, "initial"));
+        let runs = temp.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        fixture_run(&runs, "codex-run", 3001);
+        fixture_run(&runs, "claude-run", 3002);
+        let path = crate::launch::reservation_path(&runs, "claude-run");
+        let mut record = crate::launch::read_reservation(&path)
+            .expect("read")
+            .expect("record");
+        record["plan"]["backend"] = json!("claude");
+        crate::launch::publish_reservation(&path, &record).expect("Claude fixture");
+        let mut recipients = Vec::new();
+        refresh_live_at(
+            temp.path(),
+            "alpha",
+            &runs,
+            "http://127.0.0.1:1",
+            now,
+            &mut BTreeMap::new(),
+            |_home, uid, _source| {
+                recipients.push(uid);
+                Ok(())
+            },
+        )
+        .expect("valid source needs no refresh request");
+        assert_eq!(recipients, [3001]);
     }
 
     /// ´test:unit:credential-two-distinct-workers-receive-one-refresh´

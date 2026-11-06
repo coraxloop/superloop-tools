@@ -282,7 +282,7 @@ fn load_plan_with_door(
         .require(loop_name)
         .map_err(|error| LaneError::input("allocations", error.message()))?;
     let mut plan = if include_door {
-        Plan::build(
+        Plan::build_with_door(
             home,
             loop_name,
             run,
@@ -290,6 +290,8 @@ fn load_plan_with_door(
             &registry,
             worker_block,
             caller,
+            true,
+            backend,
         )?
     } else {
         Plan::build_for_record(

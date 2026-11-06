@@ -334,7 +334,11 @@ fn plan_refuses_missing_backend_before_allocation() {
     )
     .expect_err("required selector");
     assert_eq!(failure.kind, "missing-setting");
-    assert!(failure.detail.contains("backend_argv.codex"));
+    assert!(
+        failure
+            .detail
+            .contains("backend_argv has no configured program")
+    );
 }
 
 /// ´test:crate:full-plan-is-pinned-for-the-fixture´

@@ -635,14 +635,16 @@ fn driver_runtime_contract(
     driver: &Path,
     owner_home: &Path,
     environment: &BTreeMap<String, String>,
+    backend: crate::settings::BoxBackend,
 ) -> Result<&'static str, LaneError> {
+    backend.require_runtime()?;
     let answer = build::run_checked(
         driver,
         [
             "driver",
             "start",
             "--backend",
-            "codex",
+            backend.name(),
             "--runtime-contract",
         ]
         .map(str::to_owned)
@@ -1965,6 +1967,7 @@ fn entry_argv_round(
     resume: Option<(&str, &Path, &LaunchModel)>,
     mail: Option<&Value>,
 ) -> Result<Vec<String>, LaneError> {
+    crate::settings::BoxBackend::from_plan(&plan.document)?.require_runtime()?;
     let run_dir = crate::pinned::path_word(&plan.driver_dir, "run-directory")?;
     let mut argv = vec![
         "driver-launch".into(),
@@ -2911,6 +2914,14 @@ fn differing_plan_keys(recorded: &Value, current: &Value) -> String {
 }
 
 fn compare_pinned_plan(recorded: &Value, current: &Value) -> Result<(), LaneError> {
+    let recorded_backend = crate::settings::BoxBackend::from_plan(recorded)?;
+    let current_backend = crate::settings::BoxBackend::from_plan(current)?;
+    if recorded_backend != current_backend {
+        return Err(LaneError::input(
+            "backend-selection",
+            "protected backend differs from the current plan; a resumed run cannot change vendor",
+        ));
+    }
     if current != recorded {
         let differing = differing_plan_keys(recorded, current);
         let route = if recorded["door"] == current["door"] {
@@ -3698,7 +3709,7 @@ fn run_with_program(
         (0, 0),
         request.backend,
     )?;
-    let selected_backend = settings.launch_backend(request.backend)?;
+    let selected_backend = crate::settings::BoxBackend::from_plan(&plan.document)?;
     plan.select_container_program(&request.podman_bin)?;
     if settings.sandbox_mode != "danger-full-access" {
         return Err(LaneError::input(
@@ -3708,7 +3719,7 @@ fn run_with_program(
     }
     let backend = settings
         .backend_argv
-        .get("codex")
+        .get(selected_backend.name())
         .and_then(|words| words.first())
         .ok_or_else(|| LaneError::input("missing-setting", "backend_argv.codex is absent"))?;
     if !Path::new(backend).is_absolute() {
@@ -3720,7 +3731,7 @@ fn run_with_program(
     if request.observe {
         if settings
             .vendor_hosts
-            .get("codex")
+            .get(selected_backend.name())
             .is_some_and(|hosts| !hosts.is_empty())
         {
             return Err(LaneError::input(
@@ -3729,7 +3740,11 @@ fn run_with_program(
             ));
         }
         plan.observe_vendor()?;
-    } else if settings.vendor_hosts.get("codex").is_none_or(Vec::is_empty) {
+    } else if settings
+        .vendor_hosts
+        .get(selected_backend.name())
+        .is_none_or(Vec::is_empty)
+    {
         return Err(LaneError::input(
             "missing-setting",
             "vendor_hosts.codex is empty; use --observe for one named first run",
@@ -3813,7 +3828,8 @@ fn run_with_program(
     crate::pinned::owner_executable(Path::new(&podman_word), Uid::effective().as_raw())?;
     crate::pinned::owner_executable(entry, caller.0)?;
     executable(driver, "lane driver")?;
-    let driver_contract = driver_runtime_contract(driver, owner_home, &environment)?;
+    let driver_contract =
+        driver_runtime_contract(driver, owner_home, &environment, selected_backend)?;
     let driver_sha256 = sha256(driver)?;
     checks.push("driver boxed-runtime contract");
     let report = image_report(owner_home, &request.loop_name)?;
@@ -6288,7 +6304,11 @@ pub fn private_make(
         owner_home,
     )?;
     check_backend_image_program(&settings, &installed_generation(owner_home, loop_name)?)?;
-    crate::credential::preflight(owner_home, loop_name)?;
+    crate::credential::preflight(
+        owner_home,
+        loop_name,
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+    )?;
     let reservation = reservation_path(&root, run);
     let prior_birth = read_reservation(&reservation)?;
     let birth = if let Some(record) = &prior_birth {
@@ -6370,7 +6390,13 @@ pub fn private_make(
             ));
         }
     }
-    crate::credential::prepare_run(owner_home, loop_name, &plan.home, requested_uid)?;
+    crate::credential::prepare_run(
+        owner_home,
+        loop_name,
+        &plan.home,
+        requested_uid,
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+    )?;
     result["reservation"] = json!(reservation);
     result["retired_partial"] = json!(retired);
     Ok(result)
@@ -6554,7 +6580,10 @@ pub(crate) fn pinned_plan_from_record(
     podman: &Path,
     record: &Value,
 ) -> Result<(Plan, Settings), LaneError> {
-    let (mut plan, settings) = load_plan(owner_home, loop_name, run, (0, 0))?;
+    let backend = crate::settings::BoxBackend::from_plan(&record["plan"])?;
+    backend.require_runtime()?;
+    let (mut plan, settings) =
+        crate::load_launch_plan(owner_home, loop_name, run, (0, 0), Some(backend))?;
     if record["loop"] != loop_name
         || record["run"] != run
         || record["plan"]["driver_dir"] != plan.driver_dir.display().to_string()
@@ -7168,13 +7197,32 @@ mod tests {
         assert_eq!(plan["target"], serde_json::json!(last));
     }
 
+    /// ´test:unit:boxed-backend-pinned-comparison-refuses-vendor-change´
+    #[test]
+    fn boxed_backend_pinned_comparison_refuses_vendor_change() {
+        let codex = serde_json::json!({"backend":"codex"});
+        let claude = serde_json::json!({"backend":"claude"});
+        assert_eq!(
+            super::compare_pinned_plan(&codex, &claude)
+                .expect_err("vendor change")
+                .kind,
+            "backend-selection"
+        );
+        assert_eq!(
+            super::compare_pinned_plan(&serde_json::json!({}), &serde_json::json!({}))
+                .expect_err("no implicit backend")
+                .kind,
+            "backend-selection"
+        );
+    }
+
     /// ´test:unit:changed-plan-detail-names-the-door-repin-route-and-other-pinned-inputs´
     #[test]
     fn changed_plan_detail_names_the_door_repin_route_and_other_pinned_inputs() {
-        let saved = serde_json::json!({"door":{"stub_sha256":"old"},"door_floor":"audit"});
-        let door = serde_json::json!({"door":{"stub_sha256":"new"},"door_floor":"audit"});
-        let other = serde_json::json!({"door":{"stub_sha256":"old"},"door_floor":"enforce"});
-        let mixed = serde_json::json!({"door":{"stub_sha256":"new"},"door_floor":"enforce"});
+        let saved = serde_json::json!({"backend":"codex","door":{"stub_sha256":"old"},"door_floor":"audit"});
+        let door = serde_json::json!({"backend":"codex","door":{"stub_sha256":"new"},"door_floor":"audit"});
+        let other = serde_json::json!({"backend":"codex","door":{"stub_sha256":"old"},"door_floor":"enforce"});
+        let mixed = serde_json::json!({"backend":"codex","door":{"stub_sha256":"new"},"door_floor":"enforce"});
         for current in [&door, &mixed] {
             let error = super::compare_pinned_plan(&saved, current).expect_err("drift");
             assert_eq!(error.kind, "plan-read");
@@ -7909,7 +7957,7 @@ mod tests {
         let vendor = fixture.path().join("vendor");
         fs::create_dir(&vendor).expect("vendor directory");
         fs::set_permissions(&vendor, fs::Permissions::from_mode(0o700)).expect("vendor mode");
-        let mut document = json!({"loop":"alpha","run":"R","worker_uid":3000,"home":fixture.path().join("home-R"),"driver_dir":driver_dir});
+        let mut document = json!({"backend":"codex","loop":"alpha","run":"R","worker_uid":3000,"home":fixture.path().join("home-R"),"driver_dir":driver_dir});
         if observe {
             document["vendor_mode"] = json!("observing");
             document["vendor_socket"] = json!("observe-R.sock");
@@ -8680,7 +8728,12 @@ mod tests {
         ] {
             crate::fixture_exec::write_executable(&driver, script.as_bytes())
                 .expect("closed and synced driver stub");
-            let result = driver_runtime_contract(&driver, fixture.path(), &BTreeMap::new());
+            let result = driver_runtime_contract(
+                &driver,
+                fixture.path(),
+                &BTreeMap::new(),
+                crate::settings::BoxBackend::Codex,
+            );
             assert_eq!(result.is_ok(), accepted, "{script}: {result:?}");
             if !accepted {
                 assert_eq!(result.expect_err("old contract").kind, "driver-contract");
