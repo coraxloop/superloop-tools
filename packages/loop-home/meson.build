@@ -1,5 +1,10 @@
 pkg_loop_home_rust = files(
   'src/allocations.rs',
+  'src/ancestor.rs',
+  'src/anchor.rs',
+  'src/anchor/transport.rs',
+  'src/anchor/tests.rs',
+  'src/ancestor_owners.py',
   'src/app.rs',
   'src/custody.rs',
   'src/driver_launch.rs',
@@ -93,6 +98,7 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
+{"kind":"payload","path":"packages/loop-home/src/ancestor_owners.py","form":"python","sha256":"86432698c5cf7e3322fc262c97b3d77a545ab3e3f94c7c622260e786a66fdb20","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"host or namespace receiver","version_authority":"packages/loop-home/Cargo.toml","contract":"UID-map foundation with verified procfs reads; legacy caller migration is separate","calls":[]}
 {"kind":"payload","path":"packages/loop-home/src/runner/agent_runner.py","form":"python","sha256":"61c7f2413afe77949f3d331ecb22c59056070ea0abd596793c90f6e279cc12ea","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Run the configured Codex executable with tool-free exec arguments and record bounded result evidence","calls":[{"callee":"external:configured-codex-agent","selector":"program argument","anchor":"subprocess.Popen(argv","contract":"Pinned agent path receives tool-free Codex exec JSON arguments with bounded streams and process-group cleanup","lookup":"configured-external","execution_host":"entered loop"}]}
 {"kind":"payload","path":"packages/loop-home/src/runner/sign_in_policy.py","form":"python","sha256":"0cddefbb2a477d5934c27a1cf35bf30a37378323fbd49f5899b023314d4fc4bb","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Shared credential custody predicate embedded in metadata and agent programs","calls":[]}
 ''']
@@ -114,4 +120,9 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/mail/migration_control.rs:& program#1","caller":"loop-home","owner":"LOOPHOME","selector":"& program","callee":"external:reviewed-mail-migration-controller","lookup":"configured-external","setting":"mail migration deployment artifact","contract":"Execute a digest-pinned namespace-root deployment controller or native lane census through its held executable inode with fixed migration arguments; retain output and refuse changed artifacts or failure"}
+''']
+
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/ancestor.rs:\"python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"python3\"","callee":"external:python3","lookup":"test-executable","contract":"Execute the embedded rubric policy against namespace ownership fixtures and the live kernel map"}
 ''']
