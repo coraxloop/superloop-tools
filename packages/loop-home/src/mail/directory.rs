@@ -11,7 +11,8 @@ use nix::fcntl::{Flock, FlockArg};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::os::unix::fs::MetadataExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Implementation bound on loop mail configuration; the specification declares no maximum.
 pub(super) const MAX_CONFIGURATION_BYTES: u64 = 1_048_576;
@@ -110,6 +111,7 @@ pub(super) struct Actor {
     pub active: bool,
 }
 pub(super) struct Directory {
+    pub configuration: Option<Arc<crate::anchor::Anchor>>,
     pub home: PathBuf,
     pub service: u32,
     pub owner: u32,
@@ -125,6 +127,7 @@ pub(super) struct Inventory {
     pub retired: BTreeSet<Address>,
 }
 pub(super) struct Decision {
+    configuration: Option<Arc<crate::anchor::Anchor>>,
     pub registry_digest: String,
     pub configs: Vec<Snapshot>,
     registry_path: PathBuf,
@@ -132,7 +135,7 @@ pub(super) struct Decision {
 }
 impl Decision {
     pub fn current(&self) -> Result<()> {
-        let file = io::absolute(&self.registry_path, false)?;
+        let file = configuration_file(&self.registry_path, self.configuration.as_deref())?;
         let info = file.metadata()?;
         if (info.dev(), info.ino()) != self.registry_identity
             || info.mode() & 0o022 != 0
@@ -156,10 +159,21 @@ impl Decision {
             .collect()
     }
 }
+fn configuration_file(path: &Path, anchor: Option<&crate::anchor::Anchor>) -> Result<File> {
+    if let Some(anchor) = anchor {
+        let name = path
+            .file_name()
+            .ok_or(MailError::Invalid("anchor-escape: configuration file name"))?;
+        super::entry_anchors::configuration_file(anchor, Path::new(name))
+    } else {
+        io::absolute(path, false)
+    }
+}
+
 impl Directory {
     fn registry(&self) -> Result<(Registry, Vec<u8>, File)> {
         let path = self.home.join(".config/loops/registry.toml");
-        let file = io::absolute(&path, false)?;
+        let file = configuration_file(&path, self.configuration.as_deref())?;
         let info = file.metadata()?;
         if info.uid() != self.owner || info.mode() & 0o022 != 0 {
             return Err(MailError::Invalid("unsafe-storage: registry custody"));
@@ -167,7 +181,7 @@ impl Directory {
         let bytes = io::bounded(&file, 65_536).map_err(|error| {
             directory_bound(error, "invalid-directory: loop registry exceeds its bound")
         })?;
-        let mut reader = io::absolute(&path, false)?;
+        let mut reader = configuration_file(&path, self.configuration.as_deref())?;
         let registry = crate::registry::load_registry_from_file(&mut reader)
             .map_err(|_| MailError::Invalid("invalid-directory: global registry"))?;
         if reader.metadata()?.ino() != info.ino() || reader.metadata()?.dev() != info.dev() {
@@ -198,6 +212,7 @@ impl Directory {
         }
         let info = file.metadata()?;
         Ok(Decision {
+            configuration: self.configuration.clone(),
             registry_digest: digest(&bytes),
             configs,
             registry_path: self.home.join(".config/loops/registry.toml"),
@@ -205,6 +220,15 @@ impl Directory {
         })
     }
     fn allocations(&self) -> Result<Allocations> {
+        if let Some(anchor) = &self.configuration {
+            let allocations = anchor.read_configuration(&self.home, false)?.allocations;
+            if allocations.mail_uid() != Some(self.service) {
+                return Err(MailError::Invalid(
+                    "unsafe-storage: service identity reservation mismatch",
+                ));
+            }
+            return Ok(allocations);
+        }
         let allocation_file =
             io::absolute(&self.home.join(".config/loops/allocations.toml"), false)?;
         if allocation_file.metadata()?.uid() != self.owner

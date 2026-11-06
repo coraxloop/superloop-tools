@@ -79,6 +79,7 @@ fn bind_direction(
     let settings = command::settings(home)?;
     command::enter(home, &settings)?;
     let directory = Directory {
+        configuration: None,
         home: home.to_owned(),
         service: settings.uid,
         owner: io::search_directory(home)?.metadata()?.uid(),

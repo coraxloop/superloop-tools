@@ -1,4 +1,5 @@
 //! Host-session entry into the existing subordinate-identity namespace.
+pub use super::entry_anchors::serve_command;
 use super::{
     directory::Directory,
     io,
@@ -11,7 +12,7 @@ use serde::Deserialize;
 use std::ffi::OsString;
 use std::os::unix::{fs::MetadataExt as _, process::CommandExt as _};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Deserialize)]
@@ -31,8 +32,11 @@ pub(super) fn settings(home: &Path) -> Result<Settings> {
         ));
     }
     let bytes = io::bounded(&file, 4096)?;
+    parse_settings(&bytes)
+}
+pub(super) fn parse_settings(bytes: &[u8]) -> Result<Settings> {
     let settings: Settings = toml::from_str(
-        std::str::from_utf8(&bytes)
+        std::str::from_utf8(bytes)
             .map_err(|_| MailError::Invalid("invalid-directory: service settings encoding"))?,
     )
     .map_err(|_| MailError::Invalid("invalid-directory: service settings schema"))?;
@@ -54,6 +58,19 @@ pub(super) fn enter(home: &Path, settings: &Settings) -> Result<()> {
     let allocations =
         crate::allocations::Allocations::read(&home.join(".config/loops/allocations.toml"))
             .map_err(|_| MailError::Invalid("invalid-directory: allocations"))?;
+    enter_with(home, settings, &registry, &allocations)
+}
+fn enter_with(
+    home: &Path,
+    settings: &Settings,
+    registry: &crate::Registry,
+    allocations: &crate::allocations::Allocations,
+) -> Result<()> {
+    if Uid::effective().as_raw() != 0 {
+        return Err(MailError::Entry(
+            "mail-identity-drop: namespace-root entry required".into(),
+        ));
+    }
     if allocations.mail_uid() != Some(settings.uid) {
         return Err(MailError::Invalid(
             "unsafe-storage: service identity is not reserved",
@@ -75,17 +92,21 @@ pub(super) fn enter(home: &Path, settings: &Settings) -> Result<()> {
     }
     groups.sort_unstable_by_key(|group| group.as_raw());
     groups.dedup();
-    setgroups(&groups)?;
+    let refused = |error| MailError::Entry(format!("mail-identity-drop: {error}"));
+    setgroups(&groups).map_err(refused)?;
     let gid = Gid::from_raw(settings.uid);
-    setresgid(gid, gid, gid)?;
+    setresgid(gid, gid, gid).map_err(refused)?;
     let uid = Uid::from_raw(settings.uid);
-    setresuid(uid, uid, uid)?;
-    nix::sys::prctl::set_no_new_privs()?;
+    setresuid(uid, uid, uid).map_err(refused)?;
+    nix::sys::prctl::set_no_new_privs().map_err(refused)?;
     Ok(())
 }
-fn service(home: &Path, settings: &Settings) -> Result<Service> {
-    let registry = crate::load_registry(&home.join(".config/loops/registry.toml"))
-        .map_err(|_| MailError::Invalid("invalid-directory: registry"))?;
+fn service(
+    home: &Path,
+    settings: &Settings,
+    registry: &crate::Registry,
+    configuration: Option<Arc<crate::anchor::Anchor>>,
+) -> Result<Service> {
     for row in registry.rows(home) {
         // Search is sufficient: the service cannot list the loop-owned ancestor.
         // Unavailable actors are reported by inventory without stopping other loops.
@@ -106,6 +127,7 @@ fn service(home: &Path, settings: &Settings) -> Result<Service> {
         ));
     }
     let directory = Directory {
+        configuration,
         home: home.to_owned(),
         service: settings.uid,
         owner: io::search_directory(home)?.metadata()?.uid(),
@@ -137,6 +159,7 @@ fn migration_inventory(arguments: &[OsString]) -> Result<()> {
         ));
     }
     let inventory = Directory {
+        configuration: None,
         owner: io::search_directory(&home)?.metadata()?.uid(),
         home,
         service,
@@ -163,6 +186,9 @@ fn run(arguments: &[OsString], report: &mut dyn std::io::Write) -> Result<()> {
     if arguments.first().is_some_and(|mode| mode == "migrate") {
         return super::migration_cutover::run(&arguments[1..], report);
     }
+    if arguments.first().is_some_and(|mode| mode == "_serve") {
+        return anchored_serve(arguments, report);
+    }
     let [mode, home] = arguments else {
         return Err(MailError::Invalid(
             "usage: superloop-mail {serve|scan|initialize} HOST_HOME",
@@ -176,24 +202,17 @@ fn run(arguments: &[OsString], report: &mut dyn std::io::Write) -> Result<()> {
         )
         .map_err(|_| MailError::Invalid("io-failure: identity-entry machinery unavailable"))?;
         let executable = std::env::current_exe()?;
-        let error = Command::new(&podman[0])
-            .args(&podman[1..])
-            .arg("unshare")
-            .arg(executable)
-            .arg("_serve")
-            .arg(&home)
-            .exec();
+        let mut namespace: Vec<OsString> = podman.into_iter().map(OsString::from).collect();
+        namespace.push("unshare".into());
+        let error = serve_command(&home, &executable, &namespace)?.exec();
         return Err(error.into());
     }
-    if mode != "_serve" && mode != "scan" && mode != "initialize" {
+    if mode != "scan" && mode != "initialize" {
         return Err(MailError::Invalid(
             "usage: superloop-mail {serve|scan|initialize} HOST_HOME",
         ));
     }
     let settings = settings(&home)?;
-    if mode == "_serve" {
-        enter(&home, &settings)?;
-    }
     if mode == "initialize" {
         if Uid::effective().as_raw() != settings.uid {
             return Err(MailError::Invalid(
@@ -203,17 +222,56 @@ fn run(arguments: &[OsString], report: &mut dyn std::io::Write) -> Result<()> {
         Journal::create(io::absolute(&home.join(".var/loops/.mail-service"), true)?)?;
         return Ok(());
     }
-    let mut service = service(&home, &settings)?;
+    let registry = crate::load_registry(&home.join(".config/loops/registry.toml"))
+        .map_err(|_| MailError::Invalid("invalid-directory: registry"))?;
+    let mut service = service(&home, &settings, &registry, None)?;
+    for failure in service.scan()? {
+        writeln!(report, "{failure}")?;
+    }
+    Ok(())
+}
+
+fn anchored_serve(arguments: &[OsString], report: &mut dyn std::io::Write) -> Result<()> {
+    if let [_, flag, home] = arguments
+        && flag == "--check-ancestry"
+    {
+        return super::entry_anchors::check_ancestry(Path::new(home));
+    }
+    let [_, home, flag, declaration] = arguments else {
+        return Err(MailError::Entry(
+            "anchor-missing: operation=mail-serve purpose=manifest".into(),
+        ));
+    };
+    if flag != "--anchor-manifest" {
+        return Err(MailError::Entry(
+            "anchor-declaration: operation=mail-serve purpose=manifest".into(),
+        ));
+    }
+    let declaration = declaration
+        .to_str()
+        .ok_or(MailError::Invalid("anchor-declaration: manifest encoding"))?;
+    let home = Path::new(home);
+    let entered = super::entry_anchors::receive(home, declaration)?;
+    enter_with(
+        home,
+        &entered.settings,
+        &entered.configuration.registry,
+        &entered.configuration.allocations,
+    )?;
+    let mut service = service(
+        home,
+        &entered.settings,
+        &entered.configuration.registry,
+        Some(entered.anchor),
+    )?;
     loop {
         for failure in service.scan()? {
             writeln!(report, "{failure}")?;
         }
-        if mode == "scan" {
-            return Ok(());
-        }
         std::thread::sleep(Duration::from_millis(250));
     }
 }
+
 /// Execute delivery or report an explicit refusal without enabling a unit.
 pub fn entry(arguments: &[OsString], report: &mut dyn std::io::Write) -> u8 {
     if arguments.first().is_some_and(|mode| {
@@ -234,7 +292,7 @@ pub fn entry(arguments: &[OsString], report: &mut dyn std::io::Write) -> u8 {
         Ok(()) => 0,
         Err(error) => {
             let _written = writeln!(report, "{error}");
-            if matches!(error, MailError::Invalid(_)) {
+            if matches!(error, MailError::Invalid(_) | MailError::Entry(_)) {
                 2
             } else {
                 1

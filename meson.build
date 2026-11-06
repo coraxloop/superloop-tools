@@ -1067,7 +1067,7 @@ dependency_ledger += ['''
 {"kind":"external-program","identity":"external:true","selector":"true","contract":"No-effect host portal availability probe","callers":[]}
 {"kind":"external-program","identity":"external:runtime-codex","selector":"CODEX_REAL_BIN","contract":"Configured or retained standalone Codex receives exact passthrough arguments","callers":["superloop-runtime"]}
 {"kind":"external-program","identity":"external:/usr/bin/setpriv","selector":"/usr/bin/setpriv","contract":"Drop to allocated subordinate actor or service identity for explicit mail provisioning and mapped rubric and request custody fixtures","callers":["loop-home","superloop","superloop-lane","permission-triage"]}
-{"kind":"external-program","identity":"external:podman","selector":"podman","contract":"Container inspect, start, create or exec operations are selected by this runtime adapter","callers":["loop-home","superloop-runtime"]}
+{"kind":"external-program","identity":"external:podman","selector":"podman","contract":"Container inspect, start, create or exec operations are selected by this runtime adapter","callers":["superloop-runtime"]}
 {"kind":"external-program","identity":"external:id","selector":"id","contract":"Read the caller UID and GID for container identity mapping","callers":["cargo-clean","superloop-lane","superloop-runtime","superloop-steward"]}
 {"kind":"external-program","identity":"external:awk","selector":"awk","contract":"Render the measured wall duration","callers":["cargo-clean","gate-slot","lane-gateway","release-suite","superloop-lane","superloop-runtime","superloop-steward"]}
 {"kind":"external-program","identity":"external:getconf","selector":"getconf","contract":"Read the kernel process-accounting clock frequency","callers":["gate-slot"]}
@@ -1190,6 +1190,7 @@ dependency_ledger += ['''
 {"kind":"test-tool","consumer":"superloop-gate-submit","binding":"CARGO_BIN_EXE_superloop-gate-submit","provider":"cargo-target","callee":"bin/superloop-gate-submit","suite":"cargo-test","contract":"Cargo supplies the declared binary target to its own package integration tests"}
 {"kind":"test-tool","consumer":"superloop-lint","binding":"CARGO_BIN_EXE_superloop-lint","provider":"cargo-target","callee":"bin/superloop-lint","suite":"cargo-test","contract":"Cargo supplies the declared binary target to its own package integration tests"}
 {"kind":"test-tool","consumer":"superloop","binding":"CARGO_BIN_EXE_superloop","provider":"cargo-target","callee":"bin/superloop","suite":"cargo-test","contract":"Cargo supplies the declared binary target to its own package integration tests"}
+{"kind":"test-tool","consumer":"superloop","binding":"CARGO_BIN_EXE_superloop-mail","provider":"cargo-target","callee":"bin/superloop-mail","suite":"cargo-test","contract":"Cargo supplies the declared binary target to its own package integration tests"}
 {"kind":"test-tool","consumer":"permission-triage","binding":"CARGO_BIN_EXE_permission-triage-topology","provider":"cargo-target","callee":"libexec/permission-triage-topology","suite":"cargo-test","contract":"Cargo supplies the declared binary target to its own package integration tests"}
 {"kind":"test-tool","consumer":"permission-triage","binding":"CARGO_BIN_EXE_permission-triage-assemble","provider":"cargo-target","callee":"libexec/permission-triage-assemble","suite":"cargo-test","contract":"Cargo supplies the declared binary target to its own package integration tests"}
 {"kind":"test-tool","consumer":"permission-triage","binding":"CARGO_BIN_EXE_requests-helper","provider":"cargo-target","callee":"libexec/requests-helper","suite":"cargo-test","contract":"Cargo supplies the declared binary target to its own package integration tests"}
@@ -1351,6 +1352,14 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop/src/command/agent.rs:\"/usr/bin/python3\"#1","caller":"superloop","owner":"SUPERLOOP","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"public-command","contract":"Run the shared bounded door profile under the authenticated loop identity with retained cleanup ownership"}
 {"kind":"data","identity":"direct-command-policy-snapshot","writer":"superloop-lane","readers":["superloop"],"format_authority":"packages/superloop-lane/README.md","format_contract":"Schema-one owner-held loop-group snapshot in policy/snapshot.json; source revisions and digests select policy independently of request text; source writers publish under the door store lock","sites":[{"path":"packages/superloop-lane/src/requests/store/snapshot.rs","anchor":"snapshot.json"},{"path":"packages/superloop/src/command/policy.rs","anchor":"snapshot.json"}],"owner":"SUPERLOOPLANE"}
 {"kind":"data","identity":"direct-command-journal","writer":"superloop","readers":["superloop"],"format_authority":"packages/superloop/README.md","format_contract":"Schema-one command requests, answers, single-use claims and outcomes in the loop-owned direct tier, bound to the snapshot digest used for judgement; owner-side readers do not open the journal","sites":[{"path":"packages/superloop/src/command/store.rs","anchor":"command-requests.jsonl"}],"owner":"SUPERLOOP"}
+''']
+
+dependency_ledger += ['''
+{"kind":"external-program","identity":"external:namespace-entry-command","selector":"namespace command vector","contract":"Trusted host namespace-entry command composed by the mail launcher; production Podman or fixture unshare","callers":["loop-home"]}
+''']
+
+dependency_ledger += ['''
+{"kind":"external-program","identity":"external:/usr/bin/unshare","selector":"/usr/bin/unshare","contract":"Linux user-namespace fixture command; missing or unavailable user namespaces leave acceptance unmeasured","callers":["superloop"]}
 ''']
 ledger_configuration.set('ROWS', '\n'.join(dependency_ledger))
 configure_file(

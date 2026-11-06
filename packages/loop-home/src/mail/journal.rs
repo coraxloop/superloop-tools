@@ -38,6 +38,8 @@ const ZERO_DIGEST: &str = "00000000000000000000000000000000000000000000000000000
 /// Transport error without letter contents.
 #[derive(Debug)]
 pub enum MailError {
+    /// Named namespace-entry or capability failure, without payload bytes.
+    Entry(String),
     /// Unsafe, malformed or inconsistent transport state.
     Invalid(&'static str),
     /// Named backing filesystem failure.
@@ -52,6 +54,7 @@ pub type Result<T> = std::result::Result<T, MailError>;
 impl fmt::Display for MailError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Entry(reason) => f.write_str(reason),
             Self::Invalid(reason) => f.write_str(reason),
             Self::Io(error) => write!(f, "io-failure: {error}"),
             Self::Capacity => f.write_str("service-capacity"),
@@ -1212,3 +1215,9 @@ thread_local! { static CRASH_AFTER_CHECKPOINT: std::cell::Cell<bool> = const { s
 #[cfg(test)]
 #[path = "journal_tests.rs"]
 mod tests;
+
+impl From<crate::anchor::Error> for MailError {
+    fn from(error: crate::anchor::Error) -> Self {
+        Self::Entry(error.to_string())
+    }
+}

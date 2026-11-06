@@ -46,6 +46,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Mail startup carries verified configuration and executable descriptors through namespace entry, reads settings, ledger and registry beneath the held configuration, and preserves named capability and identity-drop refusals; scan-time configuration reads retain that anchor (``req:workercontracts:namespace-anchor-acceptance``).
+
 - Host rubric and sign-in source walks validate the initial UID map and reject unrelated nobody ownership, including sticky ancestors, while retaining explicit owner and loop grants (``req:workercontracts:namespace-anchor-authority``).
 
 - Citation planning bounds each linter invocation and both output streams to 120 seconds, killing its process group and reaping its leader on timeout while retaining diagnostics and refusing before publication; real-process and built-binary regressions pin cleanup and unchanged destinations (``prob:pack:cut-linter-invocation-time-bound``).

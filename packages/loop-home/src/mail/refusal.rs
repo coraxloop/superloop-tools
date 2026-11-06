@@ -60,7 +60,7 @@ fn sidecar(name: &OsStr) -> String {
 pub(super) fn code(error: &MailError) -> &'static str {
     match error {
         MailError::Capacity => "service-capacity",
-        MailError::Io(_) | MailError::ClockWait => "io-failure",
+        MailError::Entry(_) | MailError::Io(_) | MailError::ClockWait => "io-failure",
         MailError::Invalid(reason) => match reason.split(':').next().unwrap_or("") {
             "invalid-name" => "invalid-name",
             "invalid-file" => "invalid-file",

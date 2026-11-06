@@ -294,6 +294,7 @@ fn mail_directory_overflow_names_host_metadata() {
     .expect("registry");
     fs::set_permissions(&registry, fs::Permissions::from_mode(0o600)).expect("mode");
     let directory = Directory {
+        configuration: None,
         home: fixture.root.clone(),
         service: fixture.service,
         owner: nix::unistd::geteuid().as_raw(),
@@ -305,6 +306,7 @@ fn mail_directory_overflow_names_host_metadata() {
     let (_, bytes, file) = directory.registry().expect("valid registry");
     let info = file.metadata().expect("identity");
     let decision = Decision {
+        configuration: None,
         registry_digest: digest(&bytes),
         configs: Vec::new(),
         registry_path: registry.clone(),
@@ -330,5 +332,102 @@ fn mail_directory_overflow_names_host_metadata() {
             .expect_err("allocation bound")
             .to_string(),
         "invalid-directory: allocations ledger exceeds its bound"
+    );
+}
+
+/// # Panics
+/// Panics if scan-time configuration or its recheck reopens the absolute directory.
+/// ´claim:loophome:mail-scan-configuration-retains-its-anchor´
+/// ´test:unit:mail-scan-configuration-retains-its-anchor´
+#[test]
+fn mail_scan_configuration_retains_its_anchor() {
+    use crate::anchor::{
+        HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement, Transport,
+    };
+    let fixture = Fixture::new();
+    let config = fixture.root.join(".config/loops");
+    fs::create_dir_all(&config).expect("configuration");
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).expect("private directory");
+    for (name, source) in [
+        (
+            "registry.toml",
+            "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[]\n"
+                .to_owned(),
+        ),
+        (
+            "allocations.toml",
+            format!("mail_uid={}\n", fixture.service),
+        ),
+    ] {
+        let path = config.join(name);
+        fs::write(&path, source).expect("configuration file");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private file");
+    }
+    let policy = Policy {
+        kind: Kind::Directory,
+        owner: Owner::Host,
+        mode: ModePolicy::Exact(0o700),
+    };
+    let pin = HostVerifier::current()
+        .expect("host map")
+        .pin(&config, "configuration", 0, policy)
+        .expect("host configuration");
+    let manifest = Manifest {
+        version: 1,
+        transport: Transport::Rights,
+        operation: "mail-serve".into(),
+        loop_name: String::new(),
+        records: vec![pin.record()],
+    };
+    let mut anchors = Receiver::current()
+        .expect("receiver")
+        .validate(
+            &manifest,
+            vec![pin.into_fd()],
+            "mail-serve",
+            "",
+            Transport::Rights,
+            &[Requirement {
+                purpose: "configuration".into(),
+                policy,
+                alias_group: None,
+            }],
+        )
+        .expect("configuration handoff");
+    let anchor = Arc::new(anchors.pop().expect("anchor"));
+    let directory = Directory {
+        configuration: Some(Arc::clone(&anchor)),
+        home: fixture.root.clone(),
+        service: fixture.service,
+        owner: nix::unistd::Uid::effective().as_raw(),
+        durability: Durability {
+            crash_consistent_rename: true,
+            durable_sync: true,
+        },
+    };
+    let (_, bytes, file) = directory.registry().expect("registry");
+    let info = file.metadata().expect("identity");
+    let decision = Decision {
+        configuration: Some(anchor),
+        registry_digest: digest(&bytes),
+        configs: Vec::new(),
+        registry_path: config.join("registry.toml"),
+        registry_identity: (info.dev(), info.ino()),
+    };
+    let moved = fixture.root.join("configuration-held");
+    fs::rename(&config, &moved).expect("rename configuration");
+    directory.registry().expect("held registry");
+    directory.allocations().expect("held ledger and registry");
+    decision.current().expect("held recheck");
+    let replaced = moved.join("replacement");
+    fs::write(&replaced, &bytes).expect("replacement");
+    fs::set_permissions(&replaced, fs::Permissions::from_mode(0o600)).expect("replacement mode");
+    fs::rename(replaced, moved.join("registry.toml")).expect("replace registry");
+    assert!(
+        decision
+            .current()
+            .expect_err("changed inode")
+            .to_string()
+            .starts_with("changed-source:")
     );
 }

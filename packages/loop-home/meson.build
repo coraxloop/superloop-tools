@@ -37,6 +37,7 @@ pkg_loop_home_rust = files(
   'src/mail/service.rs',
   'src/mail/service_tests.rs',
   'src/mail/command.rs',
+  'src/mail/entry_anchors.rs',
 
   'src/mail/instant.rs',
   'src/mail/journal.rs',
@@ -104,11 +105,6 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
-{"kind":"call","site":"packages/loop-home/src/mail/command.rs:& podman [0]#1","caller":"loop-home","owner":"LOOPHOME","selector":"& podman [0]","callee":"external:podman","lookup":"configured-external","setting":"ENTER_LOOP_PODMAN","contract":"Enter the existing host-session user namespace through the loop-home Podman resolver, preserving its optional host prefix and exact private mail arguments"}
-''']
-
-
-dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/mail/provision.rs:\"/usr/bin/setpriv\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/setpriv\"","callee":"external:/usr/bin/setpriv","lookup":"configured-external","contract":"Namespace-root provisioning pins its executing image, enters the loop private cwd before dropping credentials, and invokes the same-image configuration or journal entry through an inherited descriptor with only the allocated mailbox group"}
 ''']
 
@@ -125,4 +121,8 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/ancestor.rs:\"python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"python3\"","callee":"external:python3","lookup":"test-executable","contract":"Execute the embedded rubric policy against namespace ownership fixtures and the live kernel map"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/mail/entry_anchors.rs:& program#1","caller":"loop-home","owner":"LOOPHOME","selector":"& program","callee":"external:namespace-entry-command","lookup":"configured-external","contract":"Host-verified namespace command receives the pinned mail entry word and one operation-bound descriptor bundle; tests inject unshare through the same composer"}
 ''']

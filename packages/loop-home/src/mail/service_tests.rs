@@ -353,6 +353,7 @@ fn mail_core_sleeps_through_equal_and_backward_utc_before_admission() {
     let next = Instant::parse("2026-01-01T00:00:00.001Z").expect("next");
     journal.reserve(first.clone()).expect("watermark");
     let directory = Directory {
+        configuration: None,
         home: fixture.root.clone(),
         service: nix::unistd::geteuid().as_raw(),
         owner: nix::unistd::geteuid().as_raw(),
@@ -440,6 +441,7 @@ fn unavailable_pin_transition(deregistered: bool) {
         .expect("complete");
     let mut service = Service::new(
         Directory {
+            configuration: None,
             home: fixture.root.clone(),
             service: nix::unistd::Uid::effective().as_raw(),
             owner: nix::unistd::Uid::effective().as_raw(),

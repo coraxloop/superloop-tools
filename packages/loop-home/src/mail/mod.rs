@@ -15,6 +15,7 @@ pub mod acl;
 pub mod command;
 pub mod configuration;
 mod directory;
+mod entry_anchors;
 mod io;
 mod refusal;
 mod service;

@@ -3349,3 +3349,9 @@ pattern = "packages/loop-home/src/anchor/tests.rs"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/ancestor_owners.py"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/entry_anchors.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/mail_anchors.rs"
