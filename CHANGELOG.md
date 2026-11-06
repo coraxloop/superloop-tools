@@ -42,6 +42,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Request-list contention refusals add listing-level elapsed time; regressions pin the shared deadline at a contended second acquisition and include helper state in read-only snapshots (``rule:superlooplane:requests-list-contention``).
 
+- The door rubric check admits the caller’s service uid alongside root and the loop uid at install and runtime; a mapped non-root service fixture verifies distinct loop custody and foreign-owner refusal (``proto:superlooplane:bounded-rubric-judgement``).
+
 ## [0.4.1] - 2026-11-06
 
 ### Changed

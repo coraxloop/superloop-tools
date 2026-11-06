@@ -76,7 +76,7 @@ def main():
     if os.getppid() != parent:
         raise Cancelled()
     started = time.monotonic()
-    program, model, effort, budget, rubric_path, deadline, loop_name = sys.argv[1:]
+    program, model, effort, budget, rubric_path, deadline, loop_name, service_uid = sys.argv[1:]
     remaining = min(int(budget) / 1000, float(deadline) - time.time())
     end = started + remaining - 2.0
     if remaining <= 2.0:
@@ -96,7 +96,7 @@ def main():
                 raise RubricFailure("snapshot-input", rubric_path)
             rubric_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         else:
-            text, rubric_digest = read_rubric(rubric_path)
+            text, rubric_digest = read_rubric(rubric_path, os.geteuid(), int(service_uid))
     except RubricFailure as error:
         EVIDENCE["rubric_failure"] = error.evidence
         emit({"service_status": "failure", "reason": "door-rubric-unavailable"})

@@ -22,18 +22,16 @@ class RubricFailure(Exception):
         super().__init__(check)
 
 
-def rubric_ancestor(info, path, loop_uid):
-    if info.st_uid not in (0, 65534, loop_uid):
+def rubric_ancestor(info, path, loop_uid, service_uid):
+    if info.st_uid not in (0, 65534, loop_uid, service_uid):
         raise RubricFailure('ancestor-owner', path, info)
     sticky_root = info.st_uid in (0, 65534) and info.st_mode & 0o1777 == 0o1777
     if info.st_mode & 0o022 and not sticky_root:
         raise RubricFailure('ancestor-writable', path, info)
 
 
-def read_rubric(path, loop_uid=None):
+def read_rubric(path, loop_uid, service_uid):
     """Read bounded rubric bytes under entered identity, pinning every ancestor."""
-    if loop_uid is None:
-        loop_uid = os.getuid()
     parts = path.split('/')[1:]
     if (not path.startswith('/') or len(path) > 4096 or not parts
             or any(part in ('', '.', '..') for part in parts)):
@@ -54,7 +52,7 @@ def read_rubric(path, loop_uid=None):
             info = os.fstat(parent)
             # Traverse under the real entered identity; bind the expected loop
             # identity at the leaf before reading any rubric bytes.
-            rubric_ancestor(info, component, os.getuid())
+            rubric_ancestor(info, component, loop_uid, service_uid)
         component = path
         check = 'file-open'
         info = None
@@ -62,7 +60,7 @@ def read_rubric(path, loop_uid=None):
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             raise RubricFailure('file-type', path, info)
-        if info.st_uid not in (0, loop_uid):
+        if info.st_uid not in (0, loop_uid, service_uid):
             raise RubricFailure('file-owner', path, info)
         if os.geteuid() != loop_uid:
             raise RubricFailure('entry-uid', path, info)

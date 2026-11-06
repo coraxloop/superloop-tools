@@ -376,13 +376,14 @@ pub fn check_rubric(
             .arg(format!("{}{}", loop_home::runner::SIGN_IN_POLICY, concat!(
                 "\nimport json, sys\n",
                 "try:\n",
-                " text, digest = read_rubric(sys.argv[1], int(sys.argv[2]))\n",
+                " text, digest = read_rubric(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]))\n",
                 " print(json.dumps({'rubric_digest': digest, 'rubric_failure': None}))\n",
                 "except RubricFailure as error:\n",
                 " print(json.dumps({'rubric_digest': None, 'rubric_failure': error.evidence}))\n",
             )))
             .arg(rubric_path)
             .arg(loop_uid.to_string())
+            .arg(nix::unistd::Uid::effective().to_string())
             .env_clear()
             .env("HOME", owner_home)
             .env("PATH", "/usr/bin:/bin")
@@ -505,6 +506,7 @@ impl CodexRunner {
                 .to_string(),
             )
             .arg(&self.loop_name)
+            .arg(nix::unistd::Uid::effective().to_string())
             .env_clear()
             .env("HOME", &self.owner_home)
             .env("PATH", "/usr/bin:/bin")

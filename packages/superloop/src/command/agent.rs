@@ -279,6 +279,7 @@ fn judge_profile(
         .arg("snapshot-input")
         .arg((now + budget).as_secs_f64().to_string())
         .arg(&policy.loop_name)
+        .arg(nix::unistd::Uid::effective().to_string())
         .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
