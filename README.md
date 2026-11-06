@@ -12,9 +12,13 @@ Build the Rust workspace with its pinned toolchain:
 cargo build
 ```
 
-The project produces no binaries; whoever uses the repository externally vendors it and merges its changes as they prefer, maintaining their own lockfile; the public repository therefore carries no ``Cargo.lock`` and pins its dependencies at the compatibility major only, certifying no dependency chain.
+The workspace builds executable programs and shared libraries. Meson builds and installs the public commands `superloop`, `superloop-mail`, `superloop-lane`, `superloop-runtime`, `superloop-lint`, `superloop-pack`, `superloop-install`, `superloop-gate-submit`, `superloop-chat-export`, `superloop-claude-desktop`, `superloop-correspondence`, `superloop-node-status` and `superloop-steward` into the configured binary directory. ``meson.build`` declares their version identities and installation destinations; the build contract records those identities (`tab:buildcontracts:executable-identities`).
 
-The workspace contains the individual tools and shared libraries. The contracts live in `docs/spec/`; package documentation describes each tool's commands and configuration.
+Private helpers, including `build-sync`, `gateway-service`, `gateway-runner`, `worker-run`, `account`, `vendor-proxy`, the permission helpers, the lane door helpers and the `superloop-claude-hook` adapter, install below the configured libexec directory in `superloop`. `superloop-run-report` is built for the workspace and is not installed. Server-kit scripts and units have an explicit opt-in installation (`rule:buildcontracts:server-kits`); a build alone does not deploy or activate them. Package documentation describes each program's commands and configuration.
+
+External users vendor the sources and merge changes as they prefer, maintaining their own lockfile. The public repository therefore carries no ``Cargo.lock`` and pins dependencies at the compatibility major only, certifying no dependency chain.
+
+The contracts live in ``docs/spec/``; the contributing guide describes the build and verification workflow (`sec:contributing:verification`).
 
 ## Versioning · `sec:publictools:versioning`
 

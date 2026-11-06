@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Request rewrite previews mark each custody file with a digest-bound `changed` flag and name the fixed conversion schema pair explicitly (``prob:door:requests-rewrite-preview-omits-unchanged-files``).
 
+- The README names the built and installed public commands, private helpers and build-only report tool while retaining the source-consumer lockfile policy (``sec:publictools:build``).
+
 - Replay coverage pins refusal before destination writes when a historical manifest lacks its required register declaration, even when TAG declares one; the replay contract states that this optional field has no fallback (``prob:pack:manifest-declares-the-unpublished-register``).
 
 - Door agent isolation documents that credential-free records and logs depend on the configured agent not emitting credentials; captured failed-agent stderr has no credential filter (``prob:door:agent-stderr-tail-credential-filter``).
