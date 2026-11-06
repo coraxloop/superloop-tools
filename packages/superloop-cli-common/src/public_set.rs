@@ -66,6 +66,8 @@ pub struct Public {
     pub readme: String,
     pub licence_code: String,
     pub licence_docs: String,
+    /// Generated unpublished-label register destination, when publication needs one.
+    pub unpublished: Option<String>,
 }
 
 /// Measured classification of the complete tracked set.
@@ -134,6 +136,21 @@ impl Manifest {
             return Err(
                 "public-set requires a relative README source and distinct relative licence_code and licence_docs paths".into(),
             );
+        }
+        if let Some(path) = &manifest.public.unpublished
+            && (!safe_path(path)
+                || path.contains(['*', '?', '[', ']'])
+                || path.chars().any(char::is_control)
+                || [
+                    "README.md",
+                    ".linter/owners.toml",
+                    manifest.public.readme.as_str(),
+                    manifest.public.licence_code.as_str(),
+                    manifest.public.licence_docs.as_str(),
+                ]
+                .contains(&path.as_str()))
+        {
+            return Err("public.unpublished requires a safe relative file path distinct from publication inputs".into());
         }
         Ok(manifest)
     }

@@ -3195,6 +3195,7 @@ pattern = "tests/steward-run.sh"
 pattern = "tests/version-smoke.py"
 
 [public]
+unpublished = "docs/public/unpublished-labels.toml"
 licence_code = "LICENSE-CODE"
 licence_docs = "LICENSE-DOCS"
 name = "superloop-tools"

@@ -667,6 +667,16 @@ fn project(
     });
     validate_required_entries(oid, manifest, &selected.included, &entries, evidence)?;
     let bounded = bounded_policy(&historical, &selected.included, &removed)?;
+    if let Some(path) = bounded.manifest.public.unpublished.as_deref()
+        && !policy.permits_public_path(path)
+    {
+        evidence.current.check = "manifest".into();
+        evidence.current.field = "public.unpublished".into();
+        evidence.current.path = Some(path.to_owned());
+        return Err(refuse(
+            "declared unpublished register excluded by final bound",
+        ));
+    }
     let omitted = selected.tracked.saturating_sub(selected.included.len());
     let mut projected = cut::project_tree_with_policy(
         &cut_request(request),
@@ -675,7 +685,13 @@ fn project(
         selected.included,
         Some(&bounded.bytes),
     )
-    .map_err(|error| annotate_projection_error(evidence, error))?;
+    .map_err(|error| {
+        annotate_projection_error(
+            evidence,
+            error,
+            bounded.manifest.public.unpublished.as_deref(),
+        )
+    })?;
     // Generated paths obey the same public destination bound as source paths.
     projected.retain(|path, _| policy.permits_public_path(path));
     refresh_projected_manifest(request, &mut projected, &bounded.bytes).inspect_err(|_| {
@@ -763,6 +779,7 @@ fn refresh_projected_manifest(
 fn annotate_projection_error(
     evidence: &mut ValidationEvidence,
     error: cut::CutError,
+    register: Option<&str>,
 ) -> ReplayError {
     evidence.current.field = "public projection inputs".into();
     if error.to_string().contains("citation-sites") {
@@ -775,7 +792,7 @@ fn annotate_projection_error(
                 if suffix == format!("{field} matches private audit kind {kind}") {
                     evidence.current.check = "burn scan".into();
                     evidence.current.field = format!("unpublished.{field}");
-                    evidence.current.path = Some("docs/public/unpublished-labels.toml".into());
+                    evidence.current.path = register.map(str::to_owned);
                     evidence.current.matcher_kind = Some(kind.into());
                     evidence.current.register_kind = Some("values".into());
                 }

@@ -44,6 +44,7 @@ rows = [{pattern = "public-set.toml"}, {pattern = ".linter/"}, {pattern = "LICEN
 [exclude]
 rows = [{pattern = "private.txt", reason = "Private fixture."}]
 [public]
+unpublished = "docs/public/unpublished-labels.toml"
 name = "replay-fixture"
 readme = "docs/readme.txt"
 licence_code = "LICENSE-CODE"
@@ -1222,4 +1223,263 @@ fn declare_linter(source: &Path) {
         .expect("declaration bytes");
     }
     fs::write(declaration.join("policy-public-pack-values.toml"), "namespace = \"class.linter.policy.public-pack.values-absent\"\nversion = [1, 0, 0]\n[owners.PROJECTA]\nactivation = \"public-pack\"\nsurface = \"*VCHAR\"\nvalues = \"local/burn-register.toml\"\nexclude = '%s\"local\" [ \"/\" *VCHAR ]'\n").expect("burn policy");
+}
+
+/// The manifest chooses the generated register destination and the snapshot follows it.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the cut loses the declared register binding.
+/// ´test:integration:manifest-register-destination-binds-the-snapshot´
+#[test]
+fn manifest_register_destination_binds_the_snapshot() {
+    let fixture = Fixture::new();
+    let path = "docs/public/citation-register.toml";
+    let manifest = MANIFEST.replace("docs/public/unpublished-labels.toml", path);
+    fixture.commit("public-set.toml", &manifest, "Declare custom register\n");
+    let out = fixture.scratch.join("custom-cut");
+    let result = manifest_cut(&fixture, &out);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(out.join(path).is_file());
+    assert!(!out.join("docs/public/unpublished-labels.toml").exists());
+    let owners: toml::Value =
+        toml::from_str(&fs::read_to_string(out.join(".linter/owners.toml")).expect("owners"))
+            .expect("owner TOML");
+    let manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(out.join("public-set.toml")).expect("manifest"))
+            .expect("manifest TOML");
+    assert_eq!(owners["unpublished"].as_str(), Some(path));
+    assert_eq!(manifest["public"]["unpublished"].as_str(), Some(path));
+    let check = Command::new(std::env::var_os("PUBLIC_PACK_TEST_LINTER").expect("real linter"))
+        .args(["check", "--root"])
+        .arg(&out)
+        .arg("--public-pack")
+        .arg("--burn-input")
+        .arg(&fixture.burn)
+        .output()
+        .expect("check generated snapshot");
+    assert!(
+        check.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    report(
+        fixture
+            .replay(&fixture.out)
+            .output()
+            .expect("replay custom destination"),
+    );
+    assert!(fixture.out.join(path).is_file());
+    assert!(
+        !fixture
+            .out
+            .join("docs/public/unpublished-labels.toml")
+            .exists()
+    );
+}
+
+/// A selected owner snapshot alone generates nothing, but excluded definitions require a declaration.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an undeclared register is generated or required evidence is lost.
+/// ´test:integration:manifest-register-absence-is-explicit´
+#[test]
+fn manifest_register_absence_is_explicit() {
+    let fixture = Fixture::new();
+    let manifest = MANIFEST.replace(
+        "unpublished = \"docs/public/unpublished-labels.toml\"\n",
+        "",
+    );
+    fixture.commit("public-set.toml", &manifest, "No register\n");
+    let out = fixture.scratch.join("no-register");
+    let result = manifest_cut(&fixture, &out);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(!out.join("docs/public/unpublished-labels.toml").exists());
+    let owners: toml::Value =
+        toml::from_str(&fs::read_to_string(out.join(".linter/owners.toml")).expect("owners"))
+            .expect("owner TOML");
+    assert!(owners.get("unpublished").is_none());
+    fs::write(
+        fixture.source.join("public-set.toml"),
+        manifest.replace(
+            "[exclude]\nrows = [",
+            "[exclude]\nrows = [{pattern = \"private.md\", reason = \"Private definition.\"}, ",
+        ),
+    )
+    .expect("exclude definition");
+    fs::write(
+        fixture.source.join("private.md"),
+        "# Private · `sec:private:definition`\n",
+    )
+    .expect("private mint");
+    fixture.commit(
+        "docs/guide.md",
+        "# Guide · `guide:public:guide`\n\nSee (`sec:private:definition`).\n",
+        "Require register\n",
+    );
+    let refused = fixture.scratch.join("refused-cut");
+    let result = manifest_cut(&fixture, &refused);
+    assert_eq!(result.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&result.stdout)
+            .contains("excluded-definition citations require public.unpublished")
+    );
+    assert!(!refused.exists());
+}
+
+/// Register paths cannot replace selected ordinary files, manifests, or directory entries.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a conflicting register destination is admitted.
+/// ´test:integration:manifest-register-collisions-refuse-before-publication´
+#[test]
+fn manifest_register_collisions_refuse_before_publication() {
+    for (path, reason) in [
+        ("public/file.txt", "overwrite a selected non-register file"),
+        ("public/link", "must replace a regular register file"),
+        (
+            "public/file.txt/labels.toml",
+            "conflicts with a selected path",
+        ),
+        ("public", "conflicts with a selected path"),
+        ("public-set.toml", "cannot replace the manifest"),
+    ] {
+        let fixture = Fixture::new();
+        if path == "public/link" {
+            std::os::unix::fs::symlink("file.txt", fixture.source.join(path))
+                .expect("selected symlink");
+        }
+        fixture.commit(
+            "public-set.toml",
+            &MANIFEST.replace("docs/public/unpublished-labels.toml", path),
+            "Conflicting register\n",
+        );
+        let out = fixture.scratch.join("refused-cut");
+        let result = manifest_cut(&fixture, &out);
+        assert_eq!(result.status.code(), Some(3), "{path}");
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains(reason),
+            "{path}: {}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        assert!(!out.exists());
+    }
+}
+
+fn manifest_cut(fixture: &Fixture, out: &Path) -> Output {
+    let tag = format!(
+        "manifest-{}",
+        out.file_name()
+            .expect("output name")
+            .to_str()
+            .expect("UTF-8")
+    );
+    git(&fixture.source, &["tag", &tag]);
+    pack(&fixture.source)
+        .args([
+            "cut",
+            "--tag",
+            &tag,
+            "--manifest",
+            "public-set.toml",
+            "--author",
+            "Publisher <publisher@example.com>",
+            "--out",
+        ])
+        .arg(out)
+        .arg("--burn-register")
+        .arg(&fixture.burn)
+        .arg("--linter")
+        .arg(std::env::var_os("PUBLIC_PACK_TEST_LINTER").expect("real linter"))
+        .output()
+        .expect("manifest cut")
+}
+
+/// A generated register cannot be declared without a selected owner snapshot.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a register without its owner snapshot is published.
+/// ´test:integration:manifest-register-requires-a-selected-snapshot´
+#[test]
+fn manifest_register_requires_a_selected_snapshot() {
+    let fixture = Fixture::new();
+    let manifest = MANIFEST.replace("{pattern = \".linter/\"}, ", "").replace(
+        "[exclude]\nrows = [",
+        "[exclude]\nrows = [{pattern = \".linter/\", reason = \"Omit snapshot.\"}, ",
+    );
+    fixture.commit("public-set.toml", &manifest, "Exclude snapshot\n");
+    let out = fixture.scratch.join("no-snapshot");
+    let result = manifest_cut(&fixture, &out);
+    assert_eq!(result.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&result.stdout)
+            .contains("public.unpublished requires a selected owner snapshot")
+    );
+    assert!(!out.exists());
+}
+
+/// A replay cannot silently drop a register required by its historical snapshot.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a final bound removes a required register.
+/// ´test:integration:manifest-register-obeys-the-final-bound´
+#[test]
+fn manifest_register_obeys_the_final_bound() {
+    let fixture = Fixture::new();
+    let manifest = MANIFEST.replace("{pattern = \"docs/\"}", "{pattern = \"docs/readme.txt\"}");
+    fixture.commit("public-set.toml", &manifest, "Exclude generated register\n");
+    fixture.unchanged_refusal("field=public.unpublished path=docs/public/unpublished-labels.toml");
+}
+
+/// Replay audit evidence names the manifest's register path for a refused unpublished label.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the audit reports a different register path.
+/// ´test:integration:manifest-register-audit-names-the-declared-path´
+#[test]
+fn manifest_register_audit_names_the_declared_path() {
+    let fixture = Fixture::new();
+    let path = "docs/public/custom-labels.toml";
+    let manifest = MANIFEST
+        .replace("docs/public/unpublished-labels.toml", path)
+        .replace(
+            "[exclude]\nrows = [",
+            "[exclude]\nrows = [{pattern = \"private.md\", reason = \"Private definition.\"}, ",
+        );
+    fs::write(fixture.source.join("public-set.toml"), manifest).expect("manifest");
+    fs::write(
+        fixture.source.join("private.md"),
+        "# Private · `sec:private:forbidden-value`\n",
+    )
+    .expect("private mint");
+    fixture.commit(
+        "docs/guide.md",
+        "# Guide · `guide:public:guide`\n\nSee (`sec:private:forbidden-value`).\n",
+        "Audited citation\n",
+    );
+    let output = fixture
+        .replay(&fixture.out)
+        .output()
+        .expect("replay refusal");
+    assert_eq!(output.status.code(), Some(3));
+    let text = String::from_utf8(output.stdout).expect("report text");
+    let report: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("report")).expect("JSON");
+    let current = &report["validation"]["current"];
+    assert_eq!(current["check"], "burn scan");
+    assert_eq!(current["field"], "unpublished.label");
+    assert_eq!(current["path"], path);
+    assert_eq!(current["matcher_kind"], "substring");
+    assert_eq!(
+        line(&fixture.out, &["rev-parse", "HEAD"]),
+        fixture.public_root
+    );
 }

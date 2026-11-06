@@ -102,3 +102,51 @@ fn parse_args_from_wraps_help_as_json_control_record() {
     };
     assert!(text.contains("Fixture helper"));
 }
+
+/// Public register destinations are optional, explicit, relative and distinct from required inputs.
+///
+/// # Panics
+/// Panics only if the manifest parser violates these fixture expectations.
+/// ´test:integration:public-register-paths-are-explicit-and-safe´
+#[test]
+fn public_register_paths_are_explicit_and_safe() {
+    use superloop_cli_common::public_set::Manifest;
+    let source = "namespace = \"org.superloop-tools.public-set\"\nversion = [1, 0, 0]\n[include]\nrows = []\n[exclude]\nrows = []\n[public]\nname = \"fixture\"\nreadme = \"docs/readme.md\"\nlicence_code = \"LICENSE-CODE\"\nlicence_docs = \"LICENSE-DOCS\"\n";
+    assert!(
+        Manifest::parse(source)
+            .expect("optional path")
+            .public
+            .unpublished
+            .is_none()
+    );
+    let declared = format!("{source}unpublished = \"docs/labels.toml\"\n");
+    assert_eq!(
+        Manifest::parse(&declared)
+            .expect("safe path")
+            .public
+            .unpublished
+            .as_deref(),
+        Some("docs/labels.toml")
+    );
+    for path in [
+        "",
+        "/absolute",
+        "../labels",
+        "docs/../labels",
+        ".git/labels",
+        "docs//labels",
+        "docs/",
+        "docs/*.toml",
+        "docs/?.toml",
+        "docs/[x].toml",
+        "README.md",
+        "docs/readme.md",
+        "LICENSE-CODE",
+        "LICENSE-DOCS",
+        ".linter/owners.toml",
+    ] {
+        let declared = format!("{source}unpublished = {path:?}\n");
+        assert!(Manifest::parse(&declared).is_err(), "{path}");
+    }
+    assert!(Manifest::parse(&format!("{source}unpublished = 1\n")).is_err());
+}

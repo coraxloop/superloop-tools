@@ -659,6 +659,23 @@ pub fn project_tree_with_policy(
         selected.remove(readme_source);
         selected.insert("README.md".to_owned(), readme);
     }
+    if manifest
+        .public
+        .unpublished
+        .as_deref()
+        .is_some_and(|path| Path::new(path) == manifest_path)
+    {
+        return Err(refuse("public.unpublished cannot replace the manifest"));
+    }
+    if manifest.public.unpublished.as_ref().is_some_and(|path| {
+        selected
+            .get(path)
+            .is_some_and(|(mode, _)| !matches!(mode.as_str(), "100644" | "100755"))
+    }) {
+        return Err(refuse(
+            "public.unpublished must replace a regular register file",
+        ));
+    }
     let generated = unpublished_register(
         root,
         commit,
@@ -714,8 +731,6 @@ pub fn write_projection(stage: &Path, projected: &Projection) -> Result<(usize, 
     }
     Ok((projected.len(), bytes))
 }
-
-const UNPUBLISHED_PATH: &str = "docs/public/unpublished-labels.toml";
 
 #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
 struct UnpublishedLabel {
@@ -807,9 +822,19 @@ fn unpublished_register<'a>(
     included.insert(readme_source.to_owned());
     let mut generated = BTreeMap::new();
     if !included.contains(".linter/owners.toml") {
+        if manifest.public.unpublished.is_some() {
+            return Err(refuse(
+                "public.unpublished requires a selected owner snapshot",
+            ));
+        }
         return Ok(generated);
     }
-    let burn = cut_burn_register(root, burn_register)?;
+    let register_input = manifest
+        .public
+        .unpublished
+        .as_deref()
+        .map(|path| cut_burn_register(root, burn_register).map(|burn| (path, burn)))
+        .transpose()?;
     let sites = resolved_sites(root, commit, linter)?;
     let mut labels = std::collections::BTreeSet::new();
     for site in sites.sites {
@@ -837,6 +862,24 @@ fn unpublished_register<'a>(
             });
         }
     }
+    let Some((register, burn)) = register_input else {
+        if !labels.is_empty() {
+            return Err(refuse(
+                "excluded-definition citations require public.unpublished",
+            ));
+        }
+        return Ok(generated);
+    };
+    if included.iter().any(|path| {
+        path.strip_prefix(register)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+            || register
+                .strip_prefix(path.as_str())
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }) {
+        return Err(refuse("public.unpublished conflicts with a selected path"));
+    }
+    let owners = public_owners(root, commit, register, included.contains(register))?;
     let document = UnpublishedLabels {
         namespace: "class.linter.unpublished-labels".to_owned(),
         version: [1, 0, 0],
@@ -844,15 +887,17 @@ fn unpublished_register<'a>(
     };
     let content = toml::to_string(&document).map_err(|error| CutError(error.to_string()))?;
     guard_unpublished(&document, &burn)?;
-    generated.insert(UNPUBLISHED_PATH.to_owned(), content.into_bytes());
-    generated.insert(
-        ".linter/owners.toml".to_owned(),
-        public_owners(root, commit)?,
-    );
+    generated.insert(register.to_owned(), content.into_bytes());
+    generated.insert(".linter/owners.toml".to_owned(), owners);
     Ok(generated)
 }
 
-fn public_owners(root: &Path, commit: &str) -> Result<Vec<u8>, CutError> {
+fn public_owners(
+    root: &Path,
+    commit: &str,
+    register: &str,
+    replaces_selected: bool,
+) -> Result<Vec<u8>, CutError> {
     let content = git(root, &["show", &format!("{commit}:.linter/owners.toml")])?;
     let mut owners: toml::Value =
         toml::from_str(std::str::from_utf8(&content).map_err(|_| refuse("owners must be UTF-8"))?)
@@ -860,6 +905,12 @@ fn public_owners(root: &Path, commit: &str) -> Result<Vec<u8>, CutError> {
     let table = owners
         .as_table_mut()
         .ok_or_else(|| refuse("owner snapshot must be a table"))?;
+    if replaces_selected && table.get("unpublished").and_then(toml::Value::as_str) != Some(register)
+    {
+        return Err(refuse(
+            "public.unpublished would overwrite a selected non-register file",
+        ));
+    }
     let mut envelope = BTreeMap::new();
     for key in ["namespace", "version"] {
         envelope.insert(
@@ -871,7 +922,7 @@ fn public_owners(root: &Path, commit: &str) -> Result<Vec<u8>, CutError> {
     }
     table.insert(
         "unpublished".to_owned(),
-        toml::Value::String(UNPUBLISHED_PATH.to_owned()),
+        toml::Value::String(register.to_owned()),
     );
     let mut content = toml::to_string(&envelope).map_err(|error| CutError(error.to_string()))?;
     content.push_str(&toml::to_string(table).map_err(|error| CutError(error.to_string()))?);

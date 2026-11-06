@@ -32,7 +32,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A registered Git receive can complete beside its box’s running compute request while same-class requests and other operations retain bounded admission exclusion (``rule:superlooplane:door-request-admission``).
 
-- Deferred list rewrites remove complete dotted stale-family and singleton assignments; rendered TOML is parsed before replacement, so active dotted-singleton duplication refuses without changing the source (``prob:linter:deferred-mode-rewrite-keeps-a-stale-catalogued-table``).
+- Publication manifests declare the unpublished-label register destination through `public.unpublished`; cuts generate it there and bind the owner snapshot to it, refusing excluded-definition citations without a declaration and unsafe or conflicting destinations (``prob:pack:manifest-declares-the-unpublished-register``).
+
+- Deferred list rewrites remove complete dotted stale-family and singleton assignments; rendered TOML is parsed before replacement, so active dotted-singleton duplication refuses without changing the source (``prob:linter:deferred-writer-parses-its-output-before-replacing``; ``prob:linter:deferred-mode-rewrite-keeps-a-stale-catalogued-table``).
 
 - Folder-matrix checks and writes ignore cell padding and valid table delimiter layout while preserving exact cell content, row identity, order and count; equivalent layouts remain unchanged (``prob:linter:matrix-comparison-normalises-cell-layout``).
 
