@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The route-rendering contract names the owner-side Codex home as the destination for door-only loops and distinguishes it from the canonical credential source (``prob:homes:render-routes-codex-home-from-custody``).
+
 - Standalone route rendering refuses an absent loop before publication while retaining empty node sections for retired routes; fixtures pin missing-key refusal without active routes and preserve home contents across registry refusals and route reactivation (``prob:homes:home-preparation-admits-a-loop-with-no-active-route``).
 
 - Codex reconciliation collapses identical complete generated SSH headers to one, preserves owner comments and refuses conflicting or incomplete duplicate headers (``prob:homes:reconciled-ssh-config-header-written-once``).
