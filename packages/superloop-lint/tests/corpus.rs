@@ -106,6 +106,7 @@
 //! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration. |
 //! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting lists removes deactivated catalogued tables and preserves deferred bytes and position. |
 //! | [`deferred_family_replacements_are_disjoint`] | control | Active family containers survive beside deferred bytes, while stale siblings leave without overlapping the active family's replacement. |
+//! | [`invalid_rendered_lists_are_refused_unchanged`] | control | An active dotted singleton beside a deferred table is refused before the writer can replace the source with duplicate TOML tables. |
 //! | [`nondeferred_inline_owner_rewrite_is_valid`] | control | The shared envelope boundary rewrites inline owners without duplicating keys even without deferred policies, and malformed source is refused unchanged. |
 //! | [`programme_outside_checkout_names_tracked_directory_requirement`] | cli | A programme outside Git names its row and its tracked-directory requirement. |
 
@@ -5731,6 +5732,79 @@ fn deferred_family_replacements_are_disjoint() {
         assert_eq!(rewritten, expected_list_rewrite(name), "{name}");
         assert!(!superloop_lint::lower_lists(&plan).expect("repeat family"));
     }
+    for (name, dotted) in [
+        (
+            "dotted-family-owner",
+            "[PROJECTA]\n\"policy.references.fixture-numbers\".retired = { path_counts=[] }\n",
+        ),
+        (
+            "dotted-family-root",
+            "PROJECTA.\"policy.references.fixture-numbers\".retired = { path_counts=[] }\n",
+        ),
+        (
+            "dotted-singleton-owner",
+            "[PROJECTB]\n\"labels.mints-well-formed\".allowances = []\n",
+        ),
+        (
+            "dotted-singleton-root",
+            "PROJECTB.\"labels.mints-well-formed\".allowances = []\n",
+        ),
+    ] {
+        let envelope = "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n";
+        let source = format!(
+            "{envelope}{dotted}{}{headed}{deferred}",
+            &prefix[envelope.len()..]
+        );
+        toml::from_str::<toml::Table>(&source).expect("valid dotted fixture");
+        fs::write(&path, &source).expect("dotted source");
+        superloop_lint::lower_lists(&plan).expect("prune dotted entry");
+        let rewritten = fs::read_to_string(&path).expect("dotted output");
+        assert_eq!(rewritten, expected_list_rewrite(name), "{name}");
+        toml::from_str::<toml::Table>(&rewritten).expect("valid dotted output");
+        assert!(!superloop_lint::lower_lists(&plan).expect("repeat dotted family"));
+    }
+}
+
+/// An active dotted singleton beside a deferred table is refused before the
+/// writer can replace the source with duplicate TOML tables.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the writer changes refused bytes.
+///
+/// ´claim:control:invalid-rendered-lists-are-refused-unchanged´
+/// ´test:integration:invalid-rendered-lists-are-refused-unchanged´
+#[test]
+fn invalid_rendered_lists_are_refused_unchanged() {
+    let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), "allowances = []");
+    let path = root.path().join(".linter/lists.toml");
+    let source = fs::read_to_string(&path).expect("lists").replace(
+        "[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []",
+        "[PROJECTA]\n\"labels.mints-well-formed\".allowances = []",
+    );
+    assert!(source.contains(".allowances"));
+    fs::write(&path, &source).expect("dotted singleton");
+    let plan =
+        ExecutionPlan::compile(root.path(), configuration(root.path())).expect("valid input");
+    let error = superloop_lint::lower_lists(&plan).expect_err("invalid output refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error
+            .to_string()
+            .contains("refusing invalid rendered lists")
+    );
+    assert_eq!(fs::read_to_string(&path).expect("unchanged"), source);
+    let output = programme_command(root.path(), &["burn", "--write"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing invalid rendered lists"));
+    assert_eq!(fs::read_to_string(&path).expect("CLI unchanged"), source);
+    fs::remove_file(&path).expect("remove lists");
+    assert_eq!(
+        superloop_lint::lower_lists(&plan)
+            .expect_err("missing source")
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert!(!path.exists());
 }
 
 /// The shared envelope boundary rewrites inline owners without duplicating keys
@@ -5761,7 +5835,7 @@ fn nondeferred_inline_owner_rewrite_is_valid() {
     );
 }
 
-/// Exact synthetic writer output recorded in the node round c-a02-probe.
+/// Exact synthetic writer output recorded in c-a02-probe and e-dotted-probe.
 ///
 /// # Panics
 /// Panics only if a test asks for an unrecorded fixture.
@@ -5793,6 +5867,15 @@ fn expected_list_rewrite(name: &str) -> &'static str {
         }
         "stale-headed-sibling" => {
             "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "dotted-family-owner" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "dotted-family-root" | "dotted-singleton-root" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "dotted-singleton-owner" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTB]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
         }
         _ => panic!("unrecorded list layout: {name}"),
     }
