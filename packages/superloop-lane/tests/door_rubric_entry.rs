@@ -295,6 +295,36 @@ fn rubric_entry_admits_distinct_non_root_service_custody() {
     }
 }
 
+/// ´test:integration:rubric-runtime-refuses-effective-only-uid-change´
+#[test]
+#[ignore = "requires namespace root with UID/GID 0 and loop 41001 mapped"]
+fn rubric_runtime_refuses_effective_only_uid_change() {
+    namespace();
+    let fixture = Fixture::new(41001);
+    assert_eq!(
+        fixture.judge().status,
+        "verdict",
+        "complete uid entry control"
+    );
+    let entry = fs::read_to_string(&fixture.runner.entry).expect("fixture entry");
+    let partial = entry
+        .replace("os.setuid(41001)", "os.seteuid(41001)")
+        .replace(
+            "assert os.getuid() == 41001",
+            "assert os.getuid() == 0 and os.geteuid() == 41001",
+        );
+    assert_ne!(entry, partial);
+    file(&fixture.runner.entry, partial.as_bytes(), 0o700);
+    let result = fixture.judge();
+    assert_eq!(result.reason, "door-rubric-unavailable", "{result:?}");
+    assert_eq!(result.observations["rubric_failure"]["check"], "entry-uid");
+    assert_eq!(
+        result.observations["rubric_failure"]["path"],
+        json!(fixture.runner.rubric_path)
+    );
+    assert!(result.rubric_digest.is_none());
+}
+
 /// ´test:integration:rubric-entry-refuses-third-uid-and-writable-ancestors´
 #[test]
 #[ignore = "requires namespace root with UID/GID 0, 3000, 3001, 41001, 41002 and 41003 mapped"]

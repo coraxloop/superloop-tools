@@ -96,7 +96,7 @@ def main():
                 raise RubricFailure("snapshot-input", rubric_path)
             rubric_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         else:
-            text, rubric_digest = read_rubric(rubric_path, os.geteuid(), int(service_uid))
+            text, rubric_digest = read_rubric(rubric_path, os.getuid(), int(service_uid))
     except RubricFailure as error:
         EVIDENCE["rubric_failure"] = error.evidence
         emit({"service_status": "failure", "reason": "door-rubric-unavailable"})

@@ -50,7 +50,7 @@ def read_rubric(path, loop_uid, service_uid):
             os.close(parent)
             parent = child
             info = os.fstat(parent)
-            # Traverse under the real entered identity; bind the expected loop
+            # Traverse under the effective entered identity; bind the expected loop
             # identity at the leaf before reading any rubric bytes.
             rubric_ancestor(info, component, loop_uid, service_uid)
         component = path
