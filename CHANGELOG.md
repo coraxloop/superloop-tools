@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-06
+
 ### Changed
 
 - Regression coverage verifies that 24 repeated learned door decisions retain their adjudicated allow and execute once per request without calling an agent; attribution of the historical excess wall remains open (``prob:door:learned-hit-judgement-wall-after-bite-6``).
@@ -221,7 +223,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/coraxloop/superloop-tools/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/coraxloop/superloop-tools/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/coraxloop/superloop-tools/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/coraxloop/superloop-tools/compare/v0.3.0...v0.3.1
