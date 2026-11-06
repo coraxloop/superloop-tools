@@ -670,7 +670,10 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
                 report["plan"]["files"][0]["after"]["requests"][0]["agent_observations"],
                 result.observations
             ),
-            _ => assert!(!report.to_string().contains("rubric_failure")),
+            _ => assert_eq!(
+                report["door_judgements"][0]["agent_observations"],
+                result.observations
+            ),
         }
     }
 }

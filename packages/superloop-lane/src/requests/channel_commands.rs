@@ -107,7 +107,7 @@ fn run_inner(
                 .into_iter()
                 .filter(|row| row.value()["state"] == *state)
                 .collect::<Vec<_>>();
-            super::list_response(loop_name, &records, shape_stale)?
+            super::list_response(&store, loop_name, &records, shape_stale)?
         }
         _ => return Err(super::usage()),
     };
@@ -120,7 +120,9 @@ fn read(store: &Store, action: &str, loop_name: &str, pending: bool) -> Result<V
     result["loop"] = json!(loop_name);
     result["shape_record"] = json!(if stale { "stale" } else { "current" });
     result["schema"] = json!(2);
-    result["decisions"] = super::list_response(loop_name, &records, stale)?["decisions"].clone();
+    let native = super::list_response(store, loop_name, &records, stale)?;
+    result["decisions"] = native["decisions"].clone();
+    result["door_judgements"] = native["door_judgements"].clone();
     result["preflight_refusals"] = json!(
         records
             .iter()

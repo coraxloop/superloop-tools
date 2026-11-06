@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Built-binary cut regressions pin the refusals of an absent and a failed linter, malformed citation JSON and an unknown protocol namespace or version, with measured protocol fixtures, retained failure diagnostics and no publication on refusal (``prob:pack:cut-executable-route-refusals-tested``).
 
+- Read-only request listings expose admitted door judgements, runner observations, call-count provenance, rubric digests and effect walls without requiring review (``prob:door:requests-show-exposes-judgement-fields``).
+
 - Strict schema-five door records retain bounded agent observations, including rubric failures and cleanup probes; the explicit digest-bound rewrite preserves schema-four judgements with null historical observations (``prob:door:request-record-keeps-agent-observations``).
 
 - Request rewrite previews mark each custody file with a digest-bound `changed` flag and name the fixed conversion schema pair explicitly (``prob:door:requests-rewrite-preview-omits-unchanged-files``).

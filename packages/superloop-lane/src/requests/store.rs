@@ -4554,6 +4554,118 @@ pub(crate) mod tests {
         assert_eq!(attempt["latest"]["withdrawal-failed"], failed);
     }
 
+    fn judgement_listing_fixture() -> Fixture {
+        let fixture = Fixture::new();
+        fixture.set_floor("enforce");
+        let setting = crate::requests::ModeSetting::first(
+            Mode::Enforce,
+            Mode::Enforce,
+            "owner",
+            "fixture",
+            "1",
+        )
+        .expect("mode");
+        let store = fixture.store();
+        for nonce in ["1a", "2b", "3c"] {
+            let mut value = waiting("R", nonce, 3000, Mode::Enforce).into_value();
+            value["mode"] = json!("enforce");
+            value["class_setting"] = setting.value().clone();
+            value["loop_setting"] = setting.value().clone();
+            value["state"] = json!("observed");
+            value["effect"]["state"] = json!("completed");
+            value["effect"]["reason"] = json!("door-complete");
+            value["effect"]["exit_status"] = json!(0);
+            value["effect"]["ref_check"] = json!("admitted");
+            value["effect"]["queue_wall_seconds"] = json!(0.25);
+            value["effect"]["mediation_wall_seconds"] = json!(0.5);
+            value["effect"]["compute_wall_seconds"] = json!(1.5);
+            store
+                .file(RequestRecord::decode(value).expect("admitted record"))
+                .expect("file");
+        }
+        let mut outcome = crate::door::agent::RunnerOutcome::referral(
+            "timeout",
+            "fixture",
+            std::time::Instant::now(),
+        );
+        outcome.status = "verdict".to_owned();
+        outcome.verdict = "allow".to_owned();
+        outcome.wall_ms = 125;
+        outcome.observations = json!({"agent_calls":1,"children_reaped":true});
+        store
+            .record_agent("R:2b", &outcome, Some(&"a".repeat(64)), Some("fixture"))
+            .expect("measured judgement");
+        outcome.observations = serde_json::Value::Null;
+        store
+            .record_agent("R:3c", &outcome, None, Some("fixture"))
+            .expect("unmeasured judgement");
+        fixture
+    }
+
+    /// ´test:unit:request-listings-expose-admitted-judgements-without-mutation´
+    #[test]
+    fn request_listings_expose_admitted_judgements_without_mutation() {
+        fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            let mut result = std::collections::BTreeMap::new();
+            for entry in fs::read_dir(root).expect("directory") {
+                let entry = entry.expect("entry");
+                if entry.file_type().expect("type").is_dir() {
+                    result.extend(files(&entry.path()));
+                } else if entry.file_type().expect("type").is_file() {
+                    result.insert(entry.path(), fs::read(entry.path()).expect("bytes"));
+                }
+            }
+            result
+        }
+        let fixture = judgement_listing_fixture();
+        let store = fixture.store();
+        let root = fixture.permission_registry.parent().expect("whole fixture");
+        let before = files(root);
+        for args in [
+            vec!["list", "alpha"],
+            vec!["list", "alpha", "--pending"],
+            vec!["status", "alpha"],
+            vec!["list", "alpha", "--state", "observed"],
+            vec!["wait", "alpha", "--state", "observed", "--timeout", "30"],
+        ] {
+            let result = fixture.command(&args, b"").expect("read-only listing");
+            let rows = result["door_judgements"].as_array().expect("judgements");
+            assert_eq!(rows.len(), 3);
+            for (index, id) in ["R:1a", "R:2b", "R:3c"].into_iter().enumerate() {
+                let row = rows
+                    .iter()
+                    .find(|row| row["source_id"] == id)
+                    .expect("source");
+                assert_eq!(row["id"], store.collection_id(id));
+                let native = store.request(id).expect("retained record");
+                for key in crate::requests::judgement::KEYS {
+                    assert_eq!(row[key], native.value()[key], "{id}: {key}");
+                }
+                assert_eq!(row["effect"], native.value()["effect"]);
+                assert_eq!(row["agent_calls"], [json!(0), json!(1), json!(null)][index]);
+                assert_eq!(
+                    row["agent_calls_source"],
+                    ["fast-lane-provenance", "runner-observation", "unmeasured"][index]
+                );
+            }
+            if args == ["list", "alpha"] {
+                let common = result["requests"].as_array().expect("common summaries");
+                assert_eq!(common.len(), 3);
+                assert!(
+                    common
+                        .iter()
+                        .all(|row| row["kind"] == "door-after-effect" && row["state"] == "filed")
+                );
+            }
+            assert_eq!(
+                files(root),
+                before,
+                "{} mutates custody or helper state",
+                args.join(" ")
+            );
+        }
+    }
+
     /// ´test:unit:commands-cover-forms-batches-and-state-filter´
     #[test]
     fn commands_cover_forms_batches_and_state_filter() {

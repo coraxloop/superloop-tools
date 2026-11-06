@@ -49,7 +49,30 @@ fn emit(output: &mut impl io::Write, value: &Value) -> Result<(), LaneError> {
     writeln!(output, "{value}").map_err(|error| LaneError::operation("stdout", error.to_string()))
 }
 
+fn judgement_response(store: &Store, row: &super::RequestRecord) -> Value {
+    let value = row.value();
+    let (calls, source) = value["agent_observations"]["agent_calls"]
+        .as_u64()
+        .map_or_else(
+            || {
+                if value["would_do_source"] == "fast-lane" {
+                    (json!(0), "fast-lane-provenance")
+                } else {
+                    (Value::Null, "unmeasured")
+                }
+            },
+            |calls| (json!(calls), "runner-observation"),
+        );
+    let mut result = json!({"id":store.collection_id(row.id()),"source_id":row.id(),
+        "agent_calls":calls,"agent_calls_source":source,"effect":value["effect"]});
+    for key in super::judgement::KEYS {
+        result[key] = value[key].clone();
+    }
+    result
+}
+
 fn list_response(
+    store: &Store,
     loop_name: &str,
     requests: &[super::RequestRecord],
     stale: bool,
@@ -66,6 +89,7 @@ fn list_response(
     Ok(
         json!({"schema":2,"loop":loop_name,"shape_record":if stale {"stale"} else {"current"},
         "decisions":decisions,
+        "door_judgements":requests.iter().map(|row| judgement_response(store, row)).collect::<Vec<_>>(),
         "requests":requests.iter().map(super::RequestRecord::value).collect::<Vec<_>>(),
         "referrals":requests.iter().filter(|row| row.value()["agent_verdict"] == "refer").map(|row|
             json!({"id":row.id(),"target":if row.value()["agent_scope"] == "estate" {"estate"} else {loop_name},
@@ -145,7 +169,10 @@ fn run_wait(
                     })
                     .collect::<Vec<_>>();
                 if !matching.is_empty() {
-                    return emit(output, &list_response(loop_name, &matching, shape_stale)?);
+                    return emit(
+                        output,
+                        &list_response(&store, loop_name, &matching, shape_stale)?,
+                    );
                 }
             }
             Err(error) if error.is_contention() => {
