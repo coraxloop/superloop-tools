@@ -2602,6 +2602,7 @@ fn execute_rotation_at(
     let launch = provision(
         owner_home,
         &LaunchRequest {
+            backend: None,
             loop_name: request.loop_name.clone(),
             run: new_run.clone(),
             letter: source.path,

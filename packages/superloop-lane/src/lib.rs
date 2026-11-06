@@ -219,7 +219,17 @@ pub fn load_plan(
     run: &str,
     caller: (u32, u32),
 ) -> Result<(Plan, Settings), LaneError> {
-    load_plan_with_door(home, loop_name, run, caller, true)
+    load_plan_with_door(home, loop_name, run, caller, true, None)
+}
+
+pub(crate) fn load_launch_plan(
+    home: &Path,
+    loop_name: &str,
+    run: &str,
+    caller: (u32, u32),
+    backend: Option<settings::BoxBackend>,
+) -> Result<(Plan, Settings), LaneError> {
+    load_plan_with_door(home, loop_name, run, caller, true, backend)
 }
 
 /// Load a protected run's paths without consulting a current door generation.
@@ -233,7 +243,7 @@ pub(crate) fn load_plan_for_record(
     run: &str,
     caller: (u32, u32),
 ) -> Result<(Plan, Settings), LaneError> {
-    load_plan_with_door(home, loop_name, run, caller, false)
+    load_plan_with_door(home, loop_name, run, caller, false, None)
 }
 
 fn load_plan_with_door(
@@ -242,6 +252,7 @@ fn load_plan_with_door(
     run: &str,
     caller: (u32, u32),
     include_door: bool,
+    backend: Option<settings::BoxBackend>,
 ) -> Result<(Plan, Settings), LaneError> {
     loop_home::validate_name(loop_name)
         .map_err(|error| LaneError::input("loop-name", error.message()))?;
@@ -254,6 +265,7 @@ fn load_plan_with_door(
         .join("workers.toml");
     let settings = Settings::read(&settings_path)?;
     settings.validate_grant(home, loop_name)?;
+    settings.launch_backend(backend)?.require_runtime()?;
     let registry_path =
         loop_home::registry_path(std::env::var_os("ENTER_LOOP_REGISTRY").as_deref(), home);
     let registry_file = loop_home::load_registry(&registry_path)

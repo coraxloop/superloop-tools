@@ -953,6 +953,12 @@ fn resume_with_program(
     reap: impl FnOnce(&Value) -> Result<Value, LaneError>,
     lane_bin: &Path,
 ) -> Result<Value, LaneError> {
+    if request.backend.is_some() {
+        return Err(LaneError::input(
+            "round-selection",
+            "resume cannot change the recorded backend",
+        ));
+    }
     let began = Instant::now();
     let caller = Uid::effective().as_raw();
     let step = request

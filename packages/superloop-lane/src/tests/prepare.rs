@@ -716,6 +716,7 @@ fn installed_seed_requires_recorded_image_program_and_repeats() {
     let letter = home.join("letter");
     fs::write(&letter, "Launch this run.\n").expect("letter");
     let launch = crate::launch::LaunchRequest {
+        backend: None,
         loop_name: "alpha".into(),
         run: "pilot-1".into(),
         letter,

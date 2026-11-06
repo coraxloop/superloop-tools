@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Boxed launch accepts an explicit `--backend {codex|claude}` selector, validates that vendor's configured program without cross-vendor fallback and names the selection in its preview; Claude execution remains refused as `backend-unavailable` pending its plan, home, entry, credential and runtime adapters, and resumed rounds refuse a backend selection; existing settings files select Codex as before (``prob:box:claude-boxed-workers``; ``conv:superlooplane:backend-selection-compatibility``).
+
 - Publication manifests declare the unpublished-label register destination through `public.unpublished`; cuts generate it there and bind the owner snapshot to it, refusing excluded-definition citations without a declaration and unsafe or conflicting destinations (``prob:pack:manifest-declares-the-unpublished-register``).
 
 - The contributing guide gives slice workers the branch workflow, source declarations, node verification bar and working-step report contract (``guide:contributing:superloop-tools``).

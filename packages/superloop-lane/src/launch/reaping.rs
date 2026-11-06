@@ -125,6 +125,15 @@ pub fn scope_preflight_with(
     mut show: impl FnMut(&str) -> Result<(String, String), LaneError>,
 ) -> Result<bool, LaneError> {
     let request = super::LaunchRequest::parse(&args[1..])?;
+    if request.round.is_none() {
+        let config = owner_home.join(".config/loops").join(&request.loop_name);
+        let settings =
+            crate::settings::Settings::read_beneath(&config.join("workers.toml"), owner_home)?;
+        settings.validate_grant(owner_home, &request.loop_name)?;
+        settings
+            .launch_backend(request.backend)?
+            .require_runtime()?;
+    }
     let recovering = recovery_record(
         owner_home,
         &request.loop_name,

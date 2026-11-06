@@ -133,6 +133,7 @@ pub(crate) fn declared_sources(letter: &[u8]) -> Result<Vec<DeclaredSource>, Lan
 
 #[derive(Debug)]
 pub struct LaunchRequest {
+    pub backend: Option<crate::settings::BoxBackend>,
     pub loop_name: String,
     pub run: String,
     pub letter: PathBuf,
@@ -251,7 +252,7 @@ impl LaunchRequest {
         let [loop_name, run, rest @ ..] = args else {
             return Err(LaneError::input(
                 "usage",
-                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]",
+                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]",
             ));
         };
         let mut letter = None;
@@ -262,6 +263,7 @@ impl LaunchRequest {
         let mut podman_bin = None;
         let mut proxy_bin = None;
         let mut model = None;
+        let mut backend = None;
         let mut effort = None;
         let mut door_scope = None;
         let mut expect_digest = None;
@@ -271,7 +273,7 @@ impl LaunchRequest {
                 "--dry-run" if !dry_run => dry_run = true,
                 "--observe" if !observe => observe = true,
                 "--letter" | "--round" | "--budget" | "--podman-bin" | "--proxy-bin"
-                | "--model" | "--effort" | "--door-scope" | "--expect-digest" => {
+                | "--model" | "--effort" | "--door-scope" | "--expect-digest" | "--backend" => {
                     let option = rest[index].as_str();
                     let value = rest.get(index + 1).ok_or_else(|| {
                         LaneError::input("usage", format!("{option} needs a value"))
@@ -283,6 +285,7 @@ impl LaunchRequest {
                         "--podman-bin" => &mut podman_bin,
                         "--proxy-bin" => &mut proxy_bin,
                         "--model" => &mut model,
+                        "--backend" => &mut backend,
                         "--door-scope" => &mut door_scope,
                         "--expect-digest" => &mut expect_digest,
                         _ => &mut effort,
@@ -318,10 +321,15 @@ impl LaunchRequest {
         }
         if let Some(step) = round.as_deref() {
             letters::valid_step(step)?;
-            if model.is_some() || effort.is_some() || observe || door_scope.is_some() {
+            if model.is_some()
+                || effort.is_some()
+                || observe
+                || door_scope.is_some()
+                || backend.is_some()
+            {
                 return Err(LaneError::input(
                     "round-selection",
-                    "resume uses the recorded model, effort and observation mode",
+                    "resume uses the recorded backend, model, effort and observation mode",
                 ));
             }
         }
@@ -335,6 +343,10 @@ impl LaunchRequest {
                 })
         })?;
         Ok(Self {
+            backend: backend
+                .as_deref()
+                .map(crate::settings::BoxBackend::parse)
+                .transpose()?,
             loop_name: loop_name.clone(),
             run: run.clone(),
             letter: letter.map_or_else(PathBuf::new, PathBuf::from),
@@ -3679,7 +3691,14 @@ fn run_with_program(
     let (_admission, mut generation_guard) =
         crate::install::lock_launch_generation(&config, request.dry_run)?;
     admission::ensure_open(&config, caller.0)?;
-    let (mut plan, settings) = load_plan(owner_home, &request.loop_name, &request.run, (0, 0))?;
+    let (mut plan, settings) = crate::load_launch_plan(
+        owner_home,
+        &request.loop_name,
+        &request.run,
+        (0, 0),
+        request.backend,
+    )?;
+    let selected_backend = settings.launch_backend(request.backend)?;
     plan.select_container_program(&request.podman_bin)?;
     if settings.sandbox_mode != "danger-full-access" {
         return Err(LaneError::input(
@@ -3983,7 +4002,7 @@ fn run_with_program(
         )?;
         let helper_preview = json!({"program":request.podman_bin,"argv":helper_argv(&exe_word, &plan.driver_dir, owner_home, &root)?});
         return Ok(
-            json!({"schema":1,"command":"launch","dry_run":true,"observe":request.observe,"enforcing":!request.observe,"plan":preview_plan,"proxy_service":proxy_service,"box_gate":box_gate,"box_probe":box_probe,"bound_source_matrix":bound_source_matrix,"bound_source_probe_identity":"launcher host identity runs rootless Podman with --userns=host; worker and fixed sibling UIDs are selected inside separate probe containers","dead_preparation":dry_recovery,"checks_performed":checks,"checks_on_launch":checks_on_launch,"driver_sha256":driver_sha256,"driver_contract":driver_contract,"selection":{"worker_uid":worker_uid,"model":selection.record(),"method":"in-process read-only runs-root snapshot under shared lock"},"children_executed":[build::image_inspect_preview(&request.podman_bin, image, owner_home)?],"hash_checks_executed":hash_checks,"prepare_argv":prepare_preview,"setup_argv":setup_preview,"helper_argv":helper_preview,"invocation":{"program":entry,"argv":launch_argv},"environment":environment,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()}),
+            json!({"schema":1,"command":"launch","dry_run":true,"observe":request.observe,"enforcing":!request.observe,"plan":preview_plan,"proxy_service":proxy_service,"box_gate":box_gate,"box_probe":box_probe,"bound_source_matrix":bound_source_matrix,"bound_source_probe_identity":"launcher host identity runs rootless Podman with --userns=host; worker and fixed sibling UIDs are selected inside separate probe containers","dead_preparation":dry_recovery,"checks_performed":checks,"checks_on_launch":checks_on_launch,"driver_sha256":driver_sha256,"driver_contract":driver_contract,"selection":{"backend":selected_backend.name(),"worker_uid":worker_uid,"model":selection.record(),"method":"in-process read-only runs-root snapshot under shared lock"},"children_executed":[build::image_inspect_preview(&request.podman_bin, image, owner_home)?],"hash_checks_executed":hash_checks,"prepare_argv":prepare_preview,"setup_argv":setup_preview,"helper_argv":helper_preview,"invocation":{"program":entry,"argv":launch_argv},"environment":environment,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()}),
         );
     }
     let _preparation_lease = lock_run_preparation(&root, &request.run, caller.0)?;

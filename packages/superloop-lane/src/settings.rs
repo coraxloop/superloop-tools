@@ -12,6 +12,54 @@ use crate::home::{pin_parent, pin_parent_beneath};
 
 pub const MAX_SETTINGS: u64 = 65_536;
 
+/// Vendor selected for one boxed launch, independently of the model name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoxBackend {
+    Codex,
+    Claude,
+}
+
+impl BoxBackend {
+    /// Parse the two supported vendor selectors.
+    ///
+    /// # Errors
+    /// Refuses an unknown vendor instead of falling back to Codex.
+    pub fn parse(value: &str) -> Result<Self, LaneError> {
+        match value {
+            "codex" => Ok(Self::Codex),
+            "claude" => Ok(Self::Claude),
+            _ => Err(LaneError::input(
+                "backend-selection",
+                format!("backend must be codex or claude, not {value}"),
+            )),
+        }
+    }
+
+    /// Return the workers settings map key.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+
+    /// Refuse a vendor whose boxed runtime and credential adapter are not ready.
+    ///
+    /// # Errors
+    /// Claude selection is admitted, but execution remains unavailable until its
+    /// plan, home, entry, credential and runtime paths implement the same selection.
+    pub(crate) fn require_runtime(self) -> Result<(), LaneError> {
+        match self {
+            Self::Codex => Ok(()),
+            Self::Claude => Err(LaneError::input(
+                "backend-unavailable",
+                "claude boxed launch awaits backend-aware plan, home, entry, credential and runtime paths",
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub runs_root: Option<PathBuf>,
@@ -250,6 +298,44 @@ pub(crate) fn split_local_policies(
 }
 
 impl Settings {
+    /// Resolve the requested vendor and require its own absolute program vector.
+    /// With no flag, Codex remains the default when configured; a Claude-only
+    /// configuration selects Claude. Endpoint declarations do not supply a program.
+    ///
+    /// # Errors
+    /// Refuses an absent selected backend or a missing or relative program.
+    pub fn launch_backend(&self, requested: Option<BoxBackend>) -> Result<BoxBackend, LaneError> {
+        let backend = match requested {
+            Some(backend) => backend,
+            None if self.backend_argv.contains_key("codex") => BoxBackend::Codex,
+            None if self.backend_argv.contains_key("claude") => BoxBackend::Claude,
+            None => {
+                return Err(LaneError::input(
+                    "missing-setting",
+                    "backend_argv has no configured program",
+                ));
+            }
+        };
+        let name = backend.name();
+        let program = self
+            .backend_argv
+            .get(name)
+            .and_then(|argv| argv.first())
+            .ok_or_else(|| {
+                LaneError::input(
+                    "missing-setting",
+                    format!("backend_argv.{name} is absent or empty"),
+                )
+            })?;
+        if !Path::new(program).is_absolute() {
+            return Err(LaneError::input(
+                "missing-setting",
+                format!("backend_argv.{name} program is not absolute"),
+            ));
+        }
+        Ok(backend)
+    }
+
     /// Read the optional positive attempt wall from the local worker policy.
     ///
     /// # Errors
