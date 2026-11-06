@@ -27,13 +27,14 @@ pub const MAX_ANCHORS: usize = 64;
 /// Maximum encoded manifest size.
 pub const MAX_MANIFEST: usize = 65_536;
 
-/// A named refusal containing only operation and purpose identifiers.
+/// A named refusal with operation, purpose and the failed custody check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     /// Stable refusal class.
     pub kind: &'static str,
     operation: String,
     purpose: String,
+    detail: String,
 }
 
 impl Error {
@@ -42,15 +43,28 @@ impl Error {
             kind,
             operation: operation.into(),
             purpose: purpose.into(),
+            detail: kind.strip_prefix("anchor-").unwrap_or(kind).into(),
         }
+    }
+    /// Attach the trusted caller's operation and purpose without discarding the cause.
+    #[must_use]
+    pub fn context(mut self, operation: &str, purpose: &str) -> Self {
+        self.operation = operation.into();
+        self.purpose = purpose.into();
+        self
+    }
+
+    fn because(mut self, check: &str, cause: impl fmt::Display) -> Self {
+        self.detail = format!("{check}: {cause}");
+        self
     }
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}: operation={} purpose={}",
-            self.kind, self.operation, self.purpose
+            "{}: operation={} purpose={} check={}",
+            self.kind, self.operation, self.purpose, self.detail
         )
     }
 }
@@ -188,11 +202,17 @@ impl View {
     fn current() -> Result<Self> {
         let uid = nix::unistd::Uid::effective().as_raw();
         let error = || Error::new("anchor-uid-map", "entry", "map");
-        let owners = Owners::current(uid).map_err(|_| error())?;
+        let owners =
+            Owners::current(uid).map_err(|cause| error().because("uid-map-read", cause))?;
         let host_uid = if owners.is_initial() {
             uid
         } else {
-            u32::try_from(owners.parent_uid(0).map_err(|_| error())?).map_err(|_| error())?
+            u32::try_from(
+                owners
+                    .parent_uid(0)
+                    .map_err(|cause| error().because("namespace-root-map", cause))?,
+            )
+            .map_err(|_| error())?
         };
         Ok(Self { owners, host_uid })
     }
@@ -217,21 +237,30 @@ fn inspect_kind(
     purpose: &str,
 ) -> Result<nix::sys::stat::FileStat> {
     if policy.mode == ModePolicy::Executable && matches!(policy.owner, Owner::Mapped(_)) {
-        return Err(Error::new("anchor-owner", operation, purpose));
+        return Err(Error::new("anchor-owner", operation, purpose).because(
+            "executable-owner-policy",
+            "loop-owned executable is not admitted",
+        ));
     }
     if policy.owner == Owner::RootFile && policy.kind != Kind::File {
-        return Err(Error::new("anchor-kind", operation, purpose));
+        return Err(Error::new("anchor-kind", operation, purpose).because(
+            "root-file-policy",
+            "root file proof cannot authorize a directory",
+        ));
     }
     let access = nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFL)
-        .map_err(|_| Error::new("anchor-missing", operation, purpose))?;
+        .map_err(|cause| system_error(cause, operation, purpose, "fcntl-getfl"))?;
     let access = OFlag::from_bits_truncate(access);
     let path_only = policy.kind == Kind::Directory || policy.mode == ModePolicy::Executable;
     if access.contains(OFlag::O_PATH) != path_only
         || (!path_only && access.intersection(OFlag::O_ACCMODE) != OFlag::O_RDONLY)
     {
-        return Err(Error::new("anchor-kind", operation, purpose));
+        return Err(Error::new("anchor-kind", operation, purpose).because(
+            "descriptor-access",
+            format_args!("path_only={path_only} flags={access:?}"),
+        ));
     }
-    let stat = fstat(fd).map_err(|_| Error::new("anchor-missing", operation, purpose))?;
+    let stat = fstat(fd).map_err(|cause| system_error(cause, operation, purpose, "fstat"))?;
     let kind = SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT;
     if kind == SFlag::S_IFLNK {
         return Err(Error::new("anchor-escape", operation, purpose));
@@ -242,7 +271,10 @@ fn inspect_kind(
             Kind::File => SFlag::S_IFREG,
         }
     {
-        return Err(Error::new("anchor-kind", operation, purpose));
+        return Err(Error::new("anchor-kind", operation, purpose).because(
+            "descriptor-kind",
+            format_args!("expected={:?} observed={kind:?}", policy.kind),
+        ));
     }
     Ok(stat)
 }
@@ -265,7 +297,14 @@ fn check_mode(
         }
     };
     if !valid {
-        return Err(Error::new("anchor-mode", operation, purpose));
+        return Err(Error::new("anchor-mode", operation, purpose).because(
+            "mode-policy",
+            format_args!(
+                "policy={:?} observed={:04o}",
+                policy.mode,
+                stat.st_mode & 0o7777
+            ),
+        ));
     }
     Ok(())
 }
@@ -302,7 +341,13 @@ fn check_owner(
             |uid| stat.st_uid == uid,
         );
     if !accepted {
-        return Err(Error::new("anchor-owner", operation, purpose));
+        return Err(Error::new("anchor-owner", operation, purpose).because(
+            "owner-binding",
+            format_args!(
+                "expected initial uid {expected}, declared {recorded}, observed {}",
+                stat.st_uid
+            ),
+        ));
     }
     Ok(())
 }
@@ -314,6 +359,17 @@ fn flags(policy: Policy) -> OFlag {
         OFlag::O_RDONLY | OFlag::O_NONBLOCK
     };
     access | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW
+}
+
+fn system_error(cause: nix::errno::Errno, operation: &str, purpose: &str, check: &str) -> Error {
+    let kind = match cause {
+        nix::errno::Errno::ENOENT | nix::errno::Errno::EBADF => "anchor-missing",
+        nix::errno::Errno::ELOOP | nix::errno::Errno::EXDEV | nix::errno::Errno::ENOTDIR => {
+            "anchor-escape"
+        }
+        _ => "anchor-io",
+    };
+    Error::new(kind, operation, purpose).because(check, cause)
 }
 
 fn open_component(
@@ -332,19 +388,7 @@ fn open_component(
                 | ResolveFlag::RESOLVE_NO_MAGICLINKS,
         ),
     )
-    .map_err(|error| {
-        Error::new(
-            match error {
-                nix::errno::Errno::ENOENT | nix::errno::Errno::EBADF => "anchor-missing",
-                nix::errno::Errno::ELOOP
-                | nix::errno::Errno::EXDEV
-                | nix::errno::Errno::ENOTDIR => "anchor-escape",
-                _ => "anchor-owner",
-            },
-            operation,
-            purpose,
-        )
-    })
+    .map_err(|cause| system_error(cause, operation, purpose, "openat2"))
 }
 
 fn relative_parts(path: &Path, operation: &str, purpose: &str) -> Result<Vec<std::ffi::OsString>> {
@@ -370,6 +414,7 @@ fn relative_parts(path: &Path, operation: &str, purpose: &str) -> Result<Vec<std
 #[derive(Debug)]
 pub struct HostVerifier {
     view: View,
+    operation: String,
 }
 /// Held host object and its measured declaration record.
 #[derive(Debug)]
@@ -404,9 +449,20 @@ impl HostVerifier {
 
     fn from_view(view: View) -> Result<Self> {
         if !view.owners.is_initial() {
-            return Err(Error::new("anchor-uid-map", "host", "map"));
+            return Err(Error::new("anchor-uid-map", "host", "map")
+                .because("initial-map", "one complete identity range required"));
         }
-        Ok(Self { view })
+        Ok(Self {
+            view,
+            operation: "host".into(),
+        })
+    }
+
+    /// Bind subsequent pins to the trusted launcher's operation.
+    #[must_use]
+    pub fn for_operation(mut self, operation: &str) -> Self {
+        self.operation = operation.into();
+        self
     }
 
     /// Pin an absolute object after checking every host ancestor.
@@ -415,7 +471,7 @@ impl HostVerifier {
     /// # Errors
     /// Refuses links, untrusted ancestors and unsafe kind, owner or mode.
     pub fn pin(&self, path: &Path, purpose: &str, slot: u32, policy: Policy) -> Result<HostPin> {
-        let operation = "host";
+        let operation = self.operation.as_str();
         if !identifier(purpose) {
             return Err(Error::new("anchor-declaration", operation, "purpose"));
         }
@@ -428,15 +484,20 @@ impl HostVerifier {
             OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| Error::new("anchor-missing", operation, purpose))?;
+        .map_err(|cause| system_error(cause, operation, purpose, "host-descriptor"))?;
         for (index, name) in parts.iter().enumerate() {
-            let parent =
-                fstat(&fd).map_err(|_| Error::new("anchor-missing", operation, purpose))?;
-            if self.view.owners.check(parent.st_uid).is_err()
-                || (parent.st_mode & 0o022 != 0
-                    && !(parent.st_uid == 0 && parent.st_mode & 0o1777 == 0o1777))
+            let parent = fstat(&fd)
+                .map_err(|cause| system_error(cause, operation, purpose, "host-descriptor"))?;
+            self.view.owners.check(parent.st_uid).map_err(|cause| {
+                Error::new("anchor-owner", operation, purpose).because("ancestor-owner", cause)
+            })?;
+            if parent.st_mode & 0o022 != 0
+                && !(parent.st_uid == 0 && parent.st_mode & 0o1777 == 0o1777)
             {
-                return Err(Error::new("anchor-owner", operation, purpose));
+                return Err(Error::new("anchor-mode", operation, purpose).because(
+                    "ancestor-mode",
+                    format_args!("observed={:04o}", parent.st_mode & 0o7777),
+                ));
             }
             let leaf = index + 1 == parts.len();
             let next = if leaf {
@@ -803,26 +864,29 @@ impl Anchor {
         };
         let mut registry =
             File::from(self.open_beneath(Path::new("registry.toml"), file, 0o700)?);
-        let registry =
-            crate::registry::load_registry_from_file(&mut registry).map_err(|_| error())?;
+        let registry = crate::registry::load_registry_from_file(&mut registry)
+            .map_err(|cause| error().because("registry-parse", cause))?;
         let mut source = String::new();
         match self.open_beneath(Path::new("allocations.toml"), file, 0o700) {
             Ok(fd) => {
                 File::from(fd)
                     .take(crate::allocations::MAX_ALLOCATIONS + 1)
                     .read_to_string(&mut source)
-                    .map_err(|_| error())?;
+                    .map_err(|cause| {
+                        Error::new("anchor-io", &self.operation, "configuration")
+                            .because("ledger-read", cause)
+                    })?;
             }
             Err(e) if optional_ledger && e.kind == "anchor-missing" => {}
             Err(e) => return Err(e),
         }
         if source.len() as u64 > crate::allocations::MAX_ALLOCATIONS {
-            return Err(error());
+            return Err(error().because("ledger-bound", "allocations exceeds its byte bound"));
         }
         let ledger = crate::allocations::Allocations::parse(&source)
-            .map_err(|_| error())?
+            .map_err(|cause| error().because("ledger-parse", cause))?
             .with_registry(&registry, home)
-            .map_err(|_| error())?;
+            .map_err(|cause| error().because("registry-ledger-binding", cause))?;
         Ok(Configuration {
             registry,
             allocations: ledger,

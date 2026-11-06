@@ -127,6 +127,18 @@ fn mail_entry_holds_configuration_across_a_partial_map() {
         "mail-identity-drop:",
     );
     assert!(!error.contains("namespace-root entry required"));
+    let malformed = fixture();
+    let mut command = launch(malformed.path());
+    fs::write(
+        malformed.path().join(".config/loops/allocations.toml"),
+        "invalid TOML",
+    )
+    .expect("malformed ledger");
+    let error = refusal(
+        command.output().expect("ledger refusal"),
+        "anchor-declaration:",
+    );
+    assert!(error.contains("operation=mail-serve purpose=configuration check=ledger-parse: malformed allocations.toml"), "{error}");
     let mut command = launch(home.path());
     fs::rename(
         home.path().join(".config/loops"),

@@ -72,7 +72,9 @@ pub fn serve_command(home: &Path, entry: &Path, namespace: &[OsString]) -> Resul
     let (word, arguments) = namespace
         .split_first()
         .ok_or_else(|| refusal("anchor-exec", "namespace-entry"))?;
-    let host = HostVerifier::current()?;
+    let host = HostVerifier::current()
+        .map_err(|e| e.context(OPERATION, "host-map"))?
+        .for_operation(OPERATION);
     let program = namespace_program(word)?;
     let _namespace_pin = executable(&host, &program, "namespace-entry", 0)?;
     let configuration = host.pin(
@@ -91,11 +93,12 @@ pub fn serve_command(home: &Path, entry: &Path, namespace: &[OsString]) -> Resul
     };
     let declaration =
         serde_json::to_string(&manifest).map_err(|_| refusal("anchor-declaration", "manifest"))?;
-    Manifest::parse(&declaration)?;
+    Manifest::parse(&declaration).map_err(|e| e.context(OPERATION, "manifest"))?;
     let (sender, receiver) = UnixStream::pair()?;
     // Queueing the bounded frame before exec preserves serve's process semantics.
     // The queued rights hold both objects across Podman and the entry-word exec.
-    anchor::transport::send(&sender, &[configuration.into_fd(), entry_pin.into_fd()])?;
+    anchor::transport::send(&sender, &[configuration.into_fd(), entry_pin.into_fd()])
+        .map_err(|e| e.context(OPERATION, "rights"))?;
     drop(sender);
     let input: OwnedFd = receiver.into();
     let mut command = Command::new(&program);
@@ -134,7 +137,7 @@ pub(super) fn receive(home: &Path, declaration: &str) -> Result<Entered> {
     if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
         return Err(refusal("anchor-declaration", "registry-override"));
     }
-    let manifest = Manifest::parse(declaration)?;
+    let manifest = Manifest::parse(declaration).map_err(|e| e.context(OPERATION, "manifest"))?;
     let input = nix::unistd::dup(std::io::stdin().as_fd())
         .map_err(|_| refusal("anchor-missing", "rights-socket"))?;
     let stat =
@@ -144,11 +147,12 @@ pub(super) fn receive(home: &Path, declaration: &str) -> Result<Entered> {
     }
     let socket = UnixStream::from(input);
     let descriptors =
-        anchor::transport::receive(&socket, manifest.records.len(), Duration::from_secs(30))?;
+        anchor::transport::receive(&socket, manifest.records.len(), Duration::from_secs(30))
+            .map_err(|e| e.context(OPERATION, "rights"))?;
     drop(socket);
     // The private receiver owns stdin; the consumed socket is setup-only.
     nix::unistd::close(0)?;
-    let receiver = Receiver::current()?;
+    let receiver = Receiver::current().map_err(|e| e.context(OPERATION, "receiver-map"))?;
     let configuration = receiver.configuration(
         &manifest,
         &descriptors,

@@ -295,12 +295,15 @@ fn anchor_ledger_and_registry_share_one_capability() {
         "allocations.toml",
         "[alpha]\nuids = { base = 41001, count = 8 }\n",
     );
-    assert_eq!(
-        anchor
-            .read_configuration(&old, false)
-            .expect_err("registry UID collision")
-            .kind,
-        "anchor-declaration"
+    let error = anchor
+        .read_configuration(&old, false)
+        .expect_err("registry UID collision");
+    assert_eq!(error.kind, "anchor-declaration");
+    assert!(
+        error.to_string().contains(
+            "check=registry-ledger-binding: worker uids for loop alpha contain registered uid 41001"
+        ),
+        "{error}"
     );
     fs::remove_file(fixture.0.join("allocations.toml")).expect("remove ledger");
     anchor
@@ -609,7 +612,7 @@ fn anchor_host_walk_refuses_links_and_writable_parents() {
             .pin(&path, "input", 0, policy(Kind::File))
             .expect_err("parent")
             .kind,
-        "anchor-owner"
+        "anchor-mode"
     );
     fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700)).expect("restore parent");
 }
@@ -651,5 +654,94 @@ fn anchor_executable_pins_require_host_owner_proof() {
             .expect_err("deferred executable owner")
             .kind,
         "anchor-owner"
+    );
+}
+
+/// # Panics
+/// Panics if ownership, mode, syscall or transport failures lose their distinct cause.
+/// ´claim:loophome:anchor-refusals-retain-the-failed-check´
+/// ´test:unit:anchor-refusals-retain-the-failed-check´
+#[test]
+fn anchor_refusals_retain_the_failed_check() {
+    let fixture = Fixture::new();
+    let child = fixture.file("child", "payload");
+    fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o770)).expect("writable ancestor");
+    let host = HostVerifier::current()
+        .expect("host")
+        .for_operation("mail-serve");
+    let error = host
+        .pin(&child, "configuration", 0, policy(Kind::File))
+        .expect_err("ancestor mode");
+    assert_eq!(error.kind, "anchor-mode");
+    assert!(
+        error
+            .to_string()
+            .contains("operation=mail-serve purpose=configuration check=ancestor-mode"),
+        "{error}"
+    );
+    fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700)).expect("restore");
+    let fd = host
+        .pin(&fixture.0, "configuration", 0, policy(Kind::Directory))
+        .expect("directory")
+        .into_fd();
+    let error = open_component(
+        &fd,
+        Path::new(&"x".repeat(4096)),
+        policy(Kind::File),
+        "mail-serve",
+        "configuration",
+    )
+    .expect_err("name limit");
+    assert_eq!(error.kind, "anchor-io");
+    assert!(
+        error.to_string().contains("check=openat2: ENAMETOOLONG"),
+        "{error}"
+    );
+    let (sender, receiver) = UnixStream::pair().expect("socket");
+    transport::send(&sender, &[]).expect("empty frame");
+    let error = transport::receive(&receiver, 1, Duration::from_secs(1))
+        .expect_err("missing rights")
+        .context("mail-serve", "rights");
+    assert_eq!(error.kind, "anchor-transport");
+    assert!(
+        error.to_string().contains(
+            "operation=mail-serve purpose=rights check=rights-frame: expected=1 received=0"
+        ),
+        "{error}"
+    );
+}
+
+/// # Panics
+/// Panics if registry and ledger schema failures lose their parser-specific cause.
+/// ´claim:loophome:anchor-configuration-refusals-retain-parser-causes´
+/// ´test:unit:anchor-configuration-refusals-retain-parser-causes´
+#[test]
+fn anchor_configuration_refusals_retain_parser_causes() {
+    let fixture = Fixture::new();
+    let (manifest, fds, required) = bundle(&fixture.0, "configuration", policy(Kind::Directory));
+    let anchor = validate(&manifest, fds, &required)
+        .expect("configuration")
+        .remove(0);
+    fixture.file("registry.toml", "invalid TOML");
+    let error = anchor
+        .read_configuration(&fixture.0, false)
+        .expect_err("registry schema");
+    assert!(
+        error.to_string().contains("check=registry-parse:"),
+        "{error}"
+    );
+    fixture.file(
+        "registry.toml",
+        "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[]\n",
+    );
+    fixture.file("allocations.toml", "invalid TOML");
+    let error = anchor
+        .read_configuration(&fixture.0, false)
+        .expect_err("ledger schema");
+    assert!(
+        error
+            .to_string()
+            .contains("check=ledger-parse: malformed allocations.toml"),
+        "{error}"
     );
 }
