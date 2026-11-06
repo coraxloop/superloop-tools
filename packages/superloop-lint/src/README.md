@@ -375,6 +375,9 @@
 |(`test:unit:bounds-the-region-at-the-next-heading`)|projection|The generated region ends at the next heading, so prose an author adds in a section of its own below the matrix is outside the region and survives every regeneration.|
 |(`test:unit:counts-a-folder-with-no-readme-rather-than-reporting-it`)|projection|A folder of tests with no readme at all is counted as lacking a matrix and reported nowhere, so the projection can be adopted gradually rather than failing every folder that has not yet been reached.|
 |(`test:unit:counts-a-readme-with-no-matrix-rather-than-reporting-it`)|projection|A readme of prose alone is likewise counted rather than reported: having a readme and having a matrix are separate facts, and a folder that documents itself without one is not yet a defect.|
+|(`test:unit:matrix-layout-preserves-current-rows`)|projection|Cell padding, optional edge pipes and valid delimiter layout do not change a matrix's rows, and a writer preserves an equivalent layout.|
+|(`test:unit:matrix-layout-refuses-changed-rows`)|projection|Layout tolerance does not hide changed identities, row order or count, extra cells, malformed delimiters, code blocks or changed cell text.|
+|(`test:unit:matrix-layout-preserves-pipe-content`)|projection|Escaped and inline-code pipes stay inside their cell, whose interior bytes remain significant while padding around it may change.|
 |(`test:unit:reports-a-stale-matrix`)|projection|cites (`claim:projection:an-index-that-is-not-what-the-labels-give-is-stale`)|
 |(`test:unit:reports-a-hand-edit-inside-the-matrix-region`)|projection|cites (`claim:projection:a-hand-edited-projection-is-stale-and-is-regenerated`)|
 |(`test:unit:reports-a-title-stating-the-wrong-level`)|projection|A title stating a level the folder does not hold is reported, naming both the title written and the level the folder actually classifies at, so a matrix cannot misdescribe the tests beneath it.|
