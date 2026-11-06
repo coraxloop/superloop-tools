@@ -270,7 +270,12 @@ pub(super) fn replace_leaf(
 }
 
 #[cfg(test)]
+type ReaderAttemptHook = Box<dyn FnOnce(Option<Instant>)>;
+
+#[cfg(test)]
 thread_local! {
+    static BEFORE_READER_LOCK_SLEEP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_READER_LOCK_ATTEMPT: std::cell::RefCell<Option<ReaderAttemptHook>> = const { std::cell::RefCell::new(None) };
     pub(crate) static WRITER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static READER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static BEFORE_LEAF_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -1135,6 +1140,13 @@ impl Store {
         caller_deadline: Option<Instant>,
         retry: bool,
     ) -> Result<StoreLock, ReadFailure> {
+        #[cfg(test)]
+        if !changing {
+            let hook = BEFORE_READER_LOCK_ATTEMPT.with(|slot| slot.borrow_mut().take());
+            if let Some(hook) = hook {
+                hook(caller_deadline);
+            }
+        }
         let state = self.state_dir();
         let flags = if changing {
             OFlag::O_RDWR
@@ -1284,6 +1296,14 @@ impl Store {
                 continue;
             }
             if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline {
+                #[cfg(test)]
+                if !changing {
+                    BEFORE_READER_LOCK_SLEEP.with(|slot| {
+                        if let Some(hook) = slot.borrow_mut().take() {
+                            hook();
+                        }
+                    });
+                }
                 std::thread::sleep(
                     Duration::from_millis(10)
                         .min(deadline.saturating_duration_since(Instant::now())),
@@ -4689,7 +4709,8 @@ pub(crate) mod tests {
                 store
                     .file(waiting("R", "1a", 3000, Mode::Audit))
                     .expect("request");
-                let before = files(&fixture.home);
+                let snapshot_root = fixture.permission_registry.parent().expect("fixture root");
+                let before = files(snapshot_root);
                 let lock = store.fixture_exclusive_lock().expect("writer lock");
                 let mut held = Some(lock);
                 if release {
@@ -4698,7 +4719,14 @@ pub(crate) mod tests {
                         *hook.borrow_mut() = Some(Box::new(move || drop(lock)));
                     });
                 }
-                let bound = Duration::from_millis(300);
+                // Release is signalled by observed contention, not elapsed wall.
+                // Keep the production allowance for setup under a loaded node;
+                // only the expiry case needs a shortened wait.
+                let bound = if release {
+                    super::READER_LOCK_WAIT
+                } else {
+                    Duration::from_millis(300)
+                };
                 super::READER_LOCK_WAIT_OVERRIDE.set(Some(bound));
                 let args: Vec<_> = ["list", "alpha"]
                     .into_iter()
@@ -4732,16 +4760,106 @@ pub(crate) mod tests {
                     assert_eq!(error.kind, "requests-record-refusal");
                     assert!(super::is_lock_contention(&error));
                     assert!(error.detail.contains("wait_seconds="));
+                    assert!(error.detail.contains("listing_elapsed_seconds="));
+                    assert!(error.detail.contains("holder_request_id=unknown"));
                     assert!(error.detail.contains(
                         "retry requests list after the active request releases the lock"
                     ));
                     assert_eq!(output, Vec::<u8>::new());
                     assert!(wall >= bound);
                 }
-                assert!(wall < Duration::from_secs(5), "listing wall: {wall:?}");
                 drop(held);
-                assert_eq!(files(&fixture.home), before);
+                assert_eq!(files(snapshot_root), before);
             }
+        }
+    }
+
+    /// # Panics
+    /// Panics if a second acquisition renews a listing's deadline or loses total elapsed time.
+    /// ´test:unit:requests-list-shares-deadline-across-acquisitions´
+    #[test]
+    fn requests_list_shares_deadline_across_acquisitions() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use std::time::Instant;
+        for suffix in [vec![], vec!["--pending"], vec!["--state", "waiting"]] {
+            let fixture = Fixture::new();
+            let store = fixture.store();
+            store
+                .file(waiting("R", "1a", 3000, Mode::Audit))
+                .expect("request");
+            let acquired = Rc::new(Cell::new(0));
+            let held = Rc::new(RefCell::new(None));
+            let observations = Rc::clone(&acquired);
+            let holder = Rc::clone(&held);
+            let bound = super::READER_LOCK_WAIT;
+            super::READER_LOCK_WAIT_OVERRIDE.set(Some(bound));
+            super::BEFORE_READER_LOCK_ATTEMPT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |first| {
+                    let first = first.expect("listing has an absolute deadline");
+                    observations.set(observations.get() + 1);
+                    AFTER_READER_LOCK_ACQUIRED.with(|hook| {
+                        *hook.borrow_mut() = Some(Box::new(move || {
+                            std::thread::sleep(first.saturating_duration_since(Instant::now()));
+                        }));
+                    });
+                    super::BEFORE_READER_LOCK_ATTEMPT.with(|next| {
+                        *next.borrow_mut() = Some(Box::new(move |second| {
+                            observations.set(observations.get() + 1);
+                            assert_eq!(
+                                second,
+                                Some(first),
+                                "the second read must share the deadline"
+                            );
+                            assert!(Instant::now() >= first, "first read consumed the allowance");
+                            *holder.borrow_mut() =
+                                Some(store.fixture_exclusive_lock().expect("second-read writer"));
+                            super::BEFORE_READER_LOCK_SLEEP.with(|sleep| {
+                                *sleep.borrow_mut() = Some(Box::new(|| {
+                                    panic!("expired second read must not wait again")
+                                }));
+                            });
+                        }));
+                    });
+                }));
+            });
+            let args: Vec<_> = ["list", "alpha"]
+                .into_iter()
+                .chain(suffix)
+                .map(str::to_owned)
+                .collect();
+            let mut output = Vec::new();
+            let error = super::channel::with_test_client(
+                super::test_helper::binary(),
+                &fixture.permission_registry,
+                || crate::requests::commands::run(&fixture.home, &args, &mut &b""[..], &mut output),
+            )
+            .expect_err("second read refuses on its exhausted shared deadline");
+            super::READER_LOCK_WAIT_OVERRIDE.set(None);
+            assert_eq!(acquired.get(), 2, "{error:?}");
+            super::BEFORE_READER_LOCK_SLEEP
+                .with(|hook| assert!(hook.borrow_mut().take().is_some()));
+            assert!(super::is_lock_contention(&error));
+            assert!(error.detail.contains("holder_request_id=unknown"));
+            assert!(error.detail.contains("retry requests list"));
+            let figure = |key: &str| -> f64 {
+                error
+                    .detail
+                    .split(';')
+                    .map(str::trim)
+                    .find_map(|part| part.strip_prefix(key))
+                    .expect("elapsed figure")
+                    .parse()
+                    .expect("numeric elapsed figure")
+            };
+            let listing = figure("listing_elapsed_seconds=");
+            let last_read = figure("total_wait_seconds=");
+            assert!(
+                listing - last_read >= bound.as_secs_f64() - 0.002,
+                "listing={listing} last={last_read}"
+            );
+            assert_eq!(output, Vec::<u8>::new());
+            drop(held.borrow_mut().take());
         }
     }
 

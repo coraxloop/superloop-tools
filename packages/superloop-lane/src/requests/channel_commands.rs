@@ -27,10 +27,32 @@ pub(super) fn run(
     input: &mut impl io::Read,
     output: &mut impl io::Write,
 ) -> Result<(), LaneError> {
+    let started = std::time::Instant::now();
+    run_inner(owner_home, args, input, output, started).map_err(|mut error| {
+        if args.first().is_some_and(|action| action == "list")
+            && crate::requests::store::is_lock_contention(&error)
+        {
+            use std::fmt::Write as _;
+            let _written = write!(
+                error.detail,
+                "; listing_elapsed_seconds={:.3}",
+                started.elapsed().as_secs_f64()
+            );
+        }
+        error
+    })
+}
+
+fn run_inner(
+    owner_home: &Path,
+    args: &[String],
+    input: &mut impl io::Read,
+    output: &mut impl io::Write,
+    started: std::time::Instant,
+) -> Result<(), LaneError> {
     let [action, loop_name, rest @ ..] = args else {
         return Err(super::usage());
     };
-    let started = std::time::Instant::now();
     let store = Store::open(owner_home, loop_name, false)?;
     let store = if action == "list" {
         store.with_reader_deadline(started + crate::requests::store::reader_lock_wait())
