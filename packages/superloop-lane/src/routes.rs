@@ -465,7 +465,14 @@ fn run(args: &[OsString]) -> Result<serde_json::Value> {
         .ok_or("arguments: invalid owner-home")?;
     let source = fs::read_to_string(required("--registry")?)
         .map_err(|_| String::from("registry-read: inspection failed"))?;
-    let rows = registry(&source, name)?;
+    let rows = registry_rows(&source, name, true)?;
+    if rows.is_empty() {
+        return Err("registry-loop: no routes for selected loop".into());
+    }
+    let rows = rows
+        .into_iter()
+        .filter(|row| row["status"] == "active")
+        .collect::<Vec<_>>();
     let output = PathBuf::from(
         required("--output")?
             .to_str()
