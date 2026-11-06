@@ -96,7 +96,7 @@ static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 // The service and host exercises share this inode; never unlink a lock on release.
 struct RequestGuard {
-    _held: nix::fcntl::Flock<File>,
+    _held: Vec<nix::fcntl::Flock<File>>,
 }
 
 impl RequestGuard {
@@ -104,6 +104,7 @@ impl RequestGuard {
         home: &Path,
         registration: &Registration,
         request: &Value,
+        operation: Option<transport::Operation>,
         started: Instant,
     ) -> io::Result<(Option<Self>, Duration)> {
         let began = Instant::now();
@@ -112,7 +113,7 @@ impl RequestGuard {
             .saturating_sub(ADMISSION_REPLY_MARGIN);
         let budget = remaining.min(ADMISSION_WAIT);
         loop {
-            if let Some(guard) = Self::acquire(home, registration)? {
+            if let Some(guard) = Self::acquire_operation(home, registration, operation)? {
                 return Ok((Some(guard), began.elapsed()));
             }
             #[cfg(test)]
@@ -137,7 +138,40 @@ impl RequestGuard {
         }
     }
 
+    #[cfg(test)]
     fn acquire(home: &Path, registration: &Registration) -> io::Result<Option<Self>> {
+        Self::acquire_operation(home, registration, None)
+    }
+
+    fn acquire_operation(
+        home: &Path,
+        registration: &Registration,
+        operation: Option<transport::Operation>,
+    ) -> io::Result<Option<Self>> {
+        let class = match operation {
+            Some(transport::Operation::Compute) => Some("compute"),
+            Some(transport::Operation::GitReceive) => Some("receive"),
+            _ => None,
+        };
+        let Some(common) = Self::acquire_lock(home, registration, "", class.is_some())? else {
+            return Ok(None);
+        };
+        let mut held = vec![common];
+        if let Some(class) = class {
+            let Some(slot) = Self::acquire_lock(home, registration, class, false)? else {
+                return Ok(None);
+            };
+            held.push(slot);
+        }
+        Ok(Some(Self { _held: held }))
+    }
+
+    fn acquire_lock(
+        home: &Path,
+        registration: &Registration,
+        class: &str,
+        shared: bool,
+    ) -> io::Result<Option<nix::fcntl::Flock<File>>> {
         use nix::fcntl::{Flock, FlockArg, OFlag, OpenHow, ResolveFlag, openat2};
         loop_home::validate_name(&registration.loop_name).map_err(io::Error::other)?;
         let owner = nix::unistd::Uid::effective().as_raw();
@@ -149,7 +183,11 @@ impl RequestGuard {
             owner,
         )
         .map_err(io::Error::other)?;
-        let name = format!("door-admission-{}.lock", registration.worker_uid);
+        let name = if class.is_empty() {
+            format!("door-admission-{}.lock", registration.worker_uid)
+        } else {
+            format!("door-admission-{}-{class}.lock", registration.worker_uid)
+        };
         let fd = openat2(
             &directory,
             Path::new(&name),
@@ -169,8 +207,13 @@ impl RequestGuard {
                 "door admission lock owner, type, mode or links differ",
             ));
         }
-        match Flock::lock(File::from(fd), FlockArg::LockExclusiveNonblock) {
-            Ok(held) => Ok(Some(Self { _held: held })),
+        let operation = if shared {
+            FlockArg::LockSharedNonblock
+        } else {
+            FlockArg::LockExclusiveNonblock
+        };
+        match Flock::lock(File::from(fd), operation) {
+            Ok(held) => Ok(Some(held)),
             Err((_, nix::errno::Errno::EWOULDBLOCK)) => Ok(None),
             Err((_, error)) => Err(io::Error::from(error)),
         }
@@ -1004,7 +1047,7 @@ fn root_refusal(
     started: Instant,
 ) -> io::Result<()> {
     let (_request_guard, admission_error) = if peer == registration.worker_uid {
-        match RequestGuard::acquire_wait(owner_home, registration, request, started) {
+        match RequestGuard::acquire_wait(owner_home, registration, request, None, started) {
             Ok((Some(guard), _)) => (Some(guard), None),
             Ok((None, waited)) => {
                 return concurrent_refusal(stream, registration, peer, started, waited).map(|_| ());
@@ -1072,20 +1115,26 @@ fn serve_request_with_agent(
     configured_model: Option<&str>,
     started: Instant,
 ) -> io::Result<(Value, Vec<u8>)> {
+    // Classify only a route-validated operation; all other shapes retain exclusive admission.
+    let admission_operation = route.and_then(|route| {
+        transport::argument_bytes(request).and_then(|args| route.allowed(&args, registration))
+    });
     // Claim the authenticated box before any preflight or intent record write,
     // and retain it through the final effect publication and reply.
-    let (_request_guard, admission_error) =
-        if let Some(home) = owner_home.filter(|_| peer == registration.worker_uid) {
-            match RequestGuard::acquire_wait(home, registration, request, started) {
-                Ok((Some(guard), _)) => (Some(guard), None),
-                Ok((None, waited)) => {
-                    return concurrent_refusal(stream, registration, peer, started, waited);
-                }
-                Err(error) => (None, Some(error)),
+    let (_request_guard, admission_error) = if let Some(home) =
+        owner_home.filter(|_| peer == registration.worker_uid)
+    {
+        match RequestGuard::acquire_wait(home, registration, request, admission_operation, started)
+        {
+            Ok((Some(guard), _)) => (Some(guard), None),
+            Ok((None, waited)) => {
+                return concurrent_refusal(stream, registration, peer, started, waited);
             }
-        } else {
-            (None, None)
-        };
+            Err(error) => (None, Some(error)),
+        }
+    } else {
+        (None, None)
+    };
     let refuse = |reason| {
         // Preserve preflight evidence when custody cannot be opened, but never
         // attempt a record write without owning this box's admission lock.

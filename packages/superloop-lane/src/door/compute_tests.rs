@@ -68,7 +68,7 @@ impl Runner for NodeRunner {
     }
 }
 
-fn compute_service(
+pub(super) fn compute_service(
     fixture: &Fixture,
     run: &str,
     worker: u32,
