@@ -103,7 +103,9 @@
 //! | [`characterizes_fix_bytes`] | harness | Both fix profiles refuse before writing over deliberately undeclared fixtures, freezing the refusal and the untouched sources. |
 //! | [`citation_sites_preserve_resolved_addresses`] | cli | The executable protocol preserves citations before the first mint and exposes no document text. # Panics Panics only if fixture IO fails or the command violates its versioned protocol. |
 //! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration. # Panics Panics only if fixture IO fails or the binary violates the containment contract. |
-//! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting catalogued lists preserves an intervening deferred table's bytes and position. # Panics Panics only if fixture IO fails or a rewrite changes opaque source. |
+//! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting lists removes deactivated catalogued tables and preserves deferred bytes and position. # Panics Panics only if fixture IO fails or a rewrite changes opaque source. |
+//! | [`deferred_family_replacements_are_disjoint`] | control | Active family containers survive beside deferred bytes, while stale siblings leave without overlapping the active family's replacement. # Panics Panics only if fixture IO fails or the writer violates the family contract. |
+//! | [`nondeferred_inline_owner_rewrite_is_valid`] | control | The shared envelope boundary rewrites inline owners without duplicating keys even without deferred policies, and malformed source is refused unchanged. # Panics Panics only if fixture IO fails or the writer violates the envelope contract. |
 //! | [`programme_outside_checkout_names_tracked_directory_requirement`] | cli | A programme outside Git names its row and its tracked-directory requirement. # Panics Panics only if fixture IO fails or the refusal loses its feature context. |
 
 use std::borrow::Cow;
@@ -5486,7 +5488,7 @@ fn nested_root_containment_uses_tracked_paths() {
     );
 }
 
-/// Rewriting catalogued lists preserves an intervening deferred table's bytes and position.
+/// Rewriting lists removes deactivated catalogued tables and preserves deferred bytes and position.
 ///
 /// # Panics
 /// Panics only if fixture IO fails or a rewrite changes opaque source.
@@ -5555,6 +5557,196 @@ fn deferred_list_rewrite_preserves_bytes_and_order() {
         fs::read_to_string(&path).expect("rewritten inline lists"),
         inline.replace("allowances=[]", "allowances = []")
     );
+    assert_deactivated_lists_are_removed(root.path(), &policies, &lists, &inline);
+}
+
+/// The shared writer prunes stale singleton and family layouts beside opaque rows.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the writer retains stale rows or changes opaque bytes.
+fn assert_deactivated_lists_are_removed(root: &Path, policies: &Path, lists: &str, inline: &str) {
+    let path = root.join(".linter/lists.toml");
+    let text = fs::read_to_string(policies).expect("active policies");
+    fs::write(
+        policies,
+        text.replace(
+            "{ owner = \"PROJECTB\", policy = \"labels.mints-well-formed\" }, ",
+            "",
+        ),
+    )
+    .expect("deactivate second catalogued policy");
+    // CLI preflight refuses stale pairs. Compile the active snapshot first,
+    // then exercise the shared writer against each stale source layout.
+    fs::write(
+        &path,
+        lists.replace(
+            "[PROJECTB.\"labels.mints-well-formed\"]\nallowances=[]\n",
+            "",
+        ),
+    )
+    .expect("active lists");
+    let plan = ExecutionPlan::compile(root, configuration(root)).expect("active execution plan");
+    let inline_owner = fs::read_to_string(&path).expect("active source").replacen(
+        "[PROJECTA.",
+        "PROJECTB = { \"labels.mints-unique\" = { allowances=[] }, \"labels.mints-well-formed\" = { allowances=[] } }\n[PROJECTA.",
+        1,
+    );
+    let headed_family = lists.replace(
+        "[PROJECTB.\"labels.mints-well-formed\"]\nallowances=[]",
+        "[PROJECTB.\"labels.mints-well-formed\".retired]\nallowances=[]",
+    );
+    let inline_family = lists.replace(
+        "[PROJECTB.\"labels.mints-well-formed\"]\nallowances=[]",
+        "[PROJECTB.\"labels.mints-well-formed\"]\nretired = { allowances=[] }",
+    );
+    let dotted = inline_owner.replace("PROJECTB = { \"labels.mints-unique\" = { allowances=[] }, \"labels.mints-well-formed\" = { allowances=[] } }", "PROJECTB.\"labels.mints-well-formed\" = { allowances=[] }");
+    for (name, held) in [
+        ("stale-headed", lists),
+        ("stale-inline", inline),
+        ("stale-owner", &inline_owner),
+        ("stale-headed-family", &headed_family),
+        ("stale-inline-family", &inline_family),
+        ("stale-dotted", &dotted),
+    ] {
+        fs::write(&path, held).expect("stale catalogued list");
+        superloop_lint::lower_lists(&plan).expect("prune stale lists");
+        let rewritten = fs::read_to_string(&path).expect("pruned lists");
+        assert_eq!(rewritten, expected_list_rewrite(name), "{name}");
+        assert!(!superloop_lint::lower_lists(&plan).expect("repeat writer"));
+        assert_eq!(fs::read_to_string(&path).expect("repeat lists"), rewritten);
+    }
+}
+
+/// Active family containers survive beside deferred bytes, while stale siblings
+/// leave without overlapping the active family's replacement.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the writer violates the family contract.
+///
+/// ´claim:control:deferred-family-replacements-are-disjoint´
+/// ´test:integration:deferred-family-replacements-are-disjoint´
+#[test]
+fn deferred_family_replacements_are_disjoint() {
+    let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), "allowances = []");
+    let policy_path = root.path().join(".linter/policies.toml");
+    let policies = fs::read_to_string(&policy_path).expect("policies");
+    fs::write(
+        &policy_path,
+        policies.replace(
+            "policies = [",
+            "policies = [{ owner = \"PROJECTA\", policy = \"references.prefix-numbers-absent\" }, ",
+        ),
+    )
+    .expect("activate families");
+    write(
+        root.path(),
+        ".linter/policy-fixture-numbers.toml",
+        "namespace = \"class.linter.policy.references.fixture-numbers\"\nversion = [1, 0, 0]\n[set.prefix-numbers]\nactive = { prefix = \"QA-\", exact = [\"1\"] }\n",
+    );
+    track(root.path());
+    let prefix = "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n";
+    let deferred =
+        format!("# keep position\r\n[PROJECTA.'{LOCAL_POLICY}']\r\nallowances = [] # opaque\r\n");
+    let inline =
+        "[PROJECTA.\"policy.references.fixture-numbers\"]\nactive = { path_counts=[] }\n\n";
+    let headed = "[PROJECTA.\"policy.references.fixture-numbers\".active]\npath_counts=[]\n\n";
+    let path = root.path().join(".linter/lists.toml");
+    for (name, family) in [("active-inline", inline), ("active-headed", headed)] {
+        let source = format!("{prefix}{family}{deferred}");
+        fs::write(&path, &source).expect("family source");
+        let output = programme_command(root.path(), &["burn", "--write"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let rewritten = fs::read_to_string(&path).expect("family output");
+        assert_eq!(rewritten, expected_list_rewrite(name), "{name}");
+        let output = programme_command(root.path(), &["burn", "--write"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(fs::read_to_string(&path).expect("repeat"), rewritten);
+    }
+    let plan =
+        ExecutionPlan::compile(root.path(), configuration(root.path())).expect("family plan");
+    for (name, family) in [
+        (
+            "stale-sibling",
+            inline.replace("active =", "retired = { path_counts=[] }\nactive ="),
+        ),
+        (
+            "stale-headed-sibling",
+            format!(
+                "[PROJECTA.\"policy.references.fixture-numbers\".retired]\npath_counts=[]\n\n{headed}"
+            ),
+        ),
+    ] {
+        fs::write(&path, format!("{prefix}{family}{deferred}")).expect("stale family");
+        superloop_lint::lower_lists(&plan).expect("prune stale sibling");
+        let rewritten = fs::read_to_string(&path).expect("pruned family");
+        assert_eq!(rewritten, expected_list_rewrite(name), "{name}");
+        assert!(!superloop_lint::lower_lists(&plan).expect("repeat family"));
+    }
+}
+
+/// The shared envelope boundary rewrites inline owners without duplicating keys
+/// even without deferred policies, and malformed source is refused unchanged.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the writer violates the envelope contract.
+///
+/// ´claim:control:nondeferred-inline-owner-rewrite-is-valid´
+/// ´test:integration:nondeferred-inline-owner-rewrite-is-valid´
+#[test]
+fn nondeferred_inline_owner_rewrite_is_valid() {
+    let root = programme_fixture("labels.mints-well-formed", None, "allowances = []");
+    let path = root.path().join(".linter/lists.toml");
+    fs::write(&path, "# retain envelope\nnamespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\nPROJECTA = { \"labels.mints-well-formed\" = { allowances=[] } }\n").expect("inline owner");
+    let output = programme_command(root.path(), &["burn", "--write"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let rewritten = fs::read_to_string(&path).expect("nondeferred output");
+    assert_eq!(rewritten, expected_list_rewrite("nondeferred"));
+    let plan =
+        ExecutionPlan::compile(root.path(), configuration(root.path())).expect("rewritten plan");
+    assert!(!superloop_lint::lower_lists(&plan).expect("repeat nondeferred"));
+    fs::write(&path, "namespace = [\n").expect("malformed source");
+    assert!(superloop_lint::lower_lists(&plan).is_err());
+    assert_eq!(
+        fs::read_to_string(&path).expect("refused bytes"),
+        "namespace = [\n"
+    );
+}
+
+/// Exact synthetic writer output recorded in the node round c-a02-probe.
+///
+/// # Panics
+/// Panics only if a test asks for an unrecorded fixture.
+fn expected_list_rewrite(name: &str) -> &'static str {
+    match name {
+        "active-inline" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\"]\nactive = { path_counts = [] }\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "nondeferred" => {
+            "# retain envelope\nnamespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n"
+        }
+        "active-headed" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "stale-headed" | "stale-headed-family" | "stale-inline-family" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n# Repository programme owns the following bytes.\r\n[PROJECTA.'profile.notice-dispositions-conform'] # keep this spelling\r\nallowances = [{ local_identity = '''opaque\n[PROJECTB.\"labels.mints-well-formed\"]\n''', decision = 'kept' }]\r\n\r\n"
+        }
+        "stale-inline" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA]\n\"labels.mints-well-formed\" = { allowances = [] }\n\n# Repository programme owns the following bytes.\r\n[PROJECTA.'profile.notice-dispositions-conform'] # keep this spelling\r\nallowances = [{ local_identity = '''opaque\n[PROJECTB.\"labels.mints-well-formed\"]\n''', decision = 'kept' }]\r\n\r\n[PROJECTB]\n\n"
+        }
+        "stale-owner" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\nPROJECTB = {  }\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n# Repository programme owns the following bytes.\r\n[PROJECTA.'profile.notice-dispositions-conform'] # keep this spelling\r\nallowances = [{ local_identity = '''opaque\n[PROJECTB.\"labels.mints-well-formed\"]\n''', decision = 'kept' }]\r\n\r\n"
+        }
+        "stale-dotted" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n# Repository programme owns the following bytes.\r\n[PROJECTA.'profile.notice-dispositions-conform'] # keep this spelling\r\nallowances = [{ local_identity = '''opaque\n[PROJECTB.\"labels.mints-well-formed\"]\n''', decision = 'kept' }]\r\n\r\n"
+        }
+        "stale-sibling" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\"]\n\nactive = { path_counts = [] }\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "stale-headed-sibling" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        _ => panic!("unrecorded list layout: {name}"),
+    }
 }
 
 /// A programme outside Git names its row and its tracked-directory requirement.

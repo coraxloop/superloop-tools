@@ -273,7 +273,7 @@ For an uncatalogued policy, an activation row may add ``programme = { package = 
 
 Deferral covers the activation row and its list only: the published linter still decodes every ``policy-*.toml`` document under ``.linter/`` and refuses a namespace outside ``class.linter.policy.``, so a repository programme keeps its own parameter documents in its package rather than in ``.linter/``.
 
-The `lists.toml` document is indexed by owner and every list pairs with a live activation, so it must be rewritten when the owner set changes.
+The `lists.toml` document is indexed by owner and every list pairs with a live activation, so it must be rewritten when the owner set changes. The writer preserves deferred bytes and their position, retains active family containers, and removes stale catalogued entries. In either mode the retained envelope ends before an inline owner, so a canonical rewrite does not duplicate that owner key. Malformed source refuses without a write; strict command preflight still refuses stale pairs, whose pruning is available through the library writer against an already compiled plan.
 
 Activations are per owner, with one pair for each owner and policy.
 
