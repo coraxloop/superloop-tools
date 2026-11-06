@@ -297,7 +297,7 @@ pattern = '%s"packages/session-core" [ "/" *VCHAR ]'
 [[partitions]]
 name = "root-files"
 owner = "TOOLS"
-pattern = '( %s"CHANGELOG.md" / %s"LICENSE-CODE" / %s"LICENSE-DOCS" / %s"public-set.toml" / %s".gitignore" / %s"Cargo.lock" / %s"Cargo.toml" / %s"README.md" / %s"meson.build" / %s"meson.options" / %s"rust-toolchain.toml" )'
+pattern = '( %s"CHANGELOG.md" / %s"LICENSE-CODE" / %s"LICENSE-DOCS" / %s"public-set.toml" / %s".gitignore" / %s"Cargo.lock" / %s"Cargo.toml" / %s"README.md" / %s"CONTRIBUTING.md" / %s"meson.build" / %s"meson.options" / %s"rust-toolchain.toml" )'
 
 [[partitions]]
 name = "package-register"

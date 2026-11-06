@@ -2,6 +2,8 @@
 
 superloop-tools is tooling for running and auditing loops of collaborative engineering work. It provides worker lanes, doors that mediate command execution, sign-in homes, a repository linter, and a gate for checking changes before integration.
 
+Slice workers start with the contributing guide (`guide:contributing:superloop-tools`) and read the backlog with its priorities register.
+
 ## Build · `sec:publictools:build`
 
 Build the Rust workspace with its pinned toolchain:

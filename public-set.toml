@@ -57,6 +57,9 @@ pattern = "LICENSE-DOCS"
 pattern = "README.md"
 
 [[include.rows]]
+pattern = "CONTRIBUTING.md"
+
+[[include.rows]]
 pattern = "ci/test_docstring_carrier.py"
 
 [[include.rows]]
