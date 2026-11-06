@@ -99,16 +99,13 @@ fn rendered_routes_pass_signin_check_and_reconcile() {
     let signin = |action: &str, extra: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_superloop-lane"))
             .env("HOME", home)
-            .args([
-                action,
-                "--backend",
-                "codex",
-                "alpha",
-                "--nodes",
-                "owl,jay",
-                "--project",
-            ])
+            .args([action, "--backend", "codex", "alpha", "--project"])
             .arg(home)
+            .args(if action == "check-signin-home" {
+                vec!["--nodes", "owl,jay"]
+            } else {
+                Vec::new()
+            })
             .args(extra)
             .output()
             .expect("sign-in command")
@@ -140,6 +137,7 @@ fn rendered_routes_pass_signin_check_and_reconcile() {
     }
     assert!(signin("check-signin-home", &[]).status.success());
     reconcile_both_orders(home, signin);
+    assert_registry_selection(home, &signin);
     for status in ["active", "retired"] {
         let bad = registry()
             .replace("/fixture", home.to_str().expect("home"))
@@ -162,6 +160,40 @@ fn rendered_routes_pass_signin_check_and_reconcile() {
             assert!(output.contains("registry-row: alpha line 11: session_identity must be an entry-relative ~/.ssh path (got an absolute path)"), "{output}");
             assert!(!output.contains("/home/alpha/private-key"), "{output}");
         }
+    }
+}
+
+/// # Panics
+/// Panics if an explicit subset or the registry-default selection is not applied exactly.
+fn assert_registry_selection(
+    home: &std::path::Path,
+    signin: &impl Fn(&str, &[&str]) -> std::process::Output,
+) {
+    for (selection, expected) in [
+        (vec!["--nodes", "owl"], vec!["Host owl-worker"]),
+        (Vec::new(), vec!["Host jay-worker", "Host owl-worker"]),
+    ] {
+        let mut arguments = selection.clone();
+        arguments.extend(["--reconcile", "--dry-run"]);
+        let preview = signin("prepare-signin-home", &arguments);
+        assert!(preview.status.success(), "{preview:?}");
+        let report: serde_json::Value = serde_json::from_slice(&preview.stdout).expect("plan");
+        let mut arguments = selection;
+        arguments.extend([
+            "--reconcile",
+            "--expect-digest",
+            report["digest"].as_str().expect("digest"),
+        ]);
+        let applied = signin("prepare-signin-home", &arguments);
+        assert!(applied.status.success(), "{applied:?}");
+        let config = fs::read_to_string(home.join(".config/loops/alpha/codex/ssh_config"))
+            .expect("reconciled config");
+        let mut actual = config
+            .lines()
+            .filter(|line| line.starts_with("Host "))
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
     }
 }
 

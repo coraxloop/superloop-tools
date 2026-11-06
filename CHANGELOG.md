@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex home preparation and reconciliation select the loop’s active registry routes when no nodes are named, while an explicit node list remains the selection override (``prob:homes:codex-reconcile-resolves-nodes-from-routes-row``).
+
 ## [0.4.1] - 2026-11-06
 
 ### Changed

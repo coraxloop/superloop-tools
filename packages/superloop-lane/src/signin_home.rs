@@ -334,9 +334,6 @@ fn settings(args: &[String], verify: bool) -> Result<Settings> {
     if selected.is_empty() && values.contains_key("--nodes") {
         return Err("invalid --nodes; expected one or more distinct node names".into());
     }
-    if selected.is_empty() && !verify {
-        return Err(refused("nodes"));
-    }
     let mut names = if selected.is_empty() {
         Vec::new()
     } else {
@@ -349,13 +346,17 @@ fn settings(args: &[String], verify: bool) -> Result<Settings> {
     }
     names.sort_unstable();
     let mut missing = Vec::new();
-    let (routes, route_refusal) = match selected_routes(&owner, &name, &names, &value("--hosts"))
-        .and_then(|rows| registry_account(rows, values.get("--user")))
-    {
-        Ok(rows) => (rows, None),
-        Err(error) if verify => (Vec::new(), Some(error)),
-        Err(error) => return Err(error),
+    let selected = if verify && names.is_empty() {
+        Ok(Vec::new())
+    } else {
+        selected_routes(&owner, &name, &names, &value("--hosts"))
     };
+    let (routes, route_refusal) =
+        match selected.and_then(|rows| registry_account(rows, values.get("--user"))) {
+            Ok(rows) => (rows, None),
+            Err(error) if verify => (Vec::new(), Some(error)),
+            Err(error) => return Err(error),
+        };
     let nodes = routes
         .iter()
         .map(|row| Node {
@@ -452,19 +453,20 @@ fn selected_routes(
     nodes: &[&str],
     hosts: &str,
 ) -> Result<Vec<crate::routes::Row>> {
-    if nodes.is_empty() {
-        return Ok(Vec::new());
-    }
     let source = fs::read_to_string(owner.join(".local/share/orchestration-instance/servers.md"))
         .map_err(|_| "registry-read: inspection failed")?;
     let active = crate::routes::registry(&source, name).map_err(|error| {
-        if error.starts_with("registry-loop:") {
+        if error.starts_with("registry-loop:") && !nodes.is_empty() {
             format!("registry-node: {}: no active row", nodes[0])
         } else {
             error
         }
     })?;
-    let mut rows = Vec::new();
+    let mut rows = if nodes.is_empty() {
+        active.clone()
+    } else {
+        Vec::new()
+    };
     for node in nodes {
         let row = active
             .iter()

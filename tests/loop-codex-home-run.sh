@@ -154,16 +154,6 @@ cat > "$REGISTRY" <<EOF
 EOF
 
 start=$(date +%s%N)
-set +e
-(cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha > "$TEST_ROOT/no-nodes.out" 2> "$TEST_ROOT/no-nodes.err")
-status=$?
-set -e
-[[ $status -eq 2 ]] || fail "missing nodes exit was $status"
-expect_line "$TEST_ROOT/no-nodes.err" 'superloop-lane signin-home: cannot resolve nodes; supply --nodes' "missing nodes reason"
-[[ ! -e $FAKE_HOME/.config/loops/alpha/codex ]] || fail "missing nodes created home"
-pass "missing node pair refuses by name" "$start"
-
-start=$(date +%s%N)
 for invalid_nodes in 'node-a,node-a' 'Node-a,node-b' 'node a,node-b' '' ',node-a' 'node-a,' 'node-a,,node-b' 'node-a,node-b,node-a' $'node-a\nnode-b'; do
   set +e
   (cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha --nodes "$invalid_nodes" > "$TEST_ROOT/invalid-nodes.out" 2> "$TEST_ROOT/invalid-nodes.err")
