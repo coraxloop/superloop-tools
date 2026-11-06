@@ -200,7 +200,14 @@ pub fn run(
             "status" | "list" | "triage" | "review" | "adjudicate"
         )
     }) {
-        return collection::run(owner_home, args, input, output);
+        return collection::run(owner_home, args, input, output).map_err(|mut error| {
+            if args[0] == "list" && super::store::is_lock_contention(&error) {
+                error.detail.push_str(
+                    "; retry requests list after the active request releases the lock; no listing was produced",
+                );
+            }
+            error
+        });
     }
     match args {
         [action, loop_name, rest @ ..] if action == "provision-registry" => {
