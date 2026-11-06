@@ -521,7 +521,7 @@ mod path_tests {
     /// # Panics
     /// Panics if path admission and its refusal form disagree on a component fault.
     /// ´claim:superlooplane:route-path-component-faults-are-shared´
-    /// ´test:unit:route-path-component-faults-are-shared´
+    /// ´test:unit:component-faults-preserve-admission-and-diagnostic-precedence´
     #[test]
     fn component_faults_preserve_admission_and_diagnostic_precedence() {
         for accepted in [

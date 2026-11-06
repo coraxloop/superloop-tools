@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Registry path admission and worker-identity refusal text share component-fault classification, preserving dot-component precedence and accepted path forms (``prob:homes:routes-worker-form-shares-path-component-predicate``).
 
+- The shared route-path classification test carries the inventory label derived from its function name (``prob:homes:routes-worker-form-shares-path-component-predicate``).
+
 ## [0.4.1] - 2026-11-06
 
 ### Changed
