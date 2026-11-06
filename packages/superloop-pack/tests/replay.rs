@@ -1131,6 +1131,63 @@ fn historical_citations_use_their_own_commit() {
     assert!(!fixture.out.join("private.md").exists());
 }
 
+/// A final declaration does not backfill a historical manifest's missing register declaration.
+///
+/// # Panics
+/// Panics only if fixture IO fails or historical register admission differs from its declaration.
+/// ´test:integration:historical-register-declaration-does-not-fall-back´
+#[test]
+fn historical_register_declaration_does_not_fall_back() {
+    for declared_history in [false, true] {
+        let fixture = Fixture::new();
+        let declared = MANIFEST.replace(
+            "[exclude]\nrows = [",
+            "[exclude]\nrows = [{pattern = \"private.md\", reason = \"Private definition.\"}, ",
+        );
+        let historical = if declared_history {
+            declared.clone()
+        } else {
+            declared.replace(
+                "unpublished = \"docs/public/unpublished-labels.toml\"\n",
+                "",
+            )
+        };
+        fs::write(fixture.source.join("public-set.toml"), historical).expect("historical manifest");
+        fs::write(
+            fixture.source.join("private.md"),
+            "# Private definition · `sec:private:earlier`\n",
+        )
+        .expect("private definition");
+        let guide =
+            "# Public guide · `guide:replay:public-guide`\n\nSee (`sec:private:earlier`).\n";
+        fixture.commit("docs/guide.md", guide, "Historical citation\n");
+        fs::write(
+            fixture.source.join("docs/guide.md"),
+            format!("{guide}\nFinal text.\n"),
+        )
+        .expect("final guide");
+        fixture.commit("public-set.toml", &declared, "Declare final register\n");
+        if declared_history {
+            let result = report(fixture.replay(&fixture.out).output().expect("replay"));
+            let first = result["mapping"][0]["public_commit"]
+                .as_str()
+                .expect("first");
+            assert!(
+                line(
+                    &fixture.out,
+                    &[
+                        "show",
+                        &format!("{first}:docs/public/unpublished-labels.toml")
+                    ]
+                )
+                .contains("sec:private:earlier")
+            );
+        } else {
+            fixture.unchanged_refusal("check=projection source ordinal=1");
+        }
+    }
+}
+
 /// Final-bound omissions still produce audited historical citation snapshots.
 ///
 /// # Panics
@@ -1282,7 +1339,7 @@ fn manifest_register_destination_binds_the_snapshot() {
     );
 }
 
-/// A selected owner snapshot alone generates nothing, but excluded definitions require a declaration.
+/// A silent manifest emits no register and refuses source register declarations or excluded definitions.
 ///
 /// # Panics
 /// Panics only if fixture IO fails or an undeclared register is generated or required evidence is lost.

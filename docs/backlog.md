@@ -1632,7 +1632,7 @@ The cut's unpublished-register plan and its `public_owners` read the working tre
 
 **Problem (The replay's projection spawns git processes per file instead of using git's batch forms)** · `prob:pack:replay-projection-spawns-git-per-file`
 
-**OPEN.** (r002g48 review 1, O1). The replay's preflight and staging spawn about three git processes per file per tree (about 1,067 files per commit), 496 s for an 18-commit range; a 40-commit range would take about 18 minutes. Remedy: the batch forms (`cat-file --batch`, `hash-object --stdin-paths`, `update-index --index-info`) in the projection; patch class once the transition has run.
+**OPEN.** (r002g48 review 1, O1). The replay's preflight and staging spawn about three git processes per file per tree (about 1,067 files per commit), 496 s for an 18-commit range; a 40-commit range would take about 18 minutes. Remedy: the batch forms (`cat-file --batch`, `hash-object --stdin-paths`, `update-index --index-info`) in the projection; patch class now that the public-history transition has run. The current development descends from the original public root, and this backlog records the first dependency-edge change since the public-history switch on 2026-11-03 (`prob:gates:gate-setup-names-a-lock-change`). This performance remainder does not hold the history transition open.
 
 **Problem (The replay's optional tests: an unparseable historical manifest, the unpublished-field audit mapping, the drift burn scan and the identity fields)** · `prob:pack:replay-optional-tests`
 
