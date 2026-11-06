@@ -282,11 +282,24 @@ impl Store {
             .map_err(|e| problem("requests-rewrite-refusal", format!("journal: {e}")))?
             .unwrap_or(Value::Null);
         let pending = journal["phase"] == "pending";
-        let plan = if pending {
+        let mut plan = if pending {
             journal["plan"].clone()
         } else {
             self.rewrite_plan()?
         };
+        // Keep the full custody inventory for resume validation. Mark image
+        // changes before hashing so the displayed flags are bound by the digest.
+        for file in plan["files"]
+            .as_array_mut()
+            .ok_or_else(|| problem("requests-rewrite-refusal", "journal files absent"))?
+        {
+            let changed = file["before"] != file["after"];
+            file.as_object_mut()
+                .ok_or_else(|| {
+                    problem("requests-rewrite-refusal", "journal file is not an object")
+                })?
+                .insert("changed".into(), json!(changed));
+        }
         let bytes = serde_json::to_vec(&plan)
             .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
         if bytes.len() > PLAN_LIMIT / 2 {
@@ -296,7 +309,7 @@ impl Store {
         if expected.is_none() {
             return Ok(
                 json!({"dry_run":true,"preview_sha256":plan_digest,"plan":plan,"resuming":pending,
-                "changed":changed_records(&plan),"predecessor_schema":3,"target_schema":4}),
+                "changed":changed_records(&plan),"fixed_schema_pair":{"predecessor":3,"target":4}}),
             );
         }
         if expected != Some(plan_digest.as_str()) {
@@ -312,7 +325,7 @@ impl Store {
         if changed == 0 && !pending {
             return Ok(
                 json!({"dry_run":false,"preview_sha256":plan_digest,"plan":plan,
-                "complete":true,"changed":0,"predecessor_schema":3,"target_schema":4}),
+                "complete":true,"changed":0,"fixed_schema_pair":{"predecessor":3,"target":4}}),
             );
         }
         if pending {
@@ -388,7 +401,7 @@ impl Store {
         )?;
         Ok(
             json!({"dry_run":false,"preview_sha256":plan_digest,"plan":plan,"complete":true,
-            "changed":changed,"predecessor_schema":3,"target_schema":4}),
+            "changed":changed,"fixed_schema_pair":{"predecessor":3,"target":4}}),
         )
     }
 }
@@ -485,6 +498,86 @@ mod tests {
         );
     }
 
+    /// ´test:unit:rewrite-preview-marks-current-and-converted-custody´
+    #[test]
+    fn rewrite_preview_marks_current_and_converted_custody() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store
+            .file(waiting("S", "2b", 3000, Mode::Audit))
+            .expect("current record");
+        let retired = fixture.home.join("runs/.retired-S-custody");
+        std::fs::rename(fixture.home.join("runs/.launch-S"), &retired).expect("retire");
+        let current = retired.join(RUN_FILE);
+        let historical = old_file(&fixture);
+        let current_bytes = std::fs::read(&current).expect("current bytes");
+        let historical_bytes = std::fs::read(&historical).expect("historical bytes");
+        let preview = store.rewrite(None).expect("mixed preview");
+        assert_eq!(preview["changed"], 1);
+        assert_eq!(
+            preview["fixed_schema_pair"],
+            json!({"predecessor":3,"target":4})
+        );
+        assert!(preview.get("predecessor_schema").is_none());
+        assert!(preview.get("target_schema").is_none());
+        let files = preview["plan"]["files"].as_array().expect("files");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["custody"], ".launch-R");
+        assert_eq!(files[0]["changed"], true);
+        assert_eq!(files[1]["custody"], ".retired-S-custody");
+        assert_eq!(files[1]["changed"], false);
+        assert_eq!(files[1]["before"], files[1]["after"]);
+        assert_eq!(
+            std::fs::read(&current).expect("preview leaves current"),
+            current_bytes
+        );
+        assert_eq!(
+            std::fs::read(&historical).expect("preview leaves historical"),
+            historical_bytes
+        );
+        assert_eq!(
+            preview["preview_sha256"],
+            digest(&serde_json::to_vec(&preview["plan"]).expect("plan bytes"))
+        );
+        let mut altered = preview["plan"].clone();
+        altered["files"][0]["changed"] = json!(false);
+        let wrong = digest(&serde_json::to_vec(&altered).expect("altered plan"));
+        assert_eq!(
+            store
+                .rewrite(Some(&wrong))
+                .expect_err("flags are bound")
+                .kind,
+            "requests-rewrite-digest"
+        );
+        let applied = store
+            .rewrite(preview["preview_sha256"].as_str())
+            .expect("apply");
+        assert_eq!(applied["plan"], preview["plan"]);
+        assert_eq!(applied["fixed_schema_pair"], preview["fixed_schema_pair"]);
+        let repeat = store.rewrite(None).expect("current-only preview");
+        assert_eq!(repeat["changed"], 0);
+        assert!(
+            repeat["plan"]["files"]
+                .as_array()
+                .expect("current files")
+                .iter()
+                .all(|file| file["changed"] == false)
+        );
+        let before_noop = std::fs::read(&historical).expect("converted bytes");
+        let noop = store
+            .rewrite(repeat["preview_sha256"].as_str())
+            .expect("no-op apply");
+        assert_eq!(noop["fixed_schema_pair"], preview["fixed_schema_pair"]);
+        assert_eq!(
+            std::fs::read(&historical).expect("no-op leaves converted"),
+            before_noop
+        );
+        assert_eq!(
+            std::fs::read(&current).expect("no-op leaves current"),
+            current_bytes
+        );
+    }
+
     /// ´test:unit:rewrite-preserves-reviewed-label-and-superloop-tier´
     #[test]
     fn rewrite_preserves_reviewed_label_and_superloop_tier() {
@@ -539,7 +632,14 @@ mod tests {
         let store = fixture.store();
         let preview = store.rewrite(None).expect("plan");
         assert_eq!(preview["plan"]["files"].as_array().expect("files").len(), 2);
-        let journal = json!({"schema":1,"phase":"pending","digest":preview["preview_sha256"],"plan":preview["plan"]});
+        // A pending journal from before per-file flags needs a fresh preview
+        // digest, without losing its original before/after images.
+        let mut saved_plan = preview["plan"].clone();
+        for file in saved_plan["files"].as_array_mut().expect("saved files") {
+            file.as_object_mut().expect("saved file").remove("changed");
+        }
+        let saved_digest = digest(&serde_json::to_vec(&saved_plan).expect("saved bytes"));
+        let journal = json!({"schema":1,"phase":"pending","digest":saved_digest,"plan":saved_plan});
         replace_leaf(
             &store.state,
             JOURNAL,
@@ -556,6 +656,13 @@ mod tests {
         assert_eq!(
             store.rewrite(None).expect("resume preview")["preview_sha256"],
             preview["preview_sha256"]
+        );
+        assert_eq!(
+            store
+                .rewrite(Some(&saved_digest))
+                .expect_err("repeat preview after upgrade")
+                .kind,
+            "requests-rewrite-digest"
         );
         store
             .rewrite(preview["preview_sha256"].as_str())
