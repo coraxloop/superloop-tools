@@ -92,7 +92,9 @@ fn boxed_backend_absent_program_never_uses_endpoints_as_a_selector() {
     assert_eq!(unselected.kind, "missing-setting");
     assert_eq!(unselected.detail, "backend_argv has no configured program");
     for backend in [BoxBackend::Codex, BoxBackend::Claude] {
-        let error = settings.launch_backend(Some(backend)).expect_err("no program");
+        let error = settings
+            .launch_backend(Some(backend))
+            .expect_err("no program");
         assert_eq!(error.kind, "missing-setting");
         assert_eq!(
             error.detail,
