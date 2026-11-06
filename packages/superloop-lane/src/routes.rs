@@ -256,11 +256,6 @@ pub(super) fn registry_rows(source: &str, selected: &str, retired: bool) -> Resu
         }
     }
     rows.sort_by(|left, right| left["node"].cmp(&right["node"]));
-    if rows.is_empty() {
-        return Err(String::from(
-            "registry-loop: no active routes for selected loop",
-        ));
-    }
     let active = rows
         .iter()
         .filter(|row| row["status"] == "active")

@@ -133,6 +133,7 @@ fn rendered_routes_pass_signin_check_and_reconcile() {
     assert!(signin("check-signin-home", &[]).status.success());
     reconcile_both_orders(home, signin);
     assert_registry_selection(home, &signin);
+    assert_route_retirement(home, &signin);
     for status in ["active", "retired"] {
         let bad = registry()
             .replace("/fixture", home.to_str().expect("home"))
@@ -155,6 +156,174 @@ fn rendered_routes_pass_signin_check_and_reconcile() {
             assert!(output.contains("registry-row: alpha line 11: session_identity must be an entry-relative ~/.ssh path (got an absolute path)"), "{output}");
             assert!(!output.contains("/home/alpha/private-key"), "{output}");
         }
+    }
+}
+
+/// # Panics
+/// Panics if retirement or reactivation changes unrelated home data or loses its observation.
+fn assert_route_retirement(
+    home: &std::path::Path,
+    signin: &impl Fn(&str, &[&str]) -> std::process::Output,
+) {
+    use std::os::unix::fs::MetadataExt as _;
+    let registry = home.join(".local/share/orchestration-instance/servers.md");
+    let active = fs::read_to_string(&registry).expect("active registry");
+    let auth = home.join(".config/loops/alpha/lanes/codex/auth.json");
+    let before = fs::metadata(&auth).expect("credential metadata");
+    let key = home.join(".config/loops/alpha/codex/keys/worker-key");
+    let key_target = fs::read_link(&key).expect("key binding");
+    for backend in ["codex", "claude"] {
+        let path = home.join(format!(".config/loops/alpha/{backend}/ssh_config"));
+        let mut config = fs::read_to_string(&path).expect("SSH config");
+        config.push_str("Host personal\n  HostName personal.invalid\n");
+        fs::write(path, config).expect("owner stanza");
+    }
+    fs::write(&registry, active.replace("|active|", "|retired|")).expect("retire nodes");
+    for _ in 0..2 {
+        let preview = signin("prepare-signin-home", &["--reconcile", "--dry-run"]);
+        assert!(preview.status.success(), "{preview:?}");
+        let plan: serde_json::Value = serde_json::from_slice(&preview.stdout).expect("plan");
+        assert_eq!(
+            plan["plan"]["observations"],
+            serde_json::json!(["no-active-routes"])
+        );
+        let applied = signin(
+            "prepare-signin-home",
+            &[
+                "--reconcile",
+                "--expect-digest",
+                plan["digest"].as_str().expect("digest"),
+            ],
+        );
+        assert!(applied.status.success(), "{applied:?}");
+        let claude = claude_apply(home, &["--reconcile"]);
+        assert_eq!(
+            claude["plan"]["observations"],
+            serde_json::json!(["no-active-routes"])
+        );
+        let checked = signin("check-signin-home", &[]);
+        assert!(checked.status.success(), "{checked:?}");
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout).expect("check");
+        assert_eq!(
+            report["observations"],
+            serde_json::json!(["no-active-routes"])
+        );
+        for backend in ["codex", "claude"] {
+            let directory = home.join(format!(".config/loops/alpha/{backend}"));
+            let config = fs::read_to_string(directory.join("ssh_config")).expect("SSH config");
+            assert_eq!(
+                config
+                    .lines()
+                    .filter(|line| line.starts_with("Host "))
+                    .collect::<Vec<_>>(),
+                ["Host personal"]
+            );
+            assert_eq!(
+                fs::read(directory.join("known_hosts.routes")).expect("host keys"),
+                [] as [u8; 0]
+            );
+        }
+    }
+    let after = fs::metadata(auth).expect("credential metadata");
+    assert_eq!(
+        (
+            before.dev(),
+            before.ino(),
+            before.len(),
+            before.mtime(),
+            before.mtime_nsec()
+        ),
+        (
+            after.dev(),
+            after.ino(),
+            after.len(),
+            after.mtime(),
+            after.mtime_nsec()
+        )
+    );
+    assert_eq!(
+        fs::read_link(key).expect("retained key binding"),
+        key_target
+    );
+    let refused = signin(
+        "prepare-signin-home",
+        &["--nodes", "jay", "--reconcile", "--dry-run"],
+    );
+    assert!(!refused.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&refused.stderr),
+        "superloop-lane signin-home: registry-node: jay: no active row\n"
+    );
+    fs::write(registry, active).expect("reactivate nodes");
+    assert_registry_selection(home, signin);
+}
+
+/// # Panics
+/// Panics if a home with no active route needs a worker key or omits its observation.
+/// ´claim:superlooplane:sign-in-homes-prepare-without-active-routes´
+/// ´test:integration:sign-in-homes-prepare-without-active-routes´
+#[test]
+fn sign_in_homes_prepare_without_active_routes() {
+    let root = tempfile::tempdir_in(temporary_root::temporary_root()).expect("fixture");
+    let home = root.path();
+    render_fixture(home);
+    canonical_signin(home);
+    fs::remove_file(home.join("worker-key")).expect("no worker key");
+    fs::remove_dir(home.join(".config/loops/alpha/claude")).expect("fresh Claude home");
+    let records = home.join(".local/share/superloop-tools/loops.d");
+    fs::create_dir_all(&records).expect("records");
+    fs::write(
+        records.join("alpha.env"),
+        format!("LOOP_CWD={}\n", home.display()),
+    )
+    .expect("record");
+    let registry = home.join(".local/share/orchestration-instance/servers.md");
+    let source = fs::read_to_string(&registry).expect("registry");
+    fs::write(&registry, source.replace("|active|", "|retired|")).expect("no active routes");
+    let call = |action: &str| {
+        Command::new(env!("CARGO_BIN_EXE_superloop-lane"))
+            .env("HOME", home)
+            .args([action, "--backend", "codex", "alpha"])
+            .output()
+            .expect("sign-in command")
+    };
+    let created = call("prepare-signin-home");
+    assert!(created.status.success(), "{created:?}");
+    assert!(String::from_utf8_lossy(&created.stdout).contains("routes=no-active-routes"));
+    let checked = call("check-signin-home");
+    assert!(checked.status.success(), "{checked:?}");
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).expect("check report");
+    assert_eq!(
+        report["observations"],
+        serde_json::json!(["no-active-routes"])
+    );
+    let claude = claude_apply(home, &[]);
+    assert_eq!(
+        claude["plan"]["observations"],
+        serde_json::json!(["no-active-routes"])
+    );
+    let empty = source
+        .lines()
+        .filter(|line| !line.contains("|alpha|"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&registry, empty).expect("loop without route history");
+    let checked = call("check-signin-home");
+    assert!(checked.status.success(), "{checked:?}");
+    assert_eq!(claude_apply(home, &["--reconcile"])["changed"], 0);
+    for backend in ["codex", "claude"] {
+        let directory = home.join(format!(".config/loops/alpha/{backend}"));
+        assert!(
+            !fs::read_to_string(directory.join("ssh_config"))
+                .expect("SSH config")
+                .lines()
+                .any(|line| line.starts_with("Host "))
+        );
+        assert_eq!(
+            fs::read(directory.join("known_hosts.routes")).expect("host keys"),
+            [] as [u8; 0]
+        );
     }
 }
 
@@ -187,7 +356,7 @@ fn assert_registry_selection(
             .expect("reconciled config");
         let mut actual = config
             .lines()
-            .filter(|line| line.starts_with("Host "))
+            .filter(|line| line.starts_with("Host ") && line.ends_with("-worker"))
             .collect::<Vec<_>>();
         actual.sort_unstable();
         assert_eq!(actual, expected);

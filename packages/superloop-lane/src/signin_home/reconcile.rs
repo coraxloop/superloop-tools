@@ -167,7 +167,11 @@ pub(super) fn header_nodes(text: &str) -> Result<Vec<&str>> {
     if headers.len() != 1 {
         return Err("reconcile requires the generated Codex node header".into());
     }
-    Ok(headers[0].split(',').collect())
+    Ok(if headers[0].is_empty() {
+        Vec::new()
+    } else {
+        headers[0].split(',').collect()
+    })
 }
 
 fn owner_leading(text: &str, settings: &Settings) -> Result<String> {
@@ -484,10 +488,14 @@ fn lock_home(path: PathBuf) -> Result<Home> {
 
 #[allow(clippy::too_many_lines)]
 pub(super) fn run(settings: &Settings) -> Result<String> {
-    if !super::link_matches(&home_key(settings)?, &settings.key) {
-        return Err(super::refused("existing-key"));
-    }
-    let key = home_key(settings)?.to_string_lossy().into_owned();
+    let key = if settings.key.as_os_str().is_empty() {
+        String::new()
+    } else {
+        if !super::link_matches(&home_key(settings)?, &settings.key) {
+            return Err(super::refused("existing-key"));
+        }
+        home_key(settings)?.to_string_lossy().into_owned()
+    };
     let mut values = vec![settings.account.as_str(), key.as_str()];
     for node in &settings.nodes {
         values.extend([
@@ -579,7 +587,10 @@ pub(super) fn run(settings: &Settings) -> Result<String> {
     if let Some(record) = &settings.record {
         files.push(record.plan());
     }
-    let plan = json!({"charter":settings.charter,"loop":settings.name,"nodes":settings.nodes.iter().map(|node|&node.name).collect::<Vec<_>>(),"files":files,"links":[charter.report()],"ssh":details(texts[0], settings)?});
+    let mut plan = json!({"charter":settings.charter,"loop":settings.name,"nodes":settings.nodes.iter().map(|node|&node.name).collect::<Vec<_>>(),"files":files,"links":[charter.report()],"ssh":details(texts[0], settings)?});
+    if settings.nodes.is_empty() {
+        plan["observations"] = json!(["no-active-routes"]);
+    }
     let mut digest = String::new();
     for byte in Sha256::digest(plan.to_string().as_bytes()) {
         write!(digest, "{byte:02x}").map_err(|e| e.to_string())?;
