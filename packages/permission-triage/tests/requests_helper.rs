@@ -385,7 +385,8 @@ fn request_helper_refuses_foreign_registry_and_state_owners() {
             assert_eq!(refusal.status.code(), Some(2));
             assert_eq!(refusal.stdout, b"");
             let detail = String::from_utf8_lossy(&refusal.stderr);
-            let expected = format!("owner uid is {other}, not process effective uid {caller}");
+            let expected =
+                format!("state-root owner uid is {other}, not process effective uid {caller}");
             assert!(detail.contains(&expected), "{action}: {detail}");
             own("state", caller);
             own("registry", other);
@@ -393,7 +394,8 @@ fn request_helper_refuses_foreign_registry_and_state_owners() {
             assert_eq!(refusal.status.code(), Some(2));
             assert_eq!(refusal.stdout, b"");
             let detail = String::from_utf8_lossy(&refusal.stderr);
-            let expected = format!("owner uid is {other}, not process effective uid {caller}");
+            let expected =
+                format!("loop registry owner uid is {other}, not process effective uid {caller}");
             assert!(detail.contains(&expected), "{action}: {detail}");
             own("registry", caller);
         }

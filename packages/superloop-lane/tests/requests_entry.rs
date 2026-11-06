@@ -517,7 +517,8 @@ fn requests_entry_requires_one_account_for_door_and_permission_custody() {
                 assert_eq!(output.status.code(), Some(2), "{command}");
                 assert_eq!(output.stdout, b"");
                 let detail = String::from_utf8_lossy(&output.stderr);
-                let expected = format!("owner uid is {other}, not process effective uid {caller}");
+                let expected =
+                    format!("{kind} owner uid is {other}, not process effective uid {caller}");
                 assert!(detail.contains(&expected), "{command} {kind}: {detail}");
             }
             chown(foreign, Some(Uid::from_raw(caller)), None).expect("restore permission owner");

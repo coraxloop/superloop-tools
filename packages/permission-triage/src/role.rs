@@ -915,6 +915,13 @@ pub enum RegistryError {
         /// Deployment uid, when a path component established one.
         deployment: u32,
     },
+    /// A registered private state root has the wrong owner.
+    StateRootOwner {
+        /// Actual owner uid.
+        actual: u32,
+        /// Effective uid required to own the state root.
+        effective: u32,
+    },
     /// The estate directory or one of its entries has the wrong owner.
     EstateOwnerMismatch {
         /// Path of the directory or entry.
@@ -946,6 +953,8 @@ pub enum RegistryError {
 }
 
 impl fmt::Display for RegistryError {
+    // Keep the exhaustive diagnostic mapping together as custody errors grow.
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StateRoot(reason) => write!(formatter, "loop state root: {reason}"),
@@ -976,6 +985,10 @@ impl fmt::Display for RegistryError {
             Self::DirectoryOwner { actual, effective } => write!(
                 formatter,
                 "loop registry owner uid is {actual}, not process effective uid {effective}"
+            ),
+            Self::StateRootOwner { actual, effective } => write!(
+                formatter,
+                "state-root owner uid is {actual}, not process effective uid {effective}"
             ),
             Self::PublicRootWritable(mode) => write!(
                 formatter,
@@ -1066,6 +1079,7 @@ impl std::error::Error for RegistryError {
             | Self::GenerationChanged
             | Self::IncompleteGeneration
             | Self::DirectoryOwner { .. }
+            | Self::StateRootOwner { .. }
             | Self::PublicRootWritable(_)
             | Self::UndeclaredEstateUid(_)
             | Self::InvalidEstateUid
@@ -1639,7 +1653,14 @@ pub(crate) fn open_state_root_for_review(path: &Path) -> Result<File, RegistryEr
 fn open_state_root_with_modes(path: &Path, allowed_modes: &[u32]) -> Result<File, RegistryError> {
     let directory = open_root_directory(path, false)?;
     let effective_uid = effective_uid()?;
-    verify_directory_mode(&directory, effective_uid, allowed_modes)?;
+    verify_directory_mode(&directory, effective_uid, allowed_modes).map_err(
+        |error| match error {
+            RegistryError::DirectoryOwner { actual, effective } => {
+                RegistryError::StateRootOwner { actual, effective }
+            }
+            other => other,
+        },
+    )?;
     Ok(directory)
 }
 
