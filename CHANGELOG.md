@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Replay coverage pins refusal before destination writes when a historical manifest lacks its required register declaration, even when TAG declares one; the replay contract states that this optional field has no fallback (``prob:pack:manifest-declares-the-unpublished-register``).
 
+- Door agent isolation documents that credential-free records and logs depend on the configured agent not emitting credentials; captured failed-agent stderr has no credential filter (``prob:door:agent-stderr-tail-credential-filter``).
+
 - Request-list shared-deadline regressions run the plain, pending and state-filtered forms on scoped threads, retaining their independent contention assertions while overlapping the production wait allowances (``rule:superlooplane:requests-list-contention``).
 
 - Real-Git regression coverage verifies repeated no-op pushes through the door stub and handler, including completion, unchanged mirror refs and recorded no-ref outcomes around a push carrying new objects, while the historical mixed-version refusal is not reproduced by this fixture (``proto:superlooplane:registered-ssh-transport``).
