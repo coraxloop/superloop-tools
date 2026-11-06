@@ -671,7 +671,7 @@ fn door_compute_receive_admission_cross_process() {
 }
 
 /// # Panics
-/// Panics if a receive cannot complete while the same box's compute still runs.
+/// Panics if a receive cannot complete beside compute or either record loses its effect identity.
 /// ´test:unit:door-receive-completes-beside-running-compute´
 #[test]
 fn door_receive_completes_beside_running_compute() {
@@ -739,6 +739,19 @@ fn door_receive_completes_beside_running_compute() {
     let rows = fixture.store().list_run("R").expect("both records");
     assert_eq!(rows.len(), 2);
     assert_ne!(rows[0].id(), rows[1].id());
+    let operations: std::collections::BTreeSet<_> = rows
+        .iter()
+        .map(|row| row.value()["operation"].as_str().expect("record operation"))
+        .collect();
+    assert_eq!(
+        operations,
+        std::collections::BTreeSet::from(["compute", "git-receive"])
+    );
+    let receive = rows
+        .iter()
+        .find(|row| row.value()["operation"] == "git-receive")
+        .expect("receive record");
+    assert_eq!(receive.value()["effect"]["ref_check"], "admitted");
     assert!(
         rows.iter()
             .all(|row| row.value()["effect"]["state"] == "completed")
