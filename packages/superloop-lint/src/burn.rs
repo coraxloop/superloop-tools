@@ -541,6 +541,7 @@ pub struct Surface {
     owner: String,
     prose: Vec<Place>,
     code: Vec<Place>,
+    excluded: Vec<AbnfPattern>,
 }
 
 impl Surface {
@@ -551,7 +552,21 @@ impl Surface {
             owner: owner.into(),
             prose,
             code,
+            excluded: Vec::new(),
         }
+    }
+
+    /// Subtract exactly the paths admitted by these policy-local patterns.
+    #[must_use]
+    pub fn with_excluded(mut self, excluded: Vec<AbnfPattern>) -> Self {
+        self.excluded = excluded;
+        self
+    }
+
+    /// The policy-local patterns subtracted before reading either surface.
+    #[must_use]
+    pub fn excluded(&self) -> &[AbnfPattern] {
+        &self.excluded
     }
 
     /// The owner whose share this surface was written in.
@@ -931,12 +946,13 @@ pub fn index_burn_lists(declared: &Snapshot) -> Vec<BurnList> {
             let surface =
                 domain_of(declaration).and_then(|domain| declared.declared_surface(domain));
 
-            let excluded = match surface {
-                // A census that walks nothing cuts nothing out of it, so the
-                // rules derive against a surface or not at all.
-                Some(_) => derived_exclusions(declared, policy_of(declaration.family)),
-                None => Vec::new(),
-            };
+            // A census without a declared surface cuts nothing out of it.
+            let excluded = surface.map_or_else(Vec::new, |surface| {
+                derived_exclusions(declared, policy_of(declaration.family))
+                    .into_iter()
+                    .chain(surface.excluded().iter().cloned().map(Exclusion::Declared))
+                    .collect()
+            });
 
             BurnList::new(
                 declaration.family,

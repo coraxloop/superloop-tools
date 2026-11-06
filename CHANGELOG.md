@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-06
+
+### Changed
+
+- Regression coverage verifies that 24 repeated learned door decisions retain their adjudicated allow and execute once per request without calling an agent; attribution of the historical excess wall remains open (``prob:door:learned-hit-judgement-wall-after-bite-6``).
+
+### Fixed
+
+- The region-reader catalogue classifies a terminal `.j2` template by its inner file kind and treats a `LICENSE-AGPL_3_0` licence notice as opaque (``prob:linter:region-reader-catalogue-gains-j2-and-the-agpl-text``).
+
+- To-do derivation excludes the header's ownership citation from the summary and name, preserves it through label insertion and repair, and leaves summary citations unchanged (``prob:linter:todo-derivation-keeps-the-ownership-slot``).
+
+- Reach reconciliation supplies self and the crate-bearing root without declared rows, refuses redundant structural-root rows, and preserves explicit reach to a crateless root (``prob:linter:reach-reconciliation-supplies-the-structural-root-like-self``).
+
+- Catalogued burn policies accept exact ABNF exclusions on their owner surfaces, retain derived share exclusions, and report the paths excluded from both prose and code censuses (``prob:linter:catalogued-burn-families-accept-an-exclude-relation``).
+
+- Pack verification declares and probes its unzip prerequisite, refusing ``unzip_unavailable`` before extraction when it cannot run; deployment names the prerequisite as a requirement independent of build placement (``prob:pack:stage-verify-declares-its-extraction-dependency``).
+
+- List rewrites retain active family containers, remove stale singleton and family entries beside deferred bytes, and canonicalize inline owners without duplicate keys in either mode; malformed rewrite sources refuse without writes (``prob:linter:deferred-mode-rewrite-keeps-a-stale-catalogued-table``).
+
+- Nested corpus roots require tracked ownership metadata before loading their snapshot, and a failed tracked-file census names its own refusal (``prob:linter:nested-root-with-no-tracked-paths-is-accepted-vacuously``).
+
+- Publication tests compare author, committer and tagger instants as epoch seconds, also checking stored offsets and the reported date across Git date renderings (``prob:pack:cut-acceptance-compares-epoch-seconds``).
+
+- Sign-in home tests pin the check-mode registry user refusal without writes and bind reversed host selections to each worker stanza (``prob:homes:registry-node-user-refusal-check-mode-test``; ``prob:homes:codex-home-hosts-test-pins-stanza``).
+
+- Request listings share one bounded lock-acquisition deadline across reads and name the elapsed wait and retry remedy on contention expiry, without changing request records (``rule:superlooplane:requests-list-contention``).
+
+- The door attribution probe shares a 55-second budget from its main function across calls and retries, caps stub calls at 35 seconds and receive at 15 seconds within the remaining budget, and names top-level timeouts while leaving missing observations unmeasured (``proto:superlooplane:registered-ssh-transport``).
+
+- The door's direct policy publication reads the loop registry through the ACL mask that mail provisioning leaves on it, so the door publishes its policy after the cutover (``sec:loophome:mail-migration``).
+
+- The door's tier custody check compares the private and direct tier modes through the ACL mask that mail provisioning leaves on the private tier, so the policy publication passes its custody check after the cutover (``sec:loophome:mail-migration``).
+
 ## [0.4.0] - 2026-11-05
 
 ### Changed
@@ -189,7 +223,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/coraxloop/superloop-tools/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/coraxloop/superloop-tools/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/coraxloop/superloop-tools/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/coraxloop/superloop-tools/compare/v0.3.0...v0.3.1

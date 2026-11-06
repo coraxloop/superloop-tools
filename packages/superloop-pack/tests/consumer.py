@@ -80,6 +80,23 @@ licence_docs = "LICENSE-DOCS"
          '--burn-register', str(burn), '--linter-version', 'fixture'], source)
     stage = proof / 'stage'
     stage.mkdir()
+    missing_tools = proof / 'missing-tools'
+    missing_tools.mkdir()
+    environment = dict(os.environ, PATH=str(missing_tools))
+    before = time.monotonic()
+    refused = subprocess.run(
+        [args.pack, 'stage-verify', '--pack', str(archive), '--burn-register', str(burn),
+         '--linter', args.linter, '--staging', str(stage)],
+        cwd=source, env=environment, capture_output=True, text=True)
+    print(json.dumps({'probe': 'missing-unzip', 'status': refused.returncode,
+                      'wall': time.monotonic() - before}), flush=True)
+    print(refused.stdout, end='', flush=True)
+    assert refused.returncode == 5, refused.stdout + refused.stderr
+    assert 'reason=unzip_unavailable' in refused.stdout, refused.stdout
+    assert 'check name=archive_members outcome=passed' in refused.stdout, refused.stdout
+    assert 'check name=extraction outcome=refused' in refused.stdout, refused.stdout
+    assert 'check name=manifest outcome=skipped' in refused.stdout, refused.stdout
+    assert not list(stage.iterdir()), 'missing unzip must leave staging empty'
     run([args.pack, 'stage-verify', '--pack', str(archive), '--burn-register', str(burn),
          '--linter', args.linter, '--staging', str(stage)], source)
     assert (stage / 'public-set.toml').is_file()

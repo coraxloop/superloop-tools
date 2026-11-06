@@ -565,6 +565,13 @@ pub enum Refusal {
         /// The owner the row names on both sides.
         owner: String,
     },
+    /// A may-cite row restates universal reach to the crate-bearing root.
+    StructuralRootReach {
+        /// The owner stating the redundant row.
+        owner: String,
+        /// The crate-bearing root reached structurally.
+        root: String,
+    },
     /// A row states no name for the region it claims.
     NamelessRow {
         /// The file the row stands in.
@@ -862,6 +869,10 @@ impl fmt::Display for Refusal {
                     "{DIRECTORY}/{OWNERS_FILE}: may_cite: {owner} : {owner}: an owner reaches itself by being itself, and the row is not written"
                 )
             }
+            Self::StructuralRootReach { owner, root } => write!(
+                formatter,
+                "{DIRECTORY}/{OWNERS_FILE}: may_cite: {owner} : {root}: every owner reaches the crate-bearing root structurally, and the row is not written"
+            ),
             Self::NamelessRow {
                 file,
                 relation,
@@ -3060,6 +3071,7 @@ fn surface_parameters(
         for (owner, declared) in declaration.owners() {
             let prose = declared.datum(PROSE_DATUM);
             let code = declared.datum(CODE_DATUM);
+            let exclude = declared.datum(BURN_EXCLUDE_DATUM);
 
             if prose.is_none() && code.is_none() {
                 continue;
@@ -3076,11 +3088,13 @@ fn surface_parameters(
 
             let prose = surface_places(namespace, owner, PROSE_DATUM, prose, refusals);
             let code = surface_places(namespace, owner, CODE_DATUM, code, refusals);
+            let excluded =
+                excluded_patterns(namespace, owner, BURN_EXCLUDE_DATUM, exclude, refusals);
 
             if surfaces
                 .insert(
                     domain.to_owned(),
-                    BurnSurface::new(owner.clone(), prose, code),
+                    BurnSurface::new(owner.clone(), prose, code).with_excluded(excluded),
                 )
                 .is_some()
             {
@@ -4085,8 +4099,8 @@ fn nested_corpora(
     for (index, row) in rows.iter().enumerate() {
         let problem = if !registered.contains(&row.owner) {
             Some("owner is not registered")
-        } else if !nested_directory(root, row, partitions) {
-            Some("root must be a normalized relative directory inside the owner's partitions")
+        } else if let Err(problem) = nested_directory(root, row, partitions) {
+            Some(problem)
         } else if row.reason.trim().is_empty() {
             Some("reason must not be empty")
         } else if configuration(&root.join(&row.root)).snapshot().is_none() {
@@ -4111,7 +4125,13 @@ fn nested_corpora(
     nested
 }
 
-fn nested_directory(root: &Path, row: &NestedCorpus, partitions: &[OwnerRow]) -> bool {
+fn nested_directory(
+    root: &Path,
+    row: &NestedCorpus,
+    partitions: &[OwnerRow],
+) -> Result<(), &'static str> {
+    const DIRECTORY: &str =
+        "root must be a normalized relative directory inside the owner's partitions";
     if row.root.is_empty()
         || row
             .root
@@ -4119,24 +4139,37 @@ fn nested_directory(root: &Path, row: &NestedCorpus, partitions: &[OwnerRow]) ->
             .any(|part| part.is_empty() || part == "." || part == "..")
         || Path::new(&row.root).is_absolute()
     {
-        return false;
+        return Err(DIRECTORY);
     }
     let Ok(base) = root.canonicalize() else {
-        return false;
+        return Err(DIRECTORY);
     };
     let directory = base.join(&row.root);
     // Reject aliases to ancestors as well as escapes: recursive snapshot loading
     // must descend into a physical child, never return to an enclosing corpus.
     if !directory.is_dir() || directory.canonicalize().ok().as_ref() != Some(&directory) {
-        return false;
+        return Err(DIRECTORY);
     }
     let (tracked, findings) = crate::plan::git_tracked(&base);
     let prefix = format!("{}/", row.root);
-    findings.is_empty()
-        && tracked
-            .iter()
-            .filter(|path| path.as_bytes().starts_with(prefix.as_bytes()))
-            .all(|path| attributed_to(path, &row.owner, partitions))
+    if !findings.is_empty() {
+        return Err("cannot enumerate the repository's tracked paths for the nested root");
+    }
+    let owners = format!("{prefix}.linter/owners.toml");
+    if !tracked
+        .iter()
+        .any(|path| path.as_bytes() == owners.as_bytes())
+    {
+        return Err("root must hold a tracked .linter/owners.toml");
+    }
+    if !tracked
+        .iter()
+        .filter(|path| path.as_bytes().starts_with(prefix.as_bytes()))
+        .all(|path| attributed_to(path, &row.owner, partitions))
+    {
+        return Err(DIRECTORY);
+    }
+    Ok(())
 }
 
 /// Whether the inclusion relation attributes a declared path to exactly this owner.

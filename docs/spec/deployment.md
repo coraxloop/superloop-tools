@@ -50,6 +50,10 @@ Routine development builds and self-contained verification builds shall run in t
 
 A short expected duration is not permission to move routine work to the host. Server artifacts and a green server report are review evidence; neither is an installable host artifact nor the verdict of record.
 
+**Requirement (Verification programs)** · `req:deployment:verification-programs`
+
+The server tool-build and verification environment shall supply the external programs its gates execute. Public pack verification and the release consumer gate require Git and `unzip` on PATH, in addition to the built pack and linter programs. The node image or its package layer installs `unzip` before those gates; bsdtar is not a substitute because the verifier executes the program named `unzip` from PATH. The prerequisite probe and named refusal are specified by public pack verification (`[ORCHESTRATION-sec:publicpack:verification]`).
+
 **Rule (Host builds from tags)** · `rule:deployment:host-builds-from-tags`
 
 The trusted host may compile an installable host artifact only from a fixed, reviewed milestone tag. The build uses a clean checkout of the tag, tagged Meson declarations, a registered host toolchain, and no executable output returned from the compute server. The resulting artifact is admitted only for the target and domain named by the same tagged install map.

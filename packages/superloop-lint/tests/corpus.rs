@@ -69,8 +69,11 @@
 //! | [`the_fix_command_writes_nothing_on_a_dry_run`] | fix | cites (´claim:fix:a-dry-run-counts-what-it-would-do-and-writes-nothing´) |
 //! | [`the_fix_command_refuses_a_dirty_tree`] | cli | The sweep refuses to run over a tree carrying uncommitted changes and writes nothing, so its edits always arrive as a diff a reviewer can read against a clean baseline. |
 //! | [`a_fixture_notice_tree_checks_and_then_fixes_clean`] | cli | cites (´claim:cli:check-then-sweep-then-check-leaves-a-tree-clean-and-settled´) |
+//! | [`todo_ownership_survives_check_and_fix`] | todo | A notice's ownership citation remains resolvable through check and fix while neither its target nor its owner becomes part of the derived notice name. # Panics Panics only if fixture IO fails or the executable violates the ownership slot. |
 //! | [`the_todo_sweep_writes_nothing_on_a_dry_run`] | fix | cites (´claim:fix:a-dry-run-counts-what-it-would-do-and-writes-nothing´) |
 //! | [`a_burn_list_fails_on_growth_and_on_a_stale_row`] | burn | The ratchet binds in both directions: the census as found passes, one more reference fails as growth with the new occurrence named, and one fewer fails as a stale row until the list falls with it. A file losing its last reference leaves the list rather than standing at zero. |
+//! | [`structural_root_rows_are_refused`] | layers | Root rows are refused only when workspace ownership supplies structural reach, including a root-owned member under a virtual manifest. # Panics Panics only if fixture IO fails or the binary violates the root-reach contract. |
+//! | [`catalogued_burns_subtract_declared_patterns`] | burn | Catalogued burns subtract exact policy-local patterns from prose and code, including root censuses. # Panics Panics only if fixture IO fails or the binary violates the exclusion contract. |
 //! | [`the_burn_command_emits_json_and_writes_nothing_by_default`] | cli | The burn command reports and writes nothing unless asked: every adopted family is registered at its census, none is rewritten, and the trees excluded from each census are named in the report rather than left to be remembered. |
 //! | [`kept_and_owed_counts_sum_across_families`] | cli | A family with kept and unkept rows retains their full registered count while reporting the two parts, and the check report sums each part across two families. # Panics Panics only if the temporary fixture cannot be read, written, executed, or parsed. |
 //! | [`the_burn_write_lowers_nothing_from_an_empty_declaration_and_keeps_growth`] | cli | A lowering write over empty declared lists has no ceiling to lower: growth in two files remains a finding for each file, and only append may record it. The declaration and the rest of the tree retain their bytes. |
@@ -100,8 +103,10 @@
 //! | [`characterizes_assembly_bytes`] | harness | Assembly fixes both its report and the generated publication. |
 //! | [`characterizes_fix_bytes`] | harness | Both fix profiles refuse before writing over deliberately undeclared fixtures, freezing the refusal and the untouched sources. |
 //! | [`citation_sites_preserve_resolved_addresses`] | cli | The executable protocol preserves citations before the first mint and exposes no document text. # Panics Panics only if fixture IO fails or the command violates its versioned protocol. |
-//! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested containment ignores untracked files but refuses tracked foreign ownership. # Panics Panics only if fixture IO fails or the binary violates the containment contract. |
-//! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting catalogued lists preserves an intervening deferred table's bytes and position. # Panics Panics only if fixture IO fails or a rewrite changes opaque source. |
+//! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration. # Panics Panics only if fixture IO fails or the binary violates the containment contract. |
+//! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting lists removes deactivated catalogued tables and preserves deferred bytes and position. # Panics Panics only if fixture IO fails or a rewrite changes opaque source. |
+//! | [`deferred_family_replacements_are_disjoint`] | control | Active family containers survive beside deferred bytes, while stale siblings leave without overlapping the active family's replacement. # Panics Panics only if fixture IO fails or the writer violates the family contract. |
+//! | [`nondeferred_inline_owner_rewrite_is_valid`] | control | The shared envelope boundary rewrites inline owners without duplicating keys even without deferred policies, and malformed source is refused unchanged. # Panics Panics only if fixture IO fails or the writer violates the envelope contract. |
 //! | [`programme_outside_checkout_names_tracked_directory_requirement`] | cli | A programme outside Git names its row and its tracked-directory requirement. # Panics Panics only if fixture IO fails or the refusal loses its feature context. |
 
 use std::borrow::Cow;
@@ -3189,6 +3194,54 @@ fn a_fixture_notice_tree_checks_and_then_fixes_clean() {
     assert_eq!(again["files_changed"], 0);
 }
 
+/// A notice's ownership citation remains resolvable through check and fix while
+/// neither its target nor its owner becomes part of the derived notice name.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the executable violates the ownership slot.
+///
+/// ´claim:todo:ownership-survives-check-and-fix´
+/// ´test:integration:todo-ownership-survives-check-and-fix´
+#[test]
+fn todo_ownership_survives_check_and_fix() {
+    let root = tempfile::tempdir().expect("fixture");
+    notice_workspace(root.path());
+    let relative = "packages/demo/src/lib.rs";
+    write(
+        root.path(),
+        relative,
+        "// TODO ´todo:code:already-right´ (´todo:code:already-right´): already right\n// TODO (´todo:code:already-right´): repair the reader\n",
+    );
+    track(root.path());
+    declare_fixture_profile(root.path(), "profile.todos-conform");
+    let (code, before) = run(&["check"], root.path());
+    assert_eq!(code, Some(3));
+    assert_eq!(
+        before["todo"]["wrong"], 1,
+        "only the existing stale fixture: {before}"
+    );
+    let (code, swept) = run(
+        &["fix", "--profile", "todo", "--write", "--allow-dirty"],
+        root.path(),
+    );
+    assert_eq!(code, Some(0), "{swept}");
+    let source = fs::read_to_string(root.path().join(relative)).expect("rewritten notice");
+    // Exact output recorded by the c-a08-probe node round.
+    assert_eq!(
+        source,
+        "// TODO ´todo:code:already-right´ (´todo:code:already-right´): already right\n// TODO ´todo:code:repair-the-reader´ (´todo:code:already-right´): repair the reader\n"
+    );
+    let (code, after) = run(&["check"], root.path());
+    assert_eq!(code, Some(0), "{after}");
+    assert_eq!(after["todo"]["wrong"], 0);
+    let (code, again) = run(
+        &["fix", "--profile", "todo", "--write", "--allow-dirty"],
+        root.path(),
+    );
+    assert_eq!(code, Some(0), "{again}");
+    assert_eq!(again["files_changed"], 0);
+}
+
 /// The notice sweep reports its mode truthfully: without `--write` it counts
 /// what it would change and leaves every file alone, while with `--write` it
 /// reports a write and applies the changes.
@@ -3354,6 +3407,186 @@ fn a_burn_list_fails_on_growth_and_on_a_stale_row() {
     );
 }
 
+/// Root rows are refused only when workspace ownership supplies structural
+/// reach, including a root-owned member under a virtual manifest.
+///
+/// # Panics
+///
+/// Panics only if fixture IO fails or the binary violates the root-reach contract.
+///
+/// ´claim:layers:structural-root-rows-are-refused´
+/// ´test:integration:structural-root-rows-are-refused´
+#[test]
+fn structural_root_rows_are_refused() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let owners = r#"root_owner = "ROOT"
+owners = ["ROOT", "LEAF"]
+may_cite = [{ owner = "LEAF", target = "ROOT" }]
+partitions = [
+  { name = "root", owner = "ROOT", pattern = '%s".linter" [ "/" *VCHAR ] / %s"Cargo.toml" / %s"src" [ "/" *VCHAR ]' },
+  { name = "leaf", owner = "LEAF", pattern = '%s"leaf" [ "/" *VCHAR ]' },
+]
+"#;
+    declare(
+        root.path(),
+        owners,
+        "environments = []\n",
+        "policies = []\n",
+        "",
+    );
+    let virtual_manifest = "[workspace]\nmembers = [\"leaf\"]\n";
+    write(
+        root.path(),
+        "Cargo.toml",
+        &format!(
+            "{}[package]\nname = \"example-root\"\nversion = \"0.1.0\"\n",
+            virtual_manifest.replace("[\"leaf\"]", "[\".\", \"leaf\"]")
+        ),
+    );
+    write(root.path(), "src/lib.rs", "");
+    write(
+        root.path(),
+        "leaf/Cargo.toml",
+        "[package]\nname = \"example-leaf\"\nversion = \"0.1.0\"\n",
+    );
+    write(root.path(), "leaf/src/lib.rs", "");
+    track(root.path());
+    let check = || programme_command(root.path(), &["check"]);
+    let refused = || {
+        let output = check();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stdout, [] as [u8; 0]);
+        let stderr = String::from_utf8(output.stderr).expect("diagnostic");
+        assert!(stderr.contains("may_cite: LEAF : ROOT"), "{stderr}");
+        assert!(
+            stderr.contains("crate-bearing root structurally"),
+            "{stderr}"
+        );
+    };
+    refused();
+    declare(
+        root.path(),
+        &owners.replace(
+            "may_cite = [{ owner = \"LEAF\", target = \"ROOT\" }]",
+            "may_cite = []",
+        ),
+        "environments = []\n",
+        "policies = []\n",
+        "",
+    );
+    let output = check();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    // With no root-owned package the explicit edge is a real permission.
+    write(root.path(), "Cargo.toml", virtual_manifest);
+    declare(
+        root.path(),
+        owners,
+        "environments = []\n",
+        "policies = []\n",
+        "",
+    );
+    let output = check();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    // A physical root package is not required: ownership of a member suffices.
+    declare(
+        root.path(),
+        &owners.replace("owner = \"LEAF\", pattern", "owner = \"ROOT\", pattern"),
+        "environments = []\n",
+        "policies = []\n",
+        "",
+    );
+    refused();
+}
+
+/// Catalogued burns subtract exact policy-local patterns from prose and code, including root censuses.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the binary violates the exclusion contract.
+///
+/// ´claim:burn:catalogued-burns-subtract-declared-patterns´
+/// ´test:integration:catalogued-burns-subtract-declared-patterns´
+#[test]
+fn catalogued_burns_subtract_declared_patterns() {
+    for (owner, policy, surface) in [
+        (
+            "PROJECTB",
+            "legacy.section-references",
+            r#"%s"content" [ "/" *VCHAR ]"#,
+        ),
+        ("PROJECTA", "legacy.section-references-repository", "*VCHAR"),
+    ] {
+        let root = tempfile::tempdir().expect("temporary directory");
+        declare(
+            root.path(),
+            "root_owner = \"PROJECTA\"\nowners = [\"PROJECTA\", \"PROJECTB\"]\n\
+             partitions = [{ name = \"config\", owner = \"PROJECTA\", pattern = '%s\".linter\" [ \"/\" *VCHAR ]' }, \
+             { name = \"content\", owner = \"PROJECTB\", pattern = '%s\"content\" [ \"/\" *VCHAR ]' }]\nmay_cite = []\n",
+            "environments = []\n",
+            &format!("policies = [{{ owner = \"{owner}\", policy = \"{policy}\" }}]\n"),
+            &format!("[{owner}.\"{policy}\"]\npath_counts = []\n"),
+        );
+        let path = root.path().join(".linter/policy-burn.toml");
+        let source = format!(
+            "namespace = \"class.linter.policy.{policy}\"\nversion = [1, 0, 0]\n\n[owners.{owner}]\nprose = '{surface}'\ncode = '{surface}'\n"
+        );
+        fs::write(&path, &source).expect("policy");
+        for (file, text) in [
+            ("content/omit/debt.md", "Per §1.\n"),
+            ("content/omit/debt.rs", "//! Per §2.\n"),
+            ("content/omit-neighbor.rs", "//! Per §3.\n"),
+            ("content/keep.md", "Per §4.\n"),
+        ] {
+            write(root.path(), file, text);
+        }
+        track(root.path());
+        let family_name = if policy.ends_with("-repository") {
+            "section-sign references (repository)"
+        } else {
+            "section-sign references"
+        };
+        let (status, report) = run(&["burn"], root.path());
+        assert_eq!(status, Some(3), "unregistered debt: {report}");
+        let family = report["families"]
+            .as_array()
+            .expect("families")
+            .iter()
+            .find(|family| family["family"] == family_name)
+            .expect("active family");
+        assert_eq!(family["occurrences"], 4, "{report}");
+        let exclude = r#"%s"content/omit" [ "/" *VCHAR ]"#;
+        fs::write(&path, format!("{source}exclude = '{exclude}'\n")).expect("exclude");
+        let (status, report) = run(&["burn"], root.path());
+        assert_eq!(status, Some(3), "remaining debt: {report}");
+        let family = report["families"]
+            .as_array()
+            .expect("families")
+            .iter()
+            .find(|family| family["family"] == family_name)
+            .expect("active family");
+        assert_eq!(family["occurrences"], 2, "{report}");
+        assert_eq!(family["files_scanned"], 2, "{report}");
+        assert_eq!(family["excluded"], serde_json::json!([exclude]));
+        let paths: Vec<_> = family["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["path"].as_str().expect("path"))
+            .collect();
+        assert_eq!(paths, ["content/keep.md", "content/omit-neighbor.rs"]);
+        for invalid in ["exclude = 7\n", "exclude = 'unknown-rule'\n"] {
+            fs::write(&path, format!("{source}{invalid}")).expect("invalid exclude");
+            let output = programme_command(root.path(), &["burn"]);
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(output.stdout, [] as [u8; 0]);
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains(&format!("owners.{owner}.exclude")),
+                "{error}"
+            );
+        }
+    }
+}
+
 /// The burn command reports and writes nothing unless asked: every adopted
 /// family is registered at its census, none is rewritten, and the trees excluded
 /// from each census are named in the report rather than left to be remembered.
@@ -3397,6 +3630,7 @@ fn the_burn_command_emits_json_and_writes_nothing_by_default() {
             }
         }
 
+        writeln!(text, "exclude = '%s\"omitted\" [ \"/\" *VCHAR ]'").expect("pattern");
         write(
             root.path(),
             &format!(".linter/policy-{}.toml", domain.replace('.', "-")),
@@ -3428,6 +3662,20 @@ fn the_burn_command_emits_json_and_writes_nothing_by_default() {
         assert_eq!(
             family["occurrences"], family["registered"],
             "{} is registered at its census",
+            family["family"]
+        );
+        assert!(
+            family["excluded"]
+                .as_array()
+                .expect("exclusions")
+                .contains(&serde_json::json!(r#"%s"omitted" [ "/" *VCHAR ]"#))
+        );
+        assert!(
+            family["excluded"]
+                .as_array()
+                .expect("exclusions")
+                .contains(&serde_json::json!("SUPERLOOPLINT")),
+            "{} keeps the checker's derived share beside the declared pattern",
             family["family"]
         );
         assert_eq!(family["kept"], 0);
@@ -5230,7 +5478,7 @@ fn citation_sites_preserve_resolved_addresses() {
     );
 }
 
-/// Nested containment ignores untracked files but refuses tracked foreign ownership.
+/// Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration.
 ///
 /// # Panics
 /// Panics only if fixture IO fails or the binary violates the containment contract.
@@ -5255,6 +5503,19 @@ fn nested_root_containment_uses_tracked_paths() {
         DECLARED_LISTS,
     );
     write(root.path(), ".gitignore", "nested/scratch/\n");
+    assert_programme_refusal(
+        root.path(),
+        "nested[1] (owner PROJECTA, root nested): root must hold a tracked .linter/owners.toml",
+    );
+    let child_owners = root.path().join("nested/.linter/owners.toml");
+    let owners_bytes = fs::read(&child_owners).expect("child owners");
+    fs::remove_file(&child_owners).expect("temporarily remove child owners");
+    track(root.path());
+    fs::write(&child_owners, owners_bytes).expect("restore untracked child owners");
+    assert_programme_refusal(
+        root.path(),
+        "nested[1] (owner PROJECTA, root nested): root must hold a tracked .linter/owners.toml",
+    );
     track(root.path());
     write(root.path(), "nested/scratch/editor.tmp", "untracked\n");
     let output = programme_command(root.path(), &["report"]);
@@ -5269,9 +5530,14 @@ fn nested_root_containment_uses_tracked_paths() {
         root.path(),
         "nested[1] (owner PROJECTA, root nested): root must be a normalized relative directory inside the owner's partitions",
     );
+    fs::remove_dir_all(root.path().join(".git")).expect("remove checkout metadata");
+    assert_programme_refusal(
+        root.path(),
+        "nested[1] (owner PROJECTA, root nested): cannot enumerate the repository's tracked paths for the nested root",
+    );
 }
 
-/// Rewriting catalogued lists preserves an intervening deferred table's bytes and position.
+/// Rewriting lists removes deactivated catalogued tables and preserves deferred bytes and position.
 ///
 /// # Panics
 /// Panics only if fixture IO fails or a rewrite changes opaque source.
@@ -5340,6 +5606,196 @@ fn deferred_list_rewrite_preserves_bytes_and_order() {
         fs::read_to_string(&path).expect("rewritten inline lists"),
         inline.replace("allowances=[]", "allowances = []")
     );
+    assert_deactivated_lists_are_removed(root.path(), &policies, &lists, &inline);
+}
+
+/// The shared writer prunes stale singleton and family layouts beside opaque rows.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the writer retains stale rows or changes opaque bytes.
+fn assert_deactivated_lists_are_removed(root: &Path, policies: &Path, lists: &str, inline: &str) {
+    let path = root.join(".linter/lists.toml");
+    let text = fs::read_to_string(policies).expect("active policies");
+    fs::write(
+        policies,
+        text.replace(
+            "{ owner = \"PROJECTB\", policy = \"labels.mints-well-formed\" }, ",
+            "",
+        ),
+    )
+    .expect("deactivate second catalogued policy");
+    // CLI preflight refuses stale pairs. Compile the active snapshot first,
+    // then exercise the shared writer against each stale source layout.
+    fs::write(
+        &path,
+        lists.replace(
+            "[PROJECTB.\"labels.mints-well-formed\"]\nallowances=[]\n",
+            "",
+        ),
+    )
+    .expect("active lists");
+    let plan = ExecutionPlan::compile(root, configuration(root)).expect("active execution plan");
+    let inline_owner = fs::read_to_string(&path).expect("active source").replacen(
+        "[PROJECTA.",
+        "PROJECTB = { \"labels.mints-unique\" = { allowances=[] }, \"labels.mints-well-formed\" = { allowances=[] } }\n[PROJECTA.",
+        1,
+    );
+    let headed_family = lists.replace(
+        "[PROJECTB.\"labels.mints-well-formed\"]\nallowances=[]",
+        "[PROJECTB.\"labels.mints-well-formed\".retired]\nallowances=[]",
+    );
+    let inline_family = lists.replace(
+        "[PROJECTB.\"labels.mints-well-formed\"]\nallowances=[]",
+        "[PROJECTB.\"labels.mints-well-formed\"]\nretired = { allowances=[] }",
+    );
+    let dotted = inline_owner.replace("PROJECTB = { \"labels.mints-unique\" = { allowances=[] }, \"labels.mints-well-formed\" = { allowances=[] } }", "PROJECTB.\"labels.mints-well-formed\" = { allowances=[] }");
+    for (name, held) in [
+        ("stale-headed", lists),
+        ("stale-inline", inline),
+        ("stale-owner", &inline_owner),
+        ("stale-headed-family", &headed_family),
+        ("stale-inline-family", &inline_family),
+        ("stale-dotted", &dotted),
+    ] {
+        fs::write(&path, held).expect("stale catalogued list");
+        superloop_lint::lower_lists(&plan).expect("prune stale lists");
+        let rewritten = fs::read_to_string(&path).expect("pruned lists");
+        assert_eq!(rewritten, expected_list_rewrite(name), "{name}");
+        assert!(!superloop_lint::lower_lists(&plan).expect("repeat writer"));
+        assert_eq!(fs::read_to_string(&path).expect("repeat lists"), rewritten);
+    }
+}
+
+/// Active family containers survive beside deferred bytes, while stale siblings
+/// leave without overlapping the active family's replacement.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the writer violates the family contract.
+///
+/// ´claim:control:deferred-family-replacements-are-disjoint´
+/// ´test:integration:deferred-family-replacements-are-disjoint´
+#[test]
+fn deferred_family_replacements_are_disjoint() {
+    let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), "allowances = []");
+    let policy_path = root.path().join(".linter/policies.toml");
+    let policies = fs::read_to_string(&policy_path).expect("policies");
+    fs::write(
+        &policy_path,
+        policies.replace(
+            "policies = [",
+            "policies = [{ owner = \"PROJECTA\", policy = \"references.prefix-numbers-absent\" }, ",
+        ),
+    )
+    .expect("activate families");
+    write(
+        root.path(),
+        ".linter/policy-fixture-numbers.toml",
+        "namespace = \"class.linter.policy.references.fixture-numbers\"\nversion = [1, 0, 0]\n[set.prefix-numbers]\nactive = { prefix = \"QA-\", exact = [\"1\"] }\n",
+    );
+    track(root.path());
+    let prefix = "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n";
+    let deferred =
+        format!("# keep position\r\n[PROJECTA.'{LOCAL_POLICY}']\r\nallowances = [] # opaque\r\n");
+    let inline =
+        "[PROJECTA.\"policy.references.fixture-numbers\"]\nactive = { path_counts=[] }\n\n";
+    let headed = "[PROJECTA.\"policy.references.fixture-numbers\".active]\npath_counts=[]\n\n";
+    let path = root.path().join(".linter/lists.toml");
+    for (name, family) in [("active-inline", inline), ("active-headed", headed)] {
+        let source = format!("{prefix}{family}{deferred}");
+        fs::write(&path, &source).expect("family source");
+        let output = programme_command(root.path(), &["burn", "--write"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let rewritten = fs::read_to_string(&path).expect("family output");
+        assert_eq!(rewritten, expected_list_rewrite(name), "{name}");
+        let output = programme_command(root.path(), &["burn", "--write"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(fs::read_to_string(&path).expect("repeat"), rewritten);
+    }
+    let plan =
+        ExecutionPlan::compile(root.path(), configuration(root.path())).expect("family plan");
+    for (name, family) in [
+        (
+            "stale-sibling",
+            inline.replace("active =", "retired = { path_counts=[] }\nactive ="),
+        ),
+        (
+            "stale-headed-sibling",
+            format!(
+                "[PROJECTA.\"policy.references.fixture-numbers\".retired]\npath_counts=[]\n\n{headed}"
+            ),
+        ),
+    ] {
+        fs::write(&path, format!("{prefix}{family}{deferred}")).expect("stale family");
+        superloop_lint::lower_lists(&plan).expect("prune stale sibling");
+        let rewritten = fs::read_to_string(&path).expect("pruned family");
+        assert_eq!(rewritten, expected_list_rewrite(name), "{name}");
+        assert!(!superloop_lint::lower_lists(&plan).expect("repeat family"));
+    }
+}
+
+/// The shared envelope boundary rewrites inline owners without duplicating keys
+/// even without deferred policies, and malformed source is refused unchanged.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the writer violates the envelope contract.
+///
+/// ´claim:control:nondeferred-inline-owner-rewrite-is-valid´
+/// ´test:integration:nondeferred-inline-owner-rewrite-is-valid´
+#[test]
+fn nondeferred_inline_owner_rewrite_is_valid() {
+    let root = programme_fixture("labels.mints-well-formed", None, "allowances = []");
+    let path = root.path().join(".linter/lists.toml");
+    fs::write(&path, "# retain envelope\nnamespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\nPROJECTA = { \"labels.mints-well-formed\" = { allowances=[] } }\n").expect("inline owner");
+    let output = programme_command(root.path(), &["burn", "--write"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let rewritten = fs::read_to_string(&path).expect("nondeferred output");
+    assert_eq!(rewritten, expected_list_rewrite("nondeferred"));
+    let plan =
+        ExecutionPlan::compile(root.path(), configuration(root.path())).expect("rewritten plan");
+    assert!(!superloop_lint::lower_lists(&plan).expect("repeat nondeferred"));
+    fs::write(&path, "namespace = [\n").expect("malformed source");
+    assert!(superloop_lint::lower_lists(&plan).is_err());
+    assert_eq!(
+        fs::read_to_string(&path).expect("refused bytes"),
+        "namespace = [\n"
+    );
+}
+
+/// Exact synthetic writer output recorded in the node round c-a02-probe.
+///
+/// # Panics
+/// Panics only if a test asks for an unrecorded fixture.
+fn expected_list_rewrite(name: &str) -> &'static str {
+    match name {
+        "active-inline" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\"]\nactive = { path_counts = [] }\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "nondeferred" => {
+            "# retain envelope\nnamespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n"
+        }
+        "active-headed" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "stale-headed" | "stale-headed-family" | "stale-inline-family" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n# Repository programme owns the following bytes.\r\n[PROJECTA.'profile.notice-dispositions-conform'] # keep this spelling\r\nallowances = [{ local_identity = '''opaque\n[PROJECTB.\"labels.mints-well-formed\"]\n''', decision = 'kept' }]\r\n\r\n"
+        }
+        "stale-inline" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA]\n\"labels.mints-well-formed\" = { allowances = [] }\n\n# Repository programme owns the following bytes.\r\n[PROJECTA.'profile.notice-dispositions-conform'] # keep this spelling\r\nallowances = [{ local_identity = '''opaque\n[PROJECTB.\"labels.mints-well-formed\"]\n''', decision = 'kept' }]\r\n\r\n[PROJECTB]\n\n"
+        }
+        "stale-owner" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\nPROJECTB = {  }\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n# Repository programme owns the following bytes.\r\n[PROJECTA.'profile.notice-dispositions-conform'] # keep this spelling\r\nallowances = [{ local_identity = '''opaque\n[PROJECTB.\"labels.mints-well-formed\"]\n''', decision = 'kept' }]\r\n\r\n"
+        }
+        "stale-dotted" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n# Repository programme owns the following bytes.\r\n[PROJECTA.'profile.notice-dispositions-conform'] # keep this spelling\r\nallowances = [{ local_identity = '''opaque\n[PROJECTB.\"labels.mints-well-formed\"]\n''', decision = 'kept' }]\r\n\r\n"
+        }
+        "stale-sibling" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\"]\n\nactive = { path_counts = [] }\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "stale-headed-sibling" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        _ => panic!("unrecorded list layout: {name}"),
+    }
 }
 
 /// A programme outside Git names its row and its tracked-directory requirement.

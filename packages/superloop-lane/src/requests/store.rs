@@ -57,6 +57,19 @@ static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 type RunSnapshot = (Option<Vec<u8>>, u64, Vec<RequestRecord>);
 
 #[cfg(not(test))]
+pub(super) const fn reader_lock_wait() -> Duration {
+    READER_LOCK_WAIT
+}
+
+#[cfg(test)]
+pub(super) fn reader_lock_wait() -> Duration {
+    if let Some(wait) = READER_LOCK_WAIT_OVERRIDE.with(std::cell::Cell::get) {
+        return wait;
+    }
+    READER_LOCK_WAIT
+}
+
+#[cfg(not(test))]
 const fn writer_lock_wait() -> Duration {
     WRITER_LOCK_WAIT
 }
@@ -574,7 +587,7 @@ impl Store {
             .map_err(|error| problem("requests-record-refusal", error.to_string()))?;
         if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
             || stat.st_uid != owner
-            || stat.st_mode & 0o7777 != 0o600
+            || stat.st_mode & 0o7707 != 0o600
         {
             return Err(problem(
                 "requests-record-refusal",
@@ -1205,10 +1218,7 @@ impl Store {
         } | libc::LOCK_NB;
         // A full run can make concurrent shared reads last several seconds; the
         // answer writer must remain eligible while bounded waiters back off.
-        let reader_wait = READER_LOCK_WAIT;
-        #[cfg(test)]
-        let reader_wait =
-            READER_LOCK_WAIT_OVERRIDE.with(|bound| bound.get().unwrap_or(reader_wait));
+        let reader_wait = reader_lock_wait();
         let writer_wait = writer_lock_wait();
         let started = Instant::now();
         let mut contended = false;
@@ -4650,6 +4660,89 @@ pub(crate) mod tests {
         assert!(super::is_lock_contention(&error));
         assert!(started.elapsed() < Duration::from_secs(2));
         super::READER_LOCK_WAIT_OVERRIDE.set(None);
+    }
+
+    /// # Panics
+    /// Panics only if listing loses its bound, retry evidence or read-only behavior.
+    /// ´test:unit:requests-list-bounded-contention-is-read-only´
+    #[test]
+    fn requests_list_bounded_contention_is_read_only() {
+        use std::time::{Duration, Instant};
+        fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            let mut result = std::collections::BTreeMap::new();
+            for entry in fs::read_dir(root).expect("fixture directory") {
+                let entry = entry.expect("fixture entry");
+                let kind = entry.file_type().expect("fixture type");
+                if kind.is_dir() {
+                    result.extend(files(&entry.path()));
+                } else if kind.is_file() {
+                    result.insert(entry.path(), fs::read(entry.path()).expect("fixture bytes"));
+                }
+            }
+            result
+        }
+        assert_eq!(super::READER_LOCK_WAIT, Duration::from_secs(15));
+        for suffix in [vec![], vec!["--pending"], vec!["--state", "waiting"]] {
+            for release in [true, false] {
+                let fixture = Fixture::new();
+                let store = fixture.store();
+                store
+                    .file(waiting("R", "1a", 3000, Mode::Audit))
+                    .expect("request");
+                let before = files(&fixture.home);
+                let lock = store.fixture_exclusive_lock().expect("writer lock");
+                let mut held = Some(lock);
+                if release {
+                    let lock = held.take().expect("release guard");
+                    AFTER_READER_LOCK_CONTENTION.with(|hook| {
+                        *hook.borrow_mut() = Some(Box::new(move || drop(lock)));
+                    });
+                }
+                let bound = Duration::from_millis(300);
+                super::READER_LOCK_WAIT_OVERRIDE.set(Some(bound));
+                let args: Vec<_> = ["list", "alpha"]
+                    .into_iter()
+                    .chain(suffix.iter().copied())
+                    .map(str::to_owned)
+                    .collect();
+                let mut output = Vec::new();
+                let started = Instant::now();
+                let result = super::channel::with_test_client(
+                    super::test_helper::binary(),
+                    &fixture.permission_registry,
+                    || {
+                        crate::requests::commands::run(
+                            &fixture.home,
+                            &args,
+                            &mut &b""[..],
+                            &mut output,
+                        )
+                    },
+                );
+                let wall = started.elapsed();
+                super::READER_LOCK_WAIT_OVERRIDE.set(None);
+                if release {
+                    result.expect("listing succeeds after release");
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&output).expect("listing JSON");
+                    assert_eq!(value["decisions"][0]["id"], "R:1a");
+                    AFTER_READER_LOCK_CONTENTION.with(|hook| assert!(hook.borrow().is_none()));
+                } else {
+                    let error = result.expect_err("listing expires");
+                    assert_eq!(error.kind, "requests-record-refusal");
+                    assert!(super::is_lock_contention(&error));
+                    assert!(error.detail.contains("wait_seconds="));
+                    assert!(error.detail.contains(
+                        "retry requests list after the active request releases the lock"
+                    ));
+                    assert_eq!(output, Vec::<u8>::new());
+                    assert!(wall >= bound);
+                }
+                assert!(wall < Duration::from_secs(5), "listing wall: {wall:?}");
+                drop(held);
+                assert_eq!(files(&fixture.home), before);
+            }
+        }
     }
 
     /// # Panics

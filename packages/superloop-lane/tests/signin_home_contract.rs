@@ -926,3 +926,61 @@ fn codex_registry_selection_refuses_unpinned_hosts() {
         }
     }
 }
+
+/// # Panics
+/// Panics only if the fixture or check-mode account refusal violates its contract.
+/// ´test:integration:codex-check-refuses-a-differing-registry-user-without-writing´
+#[test]
+fn codex_check_refuses_a_differing_registry_user_without_writing() {
+    use std::fs;
+    let fixture = CodexHomeFixture::new();
+    fixture.prepare();
+    let registry = fixture
+        .root
+        .path()
+        .join(".local/share/orchestration-instance/servers.md");
+    let source = fs::read_to_string(&registry).expect("registry");
+    fs::write(
+        &registry,
+        source.replace("|alpha|fixture|", "|alpha|other|"),
+    )
+    .expect("differing account");
+    let paths = [
+        fixture.home().join("ssh_config"),
+        fixture.home().join("config.toml"),
+        registry,
+    ];
+    let before = paths.each_ref().map(|path| {
+        (
+            fs::read(path).expect("bytes"),
+            fs::metadata(path)
+                .expect("metadata")
+                .modified()
+                .expect("mtime"),
+        )
+    });
+    let output = fixture.invoke(
+        "check-signin-home",
+        None,
+        nix::unistd::Uid::effective().as_raw(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stderr, [] as [u8; 0]);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("check JSON");
+    assert_eq!(report["ok"], false);
+    assert_eq!(
+        report["missing"],
+        serde_json::json!(["registry-node: node-a: --user differs from active row account"])
+    );
+    assert_eq!(report["varied"], serde_json::json!([]));
+    let after = paths.each_ref().map(|path| {
+        (
+            fs::read(path).expect("bytes"),
+            fs::metadata(path)
+                .expect("metadata")
+                .modified()
+                .expect("mtime"),
+        )
+    });
+    assert_eq!(after, before);
+}

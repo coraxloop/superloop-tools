@@ -44,7 +44,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`answers_for_a_kind_by_its_final_component`] | commentary | The catalog is keyed by the final path component, so a suffix row answers for a file at any depth and a whole-name row answers for the extensionless files that carry one. A kind the catalog has classified for nobody is answered for by nobody, which is what lets the policy report the silence rather than pass the file. |
+//! | [`answers_for_a_kind_by_its_final_component`] | commentary | The catalog is keyed by the final path component, so a suffix row answers for a file at any depth and a whole-name row answers for the extensionless files that carry one. A kind the catalog has classified for nobody is answered for by nobody, which is what lets the policy report the silence rather than pass the file. A terminal template suffix selects the inner kind without supplying a default for unknown kinds. |
 //! | [`classifies_the_kinds_that_carry_no_comment_region`] | commentary | A kind with no comment syntax is classified rather than left out. A data format that admits no comment, a plain notice and a binary are all read as carrying no comment region, and none of them is decoded or sniffed to find that out. Prose is classified too, and is the one classified kind that is scanned without being a comment carrier. |
 //! | [`no_two_rows_answer_for_one_selector`] | commentary | Every selector in the catalog is answered for by the row that carries it, which is the property that makes the catalog a function of the final component rather than a list a reader has to scan in order. Two rows claiming one selector would make the answer depend on where a row was written. |
 //!
@@ -162,6 +162,7 @@ const CATALOG: &[Row] = &[
         selectors: &[
             "LICENSE",
             "LICENSE-GPL_3_0",
+            "LICENSE-AGPL_3_0",
             "LICENSE-MIT_0",
             "LINKING-EXCEPTION",
             "message",
@@ -172,12 +173,16 @@ const CATALOG: &[Row] = &[
 
 /// The reader catalogued for a path, or `None` when this binary has classified no kind for it.
 ///
+/// A terminal `.j2` uses the enclosed file kind; an unknown inner kind stays
+/// unclassified.
+///
 /// `None` is the loud answer rather than the quiet one. The policy consuming
 /// this catalog reports an unclassified kind, because a total reach that
 /// silently skipped what it had not learned would be a reach in name only.
 #[must_use]
 pub fn catalogued(path: &BytePath) -> Option<Reader> {
     let component = final_component(path.as_bytes());
+    let component = component.strip_suffix(b".j2").unwrap_or(component);
 
     CATALOG
         .iter()
@@ -222,7 +227,8 @@ mod tests {
     /// for a file at any depth and a whole-name row answers for the
     /// extensionless files that carry one. A kind the catalog has classified for
     /// nobody is answered for by nobody, which is what lets the policy report
-    /// the silence rather than pass the file.
+    /// the silence rather than pass the file. A terminal template suffix selects
+    /// the inner kind without supplying a default for unknown kinds.
     ///
     /// ´claim:commentary:the-catalog-answers-by-the-final-path-component´
     /// ´test:unit:answers-for-a-kind-by-its-final-component´
@@ -238,6 +244,26 @@ mod tests {
         assert_eq!(answering_for("orchard/plum.html"), Some(Reader::Angle));
         assert_eq!(answering_for("orchard/Makefile"), Some(Reader::Hash));
         assert_eq!(answering_for("orchard/.gitignore"), Some(Reader::Hash));
+        for (path, reader) in [
+            ("orchard/plum.md.j2", Reader::Prose),
+            ("orchard/plum.toml.j2", Reader::Hash),
+            ("orchard/plum.sh.j2", Reader::Hash),
+            ("orchard/plum.rs.j2", Reader::Slash),
+            ("orchard/plum.sql.j2", Reader::Dash),
+            ("orchard/plum.html.j2", Reader::Angle),
+            ("orchard/plum.json.j2", Reader::Opaque),
+            ("orchard/Makefile.j2", Reader::Hash),
+        ] {
+            assert_eq!(answering_for(path), Some(reader), "{path}");
+        }
+        for path in [
+            "orchard/plum.quince.j2",
+            "orchard/plum.j2",
+            "orchard/plum.md.j2.j2",
+            "orchard/plum.md.j2.quince",
+        ] {
+            assert_eq!(answering_for(path), None, "{path} stays unclassified");
+        }
         assert_eq!(
             answering_for("orchard/plum.quince"),
             None,
@@ -255,7 +281,13 @@ mod tests {
     /// ´test:unit:classifies-the-kinds-that-carry-no-comment-region´
     #[test]
     fn classifies_the_kinds_that_carry_no_comment_region() {
-        for path in ["orchard/plum.json", "orchard/plum.png", "orchard/LICENSE"] {
+        for path in [
+            "orchard/plum.json",
+            "orchard/plum.png",
+            "orchard/LICENSE",
+            "orchard/LICENSE-GPL_3_0",
+            "orchard/LICENSE-AGPL_3_0",
+        ] {
             assert_eq!(
                 answering_for(path),
                 Some(Reader::Opaque),

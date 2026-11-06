@@ -49,7 +49,8 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-pack/src/lib.rs:\"git\"#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"git\"","callee":"external:git","lookup":"public-command","contract":"Git repository, index and object operations; exact arguments and status remain owned by the calling operation"}
-{"kind":"call","site":"packages/superloop-pack/src/lib.rs:\"unzip\"#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"unzip\"","callee":"external:unzip","lookup":"public-command","contract":"Read the explicitly named ZIP archive"}
+{"kind":"call","site":"packages/superloop-pack/src/lib.rs:\"unzip\"#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"unzip\"","callee":"external:unzip","lookup":"public-command","contract":"Probe unzip availability without an archive before extraction"}
+{"kind":"call","site":"packages/superloop-pack/src/lib.rs:\"unzip\"#2","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"unzip\"","callee":"external:unzip","lookup":"public-command","contract":"Read the explicitly named ZIP archive"}
 {"kind":"call","site":"packages/superloop-pack/tests/subprocess_contract.rs:env ! (\"CARGO_BIN_EXE_superloop-pack\")#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"env ! (\"CARGO_BIN_EXE_superloop-pack\")","callee":"bin/superloop-pack","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-pack"}
 ''']
 

@@ -30,7 +30,13 @@ pub(super) fn run(
     let [action, loop_name, rest @ ..] = args else {
         return Err(super::usage());
     };
+    let started = std::time::Instant::now();
     let store = Store::open(owner_home, loop_name, false)?;
+    let store = if action == "list" {
+        store.with_reader_deadline(started + crate::requests::store::reader_lock_wait())
+    } else {
+        store
+    };
     let result = match (action.as_str(), rest) {
         ("status" | "list", []) => read(&store, action, loop_name, false)?,
         ("status" | "list", [flag]) if flag == "--pending" => {

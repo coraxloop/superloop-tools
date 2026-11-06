@@ -789,7 +789,8 @@ struct Declared {
     bytes: Vec<u8>,
 }
 
-/// The list file's text standing above its first table: its envelope, and any
+/// The list file's text standing above its first owner table, headed or inline:
+/// its envelope, and any
 /// comment written with it.
 ///
 /// The ratchet writer maintains the row array under an already-declared key and
@@ -802,18 +803,25 @@ struct Declared {
 ///
 /// A file with nothing above its first table carries nothing across, and its
 /// rendering is what it always was.
-fn held_prefix(text: &str) -> &str {
-    let mut at = 0;
-
-    for line in text.split_inclusive('\n') {
-        if line.trim_start().starts_with('[') {
-            return &text[..at];
-        }
-
-        at += line.len();
-    }
-
-    text
+fn held_prefix(text: &str) -> Result<&str, String> {
+    type Entries = BTreeMap<toml::Spanned<String>, toml::Value>;
+    let entries = toml::from_str::<Entries>(text).map_err(|error| error.to_string())?;
+    let first_owner = {
+        entries
+            .into_iter()
+            .filter(|(key, _)| !matches!(key.get_ref().as_str(), "namespace" | "version"))
+            .map(|(key, _)| {
+                let start = key.span().start;
+                let line = text[..start].rfind('\n').map_or(0, |at| at + 1);
+                if text[line..].trim_start().starts_with('[') {
+                    line
+                } else {
+                    start
+                }
+            })
+            .min()
+    };
+    Ok(&text[..first_owner.unwrap_or(text.len())])
 }
 
 /// Read the list file permissively, turning every semantic defect into an anomaly.
@@ -2332,18 +2340,19 @@ fn rewrite_lists(
     if snapshot.deferred_policies().is_empty() {
         return Ok(format!(
             "{}{}",
-            held_prefix(held),
+            held_prefix(held)?,
             render_lists(pairs, lists)
         ));
     }
-    let (starts, inline) = list_table_starts(held, pairs)?;
+    let (starts, inline, mut removed) =
+        list_table_starts(held, pairs, snapshot.deferred_policies())?;
     let mut replacements = Vec::new();
     let mut emitted = BTreeSet::new();
     for (index, (start, pair)) in starts.iter().enumerate() {
         let end = starts.get(index + 1).map_or(held.len(), |(at, _)| *at);
         let section = &held[*start..end];
         if let Some(pair) = pair {
-            let replacement = if emitted.insert(pair.clone()) {
+            let replacement = if pairs.contains(pair) && emitted.insert(pair.clone()) {
                 render_lists(std::slice::from_ref(pair), lists)
             } else {
                 String::new()
@@ -2372,10 +2381,25 @@ fn rewrite_lists(
         replacements.push((span, value.to_string()));
         emitted.insert(pair);
     }
+    removed.sort_by_key(|span| span.start);
+    let mut merged: RemovedLists = Vec::new();
+    for span in removed {
+        if let Some(last) = merged.last_mut()
+            && last.end >= span.start
+        {
+            last.end = last.end.max(span.end);
+        } else {
+            merged.push(span);
+        }
+    }
+    replacements.extend(merged.into_iter().map(|span| (span, String::new())));
     replacements.sort_by_key(|(span, _)| span.start);
     let mut rendered = String::new();
     let mut cursor = 0;
     for (span, replacement) in replacements {
+        if span.start < cursor || span.end < span.start || span.end > held.len() {
+            return Err("overlapping or invalid list replacement spans".to_owned());
+        }
         rendered.push_str(&held[cursor..span.start]);
         rendered.push_str(&replacement);
         cursor = span.end;
@@ -2395,36 +2419,61 @@ fn rewrite_lists(
 
 type TableStarts = Vec<(usize, Option<Pair>)>;
 type InlineLists = Vec<(std::ops::Range<usize>, Pair)>;
+type RemovedLists = Vec<std::ops::Range<usize>>;
 
 /// Locate real table headers through TOML spans, never through apparent headers
 /// inside opaque multiline strings. A missing pair marks source owned elsewhere.
-fn list_table_starts(held: &str, pairs: &[Pair]) -> Result<(TableStarts, InlineLists), String> {
-    type Fields = BTreeMap<String, toml::Spanned<toml::Value>>;
-    type Policies = BTreeMap<String, toml::Spanned<Fields>>;
-    let prefix = held_prefix(held).len();
+fn list_table_starts(
+    held: &str,
+    pairs: &[Pair],
+    deferred: &[crate::snapshot::DeferredPolicy],
+) -> Result<(TableStarts, InlineLists, RemovedLists), String> {
+    type Fields = BTreeMap<toml::Spanned<String>, toml::Spanned<toml::Value>>;
+    type Policies = BTreeMap<toml::Spanned<String>, toml::Spanned<Fields>>;
+    let prefix = held_prefix(held)?.len();
     let body = &held[prefix..];
     let owners: BTreeMap<String, toml::Spanned<Policies>> =
         toml::from_str(body).map_err(|error| error.to_string())?;
     let mut starts = Vec::new();
     let mut inline = Vec::new();
+    let mut removed = Vec::new();
     for (owner, policies) in owners {
         let span = policies.span();
+        let inline_owner = body[span.clone()].starts_with('{');
         if body[span.clone()].starts_with('[') {
             starts.push((prefix + span.start, None));
         }
-        for (policy, fields) in policies.into_inner() {
+        for (policy_key, fields) in policies.into_inner() {
+            let key_start = policy_key.span().start;
+            let policy = policy_key.into_inner();
+            let preserved = deferred
+                .iter()
+                .any(|row| row.owner == owner && row.policy == policy);
             let singleton = Pair::singleton(owner.clone(), policy.clone());
             let span = fields.span();
             let header = body[span.clone()].starts_with('[');
             if header {
-                starts.push((
-                    prefix + span.start,
-                    pairs.contains(&singleton).then_some(singleton.clone()),
-                ));
+                let replace_header = !preserved
+                    && (pairs.contains(&singleton)
+                        || !pairs
+                            .iter()
+                            .any(|pair| pair.owner == owner && pair.policy == policy));
+                starts.push((prefix + span.start, replace_header.then_some(singleton)));
             } else if body[span.clone()].starts_with('{') && pairs.contains(&singleton) {
                 inline.push((prefix + span.start..prefix + span.end, singleton));
+            } else if body[span.clone()].starts_with('{')
+                && !preserved
+                && !pairs
+                    .iter()
+                    .any(|pair| pair.owner == owner && pair.policy == policy)
+            {
+                let span = removed_inline_entry(body, key_start..span.end, inline_owner);
+                removed.push(prefix + span.start..prefix + span.end);
+                continue;
             }
-            for (family, value) in fields.into_inner() {
+            for (family_key, value) in fields.into_inner() {
+                let key_start = family_key.span().start;
+                let family = family_key.into_inner();
                 let span = value.span();
                 let pair = pairs.iter().find(|pair| {
                     pair.owner == owner
@@ -2436,18 +2485,60 @@ fn list_table_starts(held: &str, pairs: &[Pair]) -> Result<(TableStarts, InlineL
                     && body[span.clone()].starts_with('[')
                     && toml::from_str::<toml::Table>(&body[span.clone()]).is_ok()
                 {
-                    starts.push((prefix + span.start, pair.cloned()));
+                    starts.push((
+                        prefix + span.start,
+                        (!preserved).then(|| {
+                            pair.cloned().unwrap_or_else(|| Pair {
+                                owner: owner.clone(),
+                                policy: policy.clone(),
+                                family: Some(family.clone()),
+                            })
+                        }),
+                    ));
                 } else if value.get_ref().is_table()
                     && body[span.clone()].starts_with('{')
                     && let Some(pair) = pair
                 {
                     inline.push((prefix + span.start..prefix + span.end, pair.clone()));
+                } else if value.get_ref().is_table()
+                    && body[span.clone()].starts_with('{')
+                    && !preserved
+                    && pairs
+                        .iter()
+                        .any(|pair| pair.owner == owner && pair.policy == policy)
+                {
+                    let span = removed_inline_entry(body, key_start..span.end, !header);
+                    removed.push(prefix + span.start..prefix + span.end);
                 }
             }
         }
     }
     starts.sort_by_key(|(start, _)| *start);
-    Ok((starts, inline))
+    Ok((starts, inline, removed))
+}
+
+/// Include one separator when removing an entry inside an inline owner table.
+fn removed_inline_entry(
+    body: &str,
+    mut span: std::ops::Range<usize>,
+    inline_owner: bool,
+) -> std::ops::Range<usize> {
+    if inline_owner {
+        let after = &body[span.end..];
+        let trimmed = after.trim_start();
+        if trimmed.starts_with(',') {
+            span.end += after.len() - trimmed.len() + 1;
+        } else {
+            let before = body[..span.start].trim_end();
+            if before.ends_with(',') {
+                span.start = before.len() - 1;
+            }
+        }
+    } else {
+        // A dotted key owns its whole assignment, including the owner prefix.
+        span.start = body[..span.start].rfind('\n').map_or(0, |at| at + 1);
+    }
+    span
 }
 
 #[cfg(test)]

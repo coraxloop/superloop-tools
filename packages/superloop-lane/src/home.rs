@@ -453,7 +453,10 @@ pub(crate) fn trusted(
             format!("replaceable ancestor uid {}", parent.st_uid),
         ));
     }
-    if mode & 0o022 != 0 && (mode & 0o1000 == 0 || (next.st_uid != 0 && next.st_uid != 65534 && next.st_uid != owner)) {
+    if mode & 0o022 != 0
+        && (mode & 0o1000 == 0
+            || (next.st_uid != 0 && next.st_uid != 65534 && next.st_uid != owner))
+    {
         return Err(reason(
             path,
             format!("replaceable ancestor mode {mode:04o}"),

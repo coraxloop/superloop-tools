@@ -85,7 +85,8 @@ fn pin_settings_parent(path: &Path, owner: u32) -> Result<OwnedFd, LoopError> {
         let parent_mode = previous.st_mode & 0o7777;
         if (previous.st_uid != 0 && previous.st_uid != 65534 && previous.st_uid != owner)
             || (parent_mode & 0o022 != 0
-                && (parent_mode & 0o1000 == 0 || (stat.st_uid != 0 && stat.st_uid != 65534 && stat.st_uid != owner)))
+                && (parent_mode & 0o1000 == 0
+                    || (stat.st_uid != 0 && stat.st_uid != 65534 && stat.st_uid != owner)))
         {
             return Err(LoopError::refusal(format!(
                 "workers settings have a replaceable ancestor: {}",
@@ -377,7 +378,8 @@ pub mod run_paths {
                 ),
             ));
         }
-        if mode & 0o022 != 0 && (mode & 0o1000 == 0 || ![0, 65534, owner_uid].contains(&child_stat.st_uid))
+        if mode & 0o022 != 0
+            && (mode & 0o1000 == 0 || ![0, 65534, owner_uid].contains(&child_stat.st_uid))
         {
             return Err(refused(
                 path,

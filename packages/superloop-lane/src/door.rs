@@ -4472,6 +4472,92 @@ mod tests {
         }
     }
 
+    /// # Panics
+    /// Panics if a learned hit invokes the agent, changes its cited decision or repeats an effect.
+    /// ´test:unit:door-repeated-learned-hits-skip-agent´
+    #[test]
+    fn door_repeated_learned_hits_skip_agent() {
+        struct Agent(AtomicUsize);
+        impl super::agent::AgentRunner for Agent {
+            fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("learned hit invoked the agent")
+            }
+        }
+        let fixture = Fixture::new();
+        fixture.set_floor("enforce");
+        let store = fixture.store();
+        set_fixture_mode(&store, crate::requests::Mode::Enforce);
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("registration");
+        let setting = store.effective_mode("ssh").expect("setting");
+        let seed = super::request_record(
+            &registration,
+            "ssh",
+            Operation::ProbeEcho,
+            &setting,
+            &json!({"decision":"undecided","reason":"fixture seed"}),
+            true,
+            &[],
+        )
+        .expect("seed");
+        let seed_id = seed.id().to_owned();
+        store.file(seed).expect("seed filing");
+        label(&store, &seed_id, "allow");
+        let route = route_for(&fixture.home);
+        let (runner, effects, _) = counting_runner(&fixture);
+        let agent = Agent(AtomicUsize::new(0));
+        let mut observed_ids = std::collections::HashSet::from([seed_id.clone()]);
+        for iteration in 0..24 {
+            let (mut stream, mut peer) = UnixStream::pair().expect("socket pair");
+            peer.shutdown(std::net::Shutdown::Write)
+                .expect("empty input");
+            let (reply, _) = super::serve_request_with_agent(
+                &mut stream,
+                &registration,
+                3000,
+                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+                Some(&route),
+                Some(&runner),
+                Some(&fixture.home),
+                None,
+                Some(&store),
+                Some(&agent),
+                None,
+                Instant::now(),
+            )
+            .expect("learned request");
+            let frame = frame_read(&mut peer).expect("final frame");
+            assert_eq!(frame["would_do"], reply["would_do"]);
+            assert_eq!(frame["reason"], "door-complete");
+            assert_eq!(frame["status"], 0);
+            let fresh: Vec<_> = store
+                .list_run("R")
+                .expect("durable decisions")
+                .into_iter()
+                .filter(|row| !observed_ids.contains(row.id()))
+                .collect();
+            assert_eq!(fresh.len(), 1);
+            let record = &fresh[0];
+            observed_ids.insert(record.id().to_owned());
+            assert_eq!(record.value()["would_do"]["decision"], "allow");
+            assert_eq!(
+                record.value()["matched_rule"]["request_ids"],
+                json!([seed_id])
+            );
+            assert!(record.value()["agent_status"].is_null());
+            assert_eq!(record.value()["effect"]["state"], "completed");
+            assert_eq!(agent.0.load(Ordering::SeqCst), 0);
+            assert_eq!(effects.load(Ordering::SeqCst), iteration + 1);
+        }
+    }
+
     /// ´test:unit:door-audit-label-precedes-effect´
     #[test]
     fn door_audit_label_precedes_effect() {
