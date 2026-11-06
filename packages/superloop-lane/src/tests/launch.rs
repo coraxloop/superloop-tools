@@ -101,7 +101,7 @@ fn boxed_backend_home_refuses_before_writing_any_path() {
         assert_eq!(
             error.kind,
             if value == "claude" {
-                "backend-unavailable"
+                "backend-layout"
             } else {
                 "backend-selection"
             }
@@ -328,6 +328,181 @@ fn boxed_backend_refusal_precedes_allocation_and_program_probes() {
         .expect_err("outer scope refuses Claude before effects");
         assert_eq!(error.kind, "backend-unavailable");
     }
+}
+
+/// ´test:crate:boxed-backend-record-readers-do-not-use-launch-readiness´
+#[test]
+fn boxed_backend_record_readers_do_not_use_launch_readiness() {
+    let fixture = TempDir::new().expect("owner home");
+    let home = fixture.path();
+    let config = home.join(".config/loops/alpha");
+    fs::create_dir_all(&config).expect("configuration");
+    for path in [
+        home.to_path_buf(),
+        home.join(".config"),
+        home.join(".config/loops"),
+        config.clone(),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("private directory");
+    }
+    let path = config.join("workers.toml");
+    fs::write(&path, "backend_argv = { claude = [\"/fixture/claude\"] }\n")
+        .expect("Claude-only settings");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private settings");
+    for result in [
+        crate::load_plan(home, "alpha", "R", (0, 0)),
+        crate::load_plan_for_record(home, "alpha", "R", (0, 0)),
+    ] {
+        let error = result.expect_err("Codex reader requires its own configured program");
+        assert_eq!(error.kind, "missing-setting");
+        assert_eq!(error.detail, "backend_argv.codex is absent or empty");
+    }
+    let error = crate::load_launch_plan(home, "alpha", "R", (0, 0), None)
+        .expect_err("new Claude launch remains gated before registry access");
+    assert_eq!(error.kind, "backend-unavailable");
+    assert!(!home.join(".config/loops/registry.toml").exists());
+    assert!(!home.join(".var").exists());
+}
+
+/// ´test:crate:boxed-backend-claude-layout-is-vendor-specific-and-not-executable´
+#[test]
+fn boxed_backend_claude_layout_is_vendor_specific_and_not_executable() {
+    for vendors in [&["claude"][..], &["codex", "claude"][..]] {
+        let mut settings = backend_settings(vendors);
+        settings.driver_argv = vec!["/fixture/superloop-lane".into()];
+        settings.driver_bin = Some("/fixture/superloop-lane".into());
+        settings.template_dir = Some("/fixture/claude-template".into());
+        let plan = crate::plan::Plan::build_with_door(
+            std::path::Path::new("/fixture/owner"),
+            "alpha",
+            "R",
+            &settings,
+            &super::fixture_row(),
+            super::fixture_block(),
+            (1000, 1000),
+            false,
+            Some(BoxBackend::Claude),
+        )
+        .expect("Claude layout");
+        assert_eq!(plan.document["backend"], "claude");
+        assert_eq!(
+            plan.document["environment"]["CLAUDE_CONFIG_DIR"],
+            "/home/worker/.claude"
+        );
+        assert!(plan.document["environment"]["CODEX_HOME"].is_null());
+        assert_eq!(plan.document["runtime_argv"], json!([]));
+        assert_eq!(plan.document["owner_refresh_hosts"], json!([]));
+        assert_eq!(plan.document["box_gate"]["verdict"], "unavailable");
+        assert_eq!(
+            crate::plan::verify_box_attestation(&plan.document)
+                .expect_err("layout is never runtime acceptance")
+                .kind,
+            "backend-unavailable"
+        );
+        let mounts = plan.document["mounts"].as_array().expect("mounts");
+        for (target, access) in [
+            ("/home/worker", "ro"),
+            ("/home/worker/.claude", "rw"),
+            ("/home/worker/.claude/settings.json", "ro"),
+            ("/home/worker/.claude/CLAUDE.md", "ro"),
+        ] {
+            assert!(
+                mounts
+                    .iter()
+                    .any(|row| row["target"] == target && row["access"] == access)
+            );
+        }
+        assert!(!plan.json().expect("layout JSON").contains("codex"));
+        for field in ["backend", "environment"] {
+            let mut changed = plan.document.clone();
+            if field == "backend" {
+                changed[field] = json!("codex");
+            } else {
+                changed[field]["CODEX_HOME"] = json!("/home/worker/.codex");
+            }
+            assert_eq!(
+                crate::plan::verify_home_layout(&changed)
+                    .expect_err("cross-vendor state")
+                    .kind,
+                "backend-layout"
+            );
+        }
+    }
+}
+
+/// ´test:crate:boxed-backend-claude-home-creates-only-its-state-and-immutable-mountpoints´
+#[test]
+fn boxed_backend_claude_home_creates_only_its_state_and_immutable_mountpoints() {
+    let fixture = TempDir::new().expect("home fixture");
+    let root = fixture.path();
+    fs::create_dir_all(root.join(".cache/tmp")).expect("home parent");
+    fs::create_dir(root.join("runs")).expect("runs parent");
+    let settings = backend_settings(&["claude"]);
+    let row = json!({"name":"alpha","uid":41001,"runs_root":root.join("runs")});
+    let caller = (
+        nix::unistd::Uid::effective().as_raw(),
+        nix::unistd::Gid::effective().as_raw(),
+    );
+    let plan = crate::plan::Plan::build_with_door(
+        root,
+        "alpha",
+        "R",
+        &settings,
+        &row,
+        super::fixture_block(),
+        caller,
+        false,
+        Some(BoxBackend::Claude),
+    )
+    .expect("Claude layout");
+    let home_parent: std::os::fd::OwnedFd = fs::File::open(root.join(".cache/tmp"))
+        .expect("home parent")
+        .into();
+    let runs_parent: std::os::fd::OwnedFd = fs::File::open(root.join("runs"))
+        .expect("runs parent")
+        .into();
+    let report = crate::home::make_home_pinned(
+        &plan,
+        &settings,
+        b"Fixture brief.\n",
+        caller,
+        &home_parent,
+        &runs_parent,
+    )
+    .expect("make Claude layout");
+    let state = plan.home.join(".claude");
+    assert_eq!(
+        fs::metadata(&state).expect("state").permissions().mode() & 0o777,
+        0o700
+    );
+    let mut names: Vec<_> = fs::read_dir(&state)
+        .expect("state entries")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["CLAUDE.md", "settings.json"]);
+    for name in ["CLAUDE.md", "settings.json"] {
+        let path = state.join(name);
+        assert_eq!(fs::read(&path).expect("empty mountpoint"), [] as [u8; 0]);
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("mountpoint")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    assert!(!plan.home.join(".codex").exists());
+    assert!(!plan.home.join(".local/sign-in").exists());
+    let created = report["created"].as_array().expect("created paths");
+    let state_row = created
+        .iter()
+        .find(|row| row["path"] == state.display().to_string())
+        .expect("state report");
+    assert_eq!(state_row["wanted"]["uid"], 3000);
+    assert_eq!(state_row["wanted"]["gid"], 3000);
+    assert_eq!(fs::read(&plan.letter).expect("brief"), b"Fixture brief.\n");
 }
 
 fn run(

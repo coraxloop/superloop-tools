@@ -44,6 +44,38 @@ impl BoxBackend {
         }
     }
 
+    /// Worker-owned state leaf beneath the read-only home.
+    pub(crate) const fn state_leaf(self) -> &'static str {
+        match self {
+            Self::Codex => ".codex",
+            Self::Claude => ".claude",
+        }
+    }
+
+    /// Configuration root used by the selected program inside the box.
+    pub(crate) const fn state_home(self) -> &'static str {
+        match self {
+            Self::Codex => "/home/worker/.codex",
+            Self::Claude => "/home/worker/.claude",
+        }
+    }
+
+    /// Environment key selecting the vendor's state root.
+    pub(crate) const fn home_variable(self) -> &'static str {
+        match self {
+            Self::Codex => "CODEX_HOME",
+            Self::Claude => "CLAUDE_CONFIG_DIR",
+        }
+    }
+
+    /// Immutable configuration and charter files supplied by the template.
+    pub(crate) const fn template_files(self) -> [&'static str; 2] {
+        match self {
+            Self::Codex => ["config.toml", "AGENTS.md"],
+            Self::Claude => ["settings.json", "CLAUDE.md"],
+        }
+    }
+
     /// Read an explicit backend from a protected plan, never from current defaults.
     ///
     /// # Errors

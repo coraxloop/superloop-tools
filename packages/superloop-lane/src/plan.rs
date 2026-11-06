@@ -519,13 +519,16 @@ pub(crate) fn mount_inventory(
                 "/home/worker" => "worker-home",
                 "/mail" => "worker-mail",
                 "/home/worker/.codex"
+                | "/home/worker/.claude"
                 | "/home/worker/.cache/work"
                 | "/home/worker/.local/outbox"
                 | "/home/worker/.local/sources" => "worker-leaf",
                 "/home/worker/.local/bin"
                 | "/home/worker/.local/libexec/superloop"
                 | "/home/worker/.codex/config.toml"
-                | "/home/worker/.codex/AGENTS.md" => "runner-template",
+                | "/home/worker/.codex/AGENTS.md"
+                | "/home/worker/.claude/settings.json"
+                | "/home/worker/.claude/CLAUDE.md" => "runner-template",
                 "/home/worker/.local/vendor" => "capability-proxy",
                 "/home/worker/.local/door" => "capability-door",
                 "/etc/passwd" | "/etc/group" => "run-identity",
@@ -1032,6 +1035,79 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
     )
 }
 
+/// Check vendor-specific state and immutable mounts before creating a home.
+///
+/// # Errors
+/// Refuses a missing leaf, cross-vendor state, or a changed template binding.
+pub(crate) fn verify_home_layout(document: &Value) -> Result<(), LaneError> {
+    let backend = crate::settings::BoxBackend::from_plan(document)?;
+    let home = required(document, "home")?;
+    let leaf = format!("{home}/{}", backend.state_leaf());
+    let state = backend.state_home();
+    let paths = document["paths"]
+        .as_array()
+        .ok_or_else(|| LaneError::input("backend-layout", "home paths are absent"))?;
+    let mounts = document["mounts"]
+        .as_array()
+        .ok_or_else(|| LaneError::input("backend-layout", "home mounts are absent"))?;
+    let other = match backend {
+        crate::settings::BoxBackend::Codex => crate::settings::BoxBackend::Claude,
+        crate::settings::BoxBackend::Claude => crate::settings::BoxBackend::Codex,
+    };
+    let other_leaf = format!("{home}/{}", other.state_leaf());
+    let wrong_vendor = paths.iter().any(|row| {
+        row["path"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).starts_with(&other_leaf))
+    }) || mounts.iter().any(|mount| {
+        mount["target"]
+            .as_str()
+            .is_some_and(|target| Path::new(target).starts_with(other.state_home()))
+    }) || !document["environment"][other.home_variable()].is_null();
+    let state_row = paths.iter().any(|row| {
+        row["path"] == leaf
+            && row["kind"] == "directory"
+            && row["mode"] == "0700"
+            && row["uid"] == document["worker_uid"]
+            && row["gid"] == document["worker_uid"]
+    });
+    let state_mount = mounts.iter().any(|mount| {
+        mount["target"] == state && mount["source"] == leaf && mount["access"] == "rw"
+    });
+    let immutable = backend.template_files().iter().all(|name| {
+        let target = format!("{state}/{name}");
+        mounts.iter().any(|mount| {
+            mount["target"] == target
+                && mount["access"] == "ro"
+                && mount["kind"] == "bind"
+                && mount["source"].as_str().is_some_and(|source| {
+                    Path::new(source).file_name() == Some(std::ffi::OsStr::new(name))
+                        && document["mount_sources"].as_array().is_some_and(|rows| {
+                            rows.iter().any(|row| {
+                                row["path"] == source
+                                    && row["kind"] == "file"
+                                    && row["mode"] == "0440"
+                            })
+                        })
+                })
+        }) && paths
+            .iter()
+            .any(|row| row["path"] == format!("{leaf}/{name}") && row["kind"] == "mountpoint")
+    });
+    if wrong_vendor
+        || !state_row
+        || !state_mount
+        || !immutable
+        || document["environment"][backend.home_variable()] != state
+    {
+        return Err(LaneError::input(
+            "backend-layout",
+            format!("{} home differs from its backend binding", backend.name()),
+        ));
+    }
+    Ok(())
+}
+
 /// Verify that the stored gate attests the current complete vector.
 ///
 /// # Errors
@@ -1356,7 +1432,6 @@ impl Plan {
             LaneError::input("missing-setting", "driver_argv is absent in workers.toml")
         })?;
         let backend = settings.launch_backend(requested_backend)?;
-        backend.require_runtime()?;
         let backend_argv = &settings.backend_argv[backend.name()];
         let template_dir = settings.template_dir.as_ref().ok_or_else(|| {
             LaneError::input("missing-setting", "template_dir is absent in workers.toml")
@@ -1468,30 +1543,34 @@ impl Plan {
         )?;
         row(
             &mut rows,
-            home.join(".codex"),
+            home.join(backend.state_leaf()),
             worker_uid,
             worker_uid,
             0o700,
             "directory",
         )?;
-        for name in ["config.toml", "AGENTS.md"] {
+        for name in backend.template_files() {
             row(
                 &mut rows,
-                home.join(".codex").join(name),
+                home.join(backend.state_leaf()).join(name),
                 worker_uid,
                 worker_uid,
                 0o600,
                 "mountpoint",
             )?;
         }
-        row(
-            &mut rows,
-            home.join(".codex/auth.json"),
-            worker_uid,
-            worker_uid,
-            0o600,
-            "file",
-        )?;
+        // Claude's token-only credential form is measured by its adapter trial;
+        // no guessed credential file or owner sign-in is part of this layout.
+        if backend == crate::settings::BoxBackend::Codex {
+            row(
+                &mut rows,
+                home.join(".codex/auth.json"),
+                worker_uid,
+                worker_uid,
+                0o600,
+                "file",
+            )?;
+        }
         row(
             &mut rows,
             home.join(".cache"),
@@ -1648,7 +1727,7 @@ impl Plan {
                 "directory",
             )?;
         }
-        for name in ["config.toml", "AGENTS.md"] {
+        for name in backend.template_files() {
             row(
                 &mut mount_source_rows,
                 t.join(name),
@@ -1678,7 +1757,12 @@ impl Plan {
         }
         let mut mounts = Vec::new();
         mount(&mut mounts, &path(&home)?, "/home/worker", "ro", "bind");
-        for leaf in [".codex", ".cache/work", ".local/outbox", ".local/sources"] {
+        for leaf in [
+            backend.state_leaf(),
+            ".cache/work",
+            ".local/outbox",
+            ".local/sources",
+        ] {
             mount(
                 &mut mounts,
                 &path(&home.join(leaf))?,
@@ -1701,20 +1785,15 @@ impl Plan {
             "ro",
             "bind",
         );
-        mount(
-            &mut mounts,
-            &path(&t.join("config.toml"))?,
-            "/home/worker/.codex/config.toml",
-            "ro",
-            "bind",
-        );
-        mount(
-            &mut mounts,
-            &path(&t.join("AGENTS.md"))?,
-            "/home/worker/.codex/AGENTS.md",
-            "ro",
-            "bind",
-        );
+        for name in backend.template_files() {
+            mount(
+                &mut mounts,
+                &path(&t.join(name))?,
+                &format!("{}/{name}", backend.state_home()),
+                "ro",
+                "bind",
+            );
+        }
         mount(
             &mut mounts,
             &path(&s.join("vendor"))?,
@@ -1807,7 +1886,7 @@ impl Plan {
         let mut env = BTreeMap::new();
         for (key, value) in [
             ("HOME", "/home/worker"),
-            ("CODEX_HOME", "/home/worker/.codex"),
+            (backend.home_variable(), backend.state_home()),
             ("XDG_CACHE_HOME", "/home/worker/.cache"),
             ("XDG_RUNTIME_DIR", "/run/worker"),
             ("TMPDIR", "/tmp"),
@@ -1886,7 +1965,7 @@ impl Plan {
         ]);
         for key in [
             "HOME",
-            "CODEX_HOME",
+            backend.home_variable(),
             "XDG_CACHE_HOME",
             "XDG_RUNTIME_DIR",
             "TMPDIR",
@@ -1913,21 +1992,27 @@ impl Plan {
             .map(String::from),
         );
         args.push(image_digest.clone());
-        args.push("/home/worker/.local/bin/codex".into());
-        args.extend(backend_argv.iter().skip(1).cloned());
-        args.extend(["exec", "--json", "--sandbox"].map(String::from));
-        args.push(settings.sandbox_mode.clone());
-        args.extend(
-            [
-                "--skip-git-repo-check",
-                "-C",
-                "/home/worker/.cache/work",
-                "-o",
-                "/home/worker/.cache/work/last-message.md",
-            ]
-            .map(String::from),
-        );
-        args.push("-".into());
+        if backend == crate::settings::BoxBackend::Codex {
+            args.push("/home/worker/.local/bin/codex".into());
+            args.extend(backend_argv.iter().skip(1).cloned());
+            args.extend(["exec", "--json", "--sandbox"].map(String::from));
+            args.push(settings.sandbox_mode.clone());
+            args.extend(
+                [
+                    "--skip-git-repo-check",
+                    "-C",
+                    "/home/worker/.cache/work",
+                    "-o",
+                    "/home/worker/.cache/work/last-message.md",
+                ]
+                .map(String::from),
+            );
+            args.push("-".into());
+        } else {
+            // A layout is not an executable Claude plan. Keep the launch gate
+            // closed until entry, image, runtime and credential adapters exist.
+            args.clear();
+        }
         let inventory = mount_inventory(&mounts, &rows, &mount_source_rows)?;
         let vendor_hosts = settings
             .vendor_hosts
@@ -1939,7 +2024,8 @@ impl Plan {
                 == home_root
                     .join(".var/loops")
                     .join(loop_name)
-                    .join("runner-templates/codex")
+                    .join("runner-templates")
+                    .join(backend.name())
                     .join(digest)
                     .as_path()
                 && socket_dir.as_path()
@@ -1958,7 +2044,15 @@ impl Plan {
             document["door"]["peer_uid"] = json!(worker_uid);
             document["door"]["mirror_ref"] = json!(format!("refs/heads/lane/{run}"));
         }
-        document["box_gate"] = box_gate(&document)?;
+        if backend == crate::settings::BoxBackend::Codex {
+            document["box_gate"] = box_gate(&document)?;
+        } else {
+            document["owner_refresh_hosts"] = json!([]);
+            document["runtime_measurement"] =
+                json!("unavailable; Claude runtime adapter is not implemented");
+            document["box_gate"] = json!({"verdict":"unavailable","reason":"backend-unavailable"});
+        }
+        verify_home_layout(&document)?;
         if include_door && installed_roots && !document["door"].is_object() {
             let service = home_root
                 .join(".config/loops")

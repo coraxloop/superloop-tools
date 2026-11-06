@@ -1409,7 +1409,8 @@ fn make_home_pinned_with_sources(
     held_sources: &mut Option<OwnedFd>,
 ) -> Result<serde_json::Value, LaneError> {
     let backend = crate::settings::BoxBackend::from_plan(&plan.document)?;
-    settings.launch_backend(Some(backend))?.require_runtime()?;
+    settings.launch_backend(Some(backend))?;
+    crate::plan::verify_home_layout(&plan.document)?;
     let declared_sources = crate::launch::declared_sources(letter_bytes)?;
     require_absent(home_parent, &plan.home)?;
     require_absent(driver_parent, &plan.driver_dir)?;
@@ -1496,24 +1497,26 @@ fn make_home_pinned_with_sources(
         0o640,
     )?;
     report_file(&mut reports, &file, &git_path, caller.0, loop_uid, 0o640)?;
-    let codex_path = plan.home.join(".codex");
-    let codex = make_dir(&h, &codex_path, 0o700)?;
-    report_dir(&mut reports, &codex, &codex_path, worker, worker, 0o700)?;
-    for name in ["config.toml", "AGENTS.md"] {
-        let path = codex_path.join(name);
-        let file = make_file(&codex, &path, b"", 0o600)?;
+    let state_path = plan.home.join(backend.state_leaf());
+    let state = make_dir(&h, &state_path, 0o700)?;
+    report_dir(&mut reports, &state, &state_path, worker, worker, 0o700)?;
+    for name in backend.template_files() {
+        let path = state_path.join(name);
+        let file = make_file(&state, &path, b"", 0o600)?;
         report_file(&mut reports, &file, &path, worker, worker, 0o600)?;
     }
-    let credential_path = codex_path.join("auth.json");
-    let credential = make_file(&codex, &credential_path, b"", 0o600)?;
-    report_file(
-        &mut reports,
-        &credential,
-        &credential_path,
-        worker,
-        worker,
-        0o600,
-    )?;
+    if backend == crate::settings::BoxBackend::Codex {
+        let credential_path = state_path.join("auth.json");
+        let credential = make_file(&state, &credential_path, b"", 0o600)?;
+        report_file(
+            &mut reports,
+            &credential,
+            &credential_path,
+            worker,
+            worker,
+            0o600,
+        )?;
+    }
     let cache_path = plan.home.join(".cache");
     let cache = make_dir(&h, &cache_path, 0o700)?;
     report_dir(&mut reports, &cache, &cache_path, worker, worker, 0o700)?;
