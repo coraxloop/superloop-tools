@@ -101,11 +101,6 @@ fn rendered_routes_pass_signin_check_and_reconcile() {
             .env("HOME", home)
             .args([action, "--backend", "codex", "alpha", "--project"])
             .arg(home)
-            .args(if action == "check-signin-home" {
-                vec!["--nodes", "owl,jay"]
-            } else {
-                Vec::new()
-            })
             .args(extra)
             .output()
             .expect("sign-in command")
@@ -178,7 +173,7 @@ fn assert_registry_selection(
         let preview = signin("prepare-signin-home", &arguments);
         assert!(preview.status.success(), "{preview:?}");
         let report: serde_json::Value = serde_json::from_slice(&preview.stdout).expect("plan");
-        let mut arguments = selection;
+        let mut arguments = selection.clone();
         arguments.extend([
             "--reconcile",
             "--expect-digest",
@@ -186,6 +181,8 @@ fn assert_registry_selection(
         ]);
         let applied = signin("prepare-signin-home", &arguments);
         assert!(applied.status.success(), "{applied:?}");
+        let checked = signin("check-signin-home", &selection);
+        assert!(checked.status.success(), "{checked:?}");
         let config = fs::read_to_string(home.join(".config/loops/alpha/codex/ssh_config"))
             .expect("reconciled config");
         let mut actual = config

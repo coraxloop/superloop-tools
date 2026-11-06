@@ -346,11 +346,7 @@ fn settings(args: &[String], verify: bool) -> Result<Settings> {
     }
     names.sort_unstable();
     let mut missing = Vec::new();
-    let selected = if verify && names.is_empty() {
-        Ok(Vec::new())
-    } else {
-        selected_routes(&owner, &name, &names, &value("--hosts"))
-    };
+    let selected = selected_routes(&owner, &name, &names, &value("--hosts"));
     let (routes, route_refusal) =
         match selected.and_then(|rows| registry_account(rows, values.get("--user"))) {
             Ok(rows) => (rows, None),

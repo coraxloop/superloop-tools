@@ -172,10 +172,10 @@ set +e
 status=$?
 set -e
 [[ $status -eq 1 ]] || fail "verification without nodes exit was $status"
-expect_line "$TEST_ROOT/verify-no-nodes.out" "{\"loop\":\"alpha\",\"home\":\"$FAKE_HOME/.config/loops/alpha/codex\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"nodes\",\"hosts\",\"user\",\"key\"],\"varied\":[],\"varied_lines\":[]}" "verification without nodes JSON"
+expect_line "$TEST_ROOT/verify-no-nodes.out" "{\"loop\":\"alpha\",\"home\":\"$FAKE_HOME/.config/loops/alpha/codex\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"home\"],\"varied\":[],\"varied_lines\":[]}" "verification without nodes JSON"
 [[ ! -s $TEST_ROOT/verify-no-nodes.err ]] || fail "verification without nodes wrote stderr"
 [[ ! -e $FAKE_HOME/.config/loops/alpha/codex ]] || fail "verification without nodes created home"
-pass "verification without nodes reports missing nodes" "$start"
+pass "verification without nodes reports the absent home" "$start"
 
 start=$(date +%s%N)
 charter=$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md
