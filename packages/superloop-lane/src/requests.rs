@@ -445,6 +445,16 @@ impl RequestRecord {
                 "preflight state is absent",
             ));
         }
+        if preflight
+            && ["bound", "output_bytes"]
+                .iter()
+                .any(|key| value["effect"].get(key).is_some())
+        {
+            return Err(refusal(
+                "requests-record-refusal",
+                "preflight refusals cannot contain upload output evidence",
+            ));
+        }
         if value["effect"].get("bound").is_some() != value["effect"].get("output_bytes").is_some() {
             return Err(refusal(
                 "requests-record-refusal",
@@ -852,6 +862,12 @@ pub(crate) mod tests {
                 .remove(key);
         }
         assert!(RequestRecord::decode(original.clone()).is_ok());
+        for bound in [1, super::MAX_UPLOAD_OUTPUT_LIMIT] {
+            let mut record = original.clone();
+            record["effect"]["bound"] = json!(bound);
+            record["effect"]["output_bytes"] = json!(super::MAX_UPLOAD_OUTPUT_LIMIT + 1);
+            assert!(RequestRecord::decode(record).is_ok());
+        }
         for (key, good, bad) in [
             (
                 "bound",
@@ -859,7 +875,7 @@ pub(crate) mod tests {
                 vec![
                     json!(0),
                     json!(-1),
-                    json!(1_073_741_825_u64),
+                    json!(super::MAX_UPLOAD_OUTPUT_LIMIT + 1),
                     json!(1.5),
                     json!("16"),
                     Value::Null,

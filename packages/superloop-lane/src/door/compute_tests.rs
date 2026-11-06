@@ -4,6 +4,7 @@ use super::{
     Registration, Scope, compute, frame_read, frame_read_until, frame_write, serve_request,
 };
 use crate::requests::{
+    RequestRecord,
     modes::Rubric,
     store::{Store, tests::Fixture},
 };
@@ -178,6 +179,72 @@ fn door_compute_generator_forms_use_production_entry() {
             );
         }
     }
+}
+
+/// # Panics
+/// Panics if preflight upload evidence reaches a reader or a refused read changes custody.
+/// ´test:unit:door-preflight-readers-refuse-upload-evidence´
+#[test]
+fn door_preflight_readers_refuse_upload_evidence() {
+    let fixture = Fixture::new();
+    let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+    let (reply, _, _) = compute_call(&socket, "/opt/fixture/bin/report cargo run --bin generator");
+    server.join().expect("server").expect("service");
+    assert_eq!(reply["reason"], "door-compute-locked-refusal");
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    let path = fixture.home.join("runs/.launch-R/door-requests.json");
+    let original_bytes = std::fs::read(&path).expect("production preflight record");
+    let original: Value = serde_json::from_slice(&original_bytes).expect("run record");
+    let record = &original["requests"][0];
+    assert_eq!(record["state"], "preflight-refused");
+    assert!(record["effect"].get("bound").is_none());
+    assert!(record["effect"].get("output_bytes").is_none());
+    RequestRecord::decode(record.clone()).expect("ordinary preflight accepted");
+    for action in ["status", "list"] {
+        fixture
+            .command(&[action, "alpha"], b"")
+            .expect("ordinary preflight reader");
+    }
+    for evidence in [
+        json!({"bound":1,"output_bytes":0}),
+        json!({"bound":crate::requests::MAX_UPLOAD_OUTPUT_LIMIT,"output_bytes":0}),
+        json!({"bound":1}),
+        json!({"output_bytes":0}),
+        json!({"bound":null,"output_bytes":null}),
+    ] {
+        let mut changed = original.clone();
+        changed["requests"][0]["effect"]
+            .as_object_mut()
+            .expect("effect")
+            .extend(evidence.as_object().expect("evidence").clone());
+        let error = RequestRecord::decode(changed["requests"][0].clone())
+            .expect_err("preflight upload evidence refused");
+        assert_eq!(error.kind, "requests-record-refusal");
+        assert_eq!(
+            error.detail,
+            "preflight refusals cannot contain upload output evidence"
+        );
+        let bytes = serde_json::to_vec(&changed).expect("changed record");
+        fixture
+            .store()
+            .fixture_replace_run_bytes("R", &bytes)
+            .expect("inject evidence");
+        for action in ["status", "list"] {
+            let error = fixture
+                .command(&[action, "alpha"], b"")
+                .expect_err("shared reader refuses preflight upload evidence");
+            assert_eq!(error.kind, "requests-record-refusal");
+            assert_eq!(
+                error.detail,
+                "preflight refusals cannot contain upload output evidence"
+            );
+            assert_eq!(std::fs::read(&path).expect("unchanged custody"), bytes);
+        }
+    }
+    fixture
+        .store()
+        .fixture_replace_run_bytes("R", &original_bytes)
+        .expect("restore record");
 }
 
 /// ´test:unit:door-compute-preflight-refusals-survive-request-readers´
