@@ -28,7 +28,7 @@
 //! | [`counts_columns_in_characters`] | report | Columns are counted in characters rather than bytes, so an accented letter earlier in the line does not push the reported column past where the reader's cursor actually sits. |
 //! | [`clamps_offsets_past_the_end`] | report | An offset beyond the end of a source clamps to the end rather than panicking, so a caller's arithmetic mistake costs an imprecise location and never the whole run. |
 //! | [`near_misses_are_warnings_and_the_rest_are_failures`] | report | The severity split falls in one place: a near miss and the three reports of an activation that reaches nothing are warnings, and every other finding is a failure. A span that merely looks like a label therefore cannot fail a run, and neither can a report of what an activation reached, while anything the calculus actually rejects always does. |
-//! | [`traversal_failures_do_not_duplicate_message_keys_when_flattened`] | report | A flattened traversal-failure finding emits one JSON `message` key: the generic human sentence carries that name, while the finding's own cause uses a distinct key strict JSON consumers can parse. # Panics Panics only when the finding cannot be serialized or parsed back as a JSON object. |
+//! | [`traversal_failures_do_not_duplicate_message_keys_when_flattened`] | report | A flattened traversal-failure finding emits one JSON `message` key: the generic human sentence carries that name, while the finding's own cause uses a distinct key strict JSON consumers can parse. |
 
 use std::fmt;
 use std::path::{Path, PathBuf};

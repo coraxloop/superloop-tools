@@ -4,7 +4,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`publication_classification_is_optional_and_complete`] | integration | A missing manifest is inert; a declared set judges unknown files and dead rows. # Panics Panics only if fixture IO fails or the command violates the classification contract. |
+//! | [`publication_classification_is_optional_and_complete`] | integration | A missing manifest is inert; a declared set judges unknown files and dead rows. |
 
 use std::fs;
 use std::path::Path;

@@ -5,7 +5,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`the_repository_owner_surface_reconciles_in_both_directions`] | owners | The declared partition attributes every live path exactly once to the 27 manifest owners and the crateless repository owner, with the declared shape exclusions and the imported generic owner added without a partition; its 38 crate-to-crate may-cite rows equal internal path dependencies, its ten edges to the imported generic owner are declaration-authoritative and reach no partition of this tree, seven edges reach the crateless repository owner, and no imported owner receives a manifest edge. # Panics Panics only when this checkout cannot be read or parsed, or when its owner, partition, crate-name, or direct-reach facts diverge from the declaration. |
+//! | [`the_repository_owner_surface_reconciles_in_both_directions`] | owners | The declared partition attributes every live path exactly once to the 27 manifest owners and the crateless repository owner, with the declared shape exclusions and the imported generic owner added without a partition; its 38 crate-to-crate may-cite rows equal internal path dependencies, its ten edges to the imported generic owner are declaration-authoritative and reach no partition of this tree, seven edges reach the crateless repository owner, and no imported owner receives a manifest edge. |
 
 //! Repository owner-partition and manifest-reach integration tests.
 

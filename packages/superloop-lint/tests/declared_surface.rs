@@ -5,7 +5,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`the_repository_snapshot_loads_as_one_exact_surface`] | declarations | The repository exposes exactly the fixed and parameter declaration documents, while the imports directory belongs to the registry loader; every envelope parses independently, and the atomic loader accepts their joined snapshot with 34 partitions, 55 may-cite rows and three list rows. The declared environment relation is also the exact relation the imported generic snapshot publishes, with the generic title genres held as extensions. # Panics Panics only when this checkout cannot be read or parsed, or when its declared surface differs from the repository facts asserted here. |
+//! | [`the_repository_snapshot_loads_as_one_exact_surface`] | declarations | The repository exposes exactly the fixed and parameter declaration documents, while the imports directory belongs to the registry loader; every envelope parses independently, and the atomic loader accepts their joined snapshot with 34 partitions, 55 may-cite rows and three list rows. The declared environment relation is also the exact relation the imported generic snapshot publishes, with the generic title genres held as extensions. |
 
 //! Repository declaration-loading integration tests.
 
