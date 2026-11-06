@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Built-binary cut regressions pin the refusals of an absent and a failed linter, malformed citation JSON and an unknown protocol namespace or version, with measured protocol fixtures, retained failure diagnostics and no publication on refusal (``prob:pack:cut-executable-route-refusals-tested``).
+
 - Request rewrite previews mark each custody file with a digest-bound `changed` flag and name the fixed conversion schema pair explicitly (``prob:door:requests-rewrite-preview-omits-unchanged-files``).
 
 - The README names the built and installed public commands, private helpers and build-only report tool while retaining the source-consumer lockfile policy (``sec:publictools:build``).

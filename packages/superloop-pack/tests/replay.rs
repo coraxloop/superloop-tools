@@ -1,4 +1,4 @@
-//! Built-binary replay metadata, deterministic mapping and no-write refusals.
+//! Built-binary cut and replay contracts, deterministic mapping and no-write refusals.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1464,6 +1464,14 @@ fn manifest_register_collisions_refuse_before_publication() {
 }
 
 fn manifest_cut(fixture: &Fixture, out: &Path) -> Output {
+    manifest_cut_command(fixture, out)
+        .arg("--linter")
+        .arg(std::env::var_os("PUBLIC_PACK_TEST_LINTER").expect("real linter"))
+        .output()
+        .expect("manifest cut")
+}
+
+fn manifest_cut_command(fixture: &Fixture, out: &Path) -> Command {
     let tag = format!(
         "manifest-{}",
         out.file_name()
@@ -1472,7 +1480,8 @@ fn manifest_cut(fixture: &Fixture, out: &Path) -> Output {
             .expect("UTF-8")
     );
     git(&fixture.source, &["tag", &tag]);
-    pack(&fixture.source)
+    let mut command = pack(&fixture.source);
+    command
         .args([
             "cut",
             "--tag",
@@ -1485,11 +1494,140 @@ fn manifest_cut(fixture: &Fixture, out: &Path) -> Output {
         ])
         .arg(out)
         .arg("--burn-register")
-        .arg(&fixture.burn)
-        .arg("--linter")
-        .arg(std::env::var_os("PUBLIC_PACK_TEST_LINTER").expect("real linter"))
+        .arg(&fixture.burn);
+    command
+}
+
+fn citation_probe(fixture: &Fixture) -> String {
+    let output = Command::new(std::env::var_os("PUBLIC_PACK_TEST_LINTER").expect("real linter"))
+        .args(["citation-sites", "--root"])
+        .arg(&fixture.source)
         .output()
-        .expect("manifest cut")
+        .expect("citation probe");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("citation protocol text");
+    let observed: serde_json::Value =
+        serde_json::from_str(&text).expect("recorded citation protocol");
+    assert!(observed.is_object());
+    text
+}
+
+fn citation_transport(fixture: &Fixture, payload: &str, status: u8) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = fixture.scratch.join("citation-transport");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n[ \"$#\" -eq 3 ] && [ \"$1\" = citation-sites ] && [ \"$2\" = --root ] && [ -d \"$3/.git\" ] || exit 90\ncat <<'CITATION_FIXTURE'\n{}\nCITATION_FIXTURE\nprintf '%s\\n' fixture-linter-stderr >&2\nexit {status}\n",
+            payload.trim_end()
+        ),
+    )
+    .expect("fixture transport");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("executable transport");
+    path
+}
+
+fn cut_route_refusal(fixture: &Fixture, linter: Option<&Path>, expected: &str) -> String {
+    let out = fixture.scratch.join("refused-route");
+    let mut command = manifest_cut_command(fixture, &out);
+    command.env("TMPDIR", &fixture.scratch);
+    if let Some(linter) = linter {
+        command.arg("--linter").arg(linter);
+    }
+    let refs = git(&fixture.source, &["show-ref"]);
+    let state = git(&fixture.source, &["status", "--porcelain=v1", "--ignored"]);
+    let output = command.output().expect("cut refusal");
+    let text = String::from_utf8(output.stdout).expect("cut report");
+    assert_eq!(output.status.code(), Some(3), "{text}");
+    assert!(text.contains(expected), "{text}");
+    assert!(!out.exists());
+    assert_eq!(git(&fixture.source, &["show-ref"]), refs);
+    assert_eq!(
+        git(&fixture.source, &["status", "--porcelain=v1", "--ignored"]),
+        state
+    );
+    text
+}
+
+/// A cut requiring citation sites refuses an absent linter before publication.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the built cut accepts a missing linter or changes output.
+/// ´test:integration:cut-route-refuses-missing-linter´
+#[test]
+fn cut_route_refuses_missing_linter() {
+    let fixture = Fixture::new();
+    cut_route_refusal(&fixture, None, "unpublished labels require --linter");
+}
+
+/// A failed citation executable retains its stdout and stderr and refuses before publication.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the cut loses diagnostics or changes output on refusal.
+/// ´test:integration:cut-route-refuses-failed-linter´
+#[test]
+fn cut_route_refuses_failed_linter() {
+    let fixture = Fixture::new();
+    let observed = citation_probe(&fixture);
+    let linter = citation_transport(&fixture, &observed, 7);
+    let report = cut_route_refusal(&fixture, Some(&linter), "citation-sites linter refused");
+    let path = report
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("cut outcome=")
+                .and_then(|line| line.split_once("diagnostic scratch=").map(|(_, path)| path))
+        })
+        .expect("retained diagnostic path");
+    assert!(Path::new(path).starts_with(&fixture.scratch), "{report}");
+    assert_eq!(
+        fs::read_to_string(Path::new(path).join("citation-sites.stdout")).expect("stdout"),
+        format!("{}\n", observed.trim_end())
+    );
+    assert_eq!(
+        fs::read_to_string(Path::new(path).join("citation-sites.stderr")).expect("stderr"),
+        "fixture-linter-stderr\n"
+    );
+}
+
+/// A successful executable with truncated measured citation JSON refuses before publication.
+///
+/// # Panics
+/// Panics only if fixture IO fails or malformed protocol bytes are accepted or change output.
+/// ´test:integration:cut-route-refuses-malformed-json´
+#[test]
+fn cut_route_refuses_malformed_json() {
+    let fixture = Fixture::new();
+    let observed = citation_probe(&fixture);
+    let observed = observed.trim_end();
+    assert!(observed.ends_with('}'));
+    let linter = citation_transport(&fixture, &observed[..observed.len() - 1], 0);
+    cut_route_refusal(&fixture, Some(&linter), "invalid citation-sites JSON");
+}
+
+/// Unknown citation namespaces and versions refuse even when the executable returns valid JSON.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an unknown protocol is accepted or changes output.
+/// ´test:integration:cut-route-refuses-unknown-protocol´
+#[test]
+fn cut_route_refuses_unknown_protocol() {
+    for field in ["namespace", "version"] {
+        let fixture = Fixture::new();
+        let observed = citation_probe(&fixture);
+        let mut document: serde_json::Value =
+            serde_json::from_str(&observed).expect("measured JSON");
+        document[field] = if field == "namespace" {
+            serde_json::json!("class.fixture.unknown-citation-sites")
+        } else {
+            serde_json::json!([99, 0, 0])
+        };
+        let linter = citation_transport(&fixture, &document.to_string(), 0);
+        cut_route_refusal(&fixture, Some(&linter), "unknown citation-sites protocol");
+    }
 }
 
 /// A generated register cannot be declared without a selected owner snapshot.
