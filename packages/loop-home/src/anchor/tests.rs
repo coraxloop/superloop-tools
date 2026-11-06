@@ -1,6 +1,6 @@
 use super::*;
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
