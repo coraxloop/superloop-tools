@@ -996,6 +996,97 @@ fn historical_publication_name_is_preserved() {
     assert!(final_manifest.contains("name = \"renamed-fixture\""));
 }
 
+/// A malformed historical manifest cannot borrow the repaired tip's policy.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a refused history changes the public destination.
+/// ´test:integration:malformed-historical-manifest-refuses-before-publication´
+#[test]
+fn malformed_historical_manifest_refuses_before_publication() {
+    let fixture = Fixture::new();
+    fixture.commit(
+        "public-set.toml",
+        "invalid [\n",
+        "Malformed historical manifest\n",
+    );
+    fixture.commit("public-set.toml", MANIFEST, "Repair final manifest\n");
+    fixture.unchanged_refusal("invalid historical manifest");
+    fixture.unchanged_refusal("check=manifest source ordinal=1");
+}
+
+/// Generated drift paths are burn-scanned before a refusal can print a private path.
+///
+/// # Panics
+/// Panics only if fixture IO fails or drift handling writes output or discloses a private value.
+/// ´test:integration:generated-drift-paths-retain-the-burn-guard´
+#[test]
+fn generated_drift_paths_retain_the_burn_guard() {
+    let mut fixture = Fixture::new();
+    fixture.commit("private.txt", "excluded change\n", "Excluded only\n");
+    fs::write(fixture.out.join("forbidden-value.txt"), "safe\n").expect("drift");
+    git(&fixture.out, &["add", "."]);
+    git(
+        &fixture.out,
+        &["commit", "--no-gpg-sign", "-m", "Published drift"],
+    );
+    fixture.public_root = line(&fixture.out, &["rev-parse", "HEAD"]);
+    fixture.unchanged_refusal("source ordinal 0 field path match kind substring");
+    fixture.unchanged_refusal("check=burn scan");
+}
+
+/// Unpublished owner and path-class audit failures map to their declared register destination.
+///
+/// # Panics
+/// Panics only if fixture IO fails or audit evidence loses the field, path or refusal boundary.
+/// ´test:integration:unpublished-audit-maps-owner-and-path-class´
+#[test]
+fn unpublished_audit_maps_owner_and_path_class() {
+    for (field, needle) in [("owner", "PROJECTA"), ("path_class", "private.md")] {
+        let fixture = Fixture::new();
+        let path = "docs/public/custom-labels.toml";
+        let manifest = MANIFEST
+            .replace("docs/public/unpublished-labels.toml", path)
+            .replace(
+                "[exclude]\nrows = [",
+                "[exclude]\nrows = [{pattern = \"private.md\", reason = \"Private definition.\"}, ",
+            );
+        fs::write(fixture.source.join("public-set.toml"), manifest).expect("manifest");
+        fs::write(
+            fixture.source.join("private.md"),
+            "# Private · `sec:fixture:private`\n",
+        )
+        .expect("private mint");
+        let oid = fixture.commit(
+            "docs/guide.md",
+            "# Guide · `guide:fixture:public`\n\nSee (`sec:fixture:private`).\n",
+            "Audited citation\n",
+        );
+        fs::write(
+            &fixture.burn,
+            format!("[[values]]\nvalue = {needle:?}\nmatch = \"substring\"\n"),
+        )
+        .expect("audit register");
+        let expected = format!("source ordinal 1 field unpublished.{field} match kind substring");
+        fixture.unchanged_refusal(&expected);
+        let output = fixture
+            .replay(&fixture.out)
+            .output()
+            .expect("audit refusal");
+        assert_eq!(output.status.code(), Some(3));
+        let text = String::from_utf8(output.stdout).expect("report");
+        let result: serde_json::Value =
+            serde_json::from_str(text.lines().next().expect("JSON report")).expect("JSON");
+        let current = &result["validation"]["current"];
+        assert_eq!(current["check"], "burn scan");
+        assert_eq!(current["field"], format!("unpublished.{field}"));
+        assert_eq!(current["path"], path);
+        assert_eq!(current["commit"], oid);
+        assert_eq!(current["ordinal"], 1);
+        assert_eq!(current["matcher_kind"], "substring");
+        assert_eq!(current["register_kind"], "values");
+    }
+}
+
 /// Missing manifests and unclassified historical paths cannot borrow a later policy.
 ///
 /// # Panics
