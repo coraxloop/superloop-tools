@@ -80,6 +80,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Anchored native creation and runtime verification refuse every ambient registry override, including the canonical registry path, before reading grants or changing custody (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Warm public-cut acceptance leaves its configured Meson tree intact; only the replaced archive is reconfigured, and both setup walls remain reported (``prob:build:cut-acceptance-reconfigures-only-the-changed-tree``; ``proto:publicpack:configure-changed-cut-tree``).
 
 - The container helper pins its credential client and clock before namespace entry and transfers only those held executable capabilities to the refresh thread, which executes them by descriptor (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).

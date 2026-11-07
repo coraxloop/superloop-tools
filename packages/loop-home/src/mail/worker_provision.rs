@@ -587,6 +587,16 @@ fn coordinate_beneath(
     private: &crate::anchor::Anchor,
     executor: &crate::anchor::Anchor,
 ) -> Result<()> {
+    let operation = if phase == "verify" {
+        "prepare-runtime"
+    } else {
+        "make-home"
+    };
+    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+        return Err(failure(format!(
+            "anchor-declaration: operation={operation} purpose=registry-override"
+        )));
+    }
     let row = configuration
         .registry
         .row(loop_name, home)
@@ -594,11 +604,6 @@ fn coordinate_beneath(
     root.revalidate()?;
     private.revalidate()?;
     executor.revalidate()?;
-    let operation = if phase == "verify" {
-        "prepare-runtime"
-    } else {
-        "make-home"
-    };
     let descriptor = File::from(
         nix::unistd::dup(std::os::fd::AsFd::as_fd(root)).map_err(|error| {
             failure(format!("anchor-io: operation={operation} purpose=loop-storage check=descriptor-duplicate: {error}"))

@@ -230,6 +230,8 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
     for entry in ["runtime", "creation", "rotation"] {
         for case in [
             "valid",
+            "override-canonical",
+            "override-other",
             "operation",
             "identity",
             "missing",
@@ -309,7 +311,16 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             if case == "mode" {
                 set_private(64000, 0o750);
             }
-            let output = ProcessRunner.run(&request).expect("runtime entry");
+            let output = if case.starts_with("override-") {
+                let registry = if case == "override-canonical" {
+                    home.join(".config/loops/registry.toml")
+                } else {
+                    home.join("absent-registry")
+                };
+                runtime_override(&request, &registry)
+            } else {
+                ProcessRunner.run(&request).expect("runtime entry")
+            };
             if case == "owner" || case == "mode" {
                 set_private(64000, 0o700);
             }
@@ -326,6 +337,11 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                         && report.contains("unsafe-path:")
                         && report.contains(".config/loops/alpha"),
                     "validated runtime reaches settings: {report}"
+                ),
+                "override-canonical" | "override-other" => assert!(
+                    report.contains("anchor-declaration")
+                        && report.contains("purpose=registry-override"),
+                    "{report}"
                 ),
                 "operation" => assert!(report.contains("anchor-declaration"), "{report}"),
                 "identity" => assert!(report.contains("anchor-identity"), "{report}"),
@@ -462,5 +478,26 @@ fn exercise_case(
             report.contains("anchor-declaration"),
             "{mode} {case}: {report}"
         ),
+    }
+}
+
+/// # Panics
+/// Panics if the real namespace receiver cannot be launched with the selected override.
+fn runtime_override(request: &loop_home::CommandSpec, registry: &Path) -> loop_home::CommandOutput {
+    let start = std::time::Instant::now();
+    let mut command = Command::new("/usr/bin/podman");
+    command
+        .args(&request.argv[1..])
+        .env("ENTER_LOOP_REGISTRY", registry);
+    request
+        .descriptors
+        .configure(&mut command)
+        .expect("descriptor transport");
+    let output = command.output().expect("runtime override entry");
+    loop_home::CommandOutput {
+        status: output.status.code().unwrap_or(1),
+        stdout: output.stdout,
+        stderr: output.stderr,
+        wall: start.elapsed(),
     }
 }

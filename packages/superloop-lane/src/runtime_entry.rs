@@ -30,6 +30,16 @@ fn refusal(error: impl std::fmt::Display) -> LaneError {
 fn named(kind: &str, purpose: &str) -> LaneError {
     named_for(OPERATION, kind, purpose)
 }
+fn registry_override(operation: &str) -> Result<(), LaneError> {
+    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+        return Err(named_for(
+            operation,
+            "anchor-declaration",
+            "registry-override",
+        ));
+    }
+    Ok(())
+}
 fn named_for(operation: &str, kind: &str, purpose: &str) -> LaneError {
     refusal(format!("{kind}: operation={operation} purpose={purpose}"))
 }
@@ -238,6 +248,7 @@ pub(crate) fn core_pins(
     entry: &Path,
     program: &Path,
 ) -> Result<Vec<anchor::HostPin>, LaneError> {
+    registry_override(operation)?;
     let (home, held_home) = home;
     let (runs, held_runs) = runs;
     let host = HostVerifier::current()
@@ -343,6 +354,7 @@ pub(crate) fn receive_bundle(
     operation: &str,
     extras: &[Requirement],
 ) -> Result<(Configuration, Vec<Anchor>), LaneError> {
+    registry_override(operation)?;
     let manifest = Manifest::parse(source).map_err(refusal)?;
     if manifest.records.len() != PURPOSES.len() + extras.len() {
         return Err(named_for(operation, "anchor-declaration", "count"));

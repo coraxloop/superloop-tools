@@ -520,3 +520,7 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lane/tests/native_creation_custody.rs:\"/usr/bin/podman\"#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Create and clean mapped native lifetime fixture storage in the real rootless namespace"}
 {"kind":"call","site":"packages/superloop-lane/tests/native_creation_custody.rs:\"/usr/bin/podman\"#2","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Exercise production native composition and receipt phases under a partial map with overflow-owned root"}
 ''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-lane/tests/container_anchors.rs:\"/usr/bin/podman\"#3","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Inject a registry override into the real private entry without changing the test process environment"}
+''']

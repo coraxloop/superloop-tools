@@ -182,17 +182,47 @@ fn child(home: &str, manifest: &str) {
     let root: &Anchor = &anchors[6];
     let private = &anchors[7];
     let executor = &anchors[8];
+    exercise_phases(home, &configuration, root, private, executor);
+}
+/// # Panics
+/// Panics if native receipt phases or registry-override refusals differ from their contract.
+fn exercise_phases(
+    home: &Path,
+    configuration: &anchor::Configuration,
+    root: &Anchor,
+    private: &Anchor,
+    executor: &Anchor,
+) {
     let identity = loop_home::mail::birth::Identity::for_reservation(
         64010,
         "superloop-lane:native-custody".into(),
     );
+    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+        let error = loop_home::mail::worker_provision::verify_beneath(
+            home,
+            "alpha",
+            &identity,
+            configuration,
+            root,
+            private,
+            executor,
+        )
+        .expect_err("ambient registry is refused even when canonical");
+        assert!(
+            error.to_string().contains(
+                "anchor-declaration: operation=prepare-runtime purpose=registry-override"
+            ),
+            "{error}"
+        );
+        return;
+    }
     for phase in ["reserve", "finish"] {
         loop_home::mail::worker_provision::creation_beneath(
             home,
             "alpha",
             &identity,
             phase,
-            &configuration,
+            configuration,
             root,
             private,
             executor,
@@ -203,7 +233,7 @@ fn child(home: &str, manifest: &str) {
         home,
         "alpha",
         &identity,
-        &configuration,
+        configuration,
         root,
         private,
         executor,
@@ -215,7 +245,7 @@ fn child(home: &str, manifest: &str) {
             "alpha",
             &identity,
             "retire",
-            &configuration,
+            configuration,
             root,
             private,
             executor
@@ -267,15 +297,19 @@ fn native_creation_reserves_and_finishes_beneath_custody() {
         "--door-scope".into(),
         "work".into(),
     ];
-    let request = superloop_lane::creation_entry::command(
-        Path::new("/usr/bin/podman"),
-        &argv,
-        (home, &held_home),
-        (&runs, &held_runs),
-        (home, &held_home),
-        None,
-    )
-    .expect("production composer");
+    let requests = (0..3)
+        .map(|_| {
+            superloop_lane::creation_entry::command(
+                Path::new("/usr/bin/podman"),
+                &argv,
+                (home, &held_home),
+                (&runs, &held_runs),
+                (home, &held_home),
+                None,
+            )
+            .expect("production composer")
+        })
+        .collect::<Vec<_>>();
     fs::rename(home.join(".config/loops"), home.join(".config/held-loops"))
         .expect("replace configuration path after pin");
     fs::rename(
@@ -283,8 +317,24 @@ fn native_creation_reserves_and_finishes_beneath_custody() {
         home.join(".var/loops/held-alpha"),
     )
     .expect("replace storage path after pin");
+    for (request, registry) in requests.into_iter().zip([
+        None,
+        Some(home.join(".config/loops/registry.toml")),
+        Some(home.join("absent-registry")),
+    ]) {
+        run_child(home, &image, &request, registry.as_deref());
+    }
+    fixture_python(
+        home,
+        "import shutil,sys; shutil.rmtree(sys.argv[1]+'/.var')",
+    );
+}
+
+/// # Panics
+/// Panics if the anchored namespace child fails its selected registry policy.
+fn run_child(home: &Path, image: &Path, request: &loop_home::CommandSpec, registry: Option<&Path>) {
     let mut process = Command::new("/usr/bin/podman");
-    process.args(["unshare"]).arg(&image).env(CHILD, home).env(
+    process.args(["unshare"]).arg(image).env(CHILD, home).env(
         "SUPERLOOP_NATIVE_MANIFEST",
         request.argv.last().expect("manifest"),
     );
@@ -292,11 +342,10 @@ fn native_creation_reserves_and_finishes_beneath_custody() {
         .descriptors
         .configure(&mut process)
         .expect("rights transport");
+    if let Some(registry) = registry {
+        process.env("ENTER_LOOP_REGISTRY", registry);
+    }
     let output = process.output().expect("namespace entry");
-    fixture_python(
-        home,
-        "import shutil,sys; shutil.rmtree(sys.argv[1]+'/.var')",
-    );
     assert!(
         output.status.success(),
         "{}{}",
