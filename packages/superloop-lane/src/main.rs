@@ -322,7 +322,6 @@ fn bind_private_launch_args<'a>(
                 | "_follow-private"
                 | "_exercise-context-private"
                 | "_rotation-handover"
-                | "_prepare-runtime"
         )
     );
     if !private_launch {
@@ -513,6 +512,12 @@ fn bind_private_launch_args<'a>(
 fn run(args: &[String]) -> Result<i32, LaneError> {
     if args.first().is_some_and(|word| word == "_container-helper") {
         return superloop_lane::container_entry::serve(args);
+    }
+    if args.first().is_some_and(|word| word == "_prepare-runtime") {
+        let report = superloop_lane::runtime_entry::serve(args)?;
+        writeln!(io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
+        return Ok(0);
     }
     let (args, _private_home) = bind_private_launch_args(args, &io::stdin(), 0)?;
     if args.first().is_some_and(|word| word == "_container-client") {
@@ -1390,32 +1395,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
         };
         let report =
             launch::rounds::private_inspect(Path::new(owner_home), loop_name, run, evidence)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_prepare-runtime")
-    {
-        let [_, loop_name, run, home_option, owner_home, option, podman] = args else {
-            return Err(LaneError::input(
-                "runtime-private",
-                "private runtime form is incomplete",
-            ));
-        };
-        if option != "--podman-bin" || home_option != "--owner-home" {
-            return Err(LaneError::input(
-                "runtime-private",
-                "private runtime needs --podman-bin and --owner-home",
-            ));
-        }
-        let report = launch::private_prepare_runtime(
-            Path::new(owner_home),
-            loop_name,
-            run,
-            Path::new(podman),
-        )?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
@@ -2331,13 +2310,11 @@ mod tests {
         let fd = fs::File::open(&home).expect("bound home");
         let runs_fd = fs::File::open(&runs).expect("bound runs root");
         let argv = vec![
-            "_prepare-runtime".into(),
+            "_choose-uid".into(),
             "alpha".into(),
             "R".into(),
             "--owner-home".into(),
             home.display().to_string(),
-            "--podman-bin".into(),
-            "/usr/bin/podman".into(),
             "--verified-home-fd".into(),
             "0".into(),
             "--verified-runs-root".into(),

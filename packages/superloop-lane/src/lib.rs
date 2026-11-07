@@ -22,6 +22,7 @@ pub mod prepare;
 pub mod repair;
 pub mod requests;
 pub mod routes;
+pub mod runtime_entry;
 pub mod settings;
 pub mod sign_in;
 pub mod signin_home;

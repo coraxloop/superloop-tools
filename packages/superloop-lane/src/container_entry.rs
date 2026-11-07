@@ -1,6 +1,6 @@
 //! Operation-bound executable custody for the namespace container helper.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::os::fd::{AsFd, OwnedFd};
@@ -131,14 +131,40 @@ pub(crate) fn pin(
 }
 
 thread_local! {
+    static ACTIVE_OPERATION: Cell<&'static str> = const { Cell::new(OPERATION) };
     static EXECUTABLE: RefCell<Option<BTreeMap<PathBuf, Arc<Anchor>>>> = const { RefCell::new(None) };
 }
 
-struct ExecutableGuard;
+pub(crate) struct ExecutableGuard;
 impl Drop for ExecutableGuard {
     fn drop(&mut self) {
         EXECUTABLE.with(|active| *active.borrow_mut() = None);
+        ACTIVE_OPERATION.with(|operation| operation.set(OPERATION));
     }
+}
+
+/// Bind only the named executable capabilities for this private operation.
+pub(crate) fn activate_programs(
+    operation: &'static str,
+    podman: &Path,
+    executable: Anchor,
+    hash: Anchor,
+) -> ExecutableGuard {
+    ACTIVE_OPERATION.with(|active| active.set(operation));
+    EXECUTABLE.with(|active| {
+        *active.borrow_mut() = Some(BTreeMap::from([
+            (podman.to_path_buf(), Arc::new(executable)),
+            (PathBuf::from("/usr/bin/sha256sum"), Arc::new(hash)),
+        ]));
+    });
+    ExecutableGuard
+}
+
+fn active_refusal() -> LaneError {
+    refusal(format!(
+        "anchor-declaration: operation={} purpose=program",
+        ACTIVE_OPERATION.with(Cell::get)
+    ))
 }
 
 /// Recheck the held executable when this operation selected the program.
@@ -147,9 +173,7 @@ pub(crate) fn check(program: &Path) -> Option<Result<(), LaneError>> {
         active.borrow().as_ref().map(|programs| {
             programs
                 .get(program)
-                .ok_or_else(|| {
-                    refusal("anchor-declaration: operation=container-helper purpose=program")
-                })?
+                .ok_or_else(active_refusal)?
                 .revalidate()
                 .map_err(refusal)
         })
@@ -171,7 +195,10 @@ pub(crate) fn spawn_error(program: &Path, kind: &'static str, error: &std::io::E
             };
             LaneError::operation(
                 "anchor-exec",
-                format!("operation=container-helper purpose={purpose} check=child-spawn: {error}"),
+                format!(
+                    "operation={} purpose={purpose} check=child-spawn: {error}",
+                    ACTIVE_OPERATION.with(Cell::get)
+                ),
             )
         } else {
             LaneError::operation(kind, format!("{}: {error}", program.display()))
@@ -191,9 +218,7 @@ pub(crate) fn configure(
         let Some(programs) = active.as_ref() else {
             return Ok(());
         };
-        let anchor = programs.get(program).ok_or_else(|| {
-            refusal("anchor-declaration: operation=container-helper purpose=program")
-        })?;
+        let anchor = programs.get(program).ok_or_else(active_refusal)?;
         let arguments = std::iter::once(program.as_os_str().to_owned())
             .chain(argv.iter().map(OsString::from))
             .collect::<Vec<_>>();

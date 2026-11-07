@@ -2170,6 +2170,16 @@ fn proxy_refresh_preserves_live_helper_pins() {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .expect("private runs ancestor");
     }
+    // This stand-in models child results; real mapped ownership is exercised by the rootless entry tests.
+    fs::set_permissions(
+        home.join(".var/loops/alpha"),
+        fs::Permissions::from_mode(0o711),
+    )
+    .expect("provisioned loop storage mode");
+    let private_storage = home.join(".var/loops/alpha/private");
+    fs::create_dir(&private_storage).expect("provisioned private storage");
+    fs::set_permissions(&private_storage, fs::Permissions::from_mode(0o700))
+        .expect("private storage mode");
     fs::create_dir_all(template.join("bin")).expect("template bin");
     fs::create_dir_all(template.join("libexec")).expect("template helper directory");
     fs::create_dir_all(sockets.join("vendor")).expect("vendor sockets");
@@ -2947,6 +2957,15 @@ elif '_make-home' in args:
     save(home / '.var/loops/alpha/runs' / ('.reservation-' + f['seed']['run'] + '.json'), f['seed'])
     print('{}')
 elif '_prepare-runtime' in args:
+    transfer = socket.socket(fileno=0)
+    data, ancillary, flags, _ = transfer.recvmsg(1, socket.CMSG_SPACE(36))
+    assert data == bytes([1]) and flags == 0 and len(ancillary) == 1
+    assert len(ancillary[0][2]) == 36 and transfer.recv(1) == b''
+    for offset in range(0, 36, 4):
+        os.close(int.from_bytes(ancillary[0][2][offset:offset+4], sys.byteorder, signed=True))
+    manifest = json.loads(args[args.index('--anchor-manifest') + 1])
+    assert manifest['operation'] == 'prepare-runtime'
+    assert [record['purpose'] for record in manifest['records']] == ['owner-home', 'runs-root', 'entry-executable', 'podman-executable', 'hash-executable', 'configuration', 'loop-storage', 'private-storage', 'identity-executable']
     if 'SUPERLOOP_MATRIX_STAGE' not in os.environ:
         save(pathlib.Path(f['evidence']), {'runtime_argv': f['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'pending', 'rows': [{'name': 'letter', 'state': 'pending', 'target': '/home/worker/brief.txt', 'operation': 'read'}]}})
     elif f['before'] and os.environ['SUPERLOOP_MATRIX_STAGE'] == 'publish-primary':
@@ -3323,6 +3342,15 @@ elif '_make-home' in args:
     wait('unidentified-release')
     print('{}')
 elif '_prepare-runtime' in args:
+    transfer = socket.socket(fileno=0)
+    data, ancillary, flags, _ = transfer.recvmsg(1, socket.CMSG_SPACE(36))
+    assert data == bytes([1]) and flags == 0 and len(ancillary) == 1
+    assert len(ancillary[0][2]) == 36 and transfer.recv(1) == b''
+    for offset in range(0, 36, 4):
+        os.close(int.from_bytes(ancillary[0][2][offset:offset+4], sys.byteorder, signed=True))
+    manifest = json.loads(args[args.index('--anchor-manifest') + 1])
+    assert manifest['operation'] == 'prepare-runtime'
+    assert [record['purpose'] for record in manifest['records']] == ['owner-home', 'runs-root', 'entry-executable', 'podman-executable', 'hash-executable', 'configuration', 'loop-storage', 'private-storage', 'identity-executable']
     if 'SUPERLOOP_MATRIX_STAGE' not in os.environ:
         save(pathlib.Path(fixture['evidence']), {'runtime_argv': fixture['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'pending', 'rows': [{'name': 'letter', 'state': 'pending', 'target': '/home/worker/brief.txt', 'operation': 'read'}]}})
     print('{}')

@@ -123,3 +123,156 @@ fn container_helper_enters_with_held_root_files() {
     );
     assert!(!stderr.contains("container-anchor:"), "{stderr}");
 }
+
+/// # Panics
+/// Panics if runtime custody is not validated in a real partial user namespace.
+///
+/// ´claim:superlooplane:runtime-entry-retains-configuration-and-executables´
+/// ´test:integration:runtime-entry-retains-configuration-and-executables´
+#[test]
+#[allow(clippy::too_many_lines)]
+fn runtime_entry_retains_configuration_and_executables() {
+    use loop_home::{ProcessRunner, Runner};
+    let fixture = tempfile::tempdir().expect("home");
+    let home = fixture.path();
+    for path in [
+        home.to_path_buf(),
+        home.join(".config"),
+        home.join(".config/loops"),
+        home.join("runs"),
+    ] {
+        fs::create_dir_all(&path).expect("directory");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+    }
+    for (name, source) in [
+        (
+            "registry.toml",
+            "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[{name='alpha',uid=64000,launch='dev/alpha'}]\n",
+        ),
+        (
+            "allocations.toml",
+            "mail_uid=64001\n[alpha]\nuids={base=64010,count=2}\nmail_gids={base=64020,count=3}\n",
+        ),
+    ] {
+        let path = home.join(".config/loops").join(name);
+        fs::write(&path, source).expect("configuration");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("file mode");
+    }
+    let script = r"
+import os,sys
+from pathlib import Path
+home=Path(sys.argv[1])
+assert os.geteuid()==0
+assert os.stat('/').st_uid==int(Path('/proc/sys/kernel/overflowuid').read_text())
+for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.var/loops/alpha',0,0o711),(home/'.var/loops/alpha/private',64000,0o700)]:
+ path.mkdir()
+ os.chmod(path,mode)
+ os.chown(path,uid,uid)
+";
+    let output = Command::new("/usr/bin/podman")
+        .args(["unshare", "/usr/bin/python3", "-I", "-c", script])
+        .arg(home)
+        .output()
+        .expect("fixture entry");
+    assert!(
+        output.status.success(),
+        "unmeasured namespace fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let held_home = fs::File::open(home).expect("held home").into();
+    let held_runs = fs::File::open(home.join("runs")).expect("held runs").into();
+    let argv = vec![
+        "unshare".into(),
+        env!("CARGO_BIN_EXE_superloop-lane").into(),
+        "_prepare-runtime".into(),
+        "alpha".into(),
+        "lane-a".into(),
+        "--owner-home".into(),
+        home.to_str().expect("UTF-8").into(),
+        "--podman-bin".into(),
+        "/usr/bin/podman".into(),
+    ];
+    let set_private = |uid: u32, mode: u32| {
+        let output = Command::new("/usr/bin/podman")
+            .args(["unshare", "/usr/bin/python3", "-I", "-c",
+                "import os,sys; os.chmod(sys.argv[1],int(sys.argv[3])); os.chown(sys.argv[1],int(sys.argv[2]),int(sys.argv[2]))"])
+            .arg(home.join(".var/loops/alpha/private"))
+            .arg(uid.to_string()).arg(mode.to_string()).output().expect("private custody fixture");
+        assert!(
+            output.status.success(),
+            "private custody fixture: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    for case in [
+        "valid",
+        "operation",
+        "identity",
+        "missing",
+        "extra-argument",
+        "owner",
+        "mode",
+    ] {
+        let mut request = superloop_lane::runtime_entry::command(
+            Path::new("/usr/bin/podman"),
+            &argv,
+            home,
+            &held_home,
+            &home.join("runs"),
+            &held_runs,
+        )
+        .expect("production composer");
+        if case == "missing" {
+            request.descriptors = loop_home::CommandDescriptors::default();
+        }
+        if case == "operation" || case == "identity" {
+            let last = request.argv.last_mut().expect("manifest");
+            let mut manifest: Manifest = serde_json::from_str(last).expect("manifest");
+            if case == "operation" {
+                manifest.operation = "container-helper".into();
+            } else {
+                manifest.records[3].inode = manifest.records[3].inode.wrapping_add(1);
+            }
+            *last = serde_json::to_string(&manifest).expect("declaration");
+        }
+        if case == "extra-argument" {
+            // The private vector cannot append an undeclared argument to its complete frame.
+            request.argv.push("extra".into());
+        }
+        if case == "owner" {
+            set_private(0, 0o700);
+        }
+        if case == "mode" {
+            set_private(64000, 0o750);
+        }
+        let output = ProcessRunner.run(&request).expect("runtime entry");
+        if case == "owner" || case == "mode" {
+            set_private(64000, 0o700);
+        }
+
+        assert_ne!(output.status, 0, "fixture has no installed plan");
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        match case {
+            "valid" => assert!(
+                !report.contains("anchor-")
+                    && report.contains("unsafe-path:")
+                    && report.contains(".config/loops/alpha"),
+                "validated runtime reaches settings: {report}"
+            ),
+            "operation" => assert!(report.contains("anchor-declaration"), "{report}"),
+            "identity" => assert!(report.contains("anchor-identity"), "{report}"),
+            "owner" => assert!(report.contains("anchor-owner"), "{report}"),
+            "mode" => assert!(report.contains("anchor-mode"), "{report}"),
+            "missing" => assert!(report.contains("anchor-transport"), "{report}"),
+            _ => assert!(
+                report.contains("anchor-declaration: operation=prepare-runtime purpose=vector"),
+                "{report}"
+            ),
+        }
+    }
+    set_private(0, 0o700);
+}

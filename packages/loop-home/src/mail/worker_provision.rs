@@ -522,6 +522,46 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
     )
 }
 
+/// Verify a native lifetime using configuration and storage already validated at entry.
+///
+/// # Errors
+/// Refuses a missing grant, mismatched lifetime or changed custody without reopening host paths.
+pub fn verify_beneath(
+    home: &Path,
+    loop_name: &str,
+    identity: &Identity,
+    configuration: &crate::anchor::Configuration,
+    root: &crate::anchor::Anchor,
+    private: &crate::anchor::Anchor,
+    executor: &crate::anchor::Anchor,
+) -> Result<()> {
+    let row = configuration
+        .registry
+        .row(loop_name, home)
+        .map_err(failure)?;
+    root.revalidate()?;
+    private.revalidate()?;
+    executor.revalidate()?;
+    let descriptor = File::from(
+        nix::unistd::dup(std::os::fd::AsFd::as_fd(root)).map_err(|error| {
+            failure(format!("anchor-io: operation=prepare-runtime purpose=loop-storage check=descriptor-duplicate: {error}"))
+        })?,
+    );
+    let parent = io::child(&descriptor, Path::new("."), true)?;
+    coordinate_with(
+        home,
+        loop_name,
+        identity,
+        "verify",
+        &row,
+        &configuration.allocations,
+        &parent,
+        Some(private),
+        None,
+        Some(executor),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn coordinate_with(
     home: &Path,

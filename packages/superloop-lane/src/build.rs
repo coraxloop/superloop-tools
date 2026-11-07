@@ -1006,6 +1006,10 @@ pub(crate) fn run_checked_with_private_launch(
     runs: &OwnedFd,
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<String, LaneError> {
+    if argv.get(2).is_some_and(|word| word == "_prepare-runtime") {
+        let request = crate::runtime_entry::command(program, &argv, cwd, home, runs_root, runs)?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
     let spec = child(program, argv, environment, cwd, timeout_seconds, name)
         .with_private_launch(home, runs_root, runs, letter)?;
     checked_output(&spec, None)
@@ -1044,6 +1048,12 @@ pub(crate) fn private_launch_preview(
     runs: &OwnedFd,
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<Value, LaneError> {
+    if argv.get(2).is_some_and(|word| word == "_prepare-runtime") {
+        let mut preview = child(program, argv, environment, cwd, timeout_seconds, name).preview();
+        preview["anchor_manifest"] = crate::runtime_entry::preview();
+        preview["directory_transfer_socket_fd"] = json!(0);
+        return Ok(preview);
+    }
     let spec = child(program, argv, environment, cwd, timeout_seconds, name)
         .with_private_launch(home, runs_root, runs, letter)?;
     Ok(spec.preview())

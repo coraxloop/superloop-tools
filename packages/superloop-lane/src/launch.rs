@@ -6746,6 +6746,7 @@ pub fn private_prepare_runtime(
     loop_name: &str,
     run: &str,
     podman: &Path,
+    custody: &crate::runtime_entry::Custody,
 ) -> Result<Value, LaneError> {
     if !nix::unistd::Uid::effective().is_root() {
         return Err(LaneError::input(
@@ -6803,7 +6804,8 @@ pub fn private_prepare_runtime(
             "birth UID differs from protected reservation",
         ));
     }
-    loop_home::mail::worker_provision::coordinate(owner_home, loop_name, &birth, "verify")
+    custody
+        .verify_birth(owner_home, loop_name, &birth)
         .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
     crate::plan::verify_box_attestation(&plan.document)?;
     check_mount_roots(&plan, &settings, owner_home)?;
@@ -7794,6 +7796,9 @@ mod tests {
         .expect("empty labelled query");
     }
 
+    /// # Panics
+    /// Panics if preview requires provisioned storage or loses the declared custody.
+    ///
     /// ´test:unit:private-runtime-vector-never-runs-a-container´
     #[test]
     fn private_runtime_vector_never_runs_a_container() {
@@ -7814,6 +7819,32 @@ mod tests {
         assert_eq!(&vector[..3], ["unshare", "/opt/lane", "_prepare-runtime"]);
         assert!(!vector.iter().any(|word| word == "run"));
         assert_eq!(vector.last().map(String::as_str), Some("/usr/bin/podman"));
+        let fixture = tempfile::tempdir().expect("preview home");
+        let held = std::fs::File::open(fixture.path())
+            .expect("home descriptor")
+            .into();
+        let preview = crate::build::private_launch_preview(
+            Path::new("/usr/bin/podman"),
+            vector,
+            &BTreeMap::new(),
+            fixture.path(),
+            60,
+            "prepare-runtime",
+            &held,
+            fixture.path(),
+            &held,
+            None,
+        )
+        .expect("preview without provisioned configuration");
+        assert_eq!(preview["anchor_manifest"]["operation"], "prepare-runtime");
+        assert_eq!(
+            preview["anchor_manifest"]["purposes"]
+                .as_array()
+                .expect("roles")
+                .len(),
+            9
+        );
+        assert_eq!(preview["anchor_manifest"]["state"], "bound-on-launch");
     }
 
     /// ´test:unit:letter-model-overrides-flags-and-missing-values-refuse´
