@@ -6113,6 +6113,9 @@ mod tests {
         )
         .expect("probe request");
         serve_one_for_peer(&mut server, &registration, worker).expect("review refusal");
+        let announced = frame_read(&mut client).expect("compute-shaped probe announcement");
+        assert_eq!(announced["type"], "compute-deadline");
+        assert_eq!(announced["request_deadline_ms"], 1000);
         let reply = frame_read(&mut client).expect("typed reply");
         assert_eq!(reply["reason"], "door-review-compute-refusal");
         assert_eq!(reply["peer_uid"], 3001);
