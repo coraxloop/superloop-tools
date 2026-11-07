@@ -4051,6 +4051,12 @@ mod tests {
             let finished = AtomicBool::new(false);
             let observed = Arc::new(std::sync::Mutex::new(HashSet::new()));
             let watched = thread::scope(|scope| {
+                struct FinishWatch<'a>(&'a AtomicBool);
+                impl Drop for FinishWatch<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::Release);
+                    }
+                }
                 let watcher = scope.spawn(|| {
                     crate::launch::exercise::door_attribution::watch_requests_with_observer(
                         &store,
@@ -4065,6 +4071,17 @@ mod tests {
                         },
                     )
                 });
+                // Drop before scope joins even when a client assertion panics.
+                let _finish_watch = FinishWatch(&finished);
+                let read_reply = |client: &mut UnixStream| {
+                    let until = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        let frame = frame_read_until(client, until).expect("reply or credit");
+                        if frame["type"] != "request-lock-wait" {
+                            break frame;
+                        }
+                    }
+                };
                 for _ in 0..2 {
                     let observed = Arc::clone(&observed);
                     // Keep the watcher live while the receive is waiting. Only
@@ -4097,7 +4114,7 @@ mod tests {
                     )
                     .expect("receive request");
                     client.shutdown(Shutdown::Write).expect("receive end");
-                    let _reply = frame_read(&mut client).expect("receive frame");
+                    let _reply = read_reply(&mut client);
                     server
                         .join()
                         .expect("service thread")
@@ -4106,7 +4123,7 @@ mod tests {
                 let (runner, _, _) = counting_runner(&fixture);
                 let (socket, server) = fixture_service(&fixture, runner, rubric(None), 2000, None);
                 let mut echo = send_probe(&socket, 2000);
-                let echo_frame = frame_read(&mut echo).expect("echo frame");
+                let echo_frame = read_reply(&mut echo);
                 assert_eq!(
                     echo_frame["queue_state"],
                     if floor == "allow" {
