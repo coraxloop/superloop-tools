@@ -17,6 +17,7 @@ name = "superloop-node-status"
 path = "src/main.rs"
 
 [dependencies]
+tracing = { workspace = true }
 superloop-cli-common.workspace = true
 clap.workspace = true
 

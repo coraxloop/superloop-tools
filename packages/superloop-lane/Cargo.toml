@@ -13,6 +13,7 @@ tier = 2
 release-group = "lane"
 
 [dependencies]
+tracing = { workspace = true }
 execute-command.workspace = true
 superloop-cli-common.workspace = true
 libc.workspace = true

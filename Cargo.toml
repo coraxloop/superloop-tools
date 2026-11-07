@@ -49,6 +49,7 @@ tempfile = "3"
 textwrap = "0.16"
 thiserror = "2"
 toml = "1"
+# Core instrumentation vocabulary: every workspace package depends on tracing.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"

@@ -14,6 +14,7 @@ tier = 2
 release-group = "superloop-pack"
 
 [dependencies]
+tracing = { workspace = true }
 clap = { workspace = true }
 nix = { workspace = true }
 superloop-cli-common = { workspace = true }

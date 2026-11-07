@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Every workspace package depends on the shared `tracing` crate so instrumentation requires no per-package dependency change (``rule:buildcontracts:tiers``).
+
 - ACL widening fixtures reach the settings and handed-lock readers with a non-writable mask and pin their named refusals; settings diagnostics describe nominal modes with validated ACLs (``prob:homes:exact-mode-readers-reason-about-the-acl-mask``).
 
 - The compute grammar explicitly retains dash-led run-binary names in the existing `-p` value domain; regressions pin that choice and the stricter check, clippy and test selector matrix (``open:door:compute-run-bin-value-rule``).

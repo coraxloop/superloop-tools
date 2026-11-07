@@ -30,6 +30,8 @@ Protocol-coupled clients and server helpers share a release authority. A server 
 
 Internal source dependencies point strictly downward: tier 0 is common command vocabulary, tier 1 is domain libraries, tier 2 is public tools, and tier 3 is private helpers. Tier 3 may depend only on tiers 0 and 1. The rule covers ordinary, development, build and target-specific dependencies. Process invocation is a separately declared protocol and does not authorize a source edge. Owners, consumers, external admissions, resolved closure, test tools, executable-bearing calls and installation destinations are checked against the ledger; no unnamed exception disables a census.
 
+Every workspace package declares the shared `tracing` dependency, including binaries and test support. Spans and events are core vocabulary: adding an instrumentation point anywhere in the workspace requires no package dependency change. Executable entry points choose subscribers; libraries only emit observations.
+
 **Table (Package destinations)** · `tab:buildcontracts:package-destinations`
 
 |Present source|Destination and tier|

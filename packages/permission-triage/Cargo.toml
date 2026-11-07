@@ -30,6 +30,7 @@ name = "permission-triage-assemble"
 path = "src/bin/permission-triage-assemble.rs"
 
 [dependencies]
+tracing = { workspace = true }
 execute-command.workspace = true
 superloop-cli-common.workspace = true
 loop-home = { workspace = true }

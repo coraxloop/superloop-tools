@@ -13,6 +13,7 @@ tier = 3
 release-group = "claude-hook"
 
 [dependencies]
+tracing = { workspace = true }
 superloop-cli-common.workspace = true
 loop-home.workspace = true
 session-core.workspace = true

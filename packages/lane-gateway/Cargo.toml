@@ -14,6 +14,7 @@ tier = 3
 release-group = "lane-gateway"
 
 [dependencies]
+tracing = { workspace = true }
 execute-command.workspace = true
 request-core = { workspace = true }
 superloop-cli-common = { workspace = true }
