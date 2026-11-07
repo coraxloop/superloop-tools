@@ -853,6 +853,73 @@ fn door_compute_gates_preserve_lock_placement_and_shape() {
     }
 }
 
+/// ´test:unit:door-compute-test-filters-retain-exact-argv´
+#[test]
+fn door_compute_test_filters_retain_exact_argv() {
+    for tail in [
+        "cargo test -p fixture --all-features --locked --test integration module::case_2",
+        "cargo --locked test --test integration module::case_2",
+        "cargo test --locked --test integration -- module::case_2",
+        "cargo test --locked --test integration -- module::case_2 --exact",
+    ] {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+        let (reply, _, _) = compute_call(&socket, &format!("/opt/fixture/bin/report {tail}"));
+        server.join().expect("server").expect("service");
+        assert_eq!(reply["reason"], "door-complete", "{tail}: {reply}");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let records = fixture.store().list_run("R").expect("record reader");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].value()["effect"]["compute"]["words"],
+            json!(tail.split(' ').collect::<Vec<_>>())
+        );
+    }
+}
+
+/// ´test:unit:door-compute-test-filters-refuse-extra-or-unbound-words´
+#[test]
+fn door_compute_test_filters_refuse_extra_or_unbound_words() {
+    for tail in [
+        "cargo test --locked --test integration first second",
+        "cargo test --locked --test integration filter --all-features",
+        "cargo test --locked --test integration first -- second --exact",
+        "cargo test --locked --test integration -- first second --exact",
+        "cargo test --locked --test integration -- filter --nocapture",
+        "cargo test --locked --test integration -- --exact",
+        "cargo test --locked --test integration filter.name",
+        "cargo test --locked --test integration filter-name",
+        "cargo test --locked --test integration path/name",
+        "cargo test --locked filter",
+        "cargo test --locked --bin integration filter",
+        "cargo check --locked --test integration filter",
+        "cargo clippy --locked --test integration filter -- -D warnings",
+    ] {
+        assert_compute_preflight(
+            &format!("/opt/fixture/bin/report {tail}"),
+            "door-compute-command-refusal",
+        );
+    }
+}
+
+/// ´test:unit:door-compute-test-filters-refuse-empty-misplaced-and-late-lock-words´
+#[test]
+fn door_compute_test_filters_refuse_empty_misplaced_and_late_lock_words() {
+    for (tail, check) in [
+        ("cargo test --locked --test integration --", "command"),
+        ("cargo test --locked --test integration --  --exact", "words"),
+        ("cargo test --locked filter --test integration", "command"),
+        ("cargo test --locked --test integration filter --exact", "command"),
+        ("cargo test --test integration filter --locked", "locked"),
+    ] {
+        assert_compute_preflight(
+            &format!("/opt/fixture/bin/report {tail}"),
+            &format!("door-compute-{check}-refusal"),
+        );
+    }
+}
+
 /// ´test:unit:door-compute-target-selectors-refuse-dash-led-names´
 #[test]
 fn door_compute_target_selectors_refuse_dash_led_names() {
