@@ -853,6 +853,28 @@ fn door_compute_gates_preserve_lock_placement_and_shape() {
     }
 }
 
+/// ´test:unit:door-compute-target-selectors-refuse-dash-led-names´
+#[test]
+fn door_compute_target_selectors_refuse_dash_led_names() {
+    for verb in ["check", "clippy", "test"] {
+        for selector in ["--bin", "--test"] {
+            for name in ["-x", "--all-features"] {
+                let suffix = if verb == "clippy" {
+                    " -- -D warnings"
+                } else {
+                    ""
+                };
+                assert_compute_preflight(
+                    &format!(
+                        "/opt/fixture/bin/report cargo {verb} --locked {selector} {name}{suffix}"
+                    ),
+                    "door-compute-command-refusal",
+                );
+            }
+        }
+    }
+}
+
 /// ´test:unit:door-compute-preserves-dash-led-package-records´
 #[test]
 fn door_compute_preserves_dash_led_package_records() {
@@ -860,6 +882,8 @@ fn door_compute_preserves_dash_led_package_records() {
         "cargo test --locked -p --all-features",
         "cargo doc --locked -p --no-deps",
         "cargo run --locked -p --release -- check --root .",
+        "cargo run --locked --bin -x",
+        "cargo run --locked --bin --all-features",
         "cargo test --locked -p --locked",
         "cargo test --locked -p -pkg --all-features",
         "cargo clippy --locked -p -pkg --all-features -- -D warnings",
@@ -882,6 +906,36 @@ fn door_compute_preserves_dash_led_package_records() {
             records[0].value()["effect"]["compute"]["words"],
             json!(tail.split(' ').collect::<Vec<_>>())
         );
+    }
+}
+
+/// ´test:unit:door-compute-run-bin-shares-the-dash-p-value-bound´
+#[test]
+fn door_compute_run_bin_shares_the_dash_p_value_bound() {
+    for selector in ["-p", "--bin"] {
+        for name in ["a".repeat(256), "-x".to_owned()] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let (socket, calls, server) =
+                compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+            let (reply, _, _) = compute_call(
+                &socket,
+                &format!("/opt/fixture/bin/report cargo run --locked {selector} {name}"),
+            );
+            server.join().expect("server").expect("service");
+            assert_eq!(reply["reason"], "door-complete", "{selector} {name}: {reply}");
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+        for (name, check) in [
+            ("a".repeat(257), "words"),
+            ("pkg.name".to_owned(), "command"),
+            ("--".to_owned(), "command"),
+        ] {
+            assert_compute_preflight(
+                &format!("/opt/fixture/bin/report cargo run --locked {selector} {name}"),
+                &format!("door-compute-{check}-refusal"),
+            );
+        }
     }
 }
 
