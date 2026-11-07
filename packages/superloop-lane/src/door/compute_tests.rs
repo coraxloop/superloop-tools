@@ -60,6 +60,9 @@ impl Runner for NodeRunner {
         detail["checkout_commit"] = json!("a".repeat(40));
         detail["preparation_wall_seconds"] = json!(0.125);
         detail["wrapper_exit_status"] = json!(3);
+        detail["wrapper_wall_seconds"] = json!(0.2);
+        detail["wrapper_user_cpu_seconds"] = json!(0.02);
+        detail["wrapper_system_cpu_seconds"] = json!(0.01);
         detail["tree_clean"] = json!(true);
         detail["tree_change_count"] = json!(0);
         detail["discarded"] = json!({"tracked":0,"untracked":0});
@@ -545,6 +548,14 @@ fn door_compute_service_modes_streams_and_attribution() {
                 "a".repeat(40)
             );
             assert_eq!(record["effect"]["compute"]["wrapper_wall_seconds"], 0.2);
+            assert_eq!(
+                record["effect"]["compute"]["wrapper_user_cpu_seconds"],
+                0.02
+            );
+            assert_eq!(
+                record["effect"]["compute"]["wrapper_system_cpu_seconds"],
+                0.01
+            );
             assert_eq!(record["effect"]["compute"]["wrapper_exit_status"], 3);
             assert_eq!(record["effect"]["compute"]["tree_clean"], true);
             assert_eq!(record["effect"]["compute"]["tree_change_count"], 0);
@@ -657,6 +668,14 @@ fn door_compute_check_and_no_default_features_keep_judgement_and_wall() {
             assert_eq!(record["shape_key"], format!("compute:cargo {verb}"));
             assert_eq!(record["effect"]["state"], "completed");
             assert_eq!(record["effect"]["compute"]["wrapper_wall_seconds"], 0.2);
+            assert_eq!(
+                record["effect"]["compute"]["wrapper_user_cpu_seconds"],
+                0.02
+            );
+            assert_eq!(
+                record["effect"]["compute"]["wrapper_system_cpu_seconds"],
+                0.01
+            );
             assert_eq!(record["effect"]["compute"]["wrapper_exit_status"], 3);
             assert_eq!(
                 record["effect"]["compute"]["words"],
@@ -1355,6 +1374,9 @@ fn door_compute_record_is_strict_and_evidence_is_required() {
     for exit in [124, 137] {
         let mut detail = compute::pending(&words);
         detail["wrapper_exit_status"] = json!(exit);
+        detail["wrapper_wall_seconds"] = json!(0.01);
+        detail["wrapper_user_cpu_seconds"] = json!(0.0);
+        detail["wrapper_system_cpu_seconds"] = json!(0.0);
         let evidence = format!(
             "RUN-REPORT exit={exit} wall=0.01s\nDOOR-COMPUTE {}\n",
             json!({"reason":"door-complete","detail":detail})
@@ -1496,4 +1518,79 @@ fn door_compute_deadline_refusal_names_the_owner_bound() {
         super::final_line(&["fixture".into(), "cargo test".into()], &reply).as_deref(),
         Some("door-request-deadline: registered_deadline_ms=3600000 request_deadline_ms=1000")
     );
+}
+
+/// ´test:unit:door-compute-node-measurements-do-not-require-a-report-line´
+#[test]
+fn door_compute_node_measurements_do_not_require_a_report_line() {
+    let words = vec!["git".to_owned(), "diff".to_owned()];
+    let mut detail = compute::pending(&words);
+    detail["wrapper_exit_status"] = json!(3);
+    detail["wrapper_wall_seconds"] = json!(0.8);
+    detail["wrapper_user_cpu_seconds"] = json!(0.2);
+    detail["wrapper_system_cpu_seconds"] = json!(0.1);
+    for (report, expected) in [
+        ("", "door-complete"),
+        ("RUN-REPORT exit=3 wall=0.2s\n", "door-complete"),
+        (
+            "RUN-REPORT exit=2 wall=0.2s\n",
+            "door-compute-evidence-refusal",
+        ),
+        (
+            "RUN-REPORT exit=3 wall=2.0s\n",
+            "door-compute-evidence-refusal",
+        ),
+        ("RUN-REPORT malformed\n", "door-compute-evidence-refusal"),
+    ] {
+        let evidence = format!(
+            "{report}DOOR-COMPUTE {}\n",
+            json!({"reason":"door-complete","detail":detail})
+        );
+        let mut reply = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+        compute::finish(&mut reply, &words, evidence.as_bytes());
+        assert_eq!(reply["reason"], expected, "{report}");
+        assert_eq!(reply["compute"]["wrapper_wall_seconds"], 0.8);
+        assert_eq!(reply["compute"]["wrapper_user_cpu_seconds"], 0.2);
+        assert_eq!(reply["compute"]["wrapper_system_cpu_seconds"], 0.1);
+    }
+    let mut wrong_exit = detail.clone();
+    wrong_exit["wrapper_exit_status"] = json!(4);
+    let evidence = format!(
+        "DOOR-COMPUTE {}\n",
+        json!({"reason":"door-complete","detail":wrong_exit})
+    );
+    let mut reply = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+    compute::finish(&mut reply, &words, evidence.as_bytes());
+    assert_eq!(
+        reply["reason"], "door-compute-evidence-refusal",
+        "node status must match the transport status"
+    );
+    let mut unmeasured = detail.clone();
+    unmeasured["wrapper_user_cpu_seconds"] = Value::Null;
+    unmeasured["wrapper_system_cpu_seconds"] = Value::Null;
+    assert!(
+        compute::valid_detail(&unmeasured),
+        "historical CPU remains unmeasured"
+    );
+    let evidence = format!(
+        "DOOR-COMPUTE {}\n",
+        json!({"reason":"door-complete","detail":unmeasured})
+    );
+    let mut reply = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+    compute::finish(&mut reply, &words, evidence.as_bytes());
+    assert_eq!(
+        reply["reason"], "door-compute-evidence-refusal",
+        "new completion requires CPU measurement"
+    );
+    for key in [
+        "wrapper_wall_seconds",
+        "wrapper_user_cpu_seconds",
+        "wrapper_system_cpu_seconds",
+    ] {
+        let mut invalid = detail.clone();
+        invalid[key] = json!(-1);
+        assert!(!compute::valid_detail(&invalid), "{key}");
+        invalid.as_object_mut().expect("detail").remove(key);
+        assert!(!compute::valid_detail(&invalid), "{key}");
+    }
 }

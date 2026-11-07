@@ -1,4 +1,4 @@
-//! Digest-bound, resumable schema-three/four conversion. No live reader accepts it.
+//! Digest-bound, resumable schema-three/four/five conversion. No live reader accepts it.
 
 use super::*;
 use sha2::{Digest as _, Sha256};
@@ -42,8 +42,27 @@ pub(super) fn convert_record(before: &Value) -> Result<RequestRecord, LaneError>
             ));
         }
         // Preserve every historical judgement and runner field verbatim.
-        row["schema"] = json!(5);
+        row["schema"] = json!(6);
         row["agent_observations"] = Value::Null;
+    }
+    if matches!(before["schema"].as_u64(), Some(3..=5)) {
+        if row["operation"] == "compute" {
+            let detail = row["effect"]["compute"].as_object_mut().ok_or_else(|| {
+                problem(
+                    "requests-rewrite-refusal",
+                    "historical compute detail absent",
+                )
+            })?;
+            for key in ["wrapper_user_cpu_seconds", "wrapper_system_cpu_seconds"] {
+                if detail.insert(key.to_owned(), Value::Null).is_some() {
+                    return Err(problem(
+                        "requests-rewrite-refusal",
+                        "historical compute CPU key differs",
+                    ));
+                }
+            }
+        }
+        row["schema"] = json!(6);
     }
     RequestRecord::decode(row)
 }
@@ -110,7 +129,7 @@ impl Store {
         json!({"state":state,"reason":reason,"shapes":shapes,"limit":limit,
             "rebuild":if limit.is_null() {json!(format!("requests rebuild-index {}", self.loop_name))} else {Value::Null},
             "remedy":if limit.is_null() {Value::Null} else {json!("index capacity exhausted; rebuilding unchanged custody cannot reduce this limit")},
-            "precondition":"stop the door service before rebuilding; schema five only; older records require requests rewrite with the service stopped"})
+            "precondition":"stop the door service before rebuilding; schema six only; older records require requests rewrite with the service stopped"})
     }
 
     /// Rebuild derived labels without migrating or changing request custody.
@@ -352,7 +371,7 @@ impl Store {
         if expected.is_none() {
             return Ok(
                 json!({"dry_run":true,"preview_sha256":plan_digest,"plan":plan,"resuming":pending,
-                "changed":changed_records(&plan),"fixed_schema_pair":{"predecessors":[3,4],"target":5}}),
+                "changed":changed_records(&plan),"fixed_schema_pair":{"predecessors":[3,4,5],"target":6}}),
             );
         }
         if expected != Some(plan_digest.as_str()) {
@@ -368,7 +387,7 @@ impl Store {
         if changed == 0 && !pending {
             return Ok(
                 json!({"dry_run":false,"preview_sha256":plan_digest,"plan":plan,
-                "complete":true,"changed":0,"fixed_schema_pair":{"predecessors":[3,4],"target":5}}),
+                "complete":true,"changed":0,"fixed_schema_pair":{"predecessors":[3,4,5],"target":6}}),
             );
         }
         if pending {
@@ -450,7 +469,7 @@ impl Store {
         )?;
         Ok(
             json!({"dry_run":false,"preview_sha256":plan_digest,"plan":plan,"complete":true,
-            "changed":changed,"fixed_schema_pair":{"predecessors":[3,4],"target":5}}),
+            "changed":changed,"fixed_schema_pair":{"predecessors":[3,4,5],"target":6}}),
         )
     }
 }
@@ -465,7 +484,7 @@ fn changed_records(plan: &Value) -> usize {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|row| matches!(row["schema"].as_u64(), Some(3 | 4)))
+                .filter(|row| matches!(row["schema"].as_u64(), Some(3..=5)))
                 .count()
         })
         .sum();
@@ -518,7 +537,7 @@ mod tests {
         );
         assert_eq!(
             preview["plan"]["files"][0]["after"]["requests"][0]["schema"],
-            5
+            6
         );
         assert_eq!(
             store.rewrite(Some("wrong")).expect_err("digest").kind,
@@ -570,7 +589,7 @@ mod tests {
         assert_eq!(preview["changed"], 1);
         assert_eq!(
             preview["fixed_schema_pair"],
-            json!({"predecessors":[3,4],"target":5})
+            json!({"predecessors":[3,4,5],"target":6})
         );
         assert!(preview.get("predecessor_schema").is_none());
         assert!(preview.get("target_schema").is_none());
@@ -632,6 +651,66 @@ mod tests {
         );
     }
 
+    /// ´test:unit:rewrite-schema-five-compute-preserves-wall-and-marks-cpu-unmeasured´
+    #[test]
+    fn rewrite_schema_five_compute_preserves_wall_and_marks_cpu_unmeasured() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let words = vec!["git".to_owned(), "diff".to_owned()];
+        let mut row = waiting("R", "1a", 3000, Mode::Audit).into_value();
+        row["operation"] = json!("compute");
+        row["class"] = json!("compute");
+        row["shape_key"] = json!(crate::door::compute::shape(&words));
+        row["effect"]["compute"] = json!({"words":words,"checkout_path":null,
+            "checkout_ref":null,"checkout_commit":null,"wrapper_exit_status":null,
+            "wrapper_wall_seconds":null,"wrapper_user_cpu_seconds":null,
+            "wrapper_system_cpu_seconds":null,"preparation_wall_seconds":null,
+            "tree_clean":null,"tree_change_count":null,"discarded":null});
+        row["effect"]["compute"]["wrapper_wall_seconds"] = json!(0.7);
+        store
+            .file(RequestRecord::decode(row).expect("current compute"))
+            .expect("file");
+        let path = fixture.home.join("runs/.launch-R/door-requests.json");
+        let mut before: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("JSON");
+        before["requests"][0]["schema"] = json!(5);
+        for key in ["wrapper_user_cpu_seconds", "wrapper_system_cpu_seconds"] {
+            before["requests"][0]["effect"]["compute"]
+                .as_object_mut()
+                .expect("compute")
+                .remove(key);
+        }
+        let bytes = serde_json::to_vec(&before).expect("bytes");
+        std::fs::write(&path, &bytes).expect("old record");
+        assert_eq!(
+            store.list_run("R").expect_err("strict reader").kind,
+            "requests-rewrite-required"
+        );
+        assert_eq!(std::fs::read(&path).expect("unchanged"), bytes);
+        let preview = store.rewrite(None).expect("preview");
+        let mut expected = before["requests"][0].clone();
+        expected["schema"] = json!(6);
+        expected["effect"]["compute"]["wrapper_user_cpu_seconds"] = Value::Null;
+        expected["effect"]["compute"]["wrapper_system_cpu_seconds"] = Value::Null;
+        assert_eq!(
+            preview["plan"]["files"][0]["after"]["requests"][0],
+            expected
+        );
+        store
+            .rewrite(preview["preview_sha256"].as_str())
+            .expect("apply");
+        assert_eq!(store.list_run("R").expect("read")[0].value(), &expected);
+        assert_eq!(store.rewrite(None).expect("repeat")["changed"], 0);
+        let mut forged = before["requests"][0].clone();
+        forged["effect"]["compute"]["wrapper_user_cpu_seconds"] = json!(0.3);
+        assert_eq!(
+            convert_record(&forged)
+                .expect_err("old schema with new key")
+                .kind,
+            "requests-rewrite-refusal"
+        );
+    }
+
     /// ´test:unit:rewrite-schema-four-preserves-judgement-with-unmeasured-observations´
     #[test]
     fn rewrite_schema_four_preserves_judgement_with_unmeasured_observations() {
@@ -665,7 +744,7 @@ mod tests {
         let preview = store.rewrite(None).expect("preview");
         assert_eq!(preview["changed"], 1);
         let mut expected = file["requests"][0].clone();
-        expected["schema"] = json!(5);
+        expected["schema"] = json!(6);
         expected["agent_observations"] = Value::Null;
         assert_eq!(
             preview["plan"]["files"][0]["after"]["requests"][0],
@@ -723,6 +802,38 @@ mod tests {
                 .0["decision"],
             "refuse"
         );
+    }
+
+    /// ´test:unit:rewrite-current-plan-resumes-with-its-original-digest´
+    #[test]
+    fn rewrite_current_plan_resumes_with_its_original_digest() {
+        let fixture = Fixture::new();
+        let path = old_file(&fixture);
+        let store = fixture.store();
+        let preview = store.rewrite(None).expect("plan");
+        let journal = json!({"schema":1,"phase":"pending",
+            "digest":preview["preview_sha256"],"plan":preview["plan"]});
+        replace_leaf(
+            &store.state,
+            JOURNAL,
+            &serde_json::to_vec(&journal).expect("journal"),
+            store.owner,
+            PLAN_LIMIT,
+        )
+        .expect("interrupted current journal");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&preview["plan"]["files"][0]["after"]).expect("target bytes"),
+        )
+        .expect("custody published before interruption");
+        let resumed = store.rewrite(None).expect("resume preview");
+        assert_eq!(resumed["preview_sha256"], preview["preview_sha256"]);
+        assert_eq!(resumed["resuming"], true);
+        store
+            .rewrite(preview["preview_sha256"].as_str())
+            .expect("resume original digest");
+        assert_eq!(store.list_run("R").expect("read")[0].value()["schema"], 6);
+        assert_eq!(store.rewrite(None).expect("repeat")["changed"], 0);
     }
 
     /// ´test:unit:rewrite-resumes-and-includes-retired-custody´
@@ -790,7 +901,7 @@ mod tests {
         let value: Value =
             serde_json::from_slice(&std::fs::read(retired.join(RUN_FILE)).expect("retired"))
                 .expect("JSON");
-        assert_eq!(value["requests"][0]["schema"], 5);
+        assert_eq!(value["requests"][0]["schema"], 6);
         assert_eq!(store.list_run("R").expect("active").len(), 1);
     }
 }

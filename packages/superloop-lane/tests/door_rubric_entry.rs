@@ -452,7 +452,7 @@ fn rubric_failure_survives_current_request_record() {
                 "1",
             )
             .expect("setting");
-            let mut record = json!({"schema":5,"id":"R:1a","loop":"alpha","run":"R",
+            let mut record = json!({"schema":6,"id":"R:1a","loop":"alpha","run":"R",
                 "worker_uid":worker,"class":"git","shape_key":"git:upload","operation":"git-upload",
                 "mirror_ref":"refs/heads/lane/alpha","mode":"audit","floor":"audit",
                 "class_setting":setting.value(),"loop_setting":setting.value(),
@@ -464,7 +464,7 @@ fn rubric_failure_survives_current_request_record() {
             superloop_lane::requests::judgement::apply(&mut record, &result, None, Some("fixture"));
             let decoded = superloop_lane::requests::RequestRecord::decode(record)
                 .expect("current record schema");
-            assert_eq!(decoded.value()["schema"], 5);
+            assert_eq!(decoded.value()["schema"], 6);
             assert!(
                 !decoded
                     .value()
@@ -565,9 +565,9 @@ fn install_and_refresh_report_unprivileged_rubric_failure() {
     install_refusals(&Fixture::unprivileged());
 }
 
-/// ´test:integration:rubric-failure-reaches-exercise-and-schema-five-readers´
+/// ´test:integration:rubric-failure-reaches-exercise-and-current-readers´
 #[test]
-fn rubric_failure_reaches_exercise_and_schema_five_readers() {
+fn rubric_failure_reaches_exercise_and_current_readers() {
     let fixture = Fixture::unprivileged();
     file(&fixture.runner.rubric_path, &[0xff], 0o644);
     let result = fixture.judge();
@@ -628,7 +628,7 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
     )
     .expect("setting");
     for (nonce, worker) in [("1a", fixture.uid + 10), ("1b", fixture.uid + 11)] {
-        let mut record = json!({"schema":5,"id":format!("R:{nonce}"),"loop":"alpha","run":"R",
+        let mut record = json!({"schema":6,"id":format!("R:{nonce}"),"loop":"alpha","run":"R",
             "worker_uid":worker,"class":"git","shape_key":"git:upload","operation":"git-upload",
             "mirror_ref":"refs/heads/lane/alpha","mode":"audit","floor":"audit",
             "class_setting":setting.value(),"loop_setting":setting.value(),
@@ -637,7 +637,7 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
                 "stdout_bytes":0,"stderr_bytes":0,"queue_wall_seconds":null,"mediation_wall_seconds":0.0,"compute_wall_seconds":0.0},
             "state":"waiting","mark_reason":null,"review":null,"label":null,"filed_at":"1"});
         superloop_lane::requests::judgement::initialize(&mut record);
-        let mut record = RequestRecord::decode(record).expect("schema five");
+        let mut record = RequestRecord::decode(record).expect("schema six");
         record.mark("fixture review").expect("mark for review");
         store.file(record).expect("file request");
         store
@@ -645,7 +645,7 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
             .expect("production agent writer");
     }
     for row in store.list_run("R").expect("exercise run reader") {
-        assert_eq!(row.value()["schema"], 5);
+        assert_eq!(row.value()["schema"], 6);
         assert!(!row.value().to_string().contains("synthetic-fixture-only"));
         assert_eq!(row.value()["agent_reason"], result.reason);
         assert!(row.value().get("rubric_failure").is_none());

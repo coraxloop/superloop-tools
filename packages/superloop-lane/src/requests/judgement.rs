@@ -1,4 +1,4 @@
-//! Schema-five judgement evidence, independent of effect and queue updates.
+//! Schema-six judgement evidence, independent of effect and queue updates.
 
 use crate::door::agent::RunnerOutcome;
 use serde_json::{Value, json};
@@ -20,7 +20,7 @@ pub const KEYS: [&str; 12] = [
 
 /// Initialize an intent or mechanically convert historical evidence.
 pub fn initialize(record: &mut Value) {
-    record["schema"] = json!(5);
+    record["schema"] = json!(6);
     let source = if matches!(
         record["would_do"]["decision"].as_str(),
         Some("allow" | "refuse")
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn agent_observations_survive_strict_record_round_trip() {
         let mut record = waiting("R", "1a", 3000, Mode::Audit).into_value();
-        assert_eq!(record["schema"], 5);
+        assert_eq!(record["schema"], 6);
         assert!(record["agent_observations"].is_null());
         let mut result = RunnerOutcome::referral(
             "failure",
@@ -436,9 +436,9 @@ mod tests {
         );
     }
 
-    /// ´test:unit:schema-four-requires-every-key-and-separates-observed-model´
+    /// ´test:unit:current-schema-requires-every-key-and-separates-observed-model´
     #[test]
-    fn schema_four_requires_every_key_and_separates_observed_model() {
+    fn current_schema_requires_every_key_and_separates_observed_model() {
         let mut record = waiting("R", "1a", 3000, Mode::Audit).into_value();
         let result =
             RunnerOutcome::referral("failure", "missing sign-in", std::time::Instant::now());

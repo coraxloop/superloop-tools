@@ -2013,7 +2013,7 @@ impl Store {
         if index["schema"] != 1 || !index["groups"].is_object() {
             return Err(problem(
                 "requests-learned-index",
-                "index unavailable; requests rebuild-index LOOP rebuilds schema-five custody; older records need requests rewrite",
+                "index unavailable; requests rebuild-index LOOP rebuilds schema-six custody; older records need requests rewrite",
             ));
         }
         let key = json!([class, operation, shape]).to_string();
@@ -2880,7 +2880,7 @@ pub(crate) mod tests {
             .rewrite(resumed["preview_sha256"].as_str())
             .expect("resume helper publication");
         let row = store.request("R:1a").expect("read converted");
-        assert_eq!(row.value()["schema"], 5);
+        assert_eq!(row.value()["schema"], 6);
         assert_eq!(row.value()["state"], "marked");
         assert!(row.value()["agent_observations"].is_null());
         fixture
@@ -3442,7 +3442,7 @@ pub(crate) mod tests {
         );
         let converted: Value =
             serde_json::from_slice(&fs::read(&request_path).expect("converted")).expect("JSON");
-        assert_eq!(converted["requests"][0]["schema"], 5);
+        assert_eq!(converted["requests"][0]["schema"], 6);
         assert_eq!(
             fs::read(&archive).expect("archive unchanged"),
             archive_bytes

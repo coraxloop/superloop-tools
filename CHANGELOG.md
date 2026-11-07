@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Compute completion retains the node-measured wrapper wall and child user/system CPU even without a RUN-REPORT line; a present contradictory report refuses by name. Schema-six request custody uses the explicit rewrite for older records, preserving their walls with unmeasured CPU. The historical deployed null-wall observation has not been remeasured (``prob:door:door-compute-wrapper-wall-measured``; ``proto:superlooplane:compute-deadline-and-evidence``).
+
 - Release refuses a non-string declared public version in Cargo repositories before check, dry-run or apply can proceed, retaining destination refs, objects and worktree (``prob:pack:release-refuses-a-non-string-public-version``).
 
 - Container helpers retain host-verified entry, Podman and hashing file custody across namespace entry and execute protected-plan hashes, attempts and cleanup through held descriptors; the bundle refuses missing, substituted and excess descriptors and changed declarations (``proto:workercontracts:namespace-anchor-handoff``).

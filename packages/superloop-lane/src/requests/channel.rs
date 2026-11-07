@@ -812,7 +812,7 @@ mod tests {
                     .kind,
                 "requests-rewrite-required"
             );
-            record["schema"] = json!(5);
+            record["schema"] = json!(6);
             record["agent_observations"] = Value::Null;
             let bytes = serde_json::to_vec(&json!({"schema":1,"run":"R","revision":1,
                 "requests":[record]}))
