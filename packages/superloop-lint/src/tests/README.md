@@ -109,6 +109,8 @@
 |(`test:crate:does-not-report-owners-without-markdown`)|layers|Owners with no Markdown need no prose activation, even when they own other files.|
 |(`test:crate:nested-prose-retains-other-policy-coverage`)|layers|Nested prose is exempt only under its declared root and remains in the burn census.|
 |(`test:crate:refuses-invalid-nested-corpus-declarations`)|layers|A nested declaration must name an owner, a contained directory, a snapshot and a reason.|
+|(`test:crate:non-participating-owners-retain-census-coverage`)|layers|Explicit upstream owners keep partition coverage while their unmodified prose is not harvested.|
+|(`test:crate:non-participating-owner-declarations-refuse-contradictions`)|layers|Non-participating rows require a known unique owner, a reason and no label policy activation.|
 |(`test:crate:reports-every-kind-of-inactive-prose-owner`)|layers|Root, crate-bearing, and crateless owners must activate their Markdown prose.|
 |(`test:crate:explains-inactive-prose-and-clears-it-on-activation`)|layers|Activating prose restores its mints; an inactive owner without Markdown is harmless.|
 |(`test:crate:resolves-a-prefixed-crateless-owner-before-checking-reach`)|layers|A rendered crateless mint resolves before its declared reach is checked.|

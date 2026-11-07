@@ -347,6 +347,9 @@ pub fn check_with_plan(plan: &ExecutionPlan) -> CheckReport {
 /// configuration. Every compiled command plan carries the parsed snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ConfigurationCounts {
+    /// Explicit upstream owners taking part in no label policy.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub non_participating: Vec<crate::snapshot::NonParticipatingOwner>,
     /// Nested corpora whose own snapshots account for their prose.
     pub nested: Vec<crate::snapshot::NestedCorpus>,
     /// How many owners the declaration registers.

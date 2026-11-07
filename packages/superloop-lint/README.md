@@ -95,9 +95,11 @@ A first-level Markdown heading is read as the environment `Document`, irrespecti
 
 ## Allowance declarations · `sec:indexlinter:allowance-declarations`
 
-Every declared owner with attributed Markdown sources, including the root and crateless owners, must activate ``labels.mints-well-formed`` with its paired list; otherwise configuration fails rather than silently omitting that owner's prose.
+By default, every declared owner with attributed Markdown sources, including the root and crateless owners, must activate ``labels.mints-well-formed`` with its paired list; otherwise configuration fails rather than silently omitting that owner's prose.
 
-A declared nested corpus is the only exemption from this owner's prose count, because its own snapshot is the evidence it is checked; only that owner's Markdown beneath the nested root is exempt, and its paths remain visible to all other policies.
+An optional top-level `non_participating = [{ owner = "UPSTREAM", reason = "Unchanged upstream archive" }]` relation in ``.linter/owners.toml`` exempts each named owner from prose activation. Each row requires a unique registered owner and a nonempty reason, and that owner must activate no ``labels.*`` policy, including deferred policies. Its paths remain in the partition and census and in every other activated policy. Configuration reports list non-participating rows when present. This is an explicit declaration of upstream status, not a content-integrity attestation.
+
+A declared nested corpus is another exemption from this owner's prose count, because its own snapshot is the evidence it is checked; only that owner's Markdown beneath the nested root is exempt, and its paths remain visible to all other policies.
 
 Each activated owner-policy pair needs exactly one list in ``.linter/lists.toml``, using the policy's codec. A fingerprint policy's empty list is `allowances = []`; a nonempty list contains tables, not strings:
 

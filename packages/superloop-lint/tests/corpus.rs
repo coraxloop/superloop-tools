@@ -103,6 +103,7 @@
 //! | [`characterizes_assembly_bytes`] | harness | Assembly fixes both its report and the generated publication. |
 //! | [`characterizes_fix_bytes`] | harness | Both fix profiles refuse before writing over deliberately undeclared fixtures, freezing the refusal and the untouched sources. |
 //! | [`citation_sites_preserve_resolved_addresses`] | cli | The executable protocol preserves citations before the first mint and exposes no document text. |
+//! | [`non_participating_owner_keeps_upstream_bytes`] | cli | An explicit upstream owner preserves malformed upstream prose and census coverage through the CLI. |
 //! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration. |
 //! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting lists removes deactivated catalogued tables and preserves deferred bytes and position. |
 //! | [`deferred_family_replacements_are_disjoint`] | control | Active family containers survive beside deferred bytes, while stale siblings leave without overlapping the active family's replacement. |
@@ -5476,6 +5477,88 @@ fn citation_sites_preserve_resolved_addresses() {
             "sites":[{"citing_path":"adr/fixture.md", "target_path":"adr/fixture.md",
                       "surface":"document", "label":"sec:fixture:one", "owner":"PROJECTA", "path_class":null}]
         })
+    );
+}
+
+/// An explicit upstream owner preserves malformed upstream prose and census coverage through the CLI.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the declaration bypasses ordinary owner admission.
+/// ´claim:cli:non-participating-owner-keeps-upstream-bytes´
+/// ´test:integration:non-participating-owner-keeps-upstream-bytes´
+#[test]
+fn non_participating_owner_keeps_upstream_bytes() {
+    let root = build_mode_fixture("## One · `sec:fixture:one`\n");
+    let upstream = "Unmodified upstream changelog with an unmatched ` delimiter.\n";
+    write(root.path(), "vendor/CHANGELOG.md", upstream);
+    let owners = DECLARED_OWNERS.replace("owners = [\"PROJECTA\"]", "owners = [\"PROJECTA\", \"PROJECTB\"]")
+        .replace("partitions = [", "partitions = [{ name = \"upstream\", owner = \"PROJECTB\", pattern = '%s\"vendor/\" *VCHAR' }, ");
+    let declared = format!(
+        "{owners}non_participating = [{{ owner = \"PROJECTB\", reason = \"Unchanged fixture upstream archive\" }}]\n"
+    );
+    declare(
+        root.path(),
+        &declared,
+        FIXTURE_ENVIRONMENTS,
+        DECLARED_POLICIES,
+        DECLARED_LISTS,
+    );
+    track(root.path());
+    let (code, report) = run(&["check"], root.path());
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["configuration"]["partition"]["unaccounted"], 0);
+    assert_eq!(
+        report["configuration"]["non_participating"][0]["owner"],
+        "PROJECTB"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("vendor/CHANGELOG.md")).expect("upstream"),
+        upstream
+    );
+    for policy in [
+        "labels.mints-well-formed",
+        "labels.citations-local-resolve",
+        "labels.upstream-fixture",
+    ] {
+        let programme = if policy == "labels.upstream-fixture" {
+            ", programme = { package = \"vendor\", binary = \"fixture-checker\" }"
+        } else {
+            ""
+        };
+        let policies = DECLARED_POLICIES.replace(
+            "policies = [",
+            &format!("policies = [{{ owner = \"PROJECTB\", policy = {policy:?}{programme} }}, "),
+        );
+        let lists = format!("{DECLARED_LISTS}\n[PROJECTB.{policy:?}]\nallowances = []\n");
+        declare(
+            root.path(),
+            &declared,
+            FIXTURE_ENVIRONMENTS,
+            &policies,
+            &lists,
+        );
+        let config = superloop_lint::configuration(root.path());
+        let errors = config.refusals();
+        assert!(
+            format!("{errors:?}").contains("owner must activate no labels.* policy"),
+            "{errors:?}"
+        );
+    }
+    declare(
+        root.path(),
+        &owners,
+        FIXTURE_ENVIRONMENTS,
+        DECLARED_POLICIES,
+        DECLARED_LISTS,
+    );
+    let (code, report) = run(&["check"], root.path());
+    assert_eq!(code, Some(3), "{report}");
+    assert!(
+        report["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(|finding| finding["code"] == "inactive_prose_owner")
     );
 }
 

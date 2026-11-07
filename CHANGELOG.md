@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Owners can explicitly declare unchanged upstream trees non-participating with a reason, retaining partition and census coverage while refusing label activations and preserving the inactive-prose guard for all other owners (``prob:linter:non-participating-owner-for-unchanged-upstream-trees``).
+
 - Door capacity refusals identify the fixed sixteen-peer service bound and a 120-second retry cadence; the worker contract treats them as transient while node compute scheduling remains with the owner-controlled wrapper (``open:door:door-compute-capacity-under-many-lanes``; ``rule:superlooplane:door-peer-capacity``).
 
 - Registered `cargo test` commands admit `--no-run` for compile-only checks under the existing judgement tiers, retaining the exact argv and refusing the flag on other verbs or in runner arguments (``prob:door:door-compute-admits-test-no-run``).

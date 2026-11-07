@@ -1275,6 +1275,13 @@ impl LabelPlan {
                 continue;
             };
             if snapshot
+                .non_participating()
+                .iter()
+                .any(|row| row.owner == owner)
+            {
+                continue;
+            }
+            if snapshot
                 .nested()
                 .iter()
                 .any(|nested| nested.owner == owner && native.starts_with(&nested.root))

@@ -89,6 +89,7 @@
 |(`test:integration:characterizes-assembly-bytes`)|harness|Assembly fixes both its report and the generated publication.|
 |(`test:integration:characterizes-fix-bytes`)|harness|Both fix profiles refuse before writing over deliberately undeclared fixtures, freezing the refusal and the untouched sources.|
 |(`test:integration:citation-sites-preserve-resolved-addresses`)|cli|The executable protocol preserves citations before the first mint and exposes no document text.|
+|(`test:integration:non-participating-owner-keeps-upstream-bytes`)|cli|An explicit upstream owner preserves malformed upstream prose and census coverage through the CLI.|
 |(`test:integration:nested-root-containment-uses-tracked-paths`)|cli|Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration.|
 |(`test:integration:deferred-list-rewrite-preserves-bytes-and-order`)|cli|Rewriting lists removes deactivated catalogued tables and preserves deferred bytes and position.|
 |(`test:integration:deferred-family-replacements-are-disjoint`)|control|Active family containers survive beside deferred bytes, while stale siblings leave without overlapping the active family's replacement.|
