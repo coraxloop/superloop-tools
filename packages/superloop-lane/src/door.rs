@@ -4660,15 +4660,60 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
+    struct EstateReferral(&'static str, &'static str);
+    impl super::agent::AgentRunner for EstateReferral {
+        fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+            super::agent::RunnerOutcome::referral(self.0, self.1, Instant::now())
+        }
+    }
+    fn referral_client(
+        fixture: &Fixture,
+    ) -> (
+        UnixStream,
+        serde_json::Value,
+        thread::JoinHandle<serde_json::Value>,
+    ) {
+        let socket = crate::fixture_exec::fixture_socket_path(fixture.home.join("referral.sock"));
+        let listener = UnixListener::bind(&socket).expect("listener");
+        let client = thread::spawn(move || {
+            super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(Some(30_000)));
+            super::transport::stub_call_stream(
+                &socket,
+                &[std::ffi::OsString::from("door-attribution-probe")],
+                io::empty(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("stub retains the final referral refusal")
+        });
+        let (mut stream, _) = listener.accept().expect("client connection");
+        let request = frame_read(&mut stream).expect("stub request");
+        (stream, request, client)
+    }
+
+    fn referral_contender(
+        store: &crate::requests::store::Store,
+        induce_wait: bool,
+    ) -> Option<thread::JoinHandle<()>> {
+        if induce_wait {
+            let held = store.fixture_exclusive_lock().expect("competing writer");
+            let (contended, observed) = std::sync::mpsc::channel();
+            super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = Some(contended));
+            Some(thread::spawn(move || {
+                observed
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("measured store contention");
+                thread::sleep(Duration::from_millis(150));
+                drop(held);
+            }))
+        } else {
+            None
+        }
+    }
+
     /// ´test:unit:door-unprovisioned-estate-referral-has-no-effect´
     #[test]
     fn door_unprovisioned_estate_referral_has_no_effect() {
-        struct Estate(&'static str, &'static str);
-        impl super::agent::AgentRunner for Estate {
-            fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
-                super::agent::RunnerOutcome::referral(self.0, self.1, Instant::now())
-            }
-        }
         let cases = [
             ("verdict", "estate judgement needed"),
             ("timeout", "door-agent-timeout"),
@@ -4678,75 +4723,94 @@ mod tests {
             ("failure", "door-rubric-unavailable"),
             ("failure", "door-agent-sign-in-unavailable"),
         ];
-        for (mode, (status, reason)) in
-            [crate::requests::Mode::Audit, crate::requests::Mode::Enforce]
-                .into_iter()
-                .flat_map(|mode| cases.into_iter().map(move |case| (mode, case)))
-        {
-            let fixture = Fixture::new();
-            fixture.set_floor("allow");
-            let store = fixture.store();
-            set_fixture_mode(&store, mode);
-            let registration = Registration::from_row(
-                &json!({"name":"alpha","uid":41001}),
-                "alpha",
-                "R",
-                3000,
-                Scope::Work,
-            )
-            .expect("registration");
-            let (mut stream, mut peer) = UnixStream::pair().expect("socket pair");
-            let (runner, calls, _) = counting_runner(&fixture);
-            let route = route_for(&fixture.home);
-            let review_store = fixture.store();
-            super::AFTER_WAIT_READ.with(|slot| {
-                *slot.borrow_mut() = Some(Box::new(move || {
-                    let rows = review_store.list_run("R").expect("waiting review");
-                    let row = &rows[0];
-                    assert_eq!(row.value()["state"], "waiting");
-                    assert_eq!(row.value()["would_do"]["decision"], "refer");
-                    assert_eq!(row.value()["agent_reason"], reason);
-                    assert_eq!(row.value()["effect"]["state"], "pending");
-                    assert!(row.value()["label"].is_null());
-                    review_store
-                        .triage(
-                            "R",
-                            &[json!({"id":row.id(),"action":"adjudicate",
+        for induce_wait in [false, true] {
+            for (mode, (status, reason)) in
+                [crate::requests::Mode::Audit, crate::requests::Mode::Enforce]
+                    .into_iter()
+                    .flat_map(|mode| cases.into_iter().map(move |case| (mode, case)))
+            {
+                let fixture = Fixture::new();
+                fixture.set_floor("allow");
+                let store = fixture.store();
+                set_fixture_mode(&store, mode);
+                let registration = Registration::from_row(
+                    &json!({"name":"alpha","uid":41001}),
+                    "alpha",
+                    "R",
+                    3000,
+                    Scope::Work,
+                )
+                .expect("registration");
+                let (mut stream, request, client) = referral_client(&fixture);
+                let (runner, calls, _) = counting_runner(&fixture);
+                let route = route_for(&fixture.home);
+                let review_store = fixture.store();
+                super::AFTER_WAIT_READ.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        let rows = review_store.list_run("R").expect("waiting review");
+                        let row = &rows[0];
+                        assert_eq!(row.value()["state"], "waiting");
+                        assert_eq!(row.value()["would_do"]["decision"], "refer");
+                        assert_eq!(row.value()["agent_reason"], reason);
+                        assert_eq!(row.value()["effect"]["state"], "pending");
+                        assert!(row.value()["label"].is_null());
+                        review_store
+                            .triage(
+                                "R",
+                                &[json!({"id":row.id(),"action":"adjudicate",
                                 "treatment":"refuse","reason":"loop review answer"})],
-                            "fixture-reviewer",
-                            "2",
-                        )
-                        .expect("loop answer");
-                }));
-            });
-            let (reply, _) = super::serve_request_with_agent(
-                &mut stream,
-                &registration,
-                3000,
-                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":30_000}),
-                Some(&route),
-                Some(&runner),
-                Some(&fixture.home),
-                None,
-                Some(&store),
-                Some(&Estate(status, reason)),
-                None,
-                Instant::now(),
-            )
-            .expect("loop review refusal");
-            assert_eq!(reply["reason"], "door-adjudicated-refusal");
-            let wire = frame_read(&mut peer).expect("worker reply");
-            for field in ["reason", "request_id", "queue_state", "status"] {
-                assert_eq!(wire[field], reply[field], "{field}");
+                                "fixture-reviewer",
+                                "2",
+                            )
+                            .expect("loop answer");
+                    }));
+                });
+                let release = referral_contender(&store, induce_wait);
+                let (reply, _) = super::serve_request_with_agent(
+                    &mut stream,
+                    &registration,
+                    3000,
+                    &request,
+                    Some(&route),
+                    Some(&runner),
+                    Some(&fixture.home),
+                    None,
+                    Some(&store),
+                    Some(&EstateReferral(status, reason)),
+                    None,
+                    Instant::now(),
+                )
+                .expect("loop review refusal");
+                assert_eq!(reply["reason"], "door-adjudicated-refusal");
+                let wire = client.join().expect("stub client");
+                if let Some(release) = release {
+                    release.join().expect("holder released");
+                    assert!(
+                        wire["request_lock_wait_credit_ms"]
+                            .as_u64()
+                            .expect("credit")
+                            >= 50
+                    );
+                }
+                for field in [
+                    "reason",
+                    "request_id",
+                    "queue_state",
+                    "status",
+                    "request_lock_wait_ms",
+                    "request_lock_wait_credit_ms",
+                ] {
+                    assert_eq!(wire[field], reply[field], "{field}");
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                let rows = store.list_run("R").expect("retained review evidence");
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].value()["agent_scope"], "estate");
+                assert_eq!(
+                    rows[0].value()["effect"]["reason"],
+                    "door-adjudicated-refusal"
+                );
             }
-            assert_eq!(calls.load(Ordering::SeqCst), 0);
-            let rows = store.list_run("R").expect("retained review evidence");
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].value()["agent_scope"], "estate");
-            assert_eq!(
-                rows[0].value()["effect"]["reason"],
-                "door-adjudicated-refusal"
-            );
         }
     }
 

@@ -80,6 +80,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Estate-referral regressions use the production stub to consume contention progress before asserting the final adjudicated refusal and unchanged custody evidence (``proto:superlooplane:request-lock-wait-credit``).
+
 - Compute replies preserve the exact registered and requested deadline bounds under store contention and name the credited bound separately as `effective_deadline_ms` (``proto:superlooplane:request-lock-wait-credit``).
 
 - Namespace executable checks share their pin and image validation, retain the active operation’s refusal envelope and reject surplus exercise arguments before parsing the private form; the attempt runner and real runtime entry exercise held execution across pathname replacement (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
