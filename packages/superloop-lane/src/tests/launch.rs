@@ -20,6 +20,225 @@ fn backend_settings(vendors: &[&str]) -> crate::settings::Settings {
     settings
 }
 
+/// ´test:crate:boxed-backend-claude-runtime-transformations-retain-confinement´
+#[test]
+fn boxed_backend_claude_runtime_transformations_retain_confinement() {
+    for vendors in [&["claude"][..], &["codex", "claude"][..]] {
+        let mut settings = backend_settings(vendors);
+        settings.driver_argv = vec!["/fixture/driver".into()];
+        settings.driver_bin = Some("/fixture/driver".into());
+        let mut plan = crate::plan::Plan::build_with_door(
+            std::path::Path::new("/fixture/owner"),
+            "alpha",
+            "R",
+            &settings,
+            &super::fixture_row(),
+            super::fixture_block(),
+            (1000, 1000),
+            false,
+            Some(BoxBackend::Claude),
+        )
+        .expect("Claude candidate vector");
+        plan.select_worker_uid(3200).expect("reserved identity");
+        plan.select_mail_group(3300).expect("mail group");
+        plan.select_launch_model(&json!({"model":"fixture-claude", "effort":"high"}))
+            .expect("selected model");
+        plan.observe_vendor().expect("observing route");
+        crate::plan::box_gate(&plan.document).expect("structural confinement");
+        let words = plan.document["runtime_argv"]
+            .as_array()
+            .expect("runtime vector");
+        for required in [
+            "/home/worker/.local/bin/claude",
+            "--user=3200:3200",
+            "--group-add=3300",
+            "--network=none",
+            "CLAUDE_CONFIG_DIR=/home/worker/.claude",
+        ] {
+            assert!(
+                words.iter().any(|word| word == required),
+                "{required}: {words:?}"
+            );
+        }
+        assert!(words.ends_with(&[
+            json!("--model"),
+            json!("fixture-claude"),
+            json!("--effort"),
+            json!("high")
+        ]));
+        assert!(plan.document["environment"]["CODEX_HOME"].is_null());
+        assert_eq!(plan.document["owner_refresh_hosts"], json!([]));
+        assert_eq!(
+            crate::plan::verify_box_attestation(&plan.document)
+                .expect_err("structural vectors do not admit unmeasured credentials")
+                .kind,
+            "backend-unavailable"
+        );
+        plan.document["model_selection"]["model"] = json!("changed");
+        assert_eq!(
+            crate::plan::box_gate(&plan.document)
+                .expect_err("selected model must match the vector")
+                .kind,
+            "box-gate"
+        );
+    }
+}
+
+/// ´test:crate:boxed-backend-claude-runtime-refuses-cross-vendor-and-expanded-authority´
+#[test]
+fn boxed_backend_claude_runtime_refuses_cross_vendor_and_expanded_authority() {
+    let mut settings = backend_settings(&["codex", "claude"]);
+    settings.driver_argv = vec!["/fixture/driver".into()];
+    settings.driver_bin = Some("/fixture/driver".into());
+    let plan = crate::plan::Plan::build_with_door(
+        std::path::Path::new("/fixture/owner"),
+        "alpha",
+        "R",
+        &settings,
+        &super::fixture_row(),
+        super::fixture_block(),
+        (1000, 1000),
+        false,
+        Some(BoxBackend::Claude),
+    )
+    .expect("Claude candidate vector");
+    for (original, replacement) in [
+        (
+            "/home/worker/.local/bin/claude",
+            "/home/worker/.local/bin/codex",
+        ),
+        ("--network=none", "--network=host"),
+        ("--cap-drop=ALL", "--privileged"),
+        ("bypassPermissions", "acceptEdits"),
+        ("stream-json", "json"),
+        (
+            "--dangerously-skip-permissions",
+            "--allow-dangerously-skip-permissions",
+        ),
+    ] {
+        let mut changed = plan.document.clone();
+        let words = changed["runtime_argv"].as_array_mut().expect("vector");
+        let index = words
+            .iter()
+            .position(|word| word == original)
+            .expect("original word");
+        words[index] = json!(replacement);
+        assert_eq!(
+            crate::plan::box_gate(&changed)
+                .expect_err("expanded or cross-vendor vector refuses")
+                .kind,
+            "box-gate",
+            "{original} => {replacement}"
+        );
+    }
+    let mut changed = plan.document.clone();
+    let mounts = changed["mounts"].as_array_mut().expect("mounts");
+    let configuration = mounts
+        .iter_mut()
+        .find(|row| row["target"] == "/home/worker/.claude/settings.json")
+        .expect("immutable configuration");
+    configuration["access"] = json!("rw");
+    assert_eq!(
+        crate::plan::box_gate(&changed)
+            .expect_err("configuration cannot become worker writable")
+            .kind,
+        "box-gate"
+    );
+    let mut changed = plan.document;
+    changed["backend"] = json!("codex");
+    assert_eq!(
+        crate::plan::box_gate(&changed)
+            .expect_err("binding cannot select a different vector")
+            .kind,
+        "box-gate"
+    );
+}
+
+/// ´test:crate:boxed-backend-runtime-probe-requires-selected-program-evidence´
+#[test]
+fn boxed_backend_runtime_probe_requires_selected_program_evidence() {
+    let report = json!({"codex_exec_probe":{}, "image_digest":"sha256:fixture"});
+    let error = crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &json!([]))
+        .expect_err("Codex evidence cannot satisfy the Claude probe");
+    assert_eq!(error.kind, "build-report");
+    assert_eq!(error.detail, "build_environment.claude_bin is absent");
+    let error = crate::build::check_backend_exec_probe(
+        BoxBackend::Codex,
+        &json!({"claude_exec_probe":{}}),
+        &json!([]),
+    )
+    .expect_err("Claude evidence cannot satisfy the Codex probe");
+    assert_eq!(error.kind, "codex-exec-help");
+}
+
+/// ´test:crate:boxed-backend-claude-options-require-selected-capture´
+#[test]
+fn boxed_backend_claude_options_require_selected_capture() {
+    let image = format!("sha256:{}", "a".repeat(64));
+    let program = "b".repeat(64);
+    let help = [
+        "  -p, --print",
+        "  --output-format <format>  text, json or stream-json",
+        "  --verbose",
+        "  --permission-mode <mode>  acceptEdits, bypassPermissions, default or plan",
+        "  --dangerously-skip-permissions",
+        "  --model <model>",
+        "  --effort <level>",
+        "  -r, --resume [value]",
+        "  -h, --help",
+    ]
+    .join("\n");
+    let report = json!({"image_digest":image, "claude_version":"0.1.0", "claude_sha256":program,
+        "claude_source":"https://fixture.example/claude",
+        "claude_image_program":crate::build::payload::CLAUDE_IMAGE_PROGRAM,
+        "build_environment":{"claude_bin":"/fixture/claude"},
+        "claude_exec_probe":{"argv":["--help"], "stdout":help,
+            "required_options":crate::build::payload::CLAUDE_EXEC_OPTIONS,
+            "claude_sha256":program, "image_digest":image, "companions":[]},
+        "claude_runtime":{"image_digest":image,
+            "interpreter":{"path":"/lib64/ld-linux-x86-64.so.2", "sha256":"c".repeat(64)},
+            "libraries":[{"path":"/lib64/libc.so.6", "sha256":"d".repeat(64)}]},
+        "codex_exec_probe":{"stdout":"  --add-dir\n"}});
+    let planned = json!([
+        "/usr/bin/podman",
+        "run",
+        "--network=none",
+        image,
+        "/home/worker/.local/bin/claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "bypassPermissions",
+        "--dangerously-skip-permissions",
+        "--model",
+        "fixture-claude",
+        "--effort",
+        "high"
+    ]);
+    crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &planned)
+        .expect("captured Claude options");
+    let mut unlisted = planned.clone();
+    unlisted
+        .as_array_mut()
+        .expect("vector")
+        .insert(5, json!("--add-dir"));
+    let error = crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &unlisted)
+        .expect_err("an option only the Codex capture lists refuses");
+    assert_eq!(error.kind, "claude-exec-help");
+    assert_eq!(
+        error.detail,
+        "planned Claude option --add-dir is absent from the pinned help"
+    );
+    let mut foreign = planned;
+    foreign[4] = json!("/home/worker/.local/bin/codex");
+    let error = crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &foreign)
+        .expect_err("another vendor's program refuses");
+    assert_eq!(error.kind, "claude-exec-help");
+    assert_eq!(error.detail, "planned Claude program differs");
+}
+
 /// ´test:crate:boxed-backend-image-program-uses-only-selected-generation´
 #[test]
 fn boxed_backend_image_program_uses_only_selected_generation() {
@@ -247,7 +466,7 @@ fn boxed_backend_protected_plan_refuses_missing_or_changed_vendor() {
         assert_eq!(
             error.kind,
             if value == "claude" {
-                "backend-unavailable"
+                "box-gate"
             } else {
                 "backend-selection"
             }
@@ -604,9 +823,15 @@ fn boxed_backend_claude_layout_is_vendor_specific_and_not_executable() {
             "/home/worker/.claude"
         );
         assert!(plan.document["environment"]["CODEX_HOME"].is_null());
-        assert_eq!(plan.document["runtime_argv"], json!([]));
+        assert!(
+            plan.document["runtime_argv"]
+                .as_array()
+                .expect("vector")
+                .iter()
+                .any(|word| word == "/home/worker/.local/bin/claude")
+        );
         assert_eq!(plan.document["owner_refresh_hosts"], json!([]));
-        assert_eq!(plan.document["box_gate"]["verdict"], "unavailable");
+        assert_eq!(plan.document["box_gate"]["verdict"], "passed");
         assert_eq!(
             crate::plan::verify_box_attestation(&plan.document)
                 .expect_err("layout is never runtime acceptance")

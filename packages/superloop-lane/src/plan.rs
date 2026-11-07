@@ -609,14 +609,50 @@ fn arg(args: &mut Vec<String>, option: &str, value: impl AsRef<str>) {
     args.push(format!("{option}={}", value.as_ref()));
 }
 
-/// Verify that the outer box supplies the confinement used by Codex tool calls.
+const CLAUDE_PRINT_ARGUMENTS: [&str; 7] = [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    "bypassPermissions",
+    "--dangerously-skip-permissions",
+];
+
+fn check_claude_command(document: &Value, words: &[&str]) -> Result<(), LaneError> {
+    if words.first() != Some(&"/home/worker/.local/bin/claude") {
+        return Err(LaneError::input(
+            "box-gate",
+            "Claude program differs from its pinned mount",
+        ));
+    }
+    let mut tail = CLAUDE_PRINT_ARGUMENTS.to_vec();
+    if let Some(selection) = document.get("model_selection") {
+        let model = selection["model"]
+            .as_str()
+            .ok_or_else(|| LaneError::input("box-gate", "Claude model selection is absent"))?;
+        let effort = selection["effort"]
+            .as_str()
+            .ok_or_else(|| LaneError::input("box-gate", "Claude effort selection is absent"))?;
+        tail.extend(["--model", model, "--effort", effort]);
+    }
+    if !words[1..].ends_with(&tail) {
+        return Err(LaneError::input(
+            "box-gate",
+            "Claude print, permission or model arguments differ",
+        ));
+    }
+    Ok(())
+}
+
+/// Verify the selected runtime vector and its outer filesystem confinement.
 ///
 /// # Errors
 ///
 /// Refuses a missing or expanded runtime confinement option or writable mount.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
-    crate::settings::BoxBackend::from_plan(document)?.require_runtime()?;
+    let backend = crate::settings::BoxBackend::from_plan(document)?;
     let argv = document["runtime_argv"]
         .as_array()
         .ok_or_else(|| LaneError::input("box-gate", "runtime argument vector is absent"))?;
@@ -701,17 +737,21 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
             "runtime weakens container confinement",
         ));
     }
-    if !words
-        .windows(2)
-        .any(|pair| pair == ["--sandbox", "danger-full-access"])
-        || words
+    if backend == crate::settings::BoxBackend::Codex {
+        if !words
             .windows(2)
-            .any(|pair| pair[0] == "--sandbox" && pair[1] != "danger-full-access")
-    {
-        return Err(LaneError::input(
-            "box-gate",
-            "Codex must use danger-full-access inside the box",
-        ));
+            .any(|pair| pair == ["--sandbox", "danger-full-access"])
+            || words
+                .windows(2)
+                .any(|pair| pair[0] == "--sandbox" && pair[1] != "danger-full-access")
+        {
+            return Err(LaneError::input(
+                "box-gate",
+                "Codex must use danger-full-access inside the box",
+            ));
+        }
+    } else {
+        check_claude_command(document, &words[image_position + 1..])?;
     }
     let mounts = document["mounts"]
         .as_array()
@@ -719,7 +759,12 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
     let home = document["home"]
         .as_str()
         .ok_or_else(|| LaneError::input("box-gate", "worker home is absent"))?;
-    let leaves = [".codex", ".cache/work", ".local/outbox", ".local/sources"];
+    let leaves = [
+        backend.state_leaf(),
+        ".cache/work",
+        ".local/outbox",
+        ".local/sources",
+    ];
     let mut expected_mounts = Vec::new();
     for mount in mounts.iter().filter(|mount| mount["kind"] == "bind") {
         let source = mount["source"]
@@ -809,6 +854,13 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
             "one confined worker mail mount is required",
         ));
     }
+    let template_files = backend.template_files();
+    let template_targets = [
+        "/home/worker/.local/bin".to_owned(),
+        "/home/worker/.local/libexec/superloop".to_owned(),
+        format!("{}/{}", backend.state_home(), template_files[0]),
+        format!("{}/{}", backend.state_home(), template_files[1]),
+    ];
     if !mounts.iter().any(|mount| {
         mount["target"] == "/home/worker" && mount["source"] == home && mount["access"] == "ro"
     }) || leaves.iter().any(|leaf| {
@@ -818,14 +870,7 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
     }) || !mounts
         .iter()
         .any(|mount| mount["target"] == "/home/worker/.local/vendor" && mount["access"] == "ro")
-        || [
-            "/home/worker/.local/bin",
-            "/home/worker/.local/libexec/superloop",
-            "/home/worker/.codex/config.toml",
-            "/home/worker/.codex/AGENTS.md",
-        ]
-        .iter()
-        .any(|target| {
+        || template_targets.iter().any(|target| {
             !mounts
                 .iter()
                 .any(|mount| mount["target"] == *target && mount["access"] == "ro")
@@ -972,7 +1017,7 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
     }
     for key in [
         "HOME",
-        "CODEX_HOME",
+        backend.home_variable(),
         "XDG_CACHE_HOME",
         "XDG_RUNTIME_DIR",
         "TMPDIR",
@@ -1030,8 +1075,13 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
     let bytes = serde_json::to_vec(&document["runtime_argv"])
         .map_err(|error| LaneError::operation("box-gate", error.to_string()))?;
     let runtime_argv_sha256 = crate::build::sha256_bytes(&bytes, Path::new("/"))?;
+    let inner_sandbox = if backend == crate::settings::BoxBackend::Codex {
+        "danger-full-access; outer box enforces mounts"
+    } else {
+        "permission bypass; outer box enforces mounts; Claude trial remains required"
+    };
     Ok(
-        json!({"verdict":"passed","container_options":required,"root":"read-only","template":"read-only","writable_leaves":leaves,"worker_uid":worker_uid,"network":"none; vendor socket through read-only proxy mount","inner_sandbox":"danger-full-access; outer box enforces mounts","runtime_argv_sha256":runtime_argv_sha256}),
+        json!({"verdict":"passed","container_options":required,"root":"read-only","template":"read-only","writable_leaves":leaves,"worker_uid":worker_uid,"network":"none; vendor socket through read-only proxy mount","inner_sandbox":inner_sandbox,"runtime_argv_sha256":runtime_argv_sha256}),
     )
 }
 
@@ -1114,6 +1164,7 @@ pub(crate) fn verify_home_layout(document: &Value) -> Result<(), LaneError> {
 ///
 /// Refuses a changed vector or gate result.
 pub(crate) fn verify_box_attestation(document: &Value) -> Result<(), LaneError> {
+    crate::settings::BoxBackend::from_plan(document)?.require_runtime()?;
     if document["box_gate"] != box_gate(document)? {
         return Err(LaneError::input(
             "box-gate",
@@ -2007,9 +2058,9 @@ impl Plan {
             );
             args.push("-".into());
         } else {
-            // A layout is not an executable Claude plan. Keep the launch gate
-            // closed until entry, image, runtime and credential adapters exist.
-            args.clear();
+            args.push("/home/worker/.local/bin/claude".into());
+            args.extend(backend_argv.iter().skip(1).cloned());
+            args.extend(CLAUDE_PRINT_ARGUMENTS.map(String::from));
         }
         let inventory = mount_inventory(&mounts, &rows, &mount_source_rows)?;
         let vendor_hosts = settings
@@ -2042,13 +2093,12 @@ impl Plan {
             document["door"]["peer_uid"] = json!(worker_uid);
             document["door"]["mirror_ref"] = json!(format!("refs/heads/lane/{run}"));
         }
-        if backend == crate::settings::BoxBackend::Codex {
-            document["box_gate"] = box_gate(&document)?;
-        } else {
+        document["box_gate"] = box_gate(&document)?;
+        if backend == crate::settings::BoxBackend::Claude {
             document["owner_refresh_hosts"] = json!([]);
-            document["runtime_measurement"] =
-                json!("unavailable; Claude runtime adapter is not implemented");
-            document["box_gate"] = json!({"verdict":"unavailable","reason":"backend-unavailable"});
+            document["runtime_measurement"] = json!(
+                "provisional vector; Claude credential and trial acceptance remain unavailable"
+            );
         }
         verify_home_layout(&document)?;
         if include_door && installed_roots && !document["door"].is_object() {
@@ -2128,12 +2178,13 @@ impl Plan {
         Ok(())
     }
 
-    /// Fix the Codex selection in the reviewed runtime vector and box gate.
+    /// Fix the selected model in the reviewed backend runtime vector and box gate.
     ///
     /// # Errors
     ///
-    /// Refuses a runtime vector without its Codex exec boundary.
+    /// Refuses a runtime vector without its selected program boundary.
     pub fn select_launch_model(&mut self, selection: &Value) -> Result<(), LaneError> {
+        let backend = crate::settings::BoxBackend::from_plan(&self.document)?;
         let model = selection["model"]
             .as_str()
             .ok_or_else(|| LaneError::input("plan-json", "model is absent"))?;
@@ -2143,19 +2194,28 @@ impl Plan {
         let argv = self.document["runtime_argv"]
             .as_array_mut()
             .ok_or_else(|| LaneError::input("plan-json", "runtime argv is absent"))?;
-        let exec = argv
-            .iter()
-            .position(|word| word == "exec")
-            .ok_or_else(|| LaneError::input("plan-json", "Codex exec is absent"))?;
-        argv.splice(
-            (exec + 1)..=exec,
-            [
-                json!("-m"),
+        if backend == crate::settings::BoxBackend::Codex {
+            let exec = argv
+                .iter()
+                .position(|word| word == "exec")
+                .ok_or_else(|| LaneError::input("plan-json", "Codex exec is absent"))?;
+            argv.splice(
+                (exec + 1)..=exec,
+                [
+                    json!("-m"),
+                    json!(model),
+                    json!("-c"),
+                    json!(format!("model_reasoning_effort={effort}")),
+                ],
+            );
+        } else {
+            argv.extend([
+                json!("--model"),
                 json!(model),
-                json!("-c"),
-                json!(format!("model_reasoning_effort={effort}")),
-            ],
-        );
+                json!("--effort"),
+                json!(effort),
+            ]);
+        }
         self.document["model_selection"] = selection.clone();
         self.document["box_gate"] = box_gate(&self.document)?;
         Ok(())

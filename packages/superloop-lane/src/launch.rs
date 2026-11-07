@@ -3916,9 +3916,9 @@ fn run_with_program(
             "image-build.json differs from workers.toml",
         ));
     }
-    build::check_exec_probe(&report, &plan.document["runtime_argv"])?;
+    build::check_backend_exec_probe(selected_backend, &report, &plan.document["runtime_argv"])?;
     let box_probe = box_route_probe(&report, &settings, selected_backend)?;
-    checks.push("pinned Codex exec help and runtime options");
+    checks.push("pinned backend help and runtime options");
     checks.push("image and template have no inner bubblewrap route");
     check_pins(&plan, &settings, owner_home, request.observe, false)?;
     check_backend_image_program(

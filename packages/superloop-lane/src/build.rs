@@ -64,6 +64,46 @@ fn checked_exec_help(help: &str) -> Result<(), LaneError> {
     Ok(())
 }
 
+/// Bind planned options to the selected program's captured image help.
+pub(crate) fn check_backend_exec_probe(
+    backend: crate::settings::BoxBackend,
+    report: &Value,
+    runtime_argv: &Value,
+) -> Result<(), LaneError> {
+    if backend == crate::settings::BoxBackend::Codex {
+        return check_exec_probe(report, runtime_argv);
+    }
+    payload::check_claude_report(report, true)?;
+    let help = report["claude_exec_probe"]["stdout"]
+        .as_str()
+        .ok_or_else(|| LaneError::input("claude-exec-help", "captured Claude help is absent"))?;
+    let argv = runtime_argv
+        .as_array()
+        .ok_or_else(|| LaneError::input("claude-exec-help", "planned runtime vector is absent"))?;
+    let image = argv
+        .iter()
+        .position(|word| word == &report["image_digest"])
+        .ok_or_else(|| LaneError::input("claude-exec-help", "planned runtime image is absent"))?;
+    if argv.get(image + 1).and_then(Value::as_str) != Some("/home/worker/.local/bin/claude") {
+        return Err(LaneError::input(
+            "claude-exec-help",
+            "planned Claude program differs",
+        ));
+    }
+    for word in &argv[image + 2..] {
+        let word = word
+            .as_str()
+            .ok_or_else(|| LaneError::input("claude-exec-help", "runtime word is not text"))?;
+        if word.starts_with('-') && !exec_help_has_option(help, word) {
+            return Err(LaneError::input(
+                "claude-exec-help",
+                format!("planned Claude option {word} is absent from the pinned help"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn check_exec_probe(report: &Value, runtime_argv: &Value) -> Result<(), LaneError> {
     let probe = &report["codex_exec_probe"];
     let help = probe["stdout"].as_str().ok_or_else(|| {
