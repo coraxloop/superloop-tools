@@ -170,4 +170,8 @@ The binary dispatcher exposes `build`, `stage-verify`, `cut`, `replay`, and `rel
 
 The repository cut acceptance runs as Meson's `slow` test `cut-tree-acceptance`, using the built pack and candidate linter. Its shared 1,800-second budget covers the cut, linter check, public Cargo build, single README mints and a Git archive configured with an explicit source commit. The required `--work-root` is a fixed directory beneath the Meson build root: repeated runs reset and clean the fixture repositories while retaining the public Cargo target and both Meson build directories. Cut and recut identities are compared anew on every run. Cargo tests retain the small publication fixtures and refusal checks.
 
+**Protocol (Configure the changed cut tree)** · `proto:publicpack:configure-changed-cut-tree`
+
+The public cut runs ordinary `meson setup build`: it configures a new build directory and leaves an already configured directory intact. The extracted archive retains `--reconfigure` on warm runs because extraction replaces its sources and the explicit source-commit option changes, so every round still configures the current cut's tree, while the public tree's own configuration is checked when its build directory is new. Both setup commands report their measured wall time in the acceptance log. The public Cargo target and both Meson build directories survive repeated acceptance rounds.
+
 Replay archive and audit-input digests are subject to (`[TOOLS-rule:digests:full-digest-justification]`). A trusted replay record binds returned archive bytes and the independently supplied audit input against a supplier substituting either; a record controlled by that supplier is not an independent reference. Full-length fields remain the replay reader contract.

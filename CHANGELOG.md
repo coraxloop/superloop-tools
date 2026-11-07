@@ -80,6 +80,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Warm public-cut acceptance leaves its configured Meson tree intact; only the replaced archive is reconfigured, and both setup walls remain reported (``prob:build:cut-acceptance-reconfigures-only-the-changed-tree``; ``proto:publicpack:configure-changed-cut-tree``).
+
 - The container helper pins its credential client and clock before namespace entry and transfers only those held executable capabilities to the refresh thread, which executes them by descriptor (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Native creation reserves and finishes worker mail lifetimes beneath configuration and storage descriptors verified before namespace entry; its bundle retains the letter directory, any already-open rotation source, and credential refresh executables (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).

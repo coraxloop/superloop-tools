@@ -76,8 +76,7 @@ assert run(['git', 'tag', '-l', '--format=%(objecttype) %(taggername) %(contents
 assert int(run(['git', 'tag', '-l', '--format=%(taggerdate:unix)',
                 'v0.1.0'], public)) == 1791821482
 assert not (public / 'Cargo.lock').exists(), 'public cut must omit Cargo.lock'
-reconfigure = ['--reconfigure'] if (public / 'build/meson-private/coredata.dat').exists() else []
-run(['meson', 'setup', *reconfigure, 'build'], public)
+run(['meson', 'setup', 'build'], public)
 assert not (public / 'docs/public/README.md').exists()
 assert (public / 'README.md').read_bytes() == (source / 'README.md').read_bytes()
 readme = (public / 'README.md').read_text()
