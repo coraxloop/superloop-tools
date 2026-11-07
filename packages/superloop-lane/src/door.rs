@@ -188,9 +188,14 @@ impl RequestWait {
     }
 
     fn report(&self, reply: &mut Value) {
-        reply["request_lock_wait_ms"] = json!(self.micros.load(Ordering::Relaxed) / 1000);
-        reply["request_lock_wait_credit_ms"] = json!(self.elapsed().as_millis());
+        let waited = self.micros.load(Ordering::Relaxed) / 1000;
+        let credit = waited.min(self.cap_ms);
+        reply["request_lock_wait_ms"] = json!(waited);
+        reply["request_lock_wait_credit_ms"] = json!(credit);
         reply["request_lock_wait_credit_cap_ms"] = json!(self.cap_ms);
+        if let Some(requested) = reply["request_deadline_ms"].as_u64() {
+            reply["effective_deadline_ms"] = json!(requested.saturating_add(credit));
+        }
     }
 }
 

@@ -88,7 +88,7 @@ pub(super) fn compute_service(
     Arc<AtomicUsize>,
     thread::JoinHandle<io::Result<Value>>,
 ) {
-    compute_service_with_policy(fixture, run, worker, peer, scope, decision, &[], None)
+    compute_service_with_policy(fixture, run, worker, peer, scope, decision, &[], None, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -101,6 +101,7 @@ fn compute_service_with_policy(
     decision: Option<&str>,
     forms: &[super::config::ComputeDeadline],
     remaining: Option<Arc<std::sync::Mutex<f64>>>,
+    contended: Option<std::sync::mpsc::Sender<()>>,
 ) -> (
     PathBuf,
     Arc<AtomicUsize>,
@@ -136,6 +137,7 @@ fn compute_service_with_policy(
     )
     .expect("rubric");
     let server = thread::spawn(move || {
+        super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = contended);
         let (mut stream, _) = listener.accept()?;
         let started = Instant::now();
         let request = frame_read_until(&mut stream, started + Duration::from_secs(2))?;
@@ -1454,38 +1456,67 @@ fn door_compute_deadline_selects_only_the_exact_owner_form() {
             .to_vec(),
         deadline_ms: 3_600_000,
     };
-    for (tail, bound) in [
-        ("cargo test --locked -p fixture", 3_600_000),
-        ("cargo test --locked -p other", compute::DEADLINE_MS),
-        (
-            "cargo test --locked -p fixture --release",
-            compute::DEADLINE_MS,
-        ),
-        ("cargo --locked test -p fixture", compute::DEADLINE_MS),
-    ] {
-        let fixture = Fixture::new();
-        fixture.set_floor("allow");
-        let remaining = Arc::new(std::sync::Mutex::new(0.0));
-        let (socket, calls, server) = compute_service_with_policy(
-            &fixture,
-            "R",
-            3000,
-            3000,
-            Scope::Work,
-            None,
-            std::slice::from_ref(&form),
-            Some(Arc::clone(&remaining)),
-        );
-        let (reply, _, _) = compute_call(&socket, &format!("/opt/fixture/bin/report {tail}"));
-        server.join().expect("server").expect("service");
-        assert_eq!(reply["reason"], "door-complete");
-        assert_eq!(reply["registered_deadline_ms"], bound);
-        assert_eq!(reply["request_deadline_ms"], bound);
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-        let remaining = *remaining.lock().expect("remaining");
-        assert!(remaining <= Duration::from_millis(bound).as_secs_f64());
-        if bound > compute::DEADLINE_MS {
-            assert!(remaining > 1800.0);
+    for induce_wait in [false, true] {
+        for (tail, bound) in [
+            ("cargo test --locked -p fixture", 3_600_000),
+            ("cargo test --locked -p other", compute::DEADLINE_MS),
+            (
+                "cargo test --locked -p fixture --release",
+                compute::DEADLINE_MS,
+            ),
+            ("cargo --locked test -p fixture", compute::DEADLINE_MS),
+        ] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            store
+                .ensure_first_mode("compute")
+                .expect("initial compute mode");
+            let (contended, release) = if induce_wait {
+                let held = store.fixture_exclusive_lock().expect("competing writer");
+                let (contended, observed) = std::sync::mpsc::channel();
+                let release = thread::spawn(move || {
+                    observed
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("measured store contention");
+                    thread::sleep(Duration::from_millis(150));
+                    drop(held);
+                });
+                (Some(contended), Some(release))
+            } else {
+                (None, None)
+            };
+            let remaining = Arc::new(std::sync::Mutex::new(0.0));
+            let (socket, calls, server) = compute_service_with_policy(
+                &fixture,
+                "R",
+                3000,
+                3000,
+                Scope::Work,
+                None,
+                std::slice::from_ref(&form),
+                Some(Arc::clone(&remaining)),
+                contended,
+            );
+            let (reply, _, _) = compute_call(&socket, &format!("/opt/fixture/bin/report {tail}"));
+            server.join().expect("server").expect("service");
+            let credit = reply["request_lock_wait_credit_ms"]
+                .as_u64()
+                .expect("credit");
+            if let Some(release) = release {
+                release.join().expect("holder released");
+                assert!(credit >= 50);
+            }
+            assert_eq!(reply["effective_deadline_ms"], bound + credit);
+            assert_eq!(reply["reason"], "door-complete");
+            assert_eq!(reply["registered_deadline_ms"], bound);
+            assert_eq!(reply["request_deadline_ms"], bound);
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            let remaining = *remaining.lock().expect("remaining");
+            assert!(remaining <= Duration::from_millis(bound).as_secs_f64());
+            if bound > compute::DEADLINE_MS {
+                assert!(remaining > 1800.0);
+            }
         }
     }
 }
@@ -1499,8 +1530,17 @@ fn door_compute_deadline_refusal_names_the_owner_bound() {
         words: ["cargo", "test", "--locked"].map(str::to_owned).to_vec(),
         deadline_ms: 3_600_000,
     };
-    let (socket, calls, server) =
-        compute_service_with_policy(&fixture, "R", 3000, 3000, Scope::Work, None, &[form], None);
+    let (socket, calls, server) = compute_service_with_policy(
+        &fixture,
+        "R",
+        3000,
+        3000,
+        Scope::Work,
+        None,
+        &[form],
+        None,
+        None,
+    );
     let mut client = UnixStream::connect(socket).expect("socket");
     frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":1000})).expect("shorter caller bound");
     client.shutdown(Shutdown::Write).expect("EOF");

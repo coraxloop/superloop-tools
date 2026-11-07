@@ -1231,6 +1231,7 @@ pub(super) fn serve_compute(
     complete: Option<&Completion<'_>>,
     wait: Option<&super::RequestWait>,
 ) -> io::Result<Value> {
+    let request_deadline_ms = deadline.saturating_duration_since(started).as_millis();
     let deadline = wait.map_or(deadline, |wait| wait.deadline(deadline));
     let writer = if let Some(wait) = wait {
         Arc::clone(&wait.writer)
@@ -1264,8 +1265,7 @@ pub(super) fn serve_compute(
         if operation == Operation::Compute {
             reply["compute"] = super::compute::pending(runner.compute_words().unwrap_or_default());
             reply["registered_deadline_ms"] = json!(runner.compute_registered_deadline_ms());
-            reply["request_deadline_ms"] =
-                json!(deadline.saturating_duration_since(started).as_millis());
+            reply["request_deadline_ms"] = json!(request_deadline_ms);
         }
         reply["queue_state"] = json!(queue_state);
         reply["queue_wall_seconds"] = json!(queue_wall);
@@ -1436,8 +1436,7 @@ pub(super) fn serve_compute(
     }
     if let Some(words) = runner.compute_words() {
         reply["registered_deadline_ms"] = json!(runner.compute_registered_deadline_ms());
-        reply["request_deadline_ms"] =
-            json!(deadline.saturating_duration_since(started).as_millis());
+        reply["request_deadline_ms"] = json!(request_deadline_ms);
         let bytes = evidence
             .lock()
             .map_err(|_| io::Error::other("compute evidence lock"))?;

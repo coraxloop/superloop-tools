@@ -80,6 +80,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Compute replies preserve the exact registered and requested deadline bounds under store contention and name the credited bound separately as `effective_deadline_ms` (``proto:superlooplane:request-lock-wait-credit``).
+
 - Namespace executable checks share their pin and image validation, retain the active operation’s refusal envelope and reject surplus exercise arguments before parsing the private form; the attempt runner and real runtime entry exercise held execution across pathname replacement (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Runtime and native creation plans use the registry and allocation snapshot validated beneath their configuration capability for plan loading, settings grants and worker range and mail-group selection, without reopening ambient registry paths; native creation's UID census still reads the registry by its path (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
