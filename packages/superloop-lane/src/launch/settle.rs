@@ -3754,8 +3754,12 @@ else:
     fn public_settle_helper_child() {
         use std::io::Read as _;
         let h = PathBuf::from(std::env::var_os("HOME").expect("fixture home"));
+        let socket = std::os::unix::net::UnixStream::from(
+            nix::unistd::dup(std::io::stdin()).expect("input socket"),
+        );
         let fds =
-            home::receive_private_descriptors(&std::io::stdin(), 2).expect("helper descriptors");
+            loop_home::anchor::transport::receive(&socket, 5, std::time::Duration::from_secs(30))
+                .expect("helper descriptors and EOF");
         let record = read_reservation(&h.join(".reservation-R.json"))
             .expect("read")
             .expect("record");

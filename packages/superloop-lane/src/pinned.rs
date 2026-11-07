@@ -118,6 +118,9 @@ pub fn open_protected(anchor: &Path, path: &Path, owner_uid: u32) -> Result<Owne
 ///
 /// Refuses a path whose parent or inode the loop identity could replace.
 pub fn owner_executable(path: &Path, owner_uid: u32) -> Result<(), LaneError> {
+    if let Some(result) = crate::container_entry::check(path) {
+        return result;
+    }
     loop_home::workers_settings::owner_executable(path, owner_uid).map_err(|error| {
         LaneError::input(
             "owner-program",

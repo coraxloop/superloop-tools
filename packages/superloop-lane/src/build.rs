@@ -670,9 +670,9 @@ fn run_child_with_end(
             .map_err(|error| LaneError::operation(spec.name, error.to_string()))?;
     }
     crate::launch::reaping::attach_command(&mut command)?;
-    let mut child = crate::fixture_exec::spawn(&mut command).map_err(|error| {
-        LaneError::operation(spec.name, format!("{}: {error}", spec.program.display()))
-    })?;
+    crate::container_entry::configure(&mut command, &spec.program, &spec.argv, &spec.environment)?;
+    let mut child = crate::fixture_exec::spawn(&mut command)
+        .map_err(|error| crate::container_entry::spawn_error(&spec.program, spec.name, &error))?;
     if let Some(stream) = transfer {
         let home = spec.private_directory_stdin.as_ref().ok_or_else(|| {
             LaneError::input("verified-prefix", "private home descriptor is absent")
@@ -1076,7 +1076,12 @@ pub(crate) fn hash_preview(cwd: &Path) -> Value {
 
 fn hash_bytes(bytes: &[u8], spec: &ChildSpec) -> Result<String, LaneError> {
     crate::pinned::owner_executable(&spec.program, nix::unistd::Uid::effective().as_raw())
-        .map_err(|_error| {
+        .map_err(|error| {
+            // A held container-helper capability keeps its named anchor cause;
+            // the pathname route keeps its fixed remedy without kernel detail.
+            if error.kind == "container-anchor" {
+                return error;
+            }
             LaneError::input(
                 "hash-pin",
                 "the hashing program must be an owner-controlled regular executable reached without symlinks; run superloop-lane on the host with that pin",

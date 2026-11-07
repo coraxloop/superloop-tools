@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod build;
+pub mod container_entry;
 pub mod container_helper;
 pub mod credential;
 pub mod door;

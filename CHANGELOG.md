@@ -70,6 +70,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Release refuses a non-string declared public version in Cargo repositories before check, dry-run or apply can proceed, retaining destination refs, objects and worktree (``prob:pack:release-refuses-a-non-string-public-version``).
 
+- Container helpers retain host-verified entry, Podman and hashing file custody across namespace entry and execute protected-plan hashes, attempts and cleanup through held descriptors; the bundle refuses missing, substituted and excess descriptors and changed declarations (``proto:workercontracts:namespace-anchor-handoff``).
+
+- Route documentation distinguishes the door registration route, the registry-only check-mode finding and every empty artifact rendered for retired routes (``proto:superlooplane:door-node-registration``; ``prob:homes:home-preparation-admits-a-loop-with-no-active-route``).
+
 - Worker custody entry keeps consumed stdin bound to the null device and refuses non-UTF-8 launcher paths without lossy conversion; capability duplication failures name their system cause as `anchor-io` (``proto:workercontracts:namespace-anchor-handoff``).
 
 - The two-account mail fixture leaves coordinator verification to the rootless worker acceptance, which checks unchanged verification and missing-lock refusal through the production descriptor handoff instead of an obsolete private invocation (``proto:workercontracts:namespace-anchor-handoff``).

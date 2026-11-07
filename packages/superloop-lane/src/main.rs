@@ -323,7 +323,6 @@ fn bind_private_launch_args<'a>(
                 | "_exercise-context-private"
                 | "_rotation-handover"
                 | "_prepare-runtime"
-                | "_container-helper"
         )
     );
     if !private_launch {
@@ -512,6 +511,9 @@ fn bind_private_launch_args<'a>(
 
 #[allow(clippy::too_many_lines)]
 fn run(args: &[String]) -> Result<i32, LaneError> {
+    if args.first().is_some_and(|word| word == "_container-helper") {
+        return superloop_lane::container_entry::serve(args);
+    }
     let (args, _private_home) = bind_private_launch_args(args, &io::stdin(), 0)?;
     if args.first().is_some_and(|word| word == "_container-client") {
         let [_, option, run_dir] = args else {
@@ -527,25 +529,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             ));
         }
         return container_helper::client(Path::new(run_dir));
-    }
-    if args.first().is_some_and(|word| word == "_container-helper") {
-        let [_, option, run_dir, home_option, owner_home] = args else {
-            return Err(LaneError::input(
-                "helper-usage",
-                "_container-helper --run-dir DIR --owner-home HOME",
-            ));
-        };
-        if option != "--run-dir"
-            || home_option != "--owner-home"
-            || !Path::new(run_dir).is_absolute()
-            || !Path::new(owner_home).is_absolute()
-        {
-            return Err(LaneError::input(
-                "helper-usage",
-                "_container-helper --run-dir DIR --owner-home HOME",
-            ));
-        }
-        return container_helper::serve(Path::new(run_dir)).map(|()| 0);
     }
     if args == ["--help"] {
         writeln!(io::stdout().lock(), "{}", USAGE.as_str())

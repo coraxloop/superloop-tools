@@ -162,7 +162,7 @@ pub fn receive(socket: &UnixStream, count: usize, deadline: Duration) -> Result<
 /// Replace consumed transport stdin without leaving descriptor zero available to later opens.
 /// # Errors
 /// Refuses a failed null-device open or descriptor replacement by its system cause.
-pub(crate) fn replace_stdin(operation: &str) -> Result<()> {
+pub fn replace_stdin(operation: &str) -> Result<()> {
     let error = |cause: std::io::Error| {
         Error::new("anchor-io", operation, "rights").because("stdin-null", cause)
     };

@@ -767,7 +767,11 @@ impl AsFd for Anchor {
     }
 }
 impl Anchor {
-    fn revalidate(&self) -> Result<()> {
+    /// Recheck this held capability without reopening its pathname.
+    ///
+    /// # Errors
+    /// Refuses a changed identity, kind, authorized owner or custody mode.
+    pub fn revalidate(&self) -> Result<()> {
         let stat = inspect_kind(&self.fd, self.policy, &self.operation, &self.record.purpose)?;
         if (stat.st_dev, stat.st_ino) != (self.record.device, self.record.inode) {
             return Err(Error::new(

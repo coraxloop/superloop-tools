@@ -1079,9 +1079,11 @@ fn run_attempt_with(
     custody_directory
         .sync_all()
         .map_err(|error| LaneError::operation("container-evidence", error.to_string()))?;
+    crate::container_entry::configure(&mut command, Path::new(program), arguments, environment)?;
     let mut child = start_after_reservation(reservation, record, || {
-        crate::fixture_exec::spawn(&mut command)
-            .map_err(|error| LaneError::operation("container-start", error.to_string()))
+        crate::fixture_exec::spawn(&mut command).map_err(|error| {
+            crate::container_entry::spawn_error(Path::new(program), "container-start", &error)
+        })
     })?;
     let writer = Arc::new(Mutex::new(sender));
     let transferred = Arc::new(AtomicUsize::new(0));
@@ -1625,7 +1627,9 @@ fn remove_container(
     }
 }
 
-fn run_identity(run_dir: &Path) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
+pub(crate) fn run_identity(
+    run_dir: &Path,
+) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
     run_identity_at(&caller_home()?, run_dir, Uid::effective().as_raw())
 }
 
