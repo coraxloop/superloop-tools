@@ -102,6 +102,24 @@ os.chown(config,64000,64000)
         request.io = IoMode::Capture;
         request
     }
+    fn snapshot(&self, compare: bool) {
+        let action = if compare {
+            "assert snapshot == json.loads(saved.read_text())"
+        } else {
+            "saved.write_text(json.dumps(snapshot))"
+        };
+        self.python(&format!(r"
+import json,sys
+from pathlib import Path
+home=Path(sys.argv[1])
+root=home/'.var/loops/alpha'
+roots=[root/'.mail-births',root/'workers',root/'private']
+paths=sorted(p for root in roots if root.exists() for p in [root,*root.rglob('*')])
+snapshot=[[str(p),s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_mtime_ns,s.st_ctime_ns] for p in paths for s in [p.lstat()]]
+saved=home/'verification-snapshot.json'
+{action}
+"));
+    }
     fn run(&self, phase: &str) {
         let output = ProcessRunner
             .run(&self.command(phase))
@@ -138,6 +156,26 @@ fn worker_lifetime_retains_namespace_capabilities() {
     let fixture = Fixture::new();
     fixture.run("reserve");
     fixture.run("finish");
+    fixture.snapshot(false);
+    fixture.run("verify-only");
+    fixture.snapshot(true);
+    fixture.python("import sys; from pathlib import Path; p=Path(sys.argv[1])/'.var/loops/alpha/private/.config/mail/loop.lock'; p.rename(p.with_name('held.lock'))");
+    fixture.snapshot(false);
+    let output = ProcessRunner
+        .run(&fixture.command("verify-only"))
+        .expect("missing lock refusal");
+    assert_eq!(output.status, 2);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("io-failure: No such file or directory"),
+        "{error}"
+    );
+    assert!(
+        error.contains("unsafe-storage: identity provisioning step refused"),
+        "{error}"
+    );
+    fixture.snapshot(true);
+    fixture.python("import sys; from pathlib import Path; p=Path(sys.argv[1])/'.var/loops/alpha/private/.config/mail/loop.lock'; assert not p.exists(); p.with_name('held.lock').rename(p)");
     fixture.run("verify-only");
     let mut retire = fixture.command("retire");
     // Move every directory that the retired operation already holds. No absolute

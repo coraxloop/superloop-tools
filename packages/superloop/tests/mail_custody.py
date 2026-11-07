@@ -185,25 +185,10 @@ def main():
             worker_state('retire','replacement',3010,'replacement')
             worker_state('verify-retired','replacement',3010,'replacement')
             assert tomllib.loads(who(a.loop_account,{'op':'config-read'}))['private_preference']=='preserved'
-            def coordinate(phase,expected=0):
-                return run([str(a.loop_binary),'_mail-worker-birth',str(home),'alpha',phase,'coordinate-preview','3030','fixture:coordinate-preview'],expected=expected)
-            if os.geteuid()==0:
-                coordinate('reserve');coordinate('finish')
-                roots=[loop/'.mail-births',loop/'workers',loop/'private']
-                def stamps():
-                    paths=[p for root in roots for p in [root,*root.rglob('*')]]
-                    return sorted((str(p),i.st_ino,i.st_mode,i.st_uid,i.st_gid,i.st_mtime_ns,i.st_ctime_ns) for p in paths for i in [p.lstat()])
-                before=stamps();coordinate('verify-only');assert stamps()==before
-                who(a.loop_account,{'op':'config-lock-remove'})
-                before=stamps();coordinate('verify-only',2);assert stamps()==before
-                assert who(a.loop_account,{'op':'config-lock-exists'}).strip()=='False'
-                run(['sudo','-n','-P','-u',a.loop_account,str(a.loop_binary),'_mail-configure',str(loop/'private'),str(service)])
-                coordinate('verify-only');coordinate('retire')
-                coordinate_evidence='positive and missing-lock refusal through namespace-root private entry'
-            else:
-                coordinate('verify-only',2)
-                assert 'namespace-root worker birth required' in events[-1]['stderr']
-                coordinate_evidence='unmeasured positive namespace-root path; node measures its refusal and the loop-identity verify-only child'
+            # Coordinator custody is exercised by the production host composer in
+            # run-worker/tests/mail_anchors.rs, including read-only verification
+            # and a missing-lock refusal under the real partial namespace map.
+            coordinate_evidence='separate rootless acceptance: run-worker/tests/mail_anchors.rs; not measured by this two-account harness'
             private_program=home/'private-helper';shutil.copyfile(a.loop_binary,private_program);os.chmod(private_program,0o755)
             argv=['sudo','-n','-P','-u',a.loop_account,sys.executable,str(pathlib.Path(__file__).resolve()),'--root',str(root),'--binary',str(a.binary),'--service-account',a.service_account,'--loop-account',a.loop_account,'--mail-group',a.mail_group,'--actor','entered']
             stamp=time.monotonic();process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
