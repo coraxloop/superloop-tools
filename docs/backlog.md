@@ -212,7 +212,7 @@ Measured again by torrust-index on 2026-10-29 at 18:20Z, over its run hpinwalls 
 
 **OPEN.** (2026-11-07, from the review of lane r002g81's door commits B19, B20 and B22, its first finding) Since B19 the compute stub waits only 10 s for the first frame (``packages/superloop-lane/src/door/transport.rs`` line 1580), while a compute-shaped request that the route rejects, for bad words, a wrapper or `--locked`, a review scope or no route, gets no announcement and may wait up to 30 s for admission or file its refusal under the store lock's 15 s; its named refusal can then arrive after the stub gave up, and the worker sees a read timeout where the stub listened 1,800.5 s before B19. Either the worker side announces every compute request before admission, or the first wait covers the admission and writer limits, so that a refused request reads as its refusal; the fix carries a build and a test.
 
-(2026-11-07, from the review of lane r002g81's door commits B19, B20 and B22, its eighth note) The refusal record for a registered form still uses the 1,800 s cap (``packages/superloop-lane/src/door.rs`` lines 1047 to 1054), narrower than the registered bound and harmless; it follows the registered bound when that code is next touched.
+(2026-11-07, from the review of lane r002g81's door commits B19, B20 and B22, its eighth note) The refusal record for a registered form still uses the 1,800 s cap (``packages/superloop-lane/src/door.rs`` lines 1053 to 1060), narrower than the registered bound and harmless; it follows the registered bound when that code is next touched.
 
 **Problem (A RUN-REPORT that contradicts the node's measurement is refused by a name of its own)** · `prob:door:run-report-contradiction-is-named-apart-from-missing-evidence`
 

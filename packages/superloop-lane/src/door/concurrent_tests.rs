@@ -763,6 +763,7 @@ fn door_receive_completes_beside_running_compute() {
 #[test]
 fn door_two_requesters_credit_contention_before_unlocked_triage() {
     struct PausedAgent {
+        run: &'static str,
         entered: std::sync::mpsc::Sender<()>,
         release: Mutex<std::sync::mpsc::Receiver<()>>,
     }
@@ -776,7 +777,7 @@ fn door_two_requesters_credit_contention_before_unlocked_triage() {
             result.status = "verdict".into();
             result.verdict = "allow".into();
             result.scope = "loop".into();
-            result.reason = "fixture independent judgement".into();
+            result.reason = format!("fixture independent judgement {}", self.run);
             result
         }
     }
@@ -800,7 +801,7 @@ fn door_two_requesters_credit_contention_before_unlocked_triage() {
         let (runner, _, _) = counting_runner(&fixture);
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         releases.push(release_tx);
-        let agent = PausedAgent { entered: entered_tx.clone(), release: Mutex::new(release_rx) };
+        let agent = PausedAgent { run, entered: entered_tx.clone(), release: Mutex::new(release_rx) };
         let contended = contended_tx.clone();
         services.push(thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
@@ -821,10 +822,12 @@ fn door_two_requesters_credit_contention_before_unlocked_triage() {
     thread::sleep(Duration::from_secs(6));
     drop(holder);
     for _ in 0..2 { entered_rx.recv_timeout(Duration::from_secs(10)).expect("both agents entered"); }
+    let mut pending_ids = std::collections::BTreeMap::new();
     for run in ["R", "S"] {
         let rows = store.list_run(run).expect("pending custody is readable during triage");
         assert_eq!(rows.len(), 1);
         assert!(rows[0].id().starts_with(&format!("{run}:")));
+        pending_ids.insert(run, rows[0].id().to_owned());
         assert_eq!(rows[0].value()["effect"]["state"], "pending");
     }
     drop(store.fixture_exclusive_lock().expect("triage holds no writer lock"));
@@ -841,5 +844,7 @@ fn door_two_requesters_credit_contention_before_unlocked_triage() {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].value()["effect"]["state"], "completed");
         assert_eq!(rows[0].value()["would_do"]["decision"], "allow");
+        assert_eq!(rows[0].id(), pending_ids[run]);
+        assert_eq!(rows[0].value()["would_do"]["reason"], format!("fixture independent judgement {run}"));
     }
 }

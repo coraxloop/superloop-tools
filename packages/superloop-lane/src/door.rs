@@ -114,30 +114,36 @@ static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 // extra window per request. The shared writer keeps progress frames whole even
 // when an allow-mode agent publishes beside effect output.
 #[cfg(test)]
-thread_local! { static WAIT_CREDIT_OBSERVED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) }; }
+thread_local! {
+    static WAIT_CREDIT_OBSERVED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+    static WAIT_CREDIT_CAP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
 
 pub(crate) const MAX_LOCK_WAIT_CREDIT_MS: u64 = 120_000;
 pub(crate) struct RequestWait {
     pub(super) writer: std::sync::Arc<std::sync::Mutex<UnixStream>>,
     micros: AtomicU64,
+    cap_ms: u64,
     announced: std::sync::Mutex<u64>,
 }
 
 impl RequestWait {
     fn new(stream: &UnixStream) -> io::Result<Self> {
+        let cap_ms = MAX_LOCK_WAIT_CREDIT_MS;
+        #[cfg(test)]
+        let cap_ms = WAIT_CREDIT_CAP
+            .with(std::cell::Cell::take)
+            .unwrap_or(cap_ms);
         Ok(Self {
             writer: std::sync::Arc::new(std::sync::Mutex::new(stream.try_clone()?)),
             micros: AtomicU64::new(0),
+            cap_ms,
             announced: std::sync::Mutex::new(0),
         })
     }
 
     pub(crate) fn elapsed(&self) -> Duration {
-        Duration::from_micros(
-            self.micros
-                .load(Ordering::Relaxed)
-                .min(MAX_LOCK_WAIT_CREDIT_MS * 1000),
-        )
+        Duration::from_micros(self.micros.load(Ordering::Relaxed).min(self.cap_ms * 1000))
     }
 
     pub(crate) fn deadline(&self, base: Instant) -> Instant {
@@ -165,7 +171,7 @@ impl RequestWait {
                 Err(current) => previous = current,
             }
         }
-        let total = (self.micros.load(Ordering::Relaxed) / 1000).min(MAX_LOCK_WAIT_CREDIT_MS);
+        let total = (self.micros.load(Ordering::Relaxed) / 1000).min(self.cap_ms);
         let mut announced = self
             .announced
             .lock()
@@ -184,7 +190,7 @@ impl RequestWait {
     fn report(&self, reply: &mut Value) {
         reply["request_lock_wait_ms"] = json!(self.micros.load(Ordering::Relaxed) / 1000);
         reply["request_lock_wait_credit_ms"] = json!(self.elapsed().as_millis());
-        reply["request_lock_wait_credit_cap_ms"] = json!(MAX_LOCK_WAIT_CREDIT_MS);
+        reply["request_lock_wait_credit_cap_ms"] = json!(self.cap_ms);
     }
 }
 
@@ -1416,7 +1422,7 @@ fn serve_request_with_agent(
     let class = rubric.unwrap_or(&default_rubric).class();
     let setting = match store.ensure_first_mode(class) {
         Ok(setting) => setting,
-        Err(error) => {
+        Err(error) if crate::requests::store::is_lock_contention(&error) => {
             let mut reply =
                 transport::refusal(registration, peer, "door-request-record-refusal", started);
             reply["request_record_error"] = json!(error.line());
@@ -1424,6 +1430,7 @@ fn serve_request_with_agent(
             frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             return Ok((reply, Vec::new()));
         }
+        Err(error) => return Err(io::Error::other(error)),
     };
     let shape_key = if compute_candidate {
         compute::shape(&words)
@@ -1454,7 +1461,7 @@ fn serve_request_with_agent(
         },
     ) {
         Ok(judgement) => judgement,
-        Err(error) => {
+        Err(error) if crate::requests::store::is_lock_contention(&error) => {
             let mut reply =
                 transport::refusal(registration, peer, "door-request-record-refusal", started);
             reply["request_record_error"] = json!(error.line());
@@ -1462,6 +1469,7 @@ fn serve_request_with_agent(
             frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             return Ok((reply, Vec::new()));
         }
+        Err(error) => return Err(io::Error::other(error)),
     };
     let mode = match execute_command::policy::DoorMode::from_record(setting["mode"].as_str()) {
         Ok(mode) => mode.as_str(),
@@ -4407,6 +4415,49 @@ mod tests {
         }
     }
 
+    /// ´test:unit:door-initial-store-refusal-withholds-non-lock-cause´
+    #[test]
+    fn door_initial_store_refusal_withholds_non_lock_cause() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store.ensure_first_mode("ssh").expect("initial custody");
+        std::fs::set_permissions(
+            fixture.home.join(".config/loops/alpha/door-requests.lock"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .expect("invalid fixture custody");
+        let route = route_for(&fixture.home);
+        let (runner, calls, _) = counting_runner(&fixture);
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("registration");
+        let (mut server, _worker) = UnixStream::pair().expect("worker connection");
+        let started = Instant::now();
+        let error = serve_request(
+            &mut server,
+            &registration,
+            3000,
+            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":3000}),
+            Some(&route),
+            Some(&runner),
+            Some(&fixture.home),
+            Some(&rubric(Some("allow"))),
+            Some(&store),
+            started,
+        )
+        .expect_err("non-contention failure stays at the connection boundary");
+        let reply = super::connection_refusal(&error, started);
+        assert_eq!(reply["reason"], "door-request-refusal");
+        assert!(reply.get("request_record_error").is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
     /// # Panics
     /// Panics only if a store contention refusal loses its cause at the worker boundary.
     /// ´test:unit:door-admission-lock-refusal-retains-worker-cause´
@@ -4429,7 +4480,8 @@ mod tests {
         let started = Instant::now();
         crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE
             .with(|bound| bound.set(Some(Duration::from_millis(30))));
-        let error = serve_request(
+        super::WAIT_CREDIT_CAP.with(|cap| cap.set(Some(60)));
+        let (reply, _) = serve_request(
             &mut server,
             &registration,
             3000,
@@ -4441,12 +4493,29 @@ mod tests {
             Some(&store),
             started,
         )
-        .expect_err("admission lock deadline");
+        .expect("named admission lock deadline reply");
         crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(None));
-        let reply = super::connection_refusal(&error, started);
-        frame_write(&mut server, &reply).expect("production connection refusal");
-        let reply = frame_read(&mut worker).expect("worker final frame");
-        assert_eq!(reply["reason"], "door-request-refusal");
+        let mut observed_credit = 0;
+        let delivered = loop {
+            let frame = frame_read(&mut worker).expect("worker frame");
+            if frame["type"] != "request-lock-wait" {
+                break frame;
+            }
+            let credit = frame["wait_ms"].as_u64().expect("credit milliseconds");
+            assert!(credit >= observed_credit && credit <= 60);
+            observed_credit = credit;
+        };
+        assert!(observed_credit >= 50);
+        assert_eq!(delivered, reply);
+        assert_eq!(reply["reason"], "door-request-record-refusal");
+        assert_eq!(reply["request_lock_wait_credit_ms"], 60);
+        assert_eq!(reply["request_lock_wait_credit_cap_ms"], 60);
+        assert!(
+            reply["request_lock_wait_ms"]
+                .as_u64()
+                .expect("measured contention")
+                >= 60
+        );
         let line = super::final_line(&["fixture".into(), "git status --short".into()], &reply)
             .expect("worker diagnostic");
         assert!(line.contains("request lock:"), "{line}");
