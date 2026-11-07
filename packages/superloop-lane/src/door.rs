@@ -61,6 +61,14 @@ pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Opt
                 .as_str()
                 .map_or_else(String::new, |cause| format!(": {cause}"))
         ))
+    } else if reason == "door-capacity-refusal"
+        && reply["peer_limit"].as_u64().is_some()
+        && reply["retry_after_seconds"].as_u64().is_some()
+    {
+        Some(format!(
+            "{reason}: peer_limit={} retry_after={}s; no request was dispatched",
+            reply["peer_limit"], reply["retry_after_seconds"]
+        ))
     } else if reason == "door-request-concurrent" {
         Some(format!(
             "{reason}: waited={}s retry_after={}s; {}",
@@ -88,6 +96,7 @@ const FRAME_LIMIT: usize = 65_536;
 pub const INPUT_LIMIT: usize = 16 * 1024 * 1024;
 const PEER_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_PEERS: usize = 16;
+const CAPACITY_RETRY_SECONDS: u64 = 120;
 const ADMISSION_WAIT: Duration = Duration::from_secs(30);
 const ADMISSION_POLL: Duration = Duration::from_millis(100);
 const ADMISSION_REPLY_MARGIN: Duration = Duration::from_secs(2);
@@ -267,7 +276,8 @@ fn admit_peer(active: &Arc<AtomicUsize>, stream: &mut UnixStream) -> Option<Peer
         if let Err(error) = frame_write_no_drain(
             stream,
             &json!({"schema":2,"type":"final","status":125,
-                "reason":"door-capacity-refusal","ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
+                "reason":"door-capacity-refusal","peer_limit":MAX_PEERS,
+                "retry_after_seconds":CAPACITY_RETRY_SECONDS,"ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
                 "queue_state":"no-queue","queue_wall_seconds":null,"compute_exit_status":null,
                 "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
         ) {
@@ -5669,14 +5679,36 @@ mod tests {
         let reply = frame_read(&mut client).expect("typed capacity reply");
         assert_eq!(reply["reason"], "door-capacity-refusal");
         assert_eq!(reply["queue_state"], "no-queue");
+        assert_eq!(reply["peer_limit"], 16);
+        assert_eq!(reply["retry_after_seconds"], 120);
+        assert_eq!(reply["status"], 125);
+        assert_eq!(reply["ref_check"], "not-reached");
+        assert!(reply["compute_exit_status"].is_null());
+        assert!(reply["queue_wall_seconds"].is_null());
+        for key in ["stdin_bytes", "stdout_bytes", "stderr_bytes"] {
+            assert_eq!(reply[key], 0);
+        }
+        assert_eq!(
+            super::final_line(&["fixture".into(), "cargo test".into()], &reply),
+            Some(
+                "door-capacity-refusal: peer_limit=16 retry_after=120s; no request was dispatched"
+                    .into()
+            )
+        );
+        let old_reply = json!({"type":"final", "reason":"door-capacity-refusal"});
+        assert_eq!(
+            super::final_line(&["fixture".into(), "cargo test".into()], &old_reply),
+            Some("door-capacity-refusal".into())
+        );
         let (closed, mut overflow) = UnixStream::pair().expect("early closing peer");
         drop(closed);
         assert!(admit_peer(&active, &mut overflow).is_none());
         assert_eq!(active.load(std::sync::atomic::Ordering::Relaxed), MAX_PEERS);
-        drop(grants);
-        drop(peers);
+        drop(grants.pop().expect("one released slot"));
+        assert_eq!(active.load(Ordering::Relaxed), MAX_PEERS - 1);
         let (mut next, mut next_server) = UnixStream::pair().expect("next peer");
-        let _grant = admit_peer(&active, &mut next_server).expect("released slot");
+        let grant = admit_peer(&active, &mut next_server).expect("released slot");
+        assert_eq!(active.load(Ordering::Relaxed), MAX_PEERS);
         let registration = Registration::from_row(
             &json!({"name":"alpha","uid":41001}),
             "alpha",
@@ -5692,6 +5724,10 @@ mod tests {
             frame_read(&mut next).expect("next final")["reason"],
             "door-compute-unregistered"
         );
+        drop(grant);
+        drop(grants);
+        drop(peers);
+        assert_eq!(active.load(Ordering::Relaxed), 0);
     }
 
     /// ´test:unit:fixture-socket-binds-peer-and-keeps-exact-arguments´
