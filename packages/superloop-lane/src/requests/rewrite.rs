@@ -307,6 +307,22 @@ impl Store {
         if plan.get("channel").is_none() {
             plan["channel"] = self.rewrite_channel_plan()?;
         }
+        if pending {
+            let current = self.rewrite_channel_plan()?;
+            if current["binding"] != plan["channel"]["binding"] {
+                return Err(problem(
+                    "requests-channel-refusal",
+                    "rewrite channel binding changed",
+                ));
+            }
+            if current["before"] != plan["channel"]["before"]
+                && current["before"] != plan["channel"]["after"]
+            {
+                // Preserve the custody plan, but require renewed approval for
+                // helper arrivals after an interrupted publication.
+                plan["channel"] = current;
+            }
+        }
         let previous_targets: Vec<_> = plan["files"]
             .as_array()
             .into_iter()

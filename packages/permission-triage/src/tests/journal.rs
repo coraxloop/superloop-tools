@@ -1597,14 +1597,14 @@ fn owner_door_rewrite_preserves_permission_and_supervisory_state() {
         )
         .expect("commit");
     assert_eq!(result["collection"], target);
-    assert!(
-        journal
-            .owner_transaction(
-                &crate::CallerRole::Unknown,
-                "rewrite-door",
-                &serde_json::to_vec(&input).expect("stale"),
-                true
-            )
-            .is_err()
-    );
+    let refusal = journal
+        .owner_transaction(
+            &crate::CallerRole::Unknown,
+            "rewrite-door",
+            &serde_json::to_vec(&input).expect("stale"),
+            true,
+        )
+        .expect_err("stale helper preimage");
+    assert_eq!(refusal.class, "requests-conflict");
+    assert_eq!(refusal.detail, "preview preimage changed");
 }

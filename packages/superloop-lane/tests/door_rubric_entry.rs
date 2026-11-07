@@ -424,10 +424,10 @@ fn install_refusals(fixture: &Fixture) {
     }
 }
 
-/// ´test:integration:rubric-failure-survives-request-record-and-rewrite´
+/// ´test:integration:rubric-failure-survives-current-request-record´
 #[test]
 #[ignore = "requires namespace root with UID/GID 0, 3000, 3001, 41001, 41002 and 41003 mapped"]
-fn rubric_failure_survives_request_record_and_rewrite() {
+fn rubric_failure_survives_current_request_record() {
     // The mapped failure evidence survives the current strict record decoder.
     namespace();
     for uid in [41001, 41002] {
@@ -465,6 +465,12 @@ fn rubric_failure_survives_request_record_and_rewrite() {
             let decoded = superloop_lane::requests::RequestRecord::decode(record)
                 .expect("current record schema");
             assert_eq!(decoded.value()["schema"], 5);
+            assert!(
+                !decoded
+                    .value()
+                    .to_string()
+                    .contains("synthetic-fixture-only")
+            );
             assert_eq!(decoded.value()["agent_observations"], result.observations);
             assert!(decoded.value().get("agent_evidence").is_none());
             assert!(decoded.value().get("rubric_failure").is_none());
@@ -559,19 +565,32 @@ fn install_and_refresh_report_unprivileged_rubric_failure() {
     install_refusals(&Fixture::unprivileged());
 }
 
-/// ´test:integration:rubric-failure-reaches-exercise-and-schema-four-readers´
+/// ´test:integration:rubric-failure-reaches-exercise-and-schema-five-readers´
 #[test]
-fn rubric_failure_reaches_exercise_and_schema_four_readers() {
+fn rubric_failure_reaches_exercise_and_schema_five_readers() {
     let fixture = Fixture::unprivileged();
     file(&fixture.runner.rubric_path, &[0xff], 0o644);
     let result = fixture.judge();
     let evidence = json!({"check":"file-utf8","path":fixture.runner.rubric_path,
         "owner_uid":fixture.uid,"mode":"0644","errno":null});
     assert_eq!(result.observations["rubric_failure"], evidence);
+    assert_eq!(result.reason, "door-rubric-unavailable", "{result:?}");
     assert_eq!(
         result.exercise_observation(5000, None)["observations"]["rubric_failure"],
         evidence
     );
+    record_readers(&fixture, &result);
+    drop(fixture);
+}
+
+/// ´test:integration:agent-signin-bytes-stay-out-of-records-and-listings´
+#[test]
+fn agent_signin_bytes_stay_out_of_records_and_listings() {
+    let fixture = Fixture::unprivileged();
+    let result = fixture.judge();
+    assert_eq!(result.status, "verdict", "{result:?}");
+    assert_eq!(result.observations["agent_calls"], 1);
+    assert_eq!(result.observations["sign_in_link_preserved"], true);
     record_readers(&fixture, &result);
     drop(fixture);
 }
@@ -627,7 +646,8 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
     }
     for row in store.list_run("R").expect("exercise run reader") {
         assert_eq!(row.value()["schema"], 5);
-        assert_eq!(row.value()["agent_reason"], "door-rubric-unavailable");
+        assert!(!row.value().to_string().contains("synthetic-fixture-only"));
+        assert_eq!(row.value()["agent_reason"], result.reason);
         assert!(row.value().get("rubric_failure").is_none());
         assert_eq!(row.value()["agent_observations"], result.observations);
         assert_eq!(
@@ -663,17 +683,22 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-fixture-only"));
         let report: Value = serde_json::from_slice(&output.stdout).expect("reader JSON");
-        match action {
-            "review" => assert_eq!(report["agent_observations"], result.observations),
-            "rewrite" => assert_eq!(
-                report["plan"]["files"][0]["after"]["requests"][0]["agent_observations"],
-                result.observations
-            ),
-            _ => assert_eq!(
-                report["door_judgements"][0]["agent_observations"],
-                result.observations
-            ),
-        }
+        assert_reader_observations(&report, action, result);
+    }
+}
+
+fn assert_reader_observations(report: &Value, action: &str, result: &RunnerOutcome) {
+    match action {
+        "review" => assert_eq!(report["agent_observations"], result.observations),
+        "rewrite" => assert_eq!(
+            report["plan"]["files"][0]["after"]["requests"][0]["agent_observations"],
+            result.observations
+        ),
+        _ => assert_eq!(
+            report["door_judgements"][0]["agent_observations"],
+            result.observations
+        ),
     }
 }

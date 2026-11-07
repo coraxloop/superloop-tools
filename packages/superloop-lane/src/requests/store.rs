@@ -2780,15 +2780,26 @@ pub(crate) mod tests {
     /// ´test:unit:rewrite-upgrades-helper-copies-and-resumes-after-custody-publication´
     #[test]
     fn rewrite_upgrades_helper_copies_and_resumes_after_custody_publication() {
+        rewrite_helper_resume(false);
+    }
+
+    /// ´test:unit:rewrite-resume-refreshes-changed-helper-preimage´
+    #[test]
+    fn rewrite_resume_refreshes_changed_helper_preimage() {
+        rewrite_helper_resume(true);
+    }
+
+    fn older_door_record(record: &mut serde_json::Value) {
+        record["schema"] = json!(4);
+        record
+            .as_object_mut()
+            .expect("record")
+            .remove("agent_observations");
+    }
+
+    fn rewrite_helper_resume(helper_arrival: bool) {
         use serde_json::Value;
         use std::fmt::Write as _;
-        fn older(record: &mut Value) {
-            record["schema"] = json!(4);
-            record
-                .as_object_mut()
-                .expect("record")
-                .remove("agent_observations");
-        }
         let fixture = Fixture::new();
         let store = fixture.store();
         store
@@ -2803,7 +2814,7 @@ pub(crate) mod tests {
         let path = fixture.run_file("R");
         let mut custody: Value =
             serde_json::from_slice(&fs::read(&path).expect("custody")).expect("JSON");
-        older(&mut custody["requests"][0]);
+        older_door_record(&mut custody["requests"][0]);
         let before = serde_json::to_vec(&custody).expect("old custody");
         fs::write(&path, &before).expect("downgrade fixture");
         let journal = fixture
@@ -2816,7 +2827,7 @@ pub(crate) mod tests {
             let mut value: Value = serde_json::from_str(line).expect("journal JSON");
             if let Some(rows) = value["collection"]["requests"].as_array_mut() {
                 for row in rows {
-                    older(&mut row["body"]["record"]);
+                    older_door_record(&mut row["body"]["record"]);
                 }
             }
             writeln!(old_journal, "{value}").expect("fixture line");
@@ -2831,13 +2842,17 @@ pub(crate) mod tests {
         );
         let preview = store.rewrite(None).expect("complete preview");
         assert_eq!(preview["changed"], 2);
+        assert_eq!(preview["plan"]["files"][0]["changed"], true);
         assert_eq!(preview["plan"]["channel"]["changed"], 1);
         assert_eq!(fs::read(&path).expect("preview custody"), before);
         assert_eq!(
             fs::read_to_string(&journal).expect("preview helper"),
             old_journal
         );
-        assert!(store.rewrite(Some("wrong")).is_err());
+        assert_eq!(
+            store.rewrite(Some("wrong")).expect_err("wrong digest").kind,
+            "requests-rewrite-digest"
+        );
         assert_eq!(
             fs::read_to_string(&journal).expect("refused helper"),
             old_journal
@@ -2856,8 +2871,13 @@ pub(crate) mod tests {
             serde_json::to_vec(&preview["plan"]["files"][0]["after"]).expect("published custody"),
         )
         .expect("partial publication");
+        let resumed = if helper_arrival {
+            refresh_helper_preview(&store, &journal, &old_journal, &path, &preview)
+        } else {
+            preview
+        };
         store
-            .rewrite(preview["preview_sha256"].as_str())
+            .rewrite(resumed["preview_sha256"].as_str())
             .expect("resume helper publication");
         let row = store.request("R:1a").expect("read converted");
         assert_eq!(row.value()["schema"], 5);
@@ -2873,6 +2893,70 @@ pub(crate) mod tests {
             .rewrite(repeat["preview_sha256"].as_str())
             .expect("no-op");
         assert_eq!(fs::read(&journal).expect("no-op helper"), after);
+    }
+
+    fn refresh_helper_preview(
+        store: &Store,
+        journal: &Path,
+        old_journal: &str,
+        path: &Path,
+        preview: &serde_json::Value,
+    ) -> serde_json::Value {
+        use serde_json::Value;
+        use std::fmt::Write as _;
+        let mut entries: Vec<Value> = old_journal
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("journal row"))
+            .collect();
+        let collection = &mut entries.last_mut().expect("last snapshot")["collection"];
+        let gateway = request_core::Request::filed(
+            "b".repeat(64),
+            "gateway-proposal".into(),
+            json!({"schema":1,"loop_name":"alpha","gateway_id":"c".repeat(64),
+        "registration_digest":"d".repeat(64),"proposal":{"schema":1,"lane":"fixture",
+        "seq":1,"argv":["true"],"reason":"fixture","queued_unix_ms":1,"timeout_seconds":1}}),
+            "worker".into(),
+            "R".into(),
+            1,
+        );
+        collection["requests"]
+            .as_array_mut()
+            .expect("requests")
+            .push(serde_json::to_value(&gateway).expect("gateway"));
+        collection["revision"] = json!(collection["revision"].as_u64().expect("revision") + 1);
+        let mut arrived = String::new();
+        for row in entries {
+            writeln!(arrived, "{row}").expect("fixture journal row");
+        }
+        fs::write(journal, &arrived).expect("helper arrival after custody publication");
+        let custody_before_retry = fs::read(path).expect("partial custody");
+        assert_eq!(
+            store
+                .rewrite(preview["preview_sha256"].as_str())
+                .expect_err("stale helper-inclusive digest")
+                .kind,
+            "requests-rewrite-digest"
+        );
+        assert_eq!(
+            fs::read(path).expect("refused custody"),
+            custody_before_retry
+        );
+        assert_eq!(
+            fs::read_to_string(journal).expect("refused helper"),
+            arrived
+        );
+        let resumed = store.rewrite(None).expect("renewed preview");
+        assert_ne!(resumed["preview_sha256"], preview["preview_sha256"]);
+        assert_eq!(resumed["plan"]["files"], preview["plan"]["files"]);
+        assert_eq!(
+            resumed["plan"]["channel"]["after"]["requests"]
+                .as_array()
+                .expect("target requests")
+                .last()
+                .expect("gateway"),
+            &serde_json::to_value(gateway).expect("unchanged gateway")
+        );
+        resumed
     }
 
     /// ´test:unit:agent-merge-preserves-effect-and-supervisory-label´
@@ -4636,7 +4720,16 @@ pub(crate) mod tests {
                     .iter()
                     .find(|row| row["source_id"] == id)
                     .expect("source");
-                assert_eq!(row["id"], store.collection_id(id));
+                // Fixed SHA-256 vectors for b"door\0alpha\0R:...", independent
+                // of the collection_id implementation that produced the row.
+                assert_eq!(
+                    row["id"],
+                    [
+                        "ac5a2e5c5cacd8d42768dca36c5895a3acdfe3c2662c60627efef415ee51ce2a",
+                        "cfb45d028aafa9d72c8aa619477a34d37545555699f38b8e0808ec66e7600a61",
+                        "eb6d4f27a8835599e56de2a5dce3de168f7fec237bf80766ed4163b1b770c884",
+                    ][index]
+                );
                 let native = store.request(id).expect("retained record");
                 for key in crate::requests::judgement::KEYS {
                     assert_eq!(row[key], native.value()[key], "{id}: {key}");
