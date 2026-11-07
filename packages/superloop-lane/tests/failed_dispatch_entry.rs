@@ -62,7 +62,11 @@ fn fixture() -> Fixture {
     fs::set_permissions(&scratchpad, fs::Permissions::from_mode(0o700)).expect("scratchpad mode");
     let letter = scratchpad.join("first-letter");
     let observation = json!({"schema":1,"command":"observed-hosts","loop":"alpha","run":"R","mode":"observing","enforcing":false,"source":runs.join(".observed-R.txt"),"attempted_connect_hosts":{"api.example.com":true,"failed.example.com":false},"connected_hosts":["api.example.com"]});
-    executable(&entry, "#!/bin/sh\nexit 0\n");
+    // Captured production interface query, kranich round j01, 2026-11-07.
+    executable(
+        &entry,
+        "#!/bin/sh\nif [ \"$1 $2\" = 'driver-launch --interface-version' ]; then printf 'superloop-driver-entry 0.4.1 1\\n'; fi\nexit 0\n",
+    );
     executable(
         &podman,
         &format!(

@@ -15,6 +15,9 @@ pub mod runner;
 pub mod verify;
 pub mod workers_settings;
 
+/// Version of the protected boxed driver-entry argument interface.
+pub const DRIVER_ENTRY_INTERFACE_VERSION: u32 = 1;
+
 pub use app::enter_loop_entry;
 pub use custody::{bind_custody_entry, mount_pinned, pin_custody};
 pub use ensure::{

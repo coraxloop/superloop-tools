@@ -5,6 +5,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use crate::build::sha256;
+use crate::fixture_exec::ENTRY_INTERFACE_PROBE;
 use crate::launch::{
     LaunchRequest, RecordHostsRequest, record_hosts_with_lane_bin_from, run_with_host_root,
     run_with_host_root_and_proxy, select_free_uid,
@@ -972,6 +973,20 @@ fn record_hosts_with_lane_bin(
 }
 
 fn executable(path: &std::path::Path, source: &str) {
+    let source = if path.file_name().is_some_and(|name| name == "entry-fixture") {
+        let (interpreter, body) = source.split_once('\n').expect("entry fixture header");
+        match interpreter {
+            "#!/bin/sh" => format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'driver-launch --interface-version' ]; then printf '%s\\n' '{ENTRY_INTERFACE_PROBE}'; exit 0; fi\n{body}"
+            ),
+            "#!/usr/bin/python3" => format!(
+                "#!/usr/bin/python3\nimport sys\nif sys.argv[1:] == ['driver-launch', '--interface-version']:\n    print('{ENTRY_INTERFACE_PROBE}')\n    sys.exit(0)\n{body}"
+            ),
+            _ => panic!("entry fixture interpreter is not declared"),
+        }
+    } else {
+        source.to_owned()
+    };
     crate::fixture_exec::write_executable(path, source.as_bytes())
         .expect("closed and synced fixture program");
 }
@@ -1399,6 +1414,56 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
         door_scope: crate::door::Scope::Work,
         rotation_source: None,
     };
+    // Mutations of the recorded entry response exercise the production launcher,
+    // with both preview and changing forms refusing before any run reservation.
+    let accepted_entry = fs::read(&entry).expect("entry fixture");
+    let allocation_before = fs::read(&allocations).expect("allocation snapshot");
+    for response in [
+        ENTRY_INTERFACE_PROBE.replace("0.4.1", "0.3.9"),
+        ENTRY_INTERFACE_PROBE.replace(" 1", " 0"),
+        String::new(),
+        "malformed".into(),
+    ] {
+        crate::fixture_exec::write_executable(
+            &entry,
+            format!("#!/bin/sh\nprintf '%s\\n' '{response}'\n").as_bytes(),
+        )
+        .expect("refusing entry");
+        for dry_run in [true, false] {
+            request.dry_run = dry_run;
+            let error = run(home, &request).expect_err("entry mismatch refuses first");
+            assert_eq!(error.kind, "entry-version");
+            assert!(error.detail.contains(ENTRY_INTERFACE_PROBE), "{error:?}");
+            assert!(error.detail.contains(&format!("{response:?}")), "{error:?}");
+            assert_eq!(fs::read_dir(&runs).expect("runs root").count(), 0);
+            assert!(!home.join("container-calls").exists());
+            assert_eq!(
+                fs::read(&allocations).expect("allocation unchanged"),
+                allocation_before
+            );
+        }
+    }
+    // The version record is the production j01 --version capture; this
+    // legacy stand-in deliberately omits only the new interface query.
+    crate::fixture_exec::write_executable(&entry, br#"#!/bin/sh
+if [ "$1" = --version ]; then
+    printf '%s\n' '{"schema":1,"command":"superloop","kind":"version","message":"version requested","fields":{"type":"version","version":"superloop 0.4.1"}}' >&2
+    exit 0
+fi
+exit 2
+"#).expect("legacy entry");
+    for dry_run in [true, false] {
+        request.dry_run = dry_run;
+        let error = run(home, &request).expect_err("legacy entry refuses before reservation");
+        assert_eq!(error.kind, "entry-version");
+        assert!(error.detail.contains(ENTRY_INTERFACE_PROBE), "{error:?}");
+        assert!(error.detail.contains("superloop 0.4.1"), "{error:?}");
+        assert!(error.detail.contains("interface unavailable"), "{error:?}");
+        assert_eq!(fs::read_dir(&runs).expect("runs root").count(), 0);
+        assert!(!home.join("container-calls").exists());
+    }
+    crate::fixture_exec::write_executable(&entry, &accepted_entry).expect("restore entry");
+    request.dry_run = true;
     let refusal = run(home, &request).expect_err("empty list refuses enforcing launch");
     assert_eq!(refusal.kind, "missing-setting");
     assert!(refusal.detail.contains("vendor_hosts.codex"));

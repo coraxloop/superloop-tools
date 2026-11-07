@@ -1520,6 +1520,14 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
                 .expect("config mode");
         }
+        let entry = h.join("entry");
+        crate::fixture_exec::write_executable(
+            &entry,
+            format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'driver-launch --interface-version' ]; then printf '%s\\n' '{}'; fi\n",
+                crate::fixture_exec::ENTRY_INTERFACE_PROBE
+            ).as_bytes(),
+        ).expect("recorded entry interface");
         let runtime = h.join("runtime");
         crate::fixture_exec::write_executable(&runtime, b"#!/bin/sh\ncase \"$1\" in\nps) exit 0;;\nunshare) echo 'settle-evidence: no thread or reply' >&2; exit 2;;\n*) exit 9;;\nesac\n").expect("runtime");
         for (path, text) in [
@@ -1537,7 +1545,8 @@ mod tests {
             (
                 config.join("workers.toml"),
                 format!(
-                    "runs_root = \"{}\"\nentry_bin = \"/usr/bin/true\"\ndriver_argv = [\"/usr/bin/true\"]\nimage_digest = \"sha256:{}\"\ntemplate_dir = \"{}/template\"\nsocket_dir = \"{}/sockets\"\nbackend_argv = {{ codex = [\"/usr/bin/true\"] }}\nresources = {{ memory_bytes = 2147483648, pids_max = 128, cpu_shares = 512 }}\nvendor_hosts = {{ codex = [\"api.example.com\"] }}\n",
+                    "runs_root = \"{}\"\nentry_bin = \"{}/entry\"\ndriver_argv = [\"/usr/bin/true\"]\nimage_digest = \"sha256:{}\"\ntemplate_dir = \"{}/template\"\nsocket_dir = \"{}/sockets\"\nbackend_argv = {{ codex = [\"/usr/bin/true\"] }}\nresources = {{ memory_bytes = 2147483648, pids_max = 128, cpu_shares = 512 }}\nvendor_hosts = {{ codex = [\"api.example.com\"] }}\n",
+                    h.display(),
                     h.display(),
                     "a".repeat(64),
                     h.display(),
@@ -3056,6 +3065,26 @@ else:
             b"#!/bin/sh\nfor word do\n if [ \"$word\" = _bind-mail ]; then cat \"$HOME/binding.json\"; exit 0; fi\n if [ \"$word\" = --record ]; then echo fixture-round-evidence-stop >&2; exit 17; fi\ndone\nprintf '{\"thread_id\":null}\\n'\n")
             .expect("fake container entry");
         request.dry_run = false;
+        let entry = h.join("entry");
+        let entry_source = std::fs::read_to_string(&entry).expect("recorded entry fixture");
+        crate::fixture_exec::write_executable(
+            &entry,
+            entry_source.replace("0.4.1", "0.0.0").as_bytes(),
+        )
+        .expect("different entry deployment");
+        let refusal = super::super::run_with_host_root_and_proxy(h, &request, h, owner, |_| {
+            Ok(("active".into(), "fixture-invocation".into()))
+        })
+        .expect_err("resume probes entry before reservation");
+        assert_eq!(refusal.kind, "entry-version");
+        assert!(refusal.detail.contains("0.4.1"));
+        assert!(refusal.detail.contains("0.0.0"));
+        assert_eq!(
+            read_reservation(&path).expect("read").expect("record"),
+            saved
+        );
+        crate::fixture_exec::write_executable(&entry, entry_source.as_bytes())
+            .expect("restore matching entry");
         let error = super::super::run_with_host_root_and_proxy(h, &request, h, owner, |_| {
             Ok(("active".into(), "fixture-invocation".into()))
         })

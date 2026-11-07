@@ -11,7 +11,7 @@
 //! | Status propagation | 2 | Child status seven becomes process status seven; verify probe and cleanup failures become status one |
 //! | Termination | 2 | External SIGTERM reaps the private group and closes its pipe within five seconds with a named trailer; private groups retain terminal input |
 //! | Refusal | 7 | Invalid names, nondirectory tiers, non-UTF-8 HOME, planted links, malformed ensure arguments, the owner-only row, and an ensure failure refuse without mounting |
-//! | Driver launch | 5 | Exact positional argv and child status, ordinary command dispatch, and byte-stable prelaunch refusals leave the stub untouched |
+//! | Driver launch | 6 | Exact positional argv and child status, ordinary command dispatch, byte-stable prelaunch refusals and the side-effect-free interface query |
 
 mod support;
 #[path = "subprocess_contract/termination.rs"]
@@ -2455,4 +2455,29 @@ fn driver_launch_requires_a_known_explicit_backend() {
         let output = run(&root, &stub, &log, 0, &words);
         assert_driver_refusal(&output, &log, expected);
     }
+}
+
+/// The production interface query has no dependency on a loop home or registry.
+/// ´claim:loophome:driver-entry-interface-probe-is-side-effect-free´
+/// ´test:integration:driver-entry-interface-probe-before-home-resolution´
+#[test]
+fn driver_entry_interface_probe_before_home_resolution() {
+    let directory = TestDir::new("entry-interface");
+    let output = enter_loop()
+        .env_clear()
+        .env("HOME", directory.path().join("absent"))
+        .args(["driver-launch", "--interface-version"])
+        .output()
+        .expect("production entry probe");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("interface text"),
+        format!(
+            "superloop-driver-entry {} {}\n",
+            env!("CARGO_PKG_VERSION"),
+            loop_home::DRIVER_ENTRY_INTERFACE_VERSION
+        )
+    );
+    assert_eq!(output.stderr, [] as [u8; 0]);
+    assert!(!directory.path().join("absent").exists());
 }

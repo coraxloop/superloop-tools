@@ -6,6 +6,7 @@
 
 ```text
 superloop [--json] enter NAME [--] COMMAND [ARG...]
+superloop driver-launch --interface-version
 superloop driver-launch LOOP RUN --driver-bin PATH --run-dir DIR --backend {codex|claude} -- ARGS...
 superloop [--json] provision NAME
 superloop [--json] run-bridge gpg NAME [--] [GPG-ARG...]
@@ -192,3 +193,5 @@ The explicit host rehearsal uses the fixture-only mail migration harness with `-
 The host worker harness and native lane retirement composer hand one configuration, executable and storage bundle through Podman stdin. The private birth and execution-home forms require the manifest; directory numbers alone grant no authority. The loop child validates the private-directory capability after dropping identity and keeps it as cwd for relative configuration publication, while the service child validates its journal capability before releasing reservation pins. The native lane retains its timeout, environment, process-group handling and bounded output capture. Renaming the held configuration, loop root and journal directories does not redirect a pending retirement. This implements the worker route of ``proto:workercontracts:namespace-anchor-handoff`` in ``docs/spec/worker-contracts.md``; the migration and steering callers of the library coordinator retain their separate storage-migration step, the native lane's births inside its private make and runtime-preparation forms keep the library route until those forms receive their own bundle, and the held ancestor-predicate caller switches remain last in coordinated deployment.
 
 The privilege-drop executable is pinned as a root-owned file on the host and invoked with `execveat` from that held file inside the namespace. Its child uses the retained same-image descriptor, then validates the operation-specific directory against its own mapped UID before reading or publishing configuration.
+
+**Protocol (Driver entry interface query)** · `proto:loophome:driver-entry-interface-query` `superloop driver-launch --interface-version` reports `superloop-driver-entry`, the deployment version and the protected boxed-entry interface version on one line, without resolving a home, registry or loop. The lane requires the matching deployment and interface before reserving a run; an entry without this query refuses the new launch. The interface version changes whenever the protected private argument contract changes. Equal deployment and interface versions establish this interface contract, not byte-identical builds. The query alone does not admit any driver invocation.

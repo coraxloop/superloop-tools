@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Boxed launch checks the entry deployment and interface before reservation and names both versions on refusal; the entry query resolves no loop state (``prob:box:launch-probes-the-entry-version-before-the-reservation``; ``req:superlooplane:entry-version-before-reservation``; ``proto:loophome:driver-entry-interface-query``).
+
 - Claude candidate launch vectors carry selected print and model arguments through structural container checks while execution remains gated on credential and trial acceptance (``prob:box:claude-boxed-workers``; ``proto:superlooplane:boxed-launch``; ``conv:superlooplane:backend-selection-compatibility``).
 
 - Boxed image checks bind the protected backend to its own measured program, template and manifest hashes, including the Claude sibling template in mixed installations; Claude execution remains gated (``prob:box:claude-boxed-workers``; ``pre:superlooplane:launch-input-checks``; ``proto:superlooplane:boxed-launch``).

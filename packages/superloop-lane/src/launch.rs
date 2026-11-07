@@ -632,6 +632,58 @@ pub(crate) fn launch_environment(owner_home: &Path) -> Result<BTreeMap<String, S
     Ok(environment)
 }
 
+fn entry_interface(
+    entry: &Path,
+    owner_home: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<String, LaneError> {
+    let expected = format!(
+        "superloop-driver-entry {} {}",
+        env!("CARGO_PKG_VERSION"),
+        loop_home::DRIVER_ENTRY_INTERFACE_VERSION
+    );
+    let answer = build::run_checked(
+        entry,
+        vec!["driver-launch".into(), "--interface-version".into()],
+        environment,
+        owner_home,
+        5,
+        "entry-version",
+    );
+    if let Ok(answer) = &answer
+        && answer.trim() == expected
+    {
+        return Ok(expected);
+    }
+    let observed = answer.map_or_else(
+        |_| {
+            let spec = build::child(
+                entry,
+                vec!["--version".into()],
+                environment,
+                owner_home,
+                5,
+                "entry-version",
+            );
+            let version = build::run_child(&spec, None)
+                .ok()
+                .filter(|result| result.status.success())
+                .and_then(|result| serde_json::from_slice::<Value>(&result.stderr).ok())
+                .and_then(|record| record["fields"]["version"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unavailable".into());
+            format!(
+                "{:?}; interface unavailable",
+                version.trim().chars().take(160).collect::<String>()
+            )
+        },
+        |answer| format!("{:?}", answer.trim().chars().take(160).collect::<String>()),
+    );
+    Err(LaneError::input(
+        "entry-version",
+        format!("lane expects {expected:?}; entry reports {observed}"),
+    ))
+}
+
 fn driver_runtime_contract(
     driver: &Path,
     owner_home: &Path,
@@ -3788,6 +3840,13 @@ fn run_with_program(
         request.backend,
     )?;
     let selected_backend = crate::settings::BoxBackend::from_plan(&plan.document)?;
+    let entry = settings
+        .entry_bin
+        .as_deref()
+        .ok_or_else(|| LaneError::input("missing-setting", "entry_bin is absent"))?;
+    crate::pinned::owner_executable(entry, caller.0)?;
+    let environment = launch_environment(owner_home)?;
+    let entry_version = entry_interface(entry, owner_home, &environment)?;
     plan.select_container_program(&request.podman_bin)?;
     if settings.sandbox_mode != "danger-full-access" {
         return Err(LaneError::input(
@@ -3854,10 +3913,6 @@ fn run_with_program(
         .driver_bin
         .as_deref()
         .ok_or_else(|| LaneError::input("missing-setting", "driver_bin is absent"))?;
-    let entry = settings
-        .entry_bin
-        .as_deref()
-        .ok_or_else(|| LaneError::input("missing-setting", "entry_bin is absent"))?;
     let letter = if let Some(source) = &request.rotation_source {
         rotation_source_bytes(&source.descriptor, &source.digest, owner_home, caller.0)?
     } else {
@@ -3902,7 +3957,6 @@ fn run_with_program(
     }
     checks_on_launch.push("helper readiness");
     checks_on_launch.push("readback settlement");
-    let environment = launch_environment(owner_home)?;
     crate::pinned::owner_executable(Path::new(&podman_word), Uid::effective().as_raw())?;
     crate::pinned::owner_executable(entry, caller.0)?;
     executable(driver, "lane driver")?;
@@ -3910,6 +3964,7 @@ fn run_with_program(
         driver_runtime_contract(driver, owner_home, &environment, selected_backend)?;
     let driver_sha256 = sha256(driver)?;
     checks.push("driver boxed-runtime contract");
+    checks.push("entry deployment and boxed interface version");
     let report = image_report(owner_home, &request.loop_name, selected_backend)?;
     if report["image_digest"] != image {
         return Err(LaneError::input(
@@ -4095,7 +4150,7 @@ fn run_with_program(
         )?;
         let helper_preview = json!({"program":request.podman_bin,"argv":helper_argv(&exe_word, &plan.driver_dir, owner_home, &root)?,"anchor_manifest":{"state":"bound-on-launch","transport":"rights","purposes":["owner-home","runs-root","entry-executable","podman-executable","hash-executable"]}});
         return Ok(
-            json!({"schema":1,"command":"launch","dry_run":true,"observe":request.observe,"enforcing":!request.observe,"plan":preview_plan,"proxy_service":proxy_service,"box_gate":box_gate,"box_probe":box_probe,"bound_source_matrix":bound_source_matrix,"bound_source_probe_identity":"launcher host identity runs rootless Podman with --userns=host; worker and fixed sibling UIDs are selected inside separate probe containers","dead_preparation":dry_recovery,"checks_performed":checks,"checks_on_launch":checks_on_launch,"driver_sha256":driver_sha256,"driver_contract":driver_contract,"selection":{"backend":selected_backend.name(),"worker_uid":worker_uid,"model":selection.record(),"method":"in-process read-only runs-root snapshot under shared lock"},"children_executed":[build::image_inspect_preview(&request.podman_bin, image, owner_home)?],"hash_checks_executed":hash_checks,"prepare_argv":prepare_preview,"setup_argv":setup_preview,"helper_argv":helper_preview,"invocation":{"program":entry,"argv":launch_argv},"environment":environment,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()}),
+            json!({"schema":1,"command":"launch","dry_run":true,"observe":request.observe,"enforcing":!request.observe,"plan":preview_plan,"proxy_service":proxy_service,"box_gate":box_gate,"box_probe":box_probe,"bound_source_matrix":bound_source_matrix,"bound_source_probe_identity":"launcher host identity runs rootless Podman with --userns=host; worker and fixed sibling UIDs are selected inside separate probe containers","dead_preparation":dry_recovery,"checks_performed":checks,"checks_on_launch":checks_on_launch,"driver_sha256":driver_sha256,"driver_contract":driver_contract,"entry_interface":entry_version,"selection":{"backend":selected_backend.name(),"worker_uid":worker_uid,"model":selection.record(),"method":"in-process read-only runs-root snapshot under shared lock"},"children_executed":[build::image_inspect_preview(&request.podman_bin, image, owner_home)?],"hash_checks_executed":hash_checks,"prepare_argv":prepare_preview,"setup_argv":setup_preview,"helper_argv":helper_preview,"invocation":{"program":entry,"argv":launch_argv},"environment":environment,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()}),
         );
     }
     let _preparation_lease = lock_run_preparation(&root, &request.run, caller.0)?;

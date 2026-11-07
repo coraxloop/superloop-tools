@@ -31,7 +31,13 @@ fn empty_loop() -> (TempDir, std::path::PathBuf) {
     )
     .expect("registry mode");
     let entry = home.join("superloop");
-    executable(&entry, "exit 0");
+    executable(
+        &entry,
+        &format!(
+            "if [ \"$1 $2\" = 'driver-launch --interface-version' ]; then printf '%s\\n' '{}'; fi\nexit 0",
+            crate::fixture_exec::ENTRY_INTERFACE_PROBE
+        ),
+    );
     executable(
         &home.join("superloop-lane"),
         "if [ \"$5\" = --runtime-contract ]; then printf 'boxed-runtime 1\\n'; fi\nexit 0",

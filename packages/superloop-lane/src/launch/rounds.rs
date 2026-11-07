@@ -1066,6 +1066,15 @@ fn resume_with_program(
         ));
     }
     super::compare_pinned_plan(&record["plan"], &plan.document)?;
+    // The entry probe precedes the private mail binding, so a mismatched pair
+    // refuses before any child touches the run (´req:superlooplane:entry-version-before-reservation´).
+    let entry_program = settings
+        .entry_bin
+        .as_deref()
+        .ok_or_else(|| LaneError::input("round-program", "entry_bin is absent"))?;
+    let environment = launch_environment(owner_home)?;
+    crate::pinned::owner_executable(entry_program, caller)?;
+    super::entry_interface(entry_program, owner_home, &environment)?;
     let entry = record["mail"]
         .as_array()
         .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
@@ -1117,14 +1126,9 @@ fn resume_with_program(
         .driver_bin
         .as_deref()
         .ok_or_else(|| LaneError::input("round-program", "driver_bin is absent"))?;
-    let entry_program = settings
-        .entry_bin
-        .as_deref()
-        .ok_or_else(|| LaneError::input("round-program", "entry_bin is absent"))?;
     let verified_home = home::verify_host_prefix_from(host_root, owner_home, caller, root_uid)?;
     let verified_runs =
         home::verify_host_launch_root(host_root, owner_home, &root, caller, root_uid)?;
-    let environment = launch_environment(owner_home)?;
     let inspect = vec![
         "unshare".into(),
         exe_word.clone(),

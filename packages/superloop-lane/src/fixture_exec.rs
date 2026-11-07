@@ -1,3 +1,7 @@
+// Captured from the production entry in kranich round j01, 2026-11-07.
+#[cfg(test)]
+pub const ENTRY_INTERFACE_PROBE: &str = "superloop-driver-entry 0.4.1 1";
+
 use std::io;
 use std::process::{Child, Command};
 
