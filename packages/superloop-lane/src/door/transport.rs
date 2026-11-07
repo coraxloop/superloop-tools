@@ -23,6 +23,9 @@ use serde_json::{Value, json};
 use super::{Registration, Scope, frame_read_until, frame_write_until};
 use crate::error::LaneError;
 
+#[cfg(test)]
+thread_local! { pub(super) static STUB_TEST_BUDGET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
+
 const CHUNK: usize = 8192;
 const POST_FINAL_STDIN_WAIT: Duration = Duration::from_millis(500);
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
@@ -374,6 +377,7 @@ pub(super) struct ComputeRunner<'a> {
     pub(super) words: &'a [String],
     pub(super) deadline: Instant,
     pub(super) registered_deadline_ms: u64,
+    pub(super) wait: Option<&'a super::RequestWait>,
 }
 
 impl Runner for ComputeRunner<'_> {
@@ -381,7 +385,8 @@ impl Runner for ComputeRunner<'_> {
         self.inner.spawn_compute(
             registration,
             self.words,
-            self.deadline
+            self.wait
+                .map_or(self.deadline, |wait| wait.deadline(self.deadline))
                 .saturating_duration_since(Instant::now())
                 .as_secs_f64(),
         )
@@ -904,7 +909,7 @@ fn send_output(
     write_frame_locked(stream, &value, deadline)
 }
 
-fn write_frame_locked(
+pub(super) fn write_frame_locked(
     stream: &Arc<Mutex<UnixStream>>,
     value: &Value,
     deadline: Instant,
@@ -1213,7 +1218,7 @@ fn bounded_join<T>(handle: JoinHandle<T>, deadline: Instant) -> io::Result<Optio
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) fn serve_compute(
-    stream: &mut UnixStream,
+    stream: &UnixStream,
     registration: &Registration,
     peer: u32,
     operation: Operation,
@@ -1224,10 +1229,17 @@ pub(super) fn serve_compute(
     queue_wall: Option<f64>,
     would_do: Option<&Value>,
     complete: Option<&Completion<'_>>,
+    wait: Option<&super::RequestWait>,
 ) -> io::Result<Value> {
+    let deadline = wait.map_or(deadline, |wait| wait.deadline(deadline));
+    let writer = if let Some(wait) = wait {
+        Arc::clone(&wait.writer)
+    } else {
+        Arc::new(Mutex::new(stream.try_clone()?))
+    };
     if registration.scope != Scope::Work {
         let reply = refusal(registration, peer, "door-review-compute-refusal", started);
-        frame_write_until(stream, &reply, deadline)?;
+        write_frame_locked(&writer, &reply, deadline)?;
         return Ok(reply);
     }
     let compute_started = Instant::now();
@@ -1262,12 +1274,15 @@ pub(super) fn serve_compute(
         if let Some(complete) = complete {
             complete(&reply).map_err(io::Error::other)?;
         }
-        frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+        if let Some(wait) = wait {
+            wait.report(&mut reply);
+        }
+        write_frame_locked(&writer, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok(reply);
     }
     if upload {
-        frame_write_until(
-            stream,
+        write_frame_locked(
+            &writer,
             &json!({"schema":2,"type":"limits","bound":bound,"registered":registration_state}),
             deadline,
         )?;
@@ -1293,7 +1308,6 @@ pub(super) fn serve_compute(
     let stdout_count = Arc::new(AtomicUsize::new(0));
     let stderr_count = Arc::new(AtomicUsize::new(0));
     let output_total = Arc::new(AtomicUsize::new(0));
-    let writer = Arc::new(Mutex::new(stream.try_clone()?));
     let input_socket = stream.try_clone()?;
     let evidence = Arc::new(Mutex::new(Vec::new()));
     let input = {
@@ -1440,6 +1454,9 @@ pub(super) fn serve_compute(
         reply["reason"] = json!("door-record-incomplete");
         reply["request_record_error"] = json!(error.line());
     }
+    if let Some(wait) = wait {
+        wait.report(&mut reply);
+    }
     write_frame_locked(&writer, &reply, Instant::now() + Duration::from_secs(2))?;
     Ok(reply)
 }
@@ -1493,6 +1510,21 @@ fn compute_client_deadline(frame: &Value) -> io::Result<Instant> {
     Ok(Instant::now() + Duration::from_millis(remaining.unwrap_or(0) + 500))
 }
 
+fn update_wait_credit(frame: &Value, credit: &std::sync::atomic::AtomicU64) -> io::Result<()> {
+    let total = frame["wait_ms"]
+        .as_u64()
+        .filter(|total| {
+            frame["schema"] == 2
+                && frame["type"] == "request-lock-wait"
+                && frame.as_object().is_some_and(|row| row.len() == 3)
+                && *total >= credit.load(Ordering::Relaxed)
+                && *total <= super::MAX_LOCK_WAIT_CREDIT_MS
+        })
+        .ok_or_else(|| io::Error::other("door request lock wait frame differs"))?;
+    credit.store(total, Ordering::Relaxed);
+    Ok(())
+}
+
 /// Stream exact stdin while independently draining output and final status.
 ///
 /// # Errors
@@ -1527,6 +1559,10 @@ where
     } else {
         120_000
     };
+    #[cfg(test)]
+    let deadline_ms = STUB_TEST_BUDGET
+        .with(std::cell::Cell::take)
+        .unwrap_or(deadline_ms);
     // The service owns the command deadline; leave a bounded margin for its final frame.
     let mut deadline = started + Duration::from_millis(deadline_ms + 500);
     let words = args
@@ -1569,6 +1605,8 @@ where
             break;
         }
     }
+    let wait_credit = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let sender_credit = Arc::clone(&wait_credit);
     let mut writer = stream.try_clone()?;
     let input_failure = Arc::new(Mutex::new(None));
     let sender_failure = Arc::clone(&input_failure);
@@ -1576,7 +1614,9 @@ where
         let mut buffer = [0_u8; CHUNK];
         let mut total = 0;
         loop {
-            if Instant::now() >= deadline {
+            let current_deadline =
+                deadline + Duration::from_millis(sender_credit.load(Ordering::Relaxed));
+            if Instant::now() >= current_deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "door stdin deadline",
@@ -1612,6 +1652,7 @@ where
                     "door stdin exceeds limit",
                 ));
             }
+            let deadline = deadline + Duration::from_millis(sender_credit.load(Ordering::Relaxed));
             if Instant::now() >= deadline {
                 *sender_failure
                     .lock()
@@ -1636,7 +1677,12 @@ where
         .is_some_and(|arg| arg.as_bytes().starts_with(b"git-upload-pack '"));
     let mut registered = if upload { "absent" } else { "not-applicable" };
     let final_reply = loop {
-        let frame = frame_read_until(&mut stream, deadline + Duration::from_secs(2))?;
+        let frame = frame_read_until(
+            &mut stream,
+            deadline
+                + Duration::from_millis(wait_credit.load(Ordering::Relaxed))
+                + Duration::from_secs(2),
+        )?;
         if frame["schema"] != 2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1644,6 +1690,9 @@ where
             ));
         }
         match frame["type"].as_str() {
+            Some("request-lock-wait") => {
+                update_wait_credit(&frame, &wait_credit)?;
+            }
             Some("limits") if upload && !announced && received_out == 0 && received_err == 0 => {
                 bound = frame["bound"]
                     .as_u64()
@@ -1784,6 +1833,55 @@ mod tests {
     };
 
     struct FakeRunner;
+
+    /// ´test:unit:door-lock-credit-is-cumulative-bounded-and-strict´
+    #[test]
+    fn door_lock_credit_is_cumulative_bounded_and_strict() {
+        let credit = std::sync::atomic::AtomicU64::new(0);
+        for total in [0, 50, 50, super::super::MAX_LOCK_WAIT_CREDIT_MS] {
+            super::update_wait_credit(
+                &json!({"schema":2,"type":"request-lock-wait","wait_ms":total}),
+                &credit,
+            )
+            .expect("cumulative credit");
+            assert_eq!(credit.load(std::sync::atomic::Ordering::Relaxed), total);
+        }
+        for frame in [
+            json!({"schema":2,"type":"request-lock-wait","wait_ms":1}),
+            json!({"schema":2,"type":"request-lock-wait","wait_ms":120_001}),
+            json!({"schema":2,"type":"request-lock-wait","wait_ms":"120_000"}),
+            json!({"schema":2,"type":"request-lock-wait","wait_ms":120_000,"extra":true}),
+            json!({"schema":1,"type":"request-lock-wait","wait_ms":120_000}),
+        ] {
+            assert_eq!(
+                super::update_wait_credit(&frame, &credit)
+                    .expect_err("refuse invalid credit")
+                    .to_string(),
+                "door request lock wait frame differs"
+            );
+            assert_eq!(
+                credit.load(std::sync::atomic::Ordering::Relaxed),
+                120_000,
+                "refusal changes no deadline"
+            );
+        }
+        let (service, mut client) = UnixStream::pair().expect("credit stream");
+        let wait = super::super::RequestWait::new(&service).expect("wait accounting");
+        wait.credit(Duration::from_secs(3600));
+        wait.credit(Duration::from_secs(3600));
+        assert_eq!(wait.elapsed(), Duration::from_secs(120));
+        let frame = frame_read_until(&mut client, Instant::now() + Duration::from_secs(2))
+            .expect("bounded credit frame");
+        assert_eq!(
+            frame,
+            json!({"schema":2,"type":"request-lock-wait","wait_ms":120_000})
+        );
+        let mut reply = json!({});
+        wait.report(&mut reply);
+        assert_eq!(reply["request_lock_wait_ms"], 7_200_000);
+        assert_eq!(reply["request_lock_wait_credit_ms"], 120_000);
+        assert_eq!(reply["request_lock_wait_credit_cap_ms"], 120_000);
+    }
 
     /// ´test:unit:compute-deadline-announcement-keeps-the-remaining-window´
     #[test]
@@ -2687,7 +2785,7 @@ mod tests {
     /// ´test:unit:door-child-exit-keeps-status-with-open-input-and-descendant-pipe´
     #[test]
     fn door_child_exit_keeps_status_with_open_input_and_descendant_pipe() {
-        let (mut client, mut server) = UnixStream::pair().expect("fixture peer");
+        let (mut client, server) = UnixStream::pair().expect("fixture peer");
         let registration = Registration::from_row(
             &json!({"name":"alpha","uid":41001}),
             "alpha",
@@ -2699,7 +2797,7 @@ mod tests {
         let started = Instant::now();
         let service = thread::spawn(move || {
             super::serve_compute(
-                &mut server,
+                &server,
                 &registration,
                 3000,
                 Operation::ProbeStatus,
@@ -2707,6 +2805,7 @@ mod tests {
                 started,
                 started + Duration::from_secs(4),
                 "no-queue",
+                None,
                 None,
                 None,
                 None,

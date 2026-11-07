@@ -510,6 +510,7 @@ pub struct Store {
     reader_budget: Option<Duration>,
     writer_deadline: Option<Instant>,
     request_id: Option<String>,
+    wait_credit: Option<std::sync::Arc<crate::door::RequestWait>>,
 }
 
 impl Store {
@@ -535,7 +536,28 @@ impl Store {
             reader_budget: None,
             writer_deadline: Some(deadline),
             request_id: None,
+            wait_credit: None,
         })
+    }
+
+    pub(crate) fn with_wait_credit(
+        mut self,
+        wait: std::sync::Arc<crate::door::RequestWait>,
+    ) -> Self {
+        self.wait_credit = Some(wait);
+        self
+    }
+
+    pub(crate) fn request_deadline(&self, base: Instant) -> Instant {
+        self.wait_credit
+            .as_ref()
+            .map_or(base, |wait| wait.deadline(base))
+    }
+
+    fn credited_wait(&self) -> Duration {
+        self.wait_credit
+            .as_ref()
+            .map_or(Duration::ZERO, |wait| wait.elapsed())
     }
 
     pub(crate) fn with_request_id(mut self, id: &str) -> Self {
@@ -623,6 +645,7 @@ impl Store {
             reader_budget: None,
             writer_deadline: None,
             request_id: None,
+            wait_credit: None,
             runs,
             state,
             owner,
@@ -1097,20 +1120,27 @@ impl Store {
         deadline: Option<Instant>,
     ) -> Result<StoreLock, ReadFailure> {
         let started = Instant::now();
+        let initial_credit = self.credited_wait();
+        let deadline = deadline.map(|end| end + initial_credit);
         // A late effect, deadline outcome or agent publication still gets the
         // base writer allowance. Fix this bound once, never at each retry.
-        let deadline = if changing {
+        let base_deadline = if changing {
             deadline.map(|end| end.max(started + writer_lock_wait()))
         } else {
             deadline
         };
         loop {
+            let deadline =
+                base_deadline.map(|end| end + self.credited_wait().saturating_sub(initial_credit));
             let result = self.lock_attempt(changing, deadline, true);
+            let deadline =
+                base_deadline.map(|end| end + self.credited_wait().saturating_sub(initial_credit));
             match result {
                 Err(ReadFailure::Contended(_))
                     if deadline.is_some_and(|end| Instant::now() < end) =>
                 {
                     // Yield between bounded acquisitions just as wait callers do.
+                    let waiting = Instant::now();
                     std::thread::sleep(
                         Duration::from_millis(10).min(
                             deadline
@@ -1118,6 +1148,9 @@ impl Store {
                                 .saturating_duration_since(Instant::now()),
                         ),
                     );
+                    if let Some(credit) = &self.wait_credit {
+                        credit.credit(waiting.elapsed());
+                    }
                 }
                 Err(ReadFailure::Contended(mut error)) => {
                     use std::fmt::Write as _;
@@ -1236,11 +1269,13 @@ impl Store {
         let mut contended = false;
         let mut holder = None;
         let key = (stat.st_dev, stat.st_ino);
-        let mut deadline = started + if changing { writer_wait } else { reader_wait };
-        if let Some(caller_deadline) = caller_deadline {
-            deadline = deadline.min(caller_deadline);
-        }
+        let attempt_deadline = started + if changing { writer_wait } else { reader_wait };
+        let initial_credit = self.credited_wait();
         loop {
+            let caller_deadline = caller_deadline
+                .map(|end| end + self.credited_wait().saturating_sub(initial_credit));
+            let deadline =
+                caller_deadline.map_or(attempt_deadline, |end| end.min(attempt_deadline));
             // SAFETY: flock receives a live file descriptor and a fixed operation.
             if unsafe { libc::flock(fd.as_raw_fd(), operation) } == 0 {
                 if contended {
@@ -1304,10 +1339,14 @@ impl Store {
                         }
                     });
                 }
+                let sleep_started = Instant::now();
                 std::thread::sleep(
                     Duration::from_millis(10)
                         .min(deadline.saturating_duration_since(Instant::now())),
                 );
+                if let Some(wait) = &self.wait_credit {
+                    wait.credit(sleep_started.elapsed());
+                }
                 continue;
             }
             let refusal = problem(

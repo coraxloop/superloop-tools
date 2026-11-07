@@ -110,6 +110,84 @@ const ADMISSION_REPLY_MARGIN: Duration = Duration::from_secs(2);
 pub(crate) const FULL_STORE_REASON_PREFIX: &str = "door-requests-full-refusal: ";
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+// Credit measured contention sleeps, never arbitrary work, up to one bounded
+// extra window per request. The shared writer keeps progress frames whole even
+// when an allow-mode agent publishes beside effect output.
+#[cfg(test)]
+thread_local! { static WAIT_CREDIT_OBSERVED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) }; }
+
+pub(crate) const MAX_LOCK_WAIT_CREDIT_MS: u64 = 120_000;
+pub(crate) struct RequestWait {
+    pub(super) writer: std::sync::Arc<std::sync::Mutex<UnixStream>>,
+    micros: AtomicU64,
+    announced: std::sync::Mutex<u64>,
+}
+
+impl RequestWait {
+    fn new(stream: &UnixStream) -> io::Result<Self> {
+        Ok(Self {
+            writer: std::sync::Arc::new(std::sync::Mutex::new(stream.try_clone()?)),
+            micros: AtomicU64::new(0),
+            announced: std::sync::Mutex::new(0),
+        })
+    }
+
+    pub(crate) fn elapsed(&self) -> Duration {
+        Duration::from_micros(
+            self.micros
+                .load(Ordering::Relaxed)
+                .min(MAX_LOCK_WAIT_CREDIT_MS * 1000),
+        )
+    }
+
+    pub(crate) fn deadline(&self, base: Instant) -> Instant {
+        base + self.elapsed()
+    }
+
+    pub(crate) fn credit(&self, elapsed: Duration) {
+        #[cfg(test)]
+        WAIT_CREDIT_OBSERVED.with(|slot| {
+            if let Some(sender) = slot.borrow_mut().take() {
+                let _sent = sender.send(());
+            }
+        });
+        let extra = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+        let mut previous = self.micros.load(Ordering::Relaxed);
+        loop {
+            let next = previous.saturating_add(extra);
+            match self.micros.compare_exchange_weak(
+                previous,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => previous = current,
+            }
+        }
+        let total = (self.micros.load(Ordering::Relaxed) / 1000).min(MAX_LOCK_WAIT_CREDIT_MS);
+        let mut announced = self
+            .announced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if total.saturating_sub(*announced) >= 50 {
+            let frame = json!({"schema":2,"type":"request-lock-wait","wait_ms":total});
+            let _sent = transport::write_frame_locked(
+                &self.writer,
+                &frame,
+                Instant::now() + Duration::from_secs(2),
+            );
+            *announced = total;
+        }
+    }
+
+    fn report(&self, reply: &mut Value) {
+        reply["request_lock_wait_ms"] = json!(self.micros.load(Ordering::Relaxed) / 1000);
+        reply["request_lock_wait_credit_ms"] = json!(self.elapsed().as_millis());
+        reply["request_lock_wait_credit_cap_ms"] = json!(MAX_LOCK_WAIT_CREDIT_MS);
+    }
+}
+
 // The service and host exercises share this inode; never unlink a lock on release.
 struct RequestGuard {
     _held: Vec<nix::fcntl::Flock<File>>,
@@ -836,14 +914,15 @@ thread_local! {
     static REQUEST_READY: std::cell::RefCell<Option<RequestReadiness>> = const { std::cell::RefCell::new(None) };
 }
 
-fn wait_answer(store: &Store, id: &str, stream: &UnixStream, deadline: Instant) -> Answer {
+fn wait_answer(store: &Store, id: &str, stream: &UnixStream, base_deadline: Instant) -> Answer {
     let queued = Instant::now();
     let mut interval = Duration::from_millis(10);
     loop {
-        let record = match store.waiting_request_until(id, deadline) {
+        let record = match store.waiting_request_until(id, base_deadline) {
             Ok(record) => record,
             Err(error) => {
                 if crate::requests::store::is_lock_contention(&error) {
+                    let deadline = store.request_deadline(base_deadline);
                     #[cfg(test)]
                     AFTER_WAIT_LOCK_TIMEOUT.with(|slot| {
                         if let Some(sender) = slot.borrow_mut().take() {
@@ -867,6 +946,7 @@ fn wait_answer(store: &Store, id: &str, stream: &UnixStream, deadline: Instant) 
                 action();
             }
         });
+        let deadline = store.request_deadline(base_deadline);
         match peer_disconnected(stream) {
             Ok(true) => return Answer::Disconnect(queued.elapsed().as_secs_f64()),
             Err(error) => {
@@ -1292,11 +1372,13 @@ fn serve_request_with_agent(
         frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
     };
+    let wait = std::sync::Arc::new(RequestWait::new(stream)?);
     let bound_runner = transport::ComputeRunner {
         inner: runner,
         words: &words,
         deadline,
         registered_deadline_ms,
+        wait: Some(&wait),
     };
     let runner: &dyn transport::Runner = if compute_candidate {
         &bound_runner
@@ -1323,47 +1405,69 @@ fn serve_request_with_agent(
     let store = fixture_store
         .or(opened.as_ref())
         .ok_or_else(|| io::Error::other("door store is absent"))?;
-    let store = store.for_request(deadline).map_err(io::Error::other)?;
+    let store = store
+        .for_request(deadline)
+        .map_err(io::Error::other)?
+        .with_wait_credit(std::sync::Arc::clone(&wait));
     let default_class = if compute_candidate { "compute" } else { "ssh" };
     let default_rubric = Rubric::decode(&json!({"schema":1,"class":default_class,
         "undecided_reason":"no registered rule for this operation","rules":[]}))
     .map_err(io::Error::other)?;
     let class = rubric.unwrap_or(&default_rubric).class();
-    let setting = store.ensure_first_mode(class).map_err(io::Error::other)?;
+    let setting = match store.ensure_first_mode(class) {
+        Ok(setting) => setting,
+        Err(error) => {
+            let mut reply =
+                transport::refusal(registration, peer, "door-request-record-refusal", started);
+            reply["request_record_error"] = json!(error.line());
+            wait.report(&mut reply);
+            frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+            return Ok((reply, Vec::new()));
+        }
+    };
     let shape_key = if compute_candidate {
         compute::shape(&words)
     } else {
         format!("{class}:{}", operation.name())
     };
-    let (mut would_do, matched_rule, history) = rubric
-        .map_or_else(
-            || {
-                store
-                    .learned_judgement(class, operation.name(), &shape_key)
-                    .or_else(|error| {
-                        if crate::requests::store::is_lock_contention(&error) {
-                            return Err(error);
-                        }
-                        Ok((
-                            json!({"decision":"undecided","reason":error.line()}),
-                            Value::Null,
-                            json!([]),
-                        ))
-                    })
-            },
-            |rubric| {
-                Ok((
-                    rubric.would_do(class, operation.name(), &shape_key),
-                    Value::Null,
-                    json!([]),
-                ))
-            },
-        )
-        .map_err(io::Error::other)?;
+    let (mut would_do, matched_rule, history) = match rubric.map_or_else(
+        || {
+            store
+                .learned_judgement(class, operation.name(), &shape_key)
+                .or_else(|error| {
+                    if crate::requests::store::is_lock_contention(&error) {
+                        return Err(error);
+                    }
+                    Ok((
+                        json!({"decision":"undecided","reason":error.line()}),
+                        Value::Null,
+                        json!([]),
+                    ))
+                })
+        },
+        |rubric| {
+            Ok((
+                rubric.would_do(class, operation.name(), &shape_key),
+                Value::Null,
+                json!([]),
+            ))
+        },
+    ) {
+        Ok(judgement) => judgement,
+        Err(error) => {
+            let mut reply =
+                transport::refusal(registration, peer, "door-request-record-refusal", started);
+            reply["request_record_error"] = json!(error.line());
+            wait.report(&mut reply);
+            frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+            return Ok((reply, Vec::new()));
+        }
+    };
     let mode = match execute_command::policy::DoorMode::from_record(setting["mode"].as_str()) {
         Ok(mode) => mode.as_str(),
         Err(error) => {
-            let reply = refuse(error.0);
+            let mut reply = refuse(error.0);
+            wait.report(&mut reply);
             frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             return Ok((reply, Vec::new()));
         }
@@ -1385,9 +1489,11 @@ fn serve_request_with_agent(
         let mut result = agent.map_or_else(
             || agent::RunnerOutcome::referral("failure", "door-agent-unconfigured", Instant::now()),
             |runner| match input.encode() {
-                Ok(bytes) => {
-                    runner.judge(&bytes, deadline.saturating_duration_since(Instant::now()))
-                }
+                Ok(bytes) => runner.judge(
+                    &bytes,
+                    wait.deadline(deadline)
+                        .saturating_duration_since(Instant::now()),
+                ),
                 Err(error) => agent::RunnerOutcome::referral("failure", error.0, Instant::now()),
             },
         );
@@ -1436,6 +1542,7 @@ fn serve_request_with_agent(
         };
         let mut reply = transport::refusal(registration, peer, &reason, started);
         reply["request_record_error"] = json!(error.line());
+        wait.report(&mut reply);
         frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
     }
@@ -1466,6 +1573,7 @@ fn serve_request_with_agent(
                 transport::refusal(registration, peer, "door-request-record-refusal", started);
             reply["request_record_error"] = json!(error.line());
             reply["request_id"] = json!(id);
+            wait.report(&mut reply);
             frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             return Ok((reply, Vec::new()));
         }
@@ -1486,6 +1594,7 @@ fn serve_request_with_agent(
             reply["reason"] = json!("door-record-incomplete");
             reply["request_record_error"] = json!(error.line());
         }
+        wait.report(&mut reply);
         frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
     }
@@ -1521,6 +1630,7 @@ fn serve_request_with_agent(
                     None,
                     Some(&would_do),
                     Some(&complete),
+                    Some(&wait),
                 );
                 let judgement = agent_task
                     .join()
@@ -1569,6 +1679,7 @@ fn serve_request_with_agent(
             None,
             Some(&would_do),
             Some(&complete),
+            Some(&wait),
         );
         if result.is_err() {
             let _recorded =
@@ -1598,6 +1709,7 @@ fn serve_request_with_agent(
                 Some(wall),
                 Some(&would_do),
                 Some(&complete),
+                Some(&wait),
             );
             if result.is_err() {
                 let _recorded =
@@ -1606,7 +1718,7 @@ fn serve_request_with_agent(
             result.map(|reply| (reply, Vec::new()))
         }
         Answer::ReadFailure(wall) => {
-            let reply = queue_reply(
+            let mut reply = queue_reply(
                 registration,
                 peer,
                 "door-request-read-refusal",
@@ -1624,6 +1736,7 @@ fn serve_request_with_agent(
                     error.line()
                 );
             }
+            wait.report(&mut reply);
             frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             Ok((reply, Vec::new()))
         }
@@ -1645,6 +1758,7 @@ fn serve_request_with_agent(
                 reply["request_record_error"] = json!(error.line());
             }
             if !disconnected {
+                wait.report(&mut reply);
                 frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             }
             Ok((reply, Vec::new()))

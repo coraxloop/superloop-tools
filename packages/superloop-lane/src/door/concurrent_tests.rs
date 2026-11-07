@@ -758,3 +758,88 @@ fn door_receive_completes_beside_running_compute() {
     );
     assert_eq!(compute_calls.load(Ordering::Relaxed), 1);
 }
+
+/// ´test:unit:door-two-requesters-credit-contention-before-unlocked-triage´
+#[test]
+fn door_two_requesters_credit_contention_before_unlocked_triage() {
+    struct PausedAgent {
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl super::agent::AgentRunner for PausedAgent {
+        fn judge(&self, _: &[u8], remaining: Duration) -> super::agent::RunnerOutcome {
+            assert!(!remaining.is_zero(), "contention consumed the agent budget");
+            self.entered.send(()).expect("agent entered");
+            self.release.lock().expect("release lock")
+                .recv_timeout(Duration::from_secs(10)).expect("release agent");
+            let mut result = super::agent::RunnerOutcome::referral("failure", "fixture", Instant::now());
+            result.status = "verdict".into();
+            result.verdict = "allow".into();
+            result.scope = "loop".into();
+            result.reason = "fixture independent judgement".into();
+            result
+        }
+    }
+    let fixture = Fixture::new();
+    fixture.set_floor("enforce");
+    let store = fixture.store();
+    store.ensure_first_mode("ssh").expect("initial mode");
+    let route = route_for(&fixture.home);
+    let (contended_tx, contended_rx) = std::sync::mpsc::channel();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let holder = store.fixture_exclusive_lock().expect("bounded contender");
+    let mut services = Vec::new();
+    let mut clients = Vec::new();
+    let mut releases = Vec::new();
+    for (index, run) in ["R", "S"].into_iter().enumerate() {
+        let socket = crate::fixture_exec::fixture_socket_path(fixture.home.join(format!("credit-{run}.sock")));
+        let listener = UnixListener::bind(&socket).expect("listener");
+        let home = fixture.home.clone();
+        let service_store = fixture.store();
+        let route = route.clone();
+        let (runner, _, _) = counting_runner(&fixture);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        releases.push(release_tx);
+        let agent = PausedAgent { entered: entered_tx.clone(), release: Mutex::new(release_rx) };
+        let contended = contended_tx.clone();
+        services.push(thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let request = frame_read(&mut stream).expect("request");
+            let registration = Registration::from_row(&json!({"name":"alpha","uid":2001}), "alpha", run, 3000 + u32::try_from(index).expect("two callers"), Scope::Work).expect("registration");
+            super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = Some(contended));
+            super::serve_request_with_agent(&mut stream, &registration, registration.worker_uid,
+                &request, Some(&route), Some(&runner), Some(&home), Some(&rubric(None)),
+                Some(&service_store), Some(&agent), None, Instant::now()).expect("served")
+        }));
+        clients.push(thread::spawn(move || {
+            super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(Some(3000)));
+            super::transport::stub_call_stream(&socket, &[OsString::from("door-attribution-probe")], io::empty(), Vec::new(), Vec::new()).expect("stub completes")
+        }));
+    }
+    for _ in 0..2 { contended_rx.recv_timeout(Duration::from_secs(10)).expect("both requests contend"); }
+    // Exceed the requested active budget while both callers are measured waiting.
+    thread::sleep(Duration::from_secs(6));
+    drop(holder);
+    for _ in 0..2 { entered_rx.recv_timeout(Duration::from_secs(10)).expect("both agents entered"); }
+    for run in ["R", "S"] {
+        let rows = store.list_run(run).expect("pending custody is readable during triage");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].id().starts_with(&format!("{run}:")));
+        assert_eq!(rows[0].value()["effect"]["state"], "pending");
+    }
+    drop(store.fixture_exclusive_lock().expect("triage holds no writer lock"));
+    for release in releases { release.send(()).expect("release judgement"); }
+    for client in clients {
+        let reply = client.join().expect("client");
+        assert_eq!(reply["reason"], "door-complete", "{reply}");
+        assert_eq!(reply["status"], 0);
+        assert!(reply["request_lock_wait_ms"].as_u64().expect("measured wait") >= 3000);
+    }
+    for service in services { service.join().expect("service"); }
+    for run in ["R", "S"] {
+        let rows = store.list_run(run).expect("completed custody");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value()["effect"]["state"], "completed");
+        assert_eq!(rows[0].value()["would_do"]["decision"], "allow");
+    }
+}

@@ -78,6 +78,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Door store contention receives bounded, measured deadline credit in the service and matching stub, with cumulative wait frames and reply figures; a two-requester regression pins pending custody and the existing unlocked agent-judgement boundary, without attributing the historical long custody hold to the agent (``prob:door:request-record-lock-released-before-triage``; ``proto:superlooplane:request-lock-wait-credit``).
+
 - Mount, network, door-shape and door-attribution exercises retain their protected reservation’s selected executable and hashing custody through namespace entry, refusing changed records, programs and descriptor declarations (``proto:workercontracts:namespace-anchor-handoff``).
 
 - Runtime preparation carries its configuration, worker storage and executable capabilities across namespace entry, verifies the native lifetime beneath held storage, and previews the bundle without requiring provisioned private paths (``proto:workercontracts:namespace-anchor-handoff``).

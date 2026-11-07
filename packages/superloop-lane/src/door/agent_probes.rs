@@ -202,10 +202,10 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-fixt
             "agent_status":result.status,"reason":result.reason,"evidence":result.observations}));
     }
     let calls = AtomicUsize::new(0);
-    let (mut stream, _peer) = UnixStream::pair()?;
+    let (stream, _peer) = UnixStream::pair()?;
     let now = Instant::now();
     let reply = transport::serve_compute(
-        &mut stream,
+        &stream,
         registration,
         registration.worker_uid,
         transport::Operation::ProbeEcho,
@@ -213,6 +213,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-fixt
         now,
         now,
         "no-queue",
+        None,
         None,
         None,
         None,
