@@ -1433,9 +1433,7 @@ impl Plan {
         })?;
         let backend = settings.launch_backend(requested_backend)?;
         let backend_argv = &settings.backend_argv[backend.name()];
-        let template_dir = settings.template_dir.as_ref().ok_or_else(|| {
-            LaneError::input("missing-setting", "template_dir is absent in workers.toml")
-        })?;
+        let template_dir = backend.template_dir(settings)?;
         let socket_dir = settings.socket_dir.as_ref().ok_or_else(|| {
             LaneError::input("missing-setting", "socket_dir is absent in workers.toml")
         })?;
@@ -1470,7 +1468,7 @@ impl Plan {
             door_pin(
                 home_root,
                 loop_name,
-                template_dir,
+                &template_dir,
                 socket_dir,
                 nix::unistd::Uid::effective().as_raw(),
                 loop_uid,
@@ -1506,7 +1504,7 @@ impl Plan {
         let driver_dir = runs_root.join(run);
         let identity_dir = protected_identity_dir(&driver_dir)?;
         let letter = home.join("brief.txt");
-        let t = template_dir;
+        let t = &template_dir;
         let s = socket_dir;
         let mut rows = Vec::new();
         row(

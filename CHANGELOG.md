@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Boxed image checks bind the protected backend to its own measured program, template and manifest hashes, including the Claude sibling template in mixed installations; Claude execution remains gated (``prob:box:claude-boxed-workers``; ``pre:superlooplane:launch-input-checks``; ``proto:superlooplane:boxed-launch``).
+
 - Exact compute forms in the loop's installed configuration select longer whole-request deadlines while other forms retain 1,800 seconds; the service announces the remaining window to the stub and deadline refusals name the registered bound (``prob:door:door-compute-deadline-per-form``; ``setup:superlooplane:compute-deadline-registration``).
 
 - Owners can explicitly declare unchanged upstream trees non-participating with a reason, retaining partition and census coverage while refusing label activations and preserving the inactive-prose guard for all other owners (``prob:linter:non-participating-owner-for-unchanged-upstream-trees``).

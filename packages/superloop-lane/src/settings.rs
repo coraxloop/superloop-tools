@@ -44,6 +44,33 @@ impl BoxBackend {
         }
     }
 
+    /// Installed payload metadata for the protected selection.
+    pub(crate) const fn vendor(self) -> crate::build::payload::Vendor {
+        match self {
+            Self::Codex => crate::build::payload::CODEX,
+            Self::Claude => crate::build::payload::CLAUDE,
+        }
+    }
+
+    /// Select Claude's sibling template in a mixed installation.
+    /// Custody checks still require the result beneath this loop's installed root.
+    pub(crate) fn template_dir(self, settings: &Settings) -> Result<PathBuf, LaneError> {
+        let template = settings.template_dir.as_ref().ok_or_else(|| {
+            LaneError::input("missing-setting", "template_dir is absent in workers.toml")
+        })?;
+        if self == Self::Claude
+            && let Some(hash) = settings
+                .image_digest
+                .as_deref()
+                .and_then(|v| v.strip_prefix("sha256:"))
+            && template.ends_with(Path::new("runner-templates/codex").join(hash))
+            && let Some(root) = template.parent().and_then(Path::parent)
+        {
+            return Ok(root.join("claude").join(hash));
+        }
+        Ok(template.clone())
+    }
+
     /// Worker-owned state leaf beneath the read-only home.
     pub(crate) const fn state_leaf(self) -> &'static str {
         match self {
@@ -91,13 +118,13 @@ impl BoxBackend {
     ///
     /// # Errors
     /// Claude selection is admitted, but execution remains unavailable until its
-    /// plan, home, entry, credential and runtime paths implement the same selection.
+    /// credential adapter, trial acceptance and runtime paths implement the same selection.
     pub(crate) fn require_runtime(self) -> Result<(), LaneError> {
         match self {
             Self::Codex => Ok(()),
             Self::Claude => Err(LaneError::input(
                 "backend-unavailable",
-                "claude boxed launch awaits backend-aware plan, home, entry, credential and runtime paths",
+                "claude boxed launch awaits its credential adapter, trial acceptance and runtime paths",
             )),
         }
     }

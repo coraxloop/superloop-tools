@@ -1760,10 +1760,8 @@ pub(crate) fn check_mount_roots(
     settings: &Settings,
     owner_home: &Path,
 ) -> Result<(), LaneError> {
-    let template = settings
-        .template_dir
-        .as_deref()
-        .ok_or_else(|| LaneError::input("missing-setting", "template_dir is absent"))?;
+    let backend = crate::settings::BoxBackend::from_plan(&plan.document)?;
+    let template = backend.template_dir(settings)?;
     let socket = settings
         .socket_dir
         .as_deref()
@@ -1777,7 +1775,11 @@ pub(crate) fn check_mount_roots(
         .and_then(|value| value.strip_prefix("sha256:"))
         .ok_or_else(|| LaneError::input("missing-setting", "image_digest is absent"))?;
     let loop_root = owner_home.join(".var/loops").join(loop_name);
-    if template != loop_root.join("runner-templates/codex").join(image_hash)
+    if template
+        != loop_root
+            .join("runner-templates")
+            .join(backend.name())
+            .join(image_hash)
         || socket != loop_root.join("sockets")
     {
         return Err(LaneError::input(
@@ -1821,7 +1823,7 @@ pub(crate) fn check_mount_roots(
             || ![
                 plan.home.as_path(),
                 identity_dir.as_path(),
-                template,
+                template.as_path(),
                 socket,
             ]
             .iter()
@@ -2104,17 +2106,30 @@ pub fn run_with_failure_report(
     )
 }
 
-fn image_report(owner_home: &Path, loop_name: &str) -> Result<Value, LaneError> {
+fn image_report(
+    owner_home: &Path,
+    loop_name: &str,
+    backend: crate::settings::BoxBackend,
+) -> Result<Value, LaneError> {
     let path = settings_path(owner_home, loop_name).with_file_name("image-build.json");
     let report: Value = serde_json::from_slice(&fs::read(&path).map_err(|error| {
         LaneError::input("build-report", format!("{}: {error}", path.display()))
     })?)
     .map_err(|error| LaneError::input("build-report", format!("{}: {error}", path.display())))?;
-    build::image_program_from_report(&report)?;
+    if backend == crate::settings::BoxBackend::Codex {
+        build::image_program_from_report(&report)?;
+    } else {
+        build::payload::check_claude_report(&report, true)?;
+        build::payload::image_program(&report, backend.vendor())?;
+    }
     Ok(report)
 }
 
-fn box_route_probe(report: &Value, settings: &Settings) -> Result<Value, LaneError> {
+fn box_route_probe(
+    report: &Value,
+    settings: &Settings,
+    backend: crate::settings::BoxBackend,
+) -> Result<Value, LaneError> {
     let inventory = report["package_inventory"]
         .as_array()
         .ok_or_else(|| LaneError::input("box-gate", "image report has no package inventory"))?;
@@ -2123,10 +2138,7 @@ fn box_route_probe(report: &Value, settings: &Settings) -> Result<Value, LaneErr
             .next()
             .is_some_and(|name| name == "bwrap" || name == "bubblewrap")
     });
-    let template = settings
-        .template_dir
-        .as_deref()
-        .ok_or_else(|| LaneError::input("box-gate", "installed template is absent"))?;
+    let template = backend.template_dir(settings)?;
     let bundled = [
         template.join("codex-resources/bwrap"),
         template.join("libexec/codex-resources/bwrap"),
@@ -2163,23 +2175,86 @@ fn box_route_probe(report: &Value, settings: &Settings) -> Result<Value, LaneErr
     )
 }
 
-fn check_backend_image_program(settings: &Settings, generation: &Value) -> Result<(), LaneError> {
-    let backend = settings
+pub(crate) fn check_backend_image_program(
+    settings: &Settings,
+    generation: &Value,
+    backend: crate::settings::BoxBackend,
+) -> Result<(), LaneError> {
+    let name = backend.name();
+    let program = settings
         .backend_argv
-        .get("codex")
+        .get(name)
         .and_then(|words| words.first())
-        .ok_or_else(|| LaneError::input("missing-setting", "backend_argv.codex is absent"))?;
-    let measured = generation["codex_image_program"].as_str().ok_or_else(|| {
+        .ok_or_else(|| {
+            LaneError::input("missing-setting", format!("backend_argv.{name} is absent"))
+        })?;
+    let key = backend.vendor().program_key;
+    let measured = generation[key].as_str().ok_or_else(|| {
         LaneError::input(
             "install-generation",
-            "codex_image_program is absent; repeat install --pilot",
+            format!("{key} is absent; repeat install --pilot"),
         )
     })?;
     let measured = build::validate_image_program(measured)?;
-    if backend != &measured {
+    if program != &measured {
         return Err(LaneError::input(
             "backend-program",
-            "backend_argv.codex differs from the measured image program",
+            format!("backend_argv.{name} differs from the measured image program"),
+        ));
+    }
+    Ok(())
+}
+
+const fn backend_pin_files(
+    backend: crate::settings::BoxBackend,
+) -> &'static [(&'static str, &'static str, u32)] {
+    match backend {
+        crate::settings::BoxBackend::Codex => &[
+            ("bin/codex", "codex_sha256", 0o550),
+            ("bin/codex-code-mode-host", "codex_host_sha256", 0o550),
+            ("config.toml", "config_sha256", 0o440),
+            ("AGENTS.md", "charter_sha256", 0o440),
+        ],
+        crate::settings::BoxBackend::Claude => &[
+            ("bin/claude", "claude_sha256", 0o550),
+            ("settings.json", "config_sha256", 0o440),
+            ("CLAUDE.md", "charter_sha256", 0o440),
+        ],
+    }
+}
+
+/// Bind the selected installed payload to the owner-reviewed build and install records.
+/// Candidate payload bytes and unselected vendor fields cannot replace that reference;
+/// retain the complete digest for the launch binding (´proto:superlooplane:boxed-launch´).
+pub(crate) fn check_backend_pin_records(
+    backend: crate::settings::BoxBackend,
+    manifest: &Value,
+    report: &Value,
+    generation: &Value,
+    template: &Path,
+) -> Result<(), LaneError> {
+    let vendor = backend.vendor();
+    let selected_template_matches = generation["claude_template_dir"].as_str() == template.to_str();
+    if report["image_digest"] != manifest["image_digest"]
+        || report[vendor.hash_key] != manifest[vendor.hash_key]
+        || (backend == crate::settings::BoxBackend::Codex
+            && report["codex_host_sha256"] != manifest["codex_host_sha256"])
+    {
+        return Err(LaneError::input(
+            "template-pin",
+            "image-build.json differs from installed manifest",
+        ));
+    }
+    if generation["image_digest"] != manifest["image_digest"]
+        || generation[vendor.hash_key] != manifest[vendor.hash_key]
+        || generation[vendor.program_key] != report[vendor.program_key]
+        || (backend == crate::settings::BoxBackend::Codex
+            && generation["codex_host_sha256"] != manifest["codex_host_sha256"])
+        || (backend == crate::settings::BoxBackend::Claude && !selected_template_matches)
+    {
+        return Err(LaneError::input(
+            "template-pin",
+            "pilot generation differs from the installed manifest or image-build.json",
         ));
     }
     Ok(())
@@ -3834,7 +3909,7 @@ fn run_with_program(
         driver_runtime_contract(driver, owner_home, &environment, selected_backend)?;
     let driver_sha256 = sha256(driver)?;
     checks.push("driver boxed-runtime contract");
-    let report = image_report(owner_home, &request.loop_name)?;
+    let report = image_report(owner_home, &request.loop_name, selected_backend)?;
     if report["image_digest"] != image {
         return Err(LaneError::input(
             "build-report",
@@ -3842,13 +3917,14 @@ fn run_with_program(
         ));
     }
     build::check_exec_probe(&report, &plan.document["runtime_argv"])?;
-    let box_probe = box_route_probe(&report, &settings)?;
+    let box_probe = box_route_probe(&report, &settings, selected_backend)?;
     checks.push("pinned Codex exec help and runtime options");
     checks.push("image and template have no inner bubblewrap route");
     check_pins(&plan, &settings, owner_home, request.observe, false)?;
     check_backend_image_program(
         &settings,
         &installed_generation(owner_home, &request.loop_name)?,
+        selected_backend,
     )?;
     image_check(&request.podman_bin, image, owner_home)?;
     let proxy_bin = installed_proxy(owner_home, request)?;
@@ -3988,12 +4064,10 @@ fn run_with_program(
                 .collect::<Vec<_>>()
         );
         preview_plan["reservation_census"] = reservation_census;
-        let template = settings
-            .template_dir
-            .as_deref()
-            .ok_or_else(|| LaneError::input("missing-setting", "template_dir is absent"))?;
-        let hash_checks = [template.join("bin/codex"), template.join("bin/codex-code-mode-host"), template.join("config.toml"), template.join("AGENTS.md"), template.join("libexec/box-init")]
-            .iter().map(|path| json!({"input":path,"spec":build::hash_preview(path.parent().unwrap_or_else(|| Path::new("/")))})).collect::<Vec<_>>();
+        let template = selected_backend.template_dir(&settings)?;
+        let hash_checks = backend_pin_files(selected_backend).iter().map(|(file, _, _)| template.join(file))
+            .chain(std::iter::once(template.join("libexec/box-init")))
+            .map(|path| json!({"input":path,"spec":build::hash_preview(path.parent().unwrap_or_else(|| Path::new("/")))})).collect::<Vec<_>>();
         let prepare_preview = build::private_launch_preview(
             &request.podman_bin,
             prepare_argv,
@@ -6311,7 +6385,11 @@ pub fn private_make(
             .ok_or_else(|| LaneError::input("missing-setting", "image_digest is absent"))?,
         owner_home,
     )?;
-    check_backend_image_program(&settings, &installed_generation(owner_home, loop_name)?)?;
+    check_backend_image_program(
+        &settings,
+        &installed_generation(owner_home, loop_name)?,
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+    )?;
     crate::credential::preflight(
         owner_home,
         loop_name,
@@ -6763,7 +6841,11 @@ pub fn private_prepare_runtime(
     let loop_name = plan.document["loop"]
         .as_str()
         .ok_or_else(|| LaneError::input("plan-read", "loop is absent"))?;
-    check_backend_image_program(&settings, &installed_generation(owner_home, loop_name)?)?;
+    check_backend_image_program(
+        &settings,
+        &installed_generation(owner_home, loop_name)?,
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+    )?;
     let argv = plan.document["runtime_argv"]
         .as_array()
         .ok_or_else(|| LaneError::input("plan-read", "runtime_argv is absent"))?;
@@ -6884,10 +6966,8 @@ pub(crate) fn check_pins(
     observed: bool,
     identity_created: bool,
 ) -> Result<(), LaneError> {
-    let template = settings
-        .template_dir
-        .as_deref()
-        .ok_or_else(|| LaneError::input("missing-setting", "template_dir is absent"))?;
+    let backend = crate::settings::BoxBackend::from_plan(&plan.document)?;
+    let template = backend.template_dir(settings)?;
     let owner_uid = Uid::effective().as_raw();
     let manifest_path = template.join("manifest");
     let manifest: Value = serde_json::from_slice(&crate::pinned::read_private(
@@ -6904,12 +6984,7 @@ pub(crate) fn check_pins(
             "manifest image identifier differs from workers.toml",
         ));
     }
-    for (file, key, mode) in [
-        ("bin/codex", "codex_sha256", 0o550),
-        ("bin/codex-code-mode-host", "codex_host_sha256", 0o550),
-        ("config.toml", "config_sha256", 0o440),
-        ("AGENTS.md", "charter_sha256", 0o440),
-    ] {
+    for &(file, key, mode) in backend_pin_files(backend) {
         let source = template.join(file);
         let fd = crate::pinned::open_protected(owner_home, &source, owner_uid)?;
         let metadata = nix::sys::stat::fstat(&fd)
@@ -6941,33 +7016,9 @@ pub(crate) fn check_pins(
     let loop_name = plan.document["loop"]
         .as_str()
         .ok_or_else(|| LaneError::input("plan-read", "loop is absent"))?;
-    let report_path = settings_path(owner_home, loop_name).with_file_name("image-build.json");
-    let report: Value = serde_json::from_slice(
-        &fs::read(&report_path)
-            .map_err(|error| LaneError::input("build-report", error.to_string()))?,
-    )
-    .map_err(|error| LaneError::input("build-report", error.to_string()))?;
-    build::image_program_from_report(&report)?;
-    if report["image_digest"] != manifest["image_digest"]
-        || report["codex_sha256"] != manifest["codex_sha256"]
-        || report["codex_host_sha256"] != manifest["codex_host_sha256"]
-    {
-        return Err(LaneError::input(
-            "template-pin",
-            "image-build.json differs from installed manifest",
-        ));
-    }
+    let report = image_report(owner_home, loop_name, backend)?;
     let generation = installed_generation(owner_home, loop_name)?;
-    if generation["image_digest"] != manifest["image_digest"]
-        || generation["codex_sha256"] != manifest["codex_sha256"]
-        || generation["codex_host_sha256"] != manifest["codex_host_sha256"]
-        || generation["codex_image_program"] != report["codex_image_program"]
-    {
-        return Err(LaneError::input(
-            "template-pin",
-            "pilot generation differs from the installed manifest or image-build.json",
-        ));
-    }
+    check_backend_pin_records(backend, &manifest, &report, &generation, &template)?;
     if generation["init_sha256"] != report["init_sha256"] {
         return Err(LaneError::input(
             "template-pin",
@@ -6976,7 +7027,7 @@ pub(crate) fn check_pins(
     }
     let init_path = template.join("libexec/box-init");
     let init_bytes = crate::pinned::read_private(owner_home, &init_path, owner_uid, 0o440, 65_536)?;
-    if build::sha256_bytes(&init_bytes, template)? != report["init_sha256"] {
+    if build::sha256_bytes(&init_bytes, &template)? != report["init_sha256"] {
         return Err(LaneError::input(
             "template-pin",
             "installed private init differs from image-build.json",
@@ -7138,7 +7189,7 @@ mod tests {
                 home: root.join("worker-homes/R"),
                 driver_dir: root.join("runs/R"),
                 letter: home.join("briefing"),
-                document: serde_json::json!({"loop":"alpha", "worker_uid":uid,
+                document: serde_json::json!({"loop":"alpha", "backend":"codex", "worker_uid":uid,
                     "mail":{"identity":{"name":"mine","uid":3000,"reservation":"test"}},
                     "mounts":[{"kind":"bind", "source":root.join("workers").join(worker).join("mail"),
                         "target":"/mail", "access":access}]}),

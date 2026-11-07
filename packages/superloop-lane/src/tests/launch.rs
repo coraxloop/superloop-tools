@@ -20,6 +20,220 @@ fn backend_settings(vendors: &[&str]) -> crate::settings::Settings {
     settings
 }
 
+/// ´test:crate:boxed-backend-image-program-uses-only-selected-generation´
+#[test]
+fn boxed_backend_image_program_uses_only_selected_generation() {
+    for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+        let name = backend.name();
+        let key = backend.vendor().program_key;
+        for vendors in [
+            &["codex"][..],
+            &["claude"][..],
+            &["codex", "claude"][..],
+            &[][..],
+        ] {
+            let settings = backend_settings(vendors);
+            let generation = json!({"codex_image_program":"/fixture/codex", "claude_image_program":"/fixture/claude"});
+            let result =
+                crate::launch::check_backend_image_program(&settings, &generation, backend);
+            if !vendors.contains(&name) {
+                let error = result.expect_err("selected program required");
+                assert_eq!(error.kind, "missing-setting");
+                assert_eq!(error.detail, format!("backend_argv.{name} is absent"));
+                continue;
+            }
+            result.expect("selected image program");
+            let mut changed = generation;
+            changed.as_object_mut().expect("object").remove(key);
+            let error = crate::launch::check_backend_image_program(&settings, &changed, backend)
+                .expect_err("no other-vendor generation fallback");
+            assert_eq!(error.kind, "install-generation");
+            assert_eq!(
+                error.detail,
+                format!("{key} is absent; repeat install --pilot")
+            );
+            changed[key] = json!("/fixture/wrong");
+            assert_eq!(
+                crate::launch::check_backend_image_program(&settings, &changed, backend)
+                    .expect_err("different measured program")
+                    .kind,
+                "backend-program"
+            );
+        }
+    }
+}
+
+/// ´test:crate:boxed-backend-image-pin-records-bind-selected-evidence´
+#[test]
+fn boxed_backend_image_pin_records_bind_selected_evidence() {
+    let template = std::path::Path::new("/fixture/template");
+    for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+        let vendor = backend.vendor();
+        let record = json!({"image_digest":"sha256:fixture", "codex_sha256":"codex-fixture-hash",
+            "claude_sha256":"claude-fixture-hash", "codex_host_sha256":"host-fixture-hash",
+            "codex_image_program":"/fixture/codex", "claude_image_program":"/fixture/claude",
+            "claude_template_dir":template});
+        crate::launch::check_backend_pin_records(backend, &record, &record, &record, template)
+            .expect("selected records agree");
+        for key in ["image_digest", vendor.hash_key, vendor.program_key] {
+            let mut changed = record.clone();
+            changed[key] = json!("changed");
+            assert_eq!(
+                crate::launch::check_backend_pin_records(
+                    backend, &record, &record, &changed, template
+                )
+                .expect_err("changed generation refuses")
+                .kind,
+                "template-pin"
+            );
+        }
+        let mut changed = record.clone();
+        changed[vendor.hash_key] = json!("changed");
+        assert_eq!(
+            crate::launch::check_backend_pin_records(backend, &record, &changed, &record, template)
+                .expect_err("changed build hash refuses")
+                .kind,
+            "template-pin"
+        );
+        let other = if backend == BoxBackend::Codex {
+            BoxBackend::Claude
+        } else {
+            BoxBackend::Codex
+        };
+        let mut unrelated = record.clone();
+        unrelated[other.vendor().hash_key] = json!("unrelated");
+        unrelated[other.vendor().program_key] = json!("/unrelated");
+        crate::launch::check_backend_pin_records(backend, &record, &record, &unrelated, template)
+            .expect("unselected evidence cannot substitute for selected pins");
+        if backend == BoxBackend::Claude {
+            unrelated["claude_template_dir"] = json!("/another-loop/template");
+            assert_eq!(
+                crate::launch::check_backend_pin_records(
+                    backend, &record, &record, &unrelated, template
+                )
+                .expect_err("generation template must be this selected root")
+                .kind,
+                "template-pin"
+            );
+        }
+    }
+}
+
+/// ´test:crate:boxed-backend-mixed-templates-use-selected-vendor-root´
+#[test]
+fn boxed_backend_mixed_templates_use_selected_vendor_root() {
+    let home = std::path::Path::new("/fixture/owner");
+    let root = home.join(".var/loops/alpha");
+    let hash = "a".repeat(64);
+    let mut settings = backend_settings(&["codex", "claude"]);
+    settings.driver_argv = vec!["/fixture/driver".into()];
+    settings.driver_bin = Some("/fixture/driver".into());
+    settings.image_digest = Some(format!("sha256:{hash}"));
+    settings.template_dir = Some(root.join("runner-templates/codex").join(&hash));
+    settings.socket_dir = Some(root.join("sockets"));
+    for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+        let mut plan = crate::plan::Plan::build_with_door(
+            home,
+            "alpha",
+            "R",
+            &settings,
+            &super::fixture_row(),
+            super::fixture_block(),
+            (1000, 1000),
+            false,
+            Some(backend),
+        )
+        .expect("selected layout");
+        crate::launch::check_mount_roots(&plan, &settings, home).expect("selected installed roots");
+        let template = root
+            .join("runner-templates")
+            .join(backend.name())
+            .join(&hash);
+        let config = backend.template_files()[0];
+        assert!(
+            plan.document["mounts"]
+                .as_array()
+                .expect("mounts")
+                .iter()
+                .any(
+                    |row| row["source"] == template.join(config).to_str().expect("path")
+                        && row["target"] == format!("{}/{config}", backend.state_home())
+                )
+        );
+        let other = if backend == BoxBackend::Codex {
+            "claude"
+        } else {
+            "codex"
+        };
+        plan.document["mounts"].as_array_mut().expect("mounts").push(json!({
+            "kind":"bind", "source":root.join("runner-templates").join(other).join(&hash).join("foreign"),
+            "target":"/foreign", "access":"ro"}));
+        assert_eq!(
+            crate::launch::check_mount_roots(&plan, &settings, home)
+                .expect_err("other vendor template refuses")
+                .kind,
+            "mount-source"
+        );
+    }
+}
+
+/// ´test:crate:boxed-backend-claude-pin-check-reads-selected-template´
+#[test]
+fn boxed_backend_claude_pin_check_reads_selected_template() {
+    let fixture = TempDir::new().expect("fixture");
+    let home = fixture.path();
+    let root = home.join(".var/loops/alpha");
+    let hash = "a".repeat(64);
+    let image = format!("sha256:{hash}");
+    let template = root.join("runner-templates/claude").join(&hash);
+    fs::create_dir_all(template.join("bin")).expect("template");
+    for (name, bytes, mode) in [
+        ("bin/claude", "fictional payload", 0o550),
+        ("settings.json", "{}", 0o440),
+        ("CLAUDE.md", "fictional charter", 0o440),
+    ] {
+        fs::write(template.join(name), bytes).expect("fixture file");
+        fs::set_permissions(template.join(name), fs::Permissions::from_mode(mode)).expect("mode");
+    }
+    let manifest = json!({"image_digest":image,
+        "claude_sha256":sha256(&template.join("bin/claude")).expect("hash"),
+        "config_sha256":"b".repeat(64),
+        "charter_sha256":sha256(&template.join("CLAUDE.md")).expect("hash")});
+    fs::write(
+        template.join("manifest"),
+        serde_json::to_vec(&manifest).expect("manifest"),
+    )
+    .expect("manifest file");
+    fs::set_permissions(template.join("manifest"), fs::Permissions::from_mode(0o440))
+        .expect("mode");
+    let mut settings = backend_settings(&["codex", "claude"]);
+    settings.image_digest = Some(image);
+    settings.template_dir = Some(root.join("runner-templates/codex").join(&hash));
+    let plan = crate::plan::Plan {
+        home: home.join("worker"),
+        driver_dir: root.join("runs/R"),
+        letter: home.join("letter"),
+        document: json!({"loop":"alpha", "backend":"claude"}),
+    };
+    let error = crate::launch::check_pins(&plan, &settings, home, false, false)
+        .expect_err("selected config digest differs");
+    assert_eq!(error.kind, "template-pin");
+    assert_eq!(
+        error.detail,
+        format!(
+            "{} differs from manifest config_sha256",
+            template.join("settings.json").display()
+        )
+    );
+    assert!(
+        !settings
+            .template_dir
+            .as_ref()
+            .expect("primary template")
+            .exists()
+    );
+}
+
 /// ´test:crate:boxed-backend-protected-plan-refuses-missing-or-changed-vendor´
 #[test]
 fn boxed_backend_protected_plan_refuses_missing_or_changed_vendor() {
