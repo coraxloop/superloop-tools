@@ -69,6 +69,13 @@ pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Opt
             "{reason}: peer_limit={} retry_after={}s; no request was dispatched",
             reply["peer_limit"], reply["retry_after_seconds"]
         ))
+    } else if matches!(reason, "door-request-deadline" | "door-deadline-refusal")
+        && reply["registered_deadline_ms"].is_u64()
+    {
+        Some(format!(
+            "{reason}: registered_deadline_ms={} request_deadline_ms={}",
+            reply["registered_deadline_ms"], reply["request_deadline_ms"]
+        ))
     } else if reason == "door-request-concurrent" {
         Some(format!(
             "{reason}: waited={}s retry_after={}s; {}",
@@ -1125,6 +1132,47 @@ fn serve_request_with_agent(
     configured_model: Option<&str>,
     started: Instant,
 ) -> io::Result<(Value, Vec<u8>)> {
+    // Only an authenticated, route-validated compute form can select an owner deadline.
+    let mut bounded_request = request.clone();
+    let mut registered_deadline_ms = compute::DEADLINE_MS;
+    let compute_args = transport::argument_bytes(request);
+    if peer == registration.worker_uid
+        && registration.scope == Scope::Work
+        && request.as_object().is_some_and(|row| {
+            row.len() == 3
+                && row.contains_key("schema")
+                && row.contains_key("argv")
+                && row.contains_key("deadline_ms")
+        })
+        && request["schema"] == 2
+        && request["deadline_ms"]
+            .as_u64()
+            .is_some_and(|ms| ms > 0 && ms <= compute::MAX_DEADLINE_MS)
+        && let (Some(route), Some(args)) = (route, compute_args.as_ref())
+        && route.allowed(args, registration) == Some(transport::Operation::Compute)
+    {
+        registered_deadline_ms = route.compute_deadline_ms(args);
+        let bound = request["deadline_ms"]
+            .as_u64()
+            .unwrap_or(0)
+            .min(registered_deadline_ms);
+        bounded_request["deadline_ms"] = json!(bound);
+        let deadline = started + Duration::from_millis(bound);
+        // Preserve the normal disconnect record even when the peer leaves before this frame.
+        let _announcement = frame_write_until(
+            stream,
+            &transport::compute_deadline_frame(registered_deadline_ms, bound, deadline),
+            Instant::now() + Duration::from_secs(2),
+        );
+    }
+    if compute_args.as_deref().is_some_and(compute::candidate)
+        && let Some(ms) = request["deadline_ms"]
+            .as_u64()
+            .filter(|ms| *ms > 0 && *ms <= compute::MAX_DEADLINE_MS)
+    {
+        bounded_request["deadline_ms"] = json!(ms.min(registered_deadline_ms));
+    }
+    let request = &bounded_request;
     // Classify only a route-validated operation; all other shapes retain exclusive admission.
     let admission_operation = route.and_then(|route| {
         transport::argument_bytes(request).and_then(|args| route.allowed(&args, registration))
@@ -1165,7 +1213,7 @@ fn serve_request_with_agent(
     let args = transport::argument_bytes(request);
     let compute_candidate = args.as_deref().is_some_and(compute::candidate);
     let maximum = if compute_candidate {
-        compute::DEADLINE_MS
+        registered_deadline_ms
     } else {
         120_000
     };
@@ -1248,6 +1296,7 @@ fn serve_request_with_agent(
         inner: runner,
         words: &words,
         deadline,
+        registered_deadline_ms,
     };
     let runner: &dyn transport::Runner = if compute_candidate {
         &bound_runner
@@ -1586,6 +1635,10 @@ fn serve_request_with_agent(
                 Answer::Allow(_) | Answer::ReadFailure(_) => unreachable!(),
             };
             let mut reply = queue_reply(registration, peer, reason, started, state, wall, &id);
+            if compute_candidate {
+                reply["registered_deadline_ms"] = json!(registered_deadline_ms);
+                reply["request_deadline_ms"] = request["deadline_ms"].clone();
+            }
             if let Err(error) = store.record_effect(&id, effect_from_final(&reply)) {
                 let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
                 reply["reason"] = json!("door-record-incomplete");
@@ -2014,6 +2067,7 @@ fn run_service_with_snapshot(
     if let Err(error) = publish(&owner_home, loop_name) {
         Store::report_snapshot_failure(&error);
     }
+    let compute_deadlines = Arc::new(config::compute_deadlines(&generation["agent"])?);
     let agent_runner = Arc::new(config::runner(
         &generation["agent"],
         &owner_home,
@@ -2109,6 +2163,7 @@ fn run_service_with_snapshot(
         let owner_home = Arc::clone(&owner_home);
         let peer_map = Arc::clone(&peer_map);
         let agent_runner = Arc::clone(&agent_runner);
+        let compute_deadlines = Arc::clone(&compute_deadlines);
         thread::spawn(move || {
             let _guard = guard;
             let started = Instant::now();
@@ -2140,7 +2195,7 @@ fn run_service_with_snapshot(
                     &loop_name,
                     owner,
                 ) {
-                    Ok(route) => Some(route),
+                    Ok(route) => Some(route.with_compute_deadlines(&compute_deadlines)),
                     Err(error) if error.kind == "door-compute-root-refusal" => {
                         return root_refusal(
                             &mut stream,

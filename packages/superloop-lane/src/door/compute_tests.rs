@@ -23,6 +23,7 @@ struct NodeRunner {
     store: Store,
     calls: Arc<AtomicUsize>,
     program: PathBuf,
+    remaining: Option<Arc<std::sync::Mutex<f64>>>,
 }
 
 impl Runner for NodeRunner {
@@ -36,7 +37,10 @@ impl Runner for NodeRunner {
         words: &[String],
         seconds: f64,
     ) -> io::Result<Child> {
-        assert!(seconds > 0.0 && seconds <= 1800.0);
+        assert!(seconds > 0.0 && seconds <= 86400.0);
+        if let Some(remaining) = &self.remaining {
+            *remaining.lock().expect("remaining") = seconds;
+        }
         let records = self.store.list().expect("filed intent").0;
         let record = records
             .iter()
@@ -81,6 +85,24 @@ pub(super) fn compute_service(
     Arc<AtomicUsize>,
     thread::JoinHandle<io::Result<Value>>,
 ) {
+    compute_service_with_policy(fixture, run, worker, peer, scope, decision, &[], None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_service_with_policy(
+    fixture: &Fixture,
+    run: &str,
+    worker: u32,
+    peer: u32,
+    scope: Scope,
+    decision: Option<&str>,
+    forms: &[super::config::ComputeDeadline],
+    remaining: Option<Arc<std::sync::Mutex<f64>>>,
+) -> (
+    PathBuf,
+    Arc<AtomicUsize>,
+    thread::JoinHandle<io::Result<Value>>,
+) {
     let socket = crate::fixture_exec::fixture_socket_path(
         fixture.home.join(format!("compute-{run}-{peer}.sock")),
     );
@@ -92,8 +114,9 @@ pub(super) fn compute_service(
         store: fixture.store(),
         calls: Arc::clone(&calls),
         program,
+        remaining,
     };
-    let route = route_for(&fixture.home);
+    let route = route_for(&fixture.home).with_compute_deadlines(forms);
     let home = fixture.home.clone();
     let store = fixture.store();
     let registration = Registration::from_row(
@@ -409,6 +432,7 @@ fn door_preflight_sites_file_or_report_persistence_failure() {
                 store: fixture.store(),
                 calls: Arc::clone(&calls),
                 program: fixture.home.join("must-not-run"),
+                remaining: None,
             };
             let (request, expected) = preflight_request(site, run);
             let (mut server, mut client) = UnixStream::pair().expect("pair");
@@ -435,7 +459,11 @@ fn door_preflight_sites_file_or_report_persistence_failure() {
             );
             crate::requests::store::fixture_file_cap(None);
             let reply = result.expect("service").0;
-            assert_eq!(frame_read(&mut client).expect("frame"), reply);
+            let mut frame = frame_read(&mut client).expect("frame");
+            if frame["type"] == "compute-deadline" {
+                frame = frame_read(&mut client).expect("final frame");
+            }
+            assert_eq!(frame, reply);
             assert_eq!(reply["reason"], expected, "{site}: {reply}");
             assert_eq!(calls.load(Ordering::Relaxed), 0);
             if matches!(site, "capacity" | "store" | "store-open") {
@@ -1290,6 +1318,10 @@ fn door_compute_queue_deadline_and_disconnect_have_no_effect() {
         if disconnect {
             drop(client);
         } else {
+            assert_eq!(
+                frame_read(&mut client).expect("announcement")["type"],
+                "compute-deadline"
+            );
             let reply = frame_read(&mut client).expect("deadline reply");
             assert_eq!(reply["reason"], "door-request-deadline");
         }
@@ -1371,6 +1403,10 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
         if disconnect {
             drop(client);
         } else {
+            assert_eq!(
+                frame_read(&mut client).expect("announcement")["type"],
+                "compute-deadline"
+            );
             let reply = frame_read_until(&mut client, Instant::now() + Duration::from_secs(15))
                 .expect("deadline reply");
             assert_eq!(reply["reason"], "door-deadline-refusal");
@@ -1385,4 +1421,79 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].value()["effect"]["compute"]["wrapper_exit_status"].is_null());
     }
+}
+
+/// ´test:unit:door-compute-deadline-selects-only-the-exact-owner-form´
+#[test]
+fn door_compute_deadline_selects_only_the_exact_owner_form() {
+    let form = super::config::ComputeDeadline {
+        words: ["cargo", "test", "--locked", "-p", "fixture"]
+            .map(str::to_owned)
+            .to_vec(),
+        deadline_ms: 3_600_000,
+    };
+    for (tail, bound) in [
+        ("cargo test --locked -p fixture", 3_600_000),
+        ("cargo test --locked -p other", compute::DEADLINE_MS),
+        (
+            "cargo test --locked -p fixture --release",
+            compute::DEADLINE_MS,
+        ),
+        ("cargo --locked test -p fixture", compute::DEADLINE_MS),
+    ] {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let remaining = Arc::new(std::sync::Mutex::new(0.0));
+        let (socket, calls, server) = compute_service_with_policy(
+            &fixture,
+            "R",
+            3000,
+            3000,
+            Scope::Work,
+            None,
+            std::slice::from_ref(&form),
+            Some(Arc::clone(&remaining)),
+        );
+        let (reply, _, _) = compute_call(&socket, &format!("/opt/fixture/bin/report {tail}"));
+        server.join().expect("server").expect("service");
+        assert_eq!(reply["reason"], "door-complete");
+        assert_eq!(reply["registered_deadline_ms"], bound);
+        assert_eq!(reply["request_deadline_ms"], bound);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let remaining = *remaining.lock().expect("remaining");
+        assert!(remaining <= Duration::from_millis(bound).as_secs_f64());
+        if bound > compute::DEADLINE_MS {
+            assert!(remaining > 1800.0);
+        }
+    }
+}
+
+/// ´test:unit:door-compute-deadline-refusal-names-the-owner-bound´
+#[test]
+fn door_compute_deadline_refusal_names_the_owner_bound() {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let form = super::config::ComputeDeadline {
+        words: ["cargo", "test", "--locked"].map(str::to_owned).to_vec(),
+        deadline_ms: 3_600_000,
+    };
+    let (socket, calls, server) =
+        compute_service_with_policy(&fixture, "R", 3000, 3000, Scope::Work, None, &[form], None);
+    let mut client = UnixStream::connect(socket).expect("socket");
+    frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":1000})).expect("shorter caller bound");
+    client.shutdown(Shutdown::Write).expect("EOF");
+    let announcement = frame_read(&mut client).expect("announcement");
+    assert_eq!(announcement["type"], "compute-deadline");
+    assert_eq!(announcement["registered_deadline_ms"], 3_600_000);
+    assert_eq!(announcement["request_deadline_ms"], 1000);
+    let reply = frame_read(&mut client).expect("final");
+    server.join().expect("server").expect("service");
+    assert_eq!(reply["reason"], "door-request-deadline");
+    assert_eq!(reply["registered_deadline_ms"], 3_600_000);
+    assert_eq!(reply["request_deadline_ms"], 1000);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        super::final_line(&["fixture".into(), "cargo test".into()], &reply).as_deref(),
+        Some("door-request-deadline: registered_deadline_ms=3600000 request_deadline_ms=1000")
+    );
 }

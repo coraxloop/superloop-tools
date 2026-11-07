@@ -6,6 +6,54 @@ use std::path::{Path, PathBuf};
 
 const EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
+#[derive(Clone, Debug)]
+pub(super) struct ComputeDeadline {
+    pub(super) words: Vec<String>,
+    pub(super) deadline_ms: u64,
+}
+
+pub(super) fn compute_deadlines(value: &Value) -> Result<Vec<ComputeDeadline>, LaneError> {
+    let Some(value) = value.get("compute_deadlines") else {
+        return Ok(Vec::new());
+    };
+    let rows = value
+        .as_array()
+        .filter(|rows| rows.len() <= 32)
+        .ok_or_else(|| refusal("compute_deadlines must be an array of at most 32 exact forms"))?;
+    let mut forms: Vec<ComputeDeadline> = Vec::new();
+    for row in rows {
+        if row.as_object().is_none_or(|row| {
+            row.len() != 2 || !row.contains_key("words") || !row.contains_key("deadline_ms")
+        }) {
+            return Err(refusal(
+                "compute_deadlines entry requires only words and deadline_ms",
+            ));
+        }
+        let words = row["words"]
+            .as_array()
+            .and_then(|words| {
+                words
+                    .iter()
+                    .map(|word| word.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .ok_or_else(|| refusal("compute_deadlines words must be an argv array"))?;
+        execute_command::checks::compute::validate_words(&words)
+            .map_err(|cause| refusal(format!("compute_deadlines words: {cause}")))?;
+        let deadline_ms = row["deadline_ms"]
+            .as_u64()
+            .filter(|ms| {
+                (super::compute::DEADLINE_MS + 1..=super::compute::MAX_DEADLINE_MS).contains(ms)
+            })
+            .ok_or_else(|| refusal("compute_deadlines deadline_ms must be 1800001..86400000"))?;
+        if forms.iter().any(|form| form.words == words) {
+            return Err(refusal("compute_deadlines contains a duplicate exact form"));
+        }
+        forms.push(ComputeDeadline { words, deadline_ms });
+    }
+    Ok(forms)
+}
+
 fn refusal(detail: impl Into<String>) -> LaneError {
     LaneError::input("door-agent-configuration", detail)
 }
@@ -44,7 +92,15 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Value, LaneError> {
         ));
     }
     if table.keys().any(|key| {
-        !["rubric_root", "model", "effort", "cap_ms", "executable"].contains(&key.as_str())
+        ![
+            "rubric_root",
+            "model",
+            "effort",
+            "cap_ms",
+            "executable",
+            "compute_deadlines",
+        ]
+        .contains(&key.as_str())
     }) {
         return Err(refusal("unknown door.toml key"));
     }
@@ -87,10 +143,14 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Value, LaneError> {
         .map_or(Some(30_000), toml::Value::as_integer)
         .filter(|cap| (2_001..=120_000).contains(cap))
         .ok_or_else(|| refusal("cap_ms must be 2001..120000"))?;
-    Ok(
-        json!({"rubric_root":instance,"rubric_path":instance.join("permissions/door.md"),
-        "executable":executable,"model":model,"effort":effort,"cap_ms":cap_ms}),
-    )
+    let mut result = json!({"rubric_root":instance,"rubric_path":instance.join("permissions/door.md"),
+        "executable":executable,"model":model,"effort":effort,"cap_ms":cap_ms});
+    if let Some(forms) = table.get("compute_deadlines") {
+        result["compute_deadlines"] =
+            serde_json::to_value(forms).map_err(|error| refusal(error.to_string()))?;
+    }
+    let _validated = compute_deadlines(&result)?;
+    Ok(result)
 }
 
 /// Construct the runner solely from the installed service generation.
@@ -114,12 +174,14 @@ pub fn runner(
         "loop_home",
     ];
     if value.as_object().is_none_or(|object| {
-        object.len() != KEYS.len() || KEYS.iter().any(|key| !object.contains_key(*key))
+        object.len() != KEYS.len() + usize::from(object.contains_key("compute_deadlines"))
+            || KEYS.iter().any(|key| !object.contains_key(*key))
     }) {
         return Err(refusal(
             "installed agent configuration shape differs; run install-door",
         ));
     }
+    let _validated = compute_deadlines(value)?;
     let path = |key: &str| {
         value[key]
             .as_str()
@@ -157,6 +219,66 @@ pub fn runner(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    /// ´test:unit:configuration-bounds-exact-compute-deadline-forms´
+    #[test]
+    fn configuration_bounds_exact_compute_deadline_forms() {
+        let prefix = "rubric_root = '/fixture'\nexecutable = '/fixture/codex'\nmodel = 'fixture'\n";
+        let text = format!(
+            "{prefix}[[compute_deadlines]]\nwords = ['cargo', 'test', '--locked', '-p', 'fixture']\ndeadline_ms = 3_600_000\n"
+        );
+        let mut value = parse(text.as_bytes()).expect("registered form");
+        let forms = compute_deadlines(&value).expect("installed forms");
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].deadline_ms, 3_600_000);
+        assert_eq!(
+            forms[0].words,
+            ["cargo", "test", "--locked", "-p", "fixture"]
+        );
+        value["source"] = json!("/fixture/door.toml");
+        value["entry"] = json!("/fixture/entry");
+        value["loop_home"] = json!("/fixture/loop");
+        runner(&value, Path::new("/fixture"), "fixture").expect("installed configuration");
+        for bound in [1_800_001, 86_400_000] {
+            let mut valid = value.clone();
+            valid["compute_deadlines"][0]["deadline_ms"] = json!(bound);
+            runner(&valid, Path::new("/fixture"), "fixture").expect("inclusive registered range");
+        }
+        let form = value["compute_deadlines"][0].clone();
+        for invalid in [
+            json!(null),
+            json!({}),
+            json!([form.clone(), form.clone()]),
+            json!([{"words":["cargo","test"],"deadline_ms":3_600_000}]),
+            json!([{"words":["sh","-c","true"],"deadline_ms":3_600_000}]),
+            json!([{"words":["cargo","test","--locked"],"deadline_ms":3_600_000,"extra":true}]),
+            json!(vec![form; 33]),
+        ] {
+            let mut invalid_value = value.clone();
+            invalid_value["compute_deadlines"] = invalid;
+            let error = runner(&invalid_value, Path::new("/fixture"), "fixture")
+                .expect_err("invalid policy");
+            assert_eq!(error.kind, "door-agent-configuration");
+            assert!(error.detail.contains("compute_deadlines"));
+        }
+        for bound in [
+            json!(0),
+            json!(1_800_000),
+            json!(86_400_001),
+            json!(-1),
+            json!("3600000"),
+            json!(1.5),
+        ] {
+            let mut invalid = value.clone();
+            invalid["compute_deadlines"][0]["deadline_ms"] = bound;
+            assert!(runner(&invalid, Path::new("/fixture"), "fixture").is_err());
+        }
+        assert!(
+            compute_deadlines(&parse(prefix.as_bytes()).expect("ordinary config"))
+                .expect("default policy")
+                .is_empty()
+        );
+    }
 
     /// ´test:unit:configuration-resolves-loop-paths-without-sign-in-bytes´
     #[test]

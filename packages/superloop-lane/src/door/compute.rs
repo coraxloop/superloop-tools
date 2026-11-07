@@ -3,6 +3,7 @@
 use serde_json::{Value, json};
 
 pub(super) const DEADLINE_MS: u64 = 1_800_000;
+pub(super) const MAX_DEADLINE_MS: u64 = 86_400_000;
 pub(super) const NODE_SCRIPT: &str = include_str!("compute_node.py");
 
 pub(super) fn candidate(args: &[Vec<u8>]) -> bool {

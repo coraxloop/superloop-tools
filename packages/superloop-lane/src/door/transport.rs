@@ -361,6 +361,9 @@ pub trait Runner: Send + Sync {
     fn compute_words(&self) -> Option<&[String]> {
         None
     }
+    fn compute_registered_deadline_ms(&self) -> Option<u64> {
+        None
+    }
     fn owns_process_group(&self) -> bool {
         false
     }
@@ -370,6 +373,7 @@ pub(super) struct ComputeRunner<'a> {
     pub(super) inner: &'a dyn Runner,
     pub(super) words: &'a [String],
     pub(super) deadline: Instant,
+    pub(super) registered_deadline_ms: u64,
 }
 
 impl Runner for ComputeRunner<'_> {
@@ -384,6 +388,9 @@ impl Runner for ComputeRunner<'_> {
     }
     fn compute_words(&self) -> Option<&[String]> {
         Some(self.words)
+    }
+    fn compute_registered_deadline_ms(&self) -> Option<u64> {
+        Some(self.registered_deadline_ms)
     }
     fn owns_process_group(&self) -> bool {
         self.inner.owns_process_group()
@@ -403,6 +410,7 @@ pub(super) struct HostRunner {
     upload_output_limit: Option<usize>,
     compute_wrapper: Option<String>,
     compute_environment: Option<Value>,
+    compute_deadlines: Vec<super::config::ComputeDeadline>,
 }
 
 fn parse_compute_wrapper(value: &Value) -> Result<Option<String>, LaneError> {
@@ -483,6 +491,24 @@ fn parse_compute_environment(value: &Value) -> Result<Option<Value>, LaneError> 
 }
 
 impl HostRunner {
+    pub(super) fn with_compute_deadlines(
+        mut self,
+        forms: &[super::config::ComputeDeadline],
+    ) -> Self {
+        self.compute_deadlines = forms.to_vec();
+        self
+    }
+    pub(super) fn compute_deadline_ms(&self, args: &[Vec<u8>]) -> u64 {
+        self.compute_words(args)
+            .ok()
+            .and_then(|words| {
+                self.compute_deadlines
+                    .iter()
+                    .find(|form| form.words == words)
+            })
+            .map_or(super::compute::DEADLINE_MS, |form| form.deadline_ms)
+    }
+
     pub(super) fn compute_words(&self, args: &[Vec<u8>]) -> Result<Vec<String>, &'static str> {
         let words = super::compute::parse(
             args,
@@ -603,6 +629,7 @@ impl HostRunner {
             upload_output_limit,
             compute_wrapper,
             compute_environment,
+            compute_deadlines: Vec::new(),
         })
     }
 
@@ -1224,6 +1251,9 @@ pub(super) fn serve_compute(
         let mut reply = refusal(registration, peer, "door-request-deadline", started);
         if operation == Operation::Compute {
             reply["compute"] = super::compute::pending(runner.compute_words().unwrap_or_default());
+            reply["registered_deadline_ms"] = json!(runner.compute_registered_deadline_ms());
+            reply["request_deadline_ms"] =
+                json!(deadline.saturating_duration_since(started).as_millis());
         }
         reply["queue_state"] = json!(queue_state);
         reply["queue_wall_seconds"] = json!(queue_wall);
@@ -1391,6 +1421,9 @@ pub(super) fn serve_compute(
         reply["ref_packet"] = packet.clone();
     }
     if let Some(words) = runner.compute_words() {
+        reply["registered_deadline_ms"] = json!(runner.compute_registered_deadline_ms());
+        reply["request_deadline_ms"] =
+            json!(deadline.saturating_duration_since(started).as_millis());
         let bytes = evidence
             .lock()
             .map_err(|_| io::Error::other("compute evidence lock"))?;
@@ -1409,6 +1442,55 @@ pub(super) fn serve_compute(
     }
     write_frame_locked(&writer, &reply, Instant::now() + Duration::from_secs(2))?;
     Ok(reply)
+}
+
+pub(super) fn compute_deadline_frame(registered: u64, requested: u64, deadline: Instant) -> Value {
+    json!({"schema":2,"type":"compute-deadline", "registered_deadline_ms":registered,
+        "request_deadline_ms":requested, "remaining_ms":deadline.saturating_duration_since(Instant::now()).as_millis()})
+}
+
+fn validate_final(final_reply: &Value, received_out: usize, received_err: usize) -> io::Result<()> {
+    if final_reply["status"].as_i64().is_none()
+        || final_reply["reason"].as_str().is_none()
+        || final_reply["stdout_bytes"] != received_out
+        || final_reply["stderr_bytes"] != received_err
+        || !final_reply["mediation_wall_seconds"].is_number()
+        || !final_reply["compute_wall_seconds"].is_number()
+        || !matches!(
+            final_reply["queue_state"].as_str(),
+            Some("no-queue" | "answered" | "refused" | "deadline")
+        )
+        || (final_reply["queue_state"] == "no-queue"
+            && !final_reply["queue_wall_seconds"].is_null())
+        || (final_reply["queue_state"] != "no-queue"
+            && final_reply["queue_wall_seconds"]
+                .as_f64()
+                .is_none_or(|wall| wall < 0.0))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "door final status differs",
+        ));
+    }
+    Ok(())
+}
+
+fn compute_client_deadline(frame: &Value) -> io::Result<Instant> {
+    let registered = frame["registered_deadline_ms"].as_u64();
+    let requested = frame["request_deadline_ms"].as_u64();
+    let remaining = frame["remaining_ms"].as_u64();
+    if frame.as_object().is_none_or(|row| row.len() != 5)
+        || frame["schema"] != 2
+        || frame["type"] != "compute-deadline"
+        || !matches!((registered, requested, remaining), (Some(bound), Some(request), Some(left))
+            if (super::compute::DEADLINE_MS..=super::compute::MAX_DEADLINE_MS).contains(&bound) && request > 0 && request <= bound && left <= request)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "door compute deadline announcement differs",
+        ));
+    }
+    Ok(Instant::now() + Duration::from_millis(remaining.unwrap_or(0) + 500))
 }
 
 /// Stream exact stdin while independently draining output and final status.
@@ -1436,15 +1518,17 @@ where
         ));
     }
     let mut stream = UnixStream::connect(socket)?;
+    let started = Instant::now();
+    let compute_request = args.len() == 2 && !args[1].as_encoded_bytes().starts_with(b"git-");
     let deadline_ms = if args.len() == 1 && args[0] == "door-attribution-deadline" {
         100
     } else if args.len() == 2 && !args[1].as_encoded_bytes().starts_with(b"git-") {
-        super::compute::DEADLINE_MS
+        super::compute::MAX_DEADLINE_MS
     } else {
         120_000
     };
     // The service owns the command deadline; leave a bounded margin for its final frame.
-    let deadline = Instant::now() + Duration::from_millis(deadline_ms + 500);
+    let mut deadline = started + Duration::from_millis(deadline_ms + 500);
     let words = args
         .iter()
         .map(|arg| arg.as_bytes().to_vec())
@@ -1454,6 +1538,37 @@ where
         &json!({"schema":2,"argv":words,"deadline_ms":deadline_ms}),
         deadline,
     )?;
+    let mut preflight_stderr = 0_usize;
+    if compute_request {
+        loop {
+            let frame = frame_read_until(&mut stream, started + super::PEER_DEADLINE)?;
+            if frame["schema"] == 2 && frame["type"] == "final" && frame["status"] == 125 {
+                validate_final(&frame, 0, preflight_stderr)?;
+                return Ok(frame);
+            }
+            if frame["schema"] == 2 && frame["type"] == "stderr" {
+                let bytes = frame["bytes"]
+                    .as_array()
+                    .filter(|bytes| bytes.len() <= CHUNK)
+                    .and_then(|bytes| {
+                        bytes
+                            .iter()
+                            .map(|byte| byte.as_u64().and_then(|value| u8::try_from(value).ok()))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .ok_or_else(|| io::Error::other("door preflight output frame differs"))?;
+                preflight_stderr = preflight_stderr.saturating_add(bytes.len());
+                if preflight_stderr > OUTPUT_LIMIT {
+                    return Err(io::Error::other("door preflight output limit exceeded"));
+                }
+                stderr.write_all(&bytes)?;
+                stderr.flush()?;
+                continue;
+            }
+            deadline = compute_client_deadline(&frame)?;
+            break;
+        }
+    }
     let mut writer = stream.try_clone()?;
     let input_failure = Arc::new(Mutex::new(None));
     let sender_failure = Arc::clone(&input_failure);
@@ -1513,7 +1628,7 @@ where
         writer.shutdown(Shutdown::Write)
     });
     let mut received_out = 0_usize;
-    let mut received_err = 0_usize;
+    let mut received_err = preflight_stderr;
     let mut bound = OUTPUT_LIMIT;
     let mut announced = false;
     let upload = args
@@ -1594,28 +1709,7 @@ where
             }
         }
     };
-    if final_reply["status"].as_i64().is_none()
-        || final_reply["reason"].as_str().is_none()
-        || final_reply["stdout_bytes"] != received_out
-        || final_reply["stderr_bytes"] != received_err
-        || !final_reply["mediation_wall_seconds"].is_number()
-        || !final_reply["compute_wall_seconds"].is_number()
-        || !matches!(
-            final_reply["queue_state"].as_str(),
-            Some("no-queue" | "answered" | "refused" | "deadline")
-        )
-        || (final_reply["queue_state"] == "no-queue"
-            && !final_reply["queue_wall_seconds"].is_null())
-        || (final_reply["queue_state"] != "no-queue"
-            && final_reply["queue_wall_seconds"]
-                .as_f64()
-                .is_none_or(|wall| wall < 0.0))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "door final status differs",
-        ));
-    }
+    validate_final(&final_reply, received_out, received_err)?;
     // A successful final frame gives the sender at most 500 ms to finish.
     // Open local input cannot hold the completed remote command indefinitely.
     let _closed = stream.shutdown(std::net::Shutdown::Write);
@@ -1677,8 +1771,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        HostRunner, Operation, Runner, checked_ref_packet, read_owner_leaf, stub_call,
-        stub_call_stream,
+        HostRunner, Operation, Runner, checked_ref_packet, compute_client_deadline,
+        compute_deadline_frame, read_owner_leaf, stub_call, stub_call_stream,
     };
     use crate::door::{
         Registration, Scope, frame_read_until, frame_write_until, peer_uid, serve_request,
@@ -1690,6 +1784,45 @@ mod tests {
     };
 
     struct FakeRunner;
+
+    /// ´test:unit:compute-deadline-announcement-keeps-the-remaining-window´
+    #[test]
+    fn compute_deadline_announcement_keeps_the_remaining_window() {
+        let frame = compute_deadline_frame(
+            3_600_000,
+            3_600_000,
+            Instant::now() + Duration::from_millis(10),
+        );
+        let deadline = compute_client_deadline(&frame).expect("remaining window");
+        assert!(deadline <= Instant::now() + Duration::from_millis(510));
+        for (key, value) in [
+            ("schema", json!(3)),
+            ("type", json!("final")),
+            ("remaining_ms", json!(3_600_001)),
+            ("remaining_ms", json!(-1)),
+            ("remaining_ms", json!("10")),
+            ("registered_deadline_ms", json!(86_400_001)),
+            ("registered_deadline_ms", json!(1000)),
+            ("request_deadline_ms", json!(0)),
+            ("request_deadline_ms", json!(3_600_001)),
+            ("extra", json!(true)),
+        ] {
+            let mut invalid = frame.clone();
+            invalid[key] = value;
+            assert!(compute_client_deadline(&invalid).is_err(), "{invalid}");
+        }
+        for key in [
+            "schema",
+            "type",
+            "remaining_ms",
+            "request_deadline_ms",
+            "registered_deadline_ms",
+        ] {
+            let mut missing = frame.clone();
+            missing.as_object_mut().expect("frame").remove(key);
+            assert!(compute_client_deadline(&missing).is_err(), "{key}");
+        }
+    }
 
     /// ´test:unit:door-input-write-retries-interruption-without-extending-deadline´
     #[test]
@@ -2649,6 +2782,7 @@ mod tests {
             .map_err(io::Error::other)?;
             let request = frame_read_until(&mut stream, started + Duration::from_secs(2))?;
             let route = HostRunner {
+                compute_deadlines: Vec::new(),
                 alias: "fixture".to_owned(),
                 ssh_options: Vec::new(),
                 ssh_config_sha256: String::new(),

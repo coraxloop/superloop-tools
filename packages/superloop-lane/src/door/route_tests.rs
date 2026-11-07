@@ -194,6 +194,7 @@ fn route_service(
         mirror_root: "~/mirrors".into(),
         key_path: PathBuf::from("unused"),
         upload_output_limit: runner.limit,
+        compute_deadlines: Vec::new(),
         compute_wrapper: Some("/opt/fixture/bin/report".to_owned()),
         compute_environment: Some(
             json!({"RUSTUP_HOME":"/opt/fixture/rustup","PATH":"/opt/fixture/tools:/opt/fixture/cargo/bin:/usr/bin:/bin","PUBLIC_PACK_TEST_LINTER":"/opt/fixture/tools/superloop-lint"}),
