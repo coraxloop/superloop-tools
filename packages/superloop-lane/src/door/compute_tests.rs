@@ -1479,7 +1479,6 @@ fn door_compute_deadline_selects_only_the_exact_owner_form() {
                     observed
                         .recv_timeout(Duration::from_secs(10))
                         .expect("measured store contention");
-                    thread::sleep(Duration::from_millis(150));
                     drop(held);
                 });
                 (Some(contended), Some(release))

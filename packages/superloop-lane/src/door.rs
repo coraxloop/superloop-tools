@@ -151,12 +151,6 @@ impl RequestWait {
     }
 
     pub(crate) fn credit(&self, elapsed: Duration) {
-        #[cfg(test)]
-        WAIT_CREDIT_OBSERVED.with(|slot| {
-            if let Some(sender) = slot.borrow_mut().take() {
-                let _sent = sender.send(());
-            }
-        });
         let extra = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         let mut previous = self.micros.load(Ordering::Relaxed);
         loop {
@@ -184,6 +178,16 @@ impl RequestWait {
                 Instant::now() + Duration::from_secs(2),
             );
             *announced = total;
+            // A fixture may release its holder only after the progress frame.
+            #[cfg(test)]
+            {
+                drop(announced);
+                WAIT_CREDIT_OBSERVED.with(|slot| {
+                    if let Some(sender) = slot.borrow_mut().take() {
+                        let _sent = sender.send(());
+                    }
+                });
+            }
         }
     }
 
@@ -4703,7 +4707,6 @@ mod tests {
                 observed
                     .recv_timeout(Duration::from_secs(10))
                     .expect("measured store contention");
-                thread::sleep(Duration::from_millis(150));
                 drop(held);
             }))
         } else {
