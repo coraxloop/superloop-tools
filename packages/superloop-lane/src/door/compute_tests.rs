@@ -908,9 +908,15 @@ fn door_compute_test_filters_refuse_extra_or_unbound_words() {
 fn door_compute_test_filters_refuse_empty_misplaced_and_late_lock_words() {
     for (tail, check) in [
         ("cargo test --locked --test integration --", "command"),
-        ("cargo test --locked --test integration --  --exact", "words"),
+        (
+            "cargo test --locked --test integration --  --exact",
+            "words",
+        ),
         ("cargo test --locked filter --test integration", "command"),
-        ("cargo test --locked --test integration filter --exact", "command"),
+        (
+            "cargo test --locked --test integration filter --exact",
+            "command",
+        ),
         ("cargo test --test integration filter --locked", "locked"),
     ] {
         assert_compute_preflight(
@@ -990,7 +996,10 @@ fn door_compute_run_bin_shares_the_dash_p_value_bound() {
                 &format!("/opt/fixture/bin/report cargo run --locked {selector} {name}"),
             );
             server.join().expect("server").expect("service");
-            assert_eq!(reply["reason"], "door-complete", "{selector} {name}: {reply}");
+            assert_eq!(
+                reply["reason"], "door-complete",
+                "{selector} {name}: {reply}"
+            );
             assert_eq!(calls.load(Ordering::Relaxed), 1);
         }
         for (name, check) in [

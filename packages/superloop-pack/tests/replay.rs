@@ -1638,7 +1638,10 @@ fn cut_route_refuses_a_hung_linter() {
                 .and_then(|line| line.split_once("diagnostic scratch=").map(|(_, path)| path))
         })
         .expect("retained diagnostics");
-    assert!(Path::new(diagnostic).starts_with(&fixture.scratch), "{report}");
+    assert!(
+        Path::new(diagnostic).starts_with(&fixture.scratch),
+        "{report}"
+    );
     assert_eq!(
         fs::read_to_string(Path::new(diagnostic).join("citation-sites.stdout")).expect("stdout"),
         format!("{}\n", observed.trim_end())
