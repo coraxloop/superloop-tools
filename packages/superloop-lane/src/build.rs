@@ -1170,9 +1170,12 @@ pub(crate) fn hash_preview(cwd: &Path) -> Value {
 fn hash_bytes(bytes: &[u8], spec: &ChildSpec) -> Result<String, LaneError> {
     crate::pinned::owner_executable(&spec.program, nix::unistd::Uid::effective().as_raw())
         .map_err(|error| {
-            // A held container-helper capability keeps its named anchor cause;
+            // A held operation capability keeps its named anchor cause;
             // the pathname route keeps its fixed remedy without kernel detail.
-            if error.kind == "container-anchor" {
+            if matches!(
+                error.kind,
+                "container-anchor" | "runtime-anchor" | "creation-anchor" | "exercise-anchor"
+            ) {
                 return error;
             }
             LaneError::input(

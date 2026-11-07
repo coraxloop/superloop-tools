@@ -234,6 +234,8 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             "override-other",
             "plan-held",
             "plan-widened",
+            "execute-held",
+            "execute-control",
             "operation",
             "identity",
             "missing",
@@ -241,6 +243,9 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             "owner",
             "mode",
         ] {
+            if case.starts_with("execute-") && entry != "runtime" {
+                continue;
+            }
             let mut request = if entry == "runtime" {
                 superloop_lane::runtime_entry::command(
                     Path::new("/usr/bin/podman"),
@@ -290,6 +295,10 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                 )
                 .expect("creation composer")
             };
+            if case.starts_with("execute-") {
+                runtime_hash_configuration(home);
+                request = runtime_hash_request(request, home, case == "execute-held");
+            }
             if case == "missing" {
                 request.descriptors = loop_home::CommandDescriptors::default();
             }
@@ -331,6 +340,10 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                 fs::rename(home.join(".config/held-loops"), home.join(".config/loops"))
                     .expect("restore held configuration");
             }
+            if case.starts_with("execute-") {
+                fs::remove_dir_all(home.join(".config/loops/alpha")).expect("remove hash settings");
+                fs::remove_dir_all(home.join("hash-template")).expect("remove hash fixture");
+            }
             if case == "owner" || case == "mode" {
                 set_private(64000, 0o700);
             }
@@ -352,6 +365,14 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                     report.contains("anchor-declaration")
                         && report.contains("purpose=registry-override"),
                     "{report}"
+                ),
+                "execute-held" => assert!(
+                    report.contains("sha256sum:") && report.contains("exit status: 1"),
+                    "held false executes despite its replaced name: {report}"
+                ),
+                "execute-control" => assert!(
+                    report.contains("door-generation: stub differs from installed digest"),
+                    "held hash executes to the digest comparison: {report}"
                 ),
                 "plan-held" => assert!(
                     report.contains("missing-setting: entry_bin is absent"),
@@ -428,7 +449,14 @@ fn exercise_entries_retain_selected_program_custody() {
                 "--owner-home".into(),
                 home.to_str().expect("home word").into(),
             ];
-            for case in ["valid", "operation", "record", "program", "missing"] {
+            for case in [
+                "valid",
+                "operation",
+                "record",
+                "program",
+                "missing",
+                "extra-argument",
+            ] {
                 let request = superloop_lane::launch::exercise_entry::command(
                     Path::new("/usr/bin/podman"),
                     &argv,
@@ -455,6 +483,9 @@ fn exercise_case(
     mode: &str,
 ) {
     use loop_home::{ProcessRunner, Runner};
+    if case == "extra-argument" {
+        request.argv.push("extra".into());
+    }
     if case == "operation" {
         let source = request.argv.last_mut().expect("declaration");
         let mut manifest: Manifest = serde_json::from_str(source).expect("manifest");
@@ -487,6 +518,13 @@ fn exercise_case(
         "valid" => assert!(
             !report.contains("anchor-") && report.contains("unsafe-path"),
             "{mode} valid: {report}"
+        ),
+        "extra-argument" => assert!(
+            report.contains(&format!(
+                "anchor-declaration: operation={} purpose=vector",
+                mode.trim_start_matches('_')
+            )),
+            "{mode} {case}: {report}"
         ),
         "missing" => assert!(
             report.contains("anchor-transport"),
@@ -544,4 +582,157 @@ fn substitute_plan_configuration(home: &Path, widened: bool) {
         fs::write(&path, bytes).expect("substitute bytes");
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("substitute file mode");
     }
+}
+/// # Panics
+/// Panics if the held hashing capability is replaced by an ambient pathname lookup.
+fn runtime_hash_request(
+    mut request: loop_home::CommandSpec,
+    home: &Path,
+    failed: bool,
+) -> loop_home::CommandSpec {
+    let source = request.argv.last_mut().expect("manifest");
+    let mut manifest = Manifest::parse(source).expect("runtime manifest");
+    let verifier = HostVerifier::current()
+        .expect("host map")
+        .for_operation("prepare-runtime");
+    let hash = home.join("held-hash");
+    fs::copy(
+        if failed {
+            "/usr/bin/false"
+        } else {
+            "/usr/bin/sha256sum"
+        },
+        &hash,
+    )
+    .expect("native hash capability");
+    fs::set_permissions(&hash, fs::Permissions::from_mode(0o700)).expect("hash mode");
+    let mut descriptors = Vec::new();
+    for record in &mut manifest.records {
+        let (path, policy) = match record.purpose.as_str() {
+            "owner-home" => (
+                home.to_path_buf(),
+                Policy {
+                    kind: Kind::Directory,
+                    owner: Owner::Host,
+                    mode: ModePolicy::Exact(0o700),
+                },
+            ),
+            "runs-root" => (
+                home.join("runs"),
+                Policy {
+                    kind: Kind::Directory,
+                    owner: Owner::Host,
+                    mode: ModePolicy::Exact(0o700),
+                },
+            ),
+            "configuration" => (
+                home.join(".config/loops"),
+                Policy {
+                    kind: Kind::Directory,
+                    owner: Owner::Host,
+                    mode: ModePolicy::Exact(0o700),
+                },
+            ),
+            "loop-storage" => (
+                home.join(".var/loops/alpha"),
+                Policy {
+                    kind: Kind::Directory,
+                    owner: Owner::Host,
+                    mode: ModePolicy::Exact(0o711),
+                },
+            ),
+            "private-storage" => (
+                home.join(".var/loops/alpha/private"),
+                Policy {
+                    kind: Kind::Directory,
+                    owner: Owner::Mapped(64000),
+                    mode: ModePolicy::Exact(0o700),
+                },
+            ),
+            purpose => {
+                let path = match purpose {
+                    "entry-executable" => Path::new(env!("CARGO_BIN_EXE_superloop-lane")),
+                    "podman-executable" => Path::new("/usr/bin/podman"),
+                    "identity-executable" => Path::new("/usr/bin/setpriv"),
+                    "hash-executable" => &hash,
+                    _ => panic!("unexpected role"),
+                };
+                (
+                    path.to_path_buf(),
+                    Policy {
+                        kind: Kind::File,
+                        owner: if matches!(purpose, "entry-executable" | "hash-executable") {
+                            Owner::Host
+                        } else {
+                            Owner::RootFile
+                        },
+                        mode: ModePolicy::Executable,
+                    },
+                )
+            }
+        };
+        let pin = verifier
+            .pin(&path, &record.purpose, record.slot, policy)
+            .expect("host capability");
+        *record = pin.record();
+        descriptors.push(pin.into_fd());
+    }
+    // The declaration and descriptor identify the verified original, not the replaced name.
+    let replacement = home.join("replacement-hash");
+    fs::copy("/usr/bin/true", &replacement).expect("replacement");
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700)).expect("replacement mode");
+    fs::rename(replacement, &hash).expect("replace held pathname");
+    *source = serde_json::to_string(&manifest).expect("declaration");
+    let (sender, input) = UnixStream::pair().expect("rights channel");
+    transport::send(&sender, &descriptors).expect("one complete frame");
+    request.descriptors = loop_home::CommandDescriptors::default().with_input(input.into());
+    request
+}
+
+/// # Panics
+/// Panics if the installed-door fixture cannot reach its first production hash check.
+fn runtime_hash_configuration(home: &Path) {
+    use serde_json::json;
+    let settings = home.join(".config/loops/alpha");
+    let template = home.join("hash-template");
+    fs::create_dir(&settings).expect("settings directory");
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o700)).expect("settings mode");
+    fs::create_dir_all(template.join("libexec")).expect("template");
+    let source = format!(
+        "entry_bin='/usr/bin/true'\ndriver_argv=['/usr/bin/true']\nbackend_argv={{codex=['/usr/bin/true']}}\ntemplate_dir='{}'\nsocket_dir='{}'\nimage_digest='sha256:{}'\nresources={{memory_bytes=2147483648,pids_max=128,cpu_shares=512}}\n",
+        template.display(),
+        home.join("sockets").display(),
+        "a".repeat(64)
+    );
+    let generation = json!({"schema":2,"phase":"complete","loop":"alpha","template_dir":template,"socket_dir":home.join("sockets"),"stub_sha256":"0".repeat(64),"service_sha256":"0".repeat(64),"unit_dir":settings.join("units"),"registered":["ssh"],"host_door_gid":0,"agent":{"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/rubric.md","executable":"/usr/bin/true","model":"fixture","effort":"medium","cap_ms":30000,"entry":"/usr/bin/true","loop_home":home.join(".var/loops/alpha")}});
+    for (name, bytes) in [
+        ("workers.toml", source.into_bytes()),
+        (
+            "door-install-generation.json",
+            serde_json::to_vec(&generation).expect("generation"),
+        ),
+    ] {
+        let path = settings.join(name);
+        fs::write(&path, bytes).expect("settings bytes");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("file mode");
+    }
+    let stub = template.join("libexec/ssh");
+    fs::write(&stub, b"").expect("stub bytes");
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o550)).expect("stub mode");
+    let output = Command::new("/usr/bin/podman")
+        .args([
+            "unshare",
+            "/usr/bin/python3",
+            "-I",
+            "-c",
+            "import os,sys; os.chown(sys.argv[1],0,64000)",
+        ])
+        .arg(stub)
+        .output()
+        .expect("stub group fixture");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

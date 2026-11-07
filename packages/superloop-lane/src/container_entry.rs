@@ -51,7 +51,11 @@ fn io_refusal(
     ))
 }
 
-fn directory_policy(operation: &str, fd: &impl AsFd, purpose: &str) -> Result<Policy, LaneError> {
+pub(crate) fn directory_policy(
+    operation: &str,
+    fd: &impl AsFd,
+    purpose: &str,
+) -> Result<Policy, LaneError> {
     let stat = fstat(fd).map_err(|error| io_refusal(operation, purpose, "fstat", error))?;
     let mode = stat.st_mode & 0o7777;
     if mode & 0o7022 != 0 || mode & 0o700 != 0o700 {
@@ -66,10 +70,10 @@ fn directory_policy(operation: &str, fd: &impl AsFd, purpose: &str) -> Result<Po
     })
 }
 
-const fn executable_policy(root: bool) -> Policy {
+pub(crate) const fn executable_policy(owner: Owner) -> Policy {
     Policy {
         kind: Kind::File,
-        owner: if root { Owner::RootFile } else { Owner::Host },
+        owner,
         mode: ModePolicy::Executable,
     }
 }
@@ -91,19 +95,15 @@ pub(crate) fn pin(
     pin_for(OPERATION, loop_name, home, runs, entry, podman)
 }
 
-pub(crate) fn pin_for(
-    operation: &'static str,
-    loop_name: &str,
+pub(crate) fn core_pins(
+    verifier: &HostVerifier,
+    operation: &str,
     home: (&Path, &OwnedFd),
     runs: (&Path, &OwnedFd),
     entry: &Path,
     podman: &Path,
-) -> Result<Bundle, LaneError> {
-    let verifier = HostVerifier::current()
-        .map_err(refusal)?
-        .for_operation(operation);
-    let mut records = Vec::new();
-    let mut descriptors = Vec::new();
+) -> Result<Vec<anchor::HostPin>, LaneError> {
+    let mut pins = Vec::new();
     for (slot, (path, held)) in [home, runs].into_iter().enumerate() {
         let pin = verifier
             .pin(
@@ -118,11 +118,11 @@ pub(crate) fn pin_for(
             .map_err(|error| io_refusal(operation, PURPOSES[slot], "held-stat", error))?;
         if (record.device, record.inode) != (actual.st_dev, actual.st_ino) {
             return Err(refusal(format!(
-                "anchor-identity: operation={operation} purpose=directory"
+                "anchor-identity: operation={operation} purpose={}",
+                PURPOSES[slot]
             )));
         }
-        records.push(record);
-        descriptors.push(pin.into_fd());
+        pins.push(pin);
     }
     for (slot, path) in [
         (2, entry),
@@ -131,15 +131,40 @@ pub(crate) fn pin_for(
     ] {
         let index = u32::try_from(slot).map_err(refusal)?;
         let pin = verifier
-            .pin(path, PURPOSES[slot], index, executable_policy(false))
+            .pin(path, PURPOSES[slot], index, executable_policy(Owner::Host))
             .or_else(|error| {
                 if error.kind == "anchor-owner" {
-                    verifier.pin(path, PURPOSES[slot], index, executable_policy(true))
+                    verifier.pin(
+                        path,
+                        PURPOSES[slot],
+                        index,
+                        executable_policy(Owner::RootFile),
+                    )
                 } else {
                     Err(error)
                 }
             })
             .map_err(refusal)?;
+        pins.push(pin);
+    }
+    Ok(pins)
+}
+
+pub(crate) fn pin_for(
+    operation: &'static str,
+    loop_name: &str,
+    home: (&Path, &OwnedFd),
+    runs: (&Path, &OwnedFd),
+    entry: &Path,
+    podman: &Path,
+) -> Result<Bundle, LaneError> {
+    let verifier = HostVerifier::current()
+        .map_err(refusal)?
+        .for_operation(operation);
+    let pins = core_pins(&verifier, operation, home, runs, entry, podman)?;
+    let mut records = Vec::new();
+    let mut descriptors = Vec::new();
+    for pin in pins {
         records.push(pin.record());
         descriptors.push(pin.into_fd());
     }
@@ -150,7 +175,7 @@ pub(crate) fn pin_for(
                     Path::new(path),
                     PURPOSES[slot],
                     u32::try_from(slot).map_err(refusal)?,
-                    executable_policy(true),
+                    executable_policy(Owner::RootFile),
                 )
                 .map_err(refusal)?;
             records.push(pin.record());
@@ -227,8 +252,19 @@ pub(crate) fn credential_programs() -> Result<Option<BTreeMap<PathBuf, Arc<Ancho
     })
 }
 
+fn active_error(error: impl std::fmt::Display) -> LaneError {
+    let operation = ACTIVE_OPERATION.with(Cell::get);
+    let kind = match operation {
+        "prepare-runtime" => "runtime-anchor",
+        "make-home" => "creation-anchor",
+        op if op.starts_with("exercise-") => "exercise-anchor",
+        _ => "container-anchor",
+    };
+    LaneError::input(kind, error.to_string())
+}
+
 fn active_refusal() -> LaneError {
-    refusal(format!(
+    active_error(format!(
         "anchor-declaration: operation={} purpose=program",
         ACTIVE_OPERATION.with(Cell::get)
     ))
@@ -242,7 +278,7 @@ pub(crate) fn check(program: &Path) -> Option<Result<(), LaneError>> {
                 .get(program)
                 .ok_or_else(active_refusal)?
                 .revalidate()
-                .map_err(refusal)
+                .map_err(active_error)
         })
     })
 }
@@ -299,7 +335,7 @@ pub(crate) fn configure(
             .collect::<Vec<_>>();
         anchor
             .configure_exec(command, &arguments, &environment)
-            .map_err(refusal)
+            .map_err(active_error)
     })
 }
 
@@ -452,7 +488,11 @@ pub(crate) fn receive_for(
             policy: if slot < 2 {
                 directory_policy(operation, &descriptors[slot], purpose)?
             } else {
-                executable_policy(slot >= 5 || record.owner_uid == 0)
+                executable_policy(if slot >= 5 || record.owner_uid == 0 {
+                    Owner::RootFile
+                } else {
+                    Owner::Host
+                })
             },
             alias_group: None,
         });
@@ -469,6 +509,11 @@ pub(crate) fn receive_for(
         )
         .map_err(refusal)?;
     let entry = &anchors[2];
+    check_image(operation, entry)?;
+    Ok((manifest, anchors))
+}
+
+pub(crate) fn check_image(operation: &str, entry: &Anchor) -> Result<(), LaneError> {
     let current = std::fs::File::open("/proc/self/exe")
         .map_err(|error| io_refusal(operation, "entry-executable", "self-image-open", error))?;
     let expected = fstat(entry)
@@ -480,7 +525,7 @@ pub(crate) fn receive_for(
             "anchor-identity: operation={operation} purpose=entry-executable"
         )));
     }
-    Ok((manifest, anchors))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -489,6 +534,77 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::process::Stdio;
+
+    /// # Panics
+    /// Panics if an active operation loses its refusal envelope or failed custody check.
+    /// ´claim:superlooplane:active-program-refusals-name-the-operation´
+    /// ´test:unit:active-program-refusals-name-the-operation´
+    #[test]
+    fn active_program_refusals_name_the_operation() {
+        for (operation, kind) in [
+            ("prepare-runtime", "runtime-anchor"),
+            ("make-home", "creation-anchor"),
+            ("exercise-mounts", "exercise-anchor"),
+            (OPERATION, "container-anchor"),
+        ] {
+            let _guard = activate_program_map(operation, BTreeMap::new());
+            let program = Path::new("/ungranted-program");
+            let error = check(program).expect("active").expect_err("ungranted");
+            assert_eq!(error.kind, kind);
+            assert!(error.detail.contains("purpose=program"));
+            let error = crate::build::sha256_bytes(b"", Path::new("/"))
+                .expect_err("ungranted hashing capability");
+            assert_eq!(error.kind, kind);
+            assert!(error.detail.contains("anchor-declaration"));
+        }
+        let fixture = tempfile::tempdir().expect("fixture");
+        let program = fixture.path().join("program");
+        fs::copy("/usr/bin/true", &program).expect("native program");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).expect("program mode");
+        let pin = HostVerifier::current()
+            .expect("map")
+            .for_operation("prepare-runtime")
+            .pin(
+                &program,
+                "podman-executable",
+                0,
+                executable_policy(Owner::Host),
+            )
+            .expect("host pin");
+        let manifest = Manifest {
+            version: 1,
+            transport: Transport::Rights,
+            operation: "prepare-runtime".into(),
+            loop_name: "alpha".into(),
+            records: vec![pin.record()],
+        };
+        let mut anchors = Receiver::current()
+            .expect("receiver")
+            .validate(
+                &manifest,
+                vec![pin.into_fd()],
+                "prepare-runtime",
+                "alpha",
+                Transport::Rights,
+                &[Requirement {
+                    purpose: "podman-executable".into(),
+                    policy: executable_policy(Owner::Host),
+                    alias_group: None,
+                }],
+            )
+            .expect("anchor");
+        let _guard = activate_program_map(
+            "prepare-runtime",
+            BTreeMap::from([(
+                program.clone(),
+                Arc::new(anchors.pop().expect("one anchor")),
+            )]),
+        );
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o777)).expect("unsafe mode");
+        let error = check(&program).expect("active").expect_err("changed mode");
+        assert_eq!(error.kind, "runtime-anchor");
+        assert!(error.detail.contains("anchor-mode"));
+    }
 
     const CHILD: &str = "SUPERLOOP_CONTAINER_ANCHOR_TEST";
 
@@ -658,7 +774,7 @@ mod tests {
                             &copy,
                             PURPOSES[slot],
                             u32::try_from(slot).expect("slot"),
-                            executable_policy(false),
+                            executable_policy(Owner::Host),
                         )
                         .expect("fixture pin");
                     declaration.records[slot] = pin.record();

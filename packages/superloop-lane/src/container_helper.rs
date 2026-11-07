@@ -3069,6 +3069,83 @@ mod tests {
         assert_eq!(arguments, format!("rm\n--ignore\n{TEST_CONTAINER_ID}\n"));
     }
 
+    /// # Panics
+    /// Panics if an attempt executes the replaced pathname instead of its held capability.
+    /// ´claim:superlooplane:helper-attempt-executes-the-held-inode´
+    /// ´test:unit:helper-attempt-executes-the-held-inode´
+    #[test]
+    fn helper_attempt_executes_the_held_inode() {
+        use loop_home::anchor::{
+            HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement,
+            Transport,
+        };
+        for (original, replacement, status) in [
+            ("/usr/bin/false", "/usr/bin/true", 1),
+            ("/usr/bin/true", "/usr/bin/false", 0),
+        ] {
+            let fixture = StartedAttemptFixture::new("exit 9");
+            let program = Path::new(&fixture.vector[0]);
+            fs::copy(original, program).expect("native selected program");
+            fs::set_permissions(program, fs::Permissions::from_mode(0o700)).expect("program mode");
+            let policy = Policy {
+                kind: Kind::File,
+                owner: Owner::Host,
+                mode: ModePolicy::Executable,
+            };
+            let pin = HostVerifier::current()
+                .expect("host map")
+                .for_operation("container-helper")
+                .pin(program, "podman-executable", 0, policy)
+                .expect("program pin");
+            let manifest = Manifest {
+                version: 1,
+                transport: Transport::Rights,
+                operation: "container-helper".into(),
+                loop_name: "alpha".into(),
+                records: vec![pin.record()],
+            };
+            let mut anchors = Receiver::current()
+                .expect("receiver")
+                .validate(
+                    &manifest,
+                    vec![pin.into_fd()],
+                    "container-helper",
+                    "alpha",
+                    Transport::Rights,
+                    &[Requirement {
+                        purpose: "podman-executable".into(),
+                        policy,
+                        alias_group: None,
+                    }],
+                )
+                .expect("held executable");
+            let swap = fixture.root.path().join("replacement");
+            fs::copy(replacement, &swap).expect("replacement program");
+            fs::set_permissions(&swap, fs::Permissions::from_mode(0o700))
+                .expect("replacement mode");
+            fs::rename(swap, program).expect("replace pathname");
+            let _programs = crate::container_entry::activate_program_map(
+                "container-helper",
+                BTreeMap::from([(
+                    program.to_path_buf(),
+                    Arc::new(anchors.pop().expect("one executable")),
+                )]),
+            );
+            let (mut server, mut client) = UnixStream::pair().expect("channel");
+            client
+                .write_all(&0_u32.to_le_bytes())
+                .expect("empty prompt");
+            let outcome = fixture
+                .run(&mut server, STREAM_LIMIT, Child::try_wait)
+                .expect("attempt records selected native exit");
+            assert_eq!(outcome.code, status);
+            assert_eq!(read_attempt_status(&mut client), status);
+            let evidence = fixture.evidence();
+            assert_eq!(evidence["status"], status);
+            assert!(evidence["post_start_error"].is_null());
+        }
+    }
+
     struct StartedAttemptFixture {
         root: TempDir,
         driver: PathBuf,

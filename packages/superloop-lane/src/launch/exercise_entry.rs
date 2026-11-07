@@ -38,6 +38,9 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
         .first()
         .and_then(|word| operation(word))
         .ok_or_else(|| refusal("exercise", "anchor-declaration", "operation"))?;
+    if args.len() > 7 {
+        return Err(refusal(mode, "anchor-declaration", "vector"));
+    }
     let (scope, run, identity, home) = match mode {
         "exercise-mounts" => exercise::mounts::parse_private_argv(args)?,
         "exercise-network" => exercise::network::parse_private_argv(args)?,

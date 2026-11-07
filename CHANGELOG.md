@@ -80,6 +80,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Namespace executable checks share their pin and image validation, retain the active operation’s refusal envelope and reject surplus exercise arguments before parsing the private form; the attempt runner and real runtime entry exercise held execution across pathname replacement (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Runtime and native creation plans use the registry and allocation snapshot validated beneath their configuration capability for plan loading, settings grants and worker range and mail-group selection, without reopening ambient registry paths; native creation's UID census still reads the registry by its path (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Anchored native creation and runtime verification refuse every ambient registry override, including the canonical registry path, before reading grants or changing custody (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).

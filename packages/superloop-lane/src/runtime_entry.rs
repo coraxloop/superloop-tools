@@ -4,13 +4,13 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::container_entry::executable_policy as executable;
 use crate::error::LaneError;
 use loop_home::anchor::{
     self, Anchor, Configuration, HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver,
     Requirement, Transport,
 };
 use loop_home::{CommandDescriptors, CommandSpec, IoMode};
-use nix::sys::stat::fstat;
 
 const OPERATION: &str = "prepare-runtime";
 const PURPOSES: [&str; 9] = [
@@ -58,44 +58,16 @@ const fn directory(owner: Owner, mode: u32) -> Policy {
         mode: ModePolicy::Exact(mode),
     }
 }
-const fn executable(owner: Owner) -> Policy {
-    Policy {
-        kind: Kind::File,
-        owner,
-        mode: ModePolicy::Executable,
-    }
-}
 pub(crate) fn directory_policy_for(
     operation: &str,
     fd: &impl AsFd,
     purpose: &str,
 ) -> Result<Policy, LaneError> {
-    let mode = fstat(fd)
-        .map_err(|e| io_for(operation, purpose, "fstat", e))?
-        .st_mode
-        & 0o7777;
-    if mode & 0o7022 != 0 || mode & 0o700 != 0o700 {
-        return Err(refusal(format_args!(
-            "anchor-mode: operation={operation} purpose={purpose} check=directory-mode observed={mode:04o}"
-        )));
-    }
-    Ok(directory(Owner::Host, mode))
+    crate::container_entry::directory_policy(operation, fd, purpose).map_err(boundary)
 }
-fn pin_file(
-    host: &HostVerifier,
-    path: &Path,
-    purpose: &str,
-    slot: u32,
-) -> Result<anchor::HostPin, LaneError> {
-    host.pin(path, purpose, slot, executable(Owner::Host))
-        .or_else(|e| {
-            if e.kind == "anchor-owner" {
-                host.pin(path, purpose, slot, executable(Owner::RootFile))
-            } else {
-                Err(e)
-            }
-        })
-        .map_err(refusal)
+const fn boundary(mut error: LaneError) -> LaneError {
+    error.kind = "runtime-anchor";
+    error
 }
 
 fn pins(
@@ -107,40 +79,9 @@ fn pins(
     program: &Path,
     row: &loop_home::LoopRecord,
 ) -> Result<Vec<anchor::HostPin>, LaneError> {
-    let (home, held_home) = home;
-    let (runs, held_runs) = runs;
-    let mut pins = Vec::new();
-    for (slot, (path, held)) in [(home, held_home), (runs, held_runs)]
-        .into_iter()
-        .enumerate()
-    {
-        let pin = host
-            .pin(
-                path,
-                PURPOSES[slot],
-                u32::try_from(slot).map_err(refusal)?,
-                directory_policy_for(operation, held, PURPOSES[slot])?,
-            )
-            .map_err(refusal)?;
-        let expected =
-            fstat(held).map_err(|e| io_for(operation, PURPOSES[slot], "held-stat", e))?;
-        if (pin.record().device, pin.record().inode) != (expected.st_dev, expected.st_ino) {
-            return Err(named_for(operation, "anchor-identity", PURPOSES[slot]));
-        }
-        pins.push(pin);
-    }
-    for (slot, path) in [
-        (2, entry),
-        (3, program),
-        (4, Path::new("/usr/bin/sha256sum")),
-    ] {
-        pins.push(pin_file(
-            host,
-            path,
-            PURPOSES[slot],
-            u32::try_from(slot).map_err(refusal)?,
-        )?);
-    }
+    let mut pins = crate::container_entry::core_pins(host, operation, home, runs, entry, program)
+        .map_err(boundary)?;
+    let (home, _) = home;
     for (slot, path, policy) in [
         (5, home.join(".config/loops"), directory(Owner::Host, 0o700)),
         (6, row.home.clone(), directory(Owner::Host, 0o711)),
@@ -571,13 +512,7 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
         private: next()?,
         executor: next()?,
     };
-    let image = std::fs::File::open("/proc/self/exe")
-        .map_err(|e| io("entry-executable", "self-image-open", e))?;
-    let actual = fstat(&image).map_err(|e| io("entry-executable", "self-image-stat", e))?;
-    let expected = fstat(&entry).map_err(|e| io("entry-executable", "held-stat", e))?;
-    if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino) {
-        return Err(named("anchor-identity", "entry-executable"));
-    }
+    crate::container_entry::check_image(OPERATION, &entry).map_err(boundary)?;
     let _home = crate::home::activate_private_launch(
         Path::new(home),
         &home_anchor,

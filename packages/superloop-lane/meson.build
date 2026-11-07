@@ -523,4 +523,5 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lane/tests/container_anchors.rs:\"/usr/bin/podman\"#3","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Inject a registry override into the real private entry without changing the test process environment"}
+{"kind":"call","site":"packages/superloop-lane/tests/container_anchors.rs:\"/usr/bin/podman\"#4","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Assign the installed stub fixture to its mapped loop group before the real runtime hash execution"}
 ''']

@@ -203,13 +203,10 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     let curl = next()?;
     let date = next()?;
     let letter_anchor = next()?;
-    let image = std::fs::File::open("/proc/self/exe")
-        .map_err(|e| io("entry-executable", "self-image-open", e))?;
-    let actual = fstat(&image).map_err(|e| io("entry-executable", "self-image-stat", e))?;
-    let expected = fstat(&entry).map_err(|e| io("entry-executable", "held-stat", e))?;
-    if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino) {
-        return Err(named("anchor-identity", "entry-executable"));
-    }
+    crate::container_entry::check_image(OPERATION, &entry).map_err(|mut error| {
+        error.kind = "creation-anchor";
+        error
+    })?;
     let _home = crate::home::activate_private_launch(
         Path::new(&body[6]),
         &home,
