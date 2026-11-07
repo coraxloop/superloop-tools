@@ -19,13 +19,22 @@ use nix::sys::stat::fstat;
 use crate::error::LaneError;
 
 const OPERATION: &str = "container-helper";
-const PURPOSES: [&str; 5] = [
+const PURPOSES: [&str; 7] = [
     "owner-home",
     "runs-root",
     "entry-executable",
     "podman-executable",
     "hash-executable",
+    "credential-client",
+    "credential-clock",
 ];
+fn purposes(operation: &str) -> &'static [&'static str] {
+    if operation == OPERATION {
+        &PURPOSES
+    } else {
+        &PURPOSES[..5]
+    }
+}
 
 fn refusal(error: impl std::fmt::Display) -> LaneError {
     LaneError::input("container-anchor", error.to_string())
@@ -134,6 +143,20 @@ pub(crate) fn pin_for(
         records.push(pin.record());
         descriptors.push(pin.into_fd());
     }
+    if operation == OPERATION {
+        for (slot, path) in [(5, "/usr/bin/curl"), (6, "/usr/bin/date")] {
+            let pin = verifier
+                .pin(
+                    Path::new(path),
+                    PURPOSES[slot],
+                    u32::try_from(slot).map_err(refusal)?,
+                    executable_policy(true),
+                )
+                .map_err(refusal)?;
+            records.push(pin.record());
+            descriptors.push(pin.into_fd());
+        }
+    }
     let manifest = Manifest {
         version: 1,
         transport: Transport::Rights,
@@ -183,6 +206,25 @@ pub(crate) fn activate_program_map(
     ACTIVE_OPERATION.with(|active| active.set(operation));
     EXECUTABLE.with(|active| *active.borrow_mut() = Some(programs));
     ExecutableGuard
+}
+
+/// Transfer only the credential executables to the authority thread.
+pub(crate) fn credential_programs() -> Result<Option<BTreeMap<PathBuf, Arc<Anchor>>>, LaneError> {
+    EXECUTABLE.with(|active| {
+        let active = active.borrow();
+        let Some(programs) = active.as_ref() else {
+            return Ok(None);
+        };
+        ["/usr/bin/curl", "/usr/bin/date"]
+            .into_iter()
+            .map(|path| {
+                let key = PathBuf::from(path);
+                let anchor = programs.get(&key).ok_or_else(active_refusal)?;
+                Ok((key, Arc::clone(anchor)))
+            })
+            .collect::<Result<BTreeMap<_, _>, LaneError>>()
+            .map(Some)
+    })
 }
 
 fn active_refusal() -> LaneError {
@@ -313,6 +355,12 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
     let (manifest, mut anchors) = receive(source, &std::io::stdin())?;
     // The private entry owns stdin; the completed capability channel is setup-only.
     anchor::transport::replace_stdin(OPERATION).map_err(refusal)?;
+    let date = anchors.pop().ok_or_else(|| {
+        refusal("anchor-missing: operation=container-helper purpose=credential-clock")
+    })?;
+    let curl = anchors.pop().ok_or_else(|| {
+        refusal("anchor-missing: operation=container-helper purpose=credential-client")
+    })?;
     let hash = anchors.pop().ok_or_else(|| {
         refusal("anchor-missing: operation=container-helper purpose=hash-executable")
     })?;
@@ -328,10 +376,11 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
         0,
     )?;
     EXECUTABLE.with(|active| {
-        *active.borrow_mut() = Some(BTreeMap::from([(
-            PathBuf::from("/usr/bin/sha256sum"),
-            Arc::new(hash),
-        )]));
+        *active.borrow_mut() = Some(BTreeMap::from([
+            (PathBuf::from("/usr/bin/sha256sum"), Arc::new(hash)),
+            (PathBuf::from("/usr/bin/curl"), Arc::new(curl)),
+            (PathBuf::from("/usr/bin/date"), Arc::new(date)),
+        ]));
     });
     let _executable = ExecutableGuard;
     let (record_home, loop_name, _, program) =
@@ -366,9 +415,10 @@ pub(crate) fn receive_for(
     operation: &'static str,
     scope: Option<&str>,
 ) -> Result<(Manifest, Vec<Anchor>), LaneError> {
+    let purposes = purposes(operation);
     let manifest =
         Manifest::parse(source).map_err(|error| refusal(error.context(operation, "manifest")))?;
-    if manifest.records.len() != PURPOSES.len() {
+    if manifest.records.len() != purposes.len() {
         return Err(refusal(format!(
             "anchor-declaration: operation={operation} purpose=count"
         )));
@@ -379,10 +429,10 @@ pub(crate) fn receive_for(
             .try_clone_to_owned()
             .map_err(|error| io_refusal(operation, "rights", "input-duplicate", error))?,
     );
-    let descriptors = anchor::transport::receive(&stream, PURPOSES.len(), Duration::from_secs(30))
+    let descriptors = anchor::transport::receive(&stream, purposes.len(), Duration::from_secs(30))
         .map_err(|error| refusal(error.context(operation, "rights")))?;
     let mut required = Vec::new();
-    for (slot, purpose) in PURPOSES.iter().enumerate() {
+    for (slot, purpose) in purposes.iter().enumerate() {
         let record = manifest
             .records
             .iter()
@@ -402,7 +452,7 @@ pub(crate) fn receive_for(
             policy: if slot < 2 {
                 directory_policy(operation, &descriptors[slot], purpose)?
             } else {
-                executable_policy(record.owner_uid == 0)
+                executable_policy(slot >= 5 || record.owner_uid == 0)
             },
             alias_group: None,
         });
@@ -487,15 +537,40 @@ mod tests {
             let (_, mut anchors) = result.expect("production receiver");
             let program =
                 PathBuf::from(std::env::var_os("SUPERLOOP_CONTAINER_PROGRAM").expect("program"));
+            let date = anchors.pop().expect("clock");
+            let curl = anchors.pop().expect("client");
             let hash = anchors.pop().expect("hash");
             let podman = anchors.pop().expect("podman");
             EXECUTABLE.with(|active| {
                 *active.borrow_mut() = Some(BTreeMap::from([
+                    (PathBuf::from("/usr/bin/curl"), Arc::new(curl)),
+                    (PathBuf::from("/usr/bin/date"), Arc::new(date)),
                     (program.clone(), Arc::new(podman)),
                     (PathBuf::from("/usr/bin/sha256sum"), Arc::new(hash)),
                 ]));
             });
             let _guard = ExecutableGuard;
+            let credentials = credential_programs()
+                .expect("credential handoff")
+                .expect("active bundle");
+            assert_eq!(credentials.len(), 2);
+            std::thread::spawn(move || {
+                let _guard = activate_program_map(OPERATION, credentials);
+                for program in ["/usr/bin/curl", "/usr/bin/date"] {
+                    let result = crate::build::run_checked(
+                        Path::new(program),
+                        vec!["--version".into()],
+                        &std::env::vars().collect(),
+                        Path::new("/"),
+                        10,
+                        "credential-anchor-test",
+                    )
+                    .expect("credential thread uses held system file");
+                    assert_ne!(result, "");
+                }
+            })
+            .join()
+            .expect("credential thread");
             let environment = std::env::vars().collect::<BTreeMap<_, _>>();
             let result = crate::build::run_checked(
                 &program,

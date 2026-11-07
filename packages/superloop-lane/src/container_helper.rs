@@ -1961,10 +1961,14 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
     let refresh_root = root.to_path_buf();
     let refresh_driver_dir = driver_dir.clone();
     let refresh_anchors = crate::home::snapshot_private_home()?;
+    let refresh_programs = crate::container_entry::credential_programs()?;
     let refresher = std::thread::Builder::new()
         .name("credential-authority".into())
         .spawn(move || -> Result<(), LaneError> {
             let _verified = crate::home::activate_private_snapshot(refresh_anchors)?;
+            let _programs = refresh_programs.map(|programs| {
+                crate::container_entry::activate_program_map("container-helper", programs)
+            });
             let mut published = BTreeMap::new();
             let mut checked = false;
             while !refresh_cancelled.load(Ordering::Acquire) {

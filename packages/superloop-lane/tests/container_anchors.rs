@@ -86,6 +86,25 @@ fn container_helper_enters_with_held_root_files() {
         records.push(pin.record());
         descriptors.push(pin.into_fd());
     }
+    for (slot, purpose, path) in [
+        (5, "credential-client", "/usr/bin/curl"),
+        (6, "credential-clock", "/usr/bin/date"),
+    ] {
+        let pin = verifier
+            .pin(
+                Path::new(path),
+                purpose,
+                slot,
+                Policy {
+                    kind: Kind::File,
+                    owner: Owner::RootFile,
+                    mode: ModePolicy::Executable,
+                },
+            )
+            .expect("credential executable");
+        records.push(pin.record());
+        descriptors.push(pin.into_fd());
+    }
     let declaration = serde_json::to_string(&Manifest {
         version: 1,
         transport: Transport::Rights,

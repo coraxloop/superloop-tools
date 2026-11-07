@@ -1899,6 +1899,115 @@ mod tests {
         );
     }
 
+    /// # Panics
+    /// Panics if the fixture cannot pin and validate the selected real executable files.
+    fn credential_test_programs(
+        client: &str,
+        clock: &str,
+    ) -> BTreeMap<PathBuf, std::sync::Arc<loop_home::anchor::Anchor>> {
+        use loop_home::anchor::{
+            HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement,
+            Transport,
+        };
+        let host = HostVerifier::current().expect("host map");
+        let policy = Policy {
+            kind: Kind::File,
+            owner: Owner::RootFile,
+            mode: ModePolicy::Executable,
+        };
+        let mut pins = Vec::new();
+        let mut requirements = Vec::new();
+        for (slot, purpose, path) in [
+            (0, "credential-client", client),
+            (1, "credential-clock", clock),
+        ] {
+            pins.push(
+                host.pin(Path::new(path), purpose, slot, policy)
+                    .expect("host executable"),
+            );
+            requirements.push(Requirement {
+                purpose: purpose.into(),
+                policy,
+                alias_group: None,
+            });
+        }
+        let manifest = Manifest {
+            version: 1,
+            transport: Transport::Rights,
+            operation: "credential-test".into(),
+            loop_name: "alpha".into(),
+            records: pins
+                .iter()
+                .map(loop_home::anchor::HostPin::record)
+                .collect(),
+        };
+        let anchors = Receiver::current()
+            .expect("receiver")
+            .validate(
+                &manifest,
+                pins.into_iter()
+                    .map(loop_home::anchor::HostPin::into_fd)
+                    .collect(),
+                "credential-test",
+                "alpha",
+                Transport::Rights,
+                &requirements,
+            )
+            .expect("validated programs");
+        ["/usr/bin/curl", "/usr/bin/date"]
+            .into_iter()
+            .zip(anchors)
+            .map(|(path, anchor)| (PathBuf::from(path), std::sync::Arc::new(anchor)))
+            .collect()
+    }
+
+    /// # Panics
+    /// Panics if the credential thread loses held executables or changes the refresh exchange.
+    /// ´claim:superlooplane:credential-thread-refreshes-through-held-executables´
+    /// ´test:unit:credential-thread-refreshes-through-held-executables´
+    #[test]
+    fn credential_thread_refreshes_through_held_executables() {
+        let programs = credential_test_programs("/usr/bin/curl", "/usr/bin/date");
+        let _guard = crate::container_entry::activate_program_map("credential-test", programs);
+        let snapshot = crate::container_entry::credential_programs()
+            .expect("thread snapshot")
+            .expect("active programs");
+        assert_eq!(snapshot.len(), 2);
+        let (endpoint, server) = fixture_endpoint(
+            "200 OK",
+            json!({"id_token":token(1_900_000_000),"access_token":token(1_900_000_000),"refresh_token":"fixture-rotated"}),
+        );
+        let refreshed = std::thread::spawn(move || {
+            let _guard = crate::container_entry::activate_program_map("credential-test", snapshot);
+            refresh_request(
+                &Source::parse(source(1_800_000_000, "initial")).expect("source"),
+                &endpoint,
+            )
+            .expect("held refresh exchange")
+        })
+        .join()
+        .expect("credential thread");
+        let request = server.join().expect("endpoint");
+        assert_eq!(request["grant_type"], "refresh_token");
+        assert_eq!(
+            refreshed.document["tokens"]["refresh_token"],
+            "fixture-rotated"
+        );
+        assert!(
+            refreshed.document["last_refresh"]
+                .as_str()
+                .expect("clock output")
+                .ends_with('Z')
+        );
+        let _clock = crate::container_entry::activate_program_map(
+            "credential-test",
+            credential_test_programs("/usr/bin/curl", "/usr/bin/false"),
+        );
+        let refusal = utc_timestamp().expect_err("held false image replaces the date program key");
+        assert_eq!(refusal.kind, "credential-clock");
+        assert_eq!(refusal.detail, "UTC date program failed");
+    }
+
     /// ´test:unit:credential-helper-thread-retains-verified-anchors´
     #[test]
     fn credential_helper_thread_retains_verified_anchors() {

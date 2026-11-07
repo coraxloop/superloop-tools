@@ -1908,7 +1908,7 @@ exit 2
     assert_eq!(preview["helper_argv"]["argv"][7], "--verified-home-fd");
     assert_eq!(
         preview["helper_argv"]["anchor_manifest"],
-        json!({"state":"bound-on-launch","transport":"rights","purposes":["owner-home","runs-root","entry-executable","podman-executable","hash-executable"]})
+        json!({"state":"bound-on-launch","transport":"rights","purposes":["owner-home","runs-root","entry-executable","podman-executable","hash-executable","credential-client","credential-clock"]})
     );
     assert_eq!(preview["prepare_argv"]["directory_transfer_socket_fd"], 0);
     assert_eq!(
@@ -3038,13 +3038,13 @@ elif '_prepare-runtime' in args:
     print('{}')
 elif '_container-helper' in args:
     transfer = socket.socket(fileno=0)
-    data, ancillary, flags, _ = transfer.recvmsg(1, socket.CMSG_SPACE(20))
+    data, ancillary, flags, _ = transfer.recvmsg(1, socket.CMSG_SPACE(28))
     assert data == bytes([1]) and flags == 0 and len(ancillary) == 1
-    assert len(ancillary[0][2]) == 20 and transfer.recv(1) == b''
-    for offset in range(0, 20, 4):
+    assert len(ancillary[0][2]) == 28 and transfer.recv(1) == b''
+    for offset in range(0, 28, 4):
         os.close(int.from_bytes(ancillary[0][2][offset:offset+4], sys.byteorder, signed=True))
     manifest = json.loads(args[args.index('--anchor-manifest') + 1])
-    assert [record['purpose'] for record in manifest['records']] == ['owner-home', 'runs-root', 'entry-executable', 'podman-executable', 'hash-executable']
+    assert [record['purpose'] for record in manifest['records']] == ['owner-home', 'runs-root', 'entry-executable', 'podman-executable', 'hash-executable', 'credential-client', 'credential-clock']
     sys.exit(9)
 elif args and args[0] == 'ps':
     pass
@@ -3421,13 +3421,13 @@ elif '_prepare-runtime' in args:
     print('{}')
 elif '_container-helper' in args:
     transfer = socket.socket(fileno=0)
-    data, ancillary, flags, _ = transfer.recvmsg(1, socket.CMSG_SPACE(20))
+    data, ancillary, flags, _ = transfer.recvmsg(1, socket.CMSG_SPACE(28))
     assert data == bytes([1]) and flags == 0 and len(ancillary) == 1
-    assert len(ancillary[0][2]) == 20 and transfer.recv(1) == b''
-    for offset in range(0, 20, 4):
+    assert len(ancillary[0][2]) == 28 and transfer.recv(1) == b''
+    for offset in range(0, 28, 4):
         os.close(int.from_bytes(ancillary[0][2][offset:offset+4], sys.byteorder, signed=True))
     manifest = json.loads(args[args.index('--anchor-manifest') + 1])
-    assert [record['purpose'] for record in manifest['records']] == ['owner-home', 'runs-root', 'entry-executable', 'podman-executable', 'hash-executable']
+    assert [record['purpose'] for record in manifest['records']] == ['owner-home', 'runs-root', 'entry-executable', 'podman-executable', 'hash-executable', 'credential-client', 'credential-clock']
     (home / 'preparing-ready').touch()
     wait('preparing-release')
     request = socket.socket(socket.AF_UNIX)
