@@ -6,7 +6,7 @@ use std::process::Command;
 
 pub fn dispatch(args: &[OsString]) -> Option<u8> {
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
-        let help = b"usage: superloop enter|provision|verify|show|driver-launch|run-bridge|account|heartbeat|orchestrator|command ARG...\ndriver-launch LOOP RUN --driver-bin PATH --run-dir DIR -- ARGS...\nrun-bridge gpg|ssh LOOP -- ARG...; run-bridge gh -- ARG...\naccount keygen|check|create|admit-key ARG...\nheartbeat|orchestrator on|off|status|decide FILE\ncommand judge|answer|claim|complete|status LOOP (schema-one JSON on stdin)\n";
+        let help = b"usage: superloop enter|provision|verify|show|driver-launch|run-bridge|account|heartbeat|orchestrator|command ARG...\ndriver-launch LOOP RUN --driver-bin PATH --run-dir DIR --backend {codex|claude} -- ARGS...\nrun-bridge gpg|ssh LOOP -- ARG...; run-bridge gh -- ARG...\naccount keygen|check|create|admit-key ARG...\nheartbeat|orchestrator on|off|status|decide FILE\ncommand judge|answer|claim|complete|status LOOP (schema-one JSON on stdin)\n";
         return Some(u8::from(std::io::stdout().lock().write_all(help).is_err()));
     }
     if args.first().is_some_and(|a| a == "account") {

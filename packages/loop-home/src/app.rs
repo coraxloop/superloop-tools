@@ -23,7 +23,7 @@ use crate::verify::{
 };
 use crate::{CommandSpec, LoopError, LoopRecord, Runner, load_registry, registry_path};
 
-const USAGE: &str = "usage: superloop [--json] {enter <name> [--] <cmd> [args...]|driver-launch LOOP RUN --driver-bin PATH --run-dir DIR -- ARGS...|provision <name>|run-bridge gpg|ssh <name> [--] [args...]|verify <name>|show <name>}";
+const USAGE: &str = "usage: superloop [--json] {enter <name> [--] <cmd> [args...]|driver-launch LOOP RUN --driver-bin PATH --run-dir DIR --backend {codex|claude} -- ARGS...|provision <name>|run-bridge gpg|ssh <name> [--] [args...]|verify <name>|show <name>}";
 static NEXT_REPORT: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct ReportFile {
@@ -108,6 +108,7 @@ pub(crate) enum Action {
         run: String,
         driver_bin: PathBuf,
         run_dir: PathBuf,
+        backend: crate::driver_launch::DriverBackend,
         arguments: Vec<String>,
     },
     Provision {
@@ -306,17 +307,22 @@ where
 }
 
 fn parse_driver_launch(arguments: &[String]) -> Result<Action, LoopError> {
-    if arguments.len() < 6 || arguments[2] != "--driver-bin" || arguments[4] != "--run-dir" {
+    if arguments.len() < 8
+        || arguments[2] != "--driver-bin"
+        || arguments[4] != "--run-dir"
+        || arguments[6] != "--backend"
+    {
         return Err(LoopError::refusal(
-            "usage: superloop driver-launch LOOP RUN --driver-bin PATH --run-dir DIR -- ARGS...",
+            "usage: superloop driver-launch LOOP RUN --driver-bin PATH --run-dir DIR --backend {codex|claude} -- ARGS...",
         ));
     }
-    if arguments.get(6).is_none_or(|word| word != "--") {
+    let backend = crate::driver_launch::DriverBackend::parse(&arguments[7])?;
+    if arguments.get(8).is_none_or(|word| word != "--") {
         return Err(LoopError::refusal(
             "driver-launch requires -- before arguments",
         ));
     }
-    if arguments.len() == 7 {
+    if arguments.len() == 9 {
         return Err(LoopError::refusal(
             "driver-launch requires a nonempty argument vector",
         ));
@@ -326,7 +332,8 @@ fn parse_driver_launch(arguments: &[String]) -> Result<Action, LoopError> {
         run: arguments[1].clone(),
         driver_bin: PathBuf::from(&arguments[3]),
         run_dir: PathBuf::from(&arguments[5]),
-        arguments: arguments[7..].to_vec(),
+        backend,
+        arguments: arguments[9..].to_vec(),
     })
 }
 
@@ -774,6 +781,7 @@ fn execute<R: Runner, W: io::Write>(
         Action::DriverLaunch {
             driver_bin,
             run_dir,
+            backend,
             arguments,
             ..
         } => {
@@ -786,13 +794,15 @@ fn execute<R: Runner, W: io::Write>(
                 caller_home,
                 record,
                 runs_root,
-                Some("codex"),
+                Some(backend.name()),
             )?;
             if Path::new(&settings.driver_argv[0]) != driver_bin {
                 return Err(LoopError::refusal(
                     "driver_argv differs from the validated driver path",
                 ));
             }
+            let selected_driver =
+                crate::driver_launch::select_driver_backend(&settings.driver_argv, *backend)?;
             let command = [
                 String::from("/usr/bin/env"),
                 String::from("LANE_BOXED_RUNTIME=1"),
@@ -801,7 +811,7 @@ fn execute<R: Runner, W: io::Write>(
             ]
             .into_iter()
             .chain(settings.environment())
-            .chain(settings.driver_argv)
+            .chain(selected_driver)
             .chain(arguments.iter().cloned())
             .collect::<Vec<_>>();
             let plan = driver_launch_plan(
@@ -1148,6 +1158,7 @@ where
         run,
         driver_bin,
         run_dir,
+        backend,
         ..
     } = &invocation.action
     {
@@ -1158,6 +1169,7 @@ where
             run,
             driver_bin,
             run_dir,
+            *backend,
         ) {
             Ok(pinned) => Some(pinned),
             Err(failure) => return publish_error(error, &failure),

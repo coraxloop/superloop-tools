@@ -6,7 +6,7 @@
 
 `enter NAME -- COMMAND…` enters the selected loop, `provision NAME` creates its declared roots, `verify NAME` inspects roots without repairing them, and `show NAME` reads the registry row. `run-bridge gpg|ssh NAME -- ARG…` executes the selected bridge. Per-loop bridge copies dispatch by their installed filename before version handling.
 
-The private `driver-launch`, `bind-custody` and `ensure-roots` forms preserve exact arguments and child status. They are called by declared tools rather than entered by a person.
+The private `driver-launch`, `bind-custody` and `ensure-roots` forms preserve exact arguments and child status. They are called by declared tools rather than entered by a person. The private driver form requires `--backend {codex|claude}` after `--run-dir DIR`; it validates that vendor and binds the configured driver selector to it. Lane and entry must be deployed together for this private interface change.
 
 ## Session decisions · `sec:superloop:session-decisions`
 

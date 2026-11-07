@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Private boxed entry carries the protected backend explicitly, validates only its configured program and binds the driver selector without changing settings evidence; matching lane and entry versions are required, and Claude launch remains unavailable pending the image, runtime and credential adapters (``prob:box:claude-boxed-workers``; ``sec:loophome:driver-launch``; ``conv:superlooplane:backend-selection-compatibility``).
+
 - Every workspace package depends on the shared `tracing` crate so instrumentation requires no per-package dependency change (``rule:buildcontracts:tiers``).
 
 - Boxed plans bind the selected backend through home and runtime checks, resumed-plan reconstruction and credential publication; Codex refresh skips Claude records. Old runs without a binding must drain and retire before deployment; no backend is inferred for them (``prob:box:claude-boxed-workers``).

@@ -1967,7 +1967,7 @@ fn entry_argv_round(
     resume: Option<(&str, &Path, &LaunchModel)>,
     mail: Option<&Value>,
 ) -> Result<Vec<String>, LaneError> {
-    crate::settings::BoxBackend::from_plan(&plan.document)?.require_runtime()?;
+    let backend = crate::settings::BoxBackend::from_plan(&plan.document)?;
     let run_dir = crate::pinned::path_word(&plan.driver_dir, "run-directory")?;
     let mut argv = vec![
         "driver-launch".into(),
@@ -1977,6 +1977,8 @@ fn entry_argv_round(
         crate::pinned::path_word(driver, "driver-program")?,
         "--run-dir".into(),
         run_dir.clone(),
+        "--backend".into(),
+        backend.name().into(),
         "--".into(),
         "-t".into(),
         budget.to_string(),
@@ -7069,6 +7071,35 @@ pub(crate) fn check_pins(
 
 #[cfg(test)]
 mod tests {
+
+    /// ´test:unit:boxed-backend-entry-vector-retains-protected-selection´
+    #[test]
+    fn boxed_backend_entry_vector_retains_protected_selection() {
+        for backend in ["codex", "claude"] {
+            let plan = crate::plan::Plan {
+                home: "/fixture/home".into(),
+                driver_dir: "/fixture/run".into(),
+                letter: "/fixture/letter".into(),
+                document: serde_json::json!({"backend": backend}),
+            };
+            let argv = super::entry_argv_round(
+                std::path::Path::new("/fixture/driver"),
+                &plan,
+                "alpha",
+                "R",
+                "dispatch",
+                60,
+                None,
+                None,
+                None,
+            )
+            .expect("entry vector");
+            assert_eq!(
+                &argv[5..10],
+                ["--run-dir", "/fixture/run", "--backend", backend, "--"]
+            );
+        }
+    }
     /// ´test:unit:mail-mount-roots-refuse-peer-source-and-read-only-access´
     #[test]
     fn mail_mount_roots_refuse_peer_source_and_read_only_access() {
