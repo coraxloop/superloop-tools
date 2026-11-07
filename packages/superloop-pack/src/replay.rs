@@ -1531,7 +1531,10 @@ fn plan_trees(
 
 fn projection_refusal(ordinal: usize, error: &ReplayError) -> ReplayError {
     let reason = error.0.strip_prefix("cut refused: ").unwrap_or(&error.0);
-    if reason.starts_with("citation-sites linter refused; diagnostic scratch=") {
+    if reason.starts_with("citation-sites linter refused; diagnostic scratch=")
+        || (reason.starts_with("citation-sites linter timed out after ")
+            && reason.contains(" s; diagnostic scratch="))
+    {
         return refuse(format!("source ordinal {ordinal}: {reason}"));
     }
     if [
@@ -1696,6 +1699,25 @@ mod tests {
             let mut changed = report.clone();
             *changed.pointer_mut(pointer).expect("fixture field") = replacement;
             assert!(!accepts(changed), "{pointer}");
+        }
+    }
+
+    /// Replay keeps the reason and scratch path of each citation refusal retaining diagnostics.
+    ///
+    /// # Panics
+    /// Panics only if replay collapses a citation refusal that names retained diagnostics.
+    /// ´test:unit:projection-refusal-names-retained-citation-diagnostics´
+    #[test]
+    fn projection_refusal_names_retained_citation_diagnostics() {
+        for reason in [
+            "citation-sites linter refused; diagnostic scratch=/retained",
+            "citation-sites linter timed out after 120 s; diagnostic scratch=/retained",
+        ] {
+            let error = super::ReplayError(format!("cut refused: {reason}"), None);
+            assert_eq!(
+                super::projection_refusal(3, &error).0,
+                format!("source ordinal 3: {reason}")
+            );
         }
     }
 }

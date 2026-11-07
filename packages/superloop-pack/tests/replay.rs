@@ -1608,6 +1608,47 @@ fn cut_route_refuses_malformed_json() {
     cut_route_refusal(&fixture, Some(&linter), "invalid citation-sites JSON");
 }
 
+/// A hung citation executable refuses at the production deadline without publication.
+///
+/// # Panics
+/// Panics only if fixture IO fails, the bound is outlived, or diagnostics or output change.
+/// ´test:integration:cut-route-refuses-a-hung-linter´
+#[test]
+fn cut_route_refuses_a_hung_linter() {
+    let fixture = Fixture::new();
+    let observed = citation_probe(&fixture);
+    let linter = citation_transport(&fixture, &observed, 0);
+    let script = fs::read_to_string(&linter).expect("transport script");
+    fs::write(&linter, script.replace("exit 0\n", "exec /bin/sleep 300\n"))
+        .expect("hung transport");
+    let started = std::time::Instant::now();
+    let report = cut_route_refusal(
+        &fixture,
+        Some(&linter),
+        "citation-sites linter timed out after 120 s",
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(180),
+        "deadline did not bound invocation"
+    );
+    let diagnostic = report
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("cut outcome=")
+                .and_then(|line| line.split_once("diagnostic scratch=").map(|(_, path)| path))
+        })
+        .expect("retained diagnostics");
+    assert!(Path::new(diagnostic).starts_with(&fixture.scratch), "{report}");
+    assert_eq!(
+        fs::read_to_string(Path::new(diagnostic).join("citation-sites.stdout")).expect("stdout"),
+        format!("{}\n", observed.trim_end())
+    );
+    assert_eq!(
+        fs::read_to_string(Path::new(diagnostic).join("citation-sites.stderr")).expect("stderr"),
+        "fixture-linter-stderr\n"
+    );
+}
+
 /// Unknown citation namespaces and versions refuse even when the executable returns valid JSON.
 ///
 /// # Panics

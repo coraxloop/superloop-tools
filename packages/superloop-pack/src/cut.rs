@@ -7,9 +7,14 @@ use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
 
 use crate::{resolve_tag, run_git, validate_checkout, validate_repository, write_terminal_report};
 use superloop_cli_common::public_set::{Manifest, safe_path};
@@ -774,6 +779,87 @@ enum CitationSurface {
     Unpublished,
 }
 
+#[derive(Debug)]
+struct CitationFailure {
+    reason: String,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn citation_output(mut child: Child, bound: Duration) -> Result<Output, CitationFailure> {
+    let started = Instant::now();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = (|| {
+        let mut out = child.stdout.take().ok_or("citation stdout unavailable")?;
+        let mut err = child.stderr.take().ok_or("citation stderr unavailable")?;
+        fcntl(&out, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+            .map_err(|_| "citation stdout could not be made nonblocking")?;
+        fcntl(&err, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+            .map_err(|_| "citation stderr could not be made nonblocking")?;
+        let mut out_done = false;
+        let mut err_done = false;
+        loop {
+            if started.elapsed() >= bound {
+                return Err(format!(
+                    "citation-sites linter timed out after {} s",
+                    bound.as_secs_f64()
+                ));
+            }
+            let previous = stdout.len() + stderr.len();
+            out_done |= citation_chunk(&mut out, &mut stdout)?;
+            err_done |= citation_chunk(&mut err, &mut stderr)?;
+            // Keep the leader unreaped until both streams close: its PID continues
+            // to identify this process group if a descendant holds a pipe open.
+            if out_done
+                && err_done
+                && let Some(status) = child.try_wait().map_err(|_| "citation wait failed")?
+            {
+                return Ok(status);
+            }
+            if previous == stdout.len() + stderr.len() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    })();
+    match result {
+        Ok(status) => Ok(Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        Err(reason) => {
+            let _killed = killpg(Pid::from_raw(child.id().cast_signed()), Signal::SIGKILL);
+            let _reaped = child.wait();
+            Err(CitationFailure {
+                reason,
+                stdout,
+                stderr,
+            })
+        }
+    }
+}
+
+fn citation_chunk(reader: &mut impl io::Read, bytes: &mut Vec<u8>) -> Result<bool, String> {
+    let mut chunk = [0; 8192];
+    match reader.read(&mut chunk) {
+        Ok(0) => Ok(true),
+        Ok(count) => {
+            bytes.extend_from_slice(&chunk[..count]);
+            Ok(false)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(_) => Err("citation stream read failed".into()),
+    }
+}
+
 fn resolved_sites(
     root: &Path,
     commit: &str,
@@ -783,22 +869,36 @@ fn resolved_sites(
     let linter =
         fs::canonicalize(linter).map_err(|_| refuse("unreadable citation-sites linter"))?;
     let scratch = historical_tree(root, commit)?;
-    let output = Command::new(linter)
+    let child = Command::new(linter)
         .arg("citation-sites")
         .arg("--root")
         .arg(scratch.path())
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
         .map_err(|_| refuse("citation-sites linter could not run"))?;
-    if !output.status.success() {
-        let retained = scratch.keep();
-        fs::write(retained.join("citation-sites.stdout"), &output.stdout)?;
-        fs::write(retained.join("citation-sites.stderr"), &output.stderr)?;
-        return Err(refuse(&format!(
-            "citation-sites linter refused; diagnostic scratch={}",
-            retained.display()
-        )));
-    }
+    let output = match citation_output(child, Duration::from_secs(120)) {
+        Ok(output) if output.status.success() => output,
+        result => {
+            let (reason, stdout, stderr) = match result {
+                Ok(output) => (
+                    "citation-sites linter refused".to_owned(),
+                    output.stdout,
+                    output.stderr,
+                ),
+                Err(failure) => (failure.reason, failure.stdout, failure.stderr),
+            };
+            let retained = scratch.keep();
+            fs::write(retained.join("citation-sites.stdout"), stdout)?;
+            fs::write(retained.join("citation-sites.stderr"), stderr)?;
+            return Err(refuse(&format!(
+                "{reason}; diagnostic scratch={}",
+                retained.display()
+            )));
+        }
+    };
     let report: CitationSites = serde_json::from_slice(&output.stdout)
         .map_err(|_| refuse("invalid citation-sites JSON"))?;
     if report.namespace != "class.linter.citation-sites" || report.version != [1, 0, 0] {
@@ -1140,6 +1240,96 @@ pub fn write_cut_report<W: io::Write>(
 
 #[cfg(test)]
 mod guard_tests {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    fn citation_fixture(script: &str) -> (tempfile::TempDir, Child) {
+        let root = tempfile::tempdir().expect("fixture");
+        let child = Command::new("/bin/sh")
+            .args(["-c", script])
+            .env("READY", root.path().join("ready"))
+            .env("PIDFILE", root.path().join("pid"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect("fixture process");
+        let started = Instant::now();
+        while !root.path().join("ready").exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "fixture did not arm"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (root, child)
+    }
+
+    /// Citation deadlines kill silent leaders and descendants retaining inherited pipes.
+    ///
+    /// # Panics
+    /// Panics only if fixture IO fails or a timed-out process remains running.
+    /// ´test:unit:citation-deadline-reaps-the-invocation-group´
+    #[test]
+    fn citation_deadline_reaps_the_invocation_group() {
+        for script in [
+            "printf out; printf err >&2; printf '%s' $$ > \"$PIDFILE\"; printf ready > \"$READY\"; exec /bin/sleep 30",
+            "printf out; printf err >&2; /bin/sleep 30 & printf '%s' $! > \"$PIDFILE\"; printf ready > \"$READY\"; exit 0",
+        ] {
+            let (root, child) = citation_fixture(script);
+            let pid = std::fs::read_to_string(root.path().join("pid")).expect("fixture pid");
+            let started = Instant::now();
+            let failure =
+                super::citation_output(child, Duration::from_millis(100)).expect_err("deadline");
+            assert_eq!(
+                failure.reason,
+                "citation-sites linter timed out after 0.1 s"
+            );
+            assert_eq!(failure.stdout, b"out");
+            assert_eq!(failure.stderr, b"err");
+            assert!(started.elapsed() < Duration::from_secs(10));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let state = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+                if state
+                    .as_ref()
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                    || state.as_ref().is_ok_and(|text| {
+                        text.rsplit_once(") ")
+                            .is_some_and(|(_, fields)| fields.starts_with('Z'))
+                    })
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture process still running: {state:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// Both citation streams drain beyond pipe capacity before a successful exit is collected.
+    ///
+    /// # Panics
+    /// Panics only if fixture IO fails or successful stream bytes change.
+    /// ´test:unit:citation-collection-drains-both-streams´
+    #[test]
+    fn citation_collection_drains_both_streams() {
+        let (root, child) = citation_fixture(
+            "printf ready > \"$READY\"; i=0; while [ $i -lt 131072 ]; do printf x; printf y >&2; i=$((i+1)); done",
+        );
+        let output =
+            super::citation_output(child, Duration::from_secs(10)).expect("successful capture");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, vec![b'x'; 131_072]);
+        assert_eq!(output.stderr, vec![b'y'; 131_072]);
+        drop(root);
+    }
+
     use super::{cut_burn_register, guard_unpublished};
 
     /// Message overrides refuse blank text and embedded NUL bytes.
