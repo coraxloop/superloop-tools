@@ -112,7 +112,8 @@ fn pins(
                 directory_policy_for(operation, held, PURPOSES[slot])?,
             )
             .map_err(refusal)?;
-        let expected = fstat(held).map_err(|e| io_for(operation, PURPOSES[slot], "held-stat", e))?;
+        let expected =
+            fstat(held).map_err(|e| io_for(operation, PURPOSES[slot], "held-stat", e))?;
         if (pin.record().device, pin.record().inode) != (expected.st_dev, expected.st_ino) {
             return Err(named_for(operation, "anchor-identity", PURPOSES[slot]));
         }
