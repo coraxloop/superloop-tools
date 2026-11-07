@@ -838,10 +838,21 @@ fn output_ready(request: &ReplayRequest<'_>, expected: &str) -> Result<PathBuf, 
 }
 
 fn read_projection(root: &Path, oid: &str) -> Result<Projection, ReplayError> {
-    cut::tree_entries(root, oid)?
+    let entries = cut::tree_entries(root, oid)?;
+    let contents = cut::blobs(root, entries.values().map(|(_, object)| object), true)?;
+    entries
         .into_iter()
         .map(|(path, (mode, object))| {
-            Ok((path, (mode, git(root, &["cat-file", "blob", &object])?)))
+            Ok((
+                path,
+                (
+                    mode,
+                    contents
+                        .get(&object)
+                        .ok_or_else(|| refuse("missing projected blob"))?
+                        .clone(),
+                ),
+            ))
         })
         .collect()
 }
@@ -1575,6 +1586,13 @@ fn projection_refusal(ordinal: usize, error: &ReplayError) -> ReplayError {
         "unpublished site has no path class",
         "owner snapshot envelope missing",
         "owners must be UTF-8",
+        "missing batch blob header",
+        "invalid batch blob header",
+        "invalid batch blob type",
+        "unexpected batch blob identity",
+        "invalid batch blob size",
+        "truncated batch blob",
+        "unexpected batch blob bytes",
     ]
     .contains(&reason)
     {
@@ -1712,6 +1730,32 @@ mod tests {
         for reason in [
             "citation-sites linter refused; diagnostic scratch=/retained",
             "citation-sites linter timed out after 120 s; diagnostic scratch=/retained",
+        ] {
+            let error = super::ReplayError(format!("cut refused: {reason}"), None);
+            assert_eq!(
+                super::projection_refusal(3, &error).0,
+                format!("source ordinal 3: {reason}")
+            );
+        }
+    }
+
+    /// Replay names each batched blob-read refusal its projection can raise.
+    ///
+    /// # Panics
+    /// Panics only if replay collapses a batched blob-read refusal to a bare projection refusal.
+    /// ´test:unit:projection-refusal-names-batched-blob-reads´
+    #[test]
+    fn projection_refusal_names_batched_blob_reads() {
+        for reason in [
+            "git operation failed",
+            "invalid git response",
+            "missing batch blob header",
+            "invalid batch blob header",
+            "invalid batch blob type",
+            "unexpected batch blob identity",
+            "invalid batch blob size",
+            "truncated batch blob",
+            "unexpected batch blob bytes",
         ] {
             let error = super::ReplayError(format!("cut refused: {reason}"), None);
             assert_eq!(

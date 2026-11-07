@@ -280,6 +280,85 @@ fn report(output: Output) -> serde_json::Value {
     serde_json::from_str(text.lines().next().expect("report line")).expect("JSON")
 }
 
+/// Replay projects a large committed tree with bounded Git batches and unchanged blob identities.
+///
+/// # Panics
+/// Panics only if fixture IO fails, replay changes blobs or its Git calls scale per file.
+/// ´test:integration:replay-batches-projection-git-operations´
+#[test]
+fn replay_batches_projection_git_operations() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.source.join("public/bulk")).expect("bulk directory");
+    for index in 0..128 {
+        fs::write(
+            fixture.source.join(format!("public/bulk/{index:03}.bin")),
+            [0, index, 255, b'\n'],
+        )
+        .expect("binary source");
+    }
+    fixture.commit("public/file.txt", "bulk projection\n", "Bulk files\n");
+    let original = line(&fixture.out, &["rev-parse", "HEAD:public/file.txt"]);
+    let replacement = fixture.scratch.join("replacement-blob");
+    fs::write(&replacement, b"unrelated replacement bytes").expect("replacement bytes");
+    let replacement_oid = line(
+        &fixture.out,
+        &[
+            "hash-object",
+            "-w",
+            replacement.to_str().expect("fixture path"),
+        ],
+    );
+    git(&fixture.out, &["replace", &original, &replacement_oid]);
+    let trace = fixture.scratch.join("git-trace.json");
+    let result = report(
+        fixture
+            .replay(&fixture.out)
+            .env("GIT_TRACE2_EVENT", &trace)
+            .output()
+            .expect("traced replay"),
+    );
+    assert_eq!(result["mapping"].as_array().expect("mapping").len(), 1);
+    assert_eq!(
+        git(
+            &fixture.out,
+            &["ls-tree", "-r", "-z", "HEAD", "--", "public/bulk"]
+        ),
+        git(
+            &fixture.source,
+            &["ls-tree", "-r", "-z", "HEAD", "--", "public/bulk"]
+        )
+    );
+    let starts: Vec<Vec<String>> = fs::read_to_string(trace)
+        .expect("trace")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("trace JSON"))
+        .filter(|row| row["event"] == "start")
+        .map(|row| {
+            row["argv"]
+                .as_array()
+                .expect("argv")
+                .iter()
+                .map(|v| v.as_str().expect("argument").to_owned())
+                .collect()
+        })
+        .collect();
+    let count = |op: &str| {
+        starts
+            .iter()
+            .filter(|args| args.iter().any(|arg| arg == op))
+            .count()
+    };
+    assert!((1..16).contains(&count("hash-object")));
+    assert!((1..16).contains(&count("update-index")));
+    assert_eq!(
+        starts
+            .iter()
+            .filter(|args| args.windows(2).any(|pair| pair == ["cat-file", "blob"]))
+            .count(),
+        0
+    );
+}
+
 /// Original metadata survives a deterministic replay and excluded-only commits skip.
 ///
 /// # Panics

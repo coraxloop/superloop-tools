@@ -56,6 +56,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Cut and replay projection batch blob reads, object hashing and index updates per tree instead of spawning Git per file, preserving binary contents, path spelling, symlinks and modes; real Git traces pin the bounded process counts (``prob:pack:replay-projection-spawns-git-per-file``).
+
 - Anchor refusals retain the caller operation, failed custody or transport check and configuration parser cause; writable ancestors refuse as mode failures and system failures retain their errno (``req:workercontracts:namespace-anchor-refusals``).
 
 - Mail startup carries verified configuration and executable descriptors through namespace entry, reads settings, ledger and registry beneath the held configuration, and preserves named capability and identity-drop refusals; scan-time configuration reads retain that anchor (``req:workercontracts:namespace-anchor-acceptance``).

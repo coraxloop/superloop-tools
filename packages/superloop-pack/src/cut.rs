@@ -695,11 +695,22 @@ pub fn project_tree_with_policy(
             .entry(path.clone())
             .or_insert_with(|| ("100644".into(), String::new()));
     }
+    let contents = blobs(
+        root,
+        selected
+            .iter()
+            .filter(|(path, _)| !generated.contains_key(*path))
+            .map(|(_, (_, object))| object),
+        false,
+    )?;
     let mut projected = BTreeMap::new();
     for (path, (mode, object)) in &selected {
         let content = match generated.get(path) {
             Some(content) => content.clone(),
-            None => git(root, &["cat-file", "blob", object])?,
+            None => contents
+                .get(object)
+                .ok_or_else(|| refuse("missing selected blob"))?
+                .clone(),
         };
         let content = if Path::new(path) == manifest_path {
             public_manifest(policy_bytes.unwrap_or(&content), selected.keys())?
@@ -711,19 +722,137 @@ pub fn project_tree_with_policy(
     Ok(projected)
 }
 
+// A regular-file input avoids a pipe deadlock when Git emits output while reading
+// a large request. Command::output drains both output streams concurrently.
+fn batch_git(root: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, CutError> {
+    batch_git_command(crate::git_command(root), args, input)
+}
+
+fn batch_git_command(
+    mut command: Command,
+    args: &[&str],
+    input: &[u8],
+) -> Result<Vec<u8>, CutError> {
+    use std::io::{Seek as _, Write as _};
+    let mut request = tempfile::tempfile()?;
+    request.write_all(input)?;
+    request.rewind()?;
+    let output = command
+        .args(["-c", "core.hooksPath=/dev/null"])
+        .args(args)
+        .stdin(request)
+        .output()?;
+    if !output.status.success() {
+        return Err(refuse("git operation failed"));
+    }
+    Ok(output.stdout)
+}
+
+pub fn blobs<'a>(
+    root: &Path,
+    objects: impl Iterator<Item = &'a String>,
+    ignore_replacements: bool,
+) -> Result<BTreeMap<String, Vec<u8>>, CutError> {
+    let objects: std::collections::BTreeSet<_> = objects.collect();
+    if objects.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut request = String::new();
+    for object in &objects {
+        request.push_str(object);
+        request.push('\n');
+    }
+    let mut command = crate::git_command(root);
+    if ignore_replacements {
+        command
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_NO_REPLACE_OBJECTS", "1");
+    }
+    let output = batch_git_command(command, &["cat-file", "--batch"], request.as_bytes())?;
+    let mut remaining = output.as_slice();
+    let mut result = BTreeMap::new();
+    for object in objects {
+        let end = remaining
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(|| refuse("missing batch blob header"))?;
+        let header = std::str::from_utf8(&remaining[..end])
+            .map_err(|_| refuse("invalid batch blob header"))?;
+        let fields: Vec<_> = header.split(' ').collect();
+        let [actual, "blob", size] = fields.as_slice() else {
+            return Err(refuse("invalid batch blob type"));
+        };
+        if *actual != object {
+            return Err(refuse("unexpected batch blob identity"));
+        }
+        let size: usize = size
+            .parse()
+            .map_err(|_| refuse("invalid batch blob size"))?;
+        remaining = &remaining[end + 1..];
+        if remaining.get(size) != Some(&b'\n') {
+            return Err(refuse("truncated batch blob"));
+        }
+        result.insert(object.clone(), remaining[..size].to_vec());
+        remaining = &remaining[size + 1..];
+    }
+    if !remaining.is_empty() {
+        return Err(refuse("unexpected batch blob bytes"));
+    }
+    Ok(result)
+}
+
+fn quoted_git_path(path: &str) -> String {
+    use std::fmt::Write as _;
+    let mut quoted = String::from("\"");
+    for byte in path.bytes() {
+        match byte {
+            b'"' => quoted.push_str("\\\""),
+            b'\\' => quoted.push_str("\\\\"),
+            32..=126 => quoted.push(char::from(byte)),
+            _ => write!(quoted, "\\{byte:03o}").expect("writing to a string"),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 pub fn write_projection(stage: &Path, projected: &Projection) -> Result<(usize, u64), CutError> {
+    use std::io::Write as _;
+    if projected.is_empty() {
+        return Ok((0, 0));
+    }
     let mut bytes = 0;
-    for (path, (mode, content)) in projected {
+    let mut paths = String::new();
+    for (path, (_, content)) in projected {
         bytes += content.len() as u64;
         let target = stage.join(path);
         fs::create_dir_all(crate::usable_parent(&target))?;
         // Hash regular staging bytes without Git filters, then restore link/mode semantics.
         fs::write(&target, content)?;
-        let object = line(stage, &["hash-object", "-w", "--no-filters", "--", path])?;
-        git(
-            stage,
-            &["update-index", "--add", "--cacheinfo", mode, &object, path],
-        )?;
+        paths.push_str(&quoted_git_path(path));
+        paths.push('\n');
+    }
+    let hashes = batch_git(
+        stage,
+        &["hash-object", "-w", "--no-filters", "--stdin-paths"],
+        paths.as_bytes(),
+    )?;
+    let hashes = std::str::from_utf8(&hashes).map_err(|_| refuse("invalid git response"))?;
+    let hashes: Vec<_> = hashes.lines().collect();
+    if hashes.len() != projected.len()
+        || hashes.iter().any(|hash| {
+            !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(refuse("invalid git response"));
+    }
+    let mut index = Vec::new();
+    for ((path, (mode, _)), object) in projected.iter().zip(hashes) {
+        write!(index, "{mode} {object}\t{path}\0")?;
+    }
+    batch_git(stage, &["update-index", "-z", "--index-info"], &index)?;
+    for (path, (mode, content)) in projected {
+        let target = stage.join(path);
         if mode == "120000" {
             fs::remove_file(&target)?;
             symlink(std::ffi::OsStr::from_bytes(content), &target)?;
@@ -1185,12 +1314,26 @@ fn historical_tree(root: &Path, commit: &str) -> Result<tempfile::TempDir, CutEr
         .prefix("pack-citations-")
         .tempdir()?;
     git(scratch.path(), &["init", "-q", "--template="])?;
+    let entries = tree_entries(root, commit)?;
+    if entries
+        .values()
+        .any(|(mode, _)| !matches!(mode.as_str(), "100644" | "100755" | "120000"))
+    {
+        return Err(refuse("unsupported historical tree entry"));
+    }
+    let contents = blobs(root, entries.values().map(|(_, object)| object), false)?;
     let mut projected = Projection::new();
-    for (path, (mode, object)) in tree_entries(root, commit)? {
-        if !matches!(mode.as_str(), "100644" | "100755" | "120000") {
-            return Err(refuse("unsupported historical tree entry"));
-        }
-        projected.insert(path, (mode, git(root, &["cat-file", "blob", &object])?));
+    for (path, (mode, object)) in entries {
+        projected.insert(
+            path,
+            (
+                mode,
+                contents
+                    .get(&object)
+                    .ok_or_else(|| refuse("missing historical blob"))?
+                    .clone(),
+            ),
+        );
     }
     write_projection(scratch.path(), &projected)?;
     Ok(scratch)
