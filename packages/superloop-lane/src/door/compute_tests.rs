@@ -853,6 +853,50 @@ fn door_compute_gates_preserve_lock_placement_and_shape() {
     }
 }
 
+/// ´test:unit:door-compute-test-no-run-retains-exact-argv´
+#[test]
+fn door_compute_test_no_run_retains_exact_argv() {
+    for tail in [
+        "cargo test -p fixture --locked --no-run",
+        "cargo --locked test -p fixture --no-default-features --no-run",
+        "cargo test -p fixture --locked --all-features --no-run",
+        "cargo test --locked --test integration --no-run",
+        "cargo test --locked --bin fixture --no-run",
+    ] {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+        let (reply, _, _) = compute_call(&socket, &format!("/opt/fixture/bin/report {tail}"));
+        server.join().expect("server").expect("service");
+        assert_eq!(reply["reason"], "door-complete", "{tail}: {reply}");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let records = fixture.store().list_run("R").expect("record reader");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].value()["effect"]["compute"]["words"],
+            json!(tail.split(' ').collect::<Vec<_>>())
+        );
+    }
+}
+
+/// ´test:unit:door-compute-test-no-run-refuses-other-verbs-and-forwarding´
+#[test]
+fn door_compute_test_no_run_refuses_other_verbs_and_forwarding() {
+    for tail in [
+        "cargo check --locked --no-run",
+        "cargo clippy --locked --no-run -- -D warnings",
+        "cargo doc --locked --no-run",
+        "cargo run --locked --no-run",
+        "cargo test --locked --test integration -- --no-run",
+        "cargo test --locked --test integration -- filter --no-run",
+    ] {
+        assert_compute_preflight(
+            &format!("/opt/fixture/bin/report {tail}"),
+            "door-compute-command-refusal",
+        );
+    }
+}
+
 /// ´test:unit:door-compute-test-filters-retain-exact-argv´
 #[test]
 fn door_compute_test_filters_retain_exact_argv() {

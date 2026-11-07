@@ -100,7 +100,7 @@ fn cargo_words(verb: &str, rest: &[&str], mut locked: bool) -> Result<bool, &'st
                 || (matches!(verb, "run" | "clippy" | "test") && *option == "--all-features")
                 || (verb == "clippy" && *option == "--all-targets")
                 || (verb == "doc" && *option == "--no-deps")
-                || (verb == "test" && *option == "--doc");
+                || (verb == "test" && matches!(*option, "--doc" | "--no-run"));
         }
     }
     if !locked {
