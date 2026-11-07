@@ -1282,6 +1282,82 @@ fn declare_linter(source: &Path) {
     fs::write(declaration.join("policy-public-pack-values.toml"), "namespace = \"class.linter.policy.public-pack.values-absent\"\nversion = [1, 0, 0]\n[owners.PROJECTA]\nactivation = \"public-pack\"\nsurface = \"*VCHAR\"\nvalues = \"local/burn-register.toml\"\nexclude = '%s\"local\" [ \"/\" *VCHAR ]'\n").expect("burn policy");
 }
 
+/// Register planning and owner rewriting use tag blobs despite worktree changes after preflight.
+///
+/// # Panics
+/// Panics only if fixture IO fails or worktree bytes alter the committed public projection.
+/// ´test:integration:register-planning-uses-tag-blobs-after-preflight´
+#[test]
+fn register_planning_uses_tag_blobs_after_preflight() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.source.join("hidden")).expect("hidden definitions");
+    let manifest = MANIFEST.replace("reason = \"Private fixture.\"}]", "reason = \"Private fixture.\"}, {pattern = \"hidden/\", reason = \"Hidden fixture declarations.\"}]");
+    fixture.commit(
+        "hidden/definition.md",
+        "# Hidden · `sec:fixture:hidden`\n",
+        "Hidden definition\n",
+    );
+    fixture.commit(
+        "docs/citation.md",
+        "# Public · `sec:fixture:public`\n\nSee (`sec:fixture:hidden`).\n",
+        "Public citation\n",
+    );
+    fixture.commit(
+        "public-set.toml",
+        &manifest,
+        "Classify hidden definitions\n",
+    );
+    let control = fixture.scratch.join("tag-control");
+    let result = manifest_cut(&fixture, &control);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    let register = "docs/public/unpublished-labels.toml";
+    assert!(
+        fs::read_to_string(control.join(register))
+            .expect("control register")
+            .contains("sec:fixture:hidden")
+    );
+    let wrapper = fixture.scratch.join("change-worktree");
+    fs::write(&wrapper, "#!/bin/sh\n[ \"$3\" != \"$SOURCE_ROOT\" ] || exit 90\nprintf 'invalid [' > \"$SOURCE_ROOT/.linter/owners.toml\"\nprintf changed > \"$SOURCE_ROOT/hidden/definition.md\"\nprintf changed > \"$SOURCE_ROOT/docs/citation.md\"\nexec \"$REAL_LINTER\" \"$@\"\n").expect("wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("wrapper mode");
+    let out = fixture.scratch.join("tag-projection");
+    let output = manifest_cut_command(&fixture, &out)
+        .arg("--linter")
+        .arg(&wrapper)
+        .env("SOURCE_ROOT", &fixture.source)
+        .env(
+            "REAL_LINTER",
+            std::env::var_os("PUBLIC_PACK_TEST_LINTER").expect("real linter"),
+        )
+        .output()
+        .expect("cut during worktree mutation");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.source.join(".linter/owners.toml")).expect("mutated source"),
+        "invalid ["
+    );
+    assert_eq!(
+        fs::read(out.join(register)).expect("register"),
+        fs::read(control.join(register)).expect("control register")
+    );
+    assert_eq!(
+        fs::read(out.join(".linter/owners.toml")).expect("snapshot"),
+        fs::read(control.join(".linter/owners.toml")).expect("control snapshot")
+    );
+    assert_eq!(
+        line(&out, &["rev-parse", "HEAD^{tree}"]),
+        line(&control, &["rev-parse", "HEAD^{tree}"])
+    );
+}
+
 /// The manifest chooses the generated register destination and the snapshot follows it.
 ///
 /// # Panics
