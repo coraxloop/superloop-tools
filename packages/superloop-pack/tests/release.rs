@@ -351,6 +351,37 @@ fn cargo_version_precedence() {
     refusal(root, "0.2.0", &[], "reason=version ");
 }
 
+/// Every release mode refuses a non-string public version even when Cargo supplies the version.
+///
+/// # Panics
+/// Panics only if fixture IO fails or version admission changes refs, objects or the worktree.
+/// ´test:integration:cargo-version-refuses-non-string-public-declarations´
+#[test]
+fn cargo_version_refuses_non_string_public_declarations() {
+    let fixture = fixture("0.1.1");
+    let root = fixture.path();
+    for value in ["2", "true", "[]", "{}"] {
+        fs::write(
+            root.join("public-set.toml"),
+            format!("[public]\nname = 'fixture-tools'\nversion = {value}\n"),
+        )
+        .expect("manifest");
+        commit(root, "non-string manifest version");
+        let worktree = git(root, &["status", "--porcelain=v1", "--ignored"]);
+        for mode in [vec!["--check"], vec!["--dry-run"], vec![]] {
+            let report = refusal(root, "0.1.1", &mode, "reason=version ");
+            assert!(
+                report.contains("public-set.toml:public.version must be a string"),
+                "{report}"
+            );
+            assert_eq!(
+                git(root, &["status", "--porcelain=v1", "--ignored"]),
+                worktree
+            );
+        }
+    }
+}
+
 /// A second release cannot create a duplicate merge.
 ///
 /// # Panics
