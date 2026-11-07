@@ -64,3 +64,7 @@ path = "tests/driver_status/subprocess_contract.rs"
 [[test]]
 name = "driver_follow_subprocess_contract"
 path = "tests/driver_follow/subprocess_contract.rs"
+
+[[test]]
+name = "native_creation_custody"
+harness = false

@@ -928,3 +928,48 @@ fn anchor_descriptor_system_failures_retain_their_cause() {
         );
     }
 }
+
+/// # Panics
+/// Panics if retaining a private source reopens its name or accepts a widened file.
+/// ´claim:loophome:retained-private-source-binds-the-open-inode´
+/// ´test:unit:retained-private-source-binds-the-open-inode´
+#[test]
+fn retained_private_source_binds_the_open_inode() {
+    use std::io::Read as _;
+    let fixture = Fixture::new();
+    let path = fixture.file("source", "held bytes");
+    let file: OwnedFd = fs::File::open(&path).expect("source").into();
+    let verifier = HostVerifier::current().expect("host map");
+    let original = fstat(&file).expect("source identity");
+    fs::remove_file(&path).expect("unlink old name");
+    fixture.file("source", "replacement");
+    let pin = verifier
+        .retain_private_file(&file, "rotation-source", 0)
+        .expect("held source");
+    assert_eq!(
+        (pin.record().device, pin.record().inode),
+        (original.st_dev, original.st_ino)
+    );
+    let mut bytes = String::new();
+    fs::File::from(pin.into_fd())
+        .read_to_string(&mut bytes)
+        .expect("held read");
+    assert_eq!(bytes, "held bytes");
+    nix::sys::stat::fchmod(&file, nix::sys::stat::Mode::from_bits_truncate(0o640))
+        .expect("widen mode");
+    assert_eq!(
+        verifier
+            .retain_private_file(&file, "rotation-source", 0)
+            .expect_err("mode refusal")
+            .kind,
+        "anchor-mode"
+    );
+    let directory = fs::File::open(&fixture.0).expect("directory").into();
+    assert_eq!(
+        verifier
+            .retain_private_file(&directory, "rotation-source", 0)
+            .expect_err("kind refusal")
+            .kind,
+        "anchor-kind"
+    );
+}

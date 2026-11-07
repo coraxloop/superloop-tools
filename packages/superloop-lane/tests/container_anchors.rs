@@ -204,74 +204,124 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    for case in [
-        "valid",
-        "operation",
-        "identity",
-        "missing",
-        "extra-argument",
-        "owner",
-        "mode",
-    ] {
-        let mut request = superloop_lane::runtime_entry::command(
-            Path::new("/usr/bin/podman"),
-            &argv,
-            home,
-            &held_home,
-            &home.join("runs"),
-            &held_runs,
-        )
-        .expect("production composer");
-        if case == "missing" {
-            request.descriptors = loop_home::CommandDescriptors::default();
-        }
-        if case == "operation" || case == "identity" {
-            let last = request.argv.last_mut().expect("manifest");
-            let mut manifest: Manifest = serde_json::from_str(last).expect("manifest");
-            if case == "operation" {
-                manifest.operation = "container-helper".into();
+    let source_path = home.join("rotation-source");
+    fs::write(&source_path, b"source").expect("source");
+    fs::set_permissions(&source_path, fs::Permissions::from_mode(0o600)).expect("source mode");
+    let held_source = fs::File::open(&source_path).expect("held source").into();
+    for entry in ["runtime", "creation", "rotation"] {
+        for case in [
+            "valid",
+            "operation",
+            "identity",
+            "missing",
+            "extra-argument",
+            "owner",
+            "mode",
+        ] {
+            let mut request = if entry == "runtime" {
+                superloop_lane::runtime_entry::command(
+                    Path::new("/usr/bin/podman"),
+                    &argv,
+                    home,
+                    &held_home,
+                    &home.join("runs"),
+                    &held_runs,
+                )
+                .expect("runtime composer")
             } else {
-                manifest.records[3].inode = manifest.records[3].inode.wrapping_add(1);
+                let mut native = vec![
+                    "unshare".into(),
+                    env!("CARGO_BIN_EXE_superloop-lane").into(),
+                    "_make-home".into(),
+                    "alpha".into(),
+                    "lane-a".into(),
+                    "--letter".into(),
+                    home.join("letter").to_str().expect("letter").into(),
+                    "--owner-home".into(),
+                    home.to_str().expect("home").into(),
+                    "--worker-uid".into(),
+                    "64010".into(),
+                    "--podman-bin".into(),
+                    "/usr/bin/podman".into(),
+                    "--model".into(),
+                    "model".into(),
+                    "--effort".into(),
+                    "high".into(),
+                    "--model-source".into(),
+                    "argument".into(),
+                    "--effort-source".into(),
+                    "argument".into(),
+                    "--door-scope".into(),
+                    "work".into(),
+                ];
+                if entry == "rotation" {
+                    native.extend(["--rotation-sha256".into(), "0".repeat(64)]);
+                }
+                superloop_lane::creation_entry::command(
+                    Path::new("/usr/bin/podman"),
+                    &native,
+                    (home, &held_home),
+                    (&home.join("runs"), &held_runs),
+                    (home, &held_home),
+                    (entry == "rotation").then_some(&held_source),
+                )
+                .expect("creation composer")
+            };
+            if case == "missing" {
+                request.descriptors = loop_home::CommandDescriptors::default();
             }
-            *last = serde_json::to_string(&manifest).expect("declaration");
-        }
-        if case == "extra-argument" {
-            // The private vector cannot append an undeclared argument to its complete frame.
-            request.argv.push("extra".into());
-        }
-        if case == "owner" {
-            set_private(0, 0o700);
-        }
-        if case == "mode" {
-            set_private(64000, 0o750);
-        }
-        let output = ProcessRunner.run(&request).expect("runtime entry");
-        if case == "owner" || case == "mode" {
-            set_private(64000, 0o700);
-        }
+            if case == "operation" || case == "identity" {
+                let last = request.argv.last_mut().expect("manifest");
+                let mut manifest: Manifest = serde_json::from_str(last).expect("manifest");
+                if case == "operation" {
+                    manifest.operation = "container-helper".into();
+                } else {
+                    manifest.records[3].inode = manifest.records[3].inode.wrapping_add(1);
+                }
+                *last = serde_json::to_string(&manifest).expect("declaration");
+            }
+            if case == "extra-argument" {
+                // The private vector cannot append an undeclared argument to its complete frame.
+                request.argv.push("extra".into());
+            }
+            if case == "owner" {
+                set_private(0, 0o700);
+            }
+            if case == "mode" {
+                set_private(64000, 0o750);
+            }
+            let output = ProcessRunner.run(&request).expect("runtime entry");
+            if case == "owner" || case == "mode" {
+                set_private(64000, 0o700);
+            }
 
-        assert_ne!(output.status, 0, "fixture has no installed plan");
-        let report = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        match case {
-            "valid" => assert!(
-                !report.contains("anchor-")
-                    && report.contains("unsafe-path:")
-                    && report.contains(".config/loops/alpha"),
-                "validated runtime reaches settings: {report}"
-            ),
-            "operation" => assert!(report.contains("anchor-declaration"), "{report}"),
-            "identity" => assert!(report.contains("anchor-identity"), "{report}"),
-            "owner" => assert!(report.contains("anchor-owner"), "{report}"),
-            "mode" => assert!(report.contains("anchor-mode"), "{report}"),
-            "missing" => assert!(report.contains("anchor-transport"), "{report}"),
-            _ => assert!(
-                report.contains("anchor-declaration: operation=prepare-runtime purpose=vector"),
-                "{report}"
-            ),
+            assert_ne!(output.status, 0, "fixture has no installed plan");
+            let report = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            match case {
+                "valid" => assert!(
+                    !report.contains("anchor-")
+                        && report.contains("unsafe-path:")
+                        && report.contains(".config/loops/alpha"),
+                    "validated runtime reaches settings: {report}"
+                ),
+                "operation" => assert!(report.contains("anchor-declaration"), "{report}"),
+                "identity" => assert!(report.contains("anchor-identity"), "{report}"),
+                "owner" => assert!(report.contains("anchor-owner"), "{report}"),
+                "mode" => assert!(report.contains("anchor-mode"), "{report}"),
+                "missing" => assert!(report.contains("anchor-transport"), "{report}"),
+                _ => assert!(
+                    report.contains(if entry == "runtime" {
+                        "anchor-declaration: operation=prepare-runtime purpose=vector"
+                    } else {
+                        "anchor-declaration: operation=make-home purpose=vector"
+                    }),
+                    "{report}"
+                ),
+            }
         }
     }
     set_private(0, 0o700);

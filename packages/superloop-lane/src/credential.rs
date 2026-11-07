@@ -48,11 +48,34 @@ fn now_seconds() -> Result<u64, LaneError> {
         .map_err(|error| failure("credential-clock", error.to_string()))
 }
 
+fn credential_spawn_error(
+    program: &Path,
+    kind: &'static str,
+    message: &str,
+    error: &std::io::Error,
+) -> LaneError {
+    let held = crate::container_entry::spawn_error(program, kind, error);
+    if held.kind == "anchor-exec" {
+        held
+    } else {
+        failure(kind, message)
+    }
+}
+
 fn utc_timestamp() -> Result<String, LaneError> {
-    let output = Command::new("/usr/bin/date")
-        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-        .output()
-        .map_err(|_| failure("credential-clock", "UTC date program could not start"))?;
+    let program = Path::new("/usr/bin/date");
+    let argv = ["-u".into(), "+%Y-%m-%dT%H:%M:%SZ".into()];
+    let mut command = Command::new("/usr/bin/date");
+    command.args(&argv);
+    crate::container_entry::configure(&mut command, program, &argv, &std::env::vars().collect())?;
+    let output = command.output().map_err(|error| {
+        credential_spawn_error(
+            program,
+            "credential-clock",
+            "UTC date program could not start",
+            &error,
+        )
+    })?;
     if !output.status.success() {
         return Err(failure("credential-clock", "UTC date program failed"));
     }
@@ -810,28 +833,39 @@ fn refresh_request(source: &Source, endpoint: &str) -> Result<Source, LaneError>
         "grant_type": "refresh_token",
         "refresh_token": source.document["tokens"]["refresh_token"]
     });
-    let mut child = Command::new("/usr/bin/curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail-with-body",
-            "--max-time",
-            "20",
-            "--max-filesize",
-            "65536",
-            "--noproxy",
-            "*",
-            "--header",
-            "Content-Type: application/json",
-            "--data-binary",
-            "@-",
-            endpoint,
-        ])
+    let program = Path::new("/usr/bin/curl");
+    let argv = [
+        "--silent",
+        "--show-error",
+        "--fail-with-body",
+        "--max-time",
+        "20",
+        "--max-filesize",
+        "65536",
+        "--noproxy",
+        "*",
+        "--header",
+        "Content-Type: application/json",
+        "--data-binary",
+        "@-",
+        endpoint,
+    ]
+    .map(str::to_owned);
+    let mut command = Command::new("/usr/bin/curl");
+    command
+        .args(&argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| failure("credential-refresh", "token client could not start"))?;
+        .stderr(Stdio::null());
+    crate::container_entry::configure(&mut command, program, &argv, &std::env::vars().collect())?;
+    let mut child = command.spawn().map_err(|error| {
+        credential_spawn_error(
+            program,
+            "credential-refresh",
+            "token client could not start",
+            &error,
+        )
+    })?;
     child
         .stdin
         .take()

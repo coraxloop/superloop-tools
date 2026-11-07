@@ -6387,6 +6387,7 @@ pub fn private_make(
     expected_selection: &Value,
     rotation_digest: Option<&str>,
     door_scope: crate::door::Scope,
+    custody: &crate::runtime_entry::Custody,
 ) -> Result<Value, LaneError> {
     let (mut plan, settings) = load_plan(owner_home, loop_name, run, (0, 0))?;
     plan.select_container_program(podman)?;
@@ -6473,7 +6474,8 @@ pub fn private_make(
             "reserved worker identity differs",
         ));
     }
-    loop_home::mail::worker_provision::coordinate(owner_home, loop_name, &birth, "reserve")
+    custody
+        .create_birth(owner_home, loop_name, &birth, "reserve")
         .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
     let mut next = initial_reservation(
         &plan,
@@ -6517,7 +6519,8 @@ pub fn private_make(
                 return Err(error);
             }
         };
-    loop_home::mail::worker_provision::coordinate(owner_home, loop_name, &birth, "finish")
+    custody
+        .create_birth(owner_home, loop_name, &birth, "finish")
         .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
     next["declared_sources"] = result["declared_sources"].clone();
     publish_reservation(&reservation, &next)?;

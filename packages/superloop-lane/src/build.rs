@@ -1006,6 +1006,23 @@ pub(crate) fn run_checked_with_private_launch(
     runs: &OwnedFd,
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<String, LaneError> {
+    if argv.get(2).is_some_and(|word| word == "_make-home") {
+        let letter = letter.ok_or_else(|| {
+            LaneError::input(
+                "creation-anchor",
+                "anchor-missing: operation=make-home purpose=letter-directory",
+            )
+        })?;
+        let request = crate::creation_entry::command(
+            program,
+            &argv,
+            (cwd, home),
+            (runs_root, runs),
+            letter,
+            None,
+        )?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
     if argv.get(2).is_some_and(|word| word == "_prepare-runtime") {
         let request = crate::runtime_entry::command(program, &argv, cwd, home, runs_root, runs)?;
         return run_checked_command(&request, environment, cwd, timeout_seconds, name);
@@ -1037,6 +1054,17 @@ pub(crate) fn run_checked_with_private_rotation(
     letter: (&Path, &OwnedFd),
     source: &OwnedFd,
 ) -> Result<String, LaneError> {
+    if argv.get(2).is_some_and(|word| word == "_make-home") {
+        let request = crate::creation_entry::command(
+            program,
+            &argv,
+            (cwd, home),
+            (runs_root, runs),
+            letter,
+            Some(source),
+        )?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
     let spec = child(program, argv, environment, cwd, timeout_seconds, name)
         .with_private_launch(home, runs_root, runs, Some(letter))?
         .with_private_rotation_source(source)?;
@@ -1056,6 +1084,13 @@ pub(crate) fn private_launch_preview(
     runs: &OwnedFd,
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<Value, LaneError> {
+    if argv.get(2).is_some_and(|word| word == "_make-home") {
+        let mut preview = child(program, argv, environment, cwd, timeout_seconds, name)
+            .with_private_launch(home, runs_root, runs, letter)?
+            .preview();
+        preview["anchor_manifest"] = crate::creation_entry::preview();
+        return Ok(preview);
+    }
     if argv.get(2).is_some_and(|word| word == "_prepare-runtime") {
         let mut preview = child(program, argv, environment, cwd, timeout_seconds, name).preview();
         preview["anchor_manifest"] = crate::runtime_entry::preview();

@@ -491,6 +491,12 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
     if args.first().is_some_and(|word| word == "_container-helper") {
         return superloop_lane::container_entry::serve(args);
     }
+    if args.first().is_some_and(|word| word == "_make-home") {
+        let report = superloop_lane::creation_entry::serve(args)?;
+        writeln!(io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
+        return Ok(0);
+    }
     if args.first().is_some_and(|word| word == "_prepare-runtime") {
         let report = superloop_lane::runtime_entry::serve(args)?;
         writeln!(io::stdout().lock(), "{report}")
@@ -1141,95 +1147,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             ));
         }
         let report = launch::private_observed_hosts(Path::new(owner_home), loop_name, run)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_make-home") {
-        let [
-            _,
-            loop_name,
-            run,
-            letter_option,
-            letter,
-            home_option,
-            owner_home,
-            uid_option,
-            worker_uid,
-            podman_option,
-            podman,
-            model_option,
-            model,
-            effort_option,
-            effort,
-            model_source_option,
-            model_source,
-            effort_source_option,
-            effort_source,
-            door_scope_option,
-            door_scope,
-            rest @ ..,
-        ] = args
-        else {
-            return Err(LaneError::input(
-                "make-home-private",
-                "private home form is incomplete",
-            ));
-        };
-        let (rotation_digest, observe) = match rest {
-            [] => (None, false),
-            [option] if option == "--observe" => (None, true),
-            [option, digest] if option == "--rotation-sha256" => (Some(digest.as_str()), false),
-            [option, digest, observe]
-                if option == "--rotation-sha256" && observe == "--observe" =>
-            {
-                (Some(digest.as_str()), true)
-            }
-            _ => {
-                return Err(LaneError::input(
-                    "make-home-private",
-                    "private home form has unexpected arguments",
-                ));
-            }
-        };
-        if letter_option != "--letter"
-            || home_option != "--owner-home"
-            || uid_option != "--worker-uid"
-            || podman_option != "--podman-bin"
-            || model_option != "--model"
-            || effort_option != "--effort"
-            || model_source_option != "--model-source"
-            || effort_source_option != "--effort-source"
-            || door_scope_option != "--door-scope"
-        {
-            return Err(LaneError::input(
-                "make-home-private",
-                "private home form has unexpected arguments",
-            ));
-        }
-        let report = launch::private_make(
-            Path::new(owner_home),
-            loop_name,
-            run,
-            Path::new(letter),
-            observe,
-            worker_uid
-                .parse()
-                .map_err(|_| LaneError::input("make-home-private", "worker UID is not decimal"))?,
-            Path::new(podman),
-            &serde_json::json!({"model":model,"effort":effort,"model_source":model_source,"effort_source":effort_source}),
-            rotation_digest,
-            match door_scope.as_str() {
-                "work" => superloop_lane::door::Scope::Work,
-                "review" => superloop_lane::door::Scope::Review,
-                _ => {
-                    return Err(LaneError::input(
-                        "make-home-private",
-                        "door scope is invalid",
-                    ));
-                }
-            },
-        )?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);

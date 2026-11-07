@@ -469,6 +469,49 @@ impl HostVerifier {
         self
     }
 
+    /// Retain an owner-controlled file already opened beneath a verified host anchor.
+    ///
+    /// The caller retains responsibility for the preceding anchored path walk. This form
+    /// never reopens the path and admits only a regular host-owned private file.
+    /// # Errors
+    /// Refuses a foreign file, unsafe mode, or failed descriptor duplication.
+    pub fn retain_private_file(&self, file: &OwnedFd, purpose: &str, slot: u32) -> Result<HostPin> {
+        let operation = self.operation.as_str();
+        if !identifier(purpose) {
+            return Err(Error::new("anchor-declaration", operation, "purpose"));
+        }
+        let policy = Policy {
+            kind: Kind::File,
+            owner: Owner::Host,
+            mode: ModePolicy::Exact(0o600),
+        };
+        let stat = check_kind_mode(file, policy, operation, purpose)?;
+        check_owner(
+            &self.view,
+            &stat,
+            policy,
+            stat.st_uid,
+            false,
+            operation,
+            purpose,
+        )?;
+        let fd = file.as_fd().try_clone_to_owned().map_err(|cause| {
+            Error::new("anchor-io", operation, purpose).because("descriptor-duplicate", cause)
+        })?;
+        Ok(HostPin {
+            record: Record {
+                purpose: purpose.into(),
+                slot,
+                kind: Kind::File,
+                device: stat.st_dev,
+                inode: stat.st_ino,
+                verifier_uid: self.view.host_uid,
+                owner_uid: stat.st_uid,
+            },
+            fd,
+        })
+    }
+
     /// Pin an absolute object after checking every host ancestor.
     ///
     /// Mapped leaf ownership is recorded here and authorized only by the receiver.

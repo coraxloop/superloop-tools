@@ -28,11 +28,17 @@ fn refusal(error: impl std::fmt::Display) -> LaneError {
     LaneError::input("runtime-anchor", error.to_string())
 }
 fn named(kind: &str, purpose: &str) -> LaneError {
-    refusal(format!("{kind}: operation={OPERATION} purpose={purpose}"))
+    named_for(OPERATION, kind, purpose)
+}
+fn named_for(operation: &str, kind: &str, purpose: &str) -> LaneError {
+    refusal(format!("{kind}: operation={operation} purpose={purpose}"))
 }
 fn io(purpose: &str, check: &str, cause: impl std::fmt::Display) -> LaneError {
+    io_for(OPERATION, purpose, check, cause)
+}
+fn io_for(operation: &str, purpose: &str, check: &str, cause: impl std::fmt::Display) -> LaneError {
     refusal(format!(
-        "anchor-io: operation={OPERATION} purpose={purpose} check={check}: {cause}"
+        "anchor-io: operation={operation} purpose={purpose} check={check}: {cause}"
     ))
 }
 const fn directory(owner: Owner, mode: u32) -> Policy {
@@ -49,11 +55,18 @@ const fn executable(owner: Owner) -> Policy {
         mode: ModePolicy::Executable,
     }
 }
-fn directory_policy(fd: &impl AsFd, purpose: &str) -> Result<Policy, LaneError> {
-    let mode = fstat(fd).map_err(|e| io(purpose, "fstat", e))?.st_mode & 0o7777;
+pub(crate) fn directory_policy_for(
+    operation: &str,
+    fd: &impl AsFd,
+    purpose: &str,
+) -> Result<Policy, LaneError> {
+    let mode = fstat(fd)
+        .map_err(|e| io_for(operation, purpose, "fstat", e))?
+        .st_mode
+        & 0o7777;
     if mode & 0o7022 != 0 || mode & 0o700 != 0o700 {
         return Err(refusal(format_args!(
-            "anchor-mode: operation={OPERATION} purpose={purpose} check=directory-mode observed={mode:04o}"
+            "anchor-mode: operation={operation} purpose={purpose} check=directory-mode observed={mode:04o}"
         )));
     }
     Ok(directory(Owner::Host, mode))
@@ -76,6 +89,7 @@ fn pin_file(
 }
 
 fn pins(
+    operation: &str,
     host: &HostVerifier,
     home: (&Path, &OwnedFd),
     runs: (&Path, &OwnedFd),
@@ -95,12 +109,12 @@ fn pins(
                 path,
                 PURPOSES[slot],
                 u32::try_from(slot).map_err(refusal)?,
-                directory_policy(held, PURPOSES[slot])?,
+                directory_policy_for(operation, held, PURPOSES[slot])?,
             )
             .map_err(refusal)?;
-        let expected = fstat(held).map_err(|e| io(PURPOSES[slot], "held-stat", e))?;
+        let expected = fstat(held).map_err(|e| io_for(operation, PURPOSES[slot], "held-stat", e))?;
         if (pin.record().device, pin.record().inode) != (expected.st_dev, expected.st_ino) {
-            return Err(named("anchor-identity", PURPOSES[slot]));
+            return Err(named_for(operation, "anchor-identity", PURPOSES[slot]));
         }
         pins.push(pin);
     }
@@ -173,52 +187,19 @@ pub fn command(
     {
         return Err(named("anchor-declaration", "vector"));
     }
-    let host = HostVerifier::current()
-        .map_err(refusal)?
-        .for_operation(OPERATION);
-    let config = host
-        .pin(
-            &home.join(".config/loops"),
-            "configuration",
-            0,
-            directory(Owner::Host, 0o700),
-        )
-        .map_err(refusal)?;
-    let bootstrap = Manifest {
-        version: 1,
-        transport: Transport::Rights,
-        operation: OPERATION.into(),
-        loop_name: scope.clone(),
-        records: vec![config.record()],
-    };
-    let config = Receiver::current()
-        .map_err(refusal)?
-        .configuration(
-            &bootstrap,
-            &[config.into_fd()],
-            anchor::Entry {
-                operation: OPERATION,
-                loop_name: scope,
-                transport: Transport::Rights,
-            },
-            home,
-            false,
-        )
-        .map_err(refusal)?;
-    let row = config.registry.row(scope, home).map_err(refusal)?;
-    let pins = pins(
-        &host,
+    let pins = core_pins(
+        OPERATION,
+        scope,
         (home, held_home),
         (runs, held_runs),
         Path::new(entry),
         program,
-        &row,
     )?;
     let manifest = Manifest {
         version: 1,
         transport: Transport::Rights,
         operation: OPERATION.into(),
-        loop_name: scope.clone(),
+        loop_name: scope.into(),
         records: pins.iter().map(anchor::HostPin::record).collect(),
     };
     let declaration = serde_json::to_string(&manifest).map_err(refusal)?;
@@ -248,14 +229,86 @@ pub fn command(
     })
 }
 
+pub(crate) fn core_pins(
+    operation: &str,
+    scope: &str,
+    home: (&Path, &OwnedFd),
+    runs: (&Path, &OwnedFd),
+    entry: &Path,
+    program: &Path,
+) -> Result<Vec<anchor::HostPin>, LaneError> {
+    let (home, held_home) = home;
+    let (runs, held_runs) = runs;
+    let host = HostVerifier::current()
+        .map_err(refusal)?
+        .for_operation(operation);
+    let config = host
+        .pin(
+            &home.join(".config/loops"),
+            "configuration",
+            0,
+            directory(Owner::Host, 0o700),
+        )
+        .map_err(refusal)?;
+    let bootstrap = Manifest {
+        version: 1,
+        transport: Transport::Rights,
+        operation: operation.into(),
+        loop_name: scope.into(),
+        records: vec![config.record()],
+    };
+    let config = Receiver::current()
+        .map_err(refusal)?
+        .configuration(
+            &bootstrap,
+            &[config.into_fd()],
+            anchor::Entry {
+                operation,
+                loop_name: scope,
+                transport: Transport::Rights,
+            },
+            home,
+            false,
+        )
+        .map_err(refusal)?;
+    let row = config.registry.row(scope, home).map_err(refusal)?;
+    pins(
+        operation,
+        &host,
+        (home, held_home),
+        (runs, held_runs),
+        entry,
+        program,
+        &row,
+    )
+}
+
 /// Validated configuration and worker storage for the runtime's one birth check.
 pub struct Custody {
-    configuration: Configuration,
-    root: Anchor,
-    private: Anchor,
-    executor: Anchor,
+    pub(crate) configuration: Configuration,
+    pub(crate) root: Anchor,
+    pub(crate) private: Anchor,
+    pub(crate) executor: Anchor,
 }
 impl Custody {
+    pub(crate) fn create_birth(
+        &self,
+        home: &Path,
+        scope: &str,
+        identity: &loop_home::mail::birth::Identity,
+        phase: &str,
+    ) -> Result<(), loop_home::mail::journal::MailError> {
+        loop_home::mail::worker_provision::creation_beneath(
+            home,
+            scope,
+            identity,
+            phase,
+            &self.configuration,
+            &self.root,
+            &self.private,
+            &self.executor,
+        )
+    }
     pub(crate) fn verify_birth(
         &self,
         home: &Path,
@@ -279,28 +332,38 @@ fn receive(
     scope: &str,
     home: &str,
 ) -> Result<(Configuration, Vec<Anchor>), LaneError> {
+    receive_bundle(source, scope, home, OPERATION, &[])
+}
+
+pub(crate) fn receive_bundle(
+    source: &str,
+    scope: &str,
+    home: &str,
+    operation: &str,
+    extras: &[Requirement],
+) -> Result<(Configuration, Vec<Anchor>), LaneError> {
     let manifest = Manifest::parse(source).map_err(refusal)?;
-    if manifest.records.len() != PURPOSES.len() {
-        return Err(named("anchor-declaration", "count"));
+    if manifest.records.len() != PURPOSES.len() + extras.len() {
+        return Err(named_for(operation, "anchor-declaration", "count"));
     }
     let input = std::io::stdin()
         .as_fd()
         .try_clone_to_owned()
-        .map_err(|e| io("rights", "input-duplicate", e))?;
+        .map_err(|e| io_for(operation, "rights", "input-duplicate", e))?;
     let descriptors = anchor::transport::receive(
         &UnixStream::from(input),
-        PURPOSES.len(),
+        PURPOSES.len() + extras.len(),
         Duration::from_secs(30),
     )
-    .map_err(|e| refusal(e.context(OPERATION, "rights")))?;
-    anchor::transport::replace_stdin(OPERATION).map_err(refusal)?;
+    .map_err(|e| refusal(e.context(operation, "rights")))?;
+    anchor::transport::replace_stdin(operation).map_err(refusal)?;
     let receiver = Receiver::current().map_err(refusal)?;
     let configuration = receiver
         .configuration(
             &manifest,
             &descriptors,
             anchor::Entry {
-                operation: OPERATION,
+                operation,
                 loop_name: scope,
                 transport: Transport::Rights,
             },
@@ -318,12 +381,12 @@ fn receive(
             .records
             .iter()
             .find(|r| r.purpose == *purpose)
-            .ok_or_else(|| named("anchor-declaration", "roles"))?;
+            .ok_or_else(|| named_for(operation, "anchor-declaration", "roles"))?;
         if usize::try_from(record.slot).map_err(refusal)? != slot {
-            return Err(named("anchor-declaration", "slots"));
+            return Err(named_for(operation, "anchor-declaration", "slots"));
         }
         let policy = match slot {
-            0 | 1 => directory_policy(&descriptors[slot], purpose)?,
+            0 | 1 => directory_policy_for(operation, &descriptors[slot], purpose)?,
             2..=4 => executable(if record.owner_uid == 0 {
                 Owner::RootFile
             } else {
@@ -337,14 +400,38 @@ fn receive(
         policies.push(Requirement {
             purpose: (*purpose).into(),
             policy,
-            alias_group: None,
+            alias_group: (slot < 2
+                && extras
+                    .iter()
+                    .any(|extra| extra.policy.kind == Kind::Directory))
+            .then(|| "launch-directory".into()),
         });
+    }
+    for (index, requirement) in extras.iter().enumerate() {
+        let record = manifest
+            .records
+            .iter()
+            .find(|record| record.purpose == requirement.purpose)
+            .ok_or_else(|| named_for(operation, "anchor-declaration", "roles"))?;
+        if usize::try_from(record.slot).map_err(refusal)? != PURPOSES.len() + index {
+            return Err(named_for(operation, "anchor-declaration", "slots"));
+        }
+        let mut requirement = requirement.clone();
+        if requirement.policy.kind == Kind::Directory {
+            requirement.policy = directory_policy_for(
+                operation,
+                &descriptors[PURPOSES.len() + index],
+                &requirement.purpose,
+            )?;
+            requirement.alias_group = Some("launch-directory".into());
+        }
+        policies.push(requirement);
     }
     let anchors = receiver
         .validate(
             &manifest,
             descriptors,
-            OPERATION,
+            operation,
             scope,
             Transport::Rights,
             &policies,

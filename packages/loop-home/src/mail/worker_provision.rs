@@ -522,6 +522,35 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
     )
 }
 
+/// Coordinate native creation beneath an entry's validated configuration and storage.
+/// # Errors
+/// Refuses an unknown creation phase, missing grant or changed custody.
+#[allow(clippy::too_many_arguments)]
+pub fn creation_beneath(
+    home: &Path,
+    loop_name: &str,
+    identity: &Identity,
+    phase: &str,
+    configuration: &crate::anchor::Configuration,
+    root: &crate::anchor::Anchor,
+    private: &crate::anchor::Anchor,
+    executor: &crate::anchor::Anchor,
+) -> Result<()> {
+    if !matches!(phase, "reserve" | "finish") {
+        return Err(MailError::Invalid("worker-birth: unknown creation phase"));
+    }
+    coordinate_beneath(
+        home,
+        loop_name,
+        identity,
+        phase,
+        configuration,
+        root,
+        private,
+        executor,
+    )
+}
+
 /// Verify a native lifetime using configuration and storage already validated at entry.
 ///
 /// # Errors
@@ -535,6 +564,29 @@ pub fn verify_beneath(
     private: &crate::anchor::Anchor,
     executor: &crate::anchor::Anchor,
 ) -> Result<()> {
+    coordinate_beneath(
+        home,
+        loop_name,
+        identity,
+        "verify",
+        configuration,
+        root,
+        private,
+        executor,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coordinate_beneath(
+    home: &Path,
+    loop_name: &str,
+    identity: &Identity,
+    phase: &str,
+    configuration: &crate::anchor::Configuration,
+    root: &crate::anchor::Anchor,
+    private: &crate::anchor::Anchor,
+    executor: &crate::anchor::Anchor,
+) -> Result<()> {
     let row = configuration
         .registry
         .row(loop_name, home)
@@ -542,9 +594,14 @@ pub fn verify_beneath(
     root.revalidate()?;
     private.revalidate()?;
     executor.revalidate()?;
+    let operation = if phase == "verify" {
+        "prepare-runtime"
+    } else {
+        "make-home"
+    };
     let descriptor = File::from(
         nix::unistd::dup(std::os::fd::AsFd::as_fd(root)).map_err(|error| {
-            failure(format!("anchor-io: operation=prepare-runtime purpose=loop-storage check=descriptor-duplicate: {error}"))
+            failure(format!("anchor-io: operation={operation} purpose=loop-storage check=descriptor-duplicate: {error}"))
         })?,
     );
     let parent = io::child(&descriptor, Path::new("."), true)?;
@@ -552,7 +609,7 @@ pub fn verify_beneath(
         home,
         loop_name,
         identity,
-        "verify",
+        phase,
         &row,
         &configuration.allocations,
         &parent,

@@ -3,6 +3,7 @@
 pub mod build;
 pub mod container_entry;
 pub mod container_helper;
+pub mod creation_entry;
 pub mod credential;
 pub mod door;
 pub mod door_node;

@@ -167,13 +167,21 @@ pub(crate) fn activate_programs(
     executable: Anchor,
     hash: Anchor,
 ) -> ExecutableGuard {
-    ACTIVE_OPERATION.with(|active| active.set(operation));
-    EXECUTABLE.with(|active| {
-        *active.borrow_mut() = Some(BTreeMap::from([
+    activate_program_map(
+        operation,
+        BTreeMap::from([
             (podman.to_path_buf(), Arc::new(executable)),
             (PathBuf::from("/usr/bin/sha256sum"), Arc::new(hash)),
-        ]));
-    });
+        ]),
+    )
+}
+
+pub(crate) fn activate_program_map(
+    operation: &'static str,
+    programs: BTreeMap<PathBuf, Arc<Anchor>>,
+) -> ExecutableGuard {
+    ACTIVE_OPERATION.with(|active| active.set(operation));
+    EXECUTABLE.with(|active| *active.borrow_mut() = Some(programs));
     ExecutableGuard
 }
 
@@ -207,6 +215,10 @@ pub(crate) fn spawn_error(program: &Path, kind: &'static str, error: &std::io::E
         {
             let purpose = if program == Path::new("/usr/bin/sha256sum") {
                 "hash-executable"
+            } else if program == Path::new("/usr/bin/curl") {
+                "credential-client"
+            } else if program == Path::new("/usr/bin/date") {
+                "credential-clock"
             } else {
                 "podman-executable"
             };
