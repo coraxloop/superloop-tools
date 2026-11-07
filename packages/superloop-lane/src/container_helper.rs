@@ -25,6 +25,7 @@ use crate::launch::{
     publish_reservation, read_reservation, reservation_path,
 };
 use crate::plan::protected_identifier_path;
+use crate::settings::BoxBackend;
 use crate::{caller_home, load_plan, valid_run_name};
 
 const PROMPT_LIMIT: usize = 1_048_576;
@@ -34,8 +35,8 @@ const CAPACITY_EVIDENCE_LIMIT: usize = 1_048_576;
 const STREAM_DRAIN_GRACE: Duration = Duration::from_secs(30);
 const STREAM_STOP_GRACE: Duration = Duration::from_secs(5);
 
-#[derive(Default)]
 struct CapacityCapture {
+    backend: BoxBackend,
     tail: Vec<u8>,
     thread: Option<String>,
     skipping_line: bool,
@@ -43,6 +44,16 @@ struct CapacityCapture {
 }
 
 impl CapacityCapture {
+    const fn new(backend: BoxBackend) -> Self {
+        Self {
+            backend,
+            tail: Vec::new(),
+            thread: None,
+            skipping_line: false,
+            scanned: 0,
+        }
+    }
+
     fn push(&mut self, mut bytes: &[u8]) {
         if self.skipping_line {
             let Some(end) = bytes.iter().position(|byte| *byte == b'\n') else {
@@ -60,10 +71,7 @@ impl CapacityCapture {
                         return None;
                     }
                     self.scanned += line.len();
-                    let event: Value = serde_json::from_slice(line).ok()?;
-                    let thread = event["thread_id"].as_str()?;
-                    (event["type"] == "thread.started" && valid_thread(thread))
-                        .then(|| thread.to_owned())
+                    session_event(self.backend, line).ok().flatten()
                 });
         }
         if self.tail.len() > CAPACITY_EVIDENCE_LIMIT {
@@ -80,12 +88,36 @@ impl CapacityCapture {
     }
 }
 
-pub(crate) fn resume_box_vector(vector: &[String], thread: &str) -> Result<Vec<String>, LaneError> {
+pub(crate) fn resume_box_vector(
+    backend: BoxBackend,
+    vector: &[String],
+    thread: &str,
+) -> Result<Vec<String>, LaneError> {
     if !valid_thread(thread) {
         return Err(LaneError::input(
             "round-thread",
             "request thread is malformed",
         ));
+    }
+    if backend == BoxBackend::Claude {
+        let program = vector
+            .iter()
+            .position(|word| word == "/home/worker/.local/bin/claude")
+            .ok_or_else(|| LaneError::input("round-thread", "saved Claude program is absent"))?;
+        let arguments = &vector[program + 1..];
+        if arguments.first().is_none_or(|word| word != "-p")
+            || arguments
+                .iter()
+                .any(|word| matches!(word.as_str(), "--resume" | "-r"))
+        {
+            return Err(LaneError::input(
+                "round-thread",
+                "saved Claude print or resume boundary differs",
+            ));
+        }
+        let mut resumed = vector.to_vec();
+        resumed.extend(["--resume".to_owned(), thread.to_owned()]);
+        return Ok(resumed);
     }
     let exec = vector
         .iter()
@@ -105,6 +137,24 @@ pub(crate) fn resume_box_vector(vector: &[String], thread: &str) -> Result<Vec<S
     let position = resumed.len() - 1;
     resumed.splice(position..position, ["resume".to_owned(), thread.to_owned()]);
     Ok(resumed)
+}
+
+pub(crate) fn session_event(backend: BoxBackend, line: &[u8]) -> Result<Option<String>, LaneError> {
+    let Ok(event) = serde_json::from_slice::<Value>(line) else {
+        return Ok(None);
+    };
+    let key = match backend {
+        BoxBackend::Codex if event["type"] == "thread.started" => "thread_id",
+        BoxBackend::Claude if event["type"] == "system" && event["subtype"] == "init" => {
+            "session_id"
+        }
+        _ => return Ok(None),
+    };
+    let session = event[key]
+        .as_str()
+        .filter(|id| valid_thread(id))
+        .ok_or_else(|| LaneError::input("round-thread", "step thread event has a malformed id"))?;
+    Ok(Some(session.to_owned()))
 }
 
 fn valid_thread(thread: &str) -> bool {
@@ -222,6 +272,7 @@ pub(crate) fn command_for_request(
     record: &Value,
     requested: Option<&str>,
 ) -> Result<Vec<String>, LaneError> {
+    let backend = BoxBackend::from_plan(&record["plan"])?;
     let step = record["active_round"].as_str();
     if requested.is_none() && crate::launch::rounds::fresh_thread_round(record) {
         return Ok(vector.to_vec());
@@ -247,7 +298,7 @@ pub(crate) fn command_for_request(
             ),
         ));
     }
-    resume_box_vector(vector, saved)
+    resume_box_vector(backend, vector, saved)
 }
 
 fn decode_round_request(bytes: Vec<u8>) -> Result<(Option<String>, Vec<u8>), LaneError> {
@@ -438,7 +489,12 @@ fn record_attempt_wall(
     publish_reservation(reservation, &current)
 }
 
-fn capacity_event(bytes: &[u8]) -> bool {
+fn capacity_event(backend: BoxBackend, bytes: &[u8]) -> bool {
+    // No captured Claude transient-capacity event is established. Its recorded
+    // quota rejection is not retryable capacity, nor is another vendor's event.
+    if backend == BoxBackend::Claude {
+        return false;
+    }
     bytes.split(|byte| *byte == b'\n').any(|line| {
         let Ok(event) = serde_json::from_slice::<Value>(line) else {
             return false;
@@ -1012,6 +1068,7 @@ fn run_attempt_with(
     retry_thread: Option<&str>,
 ) -> Result<AttemptOutcome, LaneError> {
     let wall_bound = attempt_wall_bound(record)?;
+    let backend = BoxBackend::from_plan(&record["plan"])?;
     let mut length = [0_u8; 4];
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -1040,7 +1097,7 @@ fn run_attempt_with(
     // after capacity evidence admitted another attempt. The client still
     // has to pass the original round-request validation above.
     let resolved = if let Some(thread) = retry_thread {
-        resume_box_vector(vector, thread)?
+        resume_box_vector(backend, vector, thread)?
     } else {
         resolved
     };
@@ -1088,7 +1145,7 @@ fn run_attempt_with(
     let writer = Arc::new(Mutex::new(sender));
     let transferred = Arc::new(AtomicUsize::new(0));
     let overflow = Arc::new(AtomicBool::new(false));
-    let capacity = Arc::new(Mutex::new(CapacityCapture::default()));
+    let capacity = Arc::new(Mutex::new(CapacityCapture::new(backend)));
     let mut out_worker = None;
     let mut err_worker = None;
     let mut input_worker = None;
@@ -1271,7 +1328,7 @@ fn run_attempt_with(
             && code != 0
             && capacity
                 .lock()
-                .is_ok_and(|capture| capacity_event(&capture.tail));
+                .is_ok_and(|capture| capacity_event(capture.backend, &capture.tail));
         Ok(AttemptProgress {
             code,
             capacity: capacity_evidence,
@@ -1850,7 +1907,7 @@ pub(crate) fn publish_round_credential(
     loop_name: &str,
     record: &mut Value,
 ) -> Result<(), LaneError> {
-    let backend = crate::settings::BoxBackend::from_plan(&record["plan"])?;
+    let backend = BoxBackend::from_plan(&record["plan"])?;
     backend.require_runtime()?;
     let home = record["plan"]["home"]
         .as_str()
@@ -1929,7 +1986,7 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
                 "reservation names another run",
             ));
         }
-        let backend = crate::settings::BoxBackend::from_plan(&record["plan"])?;
+        let backend = BoxBackend::from_plan(&record["plan"])?;
         backend.require_runtime()?;
         let pid = std::process::id();
         record["helper_pid"] = json!(pid);
@@ -2193,6 +2250,105 @@ mod tests {
         stop_container, verify_vector,
     };
 
+    /// ´test:unit:boxed-claude-helper-resumes-saved-session-without-quota-retry´
+    #[test]
+    fn boxed_claude_helper_resumes_saved_session_without_quota_retry() {
+        let init = r#"{"type":"system","subtype":"init","cwd":"/x","session_id":"22222222-2222-4222-8222-222222222222","tools":[],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"auto"}"#;
+        let quota = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1789820400,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":1789820400},"seven_day":{"utilization":0.28,"resetsAt":1790301600}}},"uuid":"33333333-3333-4333-8333-333333333333","session_id":"22222222-2222-4222-8222-222222222222"}"#;
+        let mut fixture = StartedAttemptFixture::new(&format!(
+            "cat > /dev/null; printf '%s\\n' \"$@\" > \"$TEST_ARGV\"; printf '%s\\n' '{init}' '{quota}'; exit 1"
+        ));
+        let arguments = fixture.root.path().join("arguments");
+        fixture
+            .environment
+            .insert("TEST_ARGV".into(), arguments.display().to_string());
+        fixture.vector.extend([
+            "/home/worker/.local/bin/claude".into(),
+            "-p".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--verbose".into(),
+        ]);
+        let session = "22222222-2222-4222-8222-222222222222";
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":{"backend":"claude"},"active_round":"work-1","thread_id":session,"rounds":[{"step":"work-1","budget_seconds":3600}]});
+        let reservation = fixture.root.path().join(".reservation-R.json");
+        publish_reservation(&reservation, &record).expect("Claude reservation");
+        let (mut server, mut client) = UnixStream::pair().expect("channel");
+        let request = format!("\0{session}\0fixture prompt").into_bytes();
+        let reader = std::thread::spawn(move || {
+            client
+                .write_all(&u32::try_from(request.len()).expect("length").to_le_bytes())
+                .expect("header");
+            client.write_all(&request).expect("prompt");
+            read_bounded_attempt_status(&mut client, super::STREAM_LIMIT)
+        });
+        let pid = std::process::id();
+        let outcome = run_attempt(
+            &mut server,
+            &fixture.vector,
+            &fixture.environment,
+            fixture.root.path(),
+            &reservation,
+            &record,
+            &fixture.driver,
+            1,
+            &AtomicBool::new(false),
+            LauncherIdentity {
+                pid,
+                start: process_start(pid).expect("launcher"),
+            },
+            None,
+        )
+        .expect("Claude attempt");
+        assert_eq!(reader.join().expect("drained"), 1);
+        assert_eq!(outcome.thread.as_deref(), Some(session));
+        assert_eq!(outcome.code, 1);
+        assert!(!outcome.capacity);
+        assert!(!retry_after(&outcome));
+        assert!(
+            fs::read_to_string(arguments)
+                .expect("executed vector")
+                .ends_with(&format!("--resume\n{session}\n"))
+        );
+        assert_eq!(fixture.evidence()["thread_id_source"], "captured");
+    }
+
+    /// ´test:unit:boxed-selected-session-capture-and-capacity-boundary´
+    #[test]
+    fn boxed_selected_session_capture_and_capacity_boundary() {
+        // Reuse the recorded Claude init and rejected-quota events in the driver tests.
+        let init = br#"{"type":"system","subtype":"init","cwd":"/x","session_id":"22222222-2222-4222-8222-222222222222","tools":[],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"auto"}"#;
+        let quota = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1789820400,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":1789820400},"seven_day":{"utilization":0.28,"resetsAt":1790301600}}},"uuid":"33333333-3333-4333-8333-333333333333","session_id":"22222222-2222-4222-8222-222222222222"}"#;
+        let codex = b"{\"type\":\"thread.started\",\"thread_id\":\"codex-thread\"}\n";
+        let capacity = b"{\"type\":\"error\",\"message\":\"The model is at capacity\"}\n";
+        let mut claude = super::CapacityCapture::new(BoxBackend::Claude);
+        claude.push(codex);
+        assert!(claude.thread.is_none());
+        for chunk in init.chunks(7) {
+            claude.push(chunk);
+        }
+        assert!(
+            claude.thread.is_none(),
+            "an incomplete line is not evidence"
+        );
+        claude.push(b"\n");
+        assert_eq!(
+            claude.thread.as_deref(),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        claude.push(quota.as_bytes());
+        claude.push(b"\n");
+        claude.push(capacity);
+        assert!(!super::capacity_event(BoxBackend::Claude, &claude.tail));
+        let mut codex_capture = super::CapacityCapture::new(BoxBackend::Codex);
+        codex_capture.push(init);
+        codex_capture.push(b"\n");
+        assert!(codex_capture.thread.is_none());
+        codex_capture.push(codex);
+        assert_eq!(codex_capture.thread.as_deref(), Some("codex-thread"));
+        assert!(super::capacity_event(BoxBackend::Codex, capacity));
+    }
+
     /// ´test:unit:round-client-refuses-request-owned-by-another-uid´
     #[test]
     fn round_client_refuses_request_owned_by_another_uid() {
@@ -2208,6 +2364,7 @@ mod tests {
         read_reservation,
     };
     use crate::plan::protected_identifier_path;
+    use crate::settings::BoxBackend;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::fs;
@@ -2228,7 +2385,7 @@ mod tests {
     fn seed_attempt_reservation(root: &Path) {
         publish_reservation(
             &root.join(".reservation-R.json"),
-            &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
         )
         .expect("protected attempt reservation");
     }
@@ -2364,7 +2521,7 @@ mod tests {
     fn helper_wall_stop_retains_cause_in_outcome_and_round() {
         let fixture = StartedAttemptFixture::new("cat >/dev/null; exec sleep 30");
         let reservation = fixture.root.path().join(".reservation-R.json");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":7200}],"plan":{"attempt_wall_seconds":1}});
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":7200}],"plan":{"backend":"codex","attempt_wall_seconds":1}});
         publish_reservation(&reservation, &record).expect("planned wall");
         let (mut server, mut client) = UnixStream::pair().expect("channel");
         client
@@ -2710,12 +2867,15 @@ mod tests {
     #[test]
     fn helper_requires_capacity_evidence_and_the_launched_session_for_retry() {
         assert!(capacity_event(
+            BoxBackend::Codex,
             b"{\"type\":\"error\",\"message\":\"The model is at capacity\"}\n"
         ));
         assert!(!capacity_event(
+            BoxBackend::Codex,
             b"{\"type\":\"item.completed\",\"message\":\"model at capacity\"}\n"
         ));
         assert!(!capacity_event(
+            BoxBackend::Codex,
             b"{\"type\":\"error\",\"message\":\"model access denied\"}\n"
         ));
         assert!(retry_after(&AttemptOutcome {
@@ -2789,7 +2949,7 @@ mod tests {
                 .expect("namespace environment"),
             root,
             &root.join(".reservation-R.json"),
-            &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
             &driver,
             1,
             &AtomicBool::new(false),
@@ -2886,7 +3046,7 @@ mod tests {
                 .expect("namespace environment"),
             root,
             &root.join(".reservation-R.json"),
-            &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
             &driver,
             1,
             &AtomicBool::new(false),
@@ -2944,7 +3104,7 @@ mod tests {
             )
             .expect("built driver process");
             wait_fixture_ready(&ready).expect("driver start");
-            let record = json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,
+            let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,
                 "driver_entry_pid":driver.id(),"driver_entry_start":process_start(driver.id()).expect("driver identity"),
                 "active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
             let reservation = fixture.root.path().join(".reservation-R.json");
@@ -3115,7 +3275,7 @@ mod tests {
                 &self.environment,
                 self.root.path(),
                 &self.root.path().join(".reservation-R.json"),
-                &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+                &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
                 &self.driver,
                 1,
                 &AtomicBool::new(false),
@@ -3202,7 +3362,7 @@ exit 0
                 "-".into(),
             ]);
             let prompt = format!("Read /home/worker/.local/inbox/{step}.md.");
-            let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"step":step,"budget_seconds":3600}]});
+            let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"step":step,"budget_seconds":3600}]});
             let mut retry_thread = None;
             for attempt in 1..=2 {
                 let (mut server, mut client) = UnixStream::pair().expect("channel");
@@ -3321,7 +3481,7 @@ exit 0
     /// ´test:unit:capacity-capture-discards-oversized-fragments-without-losing-later-events´
     #[test]
     fn capacity_capture_discards_oversized_fragments_without_losing_later_events() {
-        let mut capture = super::CapacityCapture::default();
+        let mut capture = super::CapacityCapture::new(BoxBackend::Codex);
         capture.push(b"{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\n");
         let padding = vec![b'x'; super::FRAME_LIMIT];
         for _ in 0..300 {
@@ -3329,9 +3489,9 @@ exit 0
             assert!(capture.tail.len() <= super::CAPACITY_EVIDENCE_LIMIT);
         }
         capture.push(b"{\"type\":\"error\",\"message\":\"model at capacity\"}\n");
-        assert!(!capacity_event(&capture.tail));
+        assert!(!capacity_event(capture.backend, &capture.tail));
         capture.push(b"{\"type\":\"error\",\"message\":\"model at capacity\"}\n");
-        assert!(capacity_event(&capture.tail));
+        assert!(capacity_event(capture.backend, &capture.tail));
         assert_eq!(capture.thread.as_deref(), Some("thread-1"));
     }
 
@@ -3381,7 +3541,7 @@ exit 0
                 )
                 .expect("length");
             client.write_all(&request).expect("round request");
-            let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"step":step,"budget_seconds":3600}]});
+            let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"step":step,"budget_seconds":3600}]});
             let pid = std::process::id();
             let result = run_attempt(
                 &mut server,
@@ -3418,8 +3578,8 @@ exit 0
                 let expected = if step == "dispatch" {
                     fixture.vector[1..].to_vec()
                 } else {
-                    super::resume_box_vector(&fixture.vector, "thread-1").expect("resume vector")
-                        [1..]
+                    super::resume_box_vector(BoxBackend::Codex, &fixture.vector, "thread-1")
+                        .expect("resume vector")[1..]
                         .to_vec()
                 };
                 assert_eq!(started, format!("{}\n", expected.join("\n")));
@@ -3999,7 +4159,7 @@ exit 0
         fs::create_dir(&custody).expect("custody directory");
         fs::set_permissions(&custody, fs::Permissions::from_mode(0o700)).expect("custody mode");
         let reservation = root.join(".reservation-R.json");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
+        let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
         publish_reservation(&reservation, &record).expect("attempt reservation");
         let vector = vec![
             program.display().to_string(),
@@ -4103,7 +4263,7 @@ exit 0
         fs::create_dir(&custody).expect("custody directory");
         fs::set_permissions(&custody, fs::Permissions::from_mode(0o700)).expect("custody mode");
         let reservation = root.join(".reservation-R.json");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
+        let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
         publish_reservation(&reservation, &record).expect("attempt reservation");
         let vector = vec![
             program.display().to_string(),
@@ -4163,7 +4323,7 @@ exit 0
         fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
             .expect("protected fixture");
         let path = fixture.path().join(".reservation-R.json");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
+        let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
         publish_reservation(&path, &record).expect("seed reservation");
         start_after_reservation(&path, &record, || {
             let saved = read_reservation(&path)

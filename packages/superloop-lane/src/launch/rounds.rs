@@ -19,7 +19,10 @@ use crate::error::LaneError;
 use crate::plan::Plan;
 use crate::{build, home, load_plan};
 
-fn step_event_thread(dir: &Path) -> Result<String, LaneError> {
+fn step_event_thread(
+    backend: crate::settings::BoxBackend,
+    dir: &Path,
+) -> Result<String, LaneError> {
     let path = dir.join("events.jsonl");
     let mut file = OpenOptions::new()
         .read(true)
@@ -58,32 +61,27 @@ fn step_event_thread(dir: &Path) -> Result<String, LaneError> {
         != 0
     {
         if line.last() == Some(&b'\n')
-            && let Ok(event) = serde_json::from_slice::<Value>(&line)
-            && event["type"] == "thread.started"
+            && let Some(actual) = crate::container_helper::session_event(backend, &line)?
         {
-            let actual = event["thread_id"]
-                .as_str()
-                .filter(|id| {
-                    !id.is_empty()
-                        && id.len() <= 128
-                        && id
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                })
-                .ok_or_else(|| {
-                    LaneError::input("round-thread", "step thread event has a malformed id")
-                })?;
             if observed.as_deref().is_some_and(|prior| prior != actual) {
                 return Err(LaneError::input(
                     "round-thread",
                     "step contains two thread ids",
                 ));
             }
-            observed = Some(actual.to_owned());
+            observed = Some(actual);
         }
         line.clear();
     }
-    observed.ok_or_else(|| LaneError::input("round-thread", "step has no thread.started event"))
+    observed.ok_or_else(|| {
+        LaneError::input(
+            "round-thread",
+            match backend {
+                crate::settings::BoxBackend::Codex => "step has no thread.started event",
+                crate::settings::BoxBackend::Claude => "step has no system.init event",
+            },
+        )
+    })
 }
 
 fn recovered_threadless_round(round: &Value) -> bool {
@@ -300,7 +298,10 @@ pub(super) fn recovery_thread(
     round: &Value,
 ) -> Result<String, LaneError> {
     let directory = recorded_step_dir(plan, record, round)?;
-    let actual = step_event_thread(&directory)?;
+    let actual = step_event_thread(
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+        &directory,
+    )?;
     if let Some(expected) = record["thread_id"].as_str() {
         if expected != actual {
             return Err(LaneError::input(
@@ -457,7 +458,10 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
                 .find(|round| round["phase"] == "settled")
         })
         .ok_or_else(|| LaneError::input("round-record", "settled round is absent"))?;
-    let actual = step_event_thread(&recorded_step_dir(plan, record, round)?)?;
+    let actual = step_event_thread(
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+        &recorded_step_dir(plan, record, round)?,
+    )?;
     if actual != saved {
         return Err(LaneError::input(
             "round-thread",
@@ -647,7 +651,10 @@ pub(super) fn record_settlement_with_recovery(
     }
     if round["phase"] == "settled" {
         let directory = recorded_step_dir(plan, &record, &round)?;
-        let actual = step_event_thread(&directory)?;
+        let actual = step_event_thread(
+            crate::settings::BoxBackend::from_plan(&plan.document)?,
+            &directory,
+        )?;
         if record["thread_id"] != actual {
             return Err(LaneError::input(
                 "round-thread",
@@ -684,7 +691,10 @@ pub(super) fn record_settlement_with_recovery(
         ended_by
             .as_ref()
             .map_err(|error| LaneError::input(error.kind, error.detail.clone()))?;
-        let actual = step_event_thread(&step_dir?)?;
+        let actual = step_event_thread(
+            crate::settings::BoxBackend::from_plan(&plan.document)?,
+            &step_dir?,
+        )?;
         if let Some(saved) = record["thread_id"].as_str() {
             if saved != actual {
                 return Err(LaneError::input(
@@ -1173,7 +1183,13 @@ fn resume_with_program(
             .collect::<Result<Vec<_>, _>>()?;
         let box_command = thread.map_or_else(
             || Ok(saved_box.clone()),
-            |thread| crate::container_helper::resume_box_vector(&saved_box, thread),
+            |thread| {
+                crate::container_helper::resume_box_vector(
+                    crate::settings::BoxBackend::from_plan(&plan.document)?,
+                    &saved_box,
+                    thread,
+                )
+            },
         )?;
         return Ok(
             json!({"schema":1,"command":"launch","dry_run":true,"round":step,"budget_seconds":request.budget,"letter":letter_name,"letter_reconciliation_preview":letter_reconciliation,"proxy_service":proxy_service,"thread_id":thread,"home":plan.home,"worker_uid":worker,"invocation":{"program":entry_program,"argv":argv},"box_command":box_command,"changed":false,"wall_seconds":began.elapsed().as_secs_f64()}),
@@ -1472,6 +1488,46 @@ mod tests {
         )
         .expect("environment mode");
         (fixture, plan)
+    }
+
+    /// ´test:unit:boxed-selected-session-reader-rejects-foreign-and-conflicting-evidence´
+    #[test]
+    fn boxed_selected_session_reader_rejects_foreign_and_conflicting_evidence() {
+        use crate::settings::BoxBackend;
+        let fixture = tempfile::tempdir().expect("event fixture");
+        let path = fixture.path().join("events.jsonl");
+        std::fs::write(fixture.path().join(".event-start"), b"0\n").expect("step boundary");
+        // The driver's recorded init event supplies the session schema.
+        let init = br#"{"type":"system","subtype":"init","cwd":"/x","session_id":"22222222-2222-4222-8222-222222222222","tools":[],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"auto"}"#;
+        let mut stream = b"{\"type\":\"thread.started\",\"thread_id\":\"codex-thread\"}\n".to_vec();
+        stream.extend_from_slice(init);
+        stream.push(b'\n');
+        std::fs::write(&path, &stream).expect("events");
+        assert_eq!(
+            super::step_event_thread(BoxBackend::Codex, fixture.path()).expect("Codex event"),
+            "codex-thread"
+        );
+        assert_eq!(
+            super::step_event_thread(BoxBackend::Claude, fixture.path()).expect("Claude event"),
+            "22222222-2222-4222-8222-222222222222"
+        );
+        let changed = String::from_utf8(init.to_vec())
+            .expect("capture text")
+            .replace(
+                "22222222-2222-4222-8222-222222222222",
+                "44444444-4444-4444-8444-444444444444",
+            );
+        stream.extend_from_slice(changed.as_bytes());
+        stream.push(b'\n');
+        std::fs::write(&path, stream).expect("conflicting event");
+        assert_eq!(
+            super::step_event_thread(BoxBackend::Claude, fixture.path())
+                .expect_err("session changed")
+                .kind,
+            "round-thread"
+        );
+        std::fs::write(&path, init).expect("incomplete event");
+        assert!(super::step_event_thread(BoxBackend::Claude, fixture.path()).is_err());
     }
 
     /// # Panics
@@ -1940,9 +1996,9 @@ mod tests {
             home: fixture.path().join("home-R"),
             driver_dir,
             letter: PathBuf::new(),
-            document: json!({"worker_uid":3000}),
+            document: json!({"backend":"codex","worker_uid":3000}),
         };
-        let record = json!({"schema":1,"loop":"alpha","run":"R","phase":"started","active_round":"dispatch","worker_uid":3000,"plan":{"worker_uid":3000,"home":plan.home,"driver_dir":plan.driver_dir},"mail":[],"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}]});
+        let record = json!({"schema":1,"loop":"alpha","run":"R","phase":"started","active_round":"dispatch","worker_uid":3000,"plan":{"backend":"codex","worker_uid":3000,"home":plan.home,"driver_dir":plan.driver_dir},"mail":[],"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}]});
         super::publish_reservation(&super::reservation_path(fixture.path(), "R"), &record)
             .expect("reservation");
         (fixture, plan)

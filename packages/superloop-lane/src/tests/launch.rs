@@ -21,6 +21,83 @@ fn backend_settings(vendors: &[&str]) -> crate::settings::Settings {
     settings
 }
 
+/// ´test:crate:boxed-backend-resume-vector-binds-protected-selection´
+#[test]
+fn boxed_backend_resume_vector_binds_protected_selection() {
+    for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+        let settings = backend_settings(&["codex", "claude"]);
+        let plan = crate::plan::Plan::build_with_door(
+            std::path::Path::new("/fixture/owner"),
+            "alpha",
+            "R",
+            &settings,
+            &super::fixture_row(),
+            super::fixture_block(),
+            (1000, 1000),
+            false,
+            Some(backend),
+        )
+        .expect("selected plan");
+        let vector: Vec<String> = plan.document["runtime_argv"]
+            .as_array()
+            .expect("vector")
+            .iter()
+            .map(|word| word.as_str().expect("word").to_owned())
+            .collect();
+        let session = "22222222-2222-4222-8222-222222222222";
+        let mut record = json!({"plan":plan.document,"active_round":"dispatch"});
+        assert_eq!(
+            crate::container_helper::command_for_request(&vector, &record, None).expect("fresh"),
+            vector
+        );
+        record["active_round"] = json!("work-1");
+        record["thread_id"] = json!(session);
+        let resumed = crate::container_helper::command_for_request(&vector, &record, Some(session))
+            .expect("resume");
+        match backend {
+            BoxBackend::Codex => {
+                assert!(resumed.ends_with(&["resume".into(), session.into(), "-".into()]));
+            }
+            BoxBackend::Claude => {
+                assert_eq!(&resumed[..vector.len()], vector);
+                let foreign: Vec<_> = vector
+                    .iter()
+                    .map(|word| {
+                        if word == "/home/worker/.local/bin/claude" {
+                            "/home/worker/.local/bin/codex".to_owned()
+                        } else {
+                            word.clone()
+                        }
+                    })
+                    .collect();
+                assert_eq!(
+                    crate::container_helper::command_for_request(&foreign, &record, Some(session))
+                        .expect_err("foreign program")
+                        .kind,
+                    "round-thread"
+                );
+                assert!(resumed.ends_with(&["--resume".into(), session.into()]));
+                assert!(
+                    crate::container_helper::resume_box_vector(backend, &resumed, session).is_err()
+                );
+            }
+        }
+        assert_eq!(
+            crate::container_helper::command_for_request(&vector, &record, Some("other"))
+                .expect_err("foreign session")
+                .kind,
+            "round-thread"
+        );
+        record["plan"]["backend"] = serde_json::Value::Null;
+        assert_eq!(
+            crate::container_helper::command_for_request(&vector, &record, Some(session))
+                .expect_err("no inferred backend")
+                .kind,
+            "backend-selection"
+        );
+    }
+}
+
 /// ´test:crate:boxed-backend-claude-runtime-transformations-retain-confinement´
 #[test]
 fn boxed_backend_claude_runtime_transformations_retain_confinement() {
@@ -220,6 +297,23 @@ fn boxed_backend_claude_options_require_selected_capture() {
     ]);
     crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &planned)
         .expect("captured Claude options");
+    let session = "22222222-2222-4222-8222-222222222222";
+    let words: Vec<String> = planned
+        .as_array()
+        .expect("vector")
+        .iter()
+        .map(|word| word.as_str().expect("word").to_owned())
+        .collect();
+    let resumed = crate::container_helper::resume_box_vector(BoxBackend::Claude, &words, session)
+        .expect("resumed Claude vector");
+    let resumed = json!(resumed);
+    crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &resumed)
+        .expect("captured help lists the resume option");
+    let mut stale = report.clone();
+    stale["claude_exec_probe"]["stdout"] = json!(help.replace("  -r, --resume [value]\n", ""));
+    let error = crate::build::check_backend_exec_probe(BoxBackend::Claude, &stale, &resumed)
+        .expect_err("a capture without the resume option refuses");
+    assert_eq!(error.kind, "claude-exec-help");
     let mut unlisted = planned.clone();
     unlisted
         .as_array_mut()
