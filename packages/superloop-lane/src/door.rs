@@ -1149,6 +1149,9 @@ fn root_refusal(
     error: &LaneError,
     started: Instant,
 ) -> io::Result<()> {
+    let (bounded_request, _) =
+        announce_compute_deadline(stream, registration, peer, request, None, started);
+    let request = &bounded_request;
     let (_request_guard, admission_error) = if peer == registration.worker_uid {
         match RequestGuard::acquire_wait(owner_home, registration, request, None, started) {
             Ok((Some(guard), _)) => (Some(guard), None),
@@ -1203,27 +1206,21 @@ fn root_refusal(
     frame_write_until(stream, &reply, deadline)
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn serve_request_with_agent(
+fn announce_compute_deadline(
     stream: &mut UnixStream,
     registration: &Registration,
     peer: u32,
     request: &Value,
     route: Option<&transport::HostRunner>,
-    runner: Option<&dyn transport::Runner>,
-    owner_home: Option<&Path>,
-    rubric: Option<&Rubric>,
-    fixture_store: Option<&Store>,
-    agent: Option<&dyn agent::AgentRunner>,
-    configured_model: Option<&str>,
     started: Instant,
-) -> io::Result<(Value, Vec<u8>)> {
-    // Only an authenticated, route-validated compute form can select an owner deadline.
+) -> (Value, u64) {
+    // Announce every well-formed authenticated compute candidate before admission.
+    // Only a route-validated work request can select a longer owner deadline.
     let mut bounded_request = request.clone();
     let mut registered_deadline_ms = compute::DEADLINE_MS;
     let compute_args = transport::argument_bytes(request);
     if peer == registration.worker_uid
-        && registration.scope == Scope::Work
+        && compute_args.as_deref().is_some_and(compute::candidate)
         && request.as_object().is_some_and(|row| {
             row.len() == 3
                 && row.contains_key("schema")
@@ -1234,10 +1231,13 @@ fn serve_request_with_agent(
         && request["deadline_ms"]
             .as_u64()
             .is_some_and(|ms| ms > 0 && ms <= compute::MAX_DEADLINE_MS)
-        && let (Some(route), Some(args)) = (route, compute_args.as_ref())
-        && route.allowed(args, registration) == Some(transport::Operation::Compute)
     {
-        registered_deadline_ms = route.compute_deadline_ms(args);
+        if registration.scope == Scope::Work
+            && let (Some(route), Some(args)) = (route, compute_args.as_ref())
+            && route.allowed(args, registration) == Some(transport::Operation::Compute)
+        {
+            registered_deadline_ms = route.compute_deadline_ms(args);
+        }
         let bound = request["deadline_ms"]
             .as_u64()
             .unwrap_or(0)
@@ -1258,6 +1258,26 @@ fn serve_request_with_agent(
     {
         bounded_request["deadline_ms"] = json!(ms.min(registered_deadline_ms));
     }
+    (bounded_request, registered_deadline_ms)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn serve_request_with_agent(
+    stream: &mut UnixStream,
+    registration: &Registration,
+    peer: u32,
+    request: &Value,
+    route: Option<&transport::HostRunner>,
+    runner: Option<&dyn transport::Runner>,
+    owner_home: Option<&Path>,
+    rubric: Option<&Rubric>,
+    fixture_store: Option<&Store>,
+    agent: Option<&dyn agent::AgentRunner>,
+    configured_model: Option<&str>,
+    started: Instant,
+) -> io::Result<(Value, Vec<u8>)> {
+    let (bounded_request, registered_deadline_ms) =
+        announce_compute_deadline(stream, registration, peer, request, route, started);
     let request = &bounded_request;
     // Classify only a route-validated operation; all other shapes retain exclusive admission.
     let admission_operation = route.and_then(|route| {

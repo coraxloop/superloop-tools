@@ -78,6 +78,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Authenticated compute-shaped requests receive their deadline announcement before admission, including route and root-registration refusals, so the stub retains the named refusal through admission and record waits (``prob:door:compute-stub-first-wait-covers-admission``; ``proto:superlooplane:compute-deadline-and-evidence``).
+
+- A valid RUN-REPORT that disagrees with node measurements refuses as `door-compute-report-contradiction`, and a present report with an absent or invalid wall or exit as `door-compute-report-refusal`; replies retain the report's parsed wall and exit in `run_report` beside the node measurements, and missing node evidence keeps `door-compute-evidence-refusal` (``prob:door:run-report-contradiction-is-named-apart-from-missing-evidence``; ``proto:superlooplane:compute-deadline-and-evidence``).
+
 - Door store contention receives bounded, measured deadline credit in the service and matching stub, with cumulative wait frames and reply figures; a two-requester regression pins pending custody and the existing unlocked agent-judgement boundary, without attributing the historical long custody hold to the agent (``prob:door:request-record-lock-released-before-triage``; ``proto:superlooplane:request-lock-wait-credit``).
 
 - Mount, network, door-shape and door-attribution exercises retain their protected reservation’s selected executable and hashing custody through namespace entry, refusing changed records, programs and descriptor declarations (``proto:workercontracts:namespace-anchor-handoff``).

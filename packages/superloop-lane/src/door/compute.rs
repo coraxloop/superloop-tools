@@ -125,6 +125,26 @@ pub fn valid_detail(value: &Value) -> bool {
 
 pub(super) fn finish(reply: &mut Value, words: &[String], bytes: &[u8]) {
     let text = String::from_utf8_lossy(bytes);
+    let report = text
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("RUN-REPORT "));
+    let wall = report.and_then(|line| {
+        line.split_whitespace().find_map(|word| {
+            word.strip_prefix("wall=")?
+                .strip_suffix('s')?
+                .parse::<f64>()
+                .ok()
+        })
+    });
+    let exit = report.and_then(|line| {
+        line.split_whitespace()
+            .find_map(|word| word.strip_prefix("exit=")?.parse::<i64>().ok())
+    });
+    if report.is_some() {
+        reply["run_report"] =
+            json!({"wall_seconds":wall.filter(|wall| wall.is_finite()), "exit_status":exit});
+    }
     let metadata = text
         .lines()
         .rev()
@@ -152,38 +172,27 @@ pub(super) fn finish(reply: &mut Value, words: &[String], bytes: &[u8]) {
                 reply["reason"] = json!("door-compute-evidence-refusal");
             }
             if reason == "door-complete" {
-                let report = text
-                    .lines()
-                    .rev()
-                    .find_map(|line| line.strip_prefix("RUN-REPORT "));
-                let wall = report.and_then(|line| {
-                    line.split_whitespace().find_map(|word| {
-                        word.strip_prefix("wall=")?
-                            .strip_suffix('s')?
-                            .parse::<f64>()
-                            .ok()
-                    })
-                });
-                let exit = report.and_then(|line| {
-                    line.split_whitespace()
-                        .find_map(|word| word.strip_prefix("exit=")?.parse::<i64>().ok())
-                });
                 let measured = detail["wrapper_wall_seconds"].as_f64();
                 let measured_cpu = ["wrapper_user_cpu_seconds", "wrapper_system_cpu_seconds"]
                     .iter()
                     .all(|key| detail[*key].as_f64().is_some());
                 // The report measures the inner command; the node measures the
                 // complete wrapper. Permit one decimal place of report rounding.
-                let report_agrees = report.is_none()
-                    || (wall.zip(measured).is_some_and(|(inner, outer)| {
-                        inner.is_finite() && inner >= 0.0 && inner <= outer + 0.1
-                    }) && exit == reply["compute_exit_status"].as_i64());
                 if measured.is_none()
                     || !measured_cpu
-                    || !report_agrees
                     || detail["wrapper_exit_status"] != reply["compute_exit_status"]
                 {
                     reply["reason"] = json!("door-compute-evidence-refusal");
+                } else if report.is_some() {
+                    match (wall.filter(|wall| wall.is_finite() && *wall >= 0.0), exit) {
+                        (Some(inner), Some(exit))
+                            if measured.is_some_and(|outer| inner <= outer + 0.1)
+                                && Some(exit) == reply["compute_exit_status"].as_i64() => {}
+                        (Some(_), Some(_)) => {
+                            reply["reason"] = json!("door-compute-report-contradiction");
+                        }
+                        _ => reply["reason"] = json!("door-compute-report-refusal"),
+                    }
                 }
             }
         } else if matches!(reply["compute_exit_status"].as_i64(), Some(126 | 127))

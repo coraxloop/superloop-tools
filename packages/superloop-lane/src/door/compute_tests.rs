@@ -1529,30 +1529,15 @@ fn door_compute_node_measurements_do_not_require_a_report_line() {
     detail["wrapper_wall_seconds"] = json!(0.8);
     detail["wrapper_user_cpu_seconds"] = json!(0.2);
     detail["wrapper_system_cpu_seconds"] = json!(0.1);
-    for (report, expected) in [
-        ("", "door-complete"),
-        ("RUN-REPORT exit=3 wall=0.2s\n", "door-complete"),
-        (
-            "RUN-REPORT exit=2 wall=0.2s\n",
-            "door-compute-evidence-refusal",
-        ),
-        (
-            "RUN-REPORT exit=3 wall=2.0s\n",
-            "door-compute-evidence-refusal",
-        ),
-        ("RUN-REPORT malformed\n", "door-compute-evidence-refusal"),
-    ] {
-        let evidence = format!(
-            "{report}DOOR-COMPUTE {}\n",
-            json!({"reason":"door-complete","detail":detail})
-        );
-        let mut reply = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
-        compute::finish(&mut reply, &words, evidence.as_bytes());
-        assert_eq!(reply["reason"], expected, "{report}");
-        assert_eq!(reply["compute"]["wrapper_wall_seconds"], 0.8);
-        assert_eq!(reply["compute"]["wrapper_user_cpu_seconds"], 0.2);
-        assert_eq!(reply["compute"]["wrapper_system_cpu_seconds"], 0.1);
-    }
+    let evidence = format!(
+        "DOOR-COMPUTE {}\n",
+        json!({"reason":"door-complete","detail":detail})
+    );
+    let mut reply = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+    compute::finish(&mut reply, &words, evidence.as_bytes());
+    assert_eq!(reply["reason"], "door-complete");
+    assert_eq!(reply["compute"], detail);
+    assert!(reply.get("run_report").is_none());
     let mut wrong_exit = detail.clone();
     wrong_exit["wrapper_exit_status"] = json!(4);
     let evidence = format!(
@@ -1593,4 +1578,207 @@ fn door_compute_node_measurements_do_not_require_a_report_line() {
         invalid.as_object_mut().expect("detail").remove(key);
         assert!(!compute::valid_detail(&invalid), "{key}");
     }
+    let mut missing = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+    compute::finish(&mut missing, &words, b"RUN-REPORT exit=3 wall=0.2s\n");
+    assert_eq!(missing["reason"], "door-compute-evidence-refusal");
+    assert_eq!(
+        missing["run_report"],
+        json!({"wall_seconds":0.2,"exit_status":3})
+    );
+    assert!(missing["compute"]["wrapper_wall_seconds"].is_null());
+}
+
+/// ´test:unit:door-rejected-compute-announces-before-admission´
+#[test]
+fn door_rejected_compute_announces_before_admission() {
+    for (command, scope, reason) in [
+        (
+            "/wrong/wrapper cargo test --locked",
+            Scope::Work,
+            "door-compute-wrapper-refusal",
+        ),
+        (
+            "/opt/fixture/bin/report cargo test --locked;id",
+            Scope::Work,
+            "door-compute-words-refusal",
+        ),
+        (
+            "/opt/fixture/bin/report cargo test",
+            Scope::Work,
+            "door-compute-locked-refusal",
+        ),
+        (
+            "/opt/fixture/bin/report git diff",
+            Scope::Review,
+            "door-review-compute-refusal",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            scope,
+        )
+        .expect("registration");
+        let held = super::RequestGuard::acquire(&fixture.home, &registration)
+            .expect("guard")
+            .expect("free admission");
+        let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, scope, None);
+        let mut client = UnixStream::connect(socket).expect("connect");
+        frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),command.as_bytes().to_vec()],"deadline_ms":60000})).expect("compute-shaped request");
+        let announced = frame_read_until(&mut client, Instant::now() + Duration::from_secs(5))
+            .expect("announcement precedes the held admission guard");
+        assert_eq!(announced["type"], "compute-deadline");
+        assert_eq!(announced["registered_deadline_ms"], compute::DEADLINE_MS);
+        assert_eq!(announced["request_deadline_ms"], 60000);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(
+            fixture
+                .store()
+                .list_run("R")
+                .expect("no preflight before admission")
+                .is_empty()
+        );
+        drop(held);
+        let reply = frame_read_until(&mut client, Instant::now() + Duration::from_secs(5))
+            .expect("named refusal after admission");
+        server.join().expect("server").expect("service");
+        assert_eq!(reply["reason"], reason);
+        assert_eq!(reply["status"], 125);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+}
+
+/// ´test:unit:door-compute-report-refusals-keep-inner-and-node-measurements´
+#[test]
+fn door_compute_report_refusals_keep_inner_and_node_measurements() {
+    let words = vec!["git".to_owned(), "diff".to_owned()];
+    let mut detail = compute::pending(&words);
+    detail["wrapper_exit_status"] = json!(3);
+    detail["wrapper_wall_seconds"] = json!(0.8);
+    detail["wrapper_user_cpu_seconds"] = json!(0.2);
+    detail["wrapper_system_cpu_seconds"] = json!(0.1);
+    for (report, expected, reported) in [
+        (
+            "RUN-REPORT exit=3 wall=0.2s\n",
+            "door-complete",
+            Some(json!({"wall_seconds":0.2,"exit_status":3})),
+        ),
+        (
+            "RUN-REPORT exit=2 wall=0.2s\n",
+            "door-compute-report-contradiction",
+            Some(json!({"wall_seconds":0.2,"exit_status":2})),
+        ),
+        (
+            "RUN-REPORT exit=3 wall=2.0s\n",
+            "door-compute-report-contradiction",
+            Some(json!({"wall_seconds":2.0,"exit_status":3})),
+        ),
+        (
+            "RUN-REPORT malformed\n",
+            "door-compute-report-refusal",
+            Some(json!({"wall_seconds":null,"exit_status":null})),
+        ),
+        (
+            "RUN-REPORT exit=3 wall=-0.2s\n",
+            "door-compute-report-refusal",
+            Some(json!({"wall_seconds":-0.2,"exit_status":3})),
+        ),
+        (
+            "RUN-REPORT exit=3 wall=NaNs\n",
+            "door-compute-report-refusal",
+            Some(json!({"wall_seconds":null,"exit_status":3})),
+        ),
+    ] {
+        let evidence = format!(
+            "{report}DOOR-COMPUTE {}\n",
+            json!({"reason":"door-complete","detail":detail})
+        );
+        let mut reply = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+        compute::finish(&mut reply, &words, evidence.as_bytes());
+        assert_eq!(reply["reason"], expected, "{report}");
+        assert_eq!(reply["compute"]["wrapper_exit_status"], 3);
+        assert_eq!(reply["compute_exit_status"], 3);
+        assert_eq!(reply["compute"]["wrapper_wall_seconds"], 0.8);
+        assert_eq!(reply["compute"]["wrapper_user_cpu_seconds"], 0.2);
+        assert_eq!(reply["compute"]["wrapper_system_cpu_seconds"], 0.1);
+        assert_eq!(reply.get("run_report"), reported.as_ref());
+        assert_eq!(
+            reply["status"],
+            if expected == "door-complete" { 3 } else { 125 }
+        );
+    }
+}
+
+/// ´test:unit:door-root-refusal-announces-before-admission´
+#[test]
+fn door_root_refusal_announces_before_admission() {
+    let fixture = Fixture::new();
+    let registration = Registration::from_row(
+        &json!({"name":"alpha","uid":41001}),
+        "alpha",
+        "R",
+        3000,
+        Scope::Work,
+    )
+    .expect("registration");
+    let held = super::RequestGuard::acquire(&fixture.home, &registration)
+        .expect("guard")
+        .expect("free admission");
+    let (mut client, mut service) = UnixStream::pair().expect("socket pair");
+    let home = fixture.home.clone();
+    let server = thread::spawn(move || {
+        let home_fd = std::fs::File::open(&home).expect("home");
+        let runs = home.join("runs");
+        let runs_fd = std::fs::File::open(&runs).expect("runs");
+        let _namespace = crate::home::activate_private_launch(
+            &home,
+            &home_fd,
+            &runs,
+            &runs_fd,
+            None,
+            nix::unistd::Uid::effective().as_raw(),
+        )
+        .expect("private fixture namespace");
+        let request = frame_read(&mut service).expect("request");
+        super::root_refusal(
+            &mut service,
+            &registration,
+            3000,
+            &request,
+            &home,
+            &crate::error::LaneError::input("door-compute-root-refusal", "fixture root absent"),
+            Instant::now(),
+        )
+    });
+    frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":60000})).expect("request");
+    let announced = frame_read_until(&mut client, Instant::now() + Duration::from_secs(5))
+        .expect("root refusal announces while admission is held");
+    assert_eq!(announced["type"], "compute-deadline");
+    assert_eq!(announced["registered_deadline_ms"], compute::DEADLINE_MS);
+    assert!(
+        fixture
+            .store()
+            .list_run("R")
+            .expect("no premature record")
+            .is_empty()
+    );
+    drop(held);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let reply = loop {
+        let frame = frame_read_until(&mut client, deadline).expect("root refusal frames");
+        if frame.get("reason").is_some() {
+            break frame;
+        }
+        assert_eq!(frame["type"], "stderr");
+    };
+    server.join().expect("server").expect("root refusal");
+    assert_eq!(reply["reason"], "door-compute-root-refusal");
+    assert_eq!(reply["status"], 125);
+    let rows = fixture.store().list_run("R").expect("refusal record");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].value()["state"], "preflight-refused");
 }
