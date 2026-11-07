@@ -31,18 +31,23 @@ fn refusal(error: impl std::fmt::Display) -> LaneError {
     LaneError::input("container-anchor", error.to_string())
 }
 
-fn io_refusal(purpose: &str, check: &str, cause: impl std::fmt::Display) -> LaneError {
+fn io_refusal(
+    operation: &str,
+    purpose: &str,
+    check: &str,
+    cause: impl std::fmt::Display,
+) -> LaneError {
     refusal(format!(
-        "anchor-io: operation={OPERATION} purpose={purpose} check={check}: {cause}"
+        "anchor-io: operation={operation} purpose={purpose} check={check}: {cause}"
     ))
 }
 
-fn directory_policy(fd: &impl AsFd, purpose: &str) -> Result<Policy, LaneError> {
-    let stat = fstat(fd).map_err(|error| io_refusal(purpose, "fstat", error))?;
+fn directory_policy(operation: &str, fd: &impl AsFd, purpose: &str) -> Result<Policy, LaneError> {
+    let stat = fstat(fd).map_err(|error| io_refusal(operation, purpose, "fstat", error))?;
     let mode = stat.st_mode & 0o7777;
     if mode & 0o7022 != 0 || mode & 0o700 != 0o700 {
         return Err(refusal(format_args!(
-            "anchor-mode: operation=container-helper purpose={purpose} check=directory-mode observed={mode:04o}"
+            "anchor-mode: operation={operation} purpose={purpose} check=directory-mode observed={mode:04o}"
         )));
     }
     Ok(Policy {
@@ -74,9 +79,20 @@ pub(crate) fn pin(
     entry: &Path,
     podman: &Path,
 ) -> Result<Bundle, LaneError> {
+    pin_for(OPERATION, loop_name, home, runs, entry, podman)
+}
+
+pub(crate) fn pin_for(
+    operation: &'static str,
+    loop_name: &str,
+    home: (&Path, &OwnedFd),
+    runs: (&Path, &OwnedFd),
+    entry: &Path,
+    podman: &Path,
+) -> Result<Bundle, LaneError> {
     let verifier = HostVerifier::current()
         .map_err(refusal)?
-        .for_operation(OPERATION);
+        .for_operation(operation);
     let mut records = Vec::new();
     let mut descriptors = Vec::new();
     for (slot, (path, held)) in [home, runs].into_iter().enumerate() {
@@ -85,15 +101,16 @@ pub(crate) fn pin(
                 path,
                 PURPOSES[slot],
                 u32::try_from(slot).map_err(refusal)?,
-                directory_policy(held, PURPOSES[slot])?,
+                directory_policy(operation, held, PURPOSES[slot])?,
             )
             .map_err(refusal)?;
         let record = pin.record();
-        let actual = fstat(held).map_err(|error| io_refusal(PURPOSES[slot], "held-stat", error))?;
+        let actual = fstat(held)
+            .map_err(|error| io_refusal(operation, PURPOSES[slot], "held-stat", error))?;
         if (record.device, record.inode) != (actual.st_dev, actual.st_ino) {
-            return Err(refusal(
-                "anchor-identity: operation=container-helper purpose=directory",
-            ));
+            return Err(refusal(format!(
+                "anchor-identity: operation={operation} purpose=directory"
+            )));
         }
         records.push(record);
         descriptors.push(pin.into_fd());
@@ -120,7 +137,7 @@ pub(crate) fn pin(
     let manifest = Manifest {
         version: 1,
         transport: Transport::Rights,
-        operation: OPERATION.into(),
+        operation: operation.into(),
         loop_name: loop_name.into(),
         records,
     };
@@ -328,20 +345,30 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
 }
 
 fn receive(source: &str, input: &impl AsFd) -> Result<(Manifest, Vec<Anchor>), LaneError> {
-    let manifest = Manifest::parse(source).map_err(refusal)?;
+    receive_for(source, input, OPERATION, None)
+}
+
+pub(crate) fn receive_for(
+    source: &str,
+    input: &impl AsFd,
+    operation: &'static str,
+    scope: Option<&str>,
+) -> Result<(Manifest, Vec<Anchor>), LaneError> {
+    let manifest =
+        Manifest::parse(source).map_err(|error| refusal(error.context(operation, "manifest")))?;
     if manifest.records.len() != PURPOSES.len() {
-        return Err(refusal(
-            "anchor-declaration: operation=container-helper purpose=count",
-        ));
+        return Err(refusal(format!(
+            "anchor-declaration: operation={operation} purpose=count"
+        )));
     }
     let stream = UnixStream::from(
         input
             .as_fd()
             .try_clone_to_owned()
-            .map_err(|error| io_refusal("rights", "input-duplicate", error))?,
+            .map_err(|error| io_refusal(operation, "rights", "input-duplicate", error))?,
     );
     let descriptors = anchor::transport::receive(&stream, PURPOSES.len(), Duration::from_secs(30))
-        .map_err(|error| refusal(error.context(OPERATION, "rights")))?;
+        .map_err(|error| refusal(error.context(operation, "rights")))?;
     let mut required = Vec::new();
     for (slot, purpose) in PURPOSES.iter().enumerate() {
         let record = manifest
@@ -349,17 +376,19 @@ fn receive(source: &str, input: &impl AsFd) -> Result<(Manifest, Vec<Anchor>), L
             .iter()
             .find(|record| record.purpose == *purpose)
             .ok_or_else(|| {
-                refusal("anchor-declaration: operation=container-helper purpose=roles")
+                refusal(format!(
+                    "anchor-declaration: operation={operation} purpose=roles"
+                ))
             })?;
         if usize::try_from(record.slot).map_err(refusal)? != slot {
-            return Err(refusal(
-                "anchor-declaration: operation=container-helper purpose=slots",
-            ));
+            return Err(refusal(format!(
+                "anchor-declaration: operation={operation} purpose=slots"
+            )));
         }
         required.push(Requirement {
             purpose: (*purpose).into(),
             policy: if slot < 2 {
-                directory_policy(&descriptors[slot], purpose)?
+                directory_policy(operation, &descriptors[slot], purpose)?
             } else {
                 executable_policy(record.owner_uid == 0)
             },
@@ -367,27 +396,27 @@ fn receive(source: &str, input: &impl AsFd) -> Result<(Manifest, Vec<Anchor>), L
         });
     }
     let anchors = Receiver::current()
-        .map_err(refusal)?
+        .map_err(|error| refusal(error.context(operation, "receiver-map")))?
         .validate(
             &manifest,
             descriptors,
-            OPERATION,
-            &manifest.loop_name,
+            operation,
+            scope.unwrap_or(&manifest.loop_name),
             Transport::Rights,
             &required,
         )
         .map_err(refusal)?;
     let entry = &anchors[2];
     let current = std::fs::File::open("/proc/self/exe")
-        .map_err(|error| io_refusal("entry-executable", "self-image-open", error))?;
-    let expected =
-        fstat(entry).map_err(|error| io_refusal("entry-executable", "held-stat", error))?;
+        .map_err(|error| io_refusal(operation, "entry-executable", "self-image-open", error))?;
+    let expected = fstat(entry)
+        .map_err(|error| io_refusal(operation, "entry-executable", "held-stat", error))?;
     let actual = fstat(&current)
-        .map_err(|error| io_refusal("entry-executable", "self-image-stat", error))?;
+        .map_err(|error| io_refusal(operation, "entry-executable", "self-image-stat", error))?;
     if (expected.st_dev, expected.st_ino) != (actual.st_dev, actual.st_ino) {
-        return Err(refusal(
-            "anchor-identity: operation=container-helper purpose=entry-executable",
-        ));
+        return Err(refusal(format!(
+            "anchor-identity: operation={operation} purpose=entry-executable"
+        )));
     }
     Ok((manifest, anchors))
 }

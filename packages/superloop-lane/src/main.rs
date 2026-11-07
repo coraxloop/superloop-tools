@@ -305,10 +305,6 @@ fn bind_private_launch_args<'a>(
                 | "_exercise-measure"
                 | "_exercise-home-layout"
                 | "_exercise-harvest"
-                | "_exercise-mounts"
-                | "_exercise-door-shape"
-                | "_exercise-door-attribution"
-                | "_exercise-network"
                 | "_observed-hosts"
                 | "_make-home"
                 | "_checkpoint"
@@ -360,24 +356,6 @@ fn bind_private_launch_args<'a>(
     }
     if body.first().is_some_and(|word| word == "_exercise-harvest") {
         launch::exercise::parse_harvest_private_argv(body)?;
-    }
-    if body.first().is_some_and(|word| word == "_exercise-mounts") {
-        launch::exercise::mounts::parse_private_argv(body)?;
-    }
-    if body
-        .first()
-        .is_some_and(|word| word == "_exercise-door-shape")
-    {
-        launch::exercise::door_shape::parse_private_argv(body)?;
-    }
-    if body
-        .first()
-        .is_some_and(|word| word == "_exercise-door-attribution")
-    {
-        launch::exercise::door_attribution::parse_private_argv(body)?;
-    }
-    if body.first().is_some_and(|word| word == "_exercise-network") {
-        launch::exercise::network::parse_private_argv(body)?;
     }
     validate_bite_private_argv(body)?;
     let mut homes = body.windows(2).filter(|pair| pair[0] == "--owner-home");
@@ -515,6 +493,12 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
     }
     if args.first().is_some_and(|word| word == "_prepare-runtime") {
         let report = superloop_lane::runtime_entry::serve(args)?;
+        writeln!(io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
+        return Ok(0);
+    }
+    if launch::exercise_entry::handles(args) {
+        let report = launch::exercise_entry::serve(args)?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
@@ -1118,66 +1102,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             launch::exercise::parse_harvest_private_argv(args)?;
         let report =
             launch::exercise::private_harvest_audit(owner_home, loop_name, run, expected_record)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-mounts")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::mounts::parse_private_argv(args)?;
-        let report =
-            launch::exercise::mounts::private_measure(owner_home, loop_name, run, expected_record)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-door-shape")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::door_shape::parse_private_argv(args)?;
-        let report = launch::exercise::door_shape::private_measure(
-            owner_home,
-            loop_name,
-            run,
-            expected_record,
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-door-attribution")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::door_attribution::parse_private_argv(args)?;
-        let report = launch::exercise::door_attribution::private_measure(
-            owner_home,
-            loop_name,
-            run,
-            expected_record,
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-network")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::network::parse_private_argv(args)?;
-        let report = launch::exercise::network::private_measure(
-            owner_home,
-            loop_name,
-            run,
-            expected_record,
-        )?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);

@@ -276,3 +276,122 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
     }
     set_private(0, 0o700);
 }
+
+/// # Panics
+/// Panics if a container-backed exercise loses its selected program or protected record binding.
+///
+/// ´claim:superlooplane:exercise-entries-retain-selected-program-custody´
+/// ´test:integration:exercise-entries-retain-selected-program-custody´
+#[test]
+fn exercise_entries_retain_selected_program_custody() {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let fixture = tempfile::tempdir().expect("home");
+    let home = fixture.path();
+    fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("home mode");
+    let runs = home.join("runs");
+    fs::create_dir(&runs).expect("runs");
+    fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+    let alternate = home.join("selected-podman");
+    fs::copy("/usr/bin/podman", &alternate).expect("real alternate program");
+    fs::set_permissions(&alternate, fs::Permissions::from_mode(0o700)).expect("program mode");
+    let held_home = fs::File::open(home).expect("home descriptor").into();
+    let held_runs = fs::File::open(&runs).expect("runs descriptor").into();
+    let record_path = runs.join(".reservation-R.json");
+    for program in [Path::new("/usr/bin/podman"), alternate.as_path()] {
+        let bytes=serde_json::to_vec(&serde_json::json!({"schema":1,"phase":"preparing","worker_uid":3000,"loop":"alpha","run":"R","plan":{"runtime_argv":[program]}})).expect("record bytes");
+        fs::write(&record_path, &bytes).expect("protected record");
+        fs::set_permissions(&record_path, fs::Permissions::from_mode(0o600)).expect("record mode");
+        let stat = fs::metadata(&record_path).expect("record identity");
+        let mut identity = format!("{}:{}:", stat.dev(), stat.ino());
+        for byte in Sha256::digest(&bytes) {
+            write!(identity, "{byte:02x}").expect("digest word");
+        }
+        for mode in [
+            "_exercise-mounts",
+            "_exercise-network",
+            "_exercise-door-shape",
+            "_exercise-door-attribution",
+        ] {
+            let argv = vec![
+                "unshare".into(),
+                env!("CARGO_BIN_EXE_superloop-lane").into(),
+                mode.into(),
+                "alpha".into(),
+                "R".into(),
+                "--expect-record".into(),
+                identity.clone(),
+                "--owner-home".into(),
+                home.to_str().expect("home word").into(),
+            ];
+            for case in ["valid", "operation", "record", "program", "missing"] {
+                let request = superloop_lane::launch::exercise_entry::command(
+                    Path::new("/usr/bin/podman"),
+                    &argv,
+                    home,
+                    &held_home,
+                    &runs,
+                    &held_runs,
+                )
+                .expect("production exercise composer");
+                exercise_case(request, case, &record_path, &bytes, mode);
+            }
+        }
+        assert_eq!(fs::read(&record_path).expect("retained record"), bytes);
+    }
+}
+
+/// # Panics
+/// Panics if a production entry accepts changed custody or fails before the recorded check.
+fn exercise_case(
+    mut request: loop_home::CommandSpec,
+    case: &str,
+    record_path: &Path,
+    bytes: &[u8],
+    mode: &str,
+) {
+    use loop_home::{ProcessRunner, Runner};
+    if case == "operation" {
+        let source = request.argv.last_mut().expect("declaration");
+        let mut manifest: Manifest = serde_json::from_str(source).expect("manifest");
+        manifest.operation = "container-helper".into();
+        *source = serde_json::to_string(&manifest).expect("changed operation");
+    }
+    if case == "program" {
+        let flag = request
+            .argv
+            .iter()
+            .position(|word| word == "--anchored-program")
+            .expect("program binding");
+        request.argv[flag + 1] = "/usr/bin/false".into();
+    }
+    if case == "record" {
+        fs::write(record_path, b"{\"schema\":1,\"worker_uid\":3000}").expect("changed record");
+    }
+    if case == "missing" {
+        request.descriptors = loop_home::CommandDescriptors::default();
+    }
+    let output = ProcessRunner.run(&request).expect("exercise entry");
+    fs::write(record_path, bytes).expect("restore record");
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_ne!(output.status, 0, "fixture lacks installed configuration");
+    match case {
+        "valid" => assert!(
+            !report.contains("anchor-") && report.contains("unsafe-path"),
+            "{mode} valid: {report}"
+        ),
+        "missing" => assert!(
+            report.contains("anchor-transport"),
+            "{mode} {case}: {report}"
+        ),
+        _ => assert!(
+            report.contains("anchor-declaration"),
+            "{mode} {case}: {report}"
+        ),
+    }
+}

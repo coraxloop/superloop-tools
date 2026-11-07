@@ -1910,6 +1910,9 @@ pattern = "packages/superloop-lane/src/launch/exercise_door_modes.rs"
 pattern = "packages/superloop-lane/src/launch/exercise_door_probe.py"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_entry.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/exercise_layout.rs"
 
 [[include.rows]]

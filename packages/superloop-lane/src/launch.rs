@@ -36,6 +36,7 @@ pub mod checkout;
 pub mod checkpoint;
 pub mod driver_report;
 pub mod exercise;
+pub mod exercise_entry;
 pub(crate) mod exercise_resources;
 pub mod follow;
 pub mod harvest;

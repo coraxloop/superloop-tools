@@ -1010,6 +1010,14 @@ pub(crate) fn run_checked_with_private_launch(
         let request = crate::runtime_entry::command(program, &argv, cwd, home, runs_root, runs)?;
         return run_checked_command(&request, environment, cwd, timeout_seconds, name);
     }
+    if argv
+        .get(2..)
+        .is_some_and(crate::launch::exercise_entry::handles)
+    {
+        let request =
+            crate::launch::exercise_entry::command(program, &argv, cwd, home, runs_root, runs)?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
     let spec = child(program, argv, environment, cwd, timeout_seconds, name)
         .with_private_launch(home, runs_root, runs, letter)?;
     checked_output(&spec, None)
