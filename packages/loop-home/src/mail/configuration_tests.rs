@@ -431,3 +431,75 @@ fn mail_scan_configuration_retains_its_anchor() {
             .starts_with("changed-source:")
     );
 }
+
+/// ´claim:loophome:mail-inventory-reports-skipped-loop-reason´
+/// ´test:unit:mail-inventory-reports-skipped-loop-reason´
+#[test]
+fn mail_inventory_reports_skipped_loop_reason() {
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let fixture = Fixture::new();
+    let host = fixture.root.join(".config/loops");
+    fs::create_dir_all(&host).expect("host config");
+    fs::write(
+        host.join("registry.toml"),
+        "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[{name='alpha',uid=3000,launch='dev/alpha'}]\n",
+    )
+    .expect("registry");
+    fs::write(host.join("allocations.toml"), "mail_uid=4000\n")
+        .expect("service allocation without a loop mailbox group");
+    for name in ["registry.toml", "allocations.toml"] {
+        fs::set_permissions(host.join(name), fs::Permissions::from_mode(0o644))
+            .expect("trusted metadata");
+    }
+    let directory = Directory {
+        configuration: None,
+        home: fixture.root.clone(),
+        service: 4000,
+        owner: nix::unistd::geteuid().as_raw(),
+        durability: Durability {
+            crash_consistent_rename: true,
+            durable_sync: true,
+        },
+    };
+    let captured = Capture(Arc::default());
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
+    let inventory = tracing::subscriber::with_default(subscriber, || {
+        directory
+            .inventory()
+            .expect("inventory skips only the loop")
+    });
+    let reason = "unsafe-storage: loop mailbox group is not reserved";
+    assert_eq!(inventory.failures, [format!("alpha: {reason}")]);
+    assert!(inventory.actors.is_empty());
+    assert!(inventory.loops.contains("alpha"));
+    let output = captured.0.lock().expect("capture").clone();
+    let lines = std::str::from_utf8(&output).expect("UTF-8");
+    let events = lines
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON event"))
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1, "routine refresh stays quiet at info");
+    assert_eq!(events[0]["level"], "WARN");
+    assert_eq!(events[0]["fields"]["message"], "loop skipped");
+    assert_eq!(events[0]["fields"]["loop_name"], "alpha");
+    assert_eq!(events[0]["fields"]["reason"], reason);
+}

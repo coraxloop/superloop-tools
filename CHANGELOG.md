@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- The mail service emits structured stderr spans and events for inventory skips, each naming the skipped loop or worker and the reason the scan's failure report collects, and for delivery, refusal codes, restoration, recovery, pruning and clock waits, with `RUST_LOG` filtering and a quiet `info` default; refusal sidecars are unchanged (``prob:mail:inventory-skips-are-events-and-the-refusal-names-its-class``).
+
 - Registered test commands accept one restricted filter after a named test target, including the explicit exact-match suffix, while retaining the argv and refusing additional or unbound filters (``prob:door:door-compute-admits-test-name-filter``).
 
 - Boxed launch accepts an explicit `--backend {codex|claude}` selector, validates that vendor's configured program without cross-vendor fallback and names the selection in its preview; Claude execution remains refused as `backend-unavailable` pending its plan, home, entry, credential and runtime adapters, and resumed rounds refuse a backend selection; existing settings files select Codex as before (``prob:box:claude-boxed-workers``; ``conv:superlooplane:backend-selection-compatibility``).

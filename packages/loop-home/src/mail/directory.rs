@@ -280,16 +280,19 @@ impl Directory {
         Ok(())
     }
     pub fn inventory(&self) -> Result<Inventory> {
+        let _span = tracing::debug_span!("mail.inventory", home = %self.home.display()).entered();
         let (registry, _, _) = self.registry()?;
         let allocations = self.allocations()?;
         let rows = registry.rows(&self.home);
         self.verify_credentials(&rows, &allocations)?;
-        let loops = rows.iter().map(|row| row.name.clone()).collect();
+        let loops: BTreeSet<_> = rows.iter().map(|row| row.name.clone()).collect();
         let mut actors = BTreeMap::new();
         let mut identities = BTreeSet::from([self.service, self.owner]);
         let mut failures = Vec::new();
         let mut retired = BTreeSet::new();
         for row in rows {
+            let _span =
+                tracing::debug_span!("mail.inventory.loop", loop_name = %row.name).entered();
             let address = Address::parse(&row.name)
                 .map_err(|_| MailError::Invalid("invalid-name: registered loop"))?;
             let label = address.to_string();
@@ -307,6 +310,7 @@ impl Directory {
                         true,
                     )
                 });
+            observe_admission(&added, &row.name, &label, "loop");
             if let Err(error) = added {
                 failures.push(format!("{label}: {error}"));
             }
@@ -325,9 +329,11 @@ impl Directory {
             let workers = match io::absolute(&row.home.join("workers"), true) {
                 Ok(workers) => workers,
                 Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::trace!(loop_name = %row.name, "no worker directory");
                     continue;
                 }
                 Err(error) => {
+                    tracing::warn!(loop_name = %row.name, reason = %error, "workers skipped");
                     failures.push(format!("{}: {error}", row.name));
                     continue;
                 }
@@ -335,12 +341,15 @@ impl Directory {
             let names = match io::names(&workers) {
                 Ok(names) => names,
                 Err(error) => {
+                    tracing::warn!(loop_name = %row.name, reason = %error, "workers skipped");
                     failures.push(format!("{}: {error}", row.name));
                     continue;
                 }
             };
             for name in names {
                 let label = format!("{}+{}", row.name, name.to_string_lossy());
+                let _span =
+                    tracing::debug_span!("mail.inventory.worker", worker = %label).entered();
                 let added = (|| -> Result<()> {
                     let name = name
                         .to_str()
@@ -352,11 +361,19 @@ impl Directory {
                         self.worker_identity(&allocations, &row, &address, active)?;
                     self.add_actor(&mut actors, &mut identities, address, (uid, group), active)
                 })();
+                observe_admission(&added, &row.name, &label, "worker");
                 if let Err(error) = added {
                     failures.push(format!("{label}: {error}"));
                 }
             }
         }
+        tracing::debug!(
+            loops = loops.len(),
+            actors = actors.len(),
+            skipped = failures.len(),
+            retired = retired.len(),
+            "inventory refreshed"
+        );
         Ok(Inventory {
             loops,
             actors,
@@ -509,6 +526,14 @@ impl Directory {
             },
         );
         Ok(())
+    }
+}
+
+fn observe_admission(result: &Result<()>, loop_name: &str, address: &str, kind: &str) {
+    if let Err(error) = result {
+        tracing::warn!(loop_name, address, reason = %error, "{kind} skipped");
+    } else {
+        tracing::debug!(loop_name, address, "{kind} admitted");
     }
 }
 

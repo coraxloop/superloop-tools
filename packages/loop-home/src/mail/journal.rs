@@ -666,6 +666,11 @@ impl Journal {
         &self.root
     }
 
+    /// Last reserved instant, observed without changing the clock watermark.
+    pub(super) const fn greatest_reserved(&self) -> Option<&Instant> {
+        self.state.greatest_reserved.as_ref()
+    }
+
     /// Check actual UTC before preparing admission; the writer lock prevents races.
     ///
     /// # Errors
@@ -1007,6 +1012,7 @@ impl Journal {
         now: &Instant,
         project: impl FnOnce(&[Record]) -> Result<Pins>,
     ) -> Result<u64> {
+        let _span = tracing::debug_span!("mail.prune", now = %now).entered();
         let _admission = reservation_admission(&self.root)?;
         let live_reservations = self.reservation_pins()?;
         self.finish_compaction()?;
@@ -1016,6 +1022,7 @@ impl Journal {
             .as_ref()
             .is_some_and(|seen| now < seen)
         {
+            tracing::trace!(now = %now, greatest_observed = ?self.state.greatest_observed, "prune postponed: clock moved backward");
             return Ok(0);
         }
         let mut observed = self.state.clone();
@@ -1025,6 +1032,7 @@ impl Journal {
         let mut removed = 0;
         let records = self.records()?;
         let pins = project(&records)?;
+        let examined = records.len();
         for record in records {
             let Some(completed) = &record.completed else {
                 continue;
@@ -1069,6 +1077,24 @@ impl Journal {
             }
             self.finish_compaction()?;
             removed += 1;
+        }
+        if removed > 0 {
+            tracing::info!(
+                examined,
+                removed,
+                retained = examined as u64 - removed,
+                reservations = live_reservations.len(),
+                active_inboxes = pins.active_inboxes.len(),
+                "journal pruned"
+            );
+        } else {
+            tracing::trace!(
+                examined,
+                removed,
+                reservations = live_reservations.len(),
+                active_inboxes = pins.active_inboxes.len(),
+                "journal prune unchanged"
+            );
         }
         Ok(removed)
     }

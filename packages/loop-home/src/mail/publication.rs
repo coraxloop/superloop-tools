@@ -702,6 +702,7 @@ pub fn discard(
     delivery: &Instant,
 ) -> Result<()> {
     let record = journal.record(delivery)?;
+    let _span = tracing::info_span!("mail.discard", sender = %sender.address, recipient = %recipient.address, letter = %record.outgoing).entered();
     bindings(sender, recipient, &record)?;
     if record.phase != Phase::Discarded {
         return Err(MailError::Invalid("discard decision is not durable"));
@@ -757,6 +758,7 @@ pub fn discard(
     )?;
     #[cfg(test)]
     boundary(13)?;
+    tracing::info!(restored = 1, "discarded letter restored");
     Ok(())
 }
 
@@ -1005,6 +1007,7 @@ pub fn reconcile_accepted_preparation(
     recipient: &Endpoint,
     outgoing: &str,
 ) -> Result<Instant> {
+    let _span = tracing::info_span!("mail.reconcile_accepted_preparation", sender = %sender.address, recipient = %recipient.address, letter = %outgoing).entered();
     preparation_names(journal, sender, recipient, outgoing)?
         .ok_or(MailError::Invalid("missing preparation"))?;
     let key = preparation_key(&sender.address, outgoing);
@@ -1030,6 +1033,7 @@ pub fn reconcile_accepted_preparation(
         })
         .ok_or(MailError::Invalid("preparation lacks matching acceptance"))?;
     store::remove(journal.publication_root(), &key)?;
+    tracing::info!(recovered = 1, delivery = %record.delivery, "accepted preparation recovered");
     Ok(record.delivery)
 }
 
@@ -1186,6 +1190,7 @@ pub fn reconcile_unpublished(
     recipient: &Endpoint,
     outgoing: &str,
 ) -> Result<()> {
+    let _span = tracing::info_span!("mail.reconcile_unpublished", sender = %sender.address, recipient = %recipient.address, letter = %outgoing).entered();
     let parsed = Outgoing::parse(outgoing).map_err(|_| MailError::Invalid("invalid-name"))?;
     if parsed.recipient != recipient.address {
         return Err(MailError::Invalid("recipient binding"));
@@ -1281,7 +1286,9 @@ pub fn reconcile_unpublished(
     if store::names(journal.publication_root())?.contains(&key) {
         store::remove(journal.publication_root(), &key)?;
     }
-    store::remove(journal.publication_root(), &intent_name)
+    store::remove(journal.publication_root(), &intent_name)?;
+    tracing::info!(restored = 1, "unpublished letter restored");
+    Ok(())
 }
 
 #[cfg(test)]
