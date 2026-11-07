@@ -46,3 +46,5 @@ pub mod migration_inventory;
 pub mod migration_control;
 
 pub mod migration_cutover;
+
+mod worker_anchors;

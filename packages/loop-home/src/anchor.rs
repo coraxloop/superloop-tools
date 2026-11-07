@@ -46,6 +46,10 @@ impl Error {
             detail: kind.strip_prefix("anchor-").unwrap_or(kind).into(),
         }
     }
+    pub(crate) fn purpose(&self) -> &str {
+        &self.purpose
+    }
+
     /// Attach the trusted caller's operation and purpose without discarding the cause.
     #[must_use]
     pub fn context(mut self, operation: &str, purpose: &str) -> Self {
@@ -790,6 +794,92 @@ impl Anchor {
         )
     }
 
+    /// Execute this held file in the child without a namespace-side pathname lookup.
+    /// Arguments include argv zero; the environment is the caller's complete selection.
+    /// # Errors
+    /// Refuses non-executable custody, NUL bytes, excessive vectors or a failed duplication.
+    /// An execveat refusal reaches the caller through the command's spawn error.
+    #[allow(unsafe_code)]
+    pub fn configure_exec(
+        &self,
+        command: &mut std::process::Command,
+        arguments: &[std::ffi::OsString],
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> Result<()> {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::process::CommandExt as _;
+        const WORDS: usize = 1024;
+        let refusal = || Error::new("anchor-exec", &self.operation, &self.record.purpose);
+        if self.policy.kind != Kind::File
+            || self.policy.mode != ModePolicy::Executable
+            || arguments.is_empty()
+            || arguments.len() >= WORDS
+            || environment.len() >= WORDS
+        {
+            return Err(refusal());
+        }
+        self.revalidate()?;
+        let image = self
+            .fd
+            .try_clone()
+            .map_err(|cause| refusal().because("exec-duplicate", cause))?;
+        let argv = arguments
+            .iter()
+            .map(|word| std::ffi::CString::new(word.as_bytes()))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|cause| refusal().because("exec-arguments", cause))?;
+        let env = environment
+            .iter()
+            .map(|(key, value)| {
+                let mut word = key.clone();
+                word.push("=");
+                word.push(value);
+                std::ffi::CString::new(word.as_bytes())
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|cause| refusal().because("exec-environment", cause))?;
+        // SAFETY: all C strings and the executable descriptor are owned by this
+        // closure. After fork it fills bounded stack arrays and calls execveat;
+        // it neither allocates nor acquires locks, and failure never falls back.
+        unsafe {
+            command.pre_exec(move || {
+                let mut arguments = [std::ptr::null_mut(); WORDS];
+                let mut environment = [std::ptr::null_mut(); WORDS];
+                for (word, slot) in argv.iter().zip(arguments.iter_mut()) {
+                    *slot = word.as_ptr().cast_mut();
+                }
+                for (word, slot) in env.iter().zip(environment.iter_mut()) {
+                    *slot = word.as_ptr().cast_mut();
+                }
+                libc::execveat(
+                    image.as_raw_fd(),
+                    c"".as_ptr(),
+                    arguments.as_ptr(),
+                    environment.as_ptr(),
+                    libc::AT_EMPTY_PATH,
+                );
+                Err(std::io::Error::last_os_error())
+            });
+        }
+        Ok(())
+    }
+
+    /// Duplicate this validated capability for an explicit inherited-descriptor relay.
+    /// The declaration retains the verified identity and uses the new held number.
+    /// # Errors
+    /// Refuses changed custody or a failed descriptor duplication.
+    pub fn relay(&self) -> Result<(Record, OwnedFd)> {
+        self.revalidate()?;
+        let fd = self.fd.try_clone().map_err(|cause| {
+            Error::new("anchor-missing", &self.operation, &self.record.purpose)
+                .because("relay-duplicate", cause)
+        })?;
+        let mut record = self.record.clone();
+        record.slot = u32::try_from(fd.as_raw_fd())
+            .map_err(|_| Error::new("anchor-declaration", &self.operation, &self.record.purpose))?;
+        Ok((record, fd))
+    }
+
     /// Open and validate each child without reopening the absolute ancestor chain.
     ///
     /// # Errors
@@ -825,7 +915,7 @@ impl Anchor {
                 &self.operation,
                 &self.record.purpose,
             )?;
-            let stat = check_kind_mode(&fd, next, &self.operation, &self.record.purpose)?;
+            let stat = inspect_kind(&fd, next, &self.operation, &self.record.purpose)?;
             let expected =
                 self.view
                     .initial_owner(next.owner, &self.operation, &self.record.purpose)?;
@@ -838,6 +928,7 @@ impl Anchor {
                 &self.operation,
                 &self.record.purpose,
             )?;
+            check_mode(&fd, &stat, next, &self.operation, &self.record.purpose)?;
         }
         Ok(fd)
     }

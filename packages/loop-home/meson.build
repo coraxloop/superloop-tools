@@ -25,6 +25,7 @@ pkg_loop_home_rust = files(
   'src/mail/provision.rs',
   'src/mail/birth.rs',
   'src/mail/worker_provision.rs',
+  'src/mail/worker_anchors.rs',
   'src/mail/birth_tests.rs',
   'src/mail/configuration_store.rs',
   'src/mail/configuration_store_tests.rs',
@@ -125,4 +126,13 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/mail/entry_anchors.rs:& program#1","caller":"loop-home","owner":"LOOPHOME","selector":"& program","callee":"external:namespace-entry-command","lookup":"configured-external","contract":"Host-verified namespace command receives the pinned mail entry word and one operation-bound descriptor bundle; tests inject unshare through the same composer"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/mail/worker_anchors.rs:\"/usr/bin/setpriv\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/setpriv\"","callee":"external:/usr/bin/setpriv","lookup":"configured-external","contract":"Drop only to the validated worker-mail role with the held image and operation-bound private or journal capability"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:& path#1","caller":"loop-home","owner":"LOOPHOME","selector":"& path","callee":"external:anchor-fixture-executable","lookup":"configured-external","setting":"anchor_fixture_image","contract":"Execute the held native fixture after removing its pathname, with no fallback lookup"}
+{"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:& path#2","caller":"loop-home","owner":"LOOPHOME","selector":"& path","callee":"external:anchor-fixture-executable","lookup":"configured-external","setting":"anchor_fixture_image","contract":"Refuse an unsupported script without invoking an unpinned interpreter by pathname"}
 ''']

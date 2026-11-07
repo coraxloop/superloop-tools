@@ -38,6 +38,89 @@ pub(crate) fn validate_watched(value: Option<&str>) -> Result<(), crate::LoopErr
     }
 }
 
+/// Owned capabilities explicitly admitted across one child exec.
+///
+/// Clones retain the same open descriptors. Equality compares capability handles,
+/// not paths or contents; separately opened files are distinct command requests.
+#[derive(Clone, Debug, Default)]
+pub struct CommandDescriptors {
+    inherited: Vec<std::sync::Arc<std::os::fd::OwnedFd>>,
+    input: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
+}
+impl PartialEq for CommandDescriptors {
+    fn eq(&self, other: &Self) -> bool {
+        self.inherited
+            .iter()
+            .map(std::os::fd::AsRawFd::as_raw_fd)
+            .eq(other.inherited.iter().map(std::os::fd::AsRawFd::as_raw_fd))
+            && self.input.as_ref().map(std::os::fd::AsRawFd::as_raw_fd)
+                == other.input.as_ref().map(std::os::fd::AsRawFd::as_raw_fd)
+    }
+}
+impl Eq for CommandDescriptors {}
+impl CommandDescriptors {
+    /// Retain a bounded set at their existing descriptor numbers above stderr.
+    /// The child alone clears close-on-exec on the admitted descriptors.
+    /// # Errors
+    /// Refuses standard descriptors, duplicates and more than 64 capabilities.
+    pub fn inherit(descriptors: Vec<std::os::fd::OwnedFd>) -> io::Result<Self> {
+        use std::os::fd::AsRawFd as _;
+        let mut numbers = std::collections::BTreeSet::new();
+        if descriptors.len() > 64
+            || descriptors
+                .iter()
+                .any(|fd| fd.as_raw_fd() <= 2 || !numbers.insert(fd.as_raw_fd()))
+        {
+            return Err(io::Error::other(
+                "anchor-declaration: operation=runner purpose=inherit check=descriptor-allowlist",
+            ));
+        }
+        Ok(Self {
+            inherited: descriptors.into_iter().map(std::sync::Arc::new).collect(),
+            input: None,
+        })
+    }
+
+    /// Retain the private rights socket as child stdin without exposing its source number.
+    #[must_use]
+    pub fn with_input(mut self, descriptor: std::os::fd::OwnedFd) -> Self {
+        self.input = Some(std::sync::Arc::new(descriptor));
+        self
+    }
+
+    /// Configure child-only descriptor inheritance and optional private stdin.
+    ///
+    /// Every other descriptor above stderr is close-on-exec in this child, even
+    /// if its caller accidentally left it inheritable. The parent flags stay intact.
+    /// # Errors
+    /// Refuses failure to duplicate the retained input; child setup failures surface at spawn.
+    #[allow(unsafe_code)]
+    pub fn configure(&self, command: &mut Command) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        if let Some(input) = &self.input {
+            command.stdin(input.try_clone()?);
+        }
+        let descriptors = self.inherited.clone();
+        // SAFETY: the child callback uses only close_range and fcntl syscalls.
+        // Owned handles remain live in the closure and no parent flags change.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 4_u32) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                for fd in &descriptors {
+                    if libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, 0) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Captured status, streams, and monotonic command wall.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandOutput {
@@ -177,6 +260,7 @@ impl ProcessRunner {
                     signals.stop_report = stop_report.map(Path::to_path_buf);
                     signals.relay = watched.is_some();
                     signals.prepare(&mut command);
+                    request.descriptors.configure(&mut command)?;
                     let mut child = command.spawn()?;
                     signals.wait(&mut child)
                 })();
@@ -193,6 +277,15 @@ impl ProcessRunner {
             }
             IoMode::Capture => {
                 command.stdin(Stdio::null());
+                request
+                    .descriptors
+                    .configure(&mut command)
+                    .map_err(|error| RunError {
+                        detail: format!(
+                            "anchor-missing: operation=runner purpose=descriptors: {error}"
+                        ),
+                        wall: started.elapsed(),
+                    })?;
                 let output = command.output().map_err(|error| RunError {
                     detail: error.to_string(),
                     wall: started.elapsed(),
@@ -210,4 +303,78 @@ impl ProcessRunner {
 
 pub(crate) fn publication_error(error: &io::Error) -> crate::LoopError {
     crate::LoopError::runtime(format!("output failure: {error}"))
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+    use std::io::Write as _;
+    use std::os::fd::{AsFd as _, AsRawFd as _, OwnedFd};
+    use std::os::unix::net::UnixStream;
+
+    /// # Panics
+    /// Panics if the descriptor fixture or its custody assertions fail.
+    /// ´claim:loophome:command-descriptors-confine-child-inheritance´
+    /// ´test:unit:command-descriptors-confine-child-inheritance´
+    #[test]
+    fn command_descriptors_confine_child_inheritance() {
+        let (held, mut writer) = UnixStream::pair().expect("held socket");
+        writer.write_all(b"held").expect("held bytes");
+        let held: OwnedFd = held.into();
+        let number = held.as_raw_fd();
+        let (unlisted, _peer) = UnixStream::pair().expect("unlisted socket");
+        fcntl(unlisted.as_fd(), FcntlArg::F_SETFD(FdFlag::empty())).expect("inheritable fixture");
+        let denied = unlisted.as_raw_fd();
+        let (input, mut sender) = UnixStream::pair().expect("stdin socket");
+        sender.write_all(b"private-input").expect("input bytes");
+        sender
+            .shutdown(std::net::Shutdown::Write)
+            .expect("input EOF");
+        let descriptors = CommandDescriptors::inherit(vec![held])
+            .expect("allowlist")
+            .with_input(input.into());
+        let retained = descriptors.clone();
+        let mut request = CommandSpec::new(
+            "descriptor-fixture",
+            vec![
+                "python3".into(), "-c".into(),
+                "import os,sys\nassert os.read(int(sys.argv[1]),4)==b'held'\ntry:\n os.fstat(int(sys.argv[2]))\nexcept OSError:\n pass\nelse:\n raise AssertionError('unlisted descriptor inherited')\nassert sys.stdin.read()=='private-input'\nprint('verified')".into(),
+                number.to_string(), denied.to_string(),
+            ],
+            IoMode::Capture,
+        );
+        request.descriptors = descriptors;
+        let output = ProcessRunner.run(&request).expect("runner");
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"verified\n");
+        assert_eq!(request.descriptors, retained);
+        let flags = fcntl(retained.inherited[0].as_fd(), FcntlArg::F_GETFD).expect("parent flags");
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        assert_eq!(
+            fcntl(unlisted.as_fd(), FcntlArg::F_GETFD).expect("unlisted flags"),
+            0
+        );
+        drop(request);
+        assert!(nix::sys::stat::fstat(retained.inherited[0].as_fd()).is_ok());
+    }
+
+    /// # Panics
+    /// Panics if the descriptor fixture or its custody assertions fail.
+    /// ´claim:loophome:command-descriptors-refuse-excess-capabilities´
+    /// ´test:unit:command-descriptors-refuse-excess-capabilities´
+    #[test]
+    fn command_descriptors_refuse_excess_capabilities() {
+        let (socket, _peer) = UnixStream::pair().expect("socket");
+        let descriptors = (0..65)
+            .map(|_| nix::unistd::dup(socket.as_fd()).expect("duplicate"))
+            .collect();
+        let error = CommandDescriptors::inherit(descriptors).expect_err("bounded allowlist");
+        assert!(error.to_string().starts_with("anchor-declaration:"));
+    }
 }

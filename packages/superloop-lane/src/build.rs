@@ -348,6 +348,7 @@ pub(crate) struct ChildSpec {
     name: &'static str,
     inherited_fd: Option<i32>,
     private_directory_stdin: Option<Arc<OwnedFd>>,
+    capabilities: Option<loop_home::CommandDescriptors>,
     private_extra_fds: Vec<Arc<OwnedFd>>,
 }
 
@@ -663,6 +664,11 @@ fn run_child_with_end(
     } else if transfer.is_none() && input.is_some() {
         command.stdin(Stdio::piped());
     }
+    if let Some(capabilities) = &spec.capabilities {
+        capabilities
+            .configure(&mut command)
+            .map_err(|error| LaneError::operation(spec.name, error.to_string()))?;
+    }
     crate::launch::reaping::attach_command(&mut command)?;
     let mut child = crate::fixture_exec::spawn(&mut command).map_err(|error| {
         LaneError::operation(spec.name, format!("{}: {error}", spec.program.display()))
@@ -923,6 +929,30 @@ pub(crate) fn run_checked(
     )
 }
 
+/// Keep the bounded lane runner while passing the composer's owned capabilities.
+pub(crate) fn run_checked_command(
+    request: &loop_home::CommandSpec,
+    environment: &BTreeMap<String, String>,
+    cwd: &Path,
+    timeout_seconds: u64,
+    name: &'static str,
+) -> Result<String, LaneError> {
+    let (program, argv) = request
+        .argv
+        .split_first()
+        .ok_or_else(|| LaneError::input(name, "empty command"))?;
+    let mut spec = child(
+        Path::new(program),
+        argv.to_vec(),
+        environment,
+        cwd,
+        timeout_seconds,
+        name,
+    );
+    spec.capabilities = Some(request.descriptors.clone());
+    checked_output(&spec, None)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_checked_with_private_launch(
     program: &Path,
@@ -1035,6 +1065,7 @@ fn hash_spec(cwd: &Path) -> ChildSpec {
         name: "sha256sum",
         inherited_fd: None,
         private_directory_stdin: None,
+        capabilities: None,
         private_extra_fds: Vec::new(),
     }
 }
@@ -1243,6 +1274,7 @@ pub(crate) fn child(
         name,
         inherited_fd: None,
         private_directory_stdin: None,
+        capabilities: None,
         private_extra_fds: Vec::new(),
     }
 }
@@ -2125,6 +2157,7 @@ mod tests {
             name: "door-handoff-fixture",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         }
         .with_private_door_listener(&directory, &listener)
@@ -2172,6 +2205,7 @@ done
             name: "private-directory-stdin-fixture",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         }
         .with_private_directory(&directory)
@@ -2212,6 +2246,7 @@ done
             name: "install-handoff-fixture",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         }
         .with_private_door_directories(
@@ -2851,6 +2886,7 @@ done
             name: "fixture-child",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         };
         executable(&program, "head -c 2097153 /dev/zero");
@@ -2916,6 +2952,7 @@ done
             name: "container-stop",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         };
         let holder = HeldWriterGuard::new();
@@ -3000,6 +3037,7 @@ done
             name: "image-build",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         };
         let log = temp.path().join("image-build.log");

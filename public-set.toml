@@ -3291,6 +3291,9 @@ pattern = "packages/loop-home/src/mail/birth_tests.rs"
 pattern = "packages/loop-home/src/mail/worker_provision.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/mail/worker_anchors.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-claude-hook/docs/mail-watcher.md"
 
 [[include.rows]]
@@ -3355,3 +3358,6 @@ pattern = "packages/loop-home/src/mail/entry_anchors.rs"
 
 [[include.rows]]
 pattern = "packages/superloop/tests/mail_anchors.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/tests/mail_anchors.rs"

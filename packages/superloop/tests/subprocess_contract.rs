@@ -273,6 +273,7 @@ fn fixture_verify_child_environment() {
             label: label.to_owned(),
             argv: vec![String::from("/usr/bin/env")],
             io: IoMode::Capture,
+            descriptors: loop_home::CommandDescriptors::default(),
         };
         let output = ProcessRunner.run(&request).expect("fixed env child");
         assert_eq!(output.status, 0);

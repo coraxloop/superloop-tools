@@ -62,6 +62,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Worker-run birth and retirement and native lane retirement carry configuration, storage and executable custody through namespace entry and identity children; the runner retains only declared descriptors, and native retirement preserves its bounded command handling (``proto:workercontracts:namespace-anchor-handoff``).
+
 - Cut and replay projection batch blob reads, object hashing and index updates per tree instead of spawning Git per file, preserving binary contents, path spelling, symlinks and modes; real Git traces pin the bounded process counts (``prob:pack:replay-projection-spawns-git-per-file``).
 
 - Interrupted request rewrites can renew their helper snapshot after a concurrent helper arrival, requiring a new preview digest while retaining the original custody plan and preserving unrelated helper requests (``alg:superlooplane:request-schema-rewrite``).

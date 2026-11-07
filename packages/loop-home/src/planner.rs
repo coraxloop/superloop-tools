@@ -20,6 +20,8 @@ pub struct CommandSpec {
     pub argv: Vec<String>,
     /// Standard-stream handling.
     pub io: IoMode,
+    /// Owned descriptor custody selected by the command composer.
+    pub descriptors: crate::runner::CommandDescriptors,
 }
 
 impl CommandSpec {
@@ -28,6 +30,7 @@ impl CommandSpec {
             label: label.to_owned(),
             argv,
             io,
+            descriptors: crate::runner::CommandDescriptors::default(),
         }
     }
 }

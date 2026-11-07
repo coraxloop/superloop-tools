@@ -2,6 +2,7 @@
 use super::birth::{self, Identity};
 use super::configuration_store::ConfigurationStore;
 use super::journal::{MailError, Result};
+pub use super::worker_anchors::command as anchored_command;
 use super::{acl, io, provision};
 use crate::allocations::Allocations;
 use nix::fcntl::{Flock, FlockArg, OFlag, OpenHow, RenameFlags, ResolveFlag, openat2, renameat2};
@@ -231,6 +232,16 @@ fn configure(
     phase: &str,
     identity: &Identity,
 ) -> Result<()> {
+    configure_held(row, service, group, phase, identity, None)
+}
+fn configure_held(
+    row: &crate::LoopRecord,
+    service: u32,
+    group: u32,
+    phase: &str,
+    identity: &Identity,
+    private: Option<(&crate::anchor::Anchor, &crate::anchor::Anchor)>,
+) -> Result<()> {
     let arguments = [
         "_mail-worker-state".into(),
         ".".into(),
@@ -240,7 +251,12 @@ fn configure(
         OsString::from(identity.uid.to_string()),
         OsString::from(&identity.reservation),
     ];
-    provision::spawn_identity(row.uid, group, Some(&row.home.join("private")), &arguments)
+    private.map_or_else(
+        || provision::spawn_identity(row.uid, group, Some(&row.home.join("private")), &arguments),
+        |(private, executor)| {
+            super::worker_anchors::child(row.uid, group, private, executor, &arguments)
+        },
+    )
 }
 
 fn existing(parent: &File, name: &str) -> Result<Option<File>> {
@@ -489,13 +505,49 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
     crate::registry::validate_name(&identity.name)
         .map_err(|_| MailError::Invalid("invalid-name: worker birth name"))?;
     let row = registered(home, loop_name)?;
-    if existing(&io::absolute(&row.home, true)?, ".mail-migration-hold")?.is_some() {
+    let allocations =
+        Allocations::read(&home.join(".config/loops/allocations.toml")).map_err(failure)?;
+    let root = io::absolute(&row.home, true)?;
+    coordinate_with(
+        home,
+        loop_name,
+        identity,
+        phase,
+        &row,
+        &allocations,
+        &root,
+        None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coordinate_with(
+    home: &Path,
+    loop_name: &str,
+    identity: &Identity,
+    phase: &str,
+    row: &crate::LoopRecord,
+    allocations: &Allocations,
+    parent: &File,
+    private: Option<&crate::anchor::Anchor>,
+    journal: Option<&crate::anchor::Anchor>,
+    identity_executable: Option<&crate::anchor::Anchor>,
+) -> Result<()> {
+    let private = private.zip(identity_executable);
+    let journal = journal.zip(identity_executable);
+    if !Uid::effective().is_root() {
+        return Err(MailError::Invalid(
+            "unsafe-storage: namespace-root worker birth required",
+        ));
+    }
+    crate::registry::validate_name(&identity.name).map_err(failure)?;
+    if existing(parent, ".mail-migration-hold")?.is_some() {
         return Err(MailError::Invalid(
             "invalid-directory: retained migration history requires namespace reconciliation before worker birth",
         ));
     }
-    let allocations =
-        Allocations::read(&home.join(".config/loops/allocations.toml")).map_err(failure)?;
     if !allocations
         .get(loop_name)
         .is_some_and(|block| block.contains(identity.uid))
@@ -508,12 +560,11 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
         .mail_group(loop_name, Some(identity.uid))
         .map_err(failure)?;
     let loop_group = allocations.mail_group(loop_name, None).map_err(failure)?;
-    let parent = io::absolute(&row.home, true)?;
     let info = parent.metadata()?;
     if info.uid() != 0 || info.mode() & 0o022 != 0 {
         return Err(invalid());
     }
-    let births = birth_directory(&parent, phase == "verify-only")?;
+    let births = birth_directory(parent, phase == "verify-only")?;
     let lock = Flock::lock(births, FlockArg::LockExclusive)
         .map_err(|(_, error)| MailError::from(error))?;
     let receipts = read_receipts(&lock, 0)?;
@@ -530,7 +581,7 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
         {
             return Err(invalid());
         }
-        if let Some(workers) = existing(&parent, "workers")? {
+        if let Some(workers) = existing(parent, "workers")? {
             let expected = receipts
                 .iter()
                 .map(|receipt| receipt.identity.name.as_str())
@@ -545,7 +596,7 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
         }
         // A missing protected receipt cannot impersonate an older binding whose
         // loop-owned configuration survives. Check before creating any new receipt.
-        configure(&row, service, loop_group, "unreserved", identity)?;
+        configure_held(row, service, loop_group, "unreserved", identity, private)?;
         receipt(&lock, identity)?;
     }
     if phase == "retire" {
@@ -555,27 +606,27 @@ pub fn coordinate(home: &Path, loop_name: &str, identity: &Identity, phase: &str
         // The receipt stays allocated across every interruption until both custody
         // and the loop-owned binding durably record the terminal transition.
         worker_quiet(Path::new("/proc"), identity.uid)?;
-        retire_folders(&parent, identity, service)?;
-        configure(&row, service, loop_group, "retire", identity)?;
-        release_pins(home, loop_name, identity, service)?;
+        retire_folders(parent, identity, service)?;
+        configure_held(row, service, loop_group, "retire", identity, private)?;
+        release_pins(home, loop_name, identity, service, journal)?;
         return write_receipt(&lock, identity, true);
     }
     if matches!(phase, "verify" | "verify-only") {
         verify_active_folders(
-            &parent,
+            parent,
             loop_name,
             identity,
             service,
             group,
             phase == "verify-only",
         )?;
-        return configure(&row, service, loop_group, phase, identity);
+        return configure_held(row, service, loop_group, phase, identity, private);
     }
-    configure(&row, service, loop_group, "reserve", identity)?;
-    folders(&parent, identity, service, group, phase)
+    configure_held(row, service, loop_group, "reserve", identity, private)?;
+    folders(parent, identity, service, group, phase)
         .map_err(|error| unavailable(loop_name, identity, error))?;
     if phase == "finish" {
-        configure(&row, service, loop_group, "activate", identity)?;
+        configure_held(row, service, loop_group, "activate", identity, private)?;
     }
     Ok(())
 }
@@ -656,7 +707,13 @@ pub(super) fn hold_active(
     )?;
     Ok(guard)
 }
-fn release_pins(home: &Path, loop_name: &str, identity: &Identity, service: u32) -> Result<()> {
+fn release_pins(
+    home: &Path,
+    loop_name: &str,
+    identity: &Identity,
+    service: u32,
+    journal: Option<(&crate::anchor::Anchor, &crate::anchor::Anchor)>,
+) -> Result<()> {
     let args = [
         OsString::from("_mail-worker-pins"),
         home.as_os_str().to_owned(),
@@ -666,10 +723,20 @@ fn release_pins(home: &Path, loop_name: &str, identity: &Identity, service: u32)
         OsString::from(identity.uid.to_string()),
         OsString::from(&identity.reservation),
     ];
-    provision::spawn_identity(service, service, None, &args)
+    journal.map_or_else(
+        || provision::spawn_identity(service, service, None, &args),
+        |(journal, executor)| {
+            super::worker_anchors::child(service, service, journal, executor, &args)
+        },
+    )
 }
 
-fn retire_execution(home: &Path, loop_name: &str, lane: &str, identity: &Identity) -> Result<()> {
+fn retire_execution_with(
+    row: &crate::LoopRecord,
+    lane: &str,
+    identity: &Identity,
+    parent: &File,
+) -> Result<()> {
     if !Uid::effective().is_root() || !super::valid_identity_name(lane) {
         return Err(invalid());
     }
@@ -681,13 +748,11 @@ fn retire_execution(home: &Path, loop_name: &str, lane: &str, identity: &Identit
     {
         return Err(invalid());
     }
-    let row = registered(home, loop_name)?;
-    let parent = io::absolute(&row.home, true)?;
     let info = parent.metadata()?;
     if info.uid() != 0 || info.mode() & 0o022 != 0 {
         return Err(invalid());
     }
-    let births = io::child(&parent, Path::new(".mail-births"), true)?;
+    let births = io::child(parent, Path::new(".mail-births"), true)?;
     metadata(&births, 0, 0o700, true)?;
     let lock = Flock::lock(births, FlockArg::LockExclusive)
         .map_err(|(_, error)| MailError::from(error))?;
@@ -698,7 +763,7 @@ fn retire_execution(home: &Path, loop_name: &str, lane: &str, identity: &Identit
         return Err(invalid());
     }
     worker_quiet(Path::new("/proc"), identity.uid)?;
-    archive_execution(&parent, lane, identity, row.uid)
+    archive_execution(parent, lane, identity, row.uid)
 }
 fn archive_execution(parent: &File, lane: &str, identity: &Identity, loop_uid: u32) -> Result<()> {
     let owner = Uid::effective().as_raw();
@@ -758,6 +823,21 @@ fn text(value: &std::ffi::OsStr) -> Result<&str> {
 /// Dispatch the private namespace and loop-identity halves without activating a service.
 pub fn entry(arguments: &[OsString], report: &mut dyn std::io::Write) -> u8 {
     let result = (|| {
+        let (arguments, declaration) = match arguments {
+            [body @ .., flag, declaration] if flag == "--anchor-manifest" => {
+                (body, Some(text(declaration)?))
+            }
+            body => (body, None),
+        };
+        if arguments
+            .first()
+            .is_some_and(|mode| mode == "_mail-worker-birth" || mode == "_mail-worker-home")
+            && declaration.is_none()
+        {
+            return Err(MailError::Entry(
+                "anchor-missing: operation=mail-worker purpose=manifest".into(),
+            ));
+        }
         let [mode, path, scope, phase, name, uid, reservation] = arguments else {
             return Err(invalid());
         };
@@ -768,49 +848,54 @@ pub fn entry(arguments: &[OsString], report: &mut dyn std::io::Write) -> u8 {
         };
         let path = PathBuf::from(path);
         let phase = text(phase)?;
-        if mode == "_mail-worker-home" {
-            return retire_execution(&path, text(scope)?, phase, &identity);
+        if mode == "_mail-worker-home" || mode == "_mail-worker-birth" {
+            let declaration = declaration.ok_or_else(invalid)?;
+            let entered = super::worker_anchors::receive(
+                &path,
+                text(scope)?,
+                text(mode)?,
+                phase,
+                declaration,
+            )?;
+            if mode == "_mail-worker-home" {
+                return retire_execution_with(&entered.row, phase, &identity, &entered.root);
+            }
+            return coordinate_with(
+                &path,
+                text(scope)?,
+                &identity,
+                phase,
+                &entered.row,
+                &entered.configuration.allocations,
+                &entered.root,
+                entered.private.as_ref(),
+                entered.journal.as_ref(),
+                entered.identity_executable.as_ref(),
+            );
         }
-        if mode == "_mail-worker-birth" {
-            return coordinate(&path, text(scope)?, &identity, phase);
-        }
+        let child_anchor = declaration
+            .map(|value| super::worker_anchors::receive_child(text(mode)?, value))
+            .transpose()?;
         if mode == "_mail-worker-pins" {
             let service = text(scope)?.parse::<u32>().map_err(|_| invalid())?;
             if Uid::effective().as_raw() != service
-                || super::command::settings(&path)?.uid != service
+                || (child_anchor.is_none() && super::command::settings(&path)?.uid != service)
             {
                 return Err(invalid());
             }
             crate::registry::validate_name(phase).map_err(failure)?;
-            return super::journal::release_reservation_family(
-                &io::absolute(&path.join(".var/loops/.mail-service"), true)?,
-                &identity.pin_family(phase),
-            );
+            let root = if let Some(anchor) = child_anchor {
+                let held = File::from(nix::unistd::dup(std::os::fd::AsFd::as_fd(&anchor))?);
+                io::child(&held, Path::new("."), true)?
+            } else {
+                io::absolute(&path.join(".var/loops/.mail-service"), true)?
+            };
+            return super::journal::release_reservation_family(&root, &identity.pin_family(phase));
         }
         if mode != "_mail-worker-state" {
             return Err(invalid());
         }
-        let service = text(scope)?.parse::<u32>().map_err(|_| invalid())?;
-        if !(1000..=65535).contains(&service)
-            || service == 65534
-            || service == Uid::effective().as_raw()
-        {
-            return Err(invalid());
-        }
-        let mut store = if phase == "verify-only" {
-            ConfigurationStore::open_existing(&path, service)?
-        } else {
-            ConfigurationStore::open(&path, service)?
-        };
-        match phase {
-            "reserve" => birth::reserve(&mut store, &identity),
-            "activate" => birth::activate(&mut store, &identity),
-            "retire" => birth::retire(&mut store, &identity),
-            "verify" | "verify-only" => birth::verify(&store, &identity),
-            "verify-retired" => birth::verify_retired(&store, &identity),
-            "unreserved" => birth::unreserved(&store, &identity),
-            _ => Err(invalid()),
-        }
+        entered_state(&path, scope, phase, &identity, child_anchor.as_ref())
     })();
     match result {
         Ok(()) => 0,
@@ -818,6 +903,44 @@ pub fn entry(arguments: &[OsString], report: &mut dyn std::io::Write) -> u8 {
             let _written = writeln!(report, "{error}");
             2
         }
+    }
+}
+
+fn entered_state(
+    path: &Path,
+    scope: &std::ffi::OsStr,
+    phase: &str,
+    identity: &Identity,
+    child_anchor: Option<&crate::anchor::Anchor>,
+) -> Result<()> {
+    let service = text(scope)?.parse::<u32>().map_err(|_| invalid())?;
+    if !(1000..=65535).contains(&service)
+        || service == 65534
+        || service == Uid::effective().as_raw()
+    {
+        return Err(invalid());
+    }
+    let path = if let Some(anchor) = child_anchor {
+        nix::unistd::fchdir(anchor)?;
+        Path::new(".")
+    } else {
+        path
+    };
+    let mut store = if phase == "verify-only" {
+        ConfigurationStore::open_existing(path, service)?
+    } else if child_anchor.is_some() {
+        ConfigurationStore::open_prepared(path, service)?
+    } else {
+        ConfigurationStore::open(path, service)?
+    };
+    match phase {
+        "reserve" => birth::reserve(&mut store, identity),
+        "activate" => birth::activate(&mut store, identity),
+        "retire" => birth::retire(&mut store, identity),
+        "verify" | "verify-only" => birth::verify(&store, identity),
+        "verify-retired" => birth::verify_retired(&store, identity),
+        "unreserved" => birth::unreserved(&store, identity),
+        _ => Err(invalid()),
     }
 }
 

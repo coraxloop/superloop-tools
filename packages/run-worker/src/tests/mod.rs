@@ -79,6 +79,24 @@ impl Fixture {
         .expect("write rubric");
         fs::create_dir_all(fixture.home().join("runs")).expect("create run tree");
         fs::write(fixture.path.join("brief.md"), "# brief\n").expect("write brief");
+        fs::set_permissions(fixture.home(), fs::Permissions::from_mode(0o711))
+            .expect("loop storage mode");
+        for path in [
+            fixture.home().join("private"),
+            fixture.root().join(".var/loops/.mail-service"),
+        ] {
+            fs::create_dir_all(&path).expect("mail capability fixture");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .expect("private capability mode");
+        }
+        let settings = fixture.root().join(".config/loops/mail-service.toml");
+        fs::write(
+            &settings,
+            "version=1\nuid=45000\ncrash_consistent_rename=true\ndurable_sync=true\n",
+        )
+        .expect("mail settings");
+        fs::set_permissions(settings, fs::Permissions::from_mode(0o600))
+            .expect("mail settings mode");
         fixture
     }
 
@@ -120,7 +138,7 @@ impl Fixture {
             .expect("allocation registry fixture");
         fs::set_permissions(registry, fs::Permissions::from_mode(0o600)).expect("registry mode");
         let path = directory.join("allocations.toml");
-        fs::write(&path, source).expect("allocation fixture");
+        fs::write(&path, format!("mail_uid = 45000\n{source}")).expect("allocation fixture");
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("allocation mode");
     }
 
@@ -1050,7 +1068,7 @@ fn prepare_retains_mail_uid_history_after_the_run_table_is_empty() {
     let birth = &runner.commands[0];
     assert_eq!(birth.label, "mail-birth-reserve");
     assert_eq!(
-        &birth.argv[birth.argv.len() - 4..],
+        &birth.argv[6..10],
         [
             "reserve",
             &loop_home::mail::birth::Identity::for_reservation(
@@ -1061,6 +1079,13 @@ fn prepare_retains_mail_uid_history_after_the_run_table_is_empty() {
             "40001",
             &format!("worker-run:rw1:40001:{}", row.claimed)
         ]
+    );
+    assert_eq!(birth.argv[10], "--anchor-manifest");
+    let manifest: serde_json::Value = serde_json::from_str(&birth.argv[11]).expect("manifest");
+    assert_eq!(manifest["operation"], "mail-worker-birth-reserve");
+    assert_eq!(
+        manifest["records"].as_array().expect("capabilities").len(),
+        5
     );
     assert!(receipt.exists());
 }

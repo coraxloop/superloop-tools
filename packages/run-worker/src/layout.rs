@@ -452,6 +452,7 @@ pub fn run_tree_command(runs: &Path, podman: &[String]) -> CommandSpec {
             ])
             .collect(),
         io: IoMode::Inherit,
+        descriptors: loop_home::CommandDescriptors::default(),
     }
 }
 
@@ -476,6 +477,7 @@ pub fn install_command(
             ])
             .collect(),
         io: IoMode::Inherit,
+        descriptors: loop_home::CommandDescriptors::default(),
     }
 }
 
@@ -508,6 +510,7 @@ pub fn ownership_commands(
             .chain(words)
             .collect(),
         io: IoMode::Inherit,
+        descriptors: loop_home::CommandDescriptors::default(),
     };
     let changeable = || {
         rows.iter().filter(|layout_row| {

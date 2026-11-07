@@ -27,7 +27,7 @@ pub use planner::{
     provision_plan,
 };
 pub use registry::{LoopRecord, Registry, load_registry, registry_path, validate_name};
-pub use runner::{CommandOutput, ProcessRunner, RunError, Runner};
+pub use runner::{CommandDescriptors, CommandOutput, ProcessRunner, RunError, Runner};
 pub use verify::{VerifyRecord, assemble_verify, cleanup_probe_plan, verify_probe_plan};
 
 #[cfg(test)]

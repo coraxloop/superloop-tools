@@ -745,3 +745,52 @@ fn anchor_configuration_refusals_retain_parser_causes() {
         "{error}"
     );
 }
+
+/// # Panics
+/// Panics if execution reopens a removed pathname or falls back for an unsupported script.
+/// ´claim:loophome:anchor-exec-retains-the-held-file´
+/// ´test:unit:anchor-exec-retains-the-held-file´
+#[test]
+fn anchor_exec_retains_the_held_file() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("image");
+    fs::copy("/usr/bin/true", &path).expect("native fixture image");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("executable mode");
+    let selected = Policy {
+        kind: Kind::File,
+        owner: Owner::Host,
+        mode: ModePolicy::Executable,
+    };
+    let (manifest, fds, required) = bundle(&path, "executable", selected);
+    let anchor = validate(&manifest, fds, &required)
+        .expect("anchor")
+        .remove(0);
+    fs::remove_file(&path).expect("remove pathname");
+    let mut command = std::process::Command::new(&path);
+    assert_eq!(
+        anchor
+            .configure_exec(&mut command, &[], &[])
+            .expect_err("empty argv")
+            .kind,
+        "anchor-exec"
+    );
+    anchor
+        .configure_exec(&mut command, &["held-image".into()], &[])
+        .expect("descriptor exec");
+    assert!(command.status().expect("held execution").success());
+
+    let path = fixture.file("script", "#!/bin/sh\nexit 0\n");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("script mode");
+    let (manifest, fds, required) = bundle(&path, "executable", selected);
+    let anchor = validate(&manifest, fds, &required)
+        .expect("anchor")
+        .remove(0);
+    let mut command = std::process::Command::new(&path);
+    anchor
+        .configure_exec(&mut command, &["unsupported-script".into()], &[])
+        .expect("prepared refusal");
+    assert!(
+        command.status().is_err(),
+        "an unpinned interpreter must not execute by fallback"
+    );
+}
