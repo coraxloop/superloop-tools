@@ -228,6 +228,7 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
         ("/usr/bin/date".into(), Arc::new(date)),
     ]);
     let _programs = crate::container_entry::activate_program_map(OPERATION, programs);
+    let _configuration = custody.activate_configuration(Path::new(&body[6]), OPERATION);
     invoke(body, &custody)
 }
 /// Describe capabilities without opening a changing launch's storage.

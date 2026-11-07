@@ -295,6 +295,59 @@ pub(crate) fn core_pins(
     )
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PlanConfiguration {
+    home: std::path::PathBuf,
+    operation: &'static str,
+    pub(crate) registry: loop_home::registry::Registry,
+    pub(crate) allocations: loop_home::allocations::Allocations,
+}
+thread_local! {
+    static PLAN_CONFIGURATION: std::cell::RefCell<Option<PlanConfiguration>> = const { std::cell::RefCell::new(None) };
+}
+pub(crate) struct ConfigurationGuard {
+    previous: Option<PlanConfiguration>,
+    thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl Drop for ConfigurationGuard {
+    fn drop(&mut self) {
+        PLAN_CONFIGURATION.with(|active| *active.borrow_mut() = self.previous.take());
+    }
+}
+fn activate_configuration(
+    home: &Path,
+    configuration: &Configuration,
+    operation: &'static str,
+) -> ConfigurationGuard {
+    let snapshot = PlanConfiguration {
+        home: home.to_path_buf(),
+        operation,
+        registry: configuration.registry.clone(),
+        allocations: configuration.allocations.clone(),
+    };
+    ConfigurationGuard {
+        previous: PLAN_CONFIGURATION.with(|active| active.replace(Some(snapshot))),
+        thread: std::marker::PhantomData,
+    }
+}
+pub(crate) fn plan_configuration(home: &Path) -> Result<Option<PlanConfiguration>, LaneError> {
+    PLAN_CONFIGURATION.with(|active| {
+        let active = active.borrow();
+        let Some(snapshot) = active.as_ref() else {
+            return Ok(None);
+        };
+        registry_override(snapshot.operation)?;
+        if snapshot.home != home {
+            return Err(named_for(
+                snapshot.operation,
+                "anchor-identity",
+                "configuration-home",
+            ));
+        }
+        Ok(Some(snapshot.clone()))
+    })
+}
+
 /// Validated configuration and worker storage for the runtime's one birth check.
 pub struct Custody {
     pub(crate) configuration: Configuration,
@@ -303,6 +356,13 @@ pub struct Custody {
     pub(crate) executor: Anchor,
 }
 impl Custody {
+    pub(crate) fn activate_configuration(
+        &self,
+        home: &Path,
+        operation: &'static str,
+    ) -> ConfigurationGuard {
+        activate_configuration(home, &self.configuration, operation)
+    }
     pub(crate) fn create_birth(
         &self,
         home: &Path,
@@ -532,10 +592,124 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
         podman_anchor,
         hash,
     );
+    let _configuration = custody.activate_configuration(Path::new(home), OPERATION);
     crate::launch::private_prepare_runtime(Path::new(home), scope, run, Path::new(podman), &custody)
 }
 
 /// Describe custody that is pinned only by the changing launch.
 pub(crate) fn preview() -> serde_json::Value {
     serde_json::json!({"state":"bound-on-launch","transport":"rights","operation":OPERATION,"purposes":PURPOSES})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// # Panics
+    /// Panics if synthetic configuration fields violate the registry or ledger grammar.
+    fn configuration(uid: u32, home: &Path) -> Configuration {
+        let source = format!(
+            "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[{{name='alpha',uid={uid},launch='dev/alpha'}}]\n"
+        );
+        let path = home.join(format!("registry-{uid}.toml"));
+        std::fs::write(&path, source).expect("fixture registry");
+        let registry = loop_home::load_registry(&path).expect("registry");
+        let ledger_source =
+            "mail_uid=64001\n[alpha]\nuids={base=64010,count=2}\nmail_gids={base=64020,count=3}\n"
+                .to_owned();
+        let allocations =
+            loop_home::allocations::Allocations::parse(&ledger_source).expect("ledger");
+        Configuration {
+            registry,
+            allocations,
+            ledger_source,
+        }
+    }
+
+    /// # Panics
+    /// Panics if plan readers reopen paths, widen a grant, leak a scope or accept another home.
+    /// ´claim:superlooplane:runtime-plan-uses-anchored-configuration-snapshot´
+    /// ´test:unit:runtime-plan-uses-anchored-configuration-snapshot´
+    #[test]
+    fn runtime_plan_uses_anchored_configuration_snapshot() {
+        let directory = tempfile::tempdir().expect("home");
+        let home = directory.path();
+        assert_eq!(
+            crate::read_plan_registry(home)
+                .expect_err("no ambient registry")
+                .kind,
+            "registry-row"
+        );
+        let snapshot = configuration(64000, home);
+        let guard = activate_configuration(home, &snapshot, OPERATION);
+        assert_eq!(
+            crate::read_plan_registry(home)
+                .expect("snapshot")
+                .row("alpha", home)
+                .expect("row")
+                .uid,
+            64000
+        );
+        assert_eq!(
+            crate::home::read_allocations(home)
+                .expect("snapshot ledger")
+                .require("alpha")
+                .expect("block")
+                .base,
+            64010
+        );
+        let settings = crate::settings::Settings::from_private_bytes(
+            b"driver_argv=['/usr/bin/true']\n[backend_argv]\ncodex=['/usr/bin/true']\n".to_vec(),
+            Path::new("workers.toml"),
+        )
+        .expect("settings");
+        settings
+            .validate_grant(home, "alpha")
+            .expect("snapshot grant");
+        let error = crate::load_plan_with_settings(
+            home,
+            "alpha",
+            "R",
+            (0, 0),
+            false,
+            settings,
+            crate::settings::BoxBackend::Codex,
+        )
+        .expect_err("next plan field");
+        assert_eq!(error.kind, "missing-setting");
+        assert_eq!(error.detail, "entry_bin is absent in workers.toml");
+        assert!(
+            plan_configuration(&home.join("other"))
+                .expect_err("wrong home")
+                .detail
+                .contains("purpose=configuration-home")
+        );
+        {
+            let second = configuration(63000, home);
+            let _nested = activate_configuration(home, &second, "make-home");
+            assert_eq!(
+                crate::read_plan_registry(home)
+                    .expect("nested snapshot")
+                    .row("alpha", home)
+                    .expect("row")
+                    .uid,
+                63000
+            );
+        }
+        assert_eq!(
+            crate::read_plan_registry(home)
+                .expect("restored snapshot")
+                .row("alpha", home)
+                .expect("row")
+                .uid,
+            64000
+        );
+        drop(guard);
+        assert_eq!(
+            crate::read_plan_registry(home)
+                .expect_err("scope cleared")
+                .kind,
+            "registry-row"
+        );
+    }
 }

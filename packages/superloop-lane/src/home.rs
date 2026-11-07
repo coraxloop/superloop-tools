@@ -387,6 +387,9 @@ pub(crate) fn private_runs() -> Result<(PathBuf, OwnedFd), LaneError> {
 ///
 /// Refuses an unsafe private anchor or invalid allocation ledger.
 pub fn read_allocations(home: &Path) -> Result<loop_home::allocations::Allocations, LaneError> {
+    if let Some(configuration) = crate::runtime_entry::plan_configuration(home)? {
+        return Ok(configuration.allocations);
+    }
     let path = loop_home::allocations::allocations_path(home);
     let result = if let Some(prefix) = private_home() {
         if prefix != home {

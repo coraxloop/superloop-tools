@@ -428,10 +428,7 @@ impl Settings {
     ///
     /// Refuses a widened runs root or an unconfigured default driver.
     pub fn validate_grant(&self, home: &Path, loop_name: &str) -> Result<(), LaneError> {
-        let registry_path =
-            loop_home::registry_path(std::env::var_os("ENTER_LOOP_REGISTRY").as_deref(), home);
-        let registry = loop_home::load_registry(&registry_path)
-            .map_err(|error| LaneError::input("registry-row", error.message()))?;
+        let registry = crate::read_plan_registry(home)?;
         let row = registry
             .row(loop_name, home)
             .map_err(|error| LaneError::input("registry-row", error.message()))?;

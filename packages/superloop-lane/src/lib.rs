@@ -287,6 +287,15 @@ fn read_plan_settings(home: &Path, loop_name: &str, run: &str) -> Result<Setting
     Ok(settings)
 }
 
+pub(crate) fn read_plan_registry(home: &Path) -> Result<loop_home::registry::Registry, LaneError> {
+    if let Some(configuration) = runtime_entry::plan_configuration(home)? {
+        return Ok(configuration.registry);
+    }
+    let path = loop_home::registry_path(std::env::var_os("ENTER_LOOP_REGISTRY").as_deref(), home);
+    loop_home::load_registry(&path)
+        .map_err(|error| LaneError::input("registry-row", error.message()))
+}
+
 fn load_plan_with_settings(
     home: &Path,
     loop_name: &str,
@@ -297,10 +306,7 @@ fn load_plan_with_settings(
     backend: settings::BoxBackend,
 ) -> Result<(Plan, Settings), LaneError> {
     settings.validate_grant(home, loop_name)?;
-    let registry_path =
-        loop_home::registry_path(std::env::var_os("ENTER_LOOP_REGISTRY").as_deref(), home);
-    let registry_file = loop_home::load_registry(&registry_path)
-        .map_err(|error| LaneError::input("registry-row", error.message()))?;
+    let registry_file = read_plan_registry(home)?;
     let row = registry_file
         .row(loop_name, home)
         .map_err(|error| LaneError::input("registry-row", error.message()))?;

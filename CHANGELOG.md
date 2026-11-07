@@ -80,6 +80,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Runtime and native creation plans use the registry and allocation snapshot validated beneath their configuration capability for plan loading, settings grants and worker range and mail-group selection, without reopening ambient registry paths; native creation's UID census still reads the registry by its path (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Anchored native creation and runtime verification refuse every ambient registry override, including the canonical registry path, before reading grants or changing custody (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Warm public-cut acceptance leaves its configured Meson tree intact; only the replaced archive is reconfigured, and both setup walls remain reported (``prob:build:cut-acceptance-reconfigures-only-the-changed-tree``; ``proto:publicpack:configure-changed-cut-tree``).

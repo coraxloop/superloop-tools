@@ -232,6 +232,8 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             "valid",
             "override-canonical",
             "override-other",
+            "plan-held",
+            "plan-widened",
             "operation",
             "identity",
             "missing",
@@ -311,6 +313,9 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             if case == "mode" {
                 set_private(64000, 0o750);
             }
+            if case.starts_with("plan-") {
+                substitute_plan_configuration(home, case == "plan-widened");
+            }
             let output = if case.starts_with("override-") {
                 let registry = if case == "override-canonical" {
                     home.join(".config/loops/registry.toml")
@@ -321,6 +326,11 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             } else {
                 ProcessRunner.run(&request).expect("runtime entry")
             };
+            if case.starts_with("plan-") {
+                fs::remove_dir_all(home.join(".config/loops")).expect("remove substitute");
+                fs::rename(home.join(".config/held-loops"), home.join(".config/loops"))
+                    .expect("restore held configuration");
+            }
             if case == "owner" || case == "mode" {
                 set_private(64000, 0o700);
             }
@@ -342,6 +352,14 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                     report.contains("anchor-declaration")
                         && report.contains("purpose=registry-override"),
                     "{report}"
+                ),
+                "plan-held" => assert!(
+                    report.contains("missing-setting: entry_bin is absent"),
+                    "anchored plan reaches its next field: {report}"
+                ),
+                "plan-widened" => assert!(
+                    report.contains("settings-grant: runs_root differs"),
+                    "anchored grant is enforced: {report}"
                 ),
                 "operation" => assert!(report.contains("anchor-declaration"), "{report}"),
                 "identity" => assert!(report.contains("anchor-identity"), "{report}"),
@@ -499,5 +517,31 @@ fn runtime_override(request: &loop_home::CommandSpec, registry: &Path) -> loop_h
         stdout: output.stdout,
         stderr: output.stderr,
         wall: start.elapsed(),
+    }
+}
+
+/// # Panics
+/// Panics if the replacement configuration cannot isolate the held registry and ledger.
+fn substitute_plan_configuration(home: &Path, widened: bool) {
+    let root = home.join(".config/loops");
+    fs::rename(&root, home.join(".config/held-loops")).expect("retain configuration identity");
+    fs::create_dir(&root).expect("substitute directory");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("substitute mode");
+    fs::create_dir(root.join("alpha")).expect("settings directory");
+    fs::set_permissions(root.join("alpha"), fs::Permissions::from_mode(0o700))
+        .expect("settings directory mode");
+    let source = if widened {
+        "runs_root='/ungranted-runs'\ndriver_argv=['/usr/bin/true']\n[backend_argv]\ncodex=['/usr/bin/true']\n"
+    } else {
+        "driver_argv=['/usr/bin/true']\n[backend_argv]\ncodex=['/usr/bin/true']\n"
+    };
+    for (name, bytes) in [
+        ("registry.toml", "invalid registry"),
+        ("allocations.toml", "invalid ledger"),
+        ("alpha/workers.toml", source),
+    ] {
+        let path = root.join(name);
+        fs::write(&path, bytes).expect("substitute bytes");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("substitute file mode");
     }
 }
