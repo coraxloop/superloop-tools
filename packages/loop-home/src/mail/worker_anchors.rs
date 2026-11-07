@@ -16,6 +16,13 @@ use std::time::Duration;
 fn refusal(operation: &str, purpose: &str, kind: &str) -> MailError {
     MailError::Entry(format!("{kind}: operation={operation} purpose={purpose}"))
 }
+fn path_word(path: &Path, operation: &str, purpose: &str) -> Result<String> {
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        MailError::Entry(format!(
+            "anchor-declaration: operation={operation} purpose={purpose} check=path-encoding"
+        ))
+    })
+}
 fn operation(mode: &str, phase: &str) -> Result<String> {
     if mode == "_mail-worker-birth"
         && matches!(
@@ -147,6 +154,8 @@ pub fn command(
     namespace: &[String],
 ) -> Result<CommandSpec> {
     let operation = operation(mode, phase)?;
+    let home_word = path_word(home, &operation, "home")?;
+    let entry_word = path_word(entry, &operation, "entry-executable")?;
     if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
         return Err(refusal(
             &operation,
@@ -172,6 +181,7 @@ pub fn command(
     } else {
         return Err(refusal(&operation, "namespace-entry", "anchor-exec"));
     };
+    let program_word = path_word(&program, &operation, "namespace-entry")?;
     let _namespace = pin_executable(&host, &program, "namespace-entry", 0)?;
     let configuration = host_configuration(&host, home, loop_name, &operation)?;
     let row = configuration
@@ -222,11 +232,11 @@ pub fn command(
     )
     .map_err(|e| e.context(&operation, "rights"))?;
     let mut argv = namespace.to_vec();
-    argv[0] = program.to_string_lossy().into_owned();
+    argv[0] = program_word;
     argv.extend([
-        entry.to_string_lossy().into_owned(),
+        entry_word,
         mode.into(),
-        home.to_string_lossy().into_owned(),
+        home_word,
         loop_name.into(),
         phase.into(),
         identity.name.clone(),
@@ -270,7 +280,7 @@ pub(super) fn receive(
         Duration::from_secs(30),
     )
     .map_err(|e| e.context(&operation, "rights"))?;
-    nix::unistd::close(0)?;
+    anchor::transport::replace_stdin(&operation)?;
     let receiver = Receiver::current().map_err(|e| e.context(&operation, "receiver-map"))?;
     let configuration = receiver.configuration(
         &manifest,

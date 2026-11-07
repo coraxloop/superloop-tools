@@ -794,3 +794,137 @@ fn anchor_exec_retains_the_held_file() {
         "an unpinned interpreter must not execute by fallback"
     );
 }
+
+/// # Panics
+/// Panics if consumed transport stdin is absent, is not the null device or supplies input.
+fn null_input_reference() -> File {
+    transport::replace_stdin("fixture").expect("replace consumed stdin");
+    let actual = fstat(std::io::stdin().as_fd()).expect("stdin identity before any new open");
+    let null = File::open("/dev/null").expect("null identity");
+    assert!(
+        null.as_raw_fd() > 2,
+        "reference open must not fill vacant stdio"
+    );
+    let expected = fstat(&null).expect("null identity");
+    assert_eq!(
+        (actual.st_dev, actual.st_ino),
+        (expected.st_dev, expected.st_ino)
+    );
+    assert_eq!(
+        std::io::stdin().read(&mut [0_u8; 1]).expect("null input"),
+        0
+    );
+    null
+}
+
+/// # Panics
+/// Panics if descriptor exhaustion loses its named cause or consumed stdin can become a capability slot.
+/// ´claim:loophome:anchor-descriptor-system-failures-retain-their-cause´
+/// ´test:unit:anchor-descriptor-system-failures-retain-their-cause´
+#[test]
+#[allow(unsafe_code)]
+fn anchor_descriptor_system_failures_retain_their_cause() {
+    const CHILD: &str = "SUPERLOOP_ANCHOR_DESCRIPTOR_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "anchor::tests::anchor_descriptor_system_failures_retain_their_cause",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("isolated descriptor fixture");
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let null = null_input_reference();
+    let ceiling = u64::try_from(null.as_raw_fd()).expect("null descriptor") + 1;
+    let fixture = Fixture::new();
+    let file = File::open(fixture.file("child", "held")).expect("later descriptor");
+    assert!(file.as_raw_fd() > 2);
+    let (manifest, descriptors, required) =
+        bundle(&fixture.0, "configuration", policy(Kind::Directory));
+    let dir = validate(
+        &manifest,
+        descriptors
+            .iter()
+            .map(|fd| fd.try_clone().expect("copy"))
+            .collect(),
+        &required,
+    )
+    .expect("directory anchor")
+    .remove(0);
+    let image = fixture.0.join("image");
+    fs::copy("/usr/bin/true", &image).expect("native image");
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o700)).expect("executable mode");
+    let (executable, fds, required) = bundle(
+        &image,
+        "executable",
+        Policy {
+            kind: Kind::File,
+            owner: Owner::Host,
+            mode: ModePolicy::Executable,
+        },
+    );
+    let executable = validate(&executable, fds, &required)
+        .expect("executable anchor")
+        .remove(0);
+    let receiver = Receiver::current().expect("receiver map");
+    let mut command = std::process::Command::new(&image);
+    let mut old = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: this test runs in its own subprocess, the pointers are live, and
+    // only the soft limit changes; restore it before assertions or reporting.
+    unsafe {
+        assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut old), 0);
+        let limited = libc::rlimit {
+            rlim_cur: ceiling,
+            rlim_max: old.rlim_max,
+        };
+        assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limited), 0);
+    }
+    let relay = dir.relay();
+    let child = dir.open_beneath(Path::new("child"), policy(Kind::File), 0o700);
+    let exec = executable.configure_exec(&mut command, &["held-image".into()], &[]);
+    let configuration = receiver.configuration(
+        &manifest,
+        &descriptors,
+        Entry {
+            operation: "fixture",
+            loop_name: "alpha",
+            transport: Transport::Rights,
+        },
+        &fixture.0,
+        false,
+    );
+    // SAFETY: the saved limit belongs to this isolated process and remains valid.
+    unsafe {
+        assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &raw const old), 0);
+    }
+    for (error, check) in [
+        (relay.expect_err("relay exhaustion"), "relay-duplicate"),
+        (child.expect_err("child exhaustion"), "child-duplicate"),
+        (exec.expect_err("exec exhaustion"), "exec-duplicate"),
+        (
+            configuration.expect_err("configuration exhaustion"),
+            "configuration-duplicate",
+        ),
+    ] {
+        assert_eq!(error.kind, "anchor-io", "{error}");
+        assert!(error.to_string().contains(check), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("os error {}", libc::EMFILE)),
+            "{error}"
+        );
+    }
+}

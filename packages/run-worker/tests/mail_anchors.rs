@@ -251,7 +251,34 @@ assert not (root/'worker-homes/lane-a').exists()
 /// ´test:integration:worker-entry-refuses-capability-substitution´
 #[test]
 fn worker_entry_refuses_capability_substitution() {
+    use std::os::unix::ffi::OsStringExt as _;
     let fixture = Fixture::new();
+    let invalid = PathBuf::from(std::ffi::OsString::from_vec(b"/invalid-\xff".to_vec()));
+    for (home, entry, purpose) in [
+        (invalid.as_path(), Path::new(binary()), "home"),
+        (
+            fixture.home.as_path(),
+            invalid.as_path(),
+            "entry-executable",
+        ),
+    ] {
+        let error = loop_home::mail::worker_provision::anchored_command(
+            home,
+            "alpha",
+            &Fixture::identity(),
+            "_mail-worker-birth",
+            "reserve",
+            entry,
+            &["/usr/bin/podman".into(), "unshare".into()],
+        )
+        .expect_err("non-UTF-8 path");
+        let detail = error.to_string();
+        assert!(
+            detail.contains("anchor-declaration:") && detail.contains("check=path-encoding"),
+            "{detail}"
+        );
+        assert!(detail.contains(&format!("purpose={purpose}")), "{detail}");
+    }
     for (field, value, refusal) in [
         (
             "operation",

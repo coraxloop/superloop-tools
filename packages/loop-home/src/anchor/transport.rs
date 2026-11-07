@@ -158,3 +158,14 @@ pub fn receive(socket: &UnixStream, count: usize, deadline: Duration) -> Result<
         Err(cause) => Err(refusal("receive-eof").because("eof-read", cause)),
     }
 }
+
+/// Replace consumed transport stdin without leaving descriptor zero available to later opens.
+/// # Errors
+/// Refuses a failed null-device open or descriptor replacement by its system cause.
+pub(crate) fn replace_stdin(operation: &str) -> Result<()> {
+    let error = |cause: std::io::Error| {
+        Error::new("anchor-io", operation, "rights").because("stdin-null", cause)
+    };
+    let null = std::fs::File::open("/dev/null").map_err(error)?;
+    nix::unistd::dup2_stdin(&null).map_err(|cause| error(cause.into()))
+}

@@ -630,7 +630,7 @@ impl Receiver {
             .get(index)
             .ok_or_else(|| error("anchor-missing"))?
             .try_clone()
-            .map_err(|_| error("anchor-missing"))?;
+            .map_err(|cause| error("anchor-io").because("configuration-duplicate", cause))?;
         let mut record = record.clone();
         record.slot = 0;
         let bootstrap = Manifest {
@@ -819,10 +819,10 @@ impl Anchor {
             return Err(refusal());
         }
         self.revalidate()?;
-        let image = self
-            .fd
-            .try_clone()
-            .map_err(|cause| refusal().because("exec-duplicate", cause))?;
+        let image = self.fd.try_clone().map_err(|cause| {
+            Error::new("anchor-io", &self.operation, &self.record.purpose)
+                .because("exec-duplicate", cause)
+        })?;
         let argv = arguments
             .iter()
             .map(|word| std::ffi::CString::new(word.as_bytes()))
@@ -871,7 +871,7 @@ impl Anchor {
     pub fn relay(&self) -> Result<(Record, OwnedFd)> {
         self.revalidate()?;
         let fd = self.fd.try_clone().map_err(|cause| {
-            Error::new("anchor-missing", &self.operation, &self.record.purpose)
+            Error::new("anchor-io", &self.operation, &self.record.purpose)
                 .because("relay-duplicate", cause)
         })?;
         let mut record = self.record.clone();
@@ -894,10 +894,10 @@ impl Anchor {
             ));
         }
         let parts = relative_parts(path, &self.operation, &self.record.purpose)?;
-        let mut fd = self
-            .fd
-            .try_clone()
-            .map_err(|_| Error::new("anchor-missing", &self.operation, &self.record.purpose))?;
+        let mut fd = self.fd.try_clone().map_err(|cause| {
+            Error::new("anchor-io", &self.operation, &self.record.purpose)
+                .because("child-duplicate", cause)
+        })?;
         for (index, part) in parts.iter().enumerate() {
             let next = if index + 1 == parts.len() {
                 policy
