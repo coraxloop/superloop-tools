@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Document the existing executable-byte pins and the verified door step owed by lane-crate rebuilds, including changes outside the helpers' own sources; this chooses the record's documentation option and adds no rebuild-invariance guarantee (``prob:door:runner-template-keyed-on-embedded-bytes``; ``rule:superlooplane:door-rebuild-rollout``).
+
 - Cut-tree acceptance retains its Cargo target and Meson build directories across rounds, resets fixture sources and checks fresh cut identities on every run; configuration compiles publication selectors once (``sec:publicpack:publication-follow-ups``).
 
 - Private boxed entry carries the protected backend explicitly, validates only its configured program and binds the driver selector without changing settings evidence; matching lane and entry versions are required, and Claude launch remains unavailable pending the image, runtime and credential adapters (``prob:box:claude-boxed-workers``; ``sec:loophome:driver-launch``; ``conv:superlooplane:backend-selection-compatibility``).
