@@ -118,6 +118,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Service authority fixtures require a spawning-thread endpoint and refuse before spawning when it is absent; nested guards restore the prior endpoint and a new thread inherits no hook, while production keeps its fixed endpoint (``prob:box:service-credential-test-hook-closes-by-default``; ``claim:superlooplane:service-fixture-endpoint-required``).
+
 - Private harvest and home-layout readers retain configuration and checkpoint-tool capabilities through namespace entry, refusing changed identities and unsafe modes before plan reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-exercise-readers-retain-configuration``; ``claim:superlooplane:checkpoint-tools-use-received-capabilities``).
 
 - Private worker-identity selection scans reservations, driver directories and protected residue beneath the received runs-root descriptor, retaining record validation and refusing a substituted root or linked record by name (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:reservation-census-stays-beneath-received-root``).

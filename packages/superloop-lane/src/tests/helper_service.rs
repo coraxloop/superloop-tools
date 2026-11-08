@@ -155,7 +155,10 @@ for path,uid in [(p,0),(p/'.codex',3000)]:
 expiry=int(time.time())+86400
 payload=base64.urlsafe_b64encode(json.dumps({'exp':expiry}).encode()).decode().rstrip('=')
 token='header.'+payload+'.signature'
-source={'auth_mode':'chatgpt','OPENAI_API_KEY':None,'tokens':{'id_token':token,'access_token':token,'refresh_token':'fixture-service-refresh','account_id':'fixture-account'},'last_refresh':datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+tokens={'id_token':token,'access_token':token,
+        'refresh_token':'fixture-service-refresh','account_id':'fixture-account'}
+refreshed=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+source={'auth_mode':'chatgpt','OPENAI_API_KEY':None,'tokens':tokens,'last_refresh':refreshed}
 auth=home/'.config/loops/alpha/lanes/codex/auth.json'
 auth.write_text(json.dumps(source))
 os.chmod(auth,0o600)
@@ -276,7 +279,25 @@ fn start(home: &Path, runs: &Path, podman: &Path, endpoint: &str) -> FixtureChil
 /// # Panics
 /// Panics if the loop peer cannot exchange a prompt and status with the real service.
 fn exchange(home: &Path, runs: &Path, loop_uid: u32) -> Output {
-    let script = "import os,socket,struct,sys,time\nfrom pathlib import Path\np=Path(sys.argv[1]); deadline=time.monotonic()+30\nwhile not (p/'client-ready').exists():\n assert time.monotonic()<deadline\n time.sleep(.01)\ns=socket.socket(socket.AF_UNIX);s.connect(sys.argv[2]);s.sendall(struct.pack('<I',0))\ndef read(n):\n b=b''\n while len(b)<n:\n  q=s.recv(n-len(b));assert q;b+=q\n return b\nwhile True:\n h=read(5);b=read(struct.unpack('<I',h[1:])[0])\n if h[:1]==b'X':\n  print('STATUS',struct.unpack('<i',b)[0]);break\n print('FRAME',h[:1].decode(),b.decode(),flush=True)\n";
+    let script = r"
+import os,socket,struct,sys,time
+from pathlib import Path
+p=Path(sys.argv[1]); deadline=time.monotonic()+30
+while not (p/'client-ready').exists():
+ assert time.monotonic()<deadline
+ time.sleep(.01)
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[2]);s.sendall(struct.pack('<I',0))
+def read(n):
+ b=b''
+ while len(b)<n:
+  q=s.recv(n-len(b));assert q;b+=q
+ return b
+while True:
+ h=read(5);b=read(struct.unpack('<I',h[1:])[0])
+ if h[:1]==b'X':
+  print('STATUS',struct.unpack('<i',b)[0]);break
+ print('FRAME',h[:1].decode(),b.decode(),flush=True)
+";
     let uid = loop_uid.to_string();
     let client = Command::new("/usr/bin/podman")
         .env_remove("_CONTAINERS_USERNS_CONFIGURED")
@@ -347,15 +368,21 @@ fn refresh_namespace_authority(
         serde_json::from_slice(&fs::read(&path).expect("record")).expect("record JSON");
     record["phase"] = json!("started");
     crate::launch::publish_reservation(&path, &record).expect("live reservation for refresh");
-    let output = namespace_python(home, r"
+    let output = namespace_python(
+        home,
+        r"
 import sys,json,time,base64
 from pathlib import Path
 p=Path(sys.argv[1])/'.config/loops/alpha/lanes/codex/auth.json'
 s=json.loads(p.read_text())
-payload=base64.urlsafe_b64encode(json.dumps({'exp':int(time.time())+300}).encode()).decode().rstrip('=')
+claims=json.dumps({'exp':int(time.time())+300}).encode()
+payload=base64.urlsafe_b64encode(claims).decode().rstrip('=')
 for field in ['id_token','access_token']: s['tokens'][field]='header.'+payload+'.due'
 p.write_text(json.dumps(s))
-", worker).expect("make synthetic authority due");
+",
+        worker,
+    )
+    .expect("make synthetic authority due");
     assert!(
         output.status.success(),
         "{}",

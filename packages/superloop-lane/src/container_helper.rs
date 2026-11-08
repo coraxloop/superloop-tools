@@ -1990,7 +1990,7 @@ pub(crate) fn spawn_credential_authority(
 
 /// Run the service authority with an explicit internal refresh endpoint.
 /// The public service always supplies the fixed vendor endpoint; fixtures supply loopback.
-pub(crate) fn spawn_credential_authority_at(
+fn spawn_credential_authority_at(
     refresh_home: PathBuf,
     refresh_loop: String,
     refresh_root: PathBuf,

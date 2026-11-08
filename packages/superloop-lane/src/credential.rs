@@ -25,12 +25,20 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Select the fixed service endpoint, with an isolated override only in test builds.
+/// Select the fixed service endpoint, with a required isolated override in test builds.
+/// # Panics
+/// Panics in test builds if the spawning thread has not installed a fixture endpoint.
 pub(crate) fn service_endpoint() -> String {
     #[cfg(test)]
-    if let Some(endpoint) = SERVICE_ENDPOINT.with(|value| value.borrow().clone()) {
-        return endpoint;
+    {
+        SERVICE_ENDPOINT.with(|value| {
+            value
+                .borrow()
+                .clone()
+                .expect("service fixture endpoint is required")
+        })
     }
+    #[cfg(not(test))]
     AUTH_ENDPOINT.to_owned()
 }
 
@@ -1794,6 +1802,44 @@ fn publish_live_snapshot(
 
 #[cfg(test)]
 mod tests {
+
+    /// # Panics
+    /// Panics if a fixture can select a vendor endpoint without its thread-local guard.
+    /// ´claim:superlooplane:service-fixture-endpoint-required´
+    /// ´test:unit:service-fixture-endpoint-is-required-on-each-thread´
+    #[test]
+    fn service_fixture_endpoint_is_required_on_each_thread() {
+        std::thread::spawn(|| {
+            let refused = || {
+                let error = std::panic::catch_unwind(service_endpoint)
+                    .expect_err("missing fixture hook must refuse before spawning authority");
+                let message = error
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| error.downcast_ref::<&str>().copied());
+                assert!(
+                    message
+                        .is_some_and(|text| text.contains("service fixture endpoint is required"))
+                );
+            };
+            refused();
+            let endpoint = "http://127.0.0.1:1/fixture";
+            let guard = fixture_service_endpoint(endpoint.into());
+            assert_eq!(service_endpoint(), endpoint);
+            {
+                let _nested = fixture_service_endpoint("http://127.0.0.1:2/nested".into());
+                assert_eq!(service_endpoint(), "http://127.0.0.1:2/nested");
+            }
+            assert_eq!(service_endpoint(), endpoint);
+            std::thread::spawn(refused)
+                .join()
+                .expect("new thread refuses inherited hook");
+            drop(guard);
+            refused();
+        })
+        .join()
+        .expect("isolated endpoint policy");
+    }
     use super::*;
     use std::net::TcpListener;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
