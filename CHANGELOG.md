@@ -42,6 +42,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Native creation carries the selected backend into its private form and credential capability, reconstructs that plan through held configuration and keeps Claude preflight behind the runtime gate (``prob:box:claude-boxed-workers``; ``proto:superlooplane:native-creation-selected-credential-custody``).
+
 - The helper service's credential-authority spawn retains its own directory and executable custody after the parent releases its guards; a replaced-home fixture measures the real authority loop's first healthy and refused evidence, its received client execution and its cancellation (``test:unit:service-credential-authority-retains-custody``).
 
 - The helper transfers only the protected backend's credential client and clock into its authority thread; Claude has a distinct executable role and foreign-only capability maps refuse without ambient fallback (``prob:box:claude-boxed-workers``; ``proto:superlooplane:selected-credential-executable-custody``).

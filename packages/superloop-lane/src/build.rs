@@ -1085,8 +1085,9 @@ pub(crate) fn private_launch_preview(
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<Value, LaneError> {
     if argv.get(2).is_some_and(|word| word == "_make-home") {
+        let backend = crate::creation_entry::selected_backend(&argv[2..])?;
         let mut preview = child(program, argv, environment, cwd, timeout_seconds, name).preview();
-        preview["anchor_manifest"] = crate::creation_entry::preview();
+        preview["anchor_manifest"] = crate::creation_entry::preview(backend);
         preview["directory_transfer_socket_fd"] = json!(0);
         return Ok(preview);
     }

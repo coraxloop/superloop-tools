@@ -47,7 +47,7 @@ const CLAUDE_PURPOSES: [&str; 8] = [
     "credential-clock",
     "configuration",
 ];
-const fn credential_client(backend: BoxBackend) -> &'static str {
+pub(crate) const fn credential_client(backend: BoxBackend) -> &'static str {
     match backend {
         BoxBackend::Codex => "/usr/bin/curl",
         BoxBackend::Claude => "/usr/bin/claude",

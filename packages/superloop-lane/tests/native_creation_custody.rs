@@ -345,6 +345,8 @@ fn native_creation_reserves_and_finishes_beneath_custody() {
         "argument".into(),
         "--door-scope".into(),
         "work".into(),
+        "--backend".into(),
+        "codex".into(),
     ];
     let requests = (0..3)
         .map(|_| {

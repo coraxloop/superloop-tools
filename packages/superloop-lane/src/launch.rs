@@ -1937,6 +1937,7 @@ fn private_argv(
     request: &LaunchRequest,
     worker_uid: u32,
     selection: &LaunchModel,
+    backend: crate::settings::BoxBackend,
 ) -> Result<Vec<String>, LaneError> {
     let mut argv = vec![
         "unshare".into(),
@@ -1962,6 +1963,8 @@ fn private_argv(
         selection.effort_source.into(),
         "--door-scope".into(),
         request.door_scope.name().into(),
+        "--backend".into(),
+        backend.name().into(),
     ];
     if let Some(source) = &request.rotation_source {
         argv.extend(["--rotation-sha256".into(), source.digest.clone()]);
@@ -4108,6 +4111,7 @@ fn run_with_program(
         request,
         worker_uid,
         &selection,
+        selected_backend,
     )?;
     if request.dry_run {
         checks.push("dead preparation identity, absence, attempt evidence, plan comparison and retirement journal");
@@ -6389,8 +6393,10 @@ pub fn private_make(
     rotation_digest: Option<&str>,
     door_scope: crate::door::Scope,
     custody: &crate::runtime_entry::Custody,
+    backend: crate::settings::BoxBackend,
 ) -> Result<Value, LaneError> {
-    let (mut plan, settings) = load_plan(owner_home, loop_name, run, (0, 0))?;
+    let (mut plan, settings) =
+        crate::load_launch_plan(owner_home, loop_name, run, (0, 0), Some(backend))?;
     plan.select_container_program(podman)?;
     let root = plan
         .driver_dir
@@ -7855,6 +7861,62 @@ mod tests {
             || Ok(true),
         )
         .expect("empty labelled query");
+    }
+
+    /// # Panics
+    /// Panics if native creation drops the selected backend or accepts an ambiguous private selector.
+    /// ´test:unit:native-creation-vector-binds-selected-backend´
+    #[test]
+    fn native_creation_vector_binds_selected_backend() {
+        let request = LaunchRequest::parse(&[
+            "alpha".into(),
+            "R".into(),
+            "--letter".into(),
+            "/owner/letter".into(),
+        ])
+        .expect("request");
+        let selection =
+            super::LaunchModel::select(b"", Some("model"), Some("high")).expect("selection");
+        for backend in [
+            crate::settings::BoxBackend::Codex,
+            crate::settings::BoxBackend::Claude,
+        ] {
+            let vector = super::private_argv(
+                "/lane",
+                "/usr/bin/podman",
+                Path::new("/owner"),
+                &request,
+                64010,
+                &selection,
+                backend,
+            )
+            .expect("creation vector");
+            assert_eq!(&vector[23..], ["--backend", backend.name()]);
+            assert_eq!(
+                crate::creation_entry::selected_backend(&vector[2..]).expect("selected"),
+                backend
+            );
+            let preview = crate::creation_entry::preview(backend);
+            assert_eq!(
+                preview["purposes"][9],
+                if backend == crate::settings::BoxBackend::Claude {
+                    "credential-claude"
+                } else {
+                    "credential-client"
+                }
+            );
+            for length in 0..23 {
+                assert!(crate::creation_entry::selected_backend(&vector[2..2 + length]).is_err());
+            }
+            let mut ambiguous = vector[2..].to_vec();
+            ambiguous.extend(["--backend".into(), backend.name().into()]);
+            assert_eq!(
+                crate::creation_entry::selected_backend(&ambiguous)
+                    .expect_err("duplicate selector")
+                    .kind,
+                "creation-anchor"
+            );
+        }
     }
 
     /// # Panics

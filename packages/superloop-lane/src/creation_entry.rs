@@ -1,5 +1,5 @@
 //! Native creation carries configuration, lifetime storage and letter custody into entry.
-use crate::{error::LaneError, launch};
+use crate::{error::LaneError, launch, settings::BoxBackend};
 use loop_home::anchor::{
     self, HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Requirement, Transport,
 };
@@ -17,6 +17,27 @@ const EXTRA: [&str; 4] = [
     "letter-directory",
     "rotation-source",
 ];
+fn extras(backend: BoxBackend) -> [&'static str; 4] {
+    let mut purposes = EXTRA;
+    if backend == BoxBackend::Claude {
+        purposes[0] = "credential-claude";
+    }
+    purposes
+}
+pub(crate) fn selected_backend(body: &[String]) -> Result<BoxBackend, LaneError> {
+    if body.get(21).map(String::as_str) != Some("--backend") {
+        return Err(named("anchor-declaration", "backend"));
+    }
+    let value = body
+        .get(22)
+        .ok_or_else(|| named("anchor-declaration", "backend"))?;
+    if !matches!(value.as_str(), "codex" | "claude")
+        || body[23..].iter().any(|word| word == "--backend")
+    {
+        return Err(named("anchor-declaration", "backend"));
+    }
+    BoxBackend::parse(value)
+}
 fn refusal(error: impl std::fmt::Display) -> LaneError {
     LaneError::input("creation-anchor", error.to_string())
 }
@@ -57,6 +78,8 @@ pub fn command(
     {
         return Err(named("anchor-declaration", "vector"));
     }
+    let backend = selected_backend(&argv[2..])?;
+    let purposes = extras(backend);
     let mut pins = crate::runtime_entry::core_pins(
         OPERATION,
         &argv[3],
@@ -68,11 +91,14 @@ pub fn command(
     let host = HostVerifier::current()
         .map_err(refusal)?
         .for_operation(OPERATION);
-    for (slot, path) in [(9, "/usr/bin/curl"), (10, "/usr/bin/date")] {
+    for (slot, path) in [
+        (9, crate::container_entry::credential_client(backend)),
+        (10, "/usr/bin/date"),
+    ] {
         pins.push(
             host.pin(
                 Path::new(path),
-                EXTRA[slot - 9],
+                purposes[slot - 9],
                 u32::try_from(slot).map_err(refusal)?,
                 policy(Kind::File, Owner::RootFile, ModePolicy::Executable),
             )
@@ -133,8 +159,8 @@ pub fn command(
         descriptors: CommandDescriptors::default().with_input(input.into()),
     })
 }
-fn requirements(rotating: bool) -> Vec<Requirement> {
-    EXTRA[..if rotating { 4 } else { 3 }]
+fn requirements(rotating: bool, backend: BoxBackend) -> Vec<Requirement> {
+    extras(backend)[..if rotating { 4 } else { 3 }]
         .iter()
         .enumerate()
         .map(|(index, purpose)| Requirement {
@@ -172,6 +198,7 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     {
         return Err(named("anchor-declaration", "vector"));
     }
+    let backend = selected_backend(body)?;
     if !nix::unistd::Uid::effective().is_root() {
         return Err(named("anchor-owner", "namespace"));
     }
@@ -180,7 +207,7 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
         &body[1],
         &body[6],
         OPERATION,
-        &requirements(rotation(body)),
+        &requirements(rotation(body), backend),
     )?;
     let mut anchors = anchors.into_iter();
     let mut next = || {
@@ -201,7 +228,7 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
         private: next()?,
         executor: next()?,
     };
-    let curl = next()?;
+    let client = next()?;
     let date = next()?;
     let letter_anchor = next()?;
     crate::container_entry::check_image(OPERATION, &entry).map_err(|mut error| {
@@ -222,7 +249,10 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     let programs = BTreeMap::from([
         (Path::new(&body[10]).to_path_buf(), Arc::new(podman)),
         ("/usr/bin/sha256sum".into(), Arc::new(hash)),
-        ("/usr/bin/curl".into(), Arc::new(curl)),
+        (
+            crate::container_entry::credential_client(backend).into(),
+            Arc::new(client),
+        ),
         ("/usr/bin/date".into(), Arc::new(date)),
     ]);
     let _programs = crate::container_entry::activate_program_map(OPERATION, programs);
@@ -230,14 +260,15 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     invoke(body, &custody)
 }
 /// Describe capabilities without opening a changing launch's storage.
-pub(crate) fn preview() -> serde_json::Value {
+pub(crate) fn preview(backend: BoxBackend) -> serde_json::Value {
+    let roles = extras(backend);
     let purposes = crate::runtime_entry::PURPOSES
         .iter()
-        .chain(EXTRA[..3].iter())
+        .chain(roles[..3].iter())
         .copied()
         .collect::<Vec<_>>();
     serde_json::json!({"state":"bound-on-launch","transport":"rights","operation":OPERATION,
-        "purposes":purposes,"optional_purposes":&EXTRA[3..]})
+        "purposes":purposes,"optional_purposes":&roles[3..]})
 }
 
 fn invoke(
@@ -266,6 +297,8 @@ fn invoke(
         effort_source,
         door_scope_option,
         door_scope,
+        backend_option,
+        backend,
         rest @ ..,
     ] = args
     else {
@@ -297,6 +330,7 @@ fn invoke(
         || model_source_option != "--model-source"
         || effort_source_option != "--effort-source"
         || door_scope_option != "--door-scope"
+        || backend_option != "--backend"
     {
         return Err(LaneError::input(
             "make-home-private",
@@ -326,6 +360,7 @@ fn invoke(
             }
         },
         custody,
+        BoxBackend::parse(backend)?,
     )?;
     Ok(report)
 }

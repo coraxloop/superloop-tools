@@ -269,6 +269,11 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
     for entry in ["runtime", "creation", "rotation"] {
         for case in [
             "valid",
+            "claude-role",
+            "claude-mismatch",
+            "backend-missing",
+            "backend-invalid",
+            "backend-repeated",
             "override-canonical",
             "override-other",
             "plan-held",
@@ -288,6 +293,9 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             "owner",
             "mode",
         ] {
+            if (case.starts_with("claude-") || case.starts_with("backend-")) && entry == "runtime" {
+                continue;
+            }
             if case == "letter-runs" && entry == "runtime" {
                 continue;
             }
@@ -306,6 +314,13 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             };
             if case.starts_with("plan-") {
                 seed_held_settings(home, case);
+            }
+            if case.starts_with("claude-") {
+                seed_held_settings(home, "plan-held");
+                let path = home.join(".config/loops/alpha/workers.toml");
+                let mut source = fs::read_to_string(&path).expect("synthetic settings");
+                source.push_str("claude=['/usr/bin/true']\n");
+                fs::write(path, source).expect("mixed vendor settings");
             }
             let mut request = if entry == "runtime" {
                 superloop_lane::runtime_entry::command(
@@ -342,6 +357,8 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                     "argument".into(),
                     "--door-scope".into(),
                     "work".into(),
+                    "--backend".into(),
+                    "codex".into(),
                 ];
                 if case == "letter-runs" {
                     native[6] = home.join("runs/letter").to_str().expect("letter").into();
@@ -363,6 +380,36 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                 )
                 .expect("creation composer")
             };
+            if case.starts_with("claude-") || case.starts_with("backend-") {
+                let selector = request
+                    .argv
+                    .iter()
+                    .position(|word| word == "--backend")
+                    .expect("selector");
+                match case {
+                    "backend-missing" => {
+                        request.argv.drain(selector..selector + 2);
+                    }
+                    "backend-invalid" => request.argv[selector + 1] = "foreign".into(),
+                    "backend-repeated" => {
+                        request.argv.splice(
+                            selector + 2..selector + 2,
+                            ["--backend".into(), "codex".into()],
+                        );
+                    }
+                    _ => {
+                        request.argv[selector + 1] = "claude".into();
+                        if case == "claude-role" {
+                            // The held root-owned curl is a capability stand-in, never executed
+                            // as Claude: the runtime gate must refuse before any refresh.
+                            let source = request.argv.last_mut().expect("manifest");
+                            let mut manifest = Manifest::parse(source).expect("declaration");
+                            manifest.records[9].purpose = "credential-claude".into();
+                            *source = serde_json::to_string(&manifest).expect("selected role");
+                        }
+                    }
+                }
+            }
             if case.starts_with("execute-") {
                 runtime_hash_configuration(home);
                 request = runtime_hash_request(request, home, case == "execute-held");
@@ -413,6 +460,10 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                 fs::remove_dir_all(home.join(".config/loops/alpha")).expect("remove hash settings");
                 fs::remove_dir_all(home.join("hash-template")).expect("remove hash fixture");
             }
+            if case.starts_with("claude-") {
+                fs::remove_dir_all(home.join(".config/loops/alpha"))
+                    .expect("remove synthetic settings");
+            }
             if case == "owner" || case == "mode" {
                 set_private(64000, 0o700);
             }
@@ -424,6 +475,9 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                 String::from_utf8_lossy(&output.stderr)
             );
             match case {
+                "claude-role" => assert!(report.contains("backend-unavailable: claude boxed launch"), "{report}"),
+                "claude-mismatch" => assert!(report.contains("creation-anchor: anchor-declaration: operation=make-home purpose=roles"), "{report}"),
+                "backend-invalid" | "backend-repeated" | "backend-missing" => assert!(report.contains("creation-anchor: anchor-declaration: operation=make-home purpose=backend"), "{report}"),
                 "valid" | "letter-runs" => assert!(
                     report.contains(if entry == "runtime" {
                         "runtime-anchor: anchor-missing: operation=prepare-runtime purpose=configuration"
@@ -991,6 +1045,8 @@ fn composer_override_child(home: &Path) {
         "argument".into(),
         "--door-scope".into(),
         "work".into(),
+        "--backend".into(),
+        "codex".into(),
     ];
     for (operation, result) in [
         (
