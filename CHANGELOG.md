@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- The gated Claude owner provider reads only the ``claudeAiOauth`` object of the owner's credential file and refuses any departure from the loop's structural record, and its token-only worker encoding carries the access token with its expiry, scopes and account descriptors and neither refresh field nor the host's plugin state; the owner's own program refreshes, the Codex adapter is unchanged and Claude execution remains gated (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-owner-credential-encoding``; ``rec:superlooplane:claude-credential-structure-input``).
+
 - Boxed launch checks the entry deployment and interface before reservation and names both versions on refusal; the entry query resolves no loop state (``prob:box:launch-probes-the-entry-version-before-the-reservation``; ``req:superlooplane:entry-version-before-reservation``; ``proto:loophome:driver-entry-interface-query``).
 
 - Claude candidate launch vectors carry selected print and model arguments through structural container checks while execution remains gated on credential and trial acceptance (``prob:box:claude-boxed-workers``; ``proto:superlooplane:boxed-launch``; ``conv:superlooplane:backend-selection-compatibility``).

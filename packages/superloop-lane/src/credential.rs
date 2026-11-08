@@ -1,4 +1,4 @@
-//! Owner-side authority for one loop's Codex access credentials.
+//! Owner-side credential authority and backend-specific worker encodings.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -400,12 +400,18 @@ fn open_dir(
 }
 
 fn read_source(owner_home: &Path, loop_name: &str) -> Result<Source, LaneError> {
-    let path = sign_in_dir(owner_home, loop_name);
+    let (document, stamp) = read_owner_document(&sign_in_dir(owner_home, loop_name), "auth.json")?;
+    let mut source = Source::parse(document)?;
+    source.stamp = Some(stamp);
+    Ok(source)
+}
+
+fn read_owner_document(path: &Path, filename: &str) -> Result<(Value, FileStamp), LaneError> {
     let owner = owner_identity().0;
-    let dir = open_dir(&path, owner, owner, 0o700)?;
+    let dir = open_dir(path, owner, owner, 0o700)?;
     let file = openat2(
         &dir,
-        "auth.json",
+        filename,
         OpenHow::new()
             .flags(OFlag::O_RDONLY | OFlag::O_CLOEXEC)
             .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
@@ -438,9 +444,7 @@ fn read_source(owner_home: &Path, loop_name: &str) -> Result<Source, LaneError> 
     }
     let document = serde_json::from_slice(&bytes)
         .map_err(|_| failure("credential-sign-in", "sign-in JSON is invalid"))?;
-    let mut source = Source::parse(document)?;
-    source.stamp = Some(FileStamp::from_stat(&stat));
-    Ok(source)
+    Ok((document, FileStamp::from_stat(&stat)))
 }
 
 fn atomic_file(
@@ -962,6 +966,296 @@ impl OwnerProvider for CodexOwnerProvider<'_> {
     }
 }
 
+// The structural record describes owner authority, never a worker refresh grant.
+struct ClaudeSource {
+    oauth: Value,
+    expires_ms: u64,
+    stamp: Option<FileStamp>,
+}
+
+impl ClaudeSource {
+    fn parse(document: &Value) -> Result<Self, LaneError> {
+        let oauth = &document["claudeAiOauth"];
+        let object = oauth.as_object().ok_or_else(|| {
+            failure(
+                "credential-sign-in",
+                "Claude claudeAiOauth object is absent",
+            )
+        })?;
+        let fields = [
+            "accessToken",
+            "refreshToken",
+            "expiresAt",
+            "refreshTokenExpiresAt",
+            "scopes",
+            "subscriptionType",
+            "subscriptionTypeSource",
+            "rateLimitTier",
+        ];
+        if object.len() != fields.len() || fields.iter().any(|key| !object.contains_key(*key)) {
+            return Err(failure(
+                "credential-sign-in",
+                "Claude owner credential fields differ from the recorded schema",
+            ));
+        }
+        for field in ["accessToken", "refreshToken"] {
+            if !oauth[field].as_str().is_some_and(|value| {
+                value.len() == 108 && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+            }) {
+                return Err(failure(
+                    "credential-sign-in",
+                    format!("Claude {field} has an invalid opaque token shape"),
+                ));
+            }
+        }
+        for field in ["expiresAt", "refreshTokenExpiresAt"] {
+            if !oauth[field]
+                .as_u64()
+                .is_some_and(|value| (1_000_000_000_000..10_000_000_000_000).contains(&value))
+            {
+                return Err(failure(
+                    "credential-sign-in",
+                    format!("Claude {field} is not a 13-digit millisecond epoch"),
+                ));
+            }
+        }
+        let printable = |value: &Value| {
+            value.as_str().is_some_and(|text| {
+                !text.is_empty()
+                    && text.len() <= 256
+                    && text.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+            })
+        };
+        if !oauth["scopes"].as_array().is_some_and(|values| {
+            !values.is_empty() && values.len() <= 64 && values.iter().all(printable)
+        }) {
+            return Err(failure(
+                "credential-sign-in",
+                "Claude scopes are not bounded printable strings",
+            ));
+        }
+        for field in [
+            "subscriptionType",
+            "subscriptionTypeSource",
+            "rateLimitTier",
+        ] {
+            if !printable(&oauth[field]) {
+                return Err(failure(
+                    "credential-sign-in",
+                    format!("Claude {field} is not a bounded printable string"),
+                ));
+            }
+        }
+        Ok(Self {
+            oauth: oauth.clone(),
+            expires_ms: oauth["expiresAt"].as_u64().unwrap_or_default(),
+            stamp: None,
+        })
+    }
+
+    fn worker_file(&self) -> Vec<u8> {
+        // Neither refresh authority nor plugin state crosses this allow-list
+        // (proto:superlooplane:claude-owner-credential-encoding).
+        let mut oauth = serde_json::Map::new();
+        for key in [
+            "accessToken",
+            "expiresAt",
+            "scopes",
+            "subscriptionType",
+            "subscriptionTypeSource",
+            "rateLimitTier",
+        ] {
+            oauth.insert(key.into(), self.oauth[key].clone());
+        }
+        let mut bytes = json!({"claudeAiOauth":oauth}).to_string().into_bytes();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    const fn needs_refresh(&self, now: u64) -> bool {
+        self.expires_ms
+            <= now
+                .saturating_add(REFRESH_AHEAD.as_secs())
+                .saturating_mul(1000)
+    }
+}
+
+fn claude_sign_in_dir(owner_home: &Path, loop_name: &str) -> PathBuf {
+    owner_home
+        .join(".config/loops")
+        .join(loop_name)
+        .join("claude")
+}
+
+fn read_claude_source(home: &Path) -> Result<ClaudeSource, LaneError> {
+    let (document, stamp) = read_owner_document(home, ".credentials.json")?;
+    let mut source = ClaudeSource::parse(&document)?;
+    source.stamp = Some(stamp);
+    Ok(source)
+}
+
+struct ClaudeOwnerProvider<'a, F> {
+    home: &'a Path,
+    refresh_program: F,
+}
+
+impl<F: Fn() -> Result<(), LaneError>> OwnerProvider for ClaudeOwnerProvider<'_, F> {
+    type Snapshot = ClaudeSource;
+    type Identity = FileStamp;
+
+    fn read(&self) -> Result<ClaudeSource, LaneError> {
+        read_claude_source(self.home)
+    }
+    fn due(&self, source: &ClaudeSource, now: u64) -> bool {
+        source.needs_refresh(now)
+    }
+    fn identity(&self, source: &ClaudeSource) -> Result<FileStamp, LaneError> {
+        source
+            .stamp
+            .ok_or_else(|| failure("credential-sign-in", "Claude source identity is absent"))
+    }
+    fn refresh(&self, _source: &ClaudeSource) -> Result<Option<ClaudeSource>, LaneError> {
+        (self.refresh_program)()?;
+        Ok(None)
+    }
+    fn publish(&self, _next: &ClaudeSource, _expected: FileStamp) -> Result<bool, LaneError> {
+        Err(failure(
+            "credential-publish",
+            "Claude owner publication belongs to the vendor program",
+        ))
+    }
+}
+
+fn claude_refresh_program(home: &Path) -> Result<(), LaneError> {
+    use std::os::unix::process::CommandExt as _;
+    let program = Path::new("/usr/bin/claude");
+    // Never fall back to an ambient program from the namespace/helper thread.
+    crate::container_entry::check(program).ok_or_else(|| {
+        failure(
+            "credential-refresh",
+            "Claude refresh requires its held owner program",
+        )
+    })??;
+    let argv = vec!["--print".into(), "Reply with OK.".into()];
+    let environment = BTreeMap::from([
+        ("HOME".into(), home.to_string_lossy().into_owned()),
+        (
+            "CLAUDE_CONFIG_DIR".into(),
+            home.to_string_lossy().into_owned(),
+        ),
+        ("TMPDIR".into(), home.to_string_lossy().into_owned()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ]);
+    let mut command = Command::new("/usr/bin/claude");
+    command
+        .args(&argv)
+        .env_clear()
+        .envs(&environment)
+        .current_dir(home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    crate::container_entry::configure(&mut command, program, &argv, &environment)?;
+    let mut child = command.spawn().map_err(|error| {
+        credential_spawn_error(
+            program,
+            "credential-refresh",
+            "Claude owner refresh could not start",
+            &error,
+        )
+    })?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(failure(
+                        "credential-refresh",
+                        "Claude owner print-mode refresh failed",
+                    ))
+                };
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            state => {
+                if let Ok(pid) = i32::try_from(child.id()) {
+                    let _ignored = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(pid),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+                let _ignored = child.kill();
+                let _ignored = child.wait();
+                return Err(failure(
+                    "credential-refresh",
+                    if state.is_err() {
+                        "Claude owner refresh wait failed"
+                    } else {
+                        "Claude owner refresh timed out"
+                    },
+                ));
+            }
+        }
+    }
+}
+
+fn prepare_claude_run(
+    owner_home: &Path,
+    loop_name: &str,
+    run_home: &Path,
+    worker_uid: u32,
+    now: u64,
+) -> Result<(), LaneError> {
+    let home = claude_sign_in_dir(owner_home, loop_name);
+    prepare_claude_run_at(&home, run_home, worker_uid, now, || {
+        claude_refresh_program(&home)
+    })
+}
+
+fn prepare_claude_run_at(
+    home: &Path,
+    run_home: &Path,
+    worker_uid: u32,
+    now: u64,
+    refresh_program: impl Fn() -> Result<(), LaneError>,
+) -> Result<(), LaneError> {
+    let owner = owner_identity().0;
+    let directory = open_dir(home, owner, owner, 0o700)?;
+    let _guard = lock_with(&directory, FlockArg::LockExclusive)?;
+    let source = refresh_provider(
+        &ClaudeOwnerProvider {
+            home,
+            refresh_program,
+        },
+        now,
+        || {},
+    )?;
+    if source.expires_ms <= now.saturating_mul(1000) {
+        return Err(failure(
+            "credential-refresh",
+            "Claude owner program left expired access authority",
+        ));
+    }
+    write_claude_run(run_home, worker_uid, &source)
+}
+
+fn write_claude_run(home: &Path, worker_uid: u32, source: &ClaudeSource) -> Result<(), LaneError> {
+    atomic_file(
+        &home.join(".claude"),
+        ".credentials.json",
+        &source.worker_file(),
+        worker_uid,
+        worker_uid,
+        0o700,
+        None,
+    )
+    .map(|_published| ())
+}
+
 /// Callers hold the loop refresh lock through this operation and worker publication.
 /// This preserves the identity check followed by rename; it is not an atomic CAS.
 fn refresh_provider<P: OwnerProvider>(
@@ -1030,6 +1324,9 @@ pub fn prepare_run(
     backend: crate::settings::BoxBackend,
 ) -> Result<(), LaneError> {
     backend.require_runtime()?;
+    if backend == crate::settings::BoxBackend::Claude {
+        return prepare_claude_run(owner_home, loop_name, run_home, worker_uid, now_seconds()?);
+    }
     let _guard = lock(owner_home, loop_name)?;
     let source = refresh_if_due(owner_home, loop_name, AUTH_ENDPOINT, now_seconds()?)?;
     write_run(run_home, worker_uid, &source)
@@ -1305,6 +1602,286 @@ mod tests {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
             .expect("private fixture root");
         root
+    }
+
+    fn claude_fixture_root() -> tempfile::TempDir {
+        let root = tempfile::Builder::new()
+            .prefix("lane-claude-credential-")
+            .tempdir()
+            .expect("private TMPDIR fixture");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
+            .expect("private fixture root");
+        root
+    }
+
+    /// # Panics
+    /// Panics only if an unheld owner program is admitted for refresh.
+    /// ´test:unit:claude-refresh-refuses-unheld-program´
+    #[test]
+    fn claude_refresh_refuses_unheld_program() {
+        let error = claude_refresh_program(Path::new("/unopened-helper-home"))
+            .expect_err("no ambient executable fallback");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(
+            error.detail,
+            "Claude refresh requires its held owner program"
+        );
+    }
+
+    /// # Panics
+    /// Panics only if stale authority is published or the owner refresh loses its lock.
+    /// ´test:unit:claude-preparation-refuses-expired-program-result´
+    #[test]
+    fn claude_preparation_refuses_expired_program_result() {
+        let fixture = claude_fixture_root();
+        let document = claude_document(1_800_000_000_000);
+        let home = fixture_claude(fixture.path(), &document);
+        let run = fixture.path().join("run");
+        fs::create_dir_all(run.join(".claude")).expect("worker home");
+        for path in [&run, &run.join(".claude")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .expect("private worker home");
+        }
+        let calls = std::cell::Cell::new(0);
+        let error = prepare_claude_run_at(&home, &run, owner_identity().0, 1_800_000_000, || {
+            calls.set(calls.get() + 1);
+            let directory =
+                open_dir(&home, owner_identity().0, owner_identity().0, 0o700).expect("owner home");
+            assert!(
+                lock_with(&directory, FlockArg::LockExclusiveNonblock).is_err(),
+                "refresh must hold the owner lock"
+            );
+            Ok(())
+        })
+        .expect_err("successful program did not supply unexpired authority");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(
+            error.detail,
+            "Claude owner program left expired access authority"
+        );
+        assert!(!run.join(".claude/.credentials.json").exists());
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("owner source"),
+            document.to_string()
+        );
+    }
+
+    fn claude_document(expires_ms: u64) -> Value {
+        json!({
+            "claudeAiOauth": {
+                "accessToken": "A".repeat(108), "refreshToken": "R".repeat(108),
+                "expiresAt": expires_ms, "refreshTokenExpiresAt": 1_900_000_000_000_u64,
+                "scopes": ["a".repeat(16), "b".repeat(14), "c".repeat(16), "d".repeat(12), "e".repeat(12), "f".repeat(25)],
+                "subscriptionType": "abc", "subscriptionTypeSource": "fixture", "rateLimitTier": "t".repeat(22)
+            },
+            "mcpOAuth": {"fixture-plugin": {"accessToken": "", "discoveryState": {"oauthMetadataFound": true}}}
+        })
+    }
+
+    fn fixture_claude(home: &Path, document: &Value) -> PathBuf {
+        fixture_sign_in(home, &source(1_900_000_000, "unused-codex"));
+        let dir = claude_sign_in_dir(home, "alpha");
+        fs::create_dir_all(&dir).expect("Claude fixture home");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("private home");
+        let path = dir.join(".credentials.json");
+        fs::write(&path, document.to_string()).expect("synthetic Claude source");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private source");
+        dir
+    }
+
+    /// # Panics
+    /// Panics only if the synthetic structural fixture leaks refresh authority or host state.
+    /// ´test:unit:claude-worker-encoding-excludes-owner-authority´
+    #[test]
+    fn claude_worker_encoding_excludes_owner_authority() {
+        let document = claude_document(1_800_000_000_001);
+        let source = ClaudeSource::parse(&document).expect("recorded structural shape");
+        let encoded = source.worker_file();
+        let worker: Value = serde_json::from_slice(&encoded).expect("worker JSON");
+        assert_eq!(worker.as_object().expect("object").len(), 1);
+        assert_eq!(
+            ClaudeSource::parse(&worker)
+                .err()
+                .expect("worker is not owner authority")
+                .kind,
+            "credential-sign-in"
+        );
+        let oauth = worker["claudeAiOauth"].as_object().expect("OAuth object");
+        assert_eq!(oauth.len(), 6);
+        assert!(!oauth.contains_key("refreshToken"));
+        assert!(!oauth.contains_key("refreshTokenExpiresAt"));
+        for field in [
+            "accessToken",
+            "expiresAt",
+            "scopes",
+            "subscriptionType",
+            "subscriptionTypeSource",
+            "rateLimitTier",
+        ] {
+            assert_eq!(oauth[field], document["claudeAiOauth"][field]);
+        }
+        assert_eq!(document["claudeAiOauth"]["refreshToken"], "R".repeat(108));
+        assert!(!source.needs_refresh(1_799_999_400));
+        assert!(source.needs_refresh(1_799_999_401));
+        assert!(source.needs_refresh(u64::MAX));
+    }
+
+    /// # Panics
+    /// Panics only if malformed owner inputs pass validation or appear in diagnostics.
+    /// ´test:unit:claude-owner-schema-refuses-malformed-fields´
+    #[test]
+    fn claude_owner_schema_refuses_malformed_fields() {
+        for (field, value) in [
+            ("accessToken", json!("A".repeat(107))),
+            ("refreshToken", json!("\n".repeat(108))),
+            ("accessToken", json!("é".repeat(54))),
+            ("expiresAt", json!(1_800_000_000)),
+            ("expiresAt", json!("1800000000000")),
+            ("expiresAt", json!(1_800_000_000_000.5)),
+            ("refreshTokenExpiresAt", json!(-1)),
+            ("scopes", json!([])),
+            ("scopes", json!([false])),
+            ("subscriptionType", json!(null)),
+            ("subscriptionTypeSource", json!("\u{7f}")),
+            ("rateLimitTier", json!("x".repeat(257))),
+        ] {
+            let mut document = claude_document(1_800_000_000_000);
+            document["claudeAiOauth"][field] = value;
+            let error = ClaudeSource::parse(&document)
+                .err()
+                .expect("malformed refusal");
+            assert_eq!(error.kind, "credential-sign-in");
+            assert!(!error.detail.contains(&"A".repeat(108)));
+            assert!(!error.detail.contains(&"R".repeat(108)));
+        }
+        let mut document = claude_document(1_800_000_000_000);
+        document["claudeAiOauth"]["futureAuthority"] = json!(true);
+        assert!(ClaudeSource::parse(&document).is_err());
+        assert!(ClaudeSource::parse(&json!({})).is_err());
+    }
+
+    /// # Panics
+    /// Panics only if the provider fails to adopt its owner program's synthetic replacement.
+    /// ´test:unit:claude-provider-adopts-owner-program-publication´
+    #[test]
+    fn claude_provider_adopts_owner_program_publication() {
+        let fixture = claude_fixture_root();
+        let old = claude_document(1_800_000_000_000);
+        let home = fixture_claude(fixture.path(), &old);
+        let mut next = claude_document(1_800_000_003_000);
+        next["claudeAiOauth"]["accessToken"] = json!("B".repeat(108));
+        next["mcpOAuth"]["fixture-plugin"]["hostOnly"] = json!(true);
+        let owner_bytes = next.to_string();
+        let calls = std::cell::Cell::new(0);
+        let provider = ClaudeOwnerProvider {
+            home: &home,
+            refresh_program: || {
+                calls.set(calls.get() + 1);
+                let staged = home.join(".owner-login.tmp");
+                fs::write(&staged, &owner_bytes).expect("owner program output");
+                fs::set_permissions(&staged, fs::Permissions::from_mode(0o600))
+                    .expect("owner program mode");
+                fs::rename(staged, home.join(".credentials.json"))
+                    .expect("owner program publication");
+                Ok(())
+            },
+        };
+        let directory =
+            open_dir(&home, owner_identity().0, owner_identity().0, 0o700).expect("home");
+        let refresh_lock = lock_with(&directory, FlockArg::LockExclusive).expect("refresh lock");
+        let result = refresh_provider(&provider, 1_800_000_000, || {
+            panic!("helper must not publish owner source")
+        })
+        .expect("provider refresh");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            result.oauth["accessToken"],
+            next["claudeAiOauth"]["accessToken"]
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("owner source"),
+            owner_bytes
+        );
+        let run = fixture.path().join("run");
+        fs::create_dir_all(run.join(".claude")).expect("worker home");
+        for path in [&run, &run.join(".claude")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("worker home mode");
+        }
+        write_claude_run(&run, owner_identity().0, &result).expect("worker publication");
+        let worker_path = run.join(".claude/.credentials.json");
+        assert_eq!(
+            fs::read(&worker_path).expect("worker bytes"),
+            result.worker_file()
+        );
+        assert_eq!(
+            fs::metadata(&worker_path)
+                .expect("worker metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(refresh_lock);
+        prepare_claude_run(
+            fixture.path(),
+            "alpha",
+            &run,
+            owner_identity().0,
+            1_700_000_000,
+        )
+        .expect("production preparation with current owner authority");
+        assert_eq!(
+            fs::read(worker_path).expect("prepared worker bytes"),
+            result.worker_file()
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("owner source preserved"),
+            owner_bytes
+        );
+    }
+
+    /// # Panics
+    /// Panics only if unsafe source custody is accepted or a refusal changes authority.
+    /// ´test:unit:claude-provider-refuses-unsafe-source-and-refresh´
+    #[test]
+    fn claude_provider_refuses_unsafe_source_and_refresh() {
+        let fixture = claude_fixture_root();
+        let document = claude_document(1_800_000_000_000);
+        let home = fixture_claude(fixture.path(), &document);
+        let provider = ClaudeOwnerProvider {
+            home: &home,
+            refresh_program: || Err(failure("credential-refresh", "synthetic refusal")),
+        };
+        assert_eq!(
+            refresh_provider(&provider, 1_800_000_000, || {})
+                .err()
+                .expect("refresh refusal")
+                .kind,
+            "credential-refresh"
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("unchanged source"),
+            document.to_string()
+        );
+        let source =
+            refresh_provider(&provider, 1_700_000_000, || {}).expect("not due, no program call");
+        assert_eq!(source.expires_ms, 1_800_000_000_000);
+        let path = home.join(".credentials.json");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("bad mode");
+        assert_eq!(
+            read_claude_source(&home).err().expect("mode refusal").kind,
+            "credential-sign-in"
+        );
+        fs::remove_file(&path).expect("remove fixture");
+        std::os::unix::fs::symlink(home.join("absent"), &path).expect("source symlink");
+        assert_eq!(
+            read_claude_source(&home)
+                .err()
+                .expect("symlink refusal")
+                .kind,
+            "credential-sign-in"
+        );
     }
 
     fn encoded(bytes: &[u8]) -> String {

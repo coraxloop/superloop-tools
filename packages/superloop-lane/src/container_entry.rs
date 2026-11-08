@@ -354,7 +354,9 @@ pub(crate) fn spawn_error(program: &Path, kind: &'static str, error: &std::io::E
         {
             let purpose = if program == Path::new("/usr/bin/sha256sum") {
                 "hash-executable"
-            } else if program == Path::new("/usr/bin/curl") {
+            } else if program == Path::new("/usr/bin/curl")
+                || program == Path::new("/usr/bin/claude")
+            {
                 "credential-client"
             } else if program == Path::new("/usr/bin/date") {
                 "credential-clock"
