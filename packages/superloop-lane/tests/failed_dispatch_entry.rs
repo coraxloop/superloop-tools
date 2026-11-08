@@ -65,7 +65,10 @@ fn fixture() -> Fixture {
     // Captured production interface query, kranich round j01, 2026-11-07.
     executable(
         &entry,
-        "#!/bin/sh\nif [ \"$1 $2\" = 'driver-launch --interface-version' ]; then printf 'superloop-driver-entry 0.4.1 1\\n'; fi\nexit 0\n",
+        &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'driver-launch --interface-version' ]; then printf 'superloop-driver-entry {} 1\\n'; fi\nexit 0\n",
+            env!("CARGO_PKG_VERSION")
+        ),
     );
     executable(
         &podman,

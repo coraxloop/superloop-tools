@@ -3069,7 +3069,12 @@ else:
         let entry_source = std::fs::read_to_string(&entry).expect("recorded entry fixture");
         crate::fixture_exec::write_executable(
             &entry,
-            entry_source.replace("0.4.1", "0.0.0").as_bytes(),
+            entry_source
+                .replace(
+                    env!("CARGO_PKG_VERSION"),
+                    concat!(env!("CARGO_PKG_VERSION"), "-incompatible"),
+                )
+                .as_bytes(),
         )
         .expect("different entry deployment");
         let refusal = super::super::run_with_host_root_and_proxy(h, &request, h, owner, |_| {
@@ -3077,8 +3082,16 @@ else:
         })
         .expect_err("resume probes entry before reservation");
         assert_eq!(refusal.kind, "entry-version");
-        assert!(refusal.detail.contains("0.4.1"));
-        assert!(refusal.detail.contains("0.0.0"));
+        assert!(
+            refusal
+                .detail
+                .contains(crate::fixture_exec::ENTRY_INTERFACE_PROBE)
+        );
+        assert!(
+            refusal
+                .detail
+                .contains(concat!(env!("CARGO_PKG_VERSION"), "-incompatible"))
+        );
         assert_eq!(
             read_reservation(&path).expect("read").expect("record"),
             saved

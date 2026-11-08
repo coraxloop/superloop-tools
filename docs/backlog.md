@@ -704,6 +704,8 @@ Folded from ``open:homes:claude-lane-home-sandbox-redirects``, whose question th
 
 (the same review, L7) Nothing ties `DRIVER_ENTRY_INTERFACE_VERSION` (``packages/loop-home/src/lib.rs`` line 19) to the private argument contract, and development deploys share one workspace version, so a private-form change that forgets the bump passes the probe; a test that pins the private form beside the constant forces the bump.
 
+(2026-11-07, lane r002g84, entry fixture versions) Entry-query fixtures and deliberate mismatch answers derive the workspace package version at compilation while keeping the recorded output format, so the fresh and resumed entry checks and the failed-dispatch fixtures keep their matching and refusing paths across a package version bump, measured at 0.4.1 and a temporary 0.5.0; the lane README states the fixture requirement (``req:superlooplane:entry-fixture-package-version``, of the superloop-lane package). M1 is met; L7 stays open.
+
 ### Tests under load · `sec:toolsbacklog:open-gates`
 
 **Problem (Timing-bound tests of the lane gateway fail under load in gates of candidates that do not touch it)** · `prob:gates:gate-timing-flakes`

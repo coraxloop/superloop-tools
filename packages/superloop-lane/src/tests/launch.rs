@@ -1513,8 +1513,14 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     let accepted_entry = fs::read(&entry).expect("entry fixture");
     let allocation_before = fs::read(&allocations).expect("allocation snapshot");
     for response in [
-        ENTRY_INTERFACE_PROBE.replace("0.4.1", "0.3.9"),
-        ENTRY_INTERFACE_PROBE.replace(" 1", " 0"),
+        ENTRY_INTERFACE_PROBE.replace(
+            env!("CARGO_PKG_VERSION"),
+            concat!(env!("CARGO_PKG_VERSION"), "-incompatible"),
+        ),
+        ENTRY_INTERFACE_PROBE.replace(
+            concat!(" ", env!("CARGO_PKG_VERSION"), " 1"),
+            concat!(" ", env!("CARGO_PKG_VERSION"), " 0"),
+        ),
         String::new(),
         "malformed".into(),
     ] {
@@ -1539,19 +1545,24 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     }
     // The version record is the production j01 --version capture; this
     // legacy stand-in deliberately omits only the new interface query.
-    crate::fixture_exec::write_executable(&entry, br#"#!/bin/sh
+    crate::fixture_exec::write_executable(&entry, concat!(r#"#!/bin/sh
 if [ "$1" = --version ]; then
-    printf '%s\n' '{"schema":1,"command":"superloop","kind":"version","message":"version requested","fields":{"type":"version","version":"superloop 0.4.1"}}' >&2
+    printf '%s\n' '{"schema":1,"command":"superloop","kind":"version","message":"version requested","fields":{"type":"version","version":"superloop "#, env!("CARGO_PKG_VERSION"), r#""}}' >&2
     exit 0
 fi
 exit 2
-"#).expect("legacy entry");
+"#).as_bytes()).expect("legacy entry");
     for dry_run in [true, false] {
         request.dry_run = dry_run;
         let error = run(home, &request).expect_err("legacy entry refuses before reservation");
         assert_eq!(error.kind, "entry-version");
         assert!(error.detail.contains(ENTRY_INTERFACE_PROBE), "{error:?}");
-        assert!(error.detail.contains("superloop 0.4.1"), "{error:?}");
+        assert!(
+            error
+                .detail
+                .contains(concat!("superloop ", env!("CARGO_PKG_VERSION"))),
+            "{error:?}"
+        );
         assert!(error.detail.contains("interface unavailable"), "{error:?}");
         assert_eq!(fs::read_dir(&runs).expect("runs root").count(), 0);
         assert!(!home.join("container-calls").exists());
