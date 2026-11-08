@@ -7,7 +7,7 @@ use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use loop_home::anchor::{
@@ -311,11 +311,15 @@ fn pin_for_backend(
 thread_local! {
     static ACTIVE_OPERATION: Cell<&'static str> = const { Cell::new(OPERATION) };
     static EXECUTABLE: RefCell<Option<BTreeMap<PathBuf, Arc<Anchor>>>> = const { RefCell::new(None) };
+    static PROGRAM_BINDINGS: RefCell<BTreeMap<PathBuf, ProgramBinding>> = const { RefCell::new(BTreeMap::new()) };
+    #[cfg(test)]
+    static HASH_WORK: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
 }
 
 pub(crate) struct ExecutableGuard;
 impl Drop for ExecutableGuard {
     fn drop(&mut self) {
+        PROGRAM_BINDINGS.with(|bindings| bindings.borrow_mut().clear());
         EXECUTABLE.with(|active| *active.borrow_mut() = None);
         ACTIVE_OPERATION.with(|operation| operation.set(OPERATION));
     }
@@ -341,6 +345,7 @@ pub(crate) fn activate_program_map(
     operation: &'static str,
     programs: BTreeMap<PathBuf, Arc<Anchor>>,
 ) -> ExecutableGuard {
+    PROGRAM_BINDINGS.with(|bindings| bindings.borrow_mut().clear());
     ACTIVE_OPERATION.with(|active| active.set(operation));
     EXECUTABLE.with(|active| *active.borrow_mut() = Some(programs));
     ExecutableGuard
@@ -394,84 +399,162 @@ pub(crate) fn check(program: &Path) -> Option<Result<(), LaneError>> {
     })
 }
 
-/// Bind the held owner program bytes to the completed installation's reviewed SHA-256.
-/// A substituted executable supplier cannot choose the owner-reviewed reference;
-/// retain all 256 bits (´proto:superlooplane:claude-owner-program-binding´).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ProgramStamp {
+    device: libc::dev_t,
+    inode: libc::ino_t,
+    size: libc::off_t,
+    modified: libc::time_t,
+    modified_nsec: libc::c_long,
+    changed: libc::time_t,
+    changed_nsec: libc::c_long,
+}
+impl ProgramStamp {
+    const fn from_stat(stat: &nix::sys::stat::FileStat) -> Self {
+        Self {
+            device: stat.st_dev,
+            inode: stat.st_ino,
+            size: stat.st_size,
+            modified: stat.st_mtime,
+            modified_nsec: stat.st_mtime_nsec,
+            changed: stat.st_ctime,
+            changed_nsec: stat.st_ctime_nsec,
+        }
+    }
+}
+struct ProgramBinding {
+    anchor: Weak<Anchor>,
+    stamp: ProgramStamp,
+    digest: String,
+}
+fn program_pin_error(detail: &str) -> LaneError {
+    LaneError::input("credential-program-pin", detail)
+}
+
+/// Bind held bytes to the reviewed SHA-256, reusing only unchanged custody.
+/// The cache is local to this activation and thread; its weak anchor cannot keep
+/// a descriptor alive. Revalidate policy and metadata on every call, including
+/// the refresh execution boundary (´proto:superlooplane:claude-program-binding-cadence´).
 pub(crate) fn verify_program_digest(program: &Path, expected: &str) -> Result<(), LaneError> {
-    use sha2::{Digest as _, Sha256};
-    use std::fmt::Write as _;
-    use std::io::Read as _;
-    let fail = |detail: &str| LaneError::input("credential-program-pin", detail);
     if expected.len() != 64
         || !expected
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        return Err(fail("reviewed Claude SHA-256 is absent or malformed"));
+        return Err(program_pin_error(
+            "reviewed Claude SHA-256 is absent or malformed",
+        ));
     }
     EXECUTABLE.with(|active| {
         let active = active.borrow();
         let anchor = active
             .as_ref()
             .and_then(|programs| programs.get(program))
-            .ok_or_else(|| fail("Claude program has no held executable"))?;
+            .ok_or_else(|| program_pin_error("Claude program has no held executable"))?;
         anchor.revalidate().map_err(active_error)?;
-        let before =
-            fstat(anchor.as_ref()).map_err(|_| fail("held program metadata is unreadable"))?;
-        // Executable anchors are O_PATH. This is a descriptor reopen of the same
-        // inode, deliberately not a lookup of the installed program's pathname.
-        let mut file = std::fs::File::open(format!("/proc/self/fd/{}", anchor.as_fd().as_raw_fd()))
-            .map_err(|_| fail("held program bytes are unreadable"))?;
-        let opened = fstat(&file).map_err(|_| fail("held program metadata is unreadable"))?;
-        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
-            || !(1..=1_073_741_824).contains(&opened.st_size)
-        {
-            return Err(fail("held program identity or size is invalid"));
-        }
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; 65_536];
-        let mut length = 0_u64;
-        loop {
-            let count = file
-                .read(&mut buffer)
-                .map_err(|_| fail("held program bytes are unreadable"))?;
-            if count == 0 {
-                break;
+        let before = fstat(anchor.as_ref())
+            .map_err(|_| program_pin_error("held program metadata is unreadable"))?;
+        let stamp = ProgramStamp::from_stat(&before);
+        PROGRAM_BINDINGS.with(|bindings| {
+            let mut bindings = bindings.borrow_mut();
+            if let Some(bound) = bindings.get(program).filter(|bound| {
+                bound.stamp == stamp
+                    && bound
+                        .anchor
+                        .upgrade()
+                        .is_some_and(|held| Arc::ptr_eq(&held, anchor))
+            }) {
+                return compare_program_digest(&bound.digest, expected);
             }
-            length += count as u64;
-            if length > 1_073_741_824 {
-                return Err(fail("held program exceeds size bound"));
-            }
-            hasher.update(&buffer[..count]);
-        }
-        let after = fstat(&file).map_err(|_| fail("held program metadata is unreadable"))?;
-        let stamp = |stat: &nix::sys::stat::FileStat| {
-            (
-                stat.st_size,
-                stat.st_mtime,
-                stat.st_mtime_nsec,
-                stat.st_ctime,
-                stat.st_ctime_nsec,
-            )
-        };
-        if stamp(&before) != stamp(&opened)
-            || stamp(&opened) != stamp(&after)
-            || u64::try_from(after.st_size).ok() != Some(length)
-        {
-            return Err(fail("held program changed during verification"));
-        }
-        anchor.revalidate().map_err(active_error)?;
-        let mut actual = String::with_capacity(64);
-        for byte in hasher.finalize() {
-            write!(actual, "{byte:02x}").map_err(|_| fail("program digest encoding failed"))?;
-        }
-        if actual != expected {
-            return Err(fail(
-                "held Claude program differs from the reviewed SHA-256",
-            ));
-        }
-        Ok(())
+            bindings.remove(program);
+            let digest = hash_held_program(anchor, &before)?;
+            compare_program_digest(&digest, expected)?;
+            bindings.insert(
+                program.to_path_buf(),
+                ProgramBinding {
+                    anchor: Arc::downgrade(anchor),
+                    stamp,
+                    digest,
+                },
+            );
+            Ok(())
+        })
     })
+}
+
+fn compare_program_digest(actual: &str, expected: &str) -> Result<(), LaneError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(program_pin_error(
+            "held Claude program differs from the reviewed SHA-256",
+        ))
+    }
+}
+
+fn hash_held_program(
+    anchor: &Anchor,
+    before: &nix::sys::stat::FileStat,
+) -> Result<String, LaneError> {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    use std::io::Read as _;
+    // Executable anchors are O_PATH: reopen this descriptor's inode, never the
+    // installed pathname (´proto:superlooplane:claude-owner-program-binding´).
+    let mut file = std::fs::File::open(format!("/proc/self/fd/{}", anchor.as_fd().as_raw_fd()))
+        .map_err(|_| program_pin_error("held program bytes are unreadable"))?;
+    let opened =
+        fstat(&file).map_err(|_| program_pin_error("held program metadata is unreadable"))?;
+    if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        || !(1..=1_073_741_824).contains(&opened.st_size)
+    {
+        return Err(program_pin_error(
+            "held program identity or size is invalid",
+        ));
+    }
+    #[cfg(test)]
+    HASH_WORK.with(|work| {
+        let (passes, bytes) = work.get();
+        work.set((passes + 1, bytes));
+    });
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 65_536];
+    let mut length = 0_u64;
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| program_pin_error("held program bytes are unreadable"))?;
+        if count == 0 {
+            break;
+        }
+        length += count as u64;
+        if length > 1_073_741_824 {
+            return Err(program_pin_error("held program exceeds size bound"));
+        }
+        #[cfg(test)]
+        HASH_WORK.with(|work| {
+            let (passes, bytes) = work.get();
+            work.set((passes, bytes + count as u64));
+        });
+        hasher.update(&buffer[..count]);
+    }
+    let after =
+        fstat(&file).map_err(|_| program_pin_error("held program metadata is unreadable"))?;
+    if ProgramStamp::from_stat(before) != ProgramStamp::from_stat(&opened)
+        || ProgramStamp::from_stat(&opened) != ProgramStamp::from_stat(&after)
+        || u64::try_from(after.st_size).ok() != Some(length)
+    {
+        return Err(program_pin_error(
+            "held program changed during verification",
+        ));
+    }
+    anchor.revalidate().map_err(active_error)?;
+    let mut actual = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(actual, "{byte:02x}")
+            .map_err(|_| program_pin_error("program digest encoding failed"))?;
+    }
+    Ok(actual)
 }
 
 /// Keep a failed descriptor execution named at the runner's spawn boundary.
@@ -937,6 +1020,170 @@ mod tests {
                 .kind,
             "credential-program-pin"
         );
+    }
+
+    fn held_digest_fixture(program: &Path) -> Arc<Anchor> {
+        let pin = HostVerifier::current()
+            .expect("map")
+            .for_operation("make-home")
+            .pin(
+                program,
+                "credential-claude",
+                0,
+                executable_policy(Owner::Host),
+            )
+            .expect("pin");
+        let manifest = Manifest {
+            version: 1,
+            transport: Transport::Rights,
+            operation: "make-home".into(),
+            loop_name: "alpha".into(),
+            records: vec![pin.record()],
+        };
+        Arc::new(
+            Receiver::current()
+                .expect("receiver")
+                .validate(
+                    &manifest,
+                    vec![pin.into_fd()],
+                    "make-home",
+                    "alpha",
+                    Transport::Rights,
+                    &[Requirement {
+                        purpose: "credential-claude".into(),
+                        policy: executable_policy(Owner::Host),
+                        alias_group: None,
+                    }],
+                )
+                .expect("held fixture")
+                .pop()
+                .expect("one anchor"),
+        )
+    }
+
+    fn synthetic_program(path: &Path, length: usize) -> String {
+        use sha2::{Digest as _, Sha256};
+        use std::fmt::Write as _;
+        use std::io::Write as _;
+        let mut file = fs::File::create(path).expect("synthetic program");
+        let mut hasher = Sha256::new();
+        let chunk = vec![b'x'; 65_536];
+        let mut remaining = length;
+        while remaining > 0 {
+            let count = remaining.min(chunk.len());
+            file.write_all(&chunk[..count]).expect("synthetic bytes");
+            hasher.update(&chunk[..count]);
+            remaining -= count;
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("program mode");
+        let mut digest = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            write!(digest, "{byte:02x}").expect("synthetic digest");
+        }
+        digest
+    }
+
+    /// # Panics
+    /// Panics if metadata, custody, required-pin or activation changes reuse stale verification.
+    /// ´test:unit:claude-program-binding-cache-follows-custody´
+    #[test]
+    fn claude_program_binding_cache_follows_custody() {
+        let root = tempfile::tempdir().expect("private fixture");
+        let program = root.path().join("synthetic-program");
+        let expected = synthetic_program(&program, 65_536);
+        let anchor = held_digest_fixture(&program);
+        let guard = activate_program_map(
+            "make-home",
+            BTreeMap::from([(program.clone(), Arc::clone(&anchor))]),
+        );
+        HASH_WORK.with(|work| work.set((0, 0)));
+        // Twenty dispatcher passes plus their possible print-boundary checks.
+        for _ in 0..40 {
+            verify_program_digest(&program, &expected).expect("unchanged custody");
+        }
+        assert_eq!(HASH_WORK.with(Cell::get), (1, 65_536));
+        assert_eq!(
+            verify_program_digest(&program, &"0".repeat(64))
+                .expect_err("changed reference")
+                .kind,
+            "credential-program-pin"
+        );
+        assert_eq!(HASH_WORK.with(Cell::get), (1, 65_536));
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o777)).expect("unsafe mode");
+        assert_eq!(
+            verify_program_digest(&program, &expected)
+                .expect_err("policy is rechecked")
+                .kind,
+            "creation-anchor"
+        );
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).expect("restore mode");
+        fs::write(&program, vec![b'y'; 65_536]).expect("same-size changed bytes");
+        assert_eq!(
+            verify_program_digest(&program, &expected)
+                .expect_err("changed stamp")
+                .kind,
+            "credential-program-pin"
+        );
+        assert_eq!(HASH_WORK.with(Cell::get), (2, 131_072));
+        synthetic_program(&program, 65_536);
+        verify_program_digest(&program, &expected).expect("restored bytes are checked again");
+        assert_eq!(HASH_WORK.with(Cell::get), (3, 196_608));
+        drop(guard);
+        assert!(PROGRAM_BINDINGS.with(|bindings| bindings.borrow().is_empty()));
+        let _next = activate_program_map(
+            "make-home",
+            BTreeMap::from([(program.clone(), held_digest_fixture(&program))]),
+        );
+        verify_program_digest(&program, &expected).expect("new custody hashes again");
+        assert_eq!(HASH_WORK.with(Cell::get), (4, 262_144));
+        let child = std::thread::spawn(move || {
+            let _guard =
+                activate_program_map("make-home", BTreeMap::from([(program.clone(), anchor)]));
+            for _ in 0..40 {
+                verify_program_digest(&program, &expected).expect("thread-local binding");
+            }
+            HASH_WORK.with(Cell::get)
+        });
+        assert_eq!(child.join().expect("authority thread"), (1, 65_536));
+    }
+
+    /// # Panics
+    /// Panics if the measured synthetic cadence rereads unchanged program bytes.
+    /// ´test:unit:claude-program-binding-cadence-measurement´
+    #[test]
+    #[ignore = "explicit node measurement of a recorded-size synthetic program; no vendor or sign-in"]
+    fn claude_program_binding_cadence_measurement() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().expect("private measurement fixture");
+        let program = root.path().join("synthetic-program");
+        let expected = synthetic_program(&program, 337_814_032);
+        let _guard = activate_program_map(
+            "make-home",
+            BTreeMap::from([(program.clone(), held_digest_fixture(&program))]),
+        );
+        HASH_WORK.with(|work| work.set((0, 0)));
+        let first = std::time::Instant::now();
+        verify_program_digest(&program, &expected).expect("first binding");
+        let first_seconds = first.elapsed().as_secs_f64();
+        let repeated = std::time::Instant::now();
+        for _ in 1..40 {
+            verify_program_digest(&program, &expected).expect("repeated binding");
+        }
+        let repeated_seconds = repeated.elapsed().as_secs_f64();
+        let (hash_passes, bytes_read) = HASH_WORK.with(Cell::get);
+        writeln!(
+            std::io::stdout().lock(),
+            concat!(
+                "SYNTHETIC-CADENCE checks=40 bytes_per_program=337814032 ",
+                "hash_passes={} bytes_read={} first_seconds={:.6} repeated_seconds={:.6}"
+            ),
+            hash_passes,
+            bytes_read,
+            first_seconds,
+            repeated_seconds
+        )
+        .expect("timing output");
+        assert_eq!((hash_passes, bytes_read), (1, 337_814_032));
     }
 
     const CHILD: &str = "SUPERLOOP_CONTAINER_ANCHOR_TEST";

@@ -2895,7 +2895,10 @@ mod tests {
         assert_eq!(error.kind, "container-anchor");
         assert_eq!(
             error.detail,
-            "anchor-missing: operation=container-helper purpose=credential-executable backend=codex program=/usr/bin/curl"
+            concat!(
+                "anchor-missing: operation=container-helper ",
+                "purpose=credential-executable backend=codex program=/usr/bin/curl"
+            )
         );
         assert_eq!(fs::read(&reservation).expect("unchanged bytes"), bytes);
         assert_eq!(
