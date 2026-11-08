@@ -9,6 +9,12 @@ use loop_home::anchor::{
     HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Transport, transport,
 };
 
+const CLAUDE_UNAVAILABLE: &str = "backend-unavailable: claude boxed launch";
+const CREATION_ROLES: &str =
+    "creation-anchor: anchor-declaration: operation=make-home purpose=roles";
+const CREATION_BACKEND: &str =
+    "creation-anchor: anchor-declaration: operation=make-home purpose=backend";
+
 /// # Panics
 /// Panics if a private configuration fixture cannot be created with its declared modes.
 fn seed_configuration(home: &Path) {
@@ -475,9 +481,11 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                 String::from_utf8_lossy(&output.stderr)
             );
             match case {
-                "claude-role" => assert!(report.contains("backend-unavailable: claude boxed launch"), "{report}"),
-                "claude-mismatch" => assert!(report.contains("creation-anchor: anchor-declaration: operation=make-home purpose=roles"), "{report}"),
-                "backend-invalid" | "backend-repeated" | "backend-missing" => assert!(report.contains("creation-anchor: anchor-declaration: operation=make-home purpose=backend"), "{report}"),
+                "claude-role" => assert!(report.contains(CLAUDE_UNAVAILABLE), "{report}"),
+                "claude-mismatch" => assert!(report.contains(CREATION_ROLES), "{report}"),
+                "backend-invalid" | "backend-repeated" | "backend-missing" => {
+                    assert!(report.contains(CREATION_BACKEND), "{report}");
+                }
                 "valid" | "letter-runs" => assert!(
                     report.contains(if entry == "runtime" {
                         "runtime-anchor: anchor-missing: operation=prepare-runtime purpose=configuration"

@@ -1936,12 +1936,14 @@ pub(crate) fn publish_round_credential(
     Ok(())
 }
 
-/// The helper transfers only home custody and the two credential executables to its authority thread.
+/// The authority thread holds home and configuration custody and only two credential executables.
 pub(crate) struct CredentialThreadCustody {
     home: crate::home::PrivateHomeSnapshot,
+    configuration: Option<crate::runtime_entry::PlanConfiguration>,
     programs: Option<BTreeMap<PathBuf, Arc<loop_home::anchor::Anchor>>>,
 }
 pub(crate) struct CredentialThreadGuard {
+    _configuration: crate::runtime_entry::ConfigurationGuard,
     _programs: Option<crate::container_entry::ExecutableGuard>,
     _home: crate::home::PrivateHomeGuard,
 }
@@ -1949,12 +1951,16 @@ impl CredentialThreadCustody {
     pub(crate) fn capture(backend: BoxBackend) -> Result<Self, LaneError> {
         Ok(Self {
             home: crate::home::snapshot_private_home()?,
+            configuration: crate::runtime_entry::snapshot_configuration(),
             programs: crate::container_entry::credential_programs(backend)?,
         })
     }
     pub(crate) fn activate(self) -> Result<CredentialThreadGuard, LaneError> {
         Ok(CredentialThreadGuard {
             _home: crate::home::activate_private_snapshot(self.home)?,
+            _configuration: crate::runtime_entry::activate_configuration_snapshot(
+                self.configuration,
+            ),
             _programs: self.programs.map(|programs| {
                 crate::container_entry::activate_program_map("container-helper", programs)
             }),
@@ -1962,7 +1968,7 @@ impl CredentialThreadCustody {
     }
 }
 
-/// Spawn the service's credential authority with only its transferred home and programs.
+/// Spawn credential authority with its held home, configuration and selected programs.
 pub(crate) fn spawn_credential_authority(
     refresh_home: PathBuf,
     refresh_loop: String,

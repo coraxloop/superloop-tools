@@ -240,6 +240,34 @@ pub(crate) struct PlanConfiguration {
     pub(crate) allocations: loop_home::allocations::Allocations,
 }
 impl PlanConfiguration {
+    pub(crate) fn read_generation(
+        &self,
+        scope: &str,
+        path: &Path,
+    ) -> Result<serde_json::Value, LaneError> {
+        use std::io::Read as _;
+        let fd = self
+            .directory
+            .open_beneath(
+                &Path::new(scope).join("install-generation.json"),
+                Policy {
+                    kind: Kind::File,
+                    owner: Owner::Host,
+                    mode: ModePolicy::Exact(0o600),
+                },
+                0o700,
+            )
+            .map_err(|error| crate::container_entry::operation_error(self.operation, error))?;
+        let mut bytes = Vec::new();
+        std::fs::File::from(fd)
+            .take(65_537)
+            .read_to_end(&mut bytes)
+            .map_err(|_| {
+                LaneError::input("install-generation", "held generation cannot be read")
+            })?;
+        crate::install::validate_generation(path, &bytes)
+    }
+
     pub(crate) fn read_settings(
         &self,
         scope: &str,
@@ -306,6 +334,39 @@ pub(crate) fn plan_configuration(home: &Path) -> Result<Option<PlanConfiguration
         }
         Ok(Some(snapshot.clone()))
     })
+}
+
+/// Retain configuration custody for the helper's periodic authority thread.
+pub(crate) fn snapshot_configuration() -> Option<PlanConfiguration> {
+    PLAN_CONFIGURATION.with(|active| active.borrow().clone())
+}
+
+pub(crate) fn activate_configuration_snapshot(
+    snapshot: Option<PlanConfiguration>,
+) -> ConfigurationGuard {
+    ConfigurationGuard {
+        previous: PLAN_CONFIGURATION.with(|active| active.replace(snapshot)),
+        thread: std::marker::PhantomData,
+    }
+}
+
+/// # Panics
+/// Panics if a synthetic private configuration cannot pass the production receiver.
+#[cfg(test)]
+pub(crate) fn fixture_configuration(home: &Path) -> ConfigurationGuard {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = home.join(".config/loops");
+    std::fs::create_dir_all(root.join("alpha")).expect("fixture scope");
+    for path in [&root, &root.join("alpha")] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .expect("private directory");
+    }
+    activate_configuration(
+        home,
+        &tests::configuration(64000, home),
+        tests::configuration_directory(&root, "container-helper"),
+        "container-helper",
+    )
 }
 
 /// Validated configuration and worker storage for the runtime's one birth check.
@@ -600,7 +661,7 @@ mod tests {
 
     /// # Panics
     /// Panics if synthetic configuration fields violate the registry or ledger grammar.
-    fn configuration(uid: u32, home: &Path) -> Configuration {
+    pub(super) fn configuration(uid: u32, home: &Path) -> Configuration {
         let source = format!(
             "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[{{name='alpha',uid={uid},launch='dev/alpha'}}]\n"
         );
@@ -621,7 +682,7 @@ mod tests {
 
     /// # Panics
     /// Panics if the fixture directory cannot pass the production host and receiver checks.
-    fn configuration_directory(home: &Path, operation: &str) -> Arc<Anchor> {
+    pub(super) fn configuration_directory(home: &Path, operation: &str) -> Arc<Anchor> {
         let policy = directory(Owner::Host, 0o700);
         let pin = HostVerifier::current()
             .expect("host map")
@@ -750,5 +811,101 @@ mod tests {
                 .kind,
             "registry-row"
         );
+    }
+    fn generation_fixture(home: &Path) -> std::path::PathBuf {
+        let path = home.join(".config/loops/alpha/install-generation.json");
+        let value = serde_json::json!({"schema":1,"phase":"complete",
+            "image_digest":format!("sha256:{}", "b".repeat(64)),
+            "claude_sha256":crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256,
+            "claude_image_program":"/opt/claude/bin/claude",
+            "claude_template_dir":format!("/fixture/runner-templates/claude/{}", "b".repeat(64))});
+        std::fs::write(&path, value.to_string()).expect("synthetic generation");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("private file");
+        path
+    }
+
+    /// # Panics
+    /// Panics if the helper thread reopens a replaced configuration name or leaks custody.
+    /// ´test:unit:claude-generation-custody-survives-authority-thread-transfer´
+    #[test]
+    fn claude_generation_custody_survives_authority_thread_transfer() {
+        let root = tempfile::tempdir().expect("private home");
+        let home = root.path();
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700)).expect("home mode");
+        let error =
+            crate::launch::reviewed_claude_program_digest(home, "alpha").expect_err("no custody");
+        assert_eq!(error.kind, "credential-program-pin");
+        assert_eq!(error.detail, "Claude program has no held configuration");
+        let configuration = fixture_configuration(home);
+        generation_fixture(home);
+        let held_home = std::fs::File::open(home).expect("home descriptor");
+        let private = crate::home::activate_handed_home(
+            home,
+            &held_home,
+            nix::unistd::Uid::effective().as_raw(),
+        )
+        .expect("held home");
+        let custody = crate::container_helper::CredentialThreadCustody::capture(
+            crate::settings::BoxBackend::Claude,
+        )
+        .expect("production thread capture");
+        let retained = home.join(".config/retained-loops");
+        std::fs::rename(home.join(".config/loops"), &retained).expect("rename held root");
+        std::fs::create_dir_all(home.join(".config/loops/alpha")).expect("replacement root");
+        std::fs::write(
+            home.join(".config/loops/alpha/install-generation.json"),
+            b"{}",
+        )
+        .expect("foreign record");
+        drop(configuration);
+        drop(private);
+        let home = home.to_path_buf();
+        std::thread::spawn(move || {
+            let guard = custody.activate().expect("production thread activation");
+            assert_eq!(
+                crate::launch::reviewed_claude_program_digest(&home, "alpha").expect("held record"),
+                crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256
+            );
+            drop(guard);
+            assert!(
+                plan_configuration(&home)
+                    .expect("released configuration")
+                    .is_none()
+            );
+            assert_eq!(
+                crate::launch::reviewed_claude_program_digest(&home, "alpha")
+                    .expect_err("no ambient fallback")
+                    .kind,
+                "credential-program-pin"
+            );
+        })
+        .join()
+        .expect("authority thread");
+    }
+
+    /// # Panics
+    /// Panics if an unsafe generation leaf or an oversized document authorizes the program.
+    /// ´test:unit:claude-generation-custody-refuses-unsafe-leaves´
+    #[test]
+    fn claude_generation_custody_refuses_unsafe_leaves() {
+        let root = tempfile::tempdir().expect("private home");
+        let home = root.path();
+        let _configuration = fixture_configuration(home);
+        let path = generation_fixture(home);
+        let read = || crate::launch::reviewed_claude_program_digest(home, "alpha");
+        assert!(read().is_ok());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("unsafe mode");
+        assert_eq!(read().expect_err("mode").kind, "container-anchor");
+        std::fs::remove_file(&path).expect("remove leaf");
+        std::os::unix::fs::symlink("foreign", &path).expect("link");
+        assert_eq!(read().expect_err("symlink").kind, "container-anchor");
+        std::fs::remove_file(&path).expect("remove link");
+        generation_fixture(home);
+        std::fs::write(&path, vec![b' '; 65_537]).expect("oversized stand-in");
+        assert_eq!(read().expect_err("bound").kind, "install-generation");
+        std::fs::remove_file(&path).expect("absent leaf");
+        assert_eq!(read().expect_err("absent").kind, "container-anchor");
     }
 }

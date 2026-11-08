@@ -748,6 +748,8 @@ Folded from ``open:homes:claude-lane-home-sandbox-redirects``, whose question th
 
 (2026-11-08, from the review of lane r002g84's periodic publication step) Three more follow-ups join the parts above: onto (a), the 122-column literal at ``packages/superloop-lane/src/container_helper.rs`` line 2892 (L4); onto (c), the program hash runs on every 30 s pass of each live Claude helper over a program of up to 1 GiB, and again at each print call, so its wall is measured per pass as well as per call (M1); and (d), no test refuses a schema-1 document that carries `backend` or `provider`, or a schema-2 document with a foreign backend (L3).
 
+(2026-11-08, lane r002g84) In part (a) the match arms now use short named refusal constants and the doc comment is bounded; the literal joined onto (a) is unchanged. Part (b) now reads the installation reference through the held configuration directory and retains that snapshot across the production authority-thread custody transfer, with replaced-path and unsafe-leaf contracts (``proto:superlooplane:claude-install-reference-custody``, of the superloop-lane package). The item remains open for that literal, the gated helper namespace acceptance, part (c), the loop's measurement of the actual pinned program's hash wall per call and per pass, and part (d); synthetic file timing is not that evidence.
+
 ### Tests under load · `sec:toolsbacklog:open-gates`
 
 **Problem (Timing-bound tests of the lane gateway fail under load in gates of candidates that do not touch it)** · `prob:gates:gate-timing-flakes`

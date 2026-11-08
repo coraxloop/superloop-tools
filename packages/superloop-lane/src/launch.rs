@@ -583,7 +583,20 @@ pub(crate) fn reviewed_claude_program_digest(
     owner_home: &Path,
     loop_name: &str,
 ) -> Result<String, LaneError> {
-    let record = installed_generation(owner_home, loop_name)?;
+    let configuration = crate::runtime_entry::plan_configuration(owner_home)?.ok_or_else(|| {
+        LaneError::input(
+            "credential-program-pin",
+            "Claude program has no held configuration",
+        )
+    })?;
+    let path = settings_path(owner_home, loop_name).with_file_name("install-generation.json");
+    let record = configuration.read_generation(loop_name, &path)?;
+    if record["phase"] != "complete" {
+        return Err(LaneError::input(
+            "install-generation",
+            "pilot generation is incomplete",
+        ));
+    }
     let expected = record["claude_sha256"].as_str().ok_or_else(|| {
         LaneError::input(
             "credential-program-pin",
@@ -7896,11 +7909,14 @@ mod tests {
         let path = settings_path(root.path(), "alpha").with_file_name("install-generation.json");
         std::fs::create_dir_all(path.parent().expect("parent")).expect("loop directory");
         assert!(reviewed_claude_program_digest(root.path(), "alpha").is_err());
+        let _configuration = crate::runtime_entry::fixture_configuration(root.path());
         let expected = crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256;
         let mut complete = json!({"schema":1,"phase":"complete", "image_digest":format!("sha256:{}", "b".repeat(64)),
             "claude_sha256":expected, "claude_image_program":"/opt/claude/bin/claude",
             "claude_template_dir":format!("/owner/runner-templates/claude/{}", "b".repeat(64))});
         std::fs::write(&path, serde_json::to_vec(&complete).expect("record")).expect("write");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .expect("private generation");
         assert_eq!(
             reviewed_claude_program_digest(root.path(), "alpha").expect("completed reference"),
             expected
@@ -7931,7 +7947,7 @@ mod tests {
     }
 
     /// # Panics
-    /// Panics if native creation drops the selected backend or accepts an ambiguous private selector.
+    /// Panics if native creation loses its backend or accepts an ambiguous selector.
     /// ´test:unit:native-creation-vector-binds-selected-backend´
     #[test]
     fn native_creation_vector_binds_selected_backend() {

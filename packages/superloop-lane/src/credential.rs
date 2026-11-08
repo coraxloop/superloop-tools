@@ -1835,6 +1835,12 @@ mod tests {
             serde_json::to_vec(&record).expect("record"),
         )
         .expect("configuration");
+        fs::set_permissions(
+            loop_root.join("install-generation.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("private generation");
+        let _configuration = crate::runtime_entry::fixture_configuration(root.path());
         let worker = root.path().join("worker");
         fs::create_dir_all(worker.join(".claude")).expect("worker directory");
         let prior = worker.join(".claude/.credentials.json");

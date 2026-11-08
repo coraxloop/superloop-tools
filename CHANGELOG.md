@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Gated Claude program comparisons read the installation reference through held configuration custody retained across the authority thread, refusing unsafe or absent custody; the related entry refusal assertions use short constants (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-install-reference-custody``).
+
 - Gated Claude periodic publication selects live worker homes by protected backend and records owner-program evidence without a fabricated OAuth host (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-periodic-credential-publication``).
 
 - Gated Claude credential paths bind the held owner program to the completed installation's reviewed digest and the loop's credential-structure program pin before credential access and again before refresh execution (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-owner-program-binding``).
