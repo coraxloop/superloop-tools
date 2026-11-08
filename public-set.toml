@@ -3388,3 +3388,30 @@ pattern = "packages/superloop/tests/mail_anchors.rs"
 
 [[include.rows]]
 pattern = "packages/run-worker/tests/mail_anchors.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/src/cli.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/src/copy.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/src/store.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/src/manifest.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/tests/subprocess_contract.rs"

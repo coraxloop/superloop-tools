@@ -6,7 +6,7 @@
 members = [
     "packages/execute-command",
     "packages/superloop",
-    "packages/superloop-runtime", "packages/superloop-claude-desktop", "packages/superloop-node-status", "packages/superloop-steward", "packages/superloop-correspondence", "packages/build-sync", "packages/superloop-chat-export", "packages/superloop-cli-common", "packages/superloop-execwrap", "packages/lane-gateway", "packages/lane-lifecycle", "packages/superloop-gate-submit", "packages/superloop-lint", "packages/loop-home", "packages/permission-triage", "packages/superloop-pack", "packages/pulldown-cmark-to-cmark", "packages/superloop-install", "packages/superloop-run-report", "packages/run-worker", "packages/staff-provision", "packages/superloop-lane", "packages/session-core", "packages/superloop-claude-hook", "packages/request-core"]
+    "packages/superloop-runtime", "packages/superloop-claude-desktop", "packages/superloop-node-status", "packages/superloop-steward", "packages/superloop-correspondence", "packages/build-sync", "packages/superloop-chat-export", "packages/superloop-cli-common", "packages/superloop-execwrap", "packages/lane-gateway", "packages/lane-lifecycle", "packages/superloop-capture-admit", "packages/superloop-gate-submit", "packages/superloop-lint", "packages/loop-home", "packages/permission-triage", "packages/superloop-pack", "packages/pulldown-cmark-to-cmark", "packages/superloop-install", "packages/superloop-run-report", "packages/run-worker", "packages/staff-provision", "packages/superloop-lane", "packages/session-core", "packages/superloop-claude-hook", "packages/request-core"]
 resolver = "3"
 
 [workspace.package]

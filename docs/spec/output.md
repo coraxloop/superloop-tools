@@ -316,3 +316,7 @@ Each mode is forced through a panic or uncaught-exception path before and after 
 **Gate (Output conformance)** · `gate:output:output-conformance`
 
 Release or deployment is blocked until every shipped executable appears once in the binary-mode inventory, declares one sanctioned mode, and passes the stream, legacy-report, capture tool, machine-shape, status, terminal-invariance, failure-class, redaction, and panic checks above. A missing row, undeclared status, changed field order, wrong stream, partial object presented as a result, post-report byte, traceback, or implementation/contract discrepancy is a failing finding. Passing internal unit tests or preserving an implementation accident cannot waive the gate; changing one of these external contracts requires a separate owner-ratified compatibility decision.
+
+**Rule (Capture admission reports)** · `rule:output:capture-admission`
+
+`superloop-capture-admit admit` reports `name=`, `digest=`, `files=` and `bytes=` on standard output; an unchanged identity adds `already-sealed` before those fields. Prune reports `removed=NAME bytes=N` for each removed generation, then `removed=N` and `bytes=N` totals. Every operation ends standard output with `wall=SECONDSs`; refusals write their named cause to standard error and return the shared exit classes (`rule:output:default-exit-classes`): status two for an argument refusal and status one for every other refusal. The shared JSON `--version` response is the version contract rather than an operation report.

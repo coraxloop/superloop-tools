@@ -55,6 +55,7 @@ Every workspace package declares the shared `tracing` dependency, including bina
 |`superloop-correspondence`|Tier 2; release group `correspondence`.|
 |`superloop-execwrap`|Tier 1; release group `superloop-execwrap`.|
 |`superloop-gate-submit`|Tier 2; release group `superloop-gate-submit`.|
+|`superloop-capture-admit`|Tier 2; release group `superloop-capture-admit`.|
 |`superloop-install`|Tier 2; release group `superloop-install`.|
 |`superloop-lane`|Tier 2; release group `lane`.|
 |`superloop-lint`|Tier 2; release group `superloop-lint`.|
@@ -71,3 +72,11 @@ Every workspace package declares the shared `tracing` dependency, including bina
 |`session-core`|Internal tier 1: typed session observations, heartbeat and rulebook decisions, toggles and persistence.|ORCHESTRATORHOOK|The Claude adapter and loop session entry points.|
 |`request-core`|Internal tier 1: common request transitions, single-use claims, identical-retry completion, review identities and atomic transactions.|PERMISSIONTRIAGE|The permission/request release group and lane door integration.|
 |`execute-command`|Internal tier 1: command judgement, escalation and learning through bounded semantic persistence operations.|PERMISSIONTRIAGE|Door, permission hook, gateway and direct session adapters.|
+
+**Rule (Capture admission installation)** · `rule:buildcontracts:capture-admission-installation`
+
+Meson installs `superloop-capture-admit` in the binary directory and its provenance in the build-record directory. Node provisioning installs those artifacts root-owned and grants the reading account a sudoers route naming only this binary running as the non-root store account; account creation, group membership and the initial 0750 store root belong to provisioning.
+
+**Problem (Confined capture admission and pruning)** · `prob:servers:capture-admit-admits-and-prunes-sealed-generations`
+
+`superloop-capture-admit` supplies the store account’s admission and prune boundary: copied bytes are verified against the strict manifest, a NAME is bound to its complete manifest digest, and current, kept and live-leased generations survive pruning. Its package guide states the admitted formats and refusal contract; node provisioning owns the confinement that makes a sealed generation immutable to its readers.
