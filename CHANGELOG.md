@@ -42,6 +42,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The helper service's credential-authority spawn retains its own directory and executable custody after the parent releases its guards; a replaced-home fixture measures the real authority loop's first healthy and refused evidence, its received client execution and its cancellation (``test:unit:service-credential-authority-retains-custody``).
+
 - The helper transfers only the protected backend's credential client and clock into its authority thread; Claude has a distinct executable role and foreign-only capability maps refuse without ambient fallback (``prob:box:claude-boxed-workers``; ``proto:superlooplane:selected-credential-executable-custody``).
 
 - Owner credential refresh runs behind a provider boundary that keeps the Codex adapter's existing transport and custody, with test stand-ins for staged publication, an owner program's own publication, owner replacement and refusal, and Claude execution remains gated (``prob:box:claude-boxed-workers``; ``proto:superlooplane:owner-credential-provider``).

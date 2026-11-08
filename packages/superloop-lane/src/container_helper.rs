@@ -1957,6 +1957,50 @@ impl CredentialThreadCustody {
     }
 }
 
+/// Spawn the service's credential authority with only its transferred home and programs.
+pub(crate) fn spawn_credential_authority(
+    refresh_home: PathBuf,
+    refresh_loop: String,
+    refresh_root: PathBuf,
+    refresh_driver_dir: PathBuf,
+    backend: BoxBackend,
+    refresh_cancelled: Arc<AtomicBool>,
+) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError> {
+    let refresh_custody = CredentialThreadCustody::capture(backend)?;
+    std::thread::Builder::new()
+        .name("credential-authority".into())
+        .spawn(move || -> Result<(), LaneError> {
+            let _custody = refresh_custody.activate()?;
+            let mut published = BTreeMap::new();
+            let mut checked = false;
+            while !refresh_cancelled.load(Ordering::Acquire) {
+                let result = crate::credential::refresh_live(
+                    &refresh_home,
+                    &refresh_loop,
+                    &refresh_root,
+                    &mut published,
+                    backend,
+                );
+                if let Some(evidence) = crate::credential::evidence_for_check(&result, !checked)
+                    && let Err(error) =
+                        crate::credential::publish_evidence(&refresh_driver_dir, &evidence)
+                {
+                    refresh_cancelled.store(true, Ordering::Release);
+                    return Err(error);
+                }
+                checked = result.is_ok();
+                for _ in 0..30 {
+                    if refresh_cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| LaneError::operation("credential-thread", error.to_string()))
+}
+
 /// Serve one run's fixed container request as the namespace owner.
 ///
 /// # Errors
@@ -2039,44 +2083,14 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
     let control_cancelled = Arc::clone(&cancelled);
     let controller =
         std::thread::spawn(move || control_loop(&control_listener, &control_cancelled, 0));
-    let refresh_cancelled = Arc::clone(&cancelled);
-    let refresh_home = owner_home.clone();
-    let refresh_loop = loop_name.clone();
-    let refresh_root = root.to_path_buf();
-    let refresh_driver_dir = driver_dir.clone();
-    let refresh_custody = CredentialThreadCustody::capture(backend)?;
-    let refresher = std::thread::Builder::new()
-        .name("credential-authority".into())
-        .spawn(move || -> Result<(), LaneError> {
-            let _custody = refresh_custody.activate()?;
-            let mut published = BTreeMap::new();
-            let mut checked = false;
-            while !refresh_cancelled.load(Ordering::Acquire) {
-                let result = crate::credential::refresh_live(
-                    &refresh_home,
-                    &refresh_loop,
-                    &refresh_root,
-                    &mut published,
-                    backend,
-                );
-                if let Some(evidence) = crate::credential::evidence_for_check(&result, !checked)
-                    && let Err(error) =
-                        crate::credential::publish_evidence(&refresh_driver_dir, &evidence)
-                {
-                    refresh_cancelled.store(true, Ordering::Release);
-                    return Err(error);
-                }
-                checked = result.is_ok();
-                for _ in 0..30 {
-                    if refresh_cancelled.load(Ordering::Acquire) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            }
-            Ok(())
-        })
-        .map_err(|error| LaneError::operation("credential-thread", error.to_string()))?;
+    let refresher = spawn_credential_authority(
+        owner_home.clone(),
+        loop_name.clone(),
+        root.to_path_buf(),
+        driver_dir.clone(),
+        backend,
+        Arc::clone(&cancelled),
+    )?;
     let result = (|| {
         let mut previous_capacity = false;
         let mut retry_thread = None;

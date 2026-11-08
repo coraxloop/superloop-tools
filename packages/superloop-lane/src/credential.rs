@@ -3129,6 +3129,122 @@ mod tests {
     }
 
     /// # Panics
+    /// Panics if the service authority loses held roots, its first evidence or cancellation.
+    /// ´claim:superlooplane:service-credential-authority-retains-custody´
+    /// ´test:unit:service-credential-authority-retains-custody´
+    #[test]
+    fn service_credential_authority_retains_custody() {
+        for case in ["current", "absent", "client"] {
+            service_authority_case(case);
+        }
+    }
+
+    /// # Panics
+    /// Panics if a service authority check escapes its capabilities or loses its evidence.
+    fn service_authority_case(case: &str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let present = case != "absent";
+        let due = case == "client";
+        let (home, private, programs) = helper_custody_fixture(if due {
+            "/usr/bin/true"
+        } else {
+            "/usr/bin/curl"
+        });
+        let expires = now_seconds().expect("current instant") + if due { 300 } else { 86_400 };
+        fixture_sign_in(home.path(), &source(expires, "service"));
+        if !present {
+            fs::remove_file(sign_in_dir(home.path(), "alpha").join("auth.json"))
+                .expect("absent authority source");
+        }
+        let runs = home.path().join("runs");
+        let driver = runs.join("R");
+        fs::create_dir(&driver).expect("driver");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("evidence path");
+        fs::create_dir(&protected).expect("protected evidence directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("evidence mode");
+        let retained = home.path().with_extension("held");
+        fs::rename(home.path(), &retained).expect("retain original home inode");
+        fs::create_dir(home.path()).expect("replacement home");
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700))
+            .expect("replacement mode");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let authority = crate::container_helper::spawn_credential_authority(
+            home.path().to_path_buf(),
+            "alpha".into(),
+            runs,
+            driver,
+            crate::settings::BoxBackend::Codex,
+            Arc::clone(&cancelled),
+        )
+        .expect("service authority spawn");
+        // The spawning thread can release its guards while the service owns its snapshot.
+        drop(programs);
+        drop(private);
+        let began = Instant::now();
+        let evidence_path = retained
+            .join(
+                protected
+                    .strip_prefix(home.path())
+                    .expect("relative evidence"),
+            )
+            .join("credential-refresh.json");
+        while !evidence_path.exists() && began.elapsed() < Duration::from_secs(10) {
+            if authority.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cancelled.store(true, Ordering::Release);
+        let result = authority.join();
+        assert!(
+            !home.path().join(".config").exists(),
+            "replacement home is untouched"
+        );
+        fs::remove_dir(home.path()).expect("remove empty replacement");
+        fs::rename(retained, home.path()).expect("restore fixture for cleanup");
+        result
+            .expect("service authority join")
+            .expect("service authority result");
+        let evidence: Value = serde_json::from_slice(
+            &fs::read(protected.join("credential-refresh.json"))
+                .expect("first service check publishes evidence"),
+        )
+        .expect("evidence JSON");
+        assert_eq!(
+            evidence["state"],
+            if present && !due {
+                "current"
+            } else {
+                "refused"
+            }
+        );
+        if due {
+            assert_eq!(evidence["kind"], "credential-refresh");
+            assert!(
+                matches!(
+                    evidence["detail"].as_str(),
+                    Some("token endpoint response is invalid" | "token request could not be sent")
+                ),
+                "{evidence}"
+            );
+            assert_eq!(evidence["expires_unix"], expires);
+        } else if present {
+            assert_eq!(evidence["expires_unix"], expires);
+            assert_eq!(evidence["refresh_due_unix"], expires - 600);
+            assert_eq!(evidence["run_refusals"], json!([]));
+        } else {
+            assert_eq!(evidence["kind"], "credential-sign-in");
+            assert!(evidence["expires_unix"].is_null());
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(12),
+            "cancellation joins the real service loop"
+        );
+    }
+
+    /// # Panics
     /// Panics if the refresh client executes its pathname instead of the received capability.
     /// ´claim:superlooplane:credential-client-executes-the-received-file´
     /// ´test:unit:credential-client-executes-the-received-file´
