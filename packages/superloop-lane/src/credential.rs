@@ -2997,12 +2997,9 @@ mod tests {
             assert_eq!(fs::read(&file).expect("evidence retained"), bytes);
             assert_eq!(fs::metadata(&file).expect("identity retained").ino(), inode);
             fs::write(&file, invalid.to_string()).expect("synthetic invalid persisted evidence");
-            assert_eq!(
-                read_evidence(&held, "pilot", owner)
-                    .expect_err("mixed provider reader")
-                    .kind,
-                "credential-evidence"
-            );
+            let error = read_evidence(&held, "pilot", owner).expect_err("mixed provider reader");
+            assert_eq!(error.kind, "credential-evidence");
+            assert_eq!(error.detail, "credential evidence envelope is invalid");
         }
     }
 

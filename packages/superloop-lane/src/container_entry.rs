@@ -1241,7 +1241,16 @@ mod tests {
             "creation-anchor"
         );
         fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).expect("restore mode");
+        let changed_mtime = fs::metadata(&program)
+            .expect("prior stamp")
+            .modified()
+            .expect("prior modification time")
+            + std::time::Duration::from_secs(4);
         fs::write(&program, vec![b'y'; 65_536]).expect("same-size changed bytes");
+        fs::File::open(&program)
+            .expect("synthetic descriptor")
+            .set_modified(changed_mtime)
+            .expect("explicitly change the synthetic stamp");
         assert_eq!(
             verify_program_digest(&program, &expected)
                 .expect_err("changed stamp")
@@ -1269,6 +1278,68 @@ mod tests {
             HASH_WORK.with(Cell::get)
         });
         assert_eq!(child.join().expect("authority thread"), (1, 65_536));
+    }
+
+    /// # Panics
+    /// Panics if starting another activation reuses the prior activation's verdict.
+    /// ´test:unit:claude-program-binding-reactivation-clears-the-same-anchor´
+    #[test]
+    fn claude_program_binding_reactivation_clears_the_same_anchor() {
+        let root = tempfile::tempdir().expect("private fixture");
+        let program = root.path().join("synthetic-program");
+        let expected = synthetic_program(&program, 4096);
+        let anchor = held_digest_fixture(&program);
+        let first = activate_program_map(
+            "make-home",
+            BTreeMap::from([(program.clone(), Arc::clone(&anchor))]),
+        );
+        HASH_WORK.with(|work| work.set((0, 0)));
+        verify_program_digest(&program, &expected).expect("first activation");
+        assert_eq!(HASH_WORK.with(Cell::get), (1, 4096));
+        // Keep the first guard alive: only activation start can clear this verdict.
+        let second = activate_program_map("make-home", BTreeMap::from([(program.clone(), anchor)]));
+        verify_program_digest(&program, &expected).expect("same anchor, new activation");
+        assert_eq!(HASH_WORK.with(Cell::get), (2, 8192));
+        drop(second);
+        drop(first);
+    }
+
+    /// # Panics
+    /// Panics if replacing custody mid-activation reuses another anchor's verdict.
+    /// ´test:unit:claude-program-binding-reservation-rebind-rechecks-custody´
+    #[test]
+    fn claude_program_binding_reservation_rebind_rechecks_custody() {
+        let root = tempfile::tempdir().expect("private fixture");
+        let program = root.path().join("synthetic-program");
+        let expected = synthetic_program(&program, 4096);
+        let first = held_digest_fixture(&program);
+        let replacement = Arc::try_unwrap(held_digest_fixture(&program))
+            .unwrap_or_else(|_| panic!("replacement fixture has a sole owner"));
+        let _guard = activate_program_map(
+            "make-home",
+            BTreeMap::from([(program.clone(), Arc::clone(&first))]),
+        );
+        HASH_WORK.with(|work| work.set((0, 0)));
+        verify_program_digest(&program, &expected).expect("original custody");
+        assert_eq!(HASH_WORK.with(Cell::get), (1, 4096));
+        bind_reserved_program(
+            root.path(),
+            "alpha",
+            (
+                root.path().into(),
+                "alpha".into(),
+                "R".into(),
+                program.clone(),
+            ),
+            replacement,
+        )
+        .expect("production reservation rebind");
+        // The old anchor stays alive and the file stamp is unchanged.
+        assert_eq!(Arc::strong_count(&first), 1);
+        verify_program_digest(&program, &expected).expect("replacement custody");
+        assert_eq!(HASH_WORK.with(Cell::get), (2, 8192));
+        verify_program_digest(&program, &expected).expect("new custody is cached");
+        assert_eq!(HASH_WORK.with(Cell::get), (2, 8192));
     }
 
     /// # Panics
