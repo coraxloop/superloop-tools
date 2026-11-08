@@ -913,6 +913,83 @@ fn publish_owner(
     )
 }
 
+/// Owner-only authority operations; worker file encodings do not enter this protocol.
+/// A provider may return refreshed authority or let its owner-side program replace
+/// the source itself. The latter is adopted by the read after refresh.
+trait OwnerProvider {
+    type Snapshot;
+    type Identity: Copy + Eq;
+
+    fn read(&self) -> Result<Self::Snapshot, LaneError>;
+    fn due(&self, source: &Self::Snapshot, now: u64) -> bool;
+    fn identity(&self, source: &Self::Snapshot) -> Result<Self::Identity, LaneError>;
+    /// Some stages authority for conditional publication; None means an owner
+    /// program owns publication and the helper must only reread its source.
+    fn refresh(&self, source: &Self::Snapshot) -> Result<Option<Self::Snapshot>, LaneError>;
+    fn publish(&self, next: &Self::Snapshot, expected: Self::Identity) -> Result<bool, LaneError>;
+}
+
+struct CodexOwnerProvider<'a> {
+    owner_home: &'a Path,
+    loop_name: &'a str,
+    endpoint: &'a str,
+}
+
+impl OwnerProvider for CodexOwnerProvider<'_> {
+    type Snapshot = Source;
+    type Identity = FileStamp;
+
+    fn read(&self) -> Result<Source, LaneError> {
+        read_source(self.owner_home, self.loop_name)
+    }
+
+    fn due(&self, source: &Source, now: u64) -> bool {
+        source.needs_refresh(now)
+    }
+
+    fn identity(&self, source: &Source) -> Result<FileStamp, LaneError> {
+        source
+            .stamp
+            .ok_or_else(|| failure("credential-sign-in", "source identity is absent"))
+    }
+
+    fn refresh(&self, source: &Source) -> Result<Option<Source>, LaneError> {
+        refresh_request(source, self.endpoint).map(Some)
+    }
+
+    fn publish(&self, next: &Source, expected: FileStamp) -> Result<bool, LaneError> {
+        publish_owner(self.owner_home, self.loop_name, next, expected)
+    }
+}
+
+/// Callers hold the loop refresh lock through this operation and worker publication.
+/// This preserves the identity check followed by rename; it is not an atomic CAS.
+fn refresh_provider<P: OwnerProvider>(
+    provider: &P,
+    now: u64,
+    before_publish: impl FnOnce(),
+) -> Result<P::Snapshot, LaneError> {
+    let source = provider.read()?;
+    if !provider.due(&source, now) {
+        return Ok(source);
+    }
+    let expected = provider.identity(&source)?;
+    let next = provider.refresh(&source)?;
+    let current = provider.read()?;
+    if provider.identity(&current)? != expected {
+        return Ok(current);
+    }
+    let Some(next) = next else {
+        return Ok(current);
+    };
+    before_publish();
+    if provider.publish(&next, expected)? {
+        Ok(next)
+    } else {
+        provider.read()
+    }
+}
+
 fn refresh_if_due(
     owner_home: &Path,
     loop_name: &str,
@@ -929,24 +1006,15 @@ fn refresh_if_due_with(
     now: u64,
     before_publish: impl FnOnce(),
 ) -> Result<Source, LaneError> {
-    let source = read_source(owner_home, loop_name)?;
-    if !source.needs_refresh(now) {
-        return Ok(source);
-    }
-    let expected = source
-        .stamp
-        .ok_or_else(|| failure("credential-sign-in", "source identity is absent"))?;
-    let next = refresh_request(&source, endpoint)?;
-    let current = read_source(owner_home, loop_name)?;
-    if current.stamp != Some(expected) {
-        return Ok(current);
-    }
-    before_publish();
-    if publish_owner(owner_home, loop_name, &next, expected)? {
-        Ok(next)
-    } else {
-        read_source(owner_home, loop_name)
-    }
+    refresh_provider(
+        &CodexOwnerProvider {
+            owner_home,
+            loop_name,
+            endpoint,
+        },
+        now,
+        before_publish,
+    )
 }
 
 /// Hold the loop-wide refresh lock through the initial run-home credential publication.
@@ -1582,6 +1650,132 @@ mod tests {
         )
         .expect("valid source needs no refresh request");
         assert_eq!(recipients, [3001]);
+    }
+
+    #[derive(Clone, Copy)]
+    enum StandInRefresh {
+        Unchanged,
+        Staged,
+        OwnerProgram,
+        OwnerProgramUnchanged,
+        OwnerLogin,
+        Refused,
+    }
+
+    // These counters stand in for opaque authority and file identity. They are
+    // neither a Claude credential schema nor a fixture of vendor output.
+    struct StandInProvider {
+        current: std::cell::Cell<u64>,
+        mode: StandInRefresh,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl OwnerProvider for StandInProvider {
+        type Snapshot = u64;
+        type Identity = u64;
+
+        fn read(&self) -> Result<u64, LaneError> {
+            self.calls.borrow_mut().push("read");
+            Ok(self.current.get())
+        }
+
+        fn due(&self, _source: &u64, _now: u64) -> bool {
+            !matches!(self.mode, StandInRefresh::Unchanged)
+        }
+
+        fn identity(&self, source: &u64) -> Result<u64, LaneError> {
+            Ok(*source)
+        }
+
+        fn refresh(&self, _source: &u64) -> Result<Option<u64>, LaneError> {
+            self.calls.borrow_mut().push("owner-refresh");
+            match self.mode {
+                StandInRefresh::Refused => Err(failure("credential-refresh", "stand-in refused")),
+                StandInRefresh::OwnerProgram => {
+                    self.current.set(2);
+                    Ok(None)
+                }
+                StandInRefresh::OwnerProgramUnchanged => Ok(None),
+                StandInRefresh::OwnerLogin => {
+                    self.current.set(3);
+                    Ok(Some(2))
+                }
+                StandInRefresh::Staged => Ok(Some(2)),
+                StandInRefresh::Unchanged => panic!("unneeded refresh"),
+            }
+        }
+
+        fn publish(&self, next: &u64, expected: u64) -> Result<bool, LaneError> {
+            self.calls.borrow_mut().push("publish");
+            if self.current.get() != expected {
+                return Ok(false);
+            }
+            self.current.set(*next);
+            Ok(true)
+        }
+    }
+
+    /// ´test:unit:credential-provider-preserves-owner-refresh-boundaries´
+    #[test]
+    fn credential_provider_preserves_owner_refresh_boundaries() {
+        for (mode, replace_before_publish, expected, calls) in [
+            (StandInRefresh::Unchanged, false, Some(1), vec!["read"]),
+            (
+                StandInRefresh::Staged,
+                false,
+                Some(2),
+                vec!["read", "owner-refresh", "read", "publish"],
+            ),
+            (
+                StandInRefresh::OwnerProgram,
+                false,
+                Some(2),
+                vec!["read", "owner-refresh", "read"],
+            ),
+            (
+                StandInRefresh::OwnerProgramUnchanged,
+                false,
+                Some(1),
+                vec!["read", "owner-refresh", "read"],
+            ),
+            (
+                StandInRefresh::OwnerLogin,
+                false,
+                Some(3),
+                vec!["read", "owner-refresh", "read"],
+            ),
+            (
+                StandInRefresh::Staged,
+                true,
+                Some(3),
+                vec!["read", "owner-refresh", "read", "publish", "read"],
+            ),
+            (
+                StandInRefresh::Refused,
+                false,
+                None,
+                vec!["read", "owner-refresh"],
+            ),
+        ] {
+            let provider = StandInProvider {
+                current: std::cell::Cell::new(1),
+                mode,
+                calls: std::cell::RefCell::new(Vec::new()),
+            };
+            let result = refresh_provider(&provider, 0, || {
+                if replace_before_publish {
+                    provider.current.set(3);
+                }
+            });
+            if let Some(value) = expected {
+                assert_eq!(result.expect("provider result"), value);
+            } else {
+                let error = result.expect_err("owner refresh refusal");
+                assert_eq!(error.kind, "credential-refresh");
+                assert_eq!(provider.current.get(), 1);
+            }
+            assert_eq!(*provider.calls.borrow(), calls);
+        }
     }
 
     /// ´test:unit:credential-two-distinct-workers-receive-one-refresh´
