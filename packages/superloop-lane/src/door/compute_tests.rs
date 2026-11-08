@@ -1530,9 +1530,27 @@ fn compute_refusal_frame(client: &mut UnixStream) -> (Value, u64) {
         }
         assert_eq!(frame["schema"], 2);
         let credit = frame["wait_ms"].as_u64().expect("credit milliseconds");
-        assert!(credit >= observed_credit && credit <= 120_000);
+        assert!(credit >= observed_credit && credit <= super::MAX_LOCK_WAIT_CREDIT_MS);
         observed_credit = credit;
     }
+}
+
+fn compute_refusal_call(socket: &std::path::Path, use_stub: bool) -> (Value, Option<u64>) {
+    if use_stub {
+        let previous = super::transport::STUB_TEST_BUDGET.with(|slot| slot.replace(Some(1000)));
+        let (reply, _, _) = compute_call(socket, "/opt/fixture/bin/report cargo test --locked");
+        super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(previous));
+        return (reply, None);
+    }
+    let mut client = UnixStream::connect(socket).expect("socket");
+    frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":1000})).expect("shorter caller bound");
+    client.shutdown(Shutdown::Write).expect("EOF");
+    let announcement = frame_read(&mut client).expect("announcement");
+    assert_eq!(announcement["type"], "compute-deadline");
+    assert_eq!(announcement["registered_deadline_ms"], 3_600_000);
+    assert_eq!(announcement["request_deadline_ms"], 1000);
+    let (reply, observed_credit) = compute_refusal_frame(&mut client);
+    (reply, Some(observed_credit))
 }
 
 fn compute_queue_refusal(fixture: &Fixture) -> thread::JoinHandle<()> {
@@ -1550,7 +1568,13 @@ fn compute_queue_refusal(fixture: &Fixture) -> thread::JoinHandle<()> {
     })
 }
 
-fn compute_deadline_refusal_case(floor: &str, reason: &str, queue: &str, induce_wait: bool) {
+fn compute_deadline_refusal_case(
+    floor: &str,
+    reason: &str,
+    queue: &str,
+    induce_wait: bool,
+    use_stub: bool,
+) {
     let fixture = Fixture::new();
     fixture.set_floor(floor);
     let store = fixture.store();
@@ -1586,14 +1610,7 @@ fn compute_deadline_refusal_case(floor: &str, reason: &str, queue: &str, induce_
         contended,
     );
     let answer = (queue == "refused").then(|| compute_queue_refusal(&fixture));
-    let mut client = UnixStream::connect(socket).expect("socket");
-    frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":1000})).expect("shorter caller bound");
-    client.shutdown(Shutdown::Write).expect("EOF");
-    let announcement = frame_read(&mut client).expect("announcement");
-    assert_eq!(announcement["type"], "compute-deadline");
-    assert_eq!(announcement["registered_deadline_ms"], 3_600_000);
-    assert_eq!(announcement["request_deadline_ms"], 1000);
-    let (reply, observed_credit) = compute_refusal_frame(&mut client);
+    let (reply, observed_credit) = compute_refusal_call(&socket, use_stub);
     server.join().expect("server").expect("service");
     if let Some(answer) = answer {
         answer.join().expect("queued refusal recorded");
@@ -1603,34 +1620,40 @@ fn compute_deadline_refusal_case(floor: &str, reason: &str, queue: &str, induce_
         .expect("credit");
     if let Some(release) = release {
         release.join().expect("holder released after progress");
-        assert!(observed_credit >= 50);
-        assert!(credit >= observed_credit);
+        assert!(credit >= 50);
+        if let Some(observed_credit) = observed_credit {
+            assert!(observed_credit >= 50);
+            assert!(credit >= observed_credit);
+        }
     }
-    assert!(credit <= 120_000);
+    assert!(credit <= super::MAX_LOCK_WAIT_CREDIT_MS);
     assert_eq!(reply["effective_deadline_ms"], 1000 + credit);
     assert_eq!(reply["reason"], reason);
     assert_eq!(reply["queue_state"], queue);
     assert_eq!(reply["registered_deadline_ms"], 3_600_000);
     assert_eq!(reply["request_deadline_ms"], 1000);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
-    if reason == "door-request-deadline" {
-        assert_eq!(
-            super::final_line(&["fixture".into(), "cargo test".into()], &reply).as_deref(),
-            Some("door-request-deadline: registered_deadline_ms=3600000 request_deadline_ms=1000")
-        );
-    }
+    let expected_line = if reason == "door-request-deadline" {
+        "door-request-deadline: registered_deadline_ms=3600000 request_deadline_ms=1000"
+    } else {
+        "door-adjudicated-refusal"
+    };
+    assert_eq!(
+        super::final_line(&["fixture".into(), "cargo test".into()], &reply).as_deref(),
+        Some(expected_line)
+    );
 }
 
 /// ´test:unit:door-compute-deadline-refusal-names-the-owner-bound´
 #[test]
 fn door_compute_deadline_refusal_names_the_owner_bound() {
-    for induce_wait in [false, true] {
+    for (induce_wait, use_stub) in [(false, false), (true, false), (true, true)] {
         for (floor, reason, queue) in [
             ("allow", "door-request-deadline", "no-queue"),
             ("enforce", "door-request-deadline", "deadline"),
             ("enforce", "door-adjudicated-refusal", "refused"),
         ] {
-            compute_deadline_refusal_case(floor, reason, queue, induce_wait);
+            compute_deadline_refusal_case(floor, reason, queue, induce_wait, use_stub);
         }
     }
 }
