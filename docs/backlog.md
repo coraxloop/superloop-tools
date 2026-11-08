@@ -738,13 +738,21 @@ Folded from ``open:homes:claude-lane-home-sandbox-redirects``, whose question th
 
 (2026-11-08, the loop's measurement operation) The loop measures the vendor program's refresh margin in the helper's home with the pinned program: a print call with its home, configuration directory and temporary directory set, its output discarded and a 60 s timeout, letting expiry approach naturally and observing above and at the 600 s threshold and then at smaller remaining intervals, cycle after cycle until the margin is bracketed. A reviewed script emits only the timing, the remaining milliseconds, window membership, whether the token and the file identity changed, the exit status and the program's identity, and never a value, a prefix, a digest, raw JSON or the vendor's output; the owner is told before it runs. The operation is the loop's, and the code that follows the measurement stays with this item's lane.
 
+(2026-11-08, the loop's review of the measurement script) The script is accepted in form: it executes the sha256-pinned program by held descriptor with the helper's vector and four environment entries, opens the owner credential without following links and checks its shape, compares the token and the file identity in memory, and prints only the timing, the remaining milliseconds, window membership, the change flags, the exit status and the program's identity, with a fixed refusal line on any exception. Before the first run the loop confirms that the script's lock path equals the tools' Claude refresh lock and tells the owner, since each observation is one print call against the loop's sign-in; the first observation tells when expiry approaches, and the later ones bracket the margin.
+
+(2026-11-08, from the review of lane r002g84's periodic publication step, L1) The periodic publication repeats the print call on every 30 s pass below the margin, up to twenty calls per helper per window serialized on the Claude home's lock, where this item names only preparation, preflight and rounds; the measurement decides the window for the periodic pass too (``proto:superlooplane:claude-periodic-credential-publication``, of the superloop-lane package).
+
 **Problem (The service credential spawner's refresh exchange fails closed in its due case and pins its guard order, held-file cleanup and cancellation)** · `prob:box:service-credential-spawner-fails-closed-and-pins-its-guards`
 
 **OPEN.** (2026-11-08, from the review of lane r002g79's service credential-authority step, for its next touch of ``packages/superloop-lane/src/credential.rs``) Four follow-ups: (a) the refresh exchange gains a test-only endpoint hook, so that its due case fails closed (T-2); (b) the guard drop is ordered before the measured first check, with the case split or the repository's allow attribute, since the case stands at exactly 100 lines (T-3 and I-1); (c) the `.held` file no longer leaks on a panic (I-2); and (d) cancellation is pinned by a case of its own rather than only by the join bound (I-3).
 
+(2026-11-08, from the review of lane r002g79's helper socket-service step) Part (a) stays open: the test-only close runs through the `_at` seam with a loopback listener that must see no connection.
+
 **Problem (The Claude program binding formats its long arms, reads its install pin through held custody and measures its hash wall)** · `prob:box:claude-program-binding-formats-pins-and-measures-its-hash`
 
 **OPEN.** (2026-11-08, from the review of lane r002g84's Claude program binding, L2, L3 and I1) Three follow-ups: (a) the long match arms of ``packages/superloop-lane/tests/container_anchors.rs`` lines 478 to 480, which rustfmt leaves unformatted, and the 102-column doc comment at ``packages/superloop-lane/src/launch.rs`` line 7934 are shortened by hoisting the refusals into constants; (b) the install pin is read by pathname (``launch.rs`` line 562 and ``packages/superloop-lane/src/install.rs`` line 1188) rather than through held configuration custody, bounded meanwhile by the compiled schema pin and open until activation (``proto:superlooplane:claude-owner-program-binding``, of the superloop-lane package); and (c) the per-call program hash wall, over a program of up to 1 GiB, is unmeasured, which the measurement plan's helper-path timing covers (`prob:box:claude-print-probe-refresh-margin-measured-against-refresh-ahead`).
+
+(2026-11-08, from the review of lane r002g84's periodic publication step) Three more follow-ups join the parts above: onto (a), the 122-column literal at ``packages/superloop-lane/src/container_helper.rs`` line 2892 (L4); onto (c), the program hash runs on every 30 s pass of each live Claude helper over a program of up to 1 GiB, and again at each print call, so its wall is measured per pass as well as per call (M1); and (d), no test refuses a schema-1 document that carries `backend` or `provider`, or a schema-2 document with a foreign backend (L3).
 
 ### Tests under load · `sec:toolsbacklog:open-gates`
 
@@ -958,6 +966,8 @@ Measured again on 2026-10-31: gate run 2 of lane r002g30 on c03 went red in 628.
 
 (gate b26, 2026-11-07) The release suite's `mail-inbox-wait` test, 3.5 s, asserting that the hook's inbox wait prints exactly `You've got mail.`, failed under a full CPU stall of 126 s over 424 s, the third different timing fixture in three gates (b23's topology ceiling and door fixture socket, b25's release-harness partial census, b26's inbox wait), each untouched by its candidate; the tools gate was held until the lanes' batteries eased. Timing fixtures state their bound against a quiet node, and the gate records the node's load beside a timing red, the estate's gate form's half (``prob:gates:gate-report-carries-node-load-sample`` in its backlog).
 
+(gate b61 on a8468fd4, 2026-11-08, 167 s) `mail-inbox-wait` (``packages/superloop-claude-hook/tests/inbox_wait.py`` line 69, asserting the hook's exact output and an empty error stream) went red again, its package untouched, under a load of 31 with 14.9 s of CPU stall over the gate's 166 s, and the rebuild b62 passed it on the same tip. This is not the case's first red, since b26 and two lane batteries met it before, so the case's wait or output timing is made independent of the node's load.
+
 **Problem (The outbox's owner-private reservation test is red in lane workspaces and in 12-thread worker runs while the gate passes it)** · `prob:gates:outbox-owner-private-reservation-red-in-lane-workspaces`
 
 **OPEN.** (2026-11-03 15:45Z, from lane r002g76's B completion report) The cause of the red in worker checkouts is found: the node directory that holds the loop's lane checkouts is group-writable under a parent that is not, and the production executable-custody validation refuses a group-writable ancestor, so the test is red there and green in the loop gates, whose workspaces sit under a directory that is not group-writable. The fix of the directory is the estate's provisioning of a worker lane workspace (``prob:gates:node-lane-checkouts-created-without-group-write`` in the estate backlog); the fixture's dependence on its environment's modes, below, stays this repository's. The earlier status follows.
@@ -1053,6 +1063,8 @@ The loop's sweep between gates is the interim, 2,357 entries removed in 12.4 s, 
 (measured on the root-full node, 2026-11-07 at 18:50Z) A second sweep found 3,228 more of the orchestration account's tempfile directories older than an hour under ``/tmp``, 40 GB from under three hours of gates and lane rounds, and removed them by listed name, taking ``/tmp`` from 63 to 21 percent in use; the rate, about 15 GB of tmpfs an hour, is what this item's fix stops, and the loop sweeps between gates until it lands.
 
 (measured on the root-full node, 2026-11-08 at 10:33Z) The fifth sweep of the node's tmpfs in two days removed 7,351 fixture leftovers, taking ``/tmp`` from 60 to 25 percent in use; this item's fix stays the remedy.
+
+(measured on the root-full node, 2026-11-08 after gate b60) A sweep removed 10,265 of the orchestration account's fixture directories older than an hour from ``/tmp``, 22 GB, between gates: one loop's batteries of one day fill a third of the 63 GB tmpfs, the fixtures that ignore TMPDIR being the cause and the sweep the interim.
 
 ### Loop entry and sign-in homes · `sec:toolsbacklog:open-homes`
 
@@ -1201,6 +1213,8 @@ Codex preparation resolves its nodes from the loop's active rows (``prob:homes:c
 (2026-11-07, from the review of lane r002g79's native creation and credential-thread custody, N4) The rootless acceptance's namespace child builds its own requirement table and calls the coordinator directly (``packages/superloop-lane/tests/native_creation_custody.rs`` lines 77 to 306), while the production receiver runs only into plan loading, to its first missing setting, so no test joins the entry's bundle order to `private_make`'s reserve and finish; one acceptance that does goes with the creation entry's next touch, before step 5 is complete.
 
 (2026-11-08, from the review of lane r002g79's UID-census step, I1) The run-reservation scan beside the UID census still reads by pathname (``packages/superloop-lane/src/launch.rs`` lines 1406 and 1429), outside N1 and the contract's caller inventory, so it takes a place in the step plan or in this record. The private reservation-reader step moves this scan beneath the received runs-root capability before the held caller switches deploy.
+
+(2026-11-08, from the review of lane r002g79's helper socket-service step, F6) The overflow-root production refusal awaits the held ancestor-trust switch.
 
 **Problem (The host lane-home scans are removed with the host forms)** · `prob:homes:host-lane-home-scans-removed`
 
@@ -1604,6 +1618,8 @@ The `superloop-node-status` documentation names `known_hosts.clients` as its kno
 
 (2026-11-08, from the review of lane r002g79's service credential-authority step) A digest row computed by one review and landed over a base-skew commit can be stale by the skew's line count, as one review's ``packages/superloop-lane/src/credential.rs`` row was by the loop's one-line allow attribute, 3090 against 3091; the landing's document check verifies a row's presence, not its exactness, so the exactness check is the reviewer's script until this item's checker lands, and the deployed linter's stale-index lag covers the rest.
 
+(2026-11-08, from the review of lane r002g84's periodic publication step, I1) 63 tracked files carry missing or stale coverage rows on the base, the measurement this item's checker answers.
+
 **Problem (The letters-and-retention rule and the instance architecture pages describe the letter copied into the driver directory at launch)** · `prob:docs:letters-retention-rule-describes-the-launch-copy`
 
 **OPEN.** (r002g66 review 1, 2026-11-02) F5 (generic/instance docs): ``rule:workercontracts:letters-and-retention`` and the instance arch pages do not describe the letter copied into the driver directory at launch.
@@ -1635,6 +1651,8 @@ At that stamp the changelog's two loose-entry tidies are folded (`prob:docs:chan
 **Problem (The contributing guide names the changelog section a regression pin takes)** · `prob:docs:contributing-guide-names-the-changelog-section-of-a-regression-pin`
 
 **OPEN.** (2026-11-08, from the review of lane r002g84's entry-probe fixtures, L3) The repository places a new regression pin under Changed, as the cut's executable-route refusal tests are (``prob:pack:cut-executable-route-refusals-tested`` in the changelog), but the contributing guide says nothing about the section a pin takes, and the entry-probe step's own pin entry stood under Fixed until its landing moved it to Changed. The guide states the practice: a new regression pin goes under Changed, because a pin changes what the tests guarantee rather than the behaviour a release fixes, so that two workers write the same kind of entry under one heading.
+
+(2026-11-08, from the review of lane r002g84's periodic publication step, I2) The helper socket-service step's regression-check entry sits under Fixed against this practice; it moves to Changed at the changelog's next documentation touch, or the guide records the exception.
 
 ### Watchers, letters and monitors · `sec:toolsbacklog:open-watchers`
 
