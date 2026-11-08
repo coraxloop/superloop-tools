@@ -2834,6 +2834,67 @@ mod tests {
     }
 
     /// # Panics
+    /// Panics if unrotated authority hides repeated owner calls or crosses expiry.
+    /// ´test:unit:claude-periodic-unrotated-authority-keeps-the-refresh-window-visible´
+    #[test]
+    fn claude_periodic_unrotated_authority_keeps_the_refresh_window_visible() {
+        let root = claude_fixture_root();
+        let now = 1_800_000_000;
+        let expiry = now + REFRESH_AHEAD.as_secs();
+        let home = fixture_claude(root.path(), &claude_document(expiry * 1000));
+        let runs = root.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        let worker = claude_live_fixture(&runs, "claude-live").join(".claude/.credentials.json");
+        let calls = std::cell::Cell::new(0);
+        let mut helpers = [BTreeMap::new(), BTreeMap::new()];
+        // Stand-in calls leave the synthetic token unchanged. Injected samples
+        // model two helpers; no vendor margin or real elapsed cadence is measured.
+        for tick in 0..20 {
+            let sampled = now + tick * 30;
+            for published in &mut helpers {
+                let report = refresh_claude_live_at(
+                    &home,
+                    "alpha",
+                    &runs,
+                    sampled,
+                    published,
+                    || {
+                        let owner = owner_identity().0;
+                        let directory = open_dir(&home, owner, owner, 0o700).expect("owner home");
+                        assert!(lock_with(&directory, FlockArg::LockExclusiveNonblock).is_err());
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    },
+                    || Ok(sampled * 1000),
+                )
+                .expect("unrotated but unexpired authority");
+                assert_eq!(report.expires_unix, expiry);
+                assert_eq!(report.changed, tick == 0);
+            }
+        }
+        assert_eq!(calls.get(), 40);
+        let bytes = fs::read(&worker).expect("prior worker");
+        let inode = fs::metadata(&worker).expect("prior inode").ino();
+        let error = refresh_claude_live_at(
+            &home,
+            "alpha",
+            &runs,
+            expiry,
+            &mut helpers[0],
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+            || Ok(expiry * 1000),
+        )
+        .expect_err("expired authority cannot be published");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(calls.get(), 41);
+        assert_eq!(fs::read(&worker).expect("unchanged bytes"), bytes);
+        assert_eq!(fs::metadata(&worker).expect("unchanged inode").ino(), inode);
+    }
+
+    /// # Panics
     /// Panics if failed or expired owner refresh publishes any worker or cache entry.
     /// ´test:unit:claude-live-refresh-refusal-preserves-workers´
     #[test]

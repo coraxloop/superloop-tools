@@ -52,6 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Periodic Claude refresh regression coverage exposes repeated owner-program calls for unrotated authority inside the refresh-ahead window and retains worker bytes at expiry (``prob:box:claude-print-probe-refresh-margin-measured-against-refresh-ahead``; ``proto:superlooplane:claude-periodic-credential-publication``).
+
 - Credential evidence regression cases refuse cross-schema provider fields and foreign backends at both publication and census, retaining prior evidence on a refused publication (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-periodic-credential-publication``).
 
 - Gated Claude program bindings reuse successful verification only for unchanged held custody within one thread and activation; metadata, policy and required-pin checks remain on every boundary (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-program-binding-cadence``).
