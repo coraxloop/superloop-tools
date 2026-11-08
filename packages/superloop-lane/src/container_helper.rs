@@ -1978,7 +1978,7 @@ pub(crate) fn spawn_credential_authority(
         refresh_driver_dir,
         backend,
         refresh_cancelled,
-        crate::credential::AUTH_ENDPOINT.to_owned(),
+        crate::credential::service_endpoint(),
     )
 }
 

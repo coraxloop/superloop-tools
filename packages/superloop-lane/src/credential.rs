@@ -19,6 +19,36 @@ use crate::error::LaneError;
 
 const AUTH_HOST: &str = "auth.openai.com";
 pub(crate) const AUTH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+#[cfg(test)]
+thread_local! {
+    static SERVICE_ENDPOINT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Select the fixed service endpoint, with an isolated override only in test builds.
+pub(crate) fn service_endpoint() -> String {
+    #[cfg(test)]
+    if let Some(endpoint) = SERVICE_ENDPOINT.with(|value| value.borrow().clone()) {
+        return endpoint;
+    }
+    AUTH_ENDPOINT.to_owned()
+}
+
+#[cfg(test)]
+pub(crate) struct ServiceEndpointGuard(Option<String>);
+#[cfg(test)]
+impl Drop for ServiceEndpointGuard {
+    fn drop(&mut self) {
+        SERVICE_ENDPOINT.with(|value| *value.borrow_mut() = self.0.take());
+    }
+}
+
+/// Override the spawning thread's service endpoint in a test build.
+#[cfg(test)]
+pub(crate) fn fixture_service_endpoint(endpoint: String) -> ServiceEndpointGuard {
+    ServiceEndpointGuard(SERVICE_ENDPOINT.with(|value| value.replace(Some(endpoint))))
+}
+
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Complete SHA-256 of the program behind the loop's reviewed credential structure record.
 /// An executable supplier cannot select the independent record; bind all program bytes
@@ -3546,42 +3576,41 @@ mod tests {
         let protected = crate::plan::protected_identity_dir(&driver).expect("evidence path");
         fs::create_dir(&protected).expect("protected evidence directory");
         fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("evidence mode");
-        let retained = home.path().with_extension("held");
-        fs::rename(home.path(), &retained).expect("retain original home inode");
-        fs::create_dir(home.path()).expect("replacement home");
-        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700))
-            .expect("replacement mode");
+        let lock = lock(home.path(), "alpha").expect("order the first authority check");
+        let retained = ReplacedAuthorityHome::new(home.path());
         let cancelled = Arc::new(AtomicBool::new(false));
         let exchange = (case == "exchange").then(|| fixture_endpoint(
             "200 OK",
             json!({"id_token":token(expires + 86_400),"access_token":token(expires + 86_400),"refresh_token":"service-rotated"}),
         ));
-        let authority = if let Some((endpoint, _)) = &exchange {
-            crate::container_helper::spawn_credential_authority_at(
-                home.path().to_path_buf(),
-                "alpha".into(),
-                runs,
-                driver,
-                BoxBackend::Codex,
-                Arc::clone(&cancelled),
-                endpoint.clone(),
-            )
-        } else {
-            crate::container_helper::spawn_credential_authority(
-                home.path().to_path_buf(),
-                "alpha".into(),
-                runs,
-                driver,
-                BoxBackend::Codex,
-                Arc::clone(&cancelled),
-            )
-        }
+        // Retain the unserved listener so a lost program map can contact only loopback.
+        let refusal = TcpListener::bind("127.0.0.1:0").expect("closed fixture boundary");
+        let endpoint = exchange.as_ref().map_or_else(
+            || {
+                format!(
+                    "http://{}/token",
+                    refusal.local_addr().expect("local endpoint")
+                )
+            },
+            |(endpoint, _)| endpoint.clone(),
+        );
+        let _endpoint = fixture_service_endpoint(endpoint);
+        let authority = crate::container_helper::spawn_credential_authority(
+            home.path().to_path_buf(),
+            "alpha".into(),
+            runs,
+            driver,
+            BoxBackend::Codex,
+            Arc::clone(&cancelled),
+        )
         .expect("service authority spawn");
-        // The spawning thread can release its guards while the service owns its snapshot.
         drop(programs);
         drop(private);
+        // The blocking lock orders both guard releases before refresh_live_at can read.
+        drop(lock);
         let began = Instant::now();
         let evidence_path = retained
+            .path()
             .join(
                 protected
                     .strip_prefix(home.path())
@@ -3595,21 +3624,123 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         cancelled.store(true, Ordering::Release);
-        let result = authority.join();
+        let result = finish_service_authority(authority);
         assert!(
             !home.path().join(".config").exists(),
             "replacement home is untouched"
         );
-        fs::remove_dir(home.path()).expect("remove empty replacement");
-        fs::rename(retained, home.path()).expect("restore fixture for cleanup");
-        result
-            .expect("service authority join")
-            .expect("service authority result");
+        retained.restore();
+        result.expect("service authority result");
         assert_service_authority_evidence(case, home.path(), &protected, expires, exchange);
         assert!(
             began.elapsed() < Duration::from_secs(12),
             "cancellation joins the real service loop"
         );
+    }
+
+    struct ReplacedAuthorityHome {
+        original: PathBuf,
+        retained: tempfile::TempDir,
+    }
+    impl ReplacedAuthorityHome {
+        /// # Panics
+        /// Panics if the fixture home cannot be retained and replaced.
+        fn new(home: &Path) -> Self {
+            let retained = tempfile::tempdir_in(home.parent().expect("home parent"))
+                .expect("owned retention directory");
+            fs::rename(home, retained.path().join("home")).expect("retain original home inode");
+            fs::create_dir(home).expect("replacement home");
+            fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("replacement mode");
+            Self {
+                original: home.to_path_buf(),
+                retained,
+            }
+        }
+        fn path(&self) -> PathBuf {
+            self.retained.path().join("home")
+        }
+        /// # Panics
+        /// Panics if the empty replacement cannot be removed and the retained home restored.
+        fn restore(self) {
+            fs::remove_dir(&self.original).expect("remove empty replacement");
+            fs::rename(self.path(), &self.original).expect("restore fixture for cleanup");
+        }
+    }
+
+    /// # Panics
+    /// Panics rather than joining indefinitely if the authority ignores cancellation.
+    fn finish_service_authority(
+        authority: std::thread::JoinHandle<Result<(), LaneError>>,
+    ) -> Result<(), LaneError> {
+        let began = std::time::Instant::now();
+        while !authority.is_finished() && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            authority.is_finished(),
+            "service authority ignored cancellation"
+        );
+        authority.join().expect("service authority join")
+    }
+
+    /// # Panics
+    /// Panics if an already cancelled authority reaches its blocked first check.
+    /// ´claim:superlooplane:service-authority-cancellation-prevents-first-check´
+    /// ´test:unit:service-authority-cancellation-prevents-first-check´
+    #[test]
+    fn service_authority_cancellation_prevents_first_check() {
+        let (home, _private, _programs) = helper_custody_fixture("/usr/bin/true");
+        fixture_sign_in(
+            home.path(),
+            &source(now_seconds().expect("clock") + 300, "cancelled"),
+        );
+        let _lock = lock(home.path(), "alpha").expect("block every first check");
+        let original =
+            fs::read(sign_in_dir(home.path(), "alpha").join("auth.json")).expect("source");
+        let refusal = TcpListener::bind("127.0.0.1:0").expect("local boundary");
+        let _endpoint = fixture_service_endpoint(format!(
+            "http://{}/token",
+            refusal.local_addr().expect("address")
+        ));
+        let driver = home.path().join("runs/R");
+        let authority = crate::container_helper::spawn_credential_authority(
+            home.path().to_path_buf(),
+            "alpha".into(),
+            home.path().join("runs"),
+            driver.clone(),
+            BoxBackend::Codex,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
+        .expect("cancelled service spawn");
+        finish_service_authority(authority).expect("cancelled before first check");
+        assert!(
+            !driver.exists(),
+            "cancelled authority publishes no evidence"
+        );
+        assert_eq!(
+            fs::read(sign_in_dir(home.path(), "alpha").join("auth.json"))
+                .expect("unchanged source"),
+            original
+        );
+    }
+
+    /// # Panics
+    /// Panics if unwinding leaks the owned retention directory or its contents.
+    /// ´claim:superlooplane:service-authority-retention-cleans-up-on-panic´
+    /// ´test:unit:service-authority-retention-cleans-up-on-panic´
+    #[test]
+    fn service_authority_retention_cleans_up_on_panic() {
+        let home = tempfile::tempdir().expect("home");
+        let retained = std::cell::RefCell::new(None);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let moved = ReplacedAuthorityHome::new(home.path());
+            *retained.borrow_mut() = Some(moved.retained.path().to_path_buf());
+            fs::write(moved.path().join("sentinel"), b"fictional").expect("retained contents");
+            panic!("fixture panic after home replacement");
+        }));
+        assert!(result.is_err());
+        assert!(!retained.borrow().as_ref().expect("retained path").exists());
+        assert!(home.path().exists());
     }
 
     /// # Panics

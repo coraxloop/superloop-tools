@@ -46,6 +46,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Service credential-authority fixtures keep every refresh endpoint on loopback, order the first check after parent guard release, clean retained homes during unwinding and bound cancellation before joining (``prob:box:service-credential-spawner-fails-closed-and-pins-its-guards``; ``claim:superlooplane:service-authority-cancellation-prevents-first-check``; ``claim:superlooplane:service-authority-retention-cleans-up-on-panic``).
+
 - Credential regressions exercise the helper publication transaction with foreign client custody and retain the failed-refresh preservation case as its own bounded test (``prob:box:claude-credential-tests-the-mismatch-site-and-splits-the-long-test``; ``test:unit:helper-credential-mismatch-precedes-reservation-publication``; ``test:unit:claude-failed-round-refresh-preserves-worker-file``).
 
 - Native creation carries the selected backend into its private form and credential capability, reconstructs that plan through held configuration and keeps Claude preflight behind the runtime gate (``prob:box:claude-boxed-workers``; ``proto:superlooplane:native-creation-selected-credential-custody``).
