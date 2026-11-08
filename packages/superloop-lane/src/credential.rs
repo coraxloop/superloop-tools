@@ -43,6 +43,17 @@ impl Drop for ServiceEndpointGuard {
     }
 }
 
+/// Serve one synthetic refresh response on loopback for the namespace service fixture.
+///
+/// # Panics
+/// Panics if the fixture listener or its request/response cannot be established.
+#[cfg(test)]
+pub(crate) fn fixture_refresh_endpoint(
+    response: Value,
+) -> (String, std::thread::JoinHandle<Value>) {
+    tests::fixture_endpoint("200 OK", response)
+}
+
 /// Override the spawning thread's service endpoint in a test build.
 #[cfg(test)]
 pub(crate) fn fixture_service_endpoint(endpoint: String) -> ServiceEndpointGuard {
@@ -2464,7 +2475,10 @@ mod tests {
         );
     }
 
-    fn fixture_endpoint(status: &str, response: Value) -> (String, std::thread::JoinHandle<Value>) {
+    pub(super) fn fixture_endpoint(
+        status: &str,
+        response: Value,
+    ) -> (String, std::thread::JoinHandle<Value>) {
         fixture_endpoint_with(status, response, || {})
     }
 

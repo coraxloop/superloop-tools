@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 /// # Panics
 /// Panics if the production helper loses the reserved runtime or its authority thread.
 /// ´claim:superlooplane:helper-service-executes-received-runtime´
+/// ´claim:superlooplane:helper-service-refreshes-live-credentials´
 /// ´test:crate:helper-service-executes-received-runtime´
 #[test]
 fn helper_service_executes_received_runtime() {
@@ -64,6 +65,12 @@ fn namespace_service_entry() {
         refusal.contains("unmapped or ambiguous ancestor uid"),
         "{refusal}"
     );
+    let endpoint = std::env::var("HELPER_SERVICE_ENDPOINT").expect("fixture refresh endpoint");
+    assert!(
+        endpoint.starts_with("http://127.0.0.1:"),
+        "fixture endpoint stays on loopback"
+    );
+    let _endpoint = crate::credential::fixture_service_endpoint(endpoint);
     let args: Vec<String> = serde_json::from_str(&source).expect("private entry vector");
     assert_eq!(
         crate::container_entry::serve(&args).expect("production helper entry and service"),
@@ -205,7 +212,7 @@ fn prepare(home: &Path, runs: &Path, podman: &Path) -> Value {
 
 /// # Panics
 /// Panics if the production composer or namespace process cannot start.
-fn start(home: &Path, runs: &Path, podman: &Path) -> FixtureChild {
+fn start(home: &Path, runs: &Path, podman: &Path, endpoint: &str) -> FixtureChild {
     let image = std::env::current_exe().expect("entry image");
     let held_home = fs::File::open(home).expect("home descriptor").into();
     let held_runs = fs::File::open(runs).expect("runs descriptor").into();
@@ -250,6 +257,7 @@ fn start(home: &Path, runs: &Path, podman: &Path) -> FixtureChild {
             "--nocapture",
         ])
         .env("HOME", home)
+        .env("HELPER_SERVICE_ENDPOINT", endpoint)
         .env(
             "HELPER_SERVICE_VECTOR",
             serde_json::to_string(&args).expect("vector"),
@@ -306,6 +314,100 @@ fn exchange(home: &Path, runs: &Path, loop_uid: u32) -> Output {
 }
 
 /// # Panics
+/// Panics if the synthetic source cannot supply one loopback refresh response.
+fn namespace_refresh_endpoint(home: &Path) -> (String, std::thread::JoinHandle<Value>, String) {
+    let original: Value = serde_json::from_slice(
+        &fs::read(home.join(".config/loops/alpha/lanes/codex/auth.json")).expect("source"),
+    )
+    .expect("source JSON");
+    let token = original["tokens"]["access_token"]
+        .as_str()
+        .expect("synthetic token");
+    let rotated = format!("{}.refreshed", token.rsplit_once('.').expect("JWT shape").0);
+    let (endpoint, refresh) = crate::credential::fixture_refresh_endpoint(json!({
+        "id_token":rotated,"access_token":rotated,"refresh_token":"namespace-service-rotated",
+    }));
+    (endpoint, refresh, rotated)
+}
+
+/// # Panics
+/// Panics if the service's real periodic authority does not refresh and publish its live worker.
+fn refresh_namespace_authority(
+    home: &Path,
+    runs: &Path,
+    worker: &str,
+    evidence: &Path,
+    rotated: &str,
+) {
+    let generation = fs::metadata(evidence)
+        .expect("first evidence generation")
+        .ino();
+    let path = runs.join(".reservation-R.json");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("record")).expect("record JSON");
+    record["phase"] = json!("started");
+    crate::launch::publish_reservation(&path, &record).expect("live reservation for refresh");
+    let output = namespace_python(home, r"
+import sys,json,time,base64
+from pathlib import Path
+p=Path(sys.argv[1])/'.config/loops/alpha/lanes/codex/auth.json'
+s=json.loads(p.read_text())
+payload=base64.urlsafe_b64encode(json.dumps({'exp':int(time.time())+300}).encode()).decode().rstrip('=')
+for field in ['id_token','access_token']: s['tokens'][field]='header.'+payload+'.due'
+p.write_text(json.dumps(s))
+", worker).expect("make synthetic authority due");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let began = Instant::now();
+    while fs::metadata(evidence).expect("authority generation").ino() == generation {
+        assert!(
+            began.elapsed() < Duration::from_secs(90),
+            "namespace refresh remains unmeasured"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let observed: Value = serde_json::from_slice(&fs::read(evidence).expect("refresh evidence"))
+        .expect("evidence JSON");
+    assert_eq!(observed["state"], "published", "{observed}");
+    assert_eq!(observed["run_refusals"], json!([]), "{observed}");
+    let source: Value = serde_json::from_slice(
+        &fs::read(home.join(".config/loops/alpha/lanes/codex/auth.json")).expect("rotated source"),
+    )
+    .expect("source JSON");
+    assert_eq!(
+        source["tokens"]["refresh_token"],
+        "namespace-service-rotated"
+    );
+    assert_eq!(source["tokens"]["access_token"], rotated);
+    assert!(
+        source["last_refresh"]
+            .as_str()
+            .expect("held clock output")
+            .ends_with('Z')
+    );
+    let output = namespace_python(
+        home,
+        "import sys
+from pathlib import Path
+print((Path(sys.argv[2])/'.codex/auth.json').read_text())
+",
+        worker,
+    )
+    .expect("read mapped worker publication");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let published: Value = serde_json::from_slice(&output.stdout).expect("worker auth JSON");
+    assert_eq!(published["tokens"]["access_token"], rotated);
+    assert_eq!(published["tokens"]["refresh_token"], "");
+}
+
+/// # Panics
 /// Panics if the complete service does not execute its held runtime and publish authority evidence.
 pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
     let record = prepare(home, runs, podman);
@@ -315,7 +417,8 @@ pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
         worker: worker.to_owned(),
     };
     let loop_uid = crate::plan::loop_uid(&record["plan"]).expect("loop uid");
-    let mut child = start(home, runs, podman);
+    let (endpoint, refresh, rotated) = namespace_refresh_endpoint(home);
+    let mut child = start(home, runs, podman, &endpoint);
     let evidence = crate::plan::protected_identity_dir(&runs.join("R"))
         .expect("protected root")
         .join("credential-refresh.json");
@@ -342,9 +445,13 @@ pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let observed: Value = serde_json::from_slice(&fs::read(evidence).expect("authority evidence"))
+    let observed: Value = serde_json::from_slice(&fs::read(&evidence).expect("authority evidence"))
         .expect("evidence JSON");
     assert_eq!(observed["state"], "current");
+    refresh_namespace_authority(home, runs, worker, &evidence, &rotated);
+    let request = refresh.join().expect("namespace refresh request");
+    assert_eq!(request["grant_type"], "refresh_token");
+    assert_eq!(request["refresh_token"], "fixture-service-refresh");
     let client = exchange(home, runs, loop_uid);
     if !client.status.success() {
         let control =
