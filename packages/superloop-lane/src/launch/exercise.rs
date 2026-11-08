@@ -1,6 +1,7 @@
 //! Measure credential publication in owner custody and the private run namespace.
 
 use super::*;
+use crate::settings::BoxBackend;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "exercise_cases.rs"]
@@ -800,7 +801,39 @@ fn projection(source: &Value) -> Result<Vec<u8>, LaneError> {
     Ok(bytes)
 }
 
-fn candidates(root: &Path, loop_name: &str) -> Result<Vec<Value>, LaneError> {
+/// Parse the credential exercise selector independently of case exercises.
+///
+/// # Errors
+/// Refuses repeated, incomplete or unknown options and vendor selectors.
+pub fn parse_options(args: &[String]) -> Result<(BoxBackend, bool), LaneError> {
+    let mut backend = None;
+    let mut dry_run = false;
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "--dry-run" if !dry_run => dry_run = true,
+            "--backend" if backend.is_none() => {
+                let name = words.next().ok_or_else(|| {
+                    LaneError::input("exercise-usage", "--backend needs codex or claude")
+                })?;
+                backend = Some(BoxBackend::parse(name)?);
+            }
+            _ => {
+                return Err(LaneError::input(
+                    "exercise-usage",
+                    "exercise LOOP [--backend {codex|claude}] [--dry-run]",
+                ));
+            }
+        }
+    }
+    Ok((backend.unwrap_or(BoxBackend::Codex), dry_run))
+}
+
+fn selected_record(record: &Value, backend: BoxBackend) -> Result<bool, LaneError> {
+    Ok(BoxBackend::from_plan(&record["plan"])? == backend)
+}
+
+fn candidates(root: &Path, loop_name: &str, backend: BoxBackend) -> Result<Vec<Value>, LaneError> {
     let mut rows = Vec::new();
     for (run, record) in super::reservation_census::records(root)? {
         if record["loop"] != loop_name || record["run"] != run || record["phase"] != "started" {
@@ -820,7 +853,9 @@ fn candidates(root: &Path, loop_name: &str) -> Result<Vec<Value>, LaneError> {
         {
             continue;
         }
-        rows.push(record);
+        if selected_record(&record, backend)? {
+            rows.push(record);
+        }
     }
     rows.sort_by(|a, b| a["run"].as_str().cmp(&b["run"].as_str()));
     Ok(rows)
@@ -831,9 +866,14 @@ fn candidates(root: &Path, loop_name: &str) -> Result<Vec<Value>, LaneError> {
 /// # Errors
 ///
 /// Refuses missing live runs, unsafe records or private measurement failure.
-pub fn run(owner_home: &Path, loop_name: &str, dry_run: bool) -> Result<Value, LaneError> {
-    run_with(owner_home, loop_name, dry_run, || {
-        measure_private(owner_home, loop_name)
+pub fn run(
+    owner_home: &Path,
+    loop_name: &str,
+    dry_run: bool,
+    backend: BoxBackend,
+) -> Result<Value, LaneError> {
+    run_with(owner_home, loop_name, dry_run, backend, || {
+        measure_private(owner_home, loop_name, backend)
     })
 }
 
@@ -841,8 +881,10 @@ fn run_with(
     owner_home: &Path,
     loop_name: &str,
     dry_run: bool,
+    backend: BoxBackend,
     measure: impl FnOnce() -> Result<Value, LaneError>,
 ) -> Result<Value, LaneError> {
+    backend.require_runtime()?;
     loop_home::validate_name(loop_name)
         .map_err(|error| LaneError::input("loop-name", error.message()))?;
     let begun = Instant::now();
@@ -857,7 +899,7 @@ fn run_with(
         .ok_or_else(|| LaneError::input("exercise-grant", "runs_root is absent"))?;
     let owner = Uid::effective().as_raw();
     let _runs = lock_runs_root(root, false, owner)?;
-    let live = candidates(root, loop_name)?;
+    let live = candidates(root, loop_name, backend)?;
     let names = live
         .iter()
         .map(|record| record["run"].clone())
@@ -865,7 +907,7 @@ fn run_with(
     let scan_wall = wall()?;
     if dry_run {
         return Ok(
-            json!({"schema":1,"command":"exercise","loop":loop_name,"dry_run":true,"live_runs":names,"refresh_trigger":"access JWT within ten minutes of expiry","forced_refresh_available":false,"checks":["owner custody and worker token file identities","protected helper publication evidence","simultaneous live helpers","token-only projection"],"walls":{"started":started_wall,"scan":scan_wall},"changed":false,"wall_seconds":begun.elapsed().as_secs_f64()}),
+            json!({"schema":1,"command":"exercise","backend":backend.name(),"loop":loop_name,"dry_run":true,"live_runs":names,"refresh_trigger":"access JWT within ten minutes of expiry","forced_refresh_available":false,"checks":["owner custody and worker token file identities","protected helper publication evidence","simultaneous live helpers","token-only projection"],"walls":{"started":started_wall,"scan":scan_wall},"changed":false,"wall_seconds":begun.elapsed().as_secs_f64()}),
         );
     }
     if live.is_empty() {
@@ -906,7 +948,7 @@ fn run_with(
         None
     };
     let comparison = changes(prior.as_ref(), &measurement);
-    let report = json!({"schema":1,"command":"exercise","loop":loop_name,"dry_run":false,"live_runs":names,"measurement":measurement,"change_from_previous":comparison,"walls":{"started":started_wall,"scan":scan_wall,"private":private_wall,"journal":wall()?},"reload":"requires a worker rejection and in-box readback","changed":true,"wall_seconds":begun.elapsed().as_secs_f64()});
+    let report = json!({"schema":1,"command":"exercise","backend":backend.name(),"loop":loop_name,"dry_run":false,"live_runs":names,"measurement":measurement,"change_from_previous":comparison,"walls":{"started":started_wall,"scan":scan_wall,"private":private_wall,"journal":wall()?},"reload":"requires a worker rejection and in-box readback","changed":true,"wall_seconds":begun.elapsed().as_secs_f64()});
     build::publish(
         &path,
         &serde_json::to_vec(&report)
@@ -918,7 +960,64 @@ fn run_with(
     Ok(report)
 }
 
-fn measure_private(owner_home: &Path, loop_name: &str) -> Result<Value, LaneError> {
+fn private_measure_words(
+    owner_home: &Path,
+    loop_name: &str,
+    backend: BoxBackend,
+) -> Result<Vec<String>, LaneError> {
+    Ok(vec![
+        "_exercise-measure".into(),
+        loop_name.into(),
+        "all".into(),
+        "--backend".into(),
+        backend.name().into(),
+        "--owner-home".into(),
+        crate::pinned::path_word(owner_home, "owner-home")?,
+    ])
+}
+
+/// Receive the explicit backend of a private credential exercise.
+///
+/// # Errors
+/// Refuses incomplete, reordered or repeated selectors and unknown vendors.
+pub fn parse_private_measure(args: &[String]) -> Result<(&str, &Path, BoxBackend), LaneError> {
+    let [
+        command,
+        loop_name,
+        run,
+        selector,
+        backend,
+        option,
+        owner_home,
+    ] = args
+    else {
+        return Err(LaneError::input(
+            "exercise-private",
+            "private exercise form is incomplete",
+        ));
+    };
+    if command != "_exercise-measure"
+        || run != "all"
+        || selector != "--backend"
+        || option != "--owner-home"
+    {
+        return Err(LaneError::input(
+            "exercise-private",
+            "private exercise needs all, --backend and --owner-home",
+        ));
+    }
+    Ok((
+        loop_name,
+        Path::new(owner_home),
+        BoxBackend::parse(backend)?,
+    ))
+}
+
+fn measure_private(
+    owner_home: &Path,
+    loop_name: &str,
+    backend: BoxBackend,
+) -> Result<Value, LaneError> {
     let owner = Uid::effective().as_raw();
     let config = owner_home.join(".config/loops").join(loop_name);
     let settings = Settings::read_beneath(&config.join("workers.toml"), owner_home)?;
@@ -933,15 +1032,8 @@ fn measure_private(owner_home: &Path, loop_name: &str) -> Result<Value, LaneErro
     let exe_word = crate::pinned::owner_executable_word(&exe, owner)?;
     let podman = Path::new("/usr/bin/podman");
     crate::pinned::owner_executable(podman, owner)?;
-    let argv = vec![
-        "unshare".into(),
-        exe_word,
-        "_exercise-measure".into(),
-        loop_name.into(),
-        "all".into(),
-        "--owner-home".into(),
-        crate::pinned::path_word(owner_home, "owner-home")?,
-    ];
+    let mut argv = vec!["unshare".into(), exe_word];
+    argv.extend(private_measure_words(owner_home, loop_name, backend)?);
     let output = build::run_checked_with_private_launch(
         podman,
         argv,
@@ -963,7 +1055,12 @@ fn measure_private(owner_home: &Path, loop_name: &str) -> Result<Value, LaneErro
 /// # Errors
 ///
 /// Refuses a missing private binding or unsafe credential file.
-pub fn private_measure(owner_home: &Path, loop_name: &str) -> Result<Value, LaneError> {
+pub fn private_measure(
+    owner_home: &Path,
+    loop_name: &str,
+    backend: BoxBackend,
+) -> Result<Value, LaneError> {
+    backend.require_runtime()?;
     if !home::private_is_active() {
         return Err(LaneError::input(
             "exercise-private",
@@ -994,7 +1091,7 @@ pub fn private_measure(owner_home: &Path, loop_name: &str) -> Result<Value, Lane
         .ok_or_else(|| LaneError::input("exercise-sign-in", "access token is absent"))?;
     let refresh_due = crate::credential::refresh_due_for_access(access, wall()?)?;
     let mut runs = Vec::new();
-    for record in candidates(root, loop_name)? {
+    for record in candidates(root, loop_name, backend)? {
         let run = record["run"].as_str().unwrap_or_default();
         let uid = record["worker_uid"]
             .as_u64()
@@ -1102,6 +1199,115 @@ mod tests {
         );
     }
 
+    /// ´test:unit:credential-exercise-selects-only-protected-backend´
+    #[test]
+    fn credential_exercise_selects_only_protected_backend() {
+        let words = |items: &[&str]| {
+            items
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(parse_options(&[]).unwrap(), (BoxBackend::Codex, false));
+        for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+            assert_eq!(
+                parse_options(&words(&["--dry-run", "--backend", backend.name()])).unwrap(),
+                (backend, true)
+            );
+            for saved in [BoxBackend::Codex, BoxBackend::Claude] {
+                assert_eq!(
+                    selected_record(&json!({"plan":{"backend":saved.name()}}), backend).unwrap(),
+                    saved == backend
+                );
+            }
+        }
+        for args in [
+            vec!["--backend"],
+            vec!["--dry-run", "--dry-run"],
+            vec!["--backend", "codex", "--backend", "claude"],
+        ] {
+            assert_eq!(
+                parse_options(&words(&args)).unwrap_err().kind,
+                "exercise-usage"
+            );
+        }
+        assert_eq!(
+            parse_options(&words(&["--backend", "foreign"]))
+                .unwrap_err()
+                .kind,
+            "backend-selection"
+        );
+        for value in [Value::Null, json!("foreign")] {
+            assert_eq!(
+                selected_record(&json!({"plan":{"backend":value}}), BoxBackend::Codex)
+                    .unwrap_err()
+                    .kind,
+                "backend-selection"
+            );
+        }
+    }
+
+    /// ´test:unit:claude-credential-exercise-refuses-before-owner-access´
+    #[test]
+    fn claude_credential_exercise_refuses_before_owner_access() {
+        let root = tempfile::tempdir().expect("private fixture");
+        let absent = root.path().join("absent-owner");
+        for dry_run in [false, true] {
+            let error = run_with(&absent, "alpha", dry_run, BoxBackend::Claude, || {
+                panic!("measurement entered behind closed gate")
+            })
+            .unwrap_err();
+            assert_eq!(error.kind, "backend-unavailable");
+            assert!(error.detail.starts_with("claude boxed launch awaits"));
+        }
+        assert_eq!(
+            private_measure(&absent, "alpha", BoxBackend::Claude)
+                .unwrap_err()
+                .kind,
+            "backend-unavailable"
+        );
+        assert!(!absent.exists());
+    }
+
+    /// ´test:unit:credential-exercise-private-selector-is-required´
+    #[test]
+    fn credential_exercise_private_selector_is_required() {
+        let home = Path::new("/synthetic-owner");
+        for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+            let words = private_measure_words(home, "alpha", backend).expect("private vector");
+            assert_eq!(
+                parse_private_measure(&words).expect("receive"),
+                ("alpha", home, backend)
+            );
+            for length in 0..words.len() {
+                assert_eq!(
+                    parse_private_measure(&words[..length]).unwrap_err().kind,
+                    "exercise-private"
+                );
+            }
+            let mut repeated = words.clone();
+            repeated.extend(["--backend".into(), backend.name().into()]);
+            assert_eq!(
+                parse_private_measure(&repeated).unwrap_err().kind,
+                "exercise-private"
+            );
+            for index in [0, 2, 3, 5] {
+                let mut malformed = words.clone();
+                malformed[index] = "foreign".into();
+                assert_eq!(
+                    parse_private_measure(&malformed).unwrap_err().kind,
+                    "exercise-private"
+                );
+            }
+            let mut unknown = words;
+            unknown[4] = "foreign".into();
+            assert_eq!(
+                parse_private_measure(&unknown).unwrap_err().kind,
+                "backend-selection"
+            );
+        }
+    }
+
     struct RestoreDriver(std::path::PathBuf);
 
     impl Drop for RestoreDriver {
@@ -1162,14 +1368,19 @@ mod tests {
         let _restore = RestoreDriver(driver);
         let pid = std::process::id();
         let start = crate::container_helper::process_start(pid).expect("helper tick");
-        publish_reservation(&reservation_path(&root, "R"), &json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"helper_pid":pid,"helper_start":start,"plan":{"home":owner_home.join("worker")}})).expect("reservation");
-        let report = run(owner_home, "alpha", true).expect("preview");
+        publish_reservation(&reservation_path(&root, "R"), &json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"helper_pid":pid,"helper_start":start,"plan":{"backend":"codex","home":owner_home.join("worker")}})).expect("reservation");
+        publish_reservation(&reservation_path(&root, "S"), &json!({
+            "schema":1,"phase":"started","loop":"alpha","run":"S","worker_uid":3001,
+            "helper_pid":pid,"helper_start":start,"plan":{"backend":"claude","home":owner_home.join("foreign-worker")}
+        })).expect("foreign live reservation");
+        let report = run(owner_home, "alpha", true, BoxBackend::Codex).expect("preview");
+        assert_eq!(report["backend"], "codex");
         assert_eq!(report["live_runs"], json!(["R"]));
         assert_eq!(report["forced_refresh_available"], false);
         assert!(!config.join("exercise-latest.json").exists());
         let _launch =
             crate::install::lock_loop_config(&config, true).expect("live launch admission");
-        let sampled = run_with(owner_home, "alpha", false, || {
+        let sampled = run_with(owner_home, "alpha", false, BoxBackend::Codex, || {
             Ok(json!({"schema":1,"custody":{"digest":"fixture"},"runs":[]}))
         })
         .expect("changing sample shares launch admission");

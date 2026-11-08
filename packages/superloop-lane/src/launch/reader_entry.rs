@@ -39,16 +39,14 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
         .first()
         .and_then(|word| operation(word))
         .ok_or_else(|| refused("exercise", "anchor-declaration", "operation"))?;
-    if matches!(mode, "exercise-measure" | "observed-hosts") {
+    if mode == "exercise-measure" {
+        return measure_selection(args);
+    }
+    if mode == "observed-hosts" {
         let [_, scope, run, option, home] = args else {
             return Err(refused(mode, "anchor-declaration", "vector"));
         };
-        let valid_run = if mode == "exercise-measure" {
-            run == "all"
-        } else {
-            crate::valid_run_name(run)
-        };
-        if !valid_run || option != "--owner-home" {
+        if !crate::valid_run_name(run) || option != "--owner-home" {
             return Err(refused(mode, "anchor-declaration", "vector"));
         }
         loop_home::validate_name(scope).map_err(|_| refused(mode, "anchor-declaration", "loop"))?;
@@ -76,6 +74,22 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
         scope,
         run,
         identity,
+        home,
+    })
+}
+
+fn measure_selection(args: &[String]) -> Result<Selection<'_>, LaneError> {
+    let mode = "exercise-measure";
+    if args.len() != 7 {
+        return Err(refused(mode, "anchor-declaration", "vector"));
+    }
+    let (scope, home, _) = exercise::parse_private_measure(args)?;
+    loop_home::validate_name(scope).map_err(|_| refused(mode, "anchor-declaration", "loop"))?;
+    Ok(Selection {
+        operation: mode,
+        scope,
+        run: "all",
+        identity: "",
         home,
     })
 }
@@ -244,7 +258,8 @@ fn dispatch(selection: &Selection<'_>, body: &[String]) -> Result<serde_json::Va
     } else if mode == "observed-hosts" {
         super::private_observed_hosts(selection.home, selection.scope, selection.run)
     } else if mode == "exercise-measure" {
-        exercise::private_measure(selection.home, selection.scope)
+        let (_, _, backend) = exercise::parse_private_measure(body)?;
+        exercise::private_measure(selection.home, selection.scope, backend)
     } else if mode == "exercise-harvest" {
         exercise::private_harvest_audit(
             selection.home,

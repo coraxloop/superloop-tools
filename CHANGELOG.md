@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Credential exercise selects one protected backend through the public and private forms, excludes foreign live runs and keeps Claude measurement gated before owner access (``prob:box:claude-boxed-workers``; ``proto:superlooplane:credential-exercise-backend``).
+
 - Add `superloop-capture-admit` for verified capture admission, manifest-bound identities, quota refusal and current/keep/lease-aware pruning (`prob:servers:capture-admit-admits-and-prunes-sealed-generations`).
 
 - Gated Claude harvest inventories and removes its selected worker state without preserving credentials or sessions, and refuses missing or foreign backend ownership (``prob:box:claude-resources-and-harvest-measured``; ``proto:superlooplane:harvest-selected-worker-state``).

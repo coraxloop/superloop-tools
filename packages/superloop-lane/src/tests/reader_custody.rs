@@ -86,16 +86,21 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
 fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::CommandSpec {
     let home_fd = fs::File::open(home).expect("home").into();
     let runs_fd = fs::File::open(runs).expect("runs").into();
-    let body = if matches!(kind, "measure" | "observed") {
+    let body = if kind == "measure" {
         Ok(vec![
-            if kind == "measure" {
-                "_exercise-measure"
-            } else {
-                "_observed-hosts"
-            }
-            .into(),
+            "_exercise-measure".into(),
             "alpha".into(),
-            if kind == "measure" { "all" } else { "R" }.into(),
+            "all".into(),
+            "--backend".into(),
+            "codex".into(),
+            "--owner-home".into(),
+            home.display().to_string(),
+        ])
+    } else if kind == "observed" {
+        Ok(vec![
+            "_observed-hosts".into(),
+            "alpha".into(),
+            "R".into(),
             "--owner-home".into(),
             home.display().to_string(),
         ])
