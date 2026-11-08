@@ -90,6 +90,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Native creation previews derive their ordered capability roles from the receiver definitions; the public preview fixture pins the complete required and optional lists, and partial-map exercise fixtures pin their runs-root alias refusal envelope (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - The network exercise acceptance executes its reservation-selected native capability through the production namespace entry after pathname replacement, distinguishing the held image-inspection exit from the replacement without claiming a measured box boundary (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Helper receipt names aliased home and runs roots as the runs-root refusal, and the credential handoff exercises the received client file through the refresh path while refusing a pathname fallback (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).

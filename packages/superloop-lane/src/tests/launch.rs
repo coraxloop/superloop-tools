@@ -2064,12 +2064,12 @@ exit 2
         Some("--verified-home-fd" | "--verified-runs-root-fd" | "--verified-letter-fd")
     )));
     assert_eq!(
-        external_preview["prepare_argv"]["anchor_manifest"]["operation"],
-        "make-home"
-    );
-    assert_eq!(
-        external_preview["prepare_argv"]["anchor_manifest"]["transport"],
-        "rights"
+        external_preview["prepare_argv"]["anchor_manifest"],
+        json!({"state":"bound-on-launch","transport":"rights","operation":"make-home",
+            "purposes":["owner-home","runs-root","entry-executable","podman-executable",
+                "hash-executable","configuration","loop-storage","private-storage",
+                "identity-executable","credential-client","credential-clock","letter-directory"],
+            "optional_purposes":["rotation-source"]})
     );
     assert_eq!(
         external_preview["helper_argv"]["argv"][10],

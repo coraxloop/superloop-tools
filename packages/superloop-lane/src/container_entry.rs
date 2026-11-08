@@ -830,12 +830,24 @@ mod tests {
                 assert_override_refusals();
                 return;
             }
-            let result = receive(&source, &std::io::stdin());
+            let operation = match case.as_str() {
+                "exercise-mounts" => "exercise-mounts",
+                "exercise-network" => "exercise-network",
+                "exercise-door-shape" => "exercise-door-shape",
+                "exercise-door-attribution" => "exercise-door-attribution",
+                _ => OPERATION,
+            };
+            let result = receive_for(&source, &std::io::stdin(), operation, None);
             if !matches!(case.as_str(), "valid" | "replaced" | "claude") {
                 let error = result.expect_err("custody refusal");
                 let expected = match case.as_str() {
                     "identity" | "entry" => "anchor-identity",
-                    "operation" | "home-runs-alias" => "anchor-declaration",
+                    "operation"
+                    | "home-runs-alias"
+                    | "exercise-mounts"
+                    | "exercise-network"
+                    | "exercise-door-shape"
+                    | "exercise-door-attribution" => "anchor-declaration",
                     "mode" => "anchor-mode",
                     "substituted" => "anchor-kind",
                     "owner" => "anchor-owner",
@@ -843,11 +855,18 @@ mod tests {
                     _ => panic!("unknown case"),
                 };
                 assert!(error.detail.contains(expected), "{error:?}");
-                if case == "home-runs-alias" {
-                    assert_eq!(error.kind, "container-anchor");
+                if case == "home-runs-alias" || case.starts_with("exercise-") {
+                    assert_eq!(
+                        error.kind,
+                        if case == "home-runs-alias" {
+                            "container-anchor"
+                        } else {
+                            "exercise-anchor"
+                        }
+                    );
                     assert_eq!(
                         error.detail,
-                        "anchor-declaration: operation=container-helper purpose=runs-root"
+                        format!("anchor-declaration: operation={operation} purpose=runs-root")
                     );
                 }
                 return;
@@ -951,6 +970,10 @@ mod tests {
                 "entry",
                 "operation",
                 "home-runs-alias",
+                "exercise-mounts",
+                "exercise-network",
+                "exercise-door-shape",
+                "exercise-door-attribution",
                 "mode",
                 "substituted",
                 "owner",
@@ -966,7 +989,12 @@ mod tests {
                 } else {
                     PathBuf::from("/usr/bin/podman")
                 };
-                let mut bundle = pin(
+                let mut bundle = pin_for_backend(
+                    if case.starts_with("exercise-") {
+                        case
+                    } else {
+                        OPERATION
+                    },
                     "alpha",
                     (fixture.path(), &home),
                     (&runs, &held_runs),
@@ -1024,7 +1052,11 @@ mod tests {
                     }
                 }
                 match case {
-                    "home-runs-alias" => {
+                    "home-runs-alias"
+                    | "exercise-mounts"
+                    | "exercise-network"
+                    | "exercise-door-shape"
+                    | "exercise-door-attribution" => {
                         let mut record = declaration.records[0].clone();
                         record.purpose = "runs-root".into();
                         record.slot = 1;

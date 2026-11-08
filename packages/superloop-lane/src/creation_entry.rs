@@ -231,7 +231,13 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
 }
 /// Describe capabilities without opening a changing launch's storage.
 pub(crate) fn preview() -> serde_json::Value {
-    serde_json::json!({"state":"bound-on-launch","transport":"rights","operation":OPERATION,"purposes":["owner-home","runs-root","entry-executable","podman-executable","hash-executable","configuration","loop-storage","private-storage","identity-executable","credential-client","credential-clock","letter-directory"],"optional_purposes":["rotation-source"]})
+    let purposes = crate::runtime_entry::PURPOSES
+        .iter()
+        .chain(EXTRA[..3].iter())
+        .copied()
+        .collect::<Vec<_>>();
+    serde_json::json!({"state":"bound-on-launch","transport":"rights","operation":OPERATION,
+        "purposes":purposes,"optional_purposes":&EXTRA[3..]})
 }
 
 fn invoke(

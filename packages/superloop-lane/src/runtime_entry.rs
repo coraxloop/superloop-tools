@@ -14,7 +14,7 @@ use loop_home::anchor::{
 use loop_home::{CommandDescriptors, CommandSpec, IoMode};
 
 const OPERATION: &str = "prepare-runtime";
-const PURPOSES: [&str; 9] = [
+pub(crate) const PURPOSES: [&str; 9] = [
     "owner-home",
     "runs-root",
     "entry-executable",
