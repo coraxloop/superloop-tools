@@ -714,6 +714,8 @@ A boxed worker is the confined and reviewable form of a producing worker: its fi
 
 **OPEN.** (2026-11-05, a part of (`prob:box:claude-boxed-workers`)) The box's recorded memory, process-count and CPU limits are measured against a Claude run, whose program and node runtime differ from Codex in size, and the harvest of ``.local`` (sources, outbox and inbox) is proved for a Claude run, with scratch, sessions and credentials excluded as for Codex.
 
+(2026-11-08, lane r002g84) The gated harvest implementation now selects the protected backend's worker state for descriptor inventory and removal, with Claude credentials and sessions excluded from preservation just as Codex state is. Synthetic contracts exercise writable state, a symlink to an outside sentinel, interrupted removal and foreign-vendor refusal (``proto:superlooplane:harvest-selected-worker-state``, of the superloop-lane package). Resource sizing and harvest of an actual Claude run remain for the owner-operated trial.
+
 **Problem (The confinement cutover repeats for Claude and disables its inner sandbox)** · `prob:box:claude-confinement-cutover-disables-the-inner-sandbox`
 
 **OPEN.** (2026-11-05, a part of (`prob:box:claude-boxed-workers`)) The confinement exercise case is repeated for Claude, showing the mode, an in-home destructive canary and refused outward and mount escapes, and the Claude program's inner sandbox and command approvals are then disabled for new boxed dispatches, because the box's confinement admits no inner sandbox and replaces it.

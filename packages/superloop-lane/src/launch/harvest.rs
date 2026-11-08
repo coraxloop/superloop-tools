@@ -432,7 +432,9 @@ fn stat_entry(
 
 /// These worker-owned roots are inventoried for removal but not read as harvest evidence.
 fn collected_only(relative: &Path) -> bool {
-    relative.starts_with(".codex") || relative.starts_with(".cache")
+    relative.starts_with(".codex")
+        || relative.starts_with(".claude")
+        || relative.starts_with(".cache")
 }
 
 fn valid_writable_collected_first(collection: &Value) -> bool {
@@ -479,6 +481,8 @@ fn owner_map(
     owner: u32,
     worker: u32,
 ) -> Result<BTreeMap<PathBuf, u32>, LaneError> {
+    let backend = crate::settings::BoxBackend::from_plan(&record["plan"])?;
+    let state = backend.state_leaf();
     let rows = record["plan"]["paths"]
         .as_array()
         .ok_or_else(|| LaneError::input("harvest-plan", "plan paths are absent"))?;
@@ -488,6 +492,15 @@ fn owner_map(
             .as_str()
             .ok_or_else(|| LaneError::input("harvest-plan", "plan path is absent"))?;
         if let Ok(relative) = Path::new(name).strip_prefix(home) {
+            if [".codex", ".claude"]
+                .into_iter()
+                .any(|root| root != state && relative.starts_with(root))
+            {
+                return Err(LaneError::input(
+                    "harvest-plan",
+                    "vendor state differs from the protected backend",
+                ));
+            }
             let uid = row["uid"]
                 .as_u64()
                 .and_then(|value| u32::try_from(value).ok())
@@ -507,7 +520,7 @@ fn owner_map(
             "home owner is absent from plan",
         ));
     }
-    for root in [".codex", ".cache"] {
+    for root in [state, ".cache"] {
         if owners.get(Path::new(root)) != Some(&worker) {
             return Err(LaneError::input(
                 "harvest-plan",
@@ -524,6 +537,7 @@ fn planned_uid(relative: &Path, owners: &BTreeMap<PathBuf, u32>) -> Result<u32, 
     }
     for root in [
         ".codex",
+        ".claude",
         ".cache",
         ".local/outbox",
         ".local/sources",
@@ -544,7 +558,15 @@ fn planned_uid(relative: &Path, owners: &BTreeMap<PathBuf, u32>) -> Result<u32, 
 fn fixed_child(relative: &Path) -> bool {
     let word = relative.to_string_lossy();
     if relative.components().count() == 1 {
-        return [".ssh", ".gitconfig", ".codex", ".cache", ".local"].contains(&word.as_ref());
+        return [
+            ".ssh",
+            ".gitconfig",
+            ".codex",
+            ".claude",
+            ".cache",
+            ".local",
+        ]
+        .contains(&word.as_ref());
     }
     if relative.components().count() == 2 && word.starts_with(".local/") {
         return [
@@ -1579,6 +1601,7 @@ pub(crate) mod tests {
                     .expect("entry mode");
             }
         }
+        record["plan"]["backend"] = json!("codex");
         record["plan"]["home"] = json!(plan.home);
         record["plan"]["paths"] = json!([
             {"path":plan.home,"uid":owner,"gid":owner},
@@ -1677,6 +1700,7 @@ pub(crate) mod tests {
         plan.home = home_parent.join("lane-alpha-R");
         plan.document = serde_json::from_str(include_str!("../../tests/fixtures/plan.json"))
             .expect("fixture plan document");
+        record["plan"]["backend"] = json!("codex");
         record["plan"]["home"] = json!(plan.home);
         record["plan"]["paths"] = json!([
             {"path":plan.home,"uid":owner,"gid":owner},
@@ -2284,7 +2308,7 @@ pub(crate) mod tests {
     #[test]
     fn harvest_owner_class_comes_from_plan_and_unplanned_input_refuses() {
         let home = Path::new("~/lane-alpha-R");
-        let record = json!({"plan":{"paths":[{"path":home,"uid":41001},{"path":home.join(".codex"),"uid":3000},{"path":home.join(".cache"),"uid":3000},{"path":home.join(".local"),"uid":41001},{"path":home.join(".local/inbox"),"uid":41001},{"path":home.join(".local/outbox"),"uid":3000}]}});
+        let record = json!({"plan":{"backend":"codex","paths":[{"path":home,"uid":41001},{"path":home.join(".codex"),"uid":3000},{"path":home.join(".cache"),"uid":3000},{"path":home.join(".local"),"uid":41001},{"path":home.join(".local/inbox"),"uid":41001},{"path":home.join(".local/outbox"),"uid":3000}]}});
         let owners = owner_map(&record, home, 41001, 3000).expect("plan owners");
         assert_eq!(
             planned_uid(Path::new(".local/inbox/letter.md"), &owners).expect("inbox owner"),
@@ -2420,6 +2444,160 @@ pub(crate) mod tests {
             .expect_err("writable evidence walk")
             .kind,
             "harvest-path"
+        );
+    }
+    /// # Panics
+    /// Panics if harvest selects state from anything other than the protected backend.
+    /// ´test:unit:harvest-state-owner-is-bound-to-the-backend´
+    #[test]
+    fn harvest_state_owner_is_bound_to_the_backend() {
+        let home = Path::new("/fixture/home");
+        for (backend, state, foreign) in [
+            ("codex", ".codex", ".claude"),
+            ("claude", ".claude", ".codex"),
+        ] {
+            let mut record = json!({"plan":{"backend":backend,"paths":[
+                {"path":home,"uid":41001},{"path":home.join(state),"uid":3000},
+                {"path":home.join(".cache"),"uid":3000}]}});
+            let owners = owner_map(&record, home, 41001, 3000).expect("selected owners");
+            assert_eq!(
+                planned_uid(&Path::new(state).join("sessions/one"), &owners).expect("state child"),
+                3000
+            );
+            assert_eq!(
+                planned_uid(Path::new(foreign), &owners)
+                    .expect_err("unplanned vendor")
+                    .kind,
+                "harvest-plan"
+            );
+            record["plan"]["paths"][1]["path"] = json!(home.join(foreign));
+            let error = owner_map(&record, home, 41001, 3000).expect_err("foreign state row");
+            assert_eq!(error.kind, "harvest-plan");
+            assert_eq!(
+                error.detail,
+                "vendor state differs from the protected backend"
+            );
+            record["plan"]["paths"][1]["path"] = json!(home.join(state));
+            record["plan"]["paths"][1]["uid"] = json!(41001);
+            assert_eq!(
+                owner_map(&record, home, 41001, 3000)
+                    .expect_err("state not worker owned")
+                    .kind,
+                "harvest-plan"
+            );
+            record["plan"]["backend"] = Value::Null;
+            assert_eq!(
+                owner_map(&record, home, 41001, 3000)
+                    .expect_err("missing binding")
+                    .kind,
+                "backend-selection"
+            );
+        }
+    }
+
+    fn claude_harvest_fixture() -> (tempfile::TempDir, PathBuf, Value) {
+        let fixture = tempfile::tempdir().expect("private TMPDIR fixture");
+        let home = fixture.path().join("lane-alpha-R");
+        let uid = Uid::effective().as_raw();
+        let mut rows = Vec::new();
+        for relative in [
+            "",
+            ".claude",
+            ".claude/projects",
+            ".cache",
+            ".local",
+            ".local/outbox",
+        ] {
+            let path = home.join(relative);
+            std::fs::create_dir_all(&path).expect("home leaf");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("private leaf");
+            rows.push(json!({"path":path,"uid":uid}));
+        }
+        let authority = home.join(".claude/.credentials.json");
+        std::fs::write(&authority, b"synthetic unreadable authority").expect("synthetic state");
+        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o200))
+            .expect("unreadable file");
+        let session = home.join(".claude/projects/session.jsonl");
+        std::fs::write(&session, b"synthetic session\n").expect("session stand-in");
+        std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o664))
+            .expect("writable disposable state");
+        let reply = home.join(".local/outbox/reply.md");
+        std::fs::write(&reply, b"preserved reply\n").expect("reply");
+        std::fs::set_permissions(&reply, std::fs::Permissions::from_mode(0o600))
+            .expect("reply mode");
+        let outside = fixture.path().join("outside");
+        std::fs::write(&outside, b"outside sentinel").expect("outside file");
+        std::os::unix::fs::symlink(&outside, home.join(".claude/projects/link"))
+            .expect("worker symlink");
+        let record = json!({"plan":{"backend":"claude","paths":rows}});
+        (fixture, home, record)
+    }
+
+    /// # Panics
+    /// Panics if Claude state is read as evidence or cannot be removed and resumed safely.
+    /// ´test:unit:claude-harvest-inventories-state-without-preserving-it´
+    #[test]
+    fn claude_harvest_inventories_state_without_preserving_it() {
+        let (fixture, home, record) = claude_harvest_fixture();
+        let uid = Uid::effective().as_raw();
+        let authority = home.join(".claude/.credentials.json");
+        let reply = home.join(".local/outbox/reply.md");
+        let owners = owner_map(&record, &home, uid, uid).expect("protected Claude owners");
+        let held: OwnedFd = std::fs::File::open(&home).expect("home descriptor").into();
+        let parent: OwnedFd = std::fs::File::open(fixture.path())
+            .expect("parent descriptor")
+            .into();
+        let mut inventory = Inventory::default();
+        plan_entries(&held, Path::new(""), &owners, uid, &mut inventory, 0)
+            .expect("inventory without state reads");
+        assert_eq!(
+            inventory.preserved, 2,
+            "only outbox and reply are preserved"
+        );
+        assert_eq!(
+            inventory.preserved_contributors,
+            BTreeMap::from([(".local/outbox".into(), 2)])
+        );
+        let (planned, first) = planned_removals(&held, &owners, uid).expect("removal plan");
+        assert!(
+            planned
+                .iter()
+                .any(|path| path == ".claude/.credentials.json")
+        );
+        assert_eq!(first.as_deref(), Some(".claude/projects/link"));
+        std::fs::create_dir(home.join(".codex")).expect("foreign vendor directory");
+        assert_eq!(
+            planned_removals(&held, &owners, uid)
+                .expect_err("unplanned vendor directory")
+                .kind,
+            "harvest-plan"
+        );
+        std::fs::remove_dir(home.join(".codex")).expect("remove foreign directory");
+        let mut receipt = collection();
+        receipt["planned"] = json!(planned);
+        receipt["writable_collected_first"] = json!(first);
+        harvest_fields(&json!({"harvest_agreement":agreement(),"collection":receipt}))
+            .expect("Claude collection evidence");
+        for path in planned.iter().filter(|path| path.starts_with(".claude/")) {
+            remove_entry(&held, &parent, "lane-alpha-R", path, uid, uid, &owners)
+                .expect("state removal");
+        }
+        assert!(!authority.exists());
+        let (remaining, _) =
+            planned_removals(&held, &owners, uid).expect("resumed collection plan");
+        assert!(remaining.iter().any(|path| path == ".claude"));
+        assert!(!remaining.iter().any(|path| path.starts_with(".claude/")));
+        remove_entry(&held, &parent, "lane-alpha-R", ".claude", uid, uid, &owners)
+            .expect("state root removal");
+        assert!(!home.join(".claude").exists());
+        assert_eq!(
+            std::fs::read(fixture.path().join("outside")).expect("outside retained"),
+            b"outside sentinel"
+        );
+        assert_eq!(
+            std::fs::read(&reply).expect("preserved reply untouched"),
+            b"preserved reply\n"
         );
     }
 }
