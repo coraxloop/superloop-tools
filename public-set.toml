@@ -1970,6 +1970,9 @@ pattern = "packages/superloop-lane/src/launch/report.rs"
 pattern = "packages/superloop-lane/src/launch/report/tests.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/launch/reservation_census.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/retire.rs"
 
 [[include.rows]]

@@ -49,6 +49,7 @@ pub(crate) mod probe;
 pub mod reaping;
 pub mod repin_door;
 pub mod report;
+mod reservation_census;
 pub mod retire;
 pub mod rotation;
 pub mod rounds;
@@ -1231,6 +1232,14 @@ fn read_reservation_checked(path: &Path, check_node: bool) -> Result<Option<Valu
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)
     };
+    read_reservation_file(opened, path, check_node)
+}
+
+fn read_reservation_file(
+    opened: std::io::Result<File>,
+    path: &Path,
+    check_node: bool,
+) -> Result<Option<Value>, LaneError> {
     let file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1384,15 +1393,6 @@ pub(crate) fn select_free_uid(
     select_free_uid_with_census(root, run, base, count).map(|(uid, _skipped)| uid)
 }
 
-fn census_reservation(path: &Path) -> Result<Option<Value>, LaneError> {
-    read_reservation(path).map_err(|error| {
-        LaneError::input(
-            "launch-reservation",
-            format!("{}: {}", path.display(), error.detail),
-        )
-    })
-}
-
 #[cfg(test)]
 fn select_free_uid_with_census(
     root: &Path,
@@ -1421,99 +1421,7 @@ fn select_free_uid_with_history(
     count: u32,
     reserved: &std::collections::BTreeSet<u32>,
 ) -> Result<(u32, Vec<String>), LaneError> {
-    let own_reservation = census_reservation(&reservation_path(root, run))?;
-    let pending_uid = if let Some(record) = &own_reservation
-        && (record["phase"] == "preparing"
-            || (record["phase"] == "failed" && record["pre_driver_failure"].is_string()))
-    {
-        Some(
-            record["worker_uid"]
-                .as_u64()
-                .and_then(|uid| u32::try_from(uid).ok())
-                .filter(|uid| *uid >= base && *uid < base + count)
-                .ok_or_else(|| {
-                    LaneError::input("uid-table", "pending worker UID is outside the grant")
-                })?,
-        )
-    } else {
-        None
-    };
-    if pending_uid.is_none()
-        && (own_reservation.is_some() || fs::symlink_metadata(root.join(run)).is_ok())
-    {
-        return Err(LaneError::input(
-            "already-exists",
-            format!("{} already exists", root.join(run).display()),
-        ));
-    }
-    let driver_dir = root.join(run);
-    let identity_dir = protected_identity_dir(&driver_dir)?;
-    if pending_uid.is_none()
-        && (fs::symlink_metadata(&identity_dir).is_ok()
-            || (1..=4).any(|attempt| {
-                protected_identifier_path(&driver_dir, attempt)
-                    .is_ok_and(|path| fs::symlink_metadata(path).is_ok())
-            }))
-    {
-        return Err(LaneError::input(
-            "already-exists",
-            format!("{} has protected launch inputs", driver_dir.display()),
-        ));
-    }
-    let mut used = reserved.clone();
-    let mut skipped = Vec::new();
-    for entry in fs::read_dir(root)
-        .map_err(|error| LaneError::input("runs-root", format!("{}: {error}", root.display())))?
-    {
-        let entry = entry.map_err(|error| LaneError::input("runs-root", error.to_string()))?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(".reservation-") && name.ends_with(".json") {
-            let record = census_reservation(&entry.path())?.ok_or_else(|| {
-                LaneError::input(
-                    "launch-reservation",
-                    "reservation disappeared during census",
-                )
-            })?;
-            let uid = record["worker_uid"]
-                .as_u64()
-                .and_then(|uid| u32::try_from(uid).ok())
-                .ok_or_else(|| LaneError::input("uid-table", "reservation has no worker UID"))?;
-            used.insert(uid);
-            continue;
-        }
-        if name.starts_with('.') {
-            continue;
-        }
-        let path = entry.path();
-        let meta = fs::symlink_metadata(&path).map_err(|error| {
-            LaneError::input("runs-root", format!("{}: {error}", path.display()))
-        })?;
-        if !meta.is_dir() {
-            continue;
-        }
-        let Some(saved) = census_reservation(&reservation_path(root, &name))? else {
-            skipped.push(name.into_owned());
-            continue;
-        };
-        let uid = saved["worker_uid"]
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| {
-                LaneError::input("uid-table", format!("{} has no worker UID", path.display()))
-            })?;
-        used.insert(uid);
-    }
-    skipped.sort();
-    pending_uid
-        .or_else(|| (base..base + count).find(|uid| !used.contains(uid)))
-        .map(|uid| (uid, skipped))
-        .ok_or_else(|| {
-            LaneError::input(
-                "uid-range",
-                format!("{} has no free worker identity", root.display()),
-            )
-        })
+    reservation_census::select(root, run, base, count, reserved)
 }
 
 /// Read one free identity while holding the runs-root lock without changing disk.
