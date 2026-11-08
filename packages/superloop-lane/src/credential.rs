@@ -48,6 +48,14 @@ fn now_seconds() -> Result<u64, LaneError> {
         .map_err(|error| failure("credential-clock", error.to_string()))
 }
 
+fn now_milliseconds() -> Result<u64, LaneError> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| failure("credential-clock", error.to_string()))?;
+    u64::try_from(elapsed.as_millis())
+        .map_err(|error| failure("credential-clock", error.to_string()))
+}
+
 fn credential_spawn_error(
     program: &Path,
     kind: &'static str,
@@ -1211,9 +1219,14 @@ fn prepare_claude_run(
     now: u64,
 ) -> Result<(), LaneError> {
     let home = claude_sign_in_dir(owner_home, loop_name);
-    prepare_claude_run_at(&home, run_home, worker_uid, now, || {
-        claude_refresh_program(&home)
-    })
+    prepare_claude_run_at(
+        &home,
+        run_home,
+        worker_uid,
+        now,
+        || claude_refresh_program(&home),
+        now_milliseconds,
+    )
 }
 
 fn prepare_claude_run_at(
@@ -1222,6 +1235,7 @@ fn prepare_claude_run_at(
     worker_uid: u32,
     now: u64,
     refresh_program: impl Fn() -> Result<(), LaneError>,
+    publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
 ) -> Result<(), LaneError> {
     let owner = owner_identity().0;
     let directory = open_dir(home, owner, owner, 0o700)?;
@@ -1234,7 +1248,7 @@ fn prepare_claude_run_at(
         now,
         || {},
     )?;
-    if source.expires_ms <= now.saturating_mul(1000) {
+    if source.expires_ms <= publication_time_ms()? {
         return Err(failure(
             "credential-refresh",
             "Claude owner program left expired access authority",
@@ -1633,38 +1647,54 @@ mod tests {
     /// ´test:unit:claude-preparation-refuses-expired-program-result´
     #[test]
     fn claude_preparation_refuses_expired_program_result() {
-        let fixture = claude_fixture_root();
-        let document = claude_document(1_800_000_000_000);
-        let home = fixture_claude(fixture.path(), &document);
-        let run = fixture.path().join("run");
-        fs::create_dir_all(run.join(".claude")).expect("worker home");
-        for path in [&run, &run.join(".claude")] {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                .expect("private worker home");
-        }
-        let calls = std::cell::Cell::new(0);
-        let error = prepare_claude_run_at(&home, &run, owner_identity().0, 1_800_000_000, || {
-            calls.set(calls.get() + 1);
-            let directory =
-                open_dir(&home, owner_identity().0, owner_identity().0, 0o700).expect("owner home");
-            assert!(
-                lock_with(&directory, FlockArg::LockExclusiveNonblock).is_err(),
-                "refresh must hold the owner lock"
+        for (start, published) in [
+            (1_800_000_000, 1_800_000_000_000),
+            (1_799_999_990, 1_800_000_000_000),
+            (1_799_999_990, 1_800_000_000_001),
+        ] {
+            let fixture = claude_fixture_root();
+            let document = claude_document(1_800_000_000_000);
+            let home = fixture_claude(fixture.path(), &document);
+            let run = fixture.path().join("run");
+            fs::create_dir_all(run.join(".claude")).expect("worker home");
+            for path in [&run, &run.join(".claude")] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                    .expect("private worker home");
+            }
+            let calls = std::cell::Cell::new(0);
+            let error = prepare_claude_run_at(
+                &home,
+                &run,
+                owner_identity().0,
+                start,
+                || {
+                    calls.set(calls.get() + 1);
+                    let directory = open_dir(&home, owner_identity().0, owner_identity().0, 0o700)
+                        .expect("owner home");
+                    assert!(
+                        lock_with(&directory, FlockArg::LockExclusiveNonblock).is_err(),
+                        "refresh must hold the owner lock"
+                    );
+                    Ok(())
+                },
+                || {
+                    assert_eq!(calls.get(), 1, "publication clock must follow the program");
+                    Ok(published)
+                },
+            )
+            .expect_err("successful program did not supply unexpired authority");
+            assert_eq!(calls.get(), 1);
+            assert_eq!(error.kind, "credential-refresh");
+            assert_eq!(
+                error.detail,
+                "Claude owner program left expired access authority"
             );
-            Ok(())
-        })
-        .expect_err("successful program did not supply unexpired authority");
-        assert_eq!(calls.get(), 1);
-        assert_eq!(error.kind, "credential-refresh");
-        assert_eq!(
-            error.detail,
-            "Claude owner program left expired access authority"
-        );
-        assert!(!run.join(".claude/.credentials.json").exists());
-        assert_eq!(
-            fs::read_to_string(home.join(".credentials.json")).expect("owner source"),
-            document.to_string()
-        );
+            assert!(!run.join(".claude/.credentials.json").exists());
+            assert_eq!(
+                fs::read_to_string(home.join(".credentials.json")).expect("owner source"),
+                document.to_string()
+            );
+        }
     }
 
     fn claude_document(expires_ms: u64) -> Value {
@@ -1823,12 +1853,13 @@ mod tests {
             0o600
         );
         drop(refresh_lock);
-        prepare_claude_run(
-            fixture.path(),
-            "alpha",
+        prepare_claude_run_at(
+            &home,
             &run,
             owner_identity().0,
             1_700_000_000,
+            || panic!("current authority must not refresh"),
+            || Ok(1_700_000_000_000),
         )
         .expect("production preparation with current owner authority");
         assert_eq!(
