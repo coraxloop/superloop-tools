@@ -5,7 +5,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`the_repository_owner_surface_reconciles_in_both_directions`] | owners | The declared partition attributes every live path exactly once to the 27 manifest owners and the crateless repository owner, with the declared shape exclusions and the imported generic owner added without a partition; its 38 crate-to-crate may-cite rows equal internal path dependencies, its ten edges to the imported generic owner are declaration-authoritative and reach no partition of this tree, seven edges reach the crateless repository owner, and no imported owner receives a manifest edge. |
+//! | [`the_repository_owner_surface_reconciles_in_both_directions`] | owners | The declared partition attributes every live path exactly once to the 28 manifest owners and the crateless repository owner, with the declared shape exclusions and the imported generic owner added without a partition; its 40 crate-to-crate may-cite rows equal internal path dependencies, its ten edges to the imported generic owner are declaration-authoritative and reach no partition of this tree, twelve edges reach the crateless repository owner, and no imported owner receives a manifest edge. |
 
 //! Repository owner-partition and manifest-reach integration tests.
 
@@ -104,7 +104,7 @@ fn reconcile_partition(plan: &ExecutionPlan) -> BTreeMap<PathBuf, String> {
     assert_eq!(imported_owners, BTreeSet::from([IMPORTED_OWNER.to_owned()]));
     expected_owners.extend(imported_owners);
     assert_eq!(expected_owners, declared_owners);
-    assert_eq!(owner_by_directory.len(), 27);
+    assert_eq!(owner_by_directory.len(), 28);
     assert_eq!(plan.workspace().findings().len(), 0);
 
     let mut path_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -127,7 +127,7 @@ fn reconcile_partition(plan: &ExecutionPlan) -> BTreeMap<PathBuf, String> {
         assert_eq!(owner, expected, "{}", path.display());
         *path_counts.entry(owner.clone()).or_default() += 1;
     }
-    assert_eq!(path_counts.len(), 28);
+    assert_eq!(path_counts.len(), 29);
     assert!(path_counts.values().all(|count| *count > 0));
 
     owner_by_directory
@@ -204,12 +204,12 @@ fn manifest_reach(
 }
 
 /// The declared partition attributes every live path exactly once to the
-/// 27 manifest owners and the crateless repository owner, with the declared shape
+/// 28 manifest owners and the crateless repository owner, with the declared shape
 /// exclusions and the imported generic owner added without a partition;
-/// its 38 crate-to-crate may-cite rows equal internal path dependencies,
+/// its 40 crate-to-crate may-cite rows equal internal path dependencies,
 /// its ten edges to the imported
 /// generic owner are declaration-authoritative and reach no partition of this
-/// tree, seven edges reach the crateless repository owner, and no imported owner
+/// tree, twelve edges reach the crateless repository owner, and no imported owner
 /// receives a manifest edge.
 ///
 /// # Panics
@@ -270,6 +270,10 @@ fn the_repository_owner_surface_reconciles_in_both_directions() {
     assert_eq!(derived_reach, crate_reach);
     assert_eq!(imported_reach, expected_imported_reach);
     let expected_repository_reach = BTreeSet::from([
+        (
+            "SUPERLOOPCAPTUREADMIT".to_owned(),
+            REPOSITORY_OWNER.to_owned(),
+        ),
         ("PERMISSIONTRIAGE".to_owned(), REPOSITORY_OWNER.to_owned()),
         (
             "SUPERLOOPCHATEXPORT".to_owned(),
@@ -295,6 +299,6 @@ fn the_repository_owner_surface_reconciles_in_both_directions() {
     assert_eq!(repository_reach, expected_repository_reach);
     assert_eq!(
         declared_reach.len(),
-        38 + imported_reach.len() + repository_reach.len()
+        40 + imported_reach.len() + repository_reach.len()
     );
 }

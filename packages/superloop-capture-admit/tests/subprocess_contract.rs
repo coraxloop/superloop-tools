@@ -361,3 +361,58 @@ fn legal_generation_names_do_not_collide_with_staging_and_busy_store_refuses() {
     f.refused(&["--name", "blocked"], "store-busy");
     drop(lock);
 }
+
+/// # Panics
+/// Panics if fixture setup fails or the quota hint disagrees with protected bytes.
+/// ´test:integration:quota-hint-names-reclaimable-generations-and-sufficiency´
+#[test]
+fn quota_hint_names_reclaimable_generations_and_sufficiency() {
+    let f = Fixture::new();
+    f.admit("first");
+    f.admit("second");
+    f.admit("current");
+    f.refused(
+        &["--name", "candidate", "--quota-bytes", "26"],
+        "prune candidates=first,second reclaimable=26 sufficient=true",
+    );
+    f.refused(
+        &["--name", "candidate", "--quota-bytes", "12"],
+        "sufficient=false",
+    );
+}
+
+/// # Panics
+/// Panics if fixture setup fails or the byte paths and streamed payload differ.
+/// ´test:integration:byte-paths-and-multiple-copy-chunks-are-preserved´
+#[test]
+fn byte_paths_and_multiple_copy_chunks_are_preserved() {
+    use std::io::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    let f = Fixture::new();
+    let payload = vec![0xa5; 131_073];
+    fs::write(f.source.join("large part"), &payload).unwrap();
+    let raw_name = std::ffi::OsStr::from_bytes(b"\xff");
+    fs::write(f.source.join(raw_name), b"").unwrap();
+    let mut manifest = fs::read(&f.manifest).unwrap();
+    writeln!(
+        manifest,
+        "{} {} large part",
+        hex(&Sha256::digest(&payload)),
+        payload.len()
+    )
+    .unwrap();
+    write!(manifest, "{} 0 ", hex(&Sha256::digest(b""))).unwrap();
+    manifest.extend_from_slice(b"\xff\n");
+    fs::write(&f.manifest, manifest).unwrap();
+    f.admit("bytes");
+    assert_eq!(
+        fs::read(f.store.join("current/large part")).unwrap(),
+        payload
+    );
+    assert!(f.store.join("current").join(raw_name).is_file());
+    assert!(
+        fs::read_to_string(f.store.join("receipts/bytes.receipt"))
+            .unwrap()
+            .ends_with("files=3\nbytes=131086\n")
+    );
+}

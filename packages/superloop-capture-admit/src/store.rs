@@ -221,8 +221,14 @@ fn admit(
             .filter(|(n, _)| !protected.contains(n))
             .map(|(n, _)| n.as_str())
             .collect();
+        let reclaimable: u64 = existing
+            .iter()
+            .filter(|(n, _)| !protected.contains(n))
+            .map(|(_, size)| size)
+            .sum();
+        let sufficient = manifest.bytes <= quota && used - reclaimable <= quota - manifest.bytes;
         return Err(format!(
-            "quota-exceeded: used={used} candidate={} quota={quota}; prune candidates={}",
+            "quota-exceeded: used={used} candidate={} quota={quota}; prune candidates={} reclaimable={reclaimable} sufficient={sufficient}",
             manifest.bytes,
             reclaim.join(",")
         )

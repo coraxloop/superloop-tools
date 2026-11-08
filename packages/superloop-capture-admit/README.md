@@ -10,7 +10,7 @@ superloop-capture-admit prune --store ROOT
 superloop-capture-admit --version
 ```
 
-NAME is one to 200 ASCII letters, digits, dots, underscores or hyphens, excluding `.` and `..`. An existing NAME with the same manifest digest is `already-sealed`, without copying or changing the current selector; a different digest refuses. Admission serializes store operations through an exclusive nonblocking lock on the pinned root directory; contention refuses as `store-busy` without a lock file. The default quota is 5,000,000,000 bytes across all sealed generations plus the candidate, before any copy; a quota refusal lists prune candidates. It does not automatically prune.
+NAME is one to 200 ASCII letters, digits, dots, underscores or hyphens, excluding `.` and `..`. An existing NAME with the same manifest digest is `already-sealed`, without copying or changing the current selector; a different digest refuses. Admission serializes store operations through an exclusive nonblocking lock on the pinned root directory; contention refuses as `store-busy` without a lock file. The default quota is 5,000,000,000 bytes across all sealed generations plus the candidate, before any copy; a quota refusal lists prune candidates, their reclaimable bytes and whether pruning suffices. It does not automatically prune.
 
 ## Manifest and copy · `sec:captureadmit:manifest`
 
