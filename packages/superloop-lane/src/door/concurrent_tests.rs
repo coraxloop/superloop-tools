@@ -528,6 +528,45 @@ fn door_exercise_retries_concurrent_admission() {
     );
 }
 
+fn admission_final(client: &mut UnixStream) -> serde_json::Value {
+    let mut observed_credit = 0;
+    loop {
+        let frame = frame_read(client).expect("admission progress or final");
+        if frame["type"] != "request-lock-wait" {
+            assert_eq!(frame["type"], "final");
+            return frame;
+        }
+        let credit = frame["wait_ms"].as_u64().expect("credit milliseconds");
+        assert!(credit >= observed_credit && credit <= 120_000);
+        observed_credit = credit;
+    }
+}
+
+fn admission_release_hook(
+    last_interval: bool,
+    contended: std::sync::mpsc::Sender<()>,
+    released: std::sync::mpsc::Receiver<()>,
+    store: Store,
+    holder: std::sync::mpsc::Sender<thread::JoinHandle<()>>,
+) {
+    let hook = if last_interval {
+        &super::ADMISSION_LAST_POLL
+    } else {
+        &super::ADMISSION_CONTENDED
+    };
+    hook.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            contended.send(()).expect("overlap contended");
+            released
+                .recv_timeout(Duration::from_secs(5))
+                .expect("first guard released");
+            holder
+                .send(referral_contender(&store, true).expect("competing writer"))
+                .expect("holder thread retained");
+        }));
+    });
+}
+
 /// # Panics
 /// Panics only if admission does not resume after the first request completes.
 /// ´test:unit:door-concurrent-request-admits-after-release´
@@ -551,21 +590,17 @@ fn door_concurrent_request_admits_after_release() {
             .expect("overlap EOF");
         let (contended_tx, contended_rx) = std::sync::mpsc::channel();
         let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let (holder_tx, holder_rx) = std::sync::mpsc::channel();
+        let holder_store = fixture.store();
         let second = thread::spawn(move || {
-            let hook = if last_interval {
-                &super::ADMISSION_LAST_POLL
-            } else {
-                &super::ADMISSION_CONTENDED
-            };
-            hook.with(|slot| {
-                *slot.borrow_mut() = Some(Box::new(move || {
-                    contended_tx.send(()).expect("overlap contended");
-                    released_rx
-                        .recv_timeout(Duration::from_secs(5))
-                        .expect("first guard released");
-                }));
-            });
-            serve_request(
+            admission_release_hook(
+                last_interval,
+                contended_tx,
+                released_rx,
+                holder_store,
+                holder_tx,
+            );
+            let result = serve_request(
                 &mut second_server,
                 &concurrent_registration(3000),
                 3000,
@@ -576,14 +611,20 @@ fn door_concurrent_request_admits_after_release() {
                 Some(&rubric(Some("allow"))),
                 Some(&second_store),
                 Instant::now(),
-            )
+            );
+            holder_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("holder thread")
+                .join()
+                .expect("holder released after progress");
+            result
         });
         contended_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("overlap waiting");
         assert_eq!(store.list_run("R").expect("before release").len(), 1);
         label(&store, &first_id, "allow");
-        let first_reply = frame_read(&mut client).expect("first reply");
+        let first_reply = admission_final(&mut client);
         assert_eq!(first_reply["reason"], "door-complete");
         first.join().expect("first handler").expect("first served");
         released_tx.send(()).expect("resume admission poll");
@@ -601,7 +642,13 @@ fn door_concurrent_request_admits_after_release() {
             thread::sleep(Duration::from_millis(5));
         };
         label(&store, &second_id, "allow");
-        let reply = frame_read(&mut second_client).expect("overlap reply");
+        let reply = admission_final(&mut second_client);
+        assert!(
+            reply["request_lock_wait_credit_ms"]
+                .as_u64()
+                .expect("credit")
+                >= 50
+        );
         second
             .join()
             .expect("second handler")
