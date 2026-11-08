@@ -2009,7 +2009,8 @@ pub(crate) fn spawn_credential_authority_at(
                     backend,
                     &endpoint,
                 );
-                if let Some(evidence) = crate::credential::evidence_for_check(&result, !checked)
+                if let Some(evidence) =
+                    crate::credential::evidence_for_check(&result, !checked, backend)
                     && let Err(error) =
                         crate::credential::publish_evidence(&refresh_driver_dir, &evidence)
                 {

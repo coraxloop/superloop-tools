@@ -465,6 +465,7 @@ mod tests {
         let evidence = crate::credential::evidence_for_check(
             &Ok(crate::credential::fixture_report(1_900_000_000)),
             true,
+            crate::settings::BoxBackend::Codex,
         )
         .expect("first check evidence");
         crate::credential::publish_evidence(&root.join("R"), &evidence).expect("fixture evidence");
@@ -551,8 +552,12 @@ mod tests {
             "credential-refresh",
             "fixture vendor refusal",
         ));
-        let vendor_evidence = crate::credential::evidence_for_check(&Ok(vendor_report), false)
-            .expect("vendor refusal evidence");
+        let vendor_evidence = crate::credential::evidence_for_check(
+            &Ok(vendor_report),
+            false,
+            crate::settings::BoxBackend::Codex,
+        )
+        .expect("vendor refusal evidence");
         crate::credential::publish_evidence(&root.join("R"), &vendor_evidence)
             .expect("vendor refusal publication");
         let vendor_report = run(home, "alpha").expect("vendor refusal census");
@@ -562,8 +567,12 @@ mod tests {
                 "refresh_due_unix":1_899_999_400_u64,"evidence_state":"refused","refused":"credential-refresh"})
         );
         let source_error = LaneError::input("credential-sign-in", "source cannot be read");
-        let failure_evidence = crate::credential::evidence_for_check(&Err(source_error), false)
-            .expect("failed check evidence");
+        let failure_evidence = crate::credential::evidence_for_check(
+            &Err(source_error),
+            false,
+            crate::settings::BoxBackend::Codex,
+        )
+        .expect("failed check evidence");
         crate::credential::publish_evidence(&root.join("R"), &failure_evidence)
             .expect("failed check replaces measurement");
         let failed_check_report = run(home, "alpha").expect("refused check census");

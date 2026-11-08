@@ -1,5 +1,6 @@
 //! Owner-side credential authority and backend-specific worker encodings.
 
+use crate::settings::BoxBackend;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
@@ -563,9 +564,28 @@ pub(crate) fn publish_evidence(driver_dir: &Path, document: &Value) -> Result<()
     .map_err(|error| failure("credential-evidence", error.detail))
 }
 
+fn evidence_provider_valid(document: &Value) -> bool {
+    match document["schema"].as_u64() {
+        Some(1) => {
+            document["host"] == REFRESH_HOST
+                && document.get("backend").is_none()
+                && document.get("provider").is_none()
+        }
+        Some(2) => {
+            document["backend"] == "claude"
+                && document.get("host").is_none()
+                && document["provider"]
+                    == json!({
+                        "kind":"owner-program", "program":"/usr/bin/claude",
+                        "required_sha256":CLAUDE_SCHEMA_PROGRAM_SHA256,
+                    })
+        }
+        _ => false,
+    }
+}
+
 fn validate_evidence(document: &Value) -> Result<(), LaneError> {
-    if document["schema"] != 1
-        || document["host"] != REFRESH_HOST
+    if !evidence_provider_valid(document)
         || !matches!(
             document["state"].as_str(),
             Some("current" | "published" | "partial" | "refused")
@@ -573,7 +593,7 @@ fn validate_evidence(document: &Value) -> Result<(), LaneError> {
     {
         return Err(failure(
             "credential-evidence",
-            "schema, host or state is invalid",
+            "schema, provider or state is invalid",
         ));
     }
     let expires = document
@@ -738,8 +758,7 @@ pub(crate) fn read_evidence_bytes(
 
 // Census observes temporal defects; publication still uses validate_evidence.
 fn validate_evidence_envelope(document: &Value) -> Result<(), LaneError> {
-    if document["schema"] != 1
-        || document["host"] != REFRESH_HOST
+    if !evidence_provider_valid(document)
         || !matches!(
             document["state"].as_str(),
             Some("current" | "published" | "partial" | "refused")
@@ -1379,10 +1398,10 @@ pub fn prepare_run(
     loop_name: &str,
     run_home: &Path,
     worker_uid: u32,
-    backend: crate::settings::BoxBackend,
+    backend: BoxBackend,
 ) -> Result<(), LaneError> {
     backend.require_runtime()?;
-    if backend == crate::settings::BoxBackend::Claude {
+    if backend == BoxBackend::Claude {
         return prepare_claude_run(owner_home, loop_name, run_home, worker_uid, now_seconds()?);
     }
     let _guard = lock(owner_home, loop_name)?;
@@ -1400,10 +1419,10 @@ pub(crate) fn publish_round(
     loop_name: &str,
     run_home: &Path,
     worker_uid: u32,
-    backend: crate::settings::BoxBackend,
+    backend: BoxBackend,
 ) -> Result<Value, LaneError> {
     backend.require_runtime()?;
-    if backend == crate::settings::BoxBackend::Claude {
+    if backend == BoxBackend::Claude {
         let expected_program = claude_program_pin(owner_home, loop_name)?;
         let home = claude_sign_in_dir(owner_home, loop_name);
         return publish_claude_round_at(
@@ -1440,13 +1459,9 @@ fn publication_receipt(stamp: FileStamp) -> Result<Value, LaneError> {
 /// # Errors
 ///
 /// Refuses absent, unreadable or malformed sign-in data.
-pub fn preflight(
-    owner_home: &Path,
-    loop_name: &str,
-    backend: crate::settings::BoxBackend,
-) -> Result<(), LaneError> {
+pub fn preflight(owner_home: &Path, loop_name: &str, backend: BoxBackend) -> Result<(), LaneError> {
     backend.require_runtime()?;
-    if backend == crate::settings::BoxBackend::Claude {
+    if backend == BoxBackend::Claude {
         let expected_program = claude_program_pin(owner_home, loop_name)?;
         let home = claude_sign_in_dir(owner_home, loop_name);
         return with_claude_authority(
@@ -1486,8 +1501,9 @@ pub(crate) struct RefreshReport {
 pub(crate) fn evidence_for_check(
     result: &Result<RefreshReport, LaneError>,
     first_check: bool,
+    backend: BoxBackend,
 ) -> Option<Value> {
-    match result {
+    let mut evidence = match result {
         Err(error) => Some(json!({
             "schema":1,"host":REFRESH_HOST,"state":"refused",
             "run_refusals":[],"run_refusals_omitted":0,
@@ -1522,7 +1538,17 @@ pub(crate) fn evidence_for_check(
             }))
         }
         Ok(_) => None,
+    }?;
+    if backend == BoxBackend::Claude {
+        evidence.as_object_mut()?.remove("host");
+        evidence["schema"] = json!(2);
+        evidence["backend"] = json!("claude");
+        evidence["provider"] = json!({
+            "kind":"owner-program", "program":"/usr/bin/claude",
+            "required_sha256":CLAUDE_SCHEMA_PROGRAM_SHA256,
+        });
     }
+    Some(evidence)
 }
 
 #[cfg(test)]
@@ -1547,10 +1573,23 @@ pub(crate) fn refresh_live(
     loop_name: &str,
     runs_root: &Path,
     published: &mut BTreeMap<PathBuf, Vec<u8>>,
-    backend: crate::settings::BoxBackend,
+    backend: BoxBackend,
     endpoint: &str,
 ) -> Result<RefreshReport, LaneError> {
     backend.require_runtime()?;
+    if backend == BoxBackend::Claude {
+        let expected_program = claude_program_pin(owner_home, loop_name)?;
+        let home = claude_sign_in_dir(owner_home, loop_name);
+        return refresh_claude_live_at(
+            &home,
+            loop_name,
+            runs_root,
+            now_seconds()?,
+            published,
+            || claude_refresh_program(&home, &expected_program),
+            now_milliseconds,
+        );
+    }
     refresh_live_at(
         owner_home,
         loop_name,
@@ -1590,7 +1629,48 @@ fn refresh_live_at(
     } else {
         source
     };
-    let snapshot = next.worker_file();
+    publish_live_snapshot(
+        runs_root,
+        loop_name,
+        BoxBackend::Codex,
+        published,
+        &next.worker_file(),
+        next.expires_at,
+        |home, uid| publish(home, uid, &next),
+    )
+}
+
+fn refresh_claude_live_at(
+    home: &Path,
+    loop_name: &str,
+    runs_root: &Path,
+    now: u64,
+    published: &mut BTreeMap<PathBuf, Vec<u8>>,
+    refresh_program: impl Fn() -> Result<(), LaneError>,
+    publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
+) -> Result<RefreshReport, LaneError> {
+    with_claude_authority(home, now, refresh_program, publication_time_ms, |source| {
+        publish_live_snapshot(
+            runs_root,
+            loop_name,
+            BoxBackend::Claude,
+            published,
+            &source.worker_file(),
+            source.expires_ms / 1000,
+            |home, uid| write_claude_run(home, uid, source),
+        )
+    })
+}
+
+fn publish_live_snapshot(
+    runs_root: &Path,
+    loop_name: &str,
+    backend: BoxBackend,
+    published: &mut BTreeMap<PathBuf, Vec<u8>>,
+    snapshot: &[u8],
+    expires_unix: u64,
+    mut publish: impl FnMut(&Path, u32) -> Result<(), LaneError>,
+) -> Result<RefreshReport, LaneError> {
     let mut changed = false;
     let mut refusals = Vec::new();
     let mut refusal_bytes = 2_usize;
@@ -1628,10 +1708,8 @@ fn refresh_live_at(
         {
             continue;
         }
-        // A Codex refresh must never publish its token into a different vendor's home.
-        if crate::settings::BoxBackend::from_plan(&record["plan"])?
-            != crate::settings::BoxBackend::Codex
-        {
+        // The protected backend confines publication to its own vendor homes.
+        if BoxBackend::from_plan(&record["plan"])? != backend {
             continue;
         }
         let Some(home) = record["plan"]["home"].as_str() else {
@@ -1642,10 +1720,10 @@ fn refresh_live_at(
             .and_then(|value| u32::try_from(value).ok())
             .ok_or_else(|| failure("credential-publish", "live worker uid is absent"))?;
         let home = PathBuf::from(home);
-        if published.get(&home) == Some(&snapshot) {
+        if published.get(&home).map(Vec::as_slice) == Some(snapshot) {
             continue;
         }
-        if let Err(error) = publish(&home, uid, &next) {
+        if let Err(error) = publish(&home, uid) {
             let refusal = json!({"run": run, "kind": error.kind, "detail": error.detail});
             let entry_bytes = serde_json::to_vec(&refusal)
                 .map_err(|_| failure("credential-evidence", "run refusal cannot be encoded"))?
@@ -1660,15 +1738,15 @@ fn refresh_live_at(
             }
             continue;
         }
-        published.insert(home, snapshot.clone());
+        published.insert(home, snapshot.to_vec());
         changed = true;
     }
     Ok(RefreshReport {
         changed,
         refusals,
         refusals_omitted,
-        expires_unix: next.expires_at,
-        refresh_due_unix: next.refresh_due_unix(),
+        expires_unix,
+        refresh_due_unix: expires_unix.saturating_sub(REFRESH_AHEAD.as_secs()),
         authority_failure: None,
     })
 }
@@ -1837,7 +1915,7 @@ mod tests {
         .expect_err("expired authority");
         assert_eq!(error.kind, "credential-refresh");
         let absent = fixture.path().join("absent");
-        let backend = crate::settings::BoxBackend::Claude;
+        let backend = BoxBackend::Claude;
         for result in [
             preflight(&absent, "alpha", backend),
             prepare_run(&absent, "alpha", &absent, owner_identity().0, backend),
@@ -2529,6 +2607,227 @@ mod tests {
         assert_eq!(recipients, [3001]);
     }
 
+    fn claude_live_fixture(runs: &Path, name: &str) -> PathBuf {
+        fixture_run(runs, name, owner_identity().0);
+        let path = crate::launch::reservation_path(runs, name);
+        let mut record = crate::launch::read_reservation(&path)
+            .expect("read")
+            .expect("record");
+        record["plan"]["backend"] = json!("claude");
+        crate::launch::publish_reservation(&path, &record).expect("Claude reservation");
+        let home = PathBuf::from(record["plan"]["home"].as_str().expect("home"));
+        fs::create_dir_all(home.join(".claude")).expect("worker leaf");
+        for path in [&home, &home.join(".claude")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("worker mode");
+        }
+        home
+    }
+
+    /// # Panics
+    /// Panics if periodic publication crosses vendors, repeats unchanged writes or loses retries.
+    /// ´test:unit:claude-live-refresh-selects-live-homes-and-retries-publication´
+    #[test]
+    fn claude_live_refresh_selects_live_homes_and_retries_publication() {
+        let root = claude_fixture_root();
+        let now = 1_800_000_000;
+        let home = fixture_claude(root.path(), &claude_document((now + 500) * 1000));
+        let runs = root.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        let first = claude_live_fixture(&runs, "claude-first");
+        let second = claude_live_fixture(&runs, "claude-second");
+        fixture_run(&runs, "codex-control", owner_identity().0);
+        let retired = claude_live_fixture(&runs, "claude-retired");
+        let path = crate::launch::reservation_path(&runs, "claude-retired");
+        let mut record = crate::launch::read_reservation(&path)
+            .expect("read")
+            .expect("record");
+        record["phase"] = json!("retired");
+        crate::launch::publish_reservation(&path, &record).expect("retirement");
+        fs::set_permissions(second.join(".claude"), fs::Permissions::from_mode(0o755))
+            .expect("bad mode");
+        let calls = std::cell::Cell::new(0);
+        let mut cache = BTreeMap::new();
+        let report = refresh_claude_live_at(
+            &home,
+            "alpha",
+            &runs,
+            now,
+            &mut cache,
+            || {
+                calls.set(calls.get() + 1);
+                let dir = open_dir(&home, owner_identity().0, owner_identity().0, 0o700)?;
+                assert!(lock_with(&dir, FlockArg::LockExclusiveNonblock).is_err());
+                let mut next = claude_document((now + 3600) * 1000);
+                next["claudeAiOauth"]["accessToken"] = json!("N".repeat(108));
+                fs::write(home.join(".credentials.json"), next.to_string())
+                    .expect("synthetic owner refresh");
+                Ok(())
+            },
+            || Ok(now * 1000),
+        )
+        .expect("partial publication");
+        assert_eq!(calls.get(), 1);
+        assert!(report.changed);
+        assert_eq!(report.refusals.len(), 1);
+        assert_eq!(report.refusals[0]["run"], "claude-second");
+        assert_eq!(cache.len(), 1);
+        let bytes = fs::read(first.join(".claude/.credentials.json")).expect("first worker");
+        let worker: Value = serde_json::from_slice(&bytes).expect("encoding");
+        assert_eq!(worker.as_object().expect("object").len(), 1);
+        assert_eq!(worker["claudeAiOauth"].as_object().expect("OAuth").len(), 6);
+        assert_eq!(worker["claudeAiOauth"]["accessToken"], "N".repeat(108));
+        assert!(!retired.join(".claude/.credentials.json").exists());
+        assert!(!runs.join("home-codex-control").exists());
+        fs::set_permissions(second.join(".claude"), fs::Permissions::from_mode(0o700))
+            .expect("repair mode");
+        let prior = fs::metadata(first.join(".claude/.credentials.json"))
+            .expect("first inode")
+            .ino();
+        let report = refresh_claude_live_at(
+            &home,
+            "alpha",
+            &runs,
+            now,
+            &mut cache,
+            || panic!("current authority must not refresh"),
+            || Ok(now * 1000),
+        )
+        .expect("retry");
+        assert!(report.changed);
+        assert_eq!(report.refusals, [] as [Value; 0]);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            fs::read(second.join(".claude/.credentials.json")).expect("retry worker"),
+            bytes
+        );
+        assert_eq!(
+            fs::metadata(first.join(".claude/.credentials.json"))
+                .expect("retained inode")
+                .ino(),
+            prior
+        );
+        let report = refresh_claude_live_at(
+            &home,
+            "alpha",
+            &runs,
+            now,
+            &mut cache,
+            || panic!("current authority"),
+            || Ok(now * 1000),
+        )
+        .expect("unchanged");
+        assert!(!report.changed);
+    }
+
+    /// # Panics
+    /// Panics if failed or expired owner refresh publishes any worker or cache entry.
+    /// ´test:unit:claude-live-refresh-refusal-preserves-workers´
+    #[test]
+    fn claude_live_refresh_refusal_preserves_workers() {
+        let root = claude_fixture_root();
+        let now = 1_800_000_000;
+        let home = fixture_claude(root.path(), &claude_document(now * 1000));
+        let runs = root.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        let worker = claude_live_fixture(&runs, "claude-live").join(".claude/.credentials.json");
+        fs::write(&worker, b"synthetic prior worker").expect("prior file");
+        let inode = fs::metadata(&worker).expect("inode").ino();
+        let mut cache = BTreeMap::new();
+        for refuse in [true, false] {
+            let error = refresh_claude_live_at(
+                &home,
+                "alpha",
+                &runs,
+                now,
+                &mut cache,
+                || {
+                    if refuse {
+                        Err(failure("credential-refresh", "synthetic refusal"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || Ok(now * 1000),
+            )
+            .expect_err("owner refusal or expired result");
+            assert_eq!(error.kind, "credential-refresh");
+            assert!(cache.is_empty());
+            assert_eq!(
+                fs::read(&worker).expect("prior bytes"),
+                b"synthetic prior worker"
+            );
+            assert_eq!(fs::metadata(&worker).expect("prior inode").ino(), inode);
+        }
+        let absent = root.path().join("absent-owner");
+        assert_eq!(
+            refresh_live(
+                &absent,
+                "alpha",
+                &runs,
+                &mut cache,
+                BoxBackend::Claude,
+                AUTH_ENDPOINT
+            )
+            .expect_err("closed gate")
+            .kind,
+            "backend-unavailable"
+        );
+        assert!(!absent.exists());
+    }
+
+    /// # Panics
+    /// Panics if Claude evidence fabricates an endpoint or cannot be read by census.
+    /// ´test:unit:claude-refresh-evidence-names-owner-program-without-host´
+    #[test]
+    fn claude_refresh_evidence_names_owner_program_without_host() {
+        let backend = BoxBackend::Claude;
+        let root = claude_fixture_root();
+        let runs = root.path().join("runs");
+        let driver = runs.join("pilot");
+        fs::create_dir_all(&driver).expect("driver");
+        fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected path");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("protected mode");
+        let held =
+            open_dir(&runs, owner_identity().0, owner_identity().0, 0o700).expect("held runs");
+        for result in [
+            Ok(fixture_report(1_900_000_000)),
+            Err(failure("credential-refresh", "synthetic refusal")),
+        ] {
+            let evidence = evidence_for_check(&result, true, backend).expect("evidence");
+            assert_eq!(evidence["schema"], 2);
+            assert_eq!(evidence["backend"], "claude");
+            assert!(evidence.get("host").is_none());
+            assert_eq!(evidence["provider"]["kind"], "owner-program");
+            assert_eq!(
+                evidence["provider"]["required_sha256"],
+                CLAUDE_SCHEMA_PROGRAM_SHA256
+            );
+            publish_evidence(&driver, &evidence).expect("publish");
+            assert_eq!(
+                read_evidence(&held, "pilot", owner_identity().0).expect("census"),
+                Some(EvidenceObservation::Current(evidence.clone()))
+            );
+            let mut foreign = evidence;
+            foreign["host"] = json!(REFRESH_HOST);
+            assert_eq!(
+                publish_evidence(&driver, &foreign)
+                    .expect_err("foreign host")
+                    .kind,
+                "credential-evidence"
+            );
+            foreign.as_object_mut().expect("object").remove("host");
+            foreign["provider"]["required_sha256"] = json!("0".repeat(64));
+            assert_eq!(
+                publish_evidence(&driver, &foreign)
+                    .expect_err("foreign program")
+                    .kind,
+                "credential-evidence"
+            );
+        }
+    }
+
     #[derive(Clone, Copy)]
     enum StandInRefresh {
         Unchanged,
@@ -2813,8 +3112,9 @@ mod tests {
         let target = temp.path().join("owner-target");
         fs::write(&target, b"unchanged").expect("synthetic owner target");
         symlink(&target, old_launch.join("credential-refresh.json")).expect("loop-created symlink");
-        let evidence = evidence_for_check(&Ok(fixture_report(1_900_000_000)), true)
-            .expect("first check evidence");
+        let evidence =
+            evidence_for_check(&Ok(fixture_report(1_900_000_000)), true, BoxBackend::Codex)
+                .expect("first check evidence");
         publish_evidence(&driver, &evidence).expect("protected evidence publication");
         assert_eq!(fs::read(&target).expect("target"), b"unchanged");
         let written: Value = serde_json::from_slice(
@@ -2829,6 +3129,44 @@ mod tests {
                 .kind,
             "credential-evidence"
         );
+    }
+
+    fn assert_temporal_evidence_refusals(
+        evidence: &Value,
+        protected: &Path,
+        held: &OwnedFd,
+        driver: &Path,
+        owner: u32,
+    ) {
+        for (field, invalid, named) in [
+            ("expires_unix", Value::Null, "expires_unix"),
+            ("expires_unix", json!("1900000000"), "expires_unix"),
+            ("expires_unix", json!(1_900_000_000.5_f64), "expires_unix"),
+            ("refresh_due_unix", Value::Null, "refresh_due_unix"),
+            ("refresh_due_unix", json!("1899999400"), "refresh_due_unix"),
+            (
+                "refresh_due_unix",
+                json!(1_899_999_400.5_f64),
+                "refresh_due_unix",
+            ),
+            ("refresh_due_unix", json!(1_899_999_401_u64), "disagrees"),
+        ] {
+            let mut malformed = evidence.clone();
+            malformed[field] = invalid;
+            fs::write(
+                protected.join("credential-refresh.json"),
+                malformed.to_string(),
+            )
+            .expect("malformed fixture");
+            assert_eq!(
+                read_evidence(held, "R", owner).expect("temporal defect is observable"),
+                Some(EvidenceObservation::Current(malformed.clone()))
+            );
+            let error = publish_evidence(driver, &malformed)
+                .expect_err("writer still refuses malformed instant");
+            assert_eq!(error.status, 2);
+            assert!(error.detail.contains(named), "{}", error.line());
+        }
     }
 
     /// ´test:unit:credential-evidence-instants-follow-fixture-exp-and-refuse-missing-fields´
@@ -2858,7 +3196,8 @@ mod tests {
         let protected = crate::plan::protected_identity_dir(&driver).expect("protected name");
         fs::create_dir(&protected).expect("protected directory");
         fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("protected mode");
-        let evidence = evidence_for_check(&Ok(report), true).expect("first check publishes");
+        let evidence = evidence_for_check(&Ok(report), true, BoxBackend::Codex)
+            .expect("first check publishes");
         assert_eq!(evidence["state"], "current");
         publish_evidence(&driver, &evidence).expect("evidence publication");
         let held: OwnedFd = File::open(&runs).expect("held runs root").into();
@@ -2880,38 +3219,11 @@ mod tests {
                 json!({"schema":1,"host":REFRESH_HOST,"state":"published","run_refusals":[]})
             ))
         );
-        for (field, invalid, named) in [
-            ("expires_unix", Value::Null, "expires_unix"),
-            ("expires_unix", json!("1900000000"), "expires_unix"),
-            ("expires_unix", json!(1_900_000_000.5_f64), "expires_unix"),
-            ("refresh_due_unix", Value::Null, "refresh_due_unix"),
-            ("refresh_due_unix", json!("1899999400"), "refresh_due_unix"),
-            (
-                "refresh_due_unix",
-                json!(1_899_999_400.5_f64),
-                "refresh_due_unix",
-            ),
-            ("refresh_due_unix", json!(1_899_999_401_u64), "disagrees"),
-        ] {
-            let mut malformed = evidence.clone();
-            malformed[field] = invalid;
-            fs::write(
-                protected.join("credential-refresh.json"),
-                malformed.to_string(),
-            )
-            .expect("malformed fixture");
-            assert_eq!(
-                read_evidence(&held, "R", owner).expect("temporal defect is observable"),
-                Some(EvidenceObservation::Current(malformed.clone()))
-            );
-            let error = publish_evidence(&driver, &malformed)
-                .expect_err("writer still refuses malformed instant");
-            assert_eq!(error.status, 2);
-            assert!(error.detail.contains(named), "{}", error.line());
-        }
+        assert_temporal_evidence_refusals(&evidence, &protected, &held, &driver, owner);
         let refusal = failure("credential-sign-in", "source cannot be read");
         let failed_check: Result<RefreshReport, LaneError> = Err(refusal);
-        let refused = evidence_for_check(&failed_check, false).expect("error evidence");
+        let refused =
+            evidence_for_check(&failed_check, false, BoxBackend::Codex).expect("error evidence");
         assert_eq!(refused["expires_unix"], Value::Null);
         assert_eq!(refused["refresh_due_unix"], Value::Null);
         publish_evidence(&driver, &refused).expect("refusal replaces prior measurement");
@@ -2919,10 +3231,10 @@ mod tests {
             read_evidence(&held, "R", owner).expect("refused evidence"),
             Some(EvidenceObservation::Current(refused))
         );
-        let checked = failed_check.is_ok();
         let recovered_check = Ok(fixture_report(expires));
-        let recovered = evidence_for_check(&recovered_check, !checked)
-            .expect("healthy check after refusal republishes");
+        let recovered =
+            evidence_for_check(&recovered_check, failed_check.is_err(), BoxBackend::Codex)
+                .expect("healthy check after refusal republishes");
         assert_eq!(recovered["state"], "current");
         publish_evidence(&driver, &recovered).expect("recovered evidence publication");
         let EvidenceObservation::Current(measured) = read_evidence(&held, "R", owner)
@@ -2961,7 +3273,8 @@ mod tests {
         let protected = crate::plan::protected_identity_dir(&driver).expect("protected name");
         fs::create_dir(&protected).expect("protected directory");
         fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("protected mode");
-        let evidence = evidence_for_check(&Ok(report), false).expect("run refusals publish");
+        let evidence = evidence_for_check(&Ok(report), false, BoxBackend::Codex)
+            .expect("run refusals publish");
         publish_evidence(&driver, &evidence).expect("bounded evidence publication");
         let held: OwnedFd = File::open(&runs).expect("held runs root").into();
         assert_eq!(
@@ -3060,7 +3373,7 @@ mod tests {
             (&runs, &held_runs),
             &std::env::current_exe().expect("entry image"),
             Path::new("/usr/bin/podman"),
-            crate::settings::BoxBackend::Codex,
+            BoxBackend::Codex,
         )
         .expect("production helper composer");
         if client != "/usr/bin/curl" {
@@ -3094,11 +3407,9 @@ mod tests {
         )
         .expect("production helper receiver");
         let _configuration = anchors.pop().expect("configuration role");
-        let (runtime, mut support) = crate::container_entry::take_support_programs(
-            &mut anchors,
-            crate::settings::BoxBackend::Codex,
-        )
-        .expect("production helper support roles");
+        let (runtime, mut support) =
+            crate::container_entry::take_support_programs(&mut anchors, BoxBackend::Codex)
+                .expect("production helper support roles");
         support.insert(PathBuf::from("/usr/bin/podman"), Arc::new(runtime));
         let guard = crate::home::activate_private_launch(
             home.path(),
@@ -3120,10 +3431,8 @@ mod tests {
     #[test]
     fn credential_thread_refreshes_through_held_executables() {
         let (_home, _private, _guard) = helper_custody_fixture("/usr/bin/curl");
-        let custody = crate::container_helper::CredentialThreadCustody::capture(
-            crate::settings::BoxBackend::Codex,
-        )
-        .expect("production helper thread handoff");
+        let custody = crate::container_helper::CredentialThreadCustody::capture(BoxBackend::Codex)
+            .expect("production helper thread handoff");
         let (endpoint, server) = fixture_endpoint(
             "200 OK",
             json!({"id_token":token(1_900_000_000),"access_token":token(1_900_000_000),"refresh_token":"fixture-rotated"}),
@@ -3235,7 +3544,7 @@ mod tests {
                 "alpha".into(),
                 runs,
                 driver,
-                crate::settings::BoxBackend::Codex,
+                BoxBackend::Codex,
                 Arc::clone(&cancelled),
                 endpoint.clone(),
             )
@@ -3245,7 +3554,7 @@ mod tests {
                 "alpha".into(),
                 runs,
                 driver,
-                crate::settings::BoxBackend::Codex,
+                BoxBackend::Codex,
                 Arc::clone(&cancelled),
             )
         }
@@ -3360,10 +3669,8 @@ mod tests {
     #[test]
     fn credential_client_executes_the_received_file() {
         let (_home, _private, _programs) = helper_custody_fixture("/usr/bin/true");
-        let custody = crate::container_helper::CredentialThreadCustody::capture(
-            crate::settings::BoxBackend::Codex,
-        )
-        .expect("production handoff");
+        let custody = crate::container_helper::CredentialThreadCustody::capture(BoxBackend::Codex)
+            .expect("production handoff");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("endpoint");
         listener.set_nonblocking(true).expect("bounded observation");
         let endpoint = format!("http://{}/refresh", listener.local_addr().expect("address"));
