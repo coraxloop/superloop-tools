@@ -391,18 +391,7 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
     let (manifest, mut anchors) = receive(source, &std::io::stdin())?;
     // The private entry owns stdin; the completed capability channel is setup-only.
     anchor::transport::replace_stdin(OPERATION).map_err(refusal)?;
-    let date = anchors.pop().ok_or_else(|| {
-        refusal("anchor-missing: operation=container-helper purpose=credential-clock")
-    })?;
-    let curl = anchors.pop().ok_or_else(|| {
-        refusal("anchor-missing: operation=container-helper purpose=credential-client")
-    })?;
-    let hash = anchors.pop().ok_or_else(|| {
-        refusal("anchor-missing: operation=container-helper purpose=hash-executable")
-    })?;
-    let podman = anchors.pop().ok_or_else(|| {
-        refusal("anchor-missing: operation=container-helper purpose=podman-executable")
-    })?;
+    let (podman, support) = take_support_programs(&mut anchors)?;
     let _home = crate::home::activate_private_launch(
         Path::new(home),
         &anchors[0],
@@ -411,13 +400,7 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
         None,
         0,
     )?;
-    EXECUTABLE.with(|active| {
-        *active.borrow_mut() = Some(BTreeMap::from([
-            (PathBuf::from("/usr/bin/sha256sum"), Arc::new(hash)),
-            (PathBuf::from("/usr/bin/curl"), Arc::new(curl)),
-            (PathBuf::from("/usr/bin/date"), Arc::new(date)),
-        ]));
-    });
+    EXECUTABLE.with(|active| *active.borrow_mut() = Some(support));
     let _executable = ExecutableGuard;
     let (record_home, loop_name, _, program) =
         crate::container_helper::run_identity(Path::new(run))?;
@@ -439,6 +422,32 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
         Ok::<(), LaneError>(())
     })?;
     crate::container_helper::serve(Path::new(run)).map(|()| 0)
+}
+
+/// Extract the fixed support roles after validating the complete helper bundle.
+pub(crate) fn take_support_programs(
+    anchors: &mut Vec<Anchor>,
+) -> Result<(Anchor, BTreeMap<PathBuf, Arc<Anchor>>), LaneError> {
+    let date = anchors.pop().ok_or_else(|| {
+        refusal("anchor-missing: operation=container-helper purpose=credential-clock")
+    })?;
+    let curl = anchors.pop().ok_or_else(|| {
+        refusal("anchor-missing: operation=container-helper purpose=credential-client")
+    })?;
+    let hash = anchors.pop().ok_or_else(|| {
+        refusal("anchor-missing: operation=container-helper purpose=hash-executable")
+    })?;
+    let podman = anchors.pop().ok_or_else(|| {
+        refusal("anchor-missing: operation=container-helper purpose=podman-executable")
+    })?;
+    Ok((
+        podman,
+        BTreeMap::from([
+            (PathBuf::from("/usr/bin/sha256sum"), Arc::new(hash)),
+            (PathBuf::from("/usr/bin/curl"), Arc::new(curl)),
+            (PathBuf::from("/usr/bin/date"), Arc::new(date)),
+        ]),
+    ))
 }
 
 fn receive(source: &str, input: &impl AsFd) -> Result<(Manifest, Vec<Anchor>), LaneError> {

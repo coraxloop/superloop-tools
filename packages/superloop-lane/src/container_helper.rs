@@ -1931,6 +1931,32 @@ pub(crate) fn publish_round_credential(
     Ok(())
 }
 
+/// The helper transfers only home custody and the two credential executables to its authority thread.
+pub(crate) struct CredentialThreadCustody {
+    home: crate::home::PrivateHomeSnapshot,
+    programs: Option<BTreeMap<PathBuf, Arc<loop_home::anchor::Anchor>>>,
+}
+pub(crate) struct CredentialThreadGuard {
+    _programs: Option<crate::container_entry::ExecutableGuard>,
+    _home: crate::home::PrivateHomeGuard,
+}
+impl CredentialThreadCustody {
+    pub(crate) fn capture() -> Result<Self, LaneError> {
+        Ok(Self {
+            home: crate::home::snapshot_private_home()?,
+            programs: crate::container_entry::credential_programs()?,
+        })
+    }
+    pub(crate) fn activate(self) -> Result<CredentialThreadGuard, LaneError> {
+        Ok(CredentialThreadGuard {
+            _home: crate::home::activate_private_snapshot(self.home)?,
+            _programs: self.programs.map(|programs| {
+                crate::container_entry::activate_program_map("container-helper", programs)
+            }),
+        })
+    }
+}
+
 /// Serve one run's fixed container request as the namespace owner.
 ///
 /// # Errors
@@ -2017,15 +2043,11 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
     let refresh_loop = loop_name.clone();
     let refresh_root = root.to_path_buf();
     let refresh_driver_dir = driver_dir.clone();
-    let refresh_anchors = crate::home::snapshot_private_home()?;
-    let refresh_programs = crate::container_entry::credential_programs()?;
+    let refresh_custody = CredentialThreadCustody::capture()?;
     let refresher = std::thread::Builder::new()
         .name("credential-authority".into())
         .spawn(move || -> Result<(), LaneError> {
-            let _verified = crate::home::activate_private_snapshot(refresh_anchors)?;
-            let _programs = refresh_programs.map(|programs| {
-                crate::container_entry::activate_program_map("container-helper", programs)
-            });
+            let _custody = refresh_custody.activate()?;
             let mut published = BTreeMap::new();
             let mut checked = false;
             while !refresh_cancelled.load(Ordering::Acquire) {

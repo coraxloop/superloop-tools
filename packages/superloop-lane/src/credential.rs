@@ -1962,23 +1962,90 @@ mod tests {
     }
 
     /// # Panics
+    /// Panics if the production helper composer, receiver or support extraction disagrees.
+    fn helper_custody_fixture() -> (
+        tempfile::TempDir,
+        crate::home::PrivateHomeGuard,
+        crate::container_entry::ExecutableGuard,
+    ) {
+        let home = fixture_root();
+        let runs = home.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+        let held_home = File::open(home.path()).expect("home").into();
+        let held_runs = File::open(&runs).expect("runs").into();
+        let bundle = crate::container_entry::pin(
+            "alpha",
+            (home.path(), &held_home),
+            (&runs, &held_runs),
+            &std::env::current_exe().expect("entry image"),
+            Path::new("/usr/bin/podman"),
+        )
+        .expect("production helper composer");
+        let (sender, input) = std::os::unix::net::UnixStream::pair().expect("rights channel");
+        loop_home::anchor::transport::send(&sender, &bundle.descriptors).expect("complete frame");
+        let (_, mut anchors) = crate::container_entry::receive_for(
+            &bundle.manifest,
+            &input,
+            "container-helper",
+            Some("alpha"),
+        )
+        .expect("production helper receiver");
+        let (runtime, mut support) = crate::container_entry::take_support_programs(&mut anchors)
+            .expect("production helper support roles");
+        support.insert(PathBuf::from("/usr/bin/podman"), Arc::new(runtime));
+        let guard = crate::home::activate_private_launch(
+            home.path(),
+            &anchors[0],
+            &runs,
+            &anchors[1],
+            None,
+            Uid::effective().as_raw(),
+        )
+        .expect("held home and runs");
+        let programs = crate::container_entry::activate_program_map("container-helper", support);
+        (home, guard, programs)
+    }
+
+    /// # Panics
     /// Panics if the credential thread loses held executables or changes the refresh exchange.
     /// ´claim:superlooplane:credential-thread-refreshes-through-held-executables´
     /// ´test:unit:credential-thread-refreshes-through-held-executables´
     #[test]
     fn credential_thread_refreshes_through_held_executables() {
-        let programs = credential_test_programs("/usr/bin/curl", "/usr/bin/date");
-        let _guard = crate::container_entry::activate_program_map("credential-test", programs);
-        let snapshot = crate::container_entry::credential_programs()
-            .expect("thread snapshot")
-            .expect("active programs");
-        assert_eq!(snapshot.len(), 2);
+        let (_home, _private, _guard) = helper_custody_fixture();
+        let custody = crate::container_helper::CredentialThreadCustody::capture()
+            .expect("production helper thread handoff");
         let (endpoint, server) = fixture_endpoint(
             "200 OK",
             json!({"id_token":token(1_900_000_000),"access_token":token(1_900_000_000),"refresh_token":"fixture-rotated"}),
         );
         let refreshed = std::thread::spawn(move || {
-            let _guard = crate::container_entry::activate_program_map("credential-test", snapshot);
+            let _guard = custody
+                .activate()
+                .expect("production helper thread activation");
+            assert!(
+                crate::container_entry::check(Path::new("/usr/bin/curl"))
+                    .expect("held client")
+                    .is_ok()
+            );
+            assert!(
+                crate::container_entry::check(Path::new("/usr/bin/date"))
+                    .expect("held clock")
+                    .is_ok()
+            );
+            assert!(
+                crate::container_entry::check(Path::new("/usr/bin/sha256sum"))
+                    .expect("scoped map")
+                    .is_err(),
+                "hashing authority is not transferred"
+            );
+            assert!(
+                crate::container_entry::check(Path::new("/usr/bin/podman"))
+                    .expect("scoped map")
+                    .is_err(),
+                "container authority is not transferred"
+            );
             refresh_request(
                 &Source::parse(source(1_800_000_000, "initial")).expect("source"),
                 &endpoint,
