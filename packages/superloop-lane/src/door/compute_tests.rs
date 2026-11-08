@@ -1840,10 +1840,10 @@ fn door_compute_report_contradiction_reaches_stub_and_record() {
         .join()
         .expect("server")
         .expect("served contradiction");
-    assert_eq!(
-        reply, service_reply,
-        "stub retains the complete service reply"
-    );
+    let wire_reply: Value =
+        serde_json::from_slice(&serde_json::to_vec(&service_reply).expect("encode service reply"))
+            .expect("decode service reply");
+    assert_eq!(reply, wire_reply, "stub retains the complete wire reply");
     assert_eq!(reply["reason"], "door-compute-report-contradiction");
     assert_eq!(reply["status"], 125);
     assert_eq!(reply["compute_exit_status"], 3);
