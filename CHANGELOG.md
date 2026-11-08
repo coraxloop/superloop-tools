@@ -96,6 +96,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Helper custody regression checks execute the received runtime through the production namespace receiver and socket service after pathname replacement, authorize a mapped loop peer, retain authority-thread evidence, and complete a loopback refresh through the production spawner beneath the retained home (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:helper-service-executes-received-runtime``; ``claim:superlooplane:service-reservation-key-binds-held-runtime``; ``claim:superlooplane:service-credential-authority-retains-custody``).
+
 - Door-agent exercise probes give verdict and output checks execution headroom beyond cleanup while retaining the separate short timeout and child-reaping bound; delayed real-runner fixtures pin the distinction (``prob:gates:door-modes-runner-probes-red-intermittently-after-the-custody-move``; ``test:unit:agent-probes-separate-semantic-and-timeout-budgets``).
 
 - Native creation previews derive their ordered capability roles from the receiver definitions; the public preview fixture pins the complete required and optional lists, and partial-map exercise fixtures pin their runs-root alias refusal envelope (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).

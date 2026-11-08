@@ -2096,6 +2096,9 @@ pattern = "packages/superloop-lane/src/signin_home/reconcile.rs"
 pattern = "packages/superloop-lane/src/signin_home/repair.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/tests/helper_service.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/tests/install.rs"
 
 [[include.rows]]

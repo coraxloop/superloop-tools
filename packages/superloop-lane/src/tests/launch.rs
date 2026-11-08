@@ -2256,6 +2256,7 @@ exit 2
     );
 }
 
+/// ´claim:superlooplane:service-reservation-key-binds-held-runtime´
 /// ´test:crate:proxy-refresh-preserves-live-helper-pins´
 #[test]
 #[allow(clippy::too_many_lines)]
@@ -2617,6 +2618,11 @@ fn proxy_refresh_preserves_live_helper_pins() {
         )
         .expect("fixture mailbox source for pin reconstruction");
     }
+    if std::env::var_os("SUPERLOOP_SERVICE_PROOF").is_some() {
+        super::helper_service::exercise(home, &runs, &podman);
+        return;
+    }
+    crate::container_helper::fixture_reserved_program_attempt(home, &runs.join("R"));
     let before = crate::container_helper::fixture_pinned_request(home, "R", &podman)
         .expect("helper before refresh");
     let mut install = crate::install::InstallRequest {

@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use crate::error::LaneError;
 
 const AUTH_HOST: &str = "auth.openai.com";
-const AUTH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+pub(crate) const AUTH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Complete SHA-256 of the program behind the loop's reviewed credential structure record.
 /// An executable supplier cannot select the independent record; bind all program bytes
@@ -1548,13 +1548,14 @@ pub(crate) fn refresh_live(
     runs_root: &Path,
     published: &mut BTreeMap<PathBuf, Vec<u8>>,
     backend: crate::settings::BoxBackend,
+    endpoint: &str,
 ) -> Result<RefreshReport, LaneError> {
     backend.require_runtime()?;
     refresh_live_at(
         owner_home,
         loop_name,
         runs_root,
-        AUTH_ENDPOINT,
+        endpoint,
         now_seconds()?,
         published,
         write_run,
@@ -3188,7 +3189,7 @@ mod tests {
     /// ´test:unit:service-credential-authority-retains-custody´
     #[test]
     fn service_credential_authority_retains_custody() {
-        for case in ["current", "absent", "client"] {
+        for case in ["current", "absent", "client", "exchange"] {
             service_authority_case(case);
         }
     }
@@ -3200,8 +3201,8 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let present = case != "absent";
-        let due = case == "client";
-        let (home, private, programs) = helper_custody_fixture(if due {
+        let due = matches!(case, "client" | "exchange");
+        let (home, private, programs) = helper_custody_fixture(if case == "client" {
             "/usr/bin/true"
         } else {
             "/usr/bin/curl"
@@ -3224,14 +3225,30 @@ mod tests {
         fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700))
             .expect("replacement mode");
         let cancelled = Arc::new(AtomicBool::new(false));
-        let authority = crate::container_helper::spawn_credential_authority(
-            home.path().to_path_buf(),
-            "alpha".into(),
-            runs,
-            driver,
-            crate::settings::BoxBackend::Codex,
-            Arc::clone(&cancelled),
-        )
+        let exchange = (case == "exchange").then(|| fixture_endpoint(
+            "200 OK",
+            json!({"id_token":token(expires + 86_400),"access_token":token(expires + 86_400),"refresh_token":"service-rotated"}),
+        ));
+        let authority = if let Some((endpoint, _)) = &exchange {
+            crate::container_helper::spawn_credential_authority_at(
+                home.path().to_path_buf(),
+                "alpha".into(),
+                runs,
+                driver,
+                crate::settings::BoxBackend::Codex,
+                Arc::clone(&cancelled),
+                endpoint.clone(),
+            )
+        } else {
+            crate::container_helper::spawn_credential_authority(
+                home.path().to_path_buf(),
+                "alpha".into(),
+                runs,
+                driver,
+                crate::settings::BoxBackend::Codex,
+                Arc::clone(&cancelled),
+            )
+        }
         .expect("service authority spawn");
         // The spawning thread can release its guards while the service owns its snapshot.
         drop(programs);
@@ -3261,41 +3278,79 @@ mod tests {
         result
             .expect("service authority join")
             .expect("service authority result");
+        assert_service_authority_evidence(case, home.path(), &protected, expires, exchange);
+        assert!(
+            began.elapsed() < Duration::from_secs(12),
+            "cancellation joins the real service loop"
+        );
+    }
+
+    /// # Panics
+    /// Panics if the service exchange or its persisted evidence differs from the check.
+    fn assert_service_authority_evidence(
+        case: &str,
+        home: &Path,
+        protected: &Path,
+        expires: u64,
+        exchange: Option<(String, std::thread::JoinHandle<Value>)>,
+    ) {
+        let present = case != "absent";
+        let due = matches!(case, "client" | "exchange");
         let evidence: Value = serde_json::from_slice(
             &fs::read(protected.join("credential-refresh.json"))
                 .expect("first service check publishes evidence"),
         )
         .expect("evidence JSON");
-        assert_eq!(
-            evidence["state"],
-            if present && !due {
-                "current"
-            } else {
-                "refused"
-            }
-        );
-        if due {
-            assert_eq!(evidence["kind"], "credential-refresh");
+        if let Some((_, server)) = exchange {
+            // A refused exchange must fail before joining an endpoint that saw no request.
+            assert_eq!(evidence["state"], "current");
+            assert_eq!(evidence["expires_unix"], expires + 86_400);
+            let request = server.join().expect("service refresh exchange");
+            assert_eq!(request["grant_type"], "refresh_token");
+            assert_eq!(request["refresh_token"], "fixture-refresh-service");
+            let refreshed: Value = serde_json::from_slice(
+                &fs::read(sign_in_dir(home, "alpha").join("auth.json")).expect("refreshed source"),
+            )
+            .expect("source JSON");
+            assert_eq!(refreshed["tokens"]["refresh_token"], "service-rotated");
             assert!(
-                matches!(
-                    evidence["detail"].as_str(),
-                    Some("token endpoint response is invalid" | "token request could not be sent")
-                ),
-                "{evidence}"
+                refreshed["last_refresh"]
+                    .as_str()
+                    .expect("held clock result")
+                    .ends_with('Z')
             );
-            assert_eq!(evidence["expires_unix"], expires);
-        } else if present {
-            assert_eq!(evidence["expires_unix"], expires);
-            assert_eq!(evidence["refresh_due_unix"], expires - 600);
             assert_eq!(evidence["run_refusals"], json!([]));
         } else {
-            assert_eq!(evidence["kind"], "credential-sign-in");
-            assert!(evidence["expires_unix"].is_null());
+            assert_eq!(
+                evidence["state"],
+                if present && !due {
+                    "current"
+                } else {
+                    "refused"
+                }
+            );
+            if due {
+                assert_eq!(evidence["kind"], "credential-refresh");
+                assert!(
+                    matches!(
+                        evidence["detail"].as_str(),
+                        Some(
+                            "token endpoint response is invalid"
+                                | "token request could not be sent"
+                        )
+                    ),
+                    "{evidence}"
+                );
+                assert_eq!(evidence["expires_unix"], expires);
+            } else if present {
+                assert_eq!(evidence["expires_unix"], expires);
+                assert_eq!(evidence["refresh_due_unix"], expires - 600);
+                assert_eq!(evidence["run_refusals"], json!([]));
+            } else {
+                assert_eq!(evidence["kind"], "credential-sign-in");
+                assert!(evidence["expires_unix"].is_null());
+            }
         }
-        assert!(
-            began.elapsed() < Duration::from_secs(12),
-            "cancellation joins the real service loop"
-        );
     }
 
     /// # Panics

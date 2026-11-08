@@ -787,6 +787,11 @@ pub(crate) fn fixture_pinned_request(
     pinned_request(owner_home, "alpha", run, podman).map(|request| request.record)
 }
 
+#[cfg(test)]
+pub(crate) fn fixture_reserved_program_attempt(home: &Path, run: &Path) {
+    tests::reserved_program_attempt(home, run);
+}
+
 fn pinned_request(
     owner_home: &Path,
     loop_name: &str,
@@ -1966,6 +1971,28 @@ pub(crate) fn spawn_credential_authority(
     backend: BoxBackend,
     refresh_cancelled: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError> {
+    spawn_credential_authority_at(
+        refresh_home,
+        refresh_loop,
+        refresh_root,
+        refresh_driver_dir,
+        backend,
+        refresh_cancelled,
+        crate::credential::AUTH_ENDPOINT.to_owned(),
+    )
+}
+
+/// Run the service authority with an explicit internal refresh endpoint.
+/// The public service always supplies the fixed vendor endpoint; fixtures supply loopback.
+pub(crate) fn spawn_credential_authority_at(
+    refresh_home: PathBuf,
+    refresh_loop: String,
+    refresh_root: PathBuf,
+    refresh_driver_dir: PathBuf,
+    backend: BoxBackend,
+    refresh_cancelled: Arc<AtomicBool>,
+    endpoint: String,
+) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError> {
     let refresh_custody = CredentialThreadCustody::capture(backend)?;
     std::thread::Builder::new()
         .name("credential-authority".into())
@@ -1980,6 +2007,7 @@ pub(crate) fn spawn_credential_authority(
                     &refresh_root,
                     &mut published,
                     backend,
+                    &endpoint,
                 );
                 if let Some(evidence) = crate::credential::evidence_for_check(&result, !checked)
                     && let Err(error) =
@@ -3180,6 +3208,76 @@ mod tests {
             let evidence = fixture.evidence();
             assert_eq!(evidence["status"], status);
             assert!(evidence["post_start_error"].is_null());
+        }
+    }
+
+    /// # Panics
+    /// Panics if the service binding loses the protected program key before an attempt.
+    pub(super) fn reserved_program_attempt(home: &Path, run: &Path) {
+        for (original, replacement, status) in [
+            ("/usr/bin/false", "/usr/bin/true", 1),
+            ("/usr/bin/true", "/usr/bin/false", 0),
+        ] {
+            let mut fixture = StartedAttemptFixture::new("exit 9");
+            let held_path = Path::new(&fixture.vector[0]).to_path_buf();
+            fs::copy(original, &held_path).expect("native capability");
+            fs::set_permissions(&held_path, fs::Permissions::from_mode(0o700)).expect("mode");
+            let held_home = fs::File::open(home).expect("home descriptor").into();
+            let runs = run.parent().expect("runs root");
+            let held_runs = fs::File::open(runs).expect("runs descriptor").into();
+            let bundle = crate::container_entry::pin(
+                "alpha",
+                (home, &held_home),
+                (runs, &held_runs),
+                &std::env::current_exe().expect("entry image"),
+                &held_path,
+                BoxBackend::Codex,
+            )
+            .expect("production helper composer");
+            let (sender, input) = UnixStream::pair().expect("capability frame");
+            loop_home::anchor::transport::send(&sender, &bundle.descriptors)
+                .expect("complete helper frame");
+            let swap = fixture.root.path().join("replacement");
+            fs::copy(replacement, &swap).expect("replacement image");
+            fs::set_permissions(&swap, fs::Permissions::from_mode(0o700)).expect("mode");
+            fs::rename(swap, &held_path).expect("replace held pathname");
+            let (_, mut anchors) = crate::container_entry::receive_for(
+                &bundle.manifest,
+                &input,
+                "container-helper",
+                Some("alpha"),
+            )
+            .expect("production helper receiver");
+            let _configuration = crate::container_entry::configuration(
+                home,
+                "alpha",
+                "container-helper",
+                anchors.pop().expect("configuration"),
+            )
+            .expect("received configuration");
+            let (podman, support) =
+                crate::container_entry::take_support_programs(&mut anchors, BoxBackend::Codex)
+                    .expect("received support programs");
+            let _programs =
+                crate::container_entry::activate_program_map("container-helper", support);
+            let identity = run_identity_at(home, run, nix::unistd::Uid::effective().as_raw())
+                .expect("production reservation and plan reconstruction");
+            let selected = identity.3.clone();
+            assert_ne!(
+                selected, held_path,
+                "the reservation key is not the pinned pathname"
+            );
+            crate::container_entry::bind_reserved_program(home, "alpha", identity, podman)
+                .expect("production service program-key binding");
+            fixture.vector[0] = selected.display().to_string();
+            let (mut server, mut client) = UnixStream::pair().expect("attempt channel");
+            client.write_all(&0_u32.to_le_bytes()).expect("prompt");
+            let outcome = fixture
+                .run(&mut server, STREAM_LIMIT, Child::try_wait)
+                .expect("attempt through service-bound runtime");
+            assert_eq!(outcome.code, status);
+            assert_eq!(read_attempt_status(&mut client), status);
+            assert_eq!(fixture.evidence()["status"], status);
         }
     }
 

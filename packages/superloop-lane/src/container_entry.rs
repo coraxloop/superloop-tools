@@ -605,9 +605,24 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
     )?;
     EXECUTABLE.with(|active| *active.borrow_mut() = Some(support));
     let _executable = ExecutableGuard;
-    let (record_home, loop_name, _, program) =
-        crate::container_helper::run_identity(Path::new(run))?;
-    if record_home != Path::new(home) || loop_name != manifest.loop_name {
+    bind_reserved_program(
+        Path::new(home),
+        &manifest.loop_name,
+        crate::container_helper::run_identity(Path::new(run))?,
+        podman,
+    )?;
+    crate::container_helper::serve(Path::new(run)).map(|()| 0)
+}
+
+/// Bind the received runtime inode to the key reconstructed from the protected reservation.
+pub(crate) fn bind_reserved_program(
+    home: &Path,
+    scope: &str,
+    identity: (PathBuf, String, String, PathBuf),
+    podman: Anchor,
+) -> Result<(), LaneError> {
+    let (record_home, loop_name, _, program) = identity;
+    if record_home != home || loop_name != scope {
         return Err(refusal(
             "anchor-declaration: operation=container-helper purpose=run",
         ));
@@ -622,9 +637,8 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
                 })?
                 .insert(program, Arc::new(podman)),
         );
-        Ok::<(), LaneError>(())
-    })?;
-    crate::container_helper::serve(Path::new(run)).map(|()| 0)
+        Ok(())
+    })
 }
 
 /// Extract the selected support roles after validating the complete helper bundle.
@@ -728,8 +742,7 @@ pub(crate) fn receive_for(
             alias_group: None,
         });
     }
-    crate::runtime_entry::distinct_roots(&manifest, operation)
-        .map_err(|error| operation_error(operation, error.detail))?;
+    crate::runtime_entry::distinct_roots(&manifest, operation)?;
     let anchors = Receiver::current()
         .map_err(|error| refusal(error.context(operation, "receiver-map")))?
         .validate(

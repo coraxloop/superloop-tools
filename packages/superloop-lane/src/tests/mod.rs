@@ -11,6 +11,7 @@ use crate::plan::{Plan, box_gate, registry_with_timeout, verify_box_attestation}
 use crate::settings::{Resources, Settings};
 use crate::{load_plan, valid_run_name};
 
+mod helper_service;
 mod install;
 mod launch;
 mod prepare;
