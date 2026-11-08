@@ -4333,6 +4333,16 @@ mod tests {
         use crate::requests::store::{
             AFTER_WRITER_LOCK_TIMEOUT, BEFORE_LEAF_SYNC, WRITER_LOCK_WAIT_OVERRIDE,
         };
+        struct ProbeOutput(std::sync::mpsc::Sender<Vec<u8>>);
+        impl io::Write for ProbeOutput {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.send(bytes.to_vec()).map_err(io::Error::other)?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
         let fixture = Fixture::new();
         fixture.set_floor("allow");
         let store = fixture.store();
@@ -4363,8 +4373,10 @@ mod tests {
         effect["ref_check"] = json!("not-applicable");
         store.file(sibling).expect("sibling admitted");
         let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
         super::REQUEST_READY.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move |_| {
+                super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = Some(progress_tx));
                 WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(Some(Duration::from_millis(20))));
                 AFTER_WRITER_LOCK_TIMEOUT.with(|hook| {
                     *hook.borrow_mut() = Some(Box::new(move || {
@@ -4376,12 +4388,19 @@ mod tests {
         });
         let (runner, calls, _) = counting_runner(&fixture);
         let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 5000, None);
-        let mut client = UnixStream::connect(socket).expect("second connection");
-        frame_write(
-            &mut client,
-            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":5000}),
-        )
-        .expect("second request");
+        let (mut input, stub_input) = UnixStream::pair().expect("controlled input");
+        let (output_tx, output_rx) = std::sync::mpsc::channel();
+        let client = thread::spawn(move || {
+            super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(Some(5000)));
+            super::transport::stub_call_stream(
+                &socket,
+                &[std::ffi::OsString::from("door-attribution-probe")],
+                stub_input,
+                ProbeOutput(output_tx),
+                Vec::new(),
+            )
+            .expect("stub retains the completed effect after progress")
+        });
         let deadline = Instant::now() + Duration::from_secs(4);
         while calls.load(Ordering::Relaxed) == 0 {
             assert!(Instant::now() < deadline, "second command never started");
@@ -4389,10 +4408,12 @@ mod tests {
         }
         // Seeing stdout proves spawn's custody read has finished; the child
         // stays live on stdin while the sibling takes the record lock.
-        client.write_all(b"x").expect("running command input");
+        input.write_all(b"x").expect("running command input");
         assert_eq!(
-            frame_read(&mut client).expect("running command output")["type"],
-            "stdout"
+            output_rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("running command output"),
+            b"x"
         );
         let sibling_store = store
             .for_request(deadline)
@@ -4408,6 +4429,9 @@ mod tests {
                         release_rx
                             .recv_timeout(Duration::from_secs(4))
                             .expect("second record retried");
+                        progress_rx
+                            .recv_timeout(Duration::from_secs(4))
+                            .expect("progress frame emitted before release");
                     }));
                 });
                 sibling_store
@@ -4417,10 +4441,16 @@ mod tests {
             held_rx
                 .recv_timeout(Duration::from_secs(4))
                 .expect("sibling holds lock");
-            client
+            input
                 .shutdown(Shutdown::Write)
                 .expect("second command finishes");
-            let reply = frame_read(&mut client).expect("second final frame");
+            let reply = client.join().expect("stub client");
+            assert!(
+                reply["request_lock_wait_credit_ms"]
+                    .as_u64()
+                    .expect("measured credit")
+                    >= 50
+            );
             assert_eq!(reply["reason"], "door-complete");
             assert_eq!(reply["status"], 0);
             writer.join().expect("sibling writer");
