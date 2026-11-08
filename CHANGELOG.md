@@ -84,6 +84,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Compute deadline regressions retain the stronger unextended spawn-budget bound and force store contention on early execution-window refusals, queued deadline expiry and queued adjudicated refusals, keeping requested and registered figures exact while asserting their separate effective bound (``proto:superlooplane:request-lock-wait-credit``).
+
 - Entry-version fixtures derive the current package version and their mismatches at compilation, keeping fresh and resumed probe contracts valid across workspace version bumps (``prob:box:entry-probe-fixtures-follow-the-workspace-version``; ``req:superlooplane:entry-fixture-package-version``).
 
 - The credential refresh fixture joins the production helper bundle and its shared authority-thread handoff, verifying a real refresh exchange with only the client and clock capabilities transferred (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
@@ -94,7 +96,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Admission-release regression readers consume store-wait progress before their final completion, with both release timings forced through a contended store and the execution and custody assertions retained (``proto:superlooplane:request-lock-wait-credit``).
 
-- A service-to-stub regression pins a contradictory RUN-REPORT beside the unchanged node measurements and its persisted refusal; the spawn-budget assertion accounts for measured contention credit while the registration and request assertions remain exact (``proto:superlooplane:compute-deadline-and-evidence``; ``proto:superlooplane:request-lock-wait-credit``).
+- A service-to-stub regression pins a contradictory RUN-REPORT beside the unchanged node measurements and its persisted refusal; the spawn-budget assertion retains the original requested bound while the registration and request assertions remain exact (``proto:superlooplane:compute-deadline-and-evidence``; ``proto:superlooplane:request-lock-wait-credit``).
 
 - The completed-command regression consumes sibling-record-wait progress through the production stub before checking the final completion, with a forced progress frame and unchanged execution-count and custody assertions (``proto:superlooplane:request-lock-wait-credit``).
 

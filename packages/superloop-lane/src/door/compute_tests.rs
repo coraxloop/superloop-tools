@@ -1512,7 +1512,7 @@ fn door_compute_deadline_selects_only_the_exact_owner_form() {
             assert_eq!(reply["request_deadline_ms"], bound);
             assert_eq!(calls.load(Ordering::Relaxed), 1);
             let remaining = *remaining.lock().expect("remaining");
-            assert!(remaining <= Duration::from_millis(bound + credit).as_secs_f64());
+            assert!(remaining <= Duration::from_millis(bound).as_secs_f64());
             if bound > compute::DEADLINE_MS {
                 assert!(remaining > 1800.0);
             }
@@ -1520,11 +1520,56 @@ fn door_compute_deadline_selects_only_the_exact_owner_form() {
     }
 }
 
-/// ´test:unit:door-compute-deadline-refusal-names-the-owner-bound´
-#[test]
-fn door_compute_deadline_refusal_names_the_owner_bound() {
+fn compute_refusal_frame(client: &mut UnixStream) -> (Value, u64) {
+    let mut observed_credit = 0;
+    loop {
+        let frame = frame_read(client).expect("deadline progress or final");
+        if frame["type"] != "request-lock-wait" {
+            assert_eq!(frame["type"], "final");
+            return (frame, observed_credit);
+        }
+        assert_eq!(frame["schema"], 2);
+        let credit = frame["wait_ms"].as_u64().expect("credit milliseconds");
+        assert!(credit >= observed_credit && credit <= 120_000);
+        observed_credit = credit;
+    }
+}
+
+fn compute_queue_refusal(fixture: &Fixture) -> thread::JoinHandle<()> {
+    let store = fixture.store();
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let id = loop {
+            if let Some(record) = store.list_run("R").expect("queued request").first() {
+                break record.id().to_owned();
+            }
+            assert!(Instant::now() < deadline, "compute request never queued");
+            thread::sleep(Duration::from_millis(5));
+        };
+        store.triage("R", &[json!({"id":id,"action":"adjudicate","treatment":"refuse","reason":"fixture refusal"})], "fixture", "1").expect("queued refusal");
+    })
+}
+
+fn compute_deadline_refusal_case(floor: &str, reason: &str, queue: &str, induce_wait: bool) {
     let fixture = Fixture::new();
-    fixture.set_floor("allow");
+    fixture.set_floor(floor);
+    let store = fixture.store();
+    store
+        .ensure_first_mode("compute")
+        .expect("initial compute mode");
+    let (contended, release) = if induce_wait {
+        let held = store.fixture_exclusive_lock().expect("competing writer");
+        let (contended, observed) = std::sync::mpsc::channel();
+        let release = thread::spawn(move || {
+            observed
+                .recv_timeout(Duration::from_secs(10))
+                .expect("measured store contention");
+            drop(held);
+        });
+        (Some(contended), Some(release))
+    } else {
+        (None, None)
+    };
     let form = super::config::ComputeDeadline {
         words: ["cargo", "test", "--locked"].map(str::to_owned).to_vec(),
         deadline_ms: 3_600_000,
@@ -1538,8 +1583,9 @@ fn door_compute_deadline_refusal_names_the_owner_bound() {
         None,
         &[form],
         None,
-        None,
+        contended,
     );
+    let answer = (queue == "refused").then(|| compute_queue_refusal(&fixture));
     let mut client = UnixStream::connect(socket).expect("socket");
     frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":1000})).expect("shorter caller bound");
     client.shutdown(Shutdown::Write).expect("EOF");
@@ -1547,16 +1593,46 @@ fn door_compute_deadline_refusal_names_the_owner_bound() {
     assert_eq!(announcement["type"], "compute-deadline");
     assert_eq!(announcement["registered_deadline_ms"], 3_600_000);
     assert_eq!(announcement["request_deadline_ms"], 1000);
-    let reply = frame_read(&mut client).expect("final");
+    let (reply, observed_credit) = compute_refusal_frame(&mut client);
     server.join().expect("server").expect("service");
-    assert_eq!(reply["reason"], "door-request-deadline");
+    if let Some(answer) = answer {
+        answer.join().expect("queued refusal recorded");
+    }
+    let credit = reply["request_lock_wait_credit_ms"]
+        .as_u64()
+        .expect("credit");
+    if let Some(release) = release {
+        release.join().expect("holder released after progress");
+        assert!(observed_credit >= 50);
+        assert!(credit >= observed_credit);
+    }
+    assert!(credit <= 120_000);
+    assert_eq!(reply["effective_deadline_ms"], 1000 + credit);
+    assert_eq!(reply["reason"], reason);
+    assert_eq!(reply["queue_state"], queue);
     assert_eq!(reply["registered_deadline_ms"], 3_600_000);
     assert_eq!(reply["request_deadline_ms"], 1000);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
-    assert_eq!(
-        super::final_line(&["fixture".into(), "cargo test".into()], &reply).as_deref(),
-        Some("door-request-deadline: registered_deadline_ms=3600000 request_deadline_ms=1000")
-    );
+    if reason == "door-request-deadline" {
+        assert_eq!(
+            super::final_line(&["fixture".into(), "cargo test".into()], &reply).as_deref(),
+            Some("door-request-deadline: registered_deadline_ms=3600000 request_deadline_ms=1000")
+        );
+    }
+}
+
+/// ´test:unit:door-compute-deadline-refusal-names-the-owner-bound´
+#[test]
+fn door_compute_deadline_refusal_names_the_owner_bound() {
+    for induce_wait in [false, true] {
+        for (floor, reason, queue) in [
+            ("allow", "door-request-deadline", "no-queue"),
+            ("enforce", "door-request-deadline", "deadline"),
+            ("enforce", "door-adjudicated-refusal", "refused"),
+        ] {
+            compute_deadline_refusal_case(floor, reason, queue, induce_wait);
+        }
+    }
 }
 
 /// ´test:unit:door-compute-node-measurements-do-not-require-a-report-line´
