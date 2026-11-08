@@ -2979,7 +2979,9 @@ mod tests {
 
     /// # Panics
     /// Panics if the production helper composer, receiver or support extraction disagrees.
-    fn helper_custody_fixture() -> (
+    fn helper_custody_fixture(
+        client: &str,
+    ) -> (
         tempfile::TempDir,
         crate::home::PrivateHomeGuard,
         crate::container_entry::ExecutableGuard,
@@ -2997,7 +2999,7 @@ mod tests {
             fs::create_dir_all(&path).expect("configuration directory");
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
         }
-        let bundle = crate::container_entry::pin(
+        let mut bundle = crate::container_entry::pin(
             "alpha",
             (home.path(), &held_home),
             (&runs, &held_runs),
@@ -3006,6 +3008,27 @@ mod tests {
             crate::settings::BoxBackend::Codex,
         )
         .expect("production helper composer");
+        if client != "/usr/bin/curl" {
+            use loop_home::anchor::{HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy};
+            let pin = HostVerifier::current()
+                .expect("host map")
+                .for_operation("container-helper")
+                .pin(
+                    Path::new(client),
+                    "credential-client",
+                    5,
+                    Policy {
+                        kind: Kind::File,
+                        owner: Owner::RootFile,
+                        mode: ModePolicy::Executable,
+                    },
+                )
+                .expect("substitute root-owned client capability");
+            let mut manifest = Manifest::parse(&bundle.manifest).expect("manifest");
+            manifest.records[5] = pin.record();
+            bundle.descriptors[5] = pin.into_fd();
+            bundle.manifest = serde_json::to_string(&manifest).expect("client declaration");
+        }
         let (sender, input) = std::os::unix::net::UnixStream::pair().expect("rights channel");
         loop_home::anchor::transport::send(&sender, &bundle.descriptors).expect("complete frame");
         let (_, mut anchors) = crate::container_entry::receive_for(
@@ -3041,7 +3064,7 @@ mod tests {
     /// ´test:unit:credential-thread-refreshes-through-held-executables´
     #[test]
     fn credential_thread_refreshes_through_held_executables() {
-        let (_home, _private, _guard) = helper_custody_fixture();
+        let (_home, _private, _guard) = helper_custody_fixture("/usr/bin/curl");
         let custody = crate::container_helper::CredentialThreadCustody::capture(
             crate::settings::BoxBackend::Codex,
         )
@@ -3103,6 +3126,62 @@ mod tests {
         let refusal = utc_timestamp().expect_err("held false image replaces the date program key");
         assert_eq!(refusal.kind, "credential-clock");
         assert_eq!(refusal.detail, "UTC date program failed");
+    }
+
+    /// # Panics
+    /// Panics if the refresh client executes its pathname instead of the received capability.
+    /// ´claim:superlooplane:credential-client-executes-the-received-file´
+    /// ´test:unit:credential-client-executes-the-received-file´
+    #[test]
+    fn credential_client_executes_the_received_file() {
+        let (_home, _private, _programs) = helper_custody_fixture("/usr/bin/true");
+        let custody = crate::container_helper::CredentialThreadCustody::capture(
+            crate::settings::BoxBackend::Codex,
+        )
+        .expect("production handoff");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("endpoint");
+        listener.set_nonblocking(true).expect("bounded observation");
+        let endpoint = format!("http://{}/refresh", listener.local_addr().expect("address"));
+        let error = std::thread::spawn(move || {
+            let _guard = custody.activate().expect("production thread activation");
+            let output = crate::build::run_checked(
+                Path::new("/usr/bin/curl"),
+                Vec::new(),
+                &std::env::vars().collect(),
+                Path::new("/"),
+                10,
+                "credential-client-test",
+            )
+            .expect("held true client");
+            assert!(
+                output.is_empty(),
+                "the argument-free held client emits nothing"
+            );
+            let Err(error) = refresh_request(
+                &Source::parse(source(1_800_000_000, "initial")).expect("source"),
+                &endpoint,
+            ) else {
+                panic!("the held client produces no token response");
+            };
+            error
+        })
+        .join()
+        .expect("credential thread");
+        assert_eq!(error.kind, "credential-refresh");
+        assert!(
+            matches!(
+                error.detail.as_str(),
+                "token endpoint response is invalid" | "token request could not be sent"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            listener
+                .accept()
+                .expect_err("no pathname client connects")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     /// ´test:unit:credential-helper-thread-retains-verified-anchors´

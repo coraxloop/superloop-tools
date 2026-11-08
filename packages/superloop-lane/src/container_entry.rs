@@ -648,6 +648,8 @@ pub(crate) fn receive_for(
             alias_group: None,
         });
     }
+    crate::runtime_entry::distinct_roots(&manifest, operation)
+        .map_err(|error| operation_error(operation, error.detail))?;
     let anchors = Receiver::current()
         .map_err(|error| refusal(error.context(operation, "receiver-map")))?
         .validate(
@@ -833,7 +835,7 @@ mod tests {
                 let error = result.expect_err("custody refusal");
                 let expected = match case.as_str() {
                     "identity" | "entry" => "anchor-identity",
-                    "operation" => "anchor-declaration",
+                    "operation" | "home-runs-alias" => "anchor-declaration",
                     "mode" => "anchor-mode",
                     "substituted" => "anchor-kind",
                     "owner" => "anchor-owner",
@@ -841,6 +843,13 @@ mod tests {
                     _ => panic!("unknown case"),
                 };
                 assert!(error.detail.contains(expected), "{error:?}");
+                if case == "home-runs-alias" {
+                    assert_eq!(error.kind, "container-anchor");
+                    assert_eq!(
+                        error.detail,
+                        "anchor-declaration: operation=container-helper purpose=runs-root"
+                    );
+                }
                 return;
             }
             let (manifest, mut anchors) = result.expect("production receiver");
@@ -941,6 +950,7 @@ mod tests {
                 "identity",
                 "entry",
                 "operation",
+                "home-runs-alias",
                 "mode",
                 "substituted",
                 "owner",
@@ -1014,6 +1024,14 @@ mod tests {
                     }
                 }
                 match case {
+                    "home-runs-alias" => {
+                        let mut record = declaration.records[0].clone();
+                        record.purpose = "runs-root".into();
+                        record.slot = 1;
+                        declaration.records[1] = record;
+                        bundle.descriptors[1] =
+                            bundle.descriptors[0].try_clone().expect("same held root");
+                    }
                     "identity" => declaration.records[3].inode ^= 1,
                     "operation" => declaration.operation = "other-operation".into(),
                     "owner" => declaration.records[3].owner_uid = 1,

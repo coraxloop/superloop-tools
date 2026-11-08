@@ -386,7 +386,7 @@ fn receive(
     receive_bundle(source, scope, home, OPERATION, &[])
 }
 
-fn distinct_roots(manifest: &Manifest, operation: &str) -> Result<(), LaneError> {
+pub(crate) fn distinct_roots(manifest: &Manifest, operation: &str) -> Result<(), LaneError> {
     let home_identity = manifest
         .records
         .iter()
