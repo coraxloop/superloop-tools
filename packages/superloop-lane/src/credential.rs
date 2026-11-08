@@ -1932,7 +1932,6 @@ mod tests {
     /// # Panics
     /// Panics if a resumed round uses stale authority, leaks host state or publishes on refusal.
     /// ´test:unit:claude-round-publication-reloads-owner-authority´
-    #[allow(clippy::too_many_lines)]
     #[test]
     fn claude_round_publication_reloads_owner_authority() {
         let fixture = claude_fixture_root();
@@ -2026,6 +2025,25 @@ mod tests {
             fs::read_to_string(home.join(".credentials.json")).expect("unchanged owner"),
             next.to_string()
         );
+    }
+
+    /// # Panics
+    /// Panics if a failed refresh alters the prior worker's bytes or inode.
+    /// ´test:unit:claude-failed-round-refresh-preserves-worker-file´
+    #[test]
+    fn claude_failed_round_refresh_preserves_worker_file() {
+        let fixture = claude_fixture_root();
+        let home = fixture_claude(fixture.path(), &claude_document(1_800_000_000_000));
+        let run = fixture.path().join("worker");
+        fs::create_dir_all(run.join(".claude")).expect("worker leaf");
+        for path in [&run, &run.join(".claude")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("worker mode");
+        }
+        let worker_path = run.join(".claude/.credentials.json");
+        let bytes = b"synthetic prior worker file";
+        fs::write(&worker_path, bytes).expect("prior worker");
+        fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o600)).expect("worker mode");
+        let worker_inode = fs::metadata(&worker_path).expect("prior inode").ino();
         let error = publish_claude_round_at(
             &home,
             &run,

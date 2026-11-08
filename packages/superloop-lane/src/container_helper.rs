@@ -2030,6 +2030,36 @@ pub(crate) fn spawn_credential_authority_at(
         .map_err(|error| LaneError::operation("credential-thread", error.to_string()))
 }
 
+// Keep the selected credential capability check in the same transaction as the
+// helper PID, round receipt and reservation publication.
+fn publish_helper_identity(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    root: &Path,
+) -> Result<BoxBackend, LaneError> {
+    let reservation = reservation_path(root, run);
+    let _lock = crate::launch::lock_runs_root(root, true, Uid::effective().as_raw())?;
+    let _mailbox = crate::launch::lock_mailbox(root, run, Uid::effective().as_raw())?;
+    let mut record = crate::launch::read_reservation(&reservation)?
+        .ok_or_else(|| LaneError::input("helper-pin", "reservation is absent"))?;
+    if record["phase"] != "preparing" || record["loop"] != loop_name || record["run"] != run {
+        return Err(LaneError::input(
+            "helper-pin",
+            "reservation names another run",
+        ));
+    }
+    let backend = BoxBackend::from_plan(&record["plan"])?;
+    backend.require_runtime()?;
+    let _credentials = crate::container_entry::credential_programs(backend)?;
+    let pid = std::process::id();
+    record["helper_pid"] = json!(pid);
+    record["helper_start"] = json!(process_start(pid)?);
+    publish_round_credential(owner_home, loop_name, &mut record)?;
+    crate::launch::publish_reservation(&reservation, &record)?;
+    Ok(backend)
+}
+
 /// Serve one run's fixed container request as the namespace owner.
 ///
 /// # Errors
@@ -2074,27 +2104,7 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
         .parent()
         .ok_or_else(|| LaneError::input("helper-pin", "runs root absent"))?;
     let reservation = reservation_path(root, &run);
-    let backend = {
-        let _lock = crate::launch::lock_runs_root(root, true, 0)?;
-        let _mailbox = crate::launch::lock_mailbox(root, &run, 0)?;
-        let mut record = crate::launch::read_reservation(&reservation)?
-            .ok_or_else(|| LaneError::input("helper-pin", "reservation is absent"))?;
-        if record["phase"] != "preparing" || record["loop"] != loop_name || record["run"] != run {
-            return Err(LaneError::input(
-                "helper-pin",
-                "reservation names another run",
-            ));
-        }
-        let backend = BoxBackend::from_plan(&record["plan"])?;
-        backend.require_runtime()?;
-        let _credentials = crate::container_entry::credential_programs(backend)?;
-        let pid = std::process::id();
-        record["helper_pid"] = json!(pid);
-        record["helper_start"] = json!(process_start(pid)?);
-        publish_round_credential(&owner_home, &loop_name, &mut record)?;
-        crate::launch::publish_reservation(&reservation, &record)?;
-        backend
-    };
+    let backend = publish_helper_identity(&owner_home, &loop_name, &run, root)?;
     let listener = UnixListener::bind(socket_slot.address())
         .map_err(|error| LaneError::operation("helper-socket", error.to_string()))?;
     socket_slot
@@ -2799,6 +2809,99 @@ mod tests {
         )
         .expect("reservation mode");
         (fixture, run_dir, letter)
+    }
+
+    fn foreign_credential_custody() -> crate::container_entry::ExecutableGuard {
+        use loop_home::anchor::{
+            HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement,
+            Transport,
+        };
+        let verifier = HostVerifier::current()
+            .expect("host map")
+            .for_operation("container-helper");
+        let mut programs = BTreeMap::new();
+        for (key, role, path) in [
+            ("/usr/bin/claude", "credential-claude", "/usr/bin/true"),
+            ("/usr/bin/date", "credential-clock", "/usr/bin/date"),
+        ] {
+            let policy = Policy {
+                kind: Kind::File,
+                owner: Owner::RootFile,
+                mode: ModePolicy::Executable,
+            };
+            let pin = verifier
+                .pin(Path::new(path), role, 0, policy)
+                .expect("held foreign client and clock");
+            let manifest = Manifest {
+                version: 1,
+                transport: Transport::Rights,
+                operation: "container-helper".into(),
+                loop_name: "alpha".into(),
+                records: vec![pin.record()],
+            };
+            let mut received = Receiver::current()
+                .expect("receiver")
+                .validate(
+                    &manifest,
+                    vec![pin.into_fd()],
+                    "container-helper",
+                    "alpha",
+                    Transport::Rights,
+                    &[Requirement {
+                        purpose: role.into(),
+                        policy,
+                        alias_group: None,
+                    }],
+                )
+                .expect("validated held capability");
+            programs.insert(
+                PathBuf::from(key),
+                Arc::new(received.pop().expect("received capability")),
+            );
+        }
+        crate::container_entry::activate_program_map("container-helper", programs)
+    }
+
+    /// # Panics
+    /// Panics if foreign credential custody reaches helper or round publication.
+    /// ´test:unit:helper-credential-mismatch-precedes-reservation-publication´
+    #[test]
+    fn helper_credential_mismatch_precedes_reservation_publication() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let fixture = tempfile::tempdir().expect("private TMPDIR fixture");
+        let root = fixture.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).expect("root mode");
+        let run = root.join("R");
+        fs::create_dir(&run).expect("run");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).expect("run mode");
+        let worker = root.join("absent-worker");
+        let reservation = crate::launch::reservation_path(root, "R");
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R",
+            "worker_uid":3001,"plan":{"backend":"codex","home":worker},
+            "active_round":"one","rounds":[{"step":"one","credential_publication":null}]});
+        crate::launch::publish_reservation(&reservation, &record).expect("reservation");
+        let bytes = fs::read(&reservation).expect("prior bytes");
+        let inode = fs::metadata(&reservation).expect("prior inode").ino();
+        let _guard = foreign_credential_custody();
+        let error = super::publish_helper_identity(root, "alpha", "R", root)
+            .expect_err("foreign client at the production publication transaction");
+        assert_eq!(error.kind, "container-anchor");
+        assert_eq!(
+            error.detail,
+            "anchor-missing: operation=container-helper purpose=credential-executable backend=codex program=/usr/bin/curl"
+        );
+        assert_eq!(fs::read(&reservation).expect("unchanged bytes"), bytes);
+        assert_eq!(
+            fs::metadata(&reservation).expect("unchanged inode").ino(),
+            inode
+        );
+        let saved = crate::launch::read_reservation(&reservation)
+            .expect("read")
+            .expect("record");
+        assert!(saved.get("helper_pid").is_none());
+        assert!(saved["rounds"][0]["credential_publication"].is_null());
+        assert!(!worker.exists());
     }
 
     /// ´test:unit:helper-accepts-a-registered-custom-runs-root´
