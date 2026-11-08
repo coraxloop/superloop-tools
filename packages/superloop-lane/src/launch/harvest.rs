@@ -1,6 +1,7 @@
 //! Compare a preserved lane object with gate evidence before collecting its disposable home.
 
 use super::*;
+use crate::settings::BoxBackend;
 use nix::unistd::{UnlinkatFlags, unlinkat};
 
 const MAX_PRESERVED_ENTRIES: usize = 8192;
@@ -1248,6 +1249,7 @@ pub fn private_recover(owner_home: &Path, request: &HarvestRequest) -> Result<Va
     let mut record = checkout::read_record(&root_fd, &request.run, owner)
         .map_err(|error| LaneError::input("harvest-record", error.line()))?;
     settled_reservation(&record, &plan, &request.loop_name, &request.run)?;
+    BoxBackend::from_plan(&record["plan"])?.require_runtime()?;
     let (agreement, collection) = harvest_fields(&record)?;
     let Some(collection) = collection.filter(|collection| collection["state"] == "removing") else {
         return Ok(
@@ -1370,6 +1372,7 @@ pub fn private_run(owner_home: &Path, request: &HarvestRequest) -> Result<Value,
     let mut record = checkout::read_record(&root_fd, &request.run, owner)
         .map_err(|error| LaneError::input("harvest-record", error.line()))?;
     settled_reservation(&record, &plan, &request.loop_name, &request.run)?;
+    BoxBackend::from_plan(&record["plan"])?.require_runtime()?;
     let (prior_agreement, prior_collection) = harvest_fields(&record)?;
     let (_, checkpoints, _) = checkpoint::checkpoint_fields(&record)?;
     let checkpoint = checkpoints
@@ -1676,6 +1679,123 @@ pub(crate) mod tests {
             );
             assert!(error.detail.contains(".local/inbox"));
             assert!(plan.home.join(".local/inbox").exists());
+        }
+    }
+
+    fn gated_harvest_fixture() -> (tempfile::TempDir, Settings, PathBuf) {
+        let fixture = tempfile::tempdir().expect("fixture under TMPDIR");
+        let root = fixture.path().join("runs");
+        let worker_home = fixture.path().join("worker");
+        for path in [fixture.path(), root.as_path(), worker_home.as_path()] {
+            std::fs::create_dir_all(path).expect("fixture directory");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .expect("directory mode");
+        }
+        let sentinel = worker_home.join("retained");
+        std::fs::write(&sentinel, b"synthetic worker state").expect("worker state");
+        for name in [".prepare-R.lock", ".letter-R.lock"] {
+            let path = root.join(name);
+            std::fs::write(&path, b"").expect("existing dry-run lock");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("lock mode");
+        }
+        let settings = Settings {
+            runs_root: Some(root),
+            backend_argv: BTreeMap::default(),
+            driver_argv: Vec::new(),
+            entry_bin: None,
+            driver_bin: None,
+            image_digest: None,
+            template_dir: None,
+            resources: None,
+            socket_dir: None,
+            vendor_hosts: BTreeMap::default(),
+            sandbox_mode: String::new(),
+            context_threshold: None,
+            retention: "keep".into(),
+            source: String::new(),
+        };
+        (fixture, settings, worker_home)
+    }
+
+    /// ´test:unit:harvest-private-refuses-claude-before-collection´
+    #[test]
+    fn harvest_private_refuses_claude_before_collection() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (fixture, settings, worker_home) = gated_harvest_fixture();
+        let root = settings.runs_root.as_deref().expect("runs root");
+        let reservation = super::super::reservation_path(root, "R");
+        let sentinel = worker_home.join("retained");
+        let sentinel_inode = std::fs::metadata(&sentinel)
+            .expect("sentinel metadata")
+            .ino();
+        for (backend, expected) in [
+            ("claude", "backend-unavailable"),
+            ("codex", "harvest-checkpoint"),
+        ] {
+            for dry_run in [false, true] {
+                let document = json!({
+                    "backend":backend,"home":worker_home,"driver_dir":root.join("R")
+                });
+                let record = json!({
+                    "schema":1,"loop":"alpha","run":"R","phase":"settled",
+                    "plan":document,"worker_uid":3000,
+                    "harvest_agreement":null,"collection":null,
+                    "rounds":[{"step":"dispatch","phase":"settled","ended_by":"by-report"}],
+                    "active_round":"dispatch"
+                });
+                super::super::publish_reservation(&reservation, &record).expect("reservation");
+                let before = std::fs::read(&reservation).expect("reservation bytes");
+                let inode = std::fs::metadata(&reservation)
+                    .expect("reservation metadata")
+                    .ino();
+                let plan = Plan {
+                    home: worker_home.clone(),
+                    driver_dir: root.join("R"),
+                    letter: worker_home.join("brief.txt"),
+                    document,
+                };
+                PRIVATE_RUN_FIXTURE.with(|slot| {
+                    assert!(slot.borrow().is_none());
+                    *slot.borrow_mut() = Some((plan, settings.clone()));
+                });
+                let request = HarvestRequest {
+                    loop_name: "alpha".into(),
+                    run: "R".into(),
+                    gate_object: "a".repeat(40),
+                    dry_run,
+                };
+                let refusal =
+                    private_run(fixture.path(), &request).expect_err("closed gate or control");
+                assert_eq!(refusal.kind, expected, "{}", refusal.line());
+                if backend == "claude" {
+                    assert_eq!(
+                        refusal.detail,
+                        BoxBackend::Claude.require_runtime().unwrap_err().detail
+                    );
+                }
+                assert_eq!(
+                    std::fs::read(&reservation).expect("reservation remains"),
+                    before
+                );
+                assert_eq!(
+                    std::fs::metadata(&reservation)
+                        .expect("same reservation")
+                        .ino(),
+                    inode
+                );
+                assert_eq!(
+                    std::fs::read(&sentinel).expect("worker remains"),
+                    b"synthetic worker state"
+                );
+                assert_eq!(
+                    std::fs::metadata(&sentinel)
+                        .expect("same worker state")
+                        .ino(),
+                    sentinel_inode
+                );
+            }
         }
     }
 

@@ -122,6 +122,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Harvest and removal recovery require the protected backend's runtime gate before collection processing, refusing Claude records while activation remains closed (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:harvest-selected-worker-state``).
+
 - Service authority fixtures require a spawning-thread endpoint and refuse before spawning when it is absent; nested guards restore the prior endpoint and a new thread inherits no hook, while production keeps its fixed endpoint (``prob:box:service-credential-test-hook-closes-by-default``; ``claim:superlooplane:service-fixture-endpoint-required``).
 
 - Private harvest and home-layout readers retain configuration and checkpoint-tool capabilities through namespace entry, refusing changed identities and unsafe modes before plan reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-exercise-readers-retain-configuration``; ``claim:superlooplane:checkpoint-tools-use-received-capabilities``).
