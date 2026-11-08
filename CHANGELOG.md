@@ -50,6 +50,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Credential evidence regression cases refuse cross-schema provider fields and foreign backends at both publication and census, retaining prior evidence on a refused publication (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-periodic-credential-publication``).
+
 - Gated Claude program bindings reuse successful verification only for unchanged held custody within one thread and activation; metadata, policy and required-pin checks remain on every boundary (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-program-binding-cadence``).
 
 - Native creation is accepted through its production namespace composer, receiver and home creation, with reserve and finish bound to the protected receipt, active mail configuration, placed brief and redacted worker credential (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:native-creation-completes-reserve-and-finish``).

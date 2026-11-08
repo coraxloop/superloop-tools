@@ -2844,6 +2844,62 @@ mod tests {
     }
 
     /// # Panics
+    /// Panics if either evidence boundary accepts mixed schemas or a foreign backend.
+    /// ´test:unit:credential-evidence-refuses-cross-schema-provider-fields´
+    #[test]
+    fn credential_evidence_refuses_cross_schema_provider_fields() {
+        let root = claude_fixture_root();
+        let runs = root.path().join("runs");
+        let driver = runs.join("pilot");
+        fs::create_dir_all(&driver).expect("driver");
+        fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected path");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700))
+            .expect("private evidence");
+        let file = protected.join("credential-refresh.json");
+        let owner = owner_identity().0;
+        let held = open_dir(&runs, owner, owner, 0o700).expect("held runs");
+        for (backend, field, value) in [
+            (BoxBackend::Codex, "backend", Value::Null),
+            (BoxBackend::Codex, "backend", json!("codex")),
+            (BoxBackend::Codex, "provider", Value::Null),
+            (
+                BoxBackend::Codex,
+                "provider",
+                json!({"kind":"owner-program"}),
+            ),
+            (BoxBackend::Claude, "backend", json!("codex")),
+            (BoxBackend::Claude, "backend", json!("unknown")),
+            (BoxBackend::Claude, "backend", Value::Null),
+        ] {
+            let valid = evidence_for_check(&Ok(fixture_report(1_900_000_000)), true, backend)
+                .expect("valid evidence");
+            publish_evidence(&driver, &valid).expect("valid writer control");
+            assert_eq!(
+                read_evidence(&held, "pilot", owner).expect("valid reader control"),
+                Some(EvidenceObservation::Current(valid.clone()))
+            );
+            let bytes = fs::read(&file).expect("prior evidence");
+            let inode = fs::metadata(&file).expect("prior identity").ino();
+            let mut invalid = valid;
+            invalid[field] = value;
+            let error = publish_evidence(&driver, &invalid).expect_err("mixed provider writer");
+            assert_eq!(error.kind, "credential-evidence");
+            assert_eq!(error.detail, "schema, provider or state is invalid");
+            assert_eq!(fs::read(&file).expect("evidence retained"), bytes);
+            assert_eq!(fs::metadata(&file).expect("identity retained").ino(), inode);
+            fs::write(&file, invalid.to_string()).expect("synthetic invalid persisted evidence");
+            assert_eq!(
+                read_evidence(&held, "pilot", owner)
+                    .expect_err("mixed provider reader")
+                    .kind,
+                "credential-evidence"
+            );
+        }
+    }
+
+    /// # Panics
     /// Panics if Claude evidence fabricates an endpoint or cannot be read by census.
     /// ´test:unit:claude-refresh-evidence-names-owner-program-without-host´
     #[test]
