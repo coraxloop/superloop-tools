@@ -2007,11 +2007,7 @@ exit 2
     assert_eq!(preview["prepare_argv"]["directory_transfer_socket_fd"], 0);
     assert_eq!(
         preview["prepare_argv"]["transferred_directory_descriptors"],
-        json!([
-            {"index":0,"role":"owner_home"},
-            {"index":1,"role":"runs_root"},
-            {"index":2,"role":"letter_directory"}
-        ])
+        json!([])
     );
     assert_eq!(
         preview["prepare_argv"]["direct_private_directory_fd"],
@@ -2052,13 +2048,17 @@ exit 2
     let prepare_words = external_preview["prepare_argv"]["argv"]
         .as_array()
         .expect("private vector");
+    assert!(prepare_words.iter().all(|word| !matches!(
+        word.as_str(),
+        Some("--verified-home-fd" | "--verified-runs-root-fd" | "--verified-letter-fd")
+    )));
     assert_eq!(
-        prepare_words[prepare_words.len() - 2],
-        "--verified-letter-fd"
+        external_preview["prepare_argv"]["anchor_manifest"]["operation"],
+        "make-home"
     );
     assert_eq!(
-        prepare_words.last().and_then(serde_json::Value::as_str),
-        Some("2")
+        external_preview["prepare_argv"]["anchor_manifest"]["transport"],
+        "rights"
     );
     assert_eq!(
         external_preview["helper_argv"]["argv"][10],

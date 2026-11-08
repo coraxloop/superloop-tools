@@ -361,6 +361,23 @@ fn receive(
     receive_bundle(source, scope, home, OPERATION, &[])
 }
 
+fn distinct_roots(manifest: &Manifest, operation: &str) -> Result<(), LaneError> {
+    let home_identity = manifest
+        .records
+        .iter()
+        .find(|record| record.purpose == "owner-home")
+        .ok_or_else(|| named_for(operation, "anchor-declaration", "roles"))?;
+    let runs_identity = manifest
+        .records
+        .iter()
+        .find(|record| record.purpose == "runs-root")
+        .ok_or_else(|| named_for(operation, "anchor-declaration", "roles"))?;
+    if (home_identity.device, home_identity.inode) == (runs_identity.device, runs_identity.inode) {
+        return Err(named_for(operation, "anchor-declaration", "runs-root"));
+    }
+    Ok(())
+}
+
 pub(crate) fn receive_bundle(
     source: &str,
     scope: &str,
@@ -402,6 +419,7 @@ pub(crate) fn receive_bundle(
         .registry
         .row(scope, Path::new(home))
         .map_err(refusal)?;
+    distinct_roots(&manifest, operation)?;
     let mut policies = Vec::new();
     for (slot, purpose) in PURPOSES.iter().enumerate() {
         let record = manifest

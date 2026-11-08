@@ -234,6 +234,8 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             "override-other",
             "plan-held",
             "plan-widened",
+            "home-runs-alias",
+            "letter-runs",
             "execute-held",
             "execute-control",
             "operation",
@@ -243,17 +245,30 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             "owner",
             "mode",
         ] {
+            if case == "letter-runs" && entry == "runtime" {
+                continue;
+            }
             if case.starts_with("execute-") && entry != "runtime" {
                 continue;
             }
+            let runs_path = if case == "home-runs-alias" {
+                home.to_path_buf()
+            } else {
+                home.join("runs")
+            };
+            let runs_fd = if case == "home-runs-alias" {
+                &held_home
+            } else {
+                &held_runs
+            };
             let mut request = if entry == "runtime" {
                 superloop_lane::runtime_entry::command(
                     Path::new("/usr/bin/podman"),
                     &argv,
                     home,
                     &held_home,
-                    &home.join("runs"),
-                    &held_runs,
+                    &runs_path,
+                    runs_fd,
                 )
                 .expect("runtime composer")
             } else {
@@ -282,6 +297,9 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                     "--door-scope".into(),
                     "work".into(),
                 ];
+                if case == "letter-runs" {
+                    native[6] = home.join("runs/letter").to_str().expect("letter").into();
+                }
                 if entry == "rotation" {
                     native.extend(["--rotation-sha256".into(), "0".repeat(64)]);
                 }
@@ -289,8 +307,12 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                     Path::new("/usr/bin/podman"),
                     &native,
                     (home, &held_home),
-                    (&home.join("runs"), &held_runs),
-                    (home, &held_home),
+                    (&runs_path, runs_fd),
+                    if case == "letter-runs" {
+                        (&runs_path, runs_fd)
+                    } else {
+                        (home, &held_home)
+                    },
                     (entry == "rotation").then_some(&held_source),
                 )
                 .expect("creation composer")
@@ -355,7 +377,7 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                 String::from_utf8_lossy(&output.stderr)
             );
             match case {
-                "valid" => assert!(
+                "valid" | "letter-runs" => assert!(
                     !report.contains("anchor-")
                         && report.contains("unsafe-path:")
                         && report.contains(".config/loops/alpha"),
@@ -381,6 +403,10 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                 "plan-widened" => assert!(
                     report.contains("settings-grant: runs_root differs"),
                     "anchored grant is enforced: {report}"
+                ),
+                "home-runs-alias" => assert!(
+                    report.contains("anchor-declaration") && report.contains("purpose=runs-root"),
+                    "{report}"
                 ),
                 "operation" => assert!(report.contains("anchor-declaration"), "{report}"),
                 "identity" => assert!(report.contains("anchor-identity"), "{report}"),

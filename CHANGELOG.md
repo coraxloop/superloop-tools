@@ -80,6 +80,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Native creation previews describe the capability bundle instead of retired descriptor flags, and creation receipt keeps owner home and runs root distinct while permitting the letter directory to reuse either (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Native creation selects worker UIDs from its verified configuration and held loop-storage history, preserving receipt and reconciliation checks after configuration or storage path replacement (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Admission-release regression readers consume store-wait progress before their final completion, with both release timings forced through a contended store and the execution and custody assertions retained (``proto:superlooplane:request-lock-wait-credit``).
