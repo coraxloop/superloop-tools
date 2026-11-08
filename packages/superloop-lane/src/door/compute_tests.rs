@@ -1512,7 +1512,7 @@ fn door_compute_deadline_selects_only_the_exact_owner_form() {
             assert_eq!(reply["request_deadline_ms"], bound);
             assert_eq!(calls.load(Ordering::Relaxed), 1);
             let remaining = *remaining.lock().expect("remaining");
-            assert!(remaining <= Duration::from_millis(bound).as_secs_f64());
+            assert!(remaining <= Duration::from_millis(bound + credit).as_secs_f64());
             if bound > compute::DEADLINE_MS {
                 assert!(remaining > 1800.0);
             }
@@ -1820,4 +1820,49 @@ fn door_root_refusal_announces_before_admission() {
     let rows = fixture.store().list_run("R").expect("refusal record");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].value()["state"], "preflight-refused");
+}
+
+/// ´test:unit:door-compute-report-contradiction-reaches-stub-and-record´
+#[test]
+fn door_compute_report_contradiction_reaches_stub_and_record() {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+    let program = fixture.home.join("node-R");
+    let source = std::fs::read_to_string(&program).expect("fixture node program");
+    let contradicting =
+        source.replace("RUN-REPORT exit=3 wall=0.2s", "RUN-REPORT exit=7 wall=1.5s");
+    assert_ne!(source, contradicting, "fixture report replaced");
+    crate::fixture_exec::write_executable(&program, contradicting.as_bytes())
+        .expect("contradicting inner report");
+    let (reply, stdout, _) = compute_call(&socket, "/opt/fixture/bin/report git diff");
+    let service_reply = server
+        .join()
+        .expect("server")
+        .expect("served contradiction");
+    assert_eq!(
+        reply, service_reply,
+        "stub retains the complete service reply"
+    );
+    assert_eq!(reply["reason"], "door-compute-report-contradiction");
+    assert_eq!(reply["status"], 125);
+    assert_eq!(reply["compute_exit_status"], 3);
+    assert_eq!(
+        reply["run_report"],
+        json!({"wall_seconds":1.5,"exit_status":7})
+    );
+    assert_eq!(reply["compute"]["wrapper_exit_status"], 3);
+    assert_eq!(reply["compute"]["wrapper_wall_seconds"], 0.2);
+    assert_eq!(reply["compute"]["wrapper_user_cpu_seconds"], 0.02);
+    assert_eq!(reply["compute"]["wrapper_system_cpu_seconds"], 0.01);
+    assert_eq!(stdout, b"generator output\n");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    let rows = fixture.store().list_run("R").expect("persisted effect");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value()["effect"]["reason"],
+        "door-compute-report-contradiction"
+    );
+    assert_eq!(rows[0].value()["effect"]["compute"], reply["compute"]);
+    assert!(rows[0].value()["effect"].get("run_report").is_none());
 }
