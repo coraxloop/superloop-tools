@@ -29,6 +29,14 @@ const PURPOSES: [&str; 8] = [
     "credential-clock",
     "configuration",
 ];
+const READER_PURPOSES: [&str; 6] = [
+    "owner-home",
+    "runs-root",
+    "entry-executable",
+    "hash-executable",
+    "git-executable",
+    "configuration",
+];
 const EXERCISE_PURPOSES: [&str; 6] = [
     "owner-home",
     "runs-root",
@@ -54,7 +62,9 @@ pub(crate) const fn credential_client(backend: BoxBackend) -> &'static str {
     }
 }
 fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
-    if operation == OPERATION {
+    if matches!(operation, "exercise-harvest" | "exercise-home-layout") {
+        &READER_PURPOSES
+    } else if operation == OPERATION {
         if backend == BoxBackend::Claude {
             &CLAUDE_PURPOSES
         } else {
@@ -177,13 +187,11 @@ pub(crate) fn pin(
     pin_for_backend(OPERATION, loop_name, home, runs, entry, podman, backend)
 }
 
-pub(crate) fn core_pins(
+fn directory_pins(
     verifier: &HostVerifier,
     operation: &str,
     home: (&Path, &OwnedFd),
     runs: (&Path, &OwnedFd),
-    entry: &Path,
-    podman: &Path,
 ) -> Result<Vec<anchor::HostPin>, LaneError> {
     let mut pins = Vec::new();
     for (slot, (path, held)) in [home, runs].into_iter().enumerate() {
@@ -206,30 +214,103 @@ pub(crate) fn core_pins(
         }
         pins.push(pin);
     }
+    Ok(pins)
+}
+
+fn executable_pin(
+    verifier: &HostVerifier,
+    slot: usize,
+    path: &Path,
+) -> Result<anchor::HostPin, LaneError> {
+    let index = u32::try_from(slot).map_err(refusal)?;
+    verifier
+        .pin(path, PURPOSES[slot], index, executable_policy(Owner::Host))
+        .or_else(|error| {
+            if error.kind == "anchor-owner" {
+                verifier.pin(
+                    path,
+                    PURPOSES[slot],
+                    index,
+                    executable_policy(Owner::RootFile),
+                )
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(refusal)
+}
+
+pub(crate) fn core_pins(
+    verifier: &HostVerifier,
+    operation: &str,
+    home: (&Path, &OwnedFd),
+    runs: (&Path, &OwnedFd),
+    entry: &Path,
+    podman: &Path,
+) -> Result<Vec<anchor::HostPin>, LaneError> {
+    let mut pins = directory_pins(verifier, operation, home, runs)?;
     for (slot, path) in [
         (2, entry),
         (3, podman),
         (4, Path::new("/usr/bin/sha256sum")),
     ] {
-        let index = u32::try_from(slot).map_err(refusal)?;
-        let pin = verifier
-            .pin(path, PURPOSES[slot], index, executable_policy(Owner::Host))
-            .or_else(|error| {
-                if error.kind == "anchor-owner" {
-                    verifier.pin(
-                        path,
-                        PURPOSES[slot],
-                        index,
-                        executable_policy(Owner::RootFile),
-                    )
-                } else {
-                    Err(error)
-                }
-            })
-            .map_err(refusal)?;
-        pins.push(pin);
+        pins.push(executable_pin(verifier, slot, path)?);
     }
     Ok(pins)
+}
+
+pub(crate) fn pin_reader(
+    operation: &'static str,
+    scope: &str,
+    home: (&Path, &OwnedFd),
+    runs: (&Path, &OwnedFd),
+    entry: &Path,
+) -> Result<Bundle, LaneError> {
+    registry_override(operation)?;
+    let verifier = HostVerifier::current()
+        .map_err(refusal)?
+        .for_operation(operation);
+    let mut pins = directory_pins(&verifier, operation, home, runs)?;
+    pins.push(executable_pin(&verifier, 2, entry)?);
+    for (slot, (purpose, path)) in [
+        ("hash-executable", "/usr/bin/sha256sum"),
+        ("git-executable", "/usr/bin/git"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        pins.push(
+            verifier
+                .pin(
+                    Path::new(path),
+                    purpose,
+                    u32::try_from(slot + 3).map_err(refusal)?,
+                    executable_policy(Owner::RootFile),
+                )
+                .map_err(refusal)?,
+        );
+    }
+    pins.push(
+        verifier
+            .pin(
+                &home.0.join(".config/loops"),
+                "configuration",
+                5,
+                configuration_policy(),
+            )
+            .map_err(refusal)?,
+    );
+    let manifest = Manifest {
+        version: 1,
+        transport: Transport::Rights,
+        operation: operation.into(),
+        loop_name: scope.into(),
+        records: pins.iter().map(anchor::HostPin::record).collect(),
+    };
+    Ok(Bundle {
+        manifest: serde_json::to_string(&manifest).map_err(refusal)?,
+        descriptors: pins.into_iter().map(anchor::HostPin::into_fd).collect(),
+    })
 }
 
 pub(crate) fn pin_for(
@@ -567,6 +648,8 @@ pub(crate) fn spawn_error(program: &Path, kind: &'static str, error: &std::io::E
         {
             let purpose = if program == Path::new("/usr/bin/sha256sum") {
                 "hash-executable"
+            } else if program == Path::new("/usr/bin/git") {
+                "git-executable"
             } else if program == Path::new("/usr/bin/curl") {
                 "credential-client"
             } else if program == Path::new("/usr/bin/claude") {

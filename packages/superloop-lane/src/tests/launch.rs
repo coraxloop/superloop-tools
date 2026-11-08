@@ -2618,6 +2618,10 @@ fn proxy_refresh_preserves_live_helper_pins() {
         )
         .expect("fixture mailbox source for pin reconstruction");
     }
+    if std::env::var_os("SUPERLOOP_READER_PROOF").is_some() {
+        super::reader_custody::exercise(home, &runs, &podman);
+        return;
+    }
     if std::env::var_os("SUPERLOOP_CREATION_PROOF").is_some() {
         super::runtime_preparation::exercise_creation(home, &runs, &podman);
         return;

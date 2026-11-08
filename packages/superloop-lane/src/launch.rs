@@ -46,6 +46,7 @@ pub mod matrix;
 mod migration_inventory;
 pub mod network_evidence;
 pub(crate) mod probe;
+pub mod reader_entry;
 pub mod reaping;
 pub mod repin_door;
 pub mod report;

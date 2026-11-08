@@ -312,16 +312,24 @@ fn home_layout_private_entry_binds_owner_home_and_record() {
     let output = enter(&body, &home, &runs, None);
     let refusal = String::from_utf8(output.stderr).expect("refusal text");
     assert!(!output.status.success(), "private fixture has no run");
-    assert!(refusal.contains(&home.display().to_string()), "{refusal}");
+    assert!(
+        refusal.contains("anchor-declaration: operation=exercise-"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("purpose=vector"), "{refusal}");
     assert!(!refusal.contains(&identity), "{refusal}");
 
     let mut malformed = body;
     malformed[3] = "--wrong-record".into();
+    let malformed_error =
+        superloop_lane::launch::exercise::parse_home_layout_private_argv(&malformed)
+            .expect_err("malformed reader body");
+    assert_eq!(malformed_error.kind, "exercise-home-layout-form");
     let output = enter(&malformed, &home, &runs, None);
     assert_eq!(output.status.code(), Some(2));
     let refusal = String::from_utf8(output.stderr).expect("malformed refusal");
     assert!(
-        refusal.contains("exercise-home-layout-form: private form is malformed"),
+        refusal.contains("anchor-declaration: operation=exercise-home-layout purpose=vector"),
         "{refusal}"
     );
 }
@@ -349,15 +357,22 @@ fn harvest_case_private_entry_binds_owner_home_and_record() {
     let output = enter(&body, &home, &runs, None);
     let refusal = String::from_utf8(output.stderr).expect("refusal text");
     assert!(!output.status.success(), "fixture has no private run");
-    assert!(refusal.contains(&home.display().to_string()), "{refusal}");
+    assert!(
+        refusal.contains("anchor-declaration: operation=exercise-"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("purpose=vector"), "{refusal}");
     assert!(!refusal.contains(&identity), "{refusal}");
     let mut malformed = body;
     malformed[3] = "--wrong-record".into();
+    let malformed_error = superloop_lane::launch::exercise::parse_harvest_private_argv(&malformed)
+        .expect_err("malformed reader body");
+    assert_eq!(malformed_error.kind, "exercise-harvest-form");
     let output = enter(&malformed, &home, &runs, None);
     assert_eq!(output.status.code(), Some(2));
     let refusal = String::from_utf8(output.stderr).expect("malformed refusal");
     assert!(
-        refusal.contains("exercise-harvest-form: private form is malformed"),
+        refusal.contains("anchor-declaration: operation=exercise-harvest purpose=vector"),
         "{refusal}"
     );
 }

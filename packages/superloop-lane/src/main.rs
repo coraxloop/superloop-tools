@@ -503,6 +503,12 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
+    if launch::reader_entry::handles(args) {
+        let report = launch::reader_entry::serve(args)?;
+        writeln!(io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
+        return Ok(0);
+    }
     if launch::exercise_entry::handles(args) {
         let report = launch::exercise_entry::serve(args)?;
         writeln!(io::stdout().lock(), "{report}")

@@ -1084,6 +1084,32 @@ fn composer_override_child(home: &Path) {
         );
         assert!(!home.join(".var").exists(), "no custody preparation");
     }
+    for operation in ["exercise-harvest", "exercise-home-layout"] {
+        let argv = vec![
+            "unshare".into(),
+            "/absent-entry-image".into(),
+            format!("_{operation}"),
+            "alpha".into(),
+            "R".into(),
+            "--expect-record".into(),
+            "identity".into(),
+            "--owner-home".into(),
+            home.to_str().expect("home").into(),
+        ];
+        let Err(error) =
+            superloop_lane::launch::reader_entry::command(program, &argv, home, &fd, home, &fd)
+        else {
+            panic!("reader composer accepted registry override");
+        };
+        assert_eq!(error.kind, "exercise-anchor");
+        assert!(
+            error.detail.contains(&format!(
+                "anchor-declaration: operation={operation} purpose=registry-override"
+            )),
+            "{error}"
+        );
+        assert!(!home.join(".var").exists(), "no custody preparation");
+    }
 }
 
 /// # Panics

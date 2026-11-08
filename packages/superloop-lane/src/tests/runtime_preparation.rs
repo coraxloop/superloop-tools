@@ -19,7 +19,7 @@ fn runtime_preparation_executes_received_podman() {
 
 /// # Panics
 /// Panics if the production namespace fixture fails or omits its measured marker.
-fn proof(flag: &str, marker: &str) {
+pub(super) fn proof(flag: &str, marker: &str) {
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
@@ -46,7 +46,7 @@ fn proof(flag: &str, marker: &str) {
     assert!(stdout.contains(marker), "{stdout}");
 }
 
-struct MappedStorage(PathBuf, String);
+pub(super) struct MappedStorage(pub(super) PathBuf, pub(super) String);
 impl Drop for MappedStorage {
     fn drop(&mut self) {
         drop(helper_service::namespace_python(
@@ -59,7 +59,7 @@ impl Drop for MappedStorage {
 
 /// # Panics
 /// Panics if the package binary built beside Cargo's unit test executable is absent.
-fn binary() -> PathBuf {
+pub(super) fn binary() -> PathBuf {
     let image = std::env::current_exe().expect("test executable");
     // The nearest ancestor holding the binary is its profile directory, the gate's custom one too.
     let binary = image
@@ -76,12 +76,24 @@ fn binary() -> PathBuf {
 
 /// # Panics
 /// Panics if the complete production vector cannot enter a real namespace with its descriptors.
-fn run(request: &CommandSpec) -> std::process::Output {
+pub(super) fn run(request: &CommandSpec) -> std::process::Output {
+    run_with_registry(request, None)
+}
+
+/// # Panics
+/// Panics if the real namespace entry cannot receive its vector and descriptors.
+pub(super) fn run_with_registry(
+    request: &CommandSpec,
+    registry: Option<&str>,
+) -> std::process::Output {
     let mut command = Command::new(&request.argv[0]);
     command
         .args(&request.argv[1..])
         .env_remove("_CONTAINERS_USERNS_CONFIGURED")
         .env_remove("_CONTAINERS_ROOTLESS_UID");
+    if let Some(registry) = registry {
+        command.env("ENTER_LOOP_REGISTRY", registry);
+    }
     request
         .descriptors
         .configure(&mut command)

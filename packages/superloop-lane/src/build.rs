@@ -1029,6 +1029,14 @@ pub(crate) fn run_checked_with_private_launch(
     }
     if argv
         .get(2..)
+        .is_some_and(crate::launch::reader_entry::handles)
+    {
+        let request =
+            crate::launch::reader_entry::command(program, &argv, cwd, home, runs_root, runs)?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
+    if argv
+        .get(2..)
         .is_some_and(crate::launch::exercise_entry::handles)
     {
         let request =
