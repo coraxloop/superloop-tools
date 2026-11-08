@@ -1,4 +1,4 @@
-//! Runtime preparation executes the received program after its pathname is replaced.
+//! Production namespace preparation executes held programs and completes native worker creation.
 use super::helper_service;
 use loop_home::CommandSpec;
 use serde_json::Value;
@@ -14,13 +14,19 @@ use std::process::Command;
 /// ´test:crate:runtime-preparation-executes-received-podman´
 #[test]
 fn runtime_preparation_executes_received_podman() {
+    proof("SUPERLOOP_RUNTIME_PROOF", "RUNTIME-PODMAN-MEASURED");
+}
+
+/// # Panics
+/// Panics if the production namespace fixture fails or omits its measured marker.
+fn proof(flag: &str, marker: &str) {
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
             "tests::launch::proxy_refresh_preserves_live_helper_pins",
             "--nocapture",
         ])
-        .env("SUPERLOOP_RUNTIME_PROOF", "1")
+        .env(flag, "1")
         .env("SUPERLOOP_REFRESH_PROOF", "1")
         .env("_CONTAINERS_USERNS_CONFIGURED", "1")
         .env(
@@ -37,7 +43,7 @@ fn runtime_preparation_executes_received_podman() {
         "{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("RUNTIME-PODMAN-MEASURED"), "{stdout}");
+    assert!(stdout.contains(marker), "{stdout}");
 }
 
 struct MappedStorage(PathBuf, String);
@@ -197,4 +203,141 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
     }
     std::io::Write::write_all(&mut std::io::stdout().lock(), b"RUNTIME-PODMAN-MEASURED\n")
         .expect("measurement marker");
+}
+
+/// # Panics
+/// Panics if production native creation fails to complete its protected lifetime.
+/// ´claim:superlooplane:native-creation-completes-reserve-and-finish´
+/// ´test:crate:native-creation-completes-reserve-and-finish´
+#[test]
+fn native_creation_completes_reserve_and_finish() {
+    proof("SUPERLOOP_CREATION_PROOF", "NATIVE-CREATION-MEASURED");
+}
+
+/// # Panics
+/// Panics if a production creation receipt, binding or placed home disagrees with its reservation.
+pub(super) fn exercise_creation(home: &Path, runs: &Path, program: &Path) {
+    let record = helper_service::prepare(home, runs, program);
+    let worker = record["plan"]["home"].as_str().expect("worker home");
+    let _storage = MappedStorage(home.to_path_buf(), worker.to_owned());
+    let output = helper_service::namespace_python(home, STORAGE, worker).expect("mapped storage");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = helper_service::namespace_python(
+        home,
+        r"
+import sys,shutil
+from pathlib import Path
+home=Path(sys.argv[1]);root=home/'.var/loops/alpha/runs'
+for run in ['R','S']:
+ (root/f'.reservation-{run}.json').unlink()
+ shutil.rmtree(root/run,ignore_errors=True)
+ shutil.rmtree(root/f'.launch-{run}',ignore_errors=True)
+shutil.rmtree(sys.argv[2])
+",
+        worker,
+    )
+    .expect("fresh creation destinations");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut request = creation_request(home, runs, program);
+    request.argv[0] = "/usr/bin/podman".into();
+    let output = run(&request);
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("production creation report");
+    assert_eq!(
+        report["reservation"],
+        runs.join(".reservation-R.json").display().to_string()
+    );
+    let output = helper_service::namespace_python(
+        home,
+        r"
+import sys,tomllib,json
+from pathlib import Path
+home=Path(sys.argv[1]);root=home/'.var/loops/alpha'
+record=json.loads((root/'runs/.reservation-R.json').read_text());identity=record['mail_birth']
+assert record['worker_uid']==identity['uid']==3000
+assert identity['reservation']=='superloop-lane:R'
+config=tomllib.loads((root/'private/.config/mail/loop.toml').read_text())
+binding=config['worker_births'][identity['name']]
+assert binding['identity']==identity and binding['phase']=='active',binding
+receipts=[tomllib.loads(p.read_text()) for p in (root/'.mail-births').glob('*.toml')]
+assert len(receipts)==1 and receipts[0]['identity']==identity and not receipts[0]['retired'],receipts
+worker=Path(sys.argv[2]);assert (worker/'brief.txt').read_bytes()==(home/'scratchpad/first-letter').read_bytes()
+auth=json.loads((worker/'.codex/auth.json').read_text());assert auth['tokens']['refresh_token']==''
+assert (root/'workers'/identity['name']/'mail').is_dir()
+print('NATIVE-CREATION-MEASURED')
+",
+        worker,
+    )
+    .expect("read completed native lifetime");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::io::Write::write_all(&mut std::io::stdout().lock(), &output.stdout)
+        .expect("measurement marker");
+}
+
+/// # Panics
+/// Panics if the production creation bundle cannot pin the fixture inputs.
+fn creation_request(home: &Path, runs: &Path, program: &Path) -> CommandSpec {
+    let image = binary();
+    let letter = home.join("scratchpad/first-letter");
+    let held_home = fs::File::open(home).expect("home descriptor").into();
+    let held_runs = fs::File::open(runs).expect("runs descriptor").into();
+    let letter_dir = letter.parent().expect("letter directory");
+    let held_letter = fs::File::open(letter_dir)
+        .expect("letter descriptor")
+        .into();
+    let argv = vec![
+        "unshare".into(),
+        image.display().to_string(),
+        "_make-home".into(),
+        "alpha".into(),
+        "R".into(),
+        "--letter".into(),
+        letter.display().to_string(),
+        "--owner-home".into(),
+        home.display().to_string(),
+        "--worker-uid".into(),
+        "3000".into(),
+        "--podman-bin".into(),
+        program.display().to_string(),
+        "--model".into(),
+        "gpt-6-sol".into(),
+        "--effort".into(),
+        "high".into(),
+        "--model-source".into(),
+        "launch-flag".into(),
+        "--effort-source".into(),
+        "launch-flag".into(),
+        "--door-scope".into(),
+        "work".into(),
+        "--backend".into(),
+        "codex".into(),
+        "--observe".into(),
+    ];
+    crate::creation_entry::command(
+        program,
+        &argv,
+        (home, &held_home),
+        (runs, &held_runs),
+        (letter_dir, &held_letter),
+        None,
+    )
+    .expect("production creation composer")
 }

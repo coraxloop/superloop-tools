@@ -535,6 +535,6 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
-{"kind":"call","site":"packages/superloop-lane/src/tests/runtime_preparation.rs:std :: env :: current_exe () . expect (\"test executable\")#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:superloop-lane:self","lookup":"test-executable","contract":"Reexecute the installed-plan fixture for production runtime preparation","binding":"current_exe"}
-{"kind":"call","site":"packages/superloop-lane/src/tests/runtime_preparation.rs:& request . argv [0]#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"& request . argv [0]","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Enter real rootless worker and runtime production vectors with their descriptor frames"}
+{"kind":"call","site":"packages/superloop-lane/src/tests/runtime_preparation.rs:std :: env :: current_exe () . expect (\"test executable\")#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:superloop-lane:self","lookup":"test-executable","contract":"Reexecute the installed-plan fixture for production runtime preparation and native creation","binding":"current_exe"}
+{"kind":"call","site":"packages/superloop-lane/src/tests/runtime_preparation.rs:& request . argv [0]#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"& request . argv [0]","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Enter real rootless worker, runtime and creation production vectors with their descriptor frames"}
 ''']
