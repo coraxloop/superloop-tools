@@ -50,6 +50,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Runtime preparation executes its received container program through the production namespace receiver after pathname replacement, with real anchored birth setup and distinct image-inspection results (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:runtime-preparation-executes-received-podman``).
+
 - The complete rootless helper service refreshes a due synthetic owner source through its real periodic authority, publishes the rotated bearer without the refresh token to a live mapped worker, and records successful custody evidence before its socket attempt (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:helper-service-refreshes-live-credentials``).
 
 - Service credential-authority fixtures keep every refresh endpoint on loopback, order the first check after parent guard release, clean retained homes during unwinding and bound cancellation before joining (``prob:box:service-credential-spawner-fails-closed-and-pins-its-guards``; ``claim:superlooplane:service-authority-cancellation-prevents-first-check``; ``claim:superlooplane:service-authority-retention-cleans-up-on-panic``).

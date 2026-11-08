@@ -113,7 +113,7 @@ impl FixtureChild {
 ///
 /// # Errors
 /// Returns a namespace command spawn or collection error.
-fn namespace_python(home: &Path, script: &str, worker: &str) -> std::io::Result<Output> {
+pub(super) fn namespace_python(home: &Path, script: &str, worker: &str) -> std::io::Result<Output> {
     Command::new("/usr/bin/podman")
         .env_remove("_CONTAINERS_USERNS_CONFIGURED")
         .env_remove("_CONTAINERS_ROOTLESS_UID")
@@ -163,7 +163,7 @@ os.chmod(auth,0o600)
 
 /// # Panics
 /// Panics if the helper fixture cannot publish its source and mapped worker directory.
-fn prepare(home: &Path, runs: &Path, podman: &Path) -> Value {
+pub(super) fn prepare(home: &Path, runs: &Path, podman: &Path) -> Value {
     let path = runs.join(".reservation-R.json");
     let mut record: Value =
         serde_json::from_slice(&fs::read(&path).expect("reservation")).expect("record");

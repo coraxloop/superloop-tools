@@ -2111,6 +2111,9 @@ pattern = "packages/superloop-lane/src/tests/mod.rs"
 pattern = "packages/superloop-lane/src/tests/prepare.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/tests/runtime_preparation.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/vendor_net.rs"
 
 [[include.rows]]

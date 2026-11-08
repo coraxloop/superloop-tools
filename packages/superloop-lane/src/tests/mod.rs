@@ -15,6 +15,7 @@ mod helper_service;
 mod install;
 mod launch;
 mod prepare;
+mod runtime_preparation;
 
 fn gate_fixture() -> serde_json::Value {
     Plan::build(
