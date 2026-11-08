@@ -90,6 +90,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The network exercise acceptance executes its reservation-selected native capability through the production namespace entry after pathname replacement, distinguishing the held image-inspection exit from the replacement without claiming a measured box boundary (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Helper receipt names aliased home and runs roots as the runs-root refusal, and the credential handoff exercises the received client file through the refresh path while refusing a pathname fallback (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Runtime version-query regression derives its expected program version from the workspace package version, retaining its no-state-access assertion across release bumps (``prob:box:runtime-subprocess-contract-follows-the-workspace-version``; ``test:integration:version-and-usage-do-not-open-runtime-state``).

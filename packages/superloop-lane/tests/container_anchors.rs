@@ -1021,3 +1021,111 @@ fn composer_override_child(home: &Path) {
         assert!(!home.join(".var").exists(), "no custody preparation");
     }
 }
+
+/// # Panics
+/// Panics if a real exercise executes the replaced selected-program pathname.
+/// ´claim:superlooplane:exercise-executes-the-held-selected-program´
+/// ´test:integration:exercise-executes-the-held-selected-program´
+#[test]
+fn exercise_executes_the_held_selected_program() {
+    use loop_home::{ProcessRunner, Runner};
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
+    for (original, replacement) in [
+        ("/usr/bin/false", "/usr/bin/true"),
+        ("/usr/bin/true", "/usr/bin/false"),
+    ] {
+        let fixture = tempfile::tempdir().expect("home");
+        let home = fixture.path();
+        fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("home mode");
+        seed_configuration(home);
+        let runs = home.join("runs");
+        fs::create_dir(&runs).expect("runs");
+        fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+        let registry = home.join(".config/loops/registry.toml");
+        let source = fs::read_to_string(&registry).expect("registry").replace(
+            "launch='dev/alpha'",
+            &format!("launch='dev/alpha',runs_root='{}'", runs.display()),
+        );
+        fs::write(registry, source).expect("runs grant");
+        let settings = home.join(".config/loops/alpha");
+        fs::create_dir(&settings).expect("settings");
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o700)).expect("settings mode");
+        let settings = settings.join("workers.toml");
+        fs::write(&settings, format!("runs_root='{}'\n", runs.display())).expect("settings bytes");
+        fs::set_permissions(settings, fs::Permissions::from_mode(0o600))
+            .expect("settings file mode");
+        let program = home.join("selected-program");
+        fs::copy(original, &program).expect("native selected image");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).expect("program mode");
+        let mut plan = superloop_lane::plan::Plan {
+            home: home.to_path_buf(),
+            driver_dir: runs.join("R"),
+            letter: home.join("letter"),
+            document: serde_json::from_str(include_str!("fixtures/plan.json"))
+                .expect("complete plan fixture"),
+        };
+        plan.document["vendor_hosts"] = serde_json::json!(["api.fixture.invalid"]);
+        plan.select_container_program(&program)
+            .expect("production vector attestation");
+        let record = serde_json::json!({"schema":1,"phase":"preparing","worker_uid":3000,"loop":"alpha","run":"R","plan":plan.document});
+        let bytes = serde_json::to_vec(&record).expect("record bytes");
+        let record_path = runs.join(".reservation-R.json");
+        fs::write(&record_path, &bytes).expect("record");
+        fs::set_permissions(&record_path, fs::Permissions::from_mode(0o600)).expect("record mode");
+        let stat = fs::metadata(&record_path).expect("record stat");
+        let mut identity = format!("{}:{}:", stat.dev(), stat.ino());
+        for byte in Sha256::digest(&bytes) {
+            write!(identity, "{byte:02x}").expect("digest");
+        }
+        let argv = vec![
+            "unshare".into(),
+            env!("CARGO_BIN_EXE_superloop-lane").into(),
+            "_exercise-network".into(),
+            "alpha".into(),
+            "R".into(),
+            "--expect-record".into(),
+            identity,
+            "--owner-home".into(),
+            home.to_str().expect("home word").into(),
+        ];
+        let request = superloop_lane::launch::exercise_entry::command(
+            Path::new("/usr/bin/podman"),
+            &argv,
+            home,
+            &fs::File::open(home).expect("home descriptor").into(),
+            &runs,
+            &fs::File::open(&runs).expect("runs descriptor").into(),
+        )
+        .expect("production exercise composer");
+        let swap = home.join("replacement");
+        fs::copy(replacement, &swap).expect("replacement image");
+        fs::set_permissions(&swap, fs::Permissions::from_mode(0o700)).expect("replacement mode");
+        fs::rename(swap, &program).expect("replace pathname after composition");
+        let output = ProcessRunner.run(&request).expect("real namespace entry");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status, 0, "namespace entry is unmeasured: {stderr}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("exercise report");
+        assert_eq!(report["verdict"], "unmeasured", "{report}");
+        let reason = report["reasons"][0]
+            .as_str()
+            .expect("named image refusal")
+            .to_owned();
+        assert!(reason.starts_with("image-identity:"), "{report}");
+        let expected = if original == "/usr/bin/false" {
+            format!(
+                "image-identity: image-inspect: {} exited exit status: 1: ",
+                program.display()
+            )
+        } else {
+            "image-identity: image-inspect: image ID lacks newline".into()
+        };
+        assert_eq!(
+            reason, expected,
+            "the pathname replacement must not execute"
+        );
+        assert_eq!(fs::read(record_path).expect("record retained"), bytes);
+    }
+}
