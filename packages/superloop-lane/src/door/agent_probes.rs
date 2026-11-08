@@ -8,6 +8,12 @@ use std::fs;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::PathBuf;
 
+// Semantic probes need execution time in addition to the runner's cleanup
+// reserve. Only the timeout probe exercises a deliberately short deadline.
+const SEMANTIC_BUDGET_MS: u64 = 10_000;
+const TIMEOUT_BUDGET_MS: u64 = 2600;
+const TIMEOUT_CAP_MS: u64 = 3000;
+
 struct Directory(PathBuf);
 struct NoEffect<'a>(&'a AtomicUsize);
 impl transport::Runner for NoEffect<'_> {
@@ -76,7 +82,7 @@ fn fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
             executable,
             model: "configured-fixture".into(),
             effort: "medium".into(),
-            cap_ms: 3000,
+            cap_ms: SEMANTIC_BUDGET_MS,
             rubric_path: rubric,
         },
         DoorInput {
@@ -151,7 +157,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-fixt
     let (_root, runner, input) = fixture(script)?;
     let result = runner.judge(
         &input.encode().map_err(io::Error::other)?,
-        Duration::from_secs(3),
+        Duration::from_millis(SEMANTIC_BUDGET_MS),
     );
     let mut digest = String::new();
     for byte in Sha256::digest(fs::read(&runner.rubric_path)?) {
@@ -170,12 +176,12 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-fixt
     rows.push(json!({"observation":"isolated-runner-reviewed-rubric","status":if isolated {"pass"} else {"fail"},
         "rubric_digest":result.rubric_digest,"expected_digest":digest,"configured_model":runner.model,"observed_model":result.model,
         "agent_status":result.status,"reason":result.reason,"evidence":result.observations}));
-    let limited = runner.judge(&vec![0; 262_145], Duration::from_secs(3));
+    let limited = runner.judge(&vec![0; 262_145], Duration::from_millis(SEMANTIC_BUDGET_MS));
     rows.push(json!({"observation":"door-agent-input-limit","status":if limited.reason == "door-agent-input-limit" && limited.verdict == "refer" {"pass"} else {"fail"},"reason":limited.reason}));
     fs::remove_file(&runner.rubric_path)?;
     let absent = runner.judge(
         &input.encode().map_err(io::Error::other)?,
-        Duration::from_secs(3),
+        Duration::from_millis(SEMANTIC_BUDGET_MS),
     );
     rows.push(json!({"observation":"missing-rubric","status":if absent.verdict == "refer" && absent.reason == "door-rubric-unavailable" {"pass"} else {"fail"},"reason":absent.reason}));
     for (script, status) in [
@@ -186,19 +192,25 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-fixt
             "timeout",
         ),
     ] {
-        let (_root, runner, input) = fixture(script)?;
+        let (_root, mut runner, input) = fixture(script)?;
+        let remaining_ms = if status == "timeout" {
+            runner.cap_ms = TIMEOUT_CAP_MS;
+            TIMEOUT_BUDGET_MS
+        } else {
+            SEMANTIC_BUDGET_MS
+        };
         let result = runner.judge(
             &input.encode().map_err(io::Error::other)?,
-            Duration::from_millis(2600),
+            Duration::from_millis(remaining_ms),
         );
         let correct = result.status == status
             && result.verdict == "refer"
             && result.scope == "estate"
-            && result.wall_ms < 2600
+            && result.wall_ms < remaining_ms
             && result.observations["children_reaped"] == true
             && result.observations["private_directory_removed"] == true;
         rows.push(json!({"observation":status,"status":if correct {"pass"} else {"fail"},"verdict":result.verdict,
-            "wall_ms":result.wall_ms,"configured_cap_ms":runner.cap_ms,"request_remaining_ms":2600,
+            "wall_ms":result.wall_ms,"configured_cap_ms":runner.cap_ms,"request_remaining_ms":remaining_ms,
             "agent_status":result.status,"reason":result.reason,"evidence":result.observations}));
     }
     let calls = AtomicUsize::new(0);
@@ -246,5 +258,48 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["observation"], "strict-object-parser");
         assert_eq!(rows[0]["status"], "pass");
+    }
+
+    /// # Panics
+    /// Panics if startup latency turns a semantic probe into a deadline probe.
+    /// ´claim:superlooplane:agent-probes-separate-semantic-and-timeout-budgets´
+    /// ´test:unit:agent-probes-separate-semantic-and-timeout-budgets´
+    #[test]
+    fn agent_probes_separate_semantic_and_timeout_budgets() {
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":2000}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("registration");
+        let calls = std::cell::Cell::new(0);
+        let mut rows = Vec::new();
+        measure_inner(&registration, &mut rows, |script| {
+            let index = calls.get();
+            calls.set(index + 1);
+            // Delay the verdict, exit-failure and invalid-output fixtures. The
+            // fourth fixture must still fork before its short timeout fires.
+            if index < 3 {
+                let delayed = script.replacen('\n', "\nimport time; time.sleep(1.2)\n", 1);
+                fixture(&delayed)
+            } else {
+                fixture(script)
+            }
+        })
+        .expect("measured probes");
+        assert_eq!(calls.get(), 4);
+        assert_eq!(rows.len(), 8);
+        assert!(rows.iter().all(|row| row["status"] == "pass"), "{rows:?}");
+        let timeout = rows
+            .iter()
+            .find(|row| row["observation"] == "timeout")
+            .expect("timeout observation");
+        assert_eq!(timeout["request_remaining_ms"], 2600);
+        assert_eq!(timeout["configured_cap_ms"], 3000);
+        assert!(timeout["wall_ms"].as_u64().expect("measured wall") < 2600);
+        assert_eq!(timeout["evidence"]["children_reaped"], true);
+        assert_eq!(timeout["evidence"]["private_directory_removed"], true);
     }
 }
