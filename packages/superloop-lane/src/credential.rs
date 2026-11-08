@@ -1799,6 +1799,7 @@ mod tests {
     /// # Panics
     /// Panics if a resumed round uses stale authority, leaks host state or publishes on refusal.
     /// ´test:unit:claude-round-publication-reloads-owner-authority´
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn claude_round_publication_reloads_owner_authority() {
         let fixture = claude_fixture_root();
