@@ -83,7 +83,8 @@ fn measure_selection(args: &[String]) -> Result<Selection<'_>, LaneError> {
     if args.len() != 7 {
         return Err(refused(mode, "anchor-declaration", "vector"));
     }
-    let (scope, home, _) = exercise::parse_private_measure(args)?;
+    let (scope, home, backend) = exercise::parse_private_measure(args)?;
+    backend.require_runtime()?;
     loop_home::validate_name(scope).map_err(|_| refused(mode, "anchor-declaration", "loop"))?;
     Ok(Selection {
         operation: mode,

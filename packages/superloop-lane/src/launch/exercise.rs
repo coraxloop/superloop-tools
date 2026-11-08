@@ -1340,7 +1340,7 @@ mod tests {
     /// ´test:unit:exercise-preview-reads-protected-record-with-unreadable-driver´
     #[test]
     fn exercise_preview_reads_protected_record_with_unreadable_driver() {
-        let fixture = tempfile::TempDir::new_in("/tmp").expect("fixture");
+        let fixture = tempfile::tempdir().expect("fixture");
         let owner_home = fixture.path();
         fs::set_permissions(owner_home, fs::Permissions::from_mode(0o700)).expect("home mode");
         let config = owner_home.join(".config/loops/alpha");

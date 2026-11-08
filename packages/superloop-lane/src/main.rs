@@ -1437,6 +1437,57 @@ fn refusal_line(error: &LaneError, wall_seconds: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// # Panics
+    /// Panics if a gated Claude credential exercise reaches descriptor or owner-home access.
+    /// ´test:unit:claude-credential-exercise-refuses-before-private-custody´
+    #[test]
+    fn claude_credential_exercise_refuses_before_private_custody() {
+        let root = tempfile::tempdir().expect("private fixture");
+        let absent = root.path().join("absent-owner");
+        let home_word = absent.to_str().expect("fixture path");
+        let body = [
+            "_exercise-measure",
+            "alpha",
+            "all",
+            "--backend",
+            "claude",
+            "--owner-home",
+            home_word,
+        ]
+        .map(str::to_owned);
+        let suffix = [
+            "--verified-runs-root",
+            "/absent-synthetic-runs",
+            "--anchor-manifest",
+            "{}",
+        ]
+        .map(str::to_owned);
+        let received = [body.as_slice(), suffix.as_slice()].concat();
+        let Err(error) = super::launch::reader_entry::serve(&received) else {
+            panic!("closed gate must precede the received bundle");
+        };
+        assert_eq!(error.kind, "backend-unavailable");
+        assert!(error.detail.starts_with("claude boxed launch awaits"));
+        let unusable = || {
+            let file = std::fs::File::open("/dev/null").expect("non-directory descriptor");
+            std::os::fd::OwnedFd::from(file)
+        };
+        let mut composed = vec!["unshare".to_owned(), "/synthetic-entry".to_owned()];
+        composed.extend(body);
+        let Err(error) = super::launch::reader_entry::command(
+            std::path::Path::new("/synthetic-namespace"),
+            &composed,
+            &absent,
+            &unusable(),
+            std::path::Path::new("/absent-synthetic-runs"),
+            &unusable(),
+        ) else {
+            panic!("closed gate must precede the composed bundle");
+        };
+        assert_eq!(error.kind, "backend-unavailable");
+        assert!(!absent.exists());
+    }
+
     use super::{
         USAGE, bind_private_launch_args, parse_follow_options, print_launch_report,
         print_unsaved_launch_report, refusal_line, run,
