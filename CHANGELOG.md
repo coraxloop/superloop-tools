@@ -52,6 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Keep capture admission and pruning available after an interrupted generation rename, publish keep before current, and cover special-entry refusals (``prob:servers:capture-admit-orders-its-writes-and-declares-its-output-mode``).
+
 - The audit-before-effect regression waits through request-lock credit frames before asserting the final reply, retaining its no-effect-before-label checks (``test:unit:door-audit-label-precedes-effect``; ``proto:superlooplane:request-lock-wait-credit``).
 
 - Periodic Claude refresh regression coverage exposes repeated owner-program calls for unrotated authority inside the refresh-ahead window and retains worker bytes at expiry (``prob:box:claude-print-probe-refresh-margin-measured-against-refresh-ahead``; ``proto:superlooplane:claude-periodic-credential-publication``).

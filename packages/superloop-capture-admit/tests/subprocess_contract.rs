@@ -416,3 +416,64 @@ fn byte_paths_and_multiple_copy_chunks_are_preserved() {
             .ends_with("files=3\nbytes=131086\n")
     );
 }
+
+/// The rename-before-receipt crash state remains unsealed while admit and prune proceed.
+///
+/// # Panics
+/// Panics when fixture setup or a command assertion fails.
+/// ´test:integration:receiptless-generation-does-not-wedge-store´
+#[test]
+fn receiptless_generation_does_not_wedge_store() {
+    let f = Fixture::new();
+    f.admit("previous");
+    let orphan = f.store.join("generations/interrupted");
+    fs::create_dir(&orphan).unwrap();
+    fs::write(orphan.join("verified-bytes"), b"unpublished fixture").unwrap();
+    let before = snapshot(&orphan);
+    f.refused(&["--name", "interrupted"], "unsealed-generation-name");
+    f.admit("next");
+    success(&f.run("prune", &[]));
+    assert!(!f.store.join("generations/previous").exists());
+    assert_eq!(snapshot(&orphan), before);
+    assert_eq!(
+        fs::read_link(f.store.join("current")).unwrap(),
+        Path::new("generations/next")
+    );
+    assert!(!f.store.join("receipts/interrupted.receipt").exists());
+}
+
+/// Unlisted links and FIFOs refuse without publication; a linked root is never opened.
+///
+/// # Panics
+/// Panics when fixture setup or a refusal assertion fails.
+/// ´test:integration:unlisted-special-entries-and-linked-root-refuse´
+#[test]
+fn unlisted_special_entries_and_linked_root_refuse() {
+    for kind in ["link", "fifo", "root"] {
+        let mut f = Fixture::new();
+        f.admit("previous");
+        let actual_root = f.store.clone();
+        let before = snapshot(&actual_root);
+        match kind {
+            "link" => symlink("nested/data", f.source.join("extra")).unwrap(),
+            "fifo" => {
+                nix::unistd::mkfifo(&f.source.join("extra"), nix::sys::stat::Mode::S_IRUSR)
+                    .unwrap();
+            }
+            _ => {
+                let alias = f.temporary.path().join("store-alias");
+                symlink(&f.store, &alias).unwrap();
+                f.store = alias;
+            }
+        }
+        f.refused(
+            &["--name", "next"],
+            if kind == "root" {
+                "Not a directory"
+            } else {
+                "unlisted-or-nonregular-source-entry"
+            },
+        );
+        assert_eq!(snapshot(&actual_root), before);
+    }
+}

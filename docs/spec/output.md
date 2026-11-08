@@ -285,6 +285,8 @@ This is the complete planned helper map. A row fixes one mode, native consumer, 
 |`superloop-gate-submit`|Agents and orchestrator|`agent-text`|Standard output|Shared statuses; legacy five-field report.|
 |`superloop-lane driver status`|Agents and orchestrator|`agent-text`|Standard output|Status 42 is `stalled`; the owning command must declare its nonlegacy report order.|
 |Server run wrapper|Agents and orchestrator|`agent-text`|Standard error|Shared statuses; legacy four-field report after relayed child evidence.|
+|`superloop-pack`|Agents and orchestrator|`agent-text`|Standard output|Shared statuses 0, 1 and 2, plus refusal statuses 3 through 10 as the package guide's exit-status table declares; terminal `RUN-REPORT exit=STATUS wall=SECONDS.MILLISs verdict=VERDICT` follows evidence.|
+|`superloop-install`|Agents and orchestrator|`agent-text`|Standard output|Shared statuses 0, 1 and 2, plus refusal statuses 3 through 10 as the package guide's exit-status table declares; terminal `RUN-REPORT exit=STATUS wall=SECONDS.MILLISs verdict=VERDICT` follows evidence.|
 |`superloop-lint`|Automation and agents|`machine-json`|Standard output|Status 3 is completed with failing findings.|
 |`superloop-lane bound-roots --runs-root DIR PATH [PATH...]`|Close-out automation and agents|`machine-json`|Standard output|0 clear; 3 `clearance-refused` with a complete finding-bearing result; 1 runtime failure and 2 usage or terminal stdout refusal with no stdout result.|
 |`superloop-lane render-routes`|Owner staging and agents|`machine-json`|Standard output|Shared statuses; success declares `fields.output` as the staging path, and refusals carry `class` on standard error.|

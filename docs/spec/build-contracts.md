@@ -75,7 +75,7 @@ Every workspace package declares the shared `tracing` dependency, including bina
 
 **Rule (Capture admission installation)** · `rule:buildcontracts:capture-admission-installation`
 
-Meson installs `superloop-capture-admit` in the binary directory and its provenance in the build-record directory. Node provisioning installs those artifacts root-owned and grants the reading account a sudoers route naming only this binary running as the non-root store account; account creation, group membership and the initial 0750 store root belong to provisioning.
+Meson installs `superloop-capture-admit` in the binary directory and its provenance in the build-record directory. The tier-2 package takes the tier-1 `lane-lifecycle` dependency solely for the pure `parse_utc_instant` lease reader, sharing its validated UTC grammar instead of maintaining a second parser at the sudo boundary; the call performs no filesystem or process operations. Node provisioning installs those artifacts root-owned and grants the reading account a sudoers route naming only this binary running as the non-root store account; account creation, group membership and the initial 0750 store root belong to provisioning.
 
 **Problem (Confined capture admission and pruning)** · `prob:servers:capture-admit-admits-and-prunes-sealed-generations`
 

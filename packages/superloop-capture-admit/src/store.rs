@@ -8,7 +8,7 @@ use nix::fcntl::{Flock, FlockArg};
 use nix::unistd::geteuid;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions, Permissions};
+use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{
     DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink,
@@ -178,6 +178,11 @@ fn generations(root: &Path) -> Result<Vec<(String, u64)>> {
         if !valid_name(&name) || !entry.file_type()?.is_dir() {
             return Err("invalid-generation".into());
         }
+        match fs::symlink_metadata(root.join("receipts").join(format!("{name}.receipt"))) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
         result.push((name.clone(), receipt(root, &name)?.1));
     }
     result.sort();
@@ -239,6 +244,9 @@ fn admit(
         writeln!(keep_bytes, "{old}")?;
     }
     let target = root.join("generations").join(name);
+    if target.try_exists()? {
+        return Err("unsealed-generation-name: receipt missing; name remains reserved".into());
+    }
     let receipt_path = root.join("receipts").join(format!("{name}.receipt"));
     if receipt_path.try_exists()? {
         return Err("orphan-receipt".into());
@@ -268,13 +276,17 @@ fn admit(
     layout.temporary.push(link.clone());
     fs::rename(&incoming, &target)?;
     // Roll back publication if the receipt or selector cannot be installed.
-    if let Err(error) = publish(&root, &target, &staged_receipt, &receipt_path, &link) {
+    if let Err(error) = publish(
+        &root,
+        &target,
+        &staged_receipt,
+        &receipt_path,
+        staged_keep.as_deref(),
+        &link,
+    ) {
         let _ignored = fs::remove_file(&receipt_path);
         let _ignored = fs::remove_dir_all(&target);
         return Err(error);
-    }
-    if let Some(path) = staged_keep {
-        fs::rename(path, root.join("keep"))?;
     }
     Ok(fields.into_bytes())
 }
@@ -283,11 +295,16 @@ fn publish(
     target: &Path,
     staged: &Path,
     receipt_path: &Path,
+    keep: Option<&Path>,
     link: &Path,
 ) -> Result<()> {
     copy::directory(target.parent().ok_or("missing-parent")?)?.sync_all()?;
     fs::rename(staged, receipt_path)?;
     copy::directory(&root.join("receipts"))?.sync_all()?;
+    if let Some(path) = keep {
+        fs::rename(path, root.join("keep"))?;
+        File::open(root)?.sync_all()?;
+    }
     fs::rename(link, root.join("current"))?;
     Ok(())
 }
@@ -406,4 +423,44 @@ fn prune(layout: &Layout) -> Result<Vec<u8>> {
     }
     writeln!(report, "removed={removed}\nbytes={bytes}")?;
     Ok(report.into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed keep rename preserves the old selector at the publication boundary.
+    ///
+    /// # Panics
+    /// Panics when a fixture operation or publication assertion fails.
+    /// ´test:unit:keep-publication-failure-preserves-current´
+    #[test]
+    fn keep_publication_failure_preserves_current() {
+        let temporary = tempfile::tempdir_in(std::env::var_os("TMPDIR").unwrap()).unwrap();
+        let root = temporary.path();
+        fs::create_dir(root.join("generations")).unwrap();
+        fs::create_dir(root.join("receipts")).unwrap();
+        fs::create_dir(root.join("keep")).unwrap();
+        fs::write(root.join("keep/blocker"), b"fixture").unwrap();
+        fs::write(root.join("receipt-stage"), b"fixture receipt").unwrap();
+        fs::write(root.join("keep-stage"), b"previous\n").unwrap();
+        symlink("generations/previous", root.join("current")).unwrap();
+        symlink("generations/next", root.join("current-stage")).unwrap();
+        assert!(
+            publish(
+                root,
+                &root.join("generations/next"),
+                &root.join("receipt-stage"),
+                &root.join("receipts/next.receipt"),
+                Some(&root.join("keep-stage")),
+                &root.join("current-stage")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_link(root.join("current")).unwrap(),
+            Path::new("generations/previous")
+        );
+        assert_eq!(fs::read(root.join("keep/blocker")).unwrap(), b"fixture");
+    }
 }

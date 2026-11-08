@@ -307,13 +307,13 @@ This index locates every matching line in the tracked corpus outside this docume
 |Source and matching lines|Classification context|
 |-------------------------|----------------------|
 |``.linter/imports/orchestration.toml:87``|Prose/schema convention or imported label declaration: binding only with the named independent reference; otherwise handle, with current widths and follow-ups in the package’s definition rows. Imported policy changes require its owner.|
-|``CHANGELOG.md:19,105,107,109,215,421,423``|Change and work records repeat the named producer or reader contracts; these mentions introduce no independent digest authority or representation.|
+|``CHANGELOG.md:19,107,109,111,217,423,425``|Change and work records repeat the named producer or reader contracts; these mentions introduce no independent digest authority or representation.|
 |``docs/backlog.md:21,75,97,169,197,245,247,253,297,469,505,515,517,561,589,607,625,683,689,693,695,697,699,707,713,753,755,759,1245,1249,1319,1323,1377,1381,1393,1397,1503,1541,1543,1547,1655,1657,1659,1661,1663,1665,1667,1669,1671,1673,1787,1825``|Change and work records repeat the named producer or reader contracts; these mentions introduce no independent digest authority or representation.|
 |``docs/spec/build-contracts.md:11,17,21,23,82``|D174, D237; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``docs/spec/command-contracts.md:13,15,29``|D175; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``docs/spec/deployment.md:97,112,120,126,136,138,148,150,164,196,199,201``|D176, D177; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``docs/spec/linter-contracts.md:41,51``|D178; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
-|``docs/spec/output.md:322``|D237; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
+|``docs/spec/output.md:324``|D237; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``docs/spec/worker-contracts.md:15,41,99,101,122,137,138``|D179, D180; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``infra/cargo-clean/tests/run.sh:219,220,226,227,234,237,241,325``|Controlled fixture/oracle/reference evidence for this package’s inventoried uses; no independent production authority. Preserve algorithm vectors and reader-shape fixtures until the associated migration.|
 |``infra/correspondence-watch/correspondence-scan:45``|D143; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
@@ -404,7 +404,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-capture-admit/meson.build:33,34``|D239; reviewed expression and scope identity.|
 |``packages/superloop-capture-admit/src/copy.rs:4,62,82,83``|D238; bytes hashed during the single copy pass.|
 |``packages/superloop-capture-admit/src/manifest.rs:2,10,16,24,53,67``|D237; complete manifest bytes and receipt identity.|
-|``packages/superloop-capture-admit/src/store.rs:150,151,152,153,154,158,168,198,200,204,205,253,254``|D237; receipt digest validation, identity comparison and receipt fields.|
+|``packages/superloop-capture-admit/src/store.rs:150,151,152,153,154,158,168,203,205,209,210,261,262``|D237; receipt digest validation, identity comparison and receipt fields.|
 |``packages/superloop-capture-admit/tests/subprocess_contract.rs:1,31,145,148,164,180,400,404``|Controlled fixture evidence for D237 and D238; no independent production authority.|
 |``packages/superloop-chat-export/README.md:15,26,29,50,70,78,126,128,130,132,134,136,142,159,162``|D192, D193; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/superloop-chat-export/meson.build:97,101``|D215; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
