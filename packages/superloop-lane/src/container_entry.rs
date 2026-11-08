@@ -16,7 +16,7 @@ use loop_home::anchor::{
 };
 use nix::sys::stat::fstat;
 
-use crate::error::LaneError;
+use crate::{error::LaneError, settings::BoxBackend};
 
 const OPERATION: &str = "container-helper";
 const PURPOSES: [&str; 8] = [
@@ -37,12 +37,36 @@ const EXERCISE_PURPOSES: [&str; 6] = [
     "hash-executable",
     "configuration",
 ];
-fn purposes(operation: &str) -> &'static [&'static str] {
+const CLAUDE_PURPOSES: [&str; 8] = [
+    "owner-home",
+    "runs-root",
+    "entry-executable",
+    "podman-executable",
+    "hash-executable",
+    "credential-claude",
+    "credential-clock",
+    "configuration",
+];
+const fn credential_client(backend: BoxBackend) -> &'static str {
+    match backend {
+        BoxBackend::Codex => "/usr/bin/curl",
+        BoxBackend::Claude => "/usr/bin/claude",
+    }
+}
+fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
     if operation == OPERATION {
-        &PURPOSES
+        if backend == BoxBackend::Claude {
+            &CLAUDE_PURPOSES
+        } else {
+            &PURPOSES
+        }
     } else {
         &EXERCISE_PURPOSES
     }
+}
+/// Name the helper bundle's roles in slot order for the protected backend.
+pub(crate) fn helper_purposes(backend: BoxBackend) -> &'static [&'static str] {
+    purposes(OPERATION, backend)
 }
 
 const fn configuration_policy() -> Policy {
@@ -148,8 +172,9 @@ pub(crate) fn pin(
     runs: (&Path, &OwnedFd),
     entry: &Path,
     podman: &Path,
+    backend: BoxBackend,
 ) -> Result<Bundle, LaneError> {
-    pin_for(OPERATION, loop_name, home, runs, entry, podman)
+    pin_for_backend(OPERATION, loop_name, home, runs, entry, podman, backend)
 }
 
 pub(crate) fn core_pins(
@@ -215,6 +240,26 @@ pub(crate) fn pin_for(
     entry: &Path,
     podman: &Path,
 ) -> Result<Bundle, LaneError> {
+    pin_for_backend(
+        operation,
+        loop_name,
+        home,
+        runs,
+        entry,
+        podman,
+        BoxBackend::Codex,
+    )
+}
+
+fn pin_for_backend(
+    operation: &'static str,
+    loop_name: &str,
+    home: (&Path, &OwnedFd),
+    runs: (&Path, &OwnedFd),
+    entry: &Path,
+    podman: &Path,
+    backend: BoxBackend,
+) -> Result<Bundle, LaneError> {
     registry_override(operation)?;
     let verifier = HostVerifier::current()
         .map_err(refusal)?
@@ -227,11 +272,11 @@ pub(crate) fn pin_for(
         descriptors.push(pin.into_fd());
     }
     if operation == OPERATION {
-        for (slot, path) in [(5, "/usr/bin/curl"), (6, "/usr/bin/date")] {
+        for (slot, path) in [(5, credential_client(backend)), (6, "/usr/bin/date")] {
             let pin = verifier
                 .pin(
                     Path::new(path),
-                    PURPOSES[slot],
+                    purposes(operation, backend)[slot],
                     u32::try_from(slot).map_err(refusal)?,
                     executable_policy(Owner::RootFile),
                 )
@@ -302,17 +347,22 @@ pub(crate) fn activate_program_map(
 }
 
 /// Transfer only the credential executables to the authority thread.
-pub(crate) fn credential_programs() -> Result<Option<BTreeMap<PathBuf, Arc<Anchor>>>, LaneError> {
+pub(crate) fn credential_programs(
+    backend: BoxBackend,
+) -> Result<Option<BTreeMap<PathBuf, Arc<Anchor>>>, LaneError> {
     EXECUTABLE.with(|active| {
         let active = active.borrow();
         let Some(programs) = active.as_ref() else {
             return Ok(None);
         };
-        ["/usr/bin/curl", "/usr/bin/date"]
+        [credential_client(backend), "/usr/bin/date"]
             .into_iter()
             .map(|path| {
                 let key = PathBuf::from(path);
-                let anchor = programs.get(&key).ok_or_else(active_refusal)?;
+                let anchor = programs.get(&key).ok_or_else(|| active_error(format!(
+                    "anchor-missing: operation={} purpose=credential-executable backend={} program={path}",
+                    ACTIVE_OPERATION.with(Cell::get), backend.name()
+                )))?;
                 Ok((key, Arc::clone(anchor)))
             })
             .collect::<Result<BTreeMap<_, _>, LaneError>>()
@@ -354,10 +404,10 @@ pub(crate) fn spawn_error(program: &Path, kind: &'static str, error: &std::io::E
         {
             let purpose = if program == Path::new("/usr/bin/sha256sum") {
                 "hash-executable"
-            } else if program == Path::new("/usr/bin/curl")
-                || program == Path::new("/usr/bin/claude")
-            {
+            } else if program == Path::new("/usr/bin/curl") {
                 "credential-client"
+            } else if program == Path::new("/usr/bin/claude") {
+                "credential-claude"
             } else if program == Path::new("/usr/bin/date") {
                 "credential-clock"
             } else {
@@ -463,7 +513,8 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
         OPERATION,
         configuration_anchor,
     )?;
-    let (podman, support) = take_support_programs(&mut anchors)?;
+    let backend = manifest_backend(&manifest);
+    let (podman, support) = take_support_programs(&mut anchors, backend)?;
     let _home = crate::home::activate_private_launch(
         Path::new(home),
         &anchors[0],
@@ -496,15 +547,19 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
     crate::container_helper::serve(Path::new(run)).map(|()| 0)
 }
 
-/// Extract the fixed support roles after validating the complete helper bundle.
+/// Extract the selected support roles after validating the complete helper bundle.
 pub(crate) fn take_support_programs(
     anchors: &mut Vec<Anchor>,
+    backend: BoxBackend,
 ) -> Result<(Anchor, BTreeMap<PathBuf, Arc<Anchor>>), LaneError> {
     let date = anchors.pop().ok_or_else(|| {
         refusal("anchor-missing: operation=container-helper purpose=credential-clock")
     })?;
-    let curl = anchors.pop().ok_or_else(|| {
-        refusal("anchor-missing: operation=container-helper purpose=credential-client")
+    let client = anchors.pop().ok_or_else(|| {
+        refusal(format!(
+            "anchor-missing: operation=container-helper purpose={}",
+            purposes(OPERATION, backend)[5]
+        ))
     })?;
     let hash = anchors.pop().ok_or_else(|| {
         refusal("anchor-missing: operation=container-helper purpose=hash-executable")
@@ -516,10 +571,22 @@ pub(crate) fn take_support_programs(
         podman,
         BTreeMap::from([
             (PathBuf::from("/usr/bin/sha256sum"), Arc::new(hash)),
-            (PathBuf::from("/usr/bin/curl"), Arc::new(curl)),
+            (PathBuf::from(credential_client(backend)), Arc::new(client)),
             (PathBuf::from("/usr/bin/date"), Arc::new(date)),
         ]),
     ))
+}
+
+fn manifest_backend(manifest: &Manifest) -> BoxBackend {
+    if manifest
+        .records
+        .iter()
+        .any(|record| record.purpose == "credential-claude")
+    {
+        BoxBackend::Claude
+    } else {
+        BoxBackend::Codex
+    }
 }
 
 fn receive(source: &str, input: &impl AsFd) -> Result<(Manifest, Vec<Anchor>), LaneError> {
@@ -533,9 +600,9 @@ pub(crate) fn receive_for(
     scope: Option<&str>,
 ) -> Result<(Manifest, Vec<Anchor>), LaneError> {
     registry_override(operation)?;
-    let purposes = purposes(operation);
     let manifest =
         Manifest::parse(source).map_err(|error| refusal(error.context(operation, "manifest")))?;
+    let purposes = purposes(operation, manifest_backend(&manifest));
     if manifest.records.len() != purposes.len() {
         return Err(refusal(format!(
             "anchor-declaration: operation={operation} purpose=count"
@@ -762,7 +829,7 @@ mod tests {
                 return;
             }
             let result = receive(&source, &std::io::stdin());
-            if !matches!(case.as_str(), "valid" | "replaced") {
+            if !matches!(case.as_str(), "valid" | "replaced" | "claude") {
                 let error = result.expect_err("custody refusal");
                 let expected = match case.as_str() {
                     "identity" | "entry" => "anchor-identity",
@@ -776,30 +843,39 @@ mod tests {
                 assert!(error.detail.contains(expected), "{error:?}");
                 return;
             }
-            let (_, mut anchors) = result.expect("production receiver");
+            let (manifest, mut anchors) = result.expect("production receiver");
+            let backend = manifest_backend(&manifest);
             let program =
                 PathBuf::from(std::env::var_os("SUPERLOOP_CONTAINER_PROGRAM").expect("program"));
             let _configuration = anchors.pop().expect("configuration");
-            let date = anchors.pop().expect("clock");
-            let curl = anchors.pop().expect("client");
-            let hash = anchors.pop().expect("hash");
-            let podman = anchors.pop().expect("podman");
-            EXECUTABLE.with(|active| {
-                *active.borrow_mut() = Some(BTreeMap::from([
-                    (PathBuf::from("/usr/bin/curl"), Arc::new(curl)),
-                    (PathBuf::from("/usr/bin/date"), Arc::new(date)),
-                    (program.clone(), Arc::new(podman)),
-                    (PathBuf::from("/usr/bin/sha256sum"), Arc::new(hash)),
-                ]));
-            });
+            let (podman, mut support) = take_support_programs(&mut anchors, backend)
+                .expect("selected helper support roles");
+            support.insert(program.clone(), Arc::new(podman));
+            EXECUTABLE.with(|active| *active.borrow_mut() = Some(support));
             let _guard = ExecutableGuard;
-            let credentials = credential_programs()
+            let foreign = if backend == BoxBackend::Claude {
+                BoxBackend::Codex
+            } else {
+                BoxBackend::Claude
+            };
+            let error = credential_programs(foreign).expect_err("foreign client must refuse");
+            assert!(
+                error
+                    .detail
+                    .contains(&format!("backend={}", foreign.name())),
+                "{error:?}"
+            );
+            assert!(
+                error.detail.contains(credential_client(foreign)),
+                "{error:?}"
+            );
+            let credentials = credential_programs(backend)
                 .expect("credential handoff")
                 .expect("active bundle");
             assert_eq!(credentials.len(), 2);
             std::thread::spawn(move || {
                 let _guard = activate_program_map(OPERATION, credentials);
-                for program in ["/usr/bin/curl", "/usr/bin/date"] {
+                for program in [credential_client(backend), "/usr/bin/date"] {
                     let result = crate::build::run_checked(
                         Path::new(program),
                         vec!["--version".into()],
@@ -860,6 +936,7 @@ mod tests {
             for case in [
                 "valid",
                 "override",
+                "claude",
                 "replaced",
                 "identity",
                 "entry",
@@ -885,6 +962,7 @@ mod tests {
                     (&runs, &held_runs),
                     &image,
                     &program,
+                    BoxBackend::Codex,
                 )
                 .expect("host composer");
                 if case == "replaced" {
@@ -896,6 +974,22 @@ mod tests {
                         .expect("replace pathname while retaining old file");
                 }
                 let mut declaration = Manifest::parse(&bundle.manifest).expect("manifest");
+                if case == "claude" {
+                    // A real root-owned executable stands in for the unavailable vendor;
+                    // no Claude output or credential acceptance is asserted.
+                    let pin = HostVerifier::current()
+                        .expect("host map")
+                        .for_operation(OPERATION)
+                        .pin(
+                            Path::new("/usr/bin/true"),
+                            "credential-claude",
+                            5,
+                            executable_policy(Owner::RootFile),
+                        )
+                        .expect("Claude role stand-in");
+                    declaration.records[5] = pin.record();
+                    bundle.descriptors[5] = pin.into_fd();
+                }
                 if matches!(case, "mode" | "entry") {
                     let copy = fixture.path().join(format!("image-{namespace}-{case}"));
                     fs::copy("/usr/bin/true", &copy).expect("native fixture image");

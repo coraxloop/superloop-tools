@@ -2789,6 +2789,7 @@ mod tests {
             (&runs, &held_runs),
             &std::env::current_exe().expect("entry image"),
             Path::new("/usr/bin/podman"),
+            crate::settings::BoxBackend::Codex,
         )
         .expect("production helper composer");
         let (sender, input) = std::os::unix::net::UnixStream::pair().expect("rights channel");
@@ -2801,8 +2802,11 @@ mod tests {
         )
         .expect("production helper receiver");
         let _configuration = anchors.pop().expect("configuration role");
-        let (runtime, mut support) = crate::container_entry::take_support_programs(&mut anchors)
-            .expect("production helper support roles");
+        let (runtime, mut support) = crate::container_entry::take_support_programs(
+            &mut anchors,
+            crate::settings::BoxBackend::Codex,
+        )
+        .expect("production helper support roles");
         support.insert(PathBuf::from("/usr/bin/podman"), Arc::new(runtime));
         let guard = crate::home::activate_private_launch(
             home.path(),
@@ -2824,8 +2828,10 @@ mod tests {
     #[test]
     fn credential_thread_refreshes_through_held_executables() {
         let (_home, _private, _guard) = helper_custody_fixture();
-        let custody = crate::container_helper::CredentialThreadCustody::capture()
-            .expect("production helper thread handoff");
+        let custody = crate::container_helper::CredentialThreadCustody::capture(
+            crate::settings::BoxBackend::Codex,
+        )
+        .expect("production helper thread handoff");
         let (endpoint, server) = fixture_endpoint(
             "200 OK",
             json!({"id_token":token(1_900_000_000),"access_token":token(1_900_000_000),"refresh_token":"fixture-rotated"}),

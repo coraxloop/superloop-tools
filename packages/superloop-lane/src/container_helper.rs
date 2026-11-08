@@ -1941,10 +1941,10 @@ pub(crate) struct CredentialThreadGuard {
     _home: crate::home::PrivateHomeGuard,
 }
 impl CredentialThreadCustody {
-    pub(crate) fn capture() -> Result<Self, LaneError> {
+    pub(crate) fn capture(backend: BoxBackend) -> Result<Self, LaneError> {
         Ok(Self {
             home: crate::home::snapshot_private_home()?,
-            programs: crate::container_entry::credential_programs()?,
+            programs: crate::container_entry::credential_programs(backend)?,
         })
     }
     pub(crate) fn activate(self) -> Result<CredentialThreadGuard, LaneError> {
@@ -2014,6 +2014,7 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
         }
         let backend = BoxBackend::from_plan(&record["plan"])?;
         backend.require_runtime()?;
+        let _credentials = crate::container_entry::credential_programs(backend)?;
         let pid = std::process::id();
         record["helper_pid"] = json!(pid);
         record["helper_start"] = json!(process_start(pid)?);
@@ -2043,7 +2044,7 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
     let refresh_loop = loop_name.clone();
     let refresh_root = root.to_path_buf();
     let refresh_driver_dir = driver_dir.clone();
-    let refresh_custody = CredentialThreadCustody::capture()?;
+    let refresh_custody = CredentialThreadCustody::capture(backend)?;
     let refresher = std::thread::Builder::new()
         .name("credential-authority".into())
         .spawn(move || -> Result<(), LaneError> {

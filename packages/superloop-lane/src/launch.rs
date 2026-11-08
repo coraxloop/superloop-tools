@@ -4148,7 +4148,7 @@ fn run_with_program(
             &verified_runs,
             None,
         )?;
-        let helper_preview = json!({"program":request.podman_bin,"argv":helper_argv(&exe_word, &plan.driver_dir, owner_home, &root)?,"anchor_manifest":{"state":"bound-on-launch","transport":"rights","purposes":["owner-home","runs-root","entry-executable","podman-executable","hash-executable","credential-client","credential-clock","configuration"]}});
+        let helper_preview = json!({"program":request.podman_bin,"argv":helper_argv(&exe_word, &plan.driver_dir, owner_home, &root)?,"anchor_manifest":{"state":"bound-on-launch","transport":"rights","purposes":crate::container_entry::helper_purposes(selected_backend)}});
         return Ok(
             json!({"schema":1,"command":"launch","dry_run":true,"observe":request.observe,"enforcing":!request.observe,"plan":preview_plan,"proxy_service":proxy_service,"box_gate":box_gate,"box_probe":box_probe,"bound_source_matrix":bound_source_matrix,"bound_source_probe_identity":"launcher host identity runs rootless Podman with --userns=host; worker and fixed sibling UIDs are selected inside separate probe containers","dead_preparation":dry_recovery,"checks_performed":checks,"checks_on_launch":checks_on_launch,"driver_sha256":driver_sha256,"driver_contract":driver_contract,"entry_interface":entry_version,"selection":{"backend":selected_backend.name(),"worker_uid":worker_uid,"model":selection.record(),"method":"in-process read-only runs-root snapshot under shared lock"},"children_executed":[build::image_inspect_preview(&request.podman_bin, image, owner_home)?],"hash_checks_executed":hash_checks,"prepare_argv":prepare_preview,"setup_argv":setup_preview,"helper_argv":helper_preview,"invocation":{"program":entry,"argv":launch_argv},"environment":environment,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()}),
         );
@@ -6033,6 +6033,7 @@ fn start_helper_with_program(
             (runs_root, verified_runs),
             lane_bin,
             &request.podman_bin,
+            crate::settings::BoxBackend::from_plan(&plan.document)?,
         )?;
         let mut argv = helper_argv(&exe_word, &plan.driver_dir, owner_home, runs_root)?;
         argv.extend(["--anchor-manifest".into(), bundle.manifest.clone()]);
