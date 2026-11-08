@@ -2168,6 +2168,13 @@ mod tests {
         fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
         let held_home = File::open(home.path()).expect("home").into();
         let held_runs = File::open(&runs).expect("runs").into();
+        for path in [
+            home.path().join(".config"),
+            home.path().join(".config/loops"),
+        ] {
+            fs::create_dir_all(&path).expect("configuration directory");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
         let bundle = crate::container_entry::pin(
             "alpha",
             (home.path(), &held_home),
@@ -2185,6 +2192,7 @@ mod tests {
             Some("alpha"),
         )
         .expect("production helper receiver");
+        let _configuration = anchors.pop().expect("configuration role");
         let (runtime, mut support) = crate::container_entry::take_support_programs(&mut anchors)
             .expect("production helper support roles");
         support.insert(PathBuf::from("/usr/bin/podman"), Arc::new(runtime));

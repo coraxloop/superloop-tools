@@ -3800,7 +3800,7 @@ else:
             nix::unistd::dup(std::io::stdin()).expect("input socket"),
         );
         let fds =
-            loop_home::anchor::transport::receive(&socket, 7, std::time::Duration::from_secs(30))
+            loop_home::anchor::transport::receive(&socket, 8, std::time::Duration::from_secs(30))
                 .expect("helper descriptors and EOF");
         let record = read_reservation(&h.join(".reservation-R.json"))
             .expect("read")

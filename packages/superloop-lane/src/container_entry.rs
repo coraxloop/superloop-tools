@@ -19,7 +19,7 @@ use nix::sys::stat::fstat;
 use crate::error::LaneError;
 
 const OPERATION: &str = "container-helper";
-const PURPOSES: [&str; 7] = [
+const PURPOSES: [&str; 8] = [
     "owner-home",
     "runs-root",
     "entry-executable",
@@ -27,15 +27,72 @@ const PURPOSES: [&str; 7] = [
     "hash-executable",
     "credential-client",
     "credential-clock",
+    "configuration",
+];
+const EXERCISE_PURPOSES: [&str; 6] = [
+    "owner-home",
+    "runs-root",
+    "entry-executable",
+    "podman-executable",
+    "hash-executable",
+    "configuration",
 ];
 fn purposes(operation: &str) -> &'static [&'static str] {
     if operation == OPERATION {
         &PURPOSES
     } else {
-        &PURPOSES[..5]
+        &EXERCISE_PURPOSES
     }
 }
 
+const fn configuration_policy() -> Policy {
+    Policy {
+        kind: Kind::Directory,
+        owner: Owner::Host,
+        mode: ModePolicy::Exact(0o700),
+    }
+}
+pub(crate) fn operation_error(operation: &str, error: impl std::fmt::Display) -> LaneError {
+    let kind = match operation {
+        "prepare-runtime" => "runtime-anchor",
+        "make-home" => "creation-anchor",
+        op if op.starts_with("exercise-") => "exercise-anchor",
+        _ => "container-anchor",
+    };
+    LaneError::input(kind, error.to_string())
+}
+pub(crate) fn registry_override(operation: &str) -> Result<(), LaneError> {
+    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+        return Err(operation_error(
+            operation,
+            format!("anchor-declaration: operation={operation} purpose=registry-override"),
+        ));
+    }
+    Ok(())
+}
+pub(crate) fn configuration(
+    home: &Path,
+    scope: &str,
+    operation: &'static str,
+    anchor: Anchor,
+) -> Result<crate::runtime_entry::ConfigurationGuard, LaneError> {
+    registry_override(operation)?;
+    let configuration = anchor
+        .read_configuration(home, false)
+        .map_err(|error| operation_error(operation, error))?;
+    configuration
+        .registry
+        .row(scope, home)
+        .map_err(|error| operation_error(operation, format!(
+            "anchor-declaration: operation={operation} purpose=configuration check=registry-row: {error}"
+        )))?;
+    Ok(crate::runtime_entry::activate_configuration(
+        home,
+        &configuration,
+        Arc::new(anchor),
+        operation,
+    ))
+}
 fn refusal(error: impl std::fmt::Display) -> LaneError {
     LaneError::input("container-anchor", error.to_string())
 }
@@ -158,6 +215,7 @@ pub(crate) fn pin_for(
     entry: &Path,
     podman: &Path,
 ) -> Result<Bundle, LaneError> {
+    registry_override(operation)?;
     let verifier = HostVerifier::current()
         .map_err(refusal)?
         .for_operation(operation);
@@ -182,6 +240,16 @@ pub(crate) fn pin_for(
             descriptors.push(pin.into_fd());
         }
     }
+    let pin = verifier
+        .pin(
+            &home.0.join(".config/loops"),
+            "configuration",
+            u32::try_from(records.len()).map_err(refusal)?,
+            configuration_policy(),
+        )
+        .map_err(refusal)?;
+    records.push(pin.record());
+    descriptors.push(pin.into_fd());
     let manifest = Manifest {
         version: 1,
         transport: Transport::Rights,
@@ -253,14 +321,7 @@ pub(crate) fn credential_programs() -> Result<Option<BTreeMap<PathBuf, Arc<Ancho
 }
 
 fn active_error(error: impl std::fmt::Display) -> LaneError {
-    let operation = ACTIVE_OPERATION.with(Cell::get);
-    let kind = match operation {
-        "prepare-runtime" => "runtime-anchor",
-        "make-home" => "creation-anchor",
-        op if op.starts_with("exercise-") => "exercise-anchor",
-        _ => "container-anchor",
-    };
-    LaneError::input(kind, error.to_string())
+    operation_error(ACTIVE_OPERATION.with(Cell::get), error)
 }
 
 fn active_refusal() -> LaneError {
@@ -391,6 +452,15 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
     let (manifest, mut anchors) = receive(source, &std::io::stdin())?;
     // The private entry owns stdin; the completed capability channel is setup-only.
     anchor::transport::replace_stdin(OPERATION).map_err(refusal)?;
+    let configuration_anchor = anchors.pop().ok_or_else(|| {
+        refusal("anchor-missing: operation=container-helper purpose=configuration")
+    })?;
+    let _configuration = configuration(
+        Path::new(home),
+        &manifest.loop_name,
+        OPERATION,
+        configuration_anchor,
+    )?;
     let (podman, support) = take_support_programs(&mut anchors)?;
     let _home = crate::home::activate_private_launch(
         Path::new(home),
@@ -460,6 +530,7 @@ pub(crate) fn receive_for(
     operation: &'static str,
     scope: Option<&str>,
 ) -> Result<(Manifest, Vec<Anchor>), LaneError> {
+    registry_override(operation)?;
     let purposes = purposes(operation);
     let manifest =
         Manifest::parse(source).map_err(|error| refusal(error.context(operation, "manifest")))?;
@@ -494,7 +565,9 @@ pub(crate) fn receive_for(
         }
         required.push(Requirement {
             purpose: (*purpose).into(),
-            policy: if slot < 2 {
+            policy: if *purpose == "configuration" {
+                configuration_policy()
+            } else if slot < 2 {
                 directory_policy(operation, &descriptors[slot], purpose)?
             } else {
                 executable_policy(if slot >= 5 || record.owner_uid == 0 {
@@ -618,6 +691,44 @@ mod tests {
     const CHILD: &str = "SUPERLOOP_CONTAINER_ANCHOR_TEST";
 
     /// # Panics
+    /// Panics if a helper or exercise override reaches any pin or descriptor receive.
+    fn assert_override_refusals() {
+        let held = fs::File::open("/dev/null")
+            .expect("placeholder descriptor")
+            .into();
+        let absent = Path::new("/absent-anchor-override-fixture");
+        for operation in [
+            OPERATION,
+            "exercise-mounts",
+            "exercise-network",
+            "exercise-door-shape",
+            "exercise-door-attribution",
+        ] {
+            let Err(error) = pin_for(
+                operation,
+                "alpha",
+                (absent, &held),
+                (absent, &held),
+                absent,
+                absent,
+            ) else {
+                panic!("override reached composer pins");
+            };
+            let expected =
+                format!("anchor-declaration: operation={operation} purpose=registry-override");
+            assert_eq!(error.detail, expected);
+            let error = receive_for(
+                "not a manifest",
+                &std::io::stdin(),
+                operation,
+                Some("alpha"),
+            )
+            .expect_err("override precedes parsing and receiving");
+            assert_eq!(error.detail, expected);
+        }
+    }
+
+    /// # Panics
     /// Panics if the real namespace or a named custody check is not measured.
     ///
     /// ´claim:superlooplane:container-entry-retains-system-executable-custody´
@@ -644,6 +755,10 @@ mod tests {
                     ["0", "0", "4294967295"]
                 );
             }
+            if case == "override" {
+                assert_override_refusals();
+                return;
+            }
             let result = receive(&source, &std::io::stdin());
             if !matches!(case.as_str(), "valid" | "replaced") {
                 let error = result.expect_err("custody refusal");
@@ -662,6 +777,7 @@ mod tests {
             let (_, mut anchors) = result.expect("production receiver");
             let program =
                 PathBuf::from(std::env::var_os("SUPERLOOP_CONTAINER_PROGRAM").expect("program"));
+            let _configuration = anchors.pop().expect("configuration");
             let date = anchors.pop().expect("clock");
             let curl = anchors.pop().expect("client");
             let hash = anchors.pop().expect("hash");
@@ -728,12 +844,20 @@ mod tests {
         let runs = fixture.path().join("runs");
         fs::create_dir(&runs).expect("runs");
         fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+        for path in [
+            fixture.path().join(".config"),
+            fixture.path().join(".config/loops"),
+        ] {
+            fs::create_dir(&path).expect("configuration directory");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
         let home = fs::File::open(fixture.path()).expect("home").into();
         let held_runs = fs::File::open(&runs).expect("runs").into();
         let image = std::env::current_exe().expect("test image");
         for namespace in [false, true] {
             for case in [
                 "valid",
+                "override",
                 "replaced",
                 "identity",
                 "entry",
@@ -835,11 +959,15 @@ mod tests {
                     .stdin(Stdio::from(OwnedFd::from(receiver)))
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
-                let child = command.spawn().expect("fixture child");
+                if case == "override" {
+                    command.env("ENTER_LOOP_REGISTRY", "");
+                }
                 anchor::transport::send(&sender, &bundle.descriptors).expect("bundle");
+                let child = command.spawn().expect("fixture child");
                 let output = child.wait_with_output().expect("child end");
                 assert!(
-                    output.status.success(),
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
                     "namespace={namespace} case={case}; unavailable namespaces are unmeasured, not passed: {} {}",
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)

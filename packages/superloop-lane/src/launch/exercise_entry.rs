@@ -194,6 +194,7 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     let _entry = next()?;
     let executable = next()?;
     let hash = next()?;
+    let configuration = next()?;
     let _home = crate::home::activate_private_launch(
         selection.home,
         &home_anchor,
@@ -224,6 +225,12 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
             "record-program",
         ));
     }
+    let _configuration = crate::container_entry::configuration(
+        selection.home,
+        selection.scope,
+        selection.operation,
+        configuration,
+    )?;
     measure(&selection)
 }
 

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::container_entry::executable_policy as executable;
+use crate::container_entry::{executable_policy as executable, registry_override};
 use crate::error::LaneError;
 use loop_home::anchor::{
     self, Anchor, Configuration, HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver,
@@ -31,18 +31,12 @@ fn refusal(error: impl std::fmt::Display) -> LaneError {
 fn named(kind: &str, purpose: &str) -> LaneError {
     named_for(OPERATION, kind, purpose)
 }
-fn registry_override(operation: &str) -> Result<(), LaneError> {
-    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
-        return Err(named_for(
-            operation,
-            "anchor-declaration",
-            "registry-override",
-        ));
-    }
-    Ok(())
-}
+
 fn named_for(operation: &str, kind: &str, purpose: &str) -> LaneError {
-    refusal(format!("{kind}: operation={operation} purpose={purpose}"))
+    crate::container_entry::operation_error(
+        operation,
+        format!("{kind}: operation={operation} purpose={purpose}"),
+    )
 }
 fn io(purpose: &str, check: &str, cause: impl std::fmt::Display) -> LaneError {
     io_for(OPERATION, purpose, check, cause)
@@ -262,16 +256,7 @@ impl PlanConfiguration {
                 },
                 0o700,
             )
-            .map_err(|error| {
-                LaneError::input(
-                    if self.operation == "make-home" {
-                        "creation-anchor"
-                    } else {
-                        "runtime-anchor"
-                    },
-                    error.to_string(),
-                )
-            })?;
+            .map_err(|error| crate::container_entry::operation_error(self.operation, error))?;
         crate::Settings::from_private_file(std::fs::File::from(file), path)
     }
 }
@@ -287,7 +272,7 @@ impl Drop for ConfigurationGuard {
         PLAN_CONFIGURATION.with(|active| *active.borrow_mut() = self.previous.take());
     }
 }
-fn activate_configuration(
+pub(crate) fn activate_configuration(
     home: &Path,
     configuration: &Configuration,
     directory: Arc<Anchor>,

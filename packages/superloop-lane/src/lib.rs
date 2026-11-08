@@ -279,6 +279,10 @@ fn read_plan_settings(home: &Path, loop_name: &str, run: &str) -> Result<Setting
     if !valid_run_name(run) {
         return Err(LaneError::input("run-name", format!("bad run name: {run}")));
     }
+    read_worker_settings(home, loop_name)
+}
+
+fn read_worker_settings(home: &Path, loop_name: &str) -> Result<Settings, LaneError> {
     let settings_path = home
         .join(".config/loops")
         .join(loop_name)

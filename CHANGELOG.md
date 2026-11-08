@@ -84,6 +84,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Container helpers and the four container-backed exercises receive configuration custody alongside executable custody; registry, ledger and worker settings reads use the held directory despite pathname replacement, and ambient registry overrides refuse before helper pins or private reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``proto:workercontracts:namespace-anchor-handoff``).
+
 - Runtime and native creation read worker settings beneath the received configuration directory, retain the bounded parser and validated ACL checks, and refuse missing or unsafe held files despite substituted settings; isolated host-composer cases require registry-override refusal before pinning (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Compute deadline regressions retain the stronger unextended spawn-budget bound and force store contention on early execution-window refusals, queued deadline expiry and queued adjudicated refusals, keeping requested and registered figures exact while asserting their separate effective bound (``proto:superlooplane:request-lock-wait-credit``).

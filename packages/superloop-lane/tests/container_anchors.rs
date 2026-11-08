@@ -10,6 +10,29 @@ use loop_home::anchor::{
 };
 
 /// # Panics
+/// Panics if a private configuration fixture cannot be created with its declared modes.
+fn seed_configuration(home: &Path) {
+    for path in [home.join(".config"), home.join(".config/loops")] {
+        fs::create_dir_all(&path).expect("configuration directory");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("directory mode");
+    }
+    for (name, source) in [
+        (
+            "registry.toml",
+            "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[{name='alpha',uid=64000,launch='dev/alpha'}]\n",
+        ),
+        (
+            "allocations.toml",
+            "mail_uid=64001\n[alpha]\nuids={base=64010,count=2}\nmail_gids={base=64020,count=3}\n",
+        ),
+    ] {
+        let path = home.join(".config/loops").join(name);
+        fs::write(&path, source).expect("configuration");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("file mode");
+    }
+}
+
+/// # Panics
 /// Panics if the production helper does not reach its protected-run refusal under a partial map.
 ///
 /// ´claim:superlooplane:container-helper-enters-with-held-root-files´
@@ -105,6 +128,22 @@ fn container_helper_enters_with_held_root_files() {
         records.push(pin.record());
         descriptors.push(pin.into_fd());
     }
+    seed_configuration(fixture.path());
+    let config = verifier
+        .pin(
+            &fixture.path().join(".config/loops"),
+            "configuration",
+            7,
+            Policy {
+                kind: Kind::Directory,
+                owner: Owner::Host,
+                mode: ModePolicy::Exact(0o700),
+            },
+        )
+        .expect("configuration custody");
+    records.push(config.record());
+    descriptors.push(config.into_fd());
+    substitute_plan_configuration(fixture.path(), true);
     let declaration = serde_json::to_string(&Manifest {
         version: 1,
         transport: Transport::Rights,
@@ -462,6 +501,7 @@ fn exercise_entries_retain_selected_program_custody() {
     let fixture = tempfile::tempdir().expect("home");
     let home = fixture.path();
     fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("home mode");
+    seed_configuration(home);
     let runs = home.join("runs");
     fs::create_dir(&runs).expect("runs");
     fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
@@ -504,7 +544,16 @@ fn exercise_entries_retain_selected_program_custody() {
                 "program",
                 "missing",
                 "extra-argument",
+                "plan-held",
+                "plan-widened",
+                "plan-missing",
+                "plan-link",
+                "plan-mode",
+                "plan-large",
             ] {
+                if case.starts_with("plan-") {
+                    seed_held_settings(home, case);
+                }
                 let request = superloop_lane::launch::exercise_entry::command(
                     Path::new("/usr/bin/podman"),
                     &argv,
@@ -554,7 +603,17 @@ fn exercise_case(
     if case == "missing" {
         request.descriptors = loop_home::CommandDescriptors::default();
     }
+    let home = record_path.parent().expect("runs").parent().expect("home");
+    if case.starts_with("plan-") {
+        substitute_plan_configuration(home, case != "plan-widened");
+    }
     let output = ProcessRunner.run(&request).expect("exercise entry");
+    if case.starts_with("plan-") {
+        fs::remove_dir_all(home.join(".config/loops")).expect("remove replacement");
+        fs::rename(home.join(".config/held-loops"), home.join(".config/loops"))
+            .expect("restore held");
+        fs::remove_dir_all(home.join(".config/loops/alpha")).expect("remove settings fixture");
+    }
     fs::write(record_path, bytes).expect("restore record");
     let report = format!(
         "{}{}",
@@ -564,9 +623,34 @@ fn exercise_case(
     assert_ne!(output.status, 0, "fixture lacks installed configuration");
     match case {
         "valid" => assert!(
-            !report.contains("anchor-") && report.contains("unsafe-path"),
+            report.contains("exercise-anchor: anchor-missing")
+                && report.contains("purpose=configuration"),
             "{mode} valid: {report}"
         ),
+        "plan-held" => assert!(
+            report.contains(if mode == "_exercise-mounts" {
+                "missing-setting: entry_bin is absent"
+            } else {
+                "runs root is absent"
+            }),
+            "{mode} {case}: {report}"
+        ),
+        "plan-widened" => assert!(
+            report.contains("settings-grant: runs_root differs"),
+            "{mode} {case}: {report}"
+        ),
+        "plan-large" => assert!(report.contains("settings-size"), "{mode} {case}: {report}"),
+        "plan-missing" | "plan-link" | "plan-mode" => {
+            let expected = match case {
+                "plan-missing" => "anchor-missing",
+                "plan-link" => "anchor-escape",
+                _ => "anchor-mode",
+            };
+            assert!(
+                report.contains(expected) && report.contains("purpose=configuration"),
+                "{mode} {case}: {report}"
+            );
+        }
         "extra-argument" => assert!(
             report.contains(&format!(
                 "anchor-declaration: operation={} purpose=vector",
