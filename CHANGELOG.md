@@ -52,6 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Capture admission uses the sanctioned agent-text terminal report with matched statuses, classed diagnostics and suppressed panic payloads; its interrupted-generation and write-order follow-ups are met (``prob:servers:capture-admit-orders-its-writes-and-declares-its-output-mode``).
+
 - Keep capture admission and pruning available after an interrupted generation rename, publish keep before current, and cover special-entry refusals (``prob:servers:capture-admit-orders-its-writes-and-declares-its-output-mode``).
 
 - The audit-before-effect regression waits through request-lock credit frames before asserting the final reply, retaining its no-effect-before-label checks (``test:unit:door-audit-label-precedes-effect``; ``proto:superlooplane:request-lock-wait-credit``).

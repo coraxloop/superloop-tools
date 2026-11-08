@@ -80,3 +80,7 @@ Meson installs `superloop-capture-admit` in the binary directory and its provena
 **Problem (Confined capture admission and pruning)** · `prob:servers:capture-admit-admits-and-prunes-sealed-generations`
 
 `superloop-capture-admit` supplies the store account’s admission and prune boundary: copied bytes are verified against the strict manifest, a NAME is bound to its complete manifest digest, and current, kept and live-leased generations survive pruning. Its package guide states the admitted formats and refusal contract; node provisioning owns the confinement that makes a sealed generation immutable to its readers.
+
+**Problem (Capture admission write order and output mode)** · `prob:servers:capture-admit-orders-its-writes-and-declares-its-output-mode`
+
+Capture admission leaves receipt-less generations unsealed without blocking operations on sealed identities, reserves their names against overwrite, and publishes keep before the current selector. Its agent-text contract names its report stream, terminal fields and refusal classes. Its package guide names the pure UTC-parser dependency and the fixtures for interrupted publication and special-entry refusals.

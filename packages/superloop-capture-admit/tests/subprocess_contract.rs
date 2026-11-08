@@ -70,24 +70,46 @@ impl Fixture {
             "{output:?}"
         );
         assert_eq!(before, snapshot(&self.store));
-        assert!(
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .last()
-                .unwrap()
-                .starts_with("wall=")
-        );
+        terminal_report(&output);
     }
 }
 fn success(output: &Output) {
     assert!(output.status.success(), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .last()
-            .unwrap()
-            .starts_with("wall=")
+    terminal_report(output);
+}
+fn terminal_report(output: &Output) {
+    let text = std::str::from_utf8(&output.stdout).unwrap();
+    assert!(text.ends_with('\n'));
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("RUN-REPORT "))
+            .count(),
+        1
     );
+    let fields: Vec<_> = text.lines().last().unwrap().split(' ').collect();
+    let status = output.status.code().unwrap();
+    assert_eq!(fields.len(), 4);
+    assert_eq!(fields[0], "RUN-REPORT");
+    assert_eq!(fields[1], format!("exit={status}"));
+    let wall = fields[2]
+        .strip_prefix("wall=")
+        .unwrap()
+        .strip_suffix('s')
+        .unwrap();
+    assert!(wall.parse::<f64>().unwrap().is_finite());
+    let (seconds, fraction) = wall.split_once('.').unwrap();
+    assert!(!seconds.is_empty() && seconds.bytes().all(|c| c.is_ascii_digit()));
+    assert_eq!(fraction.len(), 6);
+    assert!(fraction.bytes().all(|c| c.is_ascii_digit()));
+    assert_eq!(
+        fields[3],
+        if status == 0 {
+            "verdict=ok"
+        } else {
+            "verdict=failed"
+        }
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("RUN-REPORT"));
 }
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u32, Vec<u8>)> {
     fn visit(root: &Path, path: &Path, result: &mut BTreeMap<PathBuf, (u32, Vec<u8>)>) {
@@ -476,4 +498,27 @@ fn unlisted_special_entries_and_linked_root_refuse() {
         );
         assert_eq!(snapshot(&actual_root), before);
     }
+}
+
+/// Every operation status carries exactly one final report on stdout.
+///
+/// # Panics
+/// Panics when fixture setup or the output contract differs.
+/// ´test:integration:agent-text-report-owns-success-usage-and-failure´
+#[test]
+fn agent_text_report_owns_success_usage_and_failure() {
+    let f = Fixture::new();
+    let good = f.run("admit", &["--name", "first"]);
+    success(&good);
+    assert_eq!(good.stderr, [] as [u8; 0]);
+    let usage = f.run("admit", &["--name", "../escape"]);
+    assert_eq!(usage.status.code(), Some(2));
+    terminal_report(&usage);
+    assert!(String::from_utf8_lossy(&usage.stderr).contains("usage-error: invalid-name"));
+    assert!(!String::from_utf8_lossy(&usage.stderr).contains("../escape"));
+    fs::write(&f.manifest, b"malformed\n").unwrap();
+    let failure = f.run("admit", &["--name", "next"]);
+    assert_eq!(failure.status.code(), Some(1));
+    terminal_report(&failure);
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("runtime-error: malformed-manifest"));
 }
