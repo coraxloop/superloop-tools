@@ -297,6 +297,19 @@ pub struct Custody {
     pub(crate) executor: Anchor,
 }
 impl Custody {
+    pub(crate) fn reserved_uids(
+        &self,
+        home: &Path,
+        loop_name: &str,
+    ) -> Result<std::collections::BTreeSet<u32>, LaneError> {
+        loop_home::mail::worker_provision::reserved_uids_beneath(
+            home,
+            loop_name,
+            &self.configuration,
+            &self.root,
+        )
+        .map_err(|error| LaneError::input("mail-birth", error.to_string()))
+    }
     pub(crate) fn activate_configuration(
         &self,
         home: &Path,

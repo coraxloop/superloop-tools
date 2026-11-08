@@ -216,6 +216,11 @@ fn exercise_phases(
         );
         return;
     }
+    let census = || {
+        loop_home::mail::worker_provision::reserved_uids_beneath(home, "alpha", configuration, root)
+            .expect("census beneath renamed configuration and storage")
+    };
+    assert!(census().is_empty(), "fresh native history");
     for phase in ["reserve", "finish"] {
         loop_home::mail::worker_provision::creation_beneath(
             home,
@@ -228,7 +233,9 @@ fn exercise_phases(
             executor,
         )
         .expect("anchored creation phase");
+        assert_eq!(census(), std::collections::BTreeSet::from([identity.uid]));
     }
+    census_refusals(home, configuration, root, identity.uid);
     loop_home::mail::worker_provision::verify_beneath(
         home,
         "alpha",
@@ -253,6 +260,48 @@ fn exercise_phases(
         .expect_err("creation cannot retire")
         .to_string()
         .contains("unknown creation phase")
+    );
+}
+/// # Panics
+/// Panics if missing receipts, malformed receipts or linked history bypass the held census.
+fn census_refusals(home: &Path, configuration: &anchor::Configuration, root: &Anchor, uid: u32) {
+    let storage = home.join(".var/loops/held-alpha");
+    let births = storage.join(".mail-births");
+    let hidden = storage.join("held-births");
+    let census = || {
+        loop_home::mail::worker_provision::reserved_uids_beneath(home, "alpha", configuration, root)
+    };
+    fs::rename(&births, &hidden).expect("hold receipts aside");
+    assert!(
+        census()
+            .expect_err("worker history requires receipts")
+            .to_string()
+            .contains("worker history requires reconciliation")
+    );
+    fs::rename(&hidden, &births).expect("restore receipts");
+    let stray = births.join("unexpected.toml");
+    fs::write(&stray, b"not a receipt").expect("malformed receipt");
+    fs::set_permissions(&stray, fs::Permissions::from_mode(0o600)).expect("receipt mode");
+    assert!(
+        census()
+            .expect_err("malformed receipt refuses")
+            .to_string()
+            .contains("worker birth receipt")
+    );
+    fs::remove_file(&stray).expect("restore receipts");
+    let workers = storage.join("workers");
+    let held = storage.join("held-workers");
+    fs::rename(&workers, &held).expect("hold worker history");
+    std::os::unix::fs::symlink(&held, &workers).expect("linked history");
+    assert!(
+        census().is_err(),
+        "history links cannot redirect the census"
+    );
+    fs::remove_file(&workers).expect("remove history link");
+    fs::rename(&held, &workers).expect("restore history");
+    assert_eq!(
+        census().expect("restored held census"),
+        std::collections::BTreeSet::from([uid])
     );
 }
 /// # Panics

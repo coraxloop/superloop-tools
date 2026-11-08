@@ -6399,8 +6399,9 @@ pub fn private_make(
     let _lock = lock_runs_root(&root, true, 0)?;
     let (base, count) = worker_range(owner_home, loop_name)?;
     exercise_resources::verify_worker_block(base, count)?;
+    let reserved = custody.reserved_uids(owner_home, loop_name)?;
     let (available, skipped_runs) =
-        select_registered_worker_uid(owner_home, loop_name, &root, run, base, count)?;
+        select_free_uid_with_history(&root, run, base, count, &reserved)?;
     if available != requested_uid {
         return Err(LaneError::input(
             "uid-race",

@@ -128,8 +128,13 @@ fn registered(home: &Path, name: &str) -> Result<crate::LoopRecord> {
     Ok(row)
 }
 
+#[cfg(test)]
 fn history(home: &Path, receipts: &[Receipt], owner: u32) -> Result<()> {
-    let workers = match io::absolute(&home.join("workers"), true) {
+    let parent = io::search_directory(home)?;
+    history_beneath(&parent, receipts, owner)
+}
+fn history_beneath(parent: &File, receipts: &[Receipt], owner: u32) -> Result<()> {
+    let workers = match io::child(parent, Path::new("workers"), true) {
         Ok(workers) => workers,
         Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
@@ -161,10 +166,50 @@ fn history(home: &Path, receipts: &[Receipt], owner: u32) -> Result<()> {
 pub fn reserved_uids(home: &Path, loop_name: &str) -> Result<BTreeSet<u32>> {
     let row = registered(home, loop_name)?;
     let owner = io::search_directory(home)?.metadata()?.uid();
-    let root = match io::absolute(&row.home.join(".mail-births"), true) {
+    let parent = match io::search_directory(&row.home) {
+        Ok(parent) => parent,
+        Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeSet::new());
+        }
+        Err(error) => return Err(error),
+    };
+    reserved_uids_from(&parent, owner)
+}
+
+/// Read native UID reservations beneath the creation entry's verified storage.
+///
+/// # Errors
+/// Refuses ambient registry overrides, missing grants, changed storage or unsafe history.
+pub fn reserved_uids_beneath(
+    home: &Path,
+    loop_name: &str,
+    configuration: &crate::anchor::Configuration,
+    root: &crate::anchor::Anchor,
+) -> Result<BTreeSet<u32>> {
+    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+        return Err(failure(
+            "anchor-declaration: operation=make-home purpose=registry-override",
+        ));
+    }
+    configuration
+        .registry
+        .row(loop_name, home)
+        .map_err(failure)?;
+    root.revalidate()?;
+    let descriptor = File::from(
+        nix::unistd::dup(std::os::fd::AsFd::as_fd(root)).map_err(|error| {
+            failure(format!("anchor-io: operation=make-home purpose=loop-storage check=descriptor-duplicate: {error}"))
+        })?,
+    );
+    let parent = io::child(&descriptor, Path::new("."), true)?;
+    reserved_uids_from(&parent, Uid::effective().as_raw())
+}
+
+fn reserved_uids_from(parent: &File, owner: u32) -> Result<BTreeSet<u32>> {
+    let root = match io::child(parent, Path::new(".mail-births"), true) {
         Ok(root) => root,
         Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            history(&row.home, &[], owner)?;
+            history_beneath(parent, &[], owner)?;
             return Ok(BTreeSet::new());
         }
         Err(error) => return Err(error),
@@ -172,7 +217,7 @@ pub fn reserved_uids(home: &Path, loop_name: &str) -> Result<BTreeSet<u32>> {
     let lock =
         Flock::lock(root, FlockArg::LockShared).map_err(|(_, error)| MailError::from(error))?;
     let receipts = read_receipts(&lock, owner)?;
-    history(&row.home, &receipts, owner)?;
+    history_beneath(parent, &receipts, owner)?;
     Ok(receipts
         .into_iter()
         .filter(|receipt| !receipt.retired)
@@ -1176,6 +1221,21 @@ mod tests {
         fn drop(&mut self) {
             let _removed = fs::remove_dir_all(&self.root);
         }
+    }
+
+    /// # Panics
+    /// Panics if host preflight requires loop storage before any lifetime exists.
+    /// ´claim:loophome:worker-uid-history-admits-unprovisioned-storage´
+    /// ´test:unit:worker-uid-history-is-empty-before-loop-storage-exists´
+    #[test]
+    fn worker_uid_history_is_empty_before_loop_storage_exists() {
+        let fixture = Fixture::new();
+        fs::remove_dir(&fixture.loop_home).expect("unprovisioned loop storage");
+        assert!(
+            reserved_uids(&fixture.root, "alpha")
+                .expect("fresh host preflight")
+                .is_empty()
+        );
     }
 
     /// ´claim:loophome:worker-uid-history-survives-before-any-run-table-or-worker-home´
