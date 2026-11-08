@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -394,6 +394,86 @@ pub(crate) fn check(program: &Path) -> Option<Result<(), LaneError>> {
     })
 }
 
+/// Bind the held owner program bytes to the completed installation's reviewed SHA-256.
+/// A substituted executable supplier cannot choose the owner-reviewed reference;
+/// retain all 256 bits (´proto:superlooplane:claude-owner-program-binding´).
+pub(crate) fn verify_program_digest(program: &Path, expected: &str) -> Result<(), LaneError> {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    use std::io::Read as _;
+    let fail = |detail: &str| LaneError::input("credential-program-pin", detail);
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(fail("reviewed Claude SHA-256 is absent or malformed"));
+    }
+    EXECUTABLE.with(|active| {
+        let active = active.borrow();
+        let anchor = active
+            .as_ref()
+            .and_then(|programs| programs.get(program))
+            .ok_or_else(|| fail("Claude program has no held executable"))?;
+        anchor.revalidate().map_err(active_error)?;
+        let before =
+            fstat(anchor.as_ref()).map_err(|_| fail("held program metadata is unreadable"))?;
+        // Executable anchors are O_PATH. This is a descriptor reopen of the same
+        // inode, deliberately not a lookup of the installed program's pathname.
+        let mut file = std::fs::File::open(format!("/proc/self/fd/{}", anchor.as_fd().as_raw_fd()))
+            .map_err(|_| fail("held program bytes are unreadable"))?;
+        let opened = fstat(&file).map_err(|_| fail("held program metadata is unreadable"))?;
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+            || !(1..=1_073_741_824).contains(&opened.st_size)
+        {
+            return Err(fail("held program identity or size is invalid"));
+        }
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; 65_536];
+        let mut length = 0_u64;
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|_| fail("held program bytes are unreadable"))?;
+            if count == 0 {
+                break;
+            }
+            length += count as u64;
+            if length > 1_073_741_824 {
+                return Err(fail("held program exceeds size bound"));
+            }
+            hasher.update(&buffer[..count]);
+        }
+        let after = fstat(&file).map_err(|_| fail("held program metadata is unreadable"))?;
+        let stamp = |stat: &nix::sys::stat::FileStat| {
+            (
+                stat.st_size,
+                stat.st_mtime,
+                stat.st_mtime_nsec,
+                stat.st_ctime,
+                stat.st_ctime_nsec,
+            )
+        };
+        if stamp(&before) != stamp(&opened)
+            || stamp(&opened) != stamp(&after)
+            || u64::try_from(after.st_size).ok() != Some(length)
+        {
+            return Err(fail("held program changed during verification"));
+        }
+        anchor.revalidate().map_err(active_error)?;
+        let mut actual = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            write!(actual, "{byte:02x}").map_err(|_| fail("program digest encoding failed"))?;
+        }
+        if actual != expected {
+            return Err(fail(
+                "held Claude program differs from the reviewed SHA-256",
+            ));
+        }
+        Ok(())
+    })
+}
+
 /// Keep a failed descriptor execution named at the runner's spawn boundary.
 pub(crate) fn spawn_error(program: &Path, kind: &'static str, error: &std::io::Error) -> LaneError {
     EXECUTABLE.with(|active| {
@@ -757,6 +837,93 @@ mod tests {
         let error = check(&program).expect("active").expect_err("changed mode");
         assert_eq!(error.kind, "runtime-anchor");
         assert!(error.detail.contains("anchor-mode"));
+    }
+
+    /// # Panics
+    /// Panics if held bytes are not bound to the independent reviewed reference.
+    /// ´test:unit:claude-program-binding-uses-held-inode´
+    #[test]
+    fn claude_program_binding_uses_held_inode() {
+        use sha2::{Digest as _, Sha256};
+        use std::fmt::Write as _;
+        let fixture = tempfile::tempdir().expect("fixture");
+        let program = fixture.path().join("program");
+        fs::copy("/usr/bin/true", &program).expect("native stand-in; never executed");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).expect("mode");
+        let mut expected = String::with_capacity(64);
+        for byte in Sha256::digest(fs::read(&program).expect("program bytes")) {
+            write!(expected, "{byte:02x}").expect("program digest encoding");
+        }
+        assert_eq!(
+            verify_program_digest(&program, &expected)
+                .expect_err("unheld")
+                .kind,
+            "credential-program-pin"
+        );
+        let pin = HostVerifier::current()
+            .expect("map")
+            .for_operation("make-home")
+            .pin(
+                &program,
+                "credential-claude",
+                0,
+                executable_policy(Owner::Host),
+            )
+            .expect("pin");
+        let manifest = Manifest {
+            version: 1,
+            transport: Transport::Rights,
+            operation: "make-home".into(),
+            loop_name: "alpha".into(),
+            records: vec![pin.record()],
+        };
+        let mut anchors = Receiver::current()
+            .expect("receiver")
+            .validate(
+                &manifest,
+                vec![pin.into_fd()],
+                "make-home",
+                "alpha",
+                Transport::Rights,
+                &[Requirement {
+                    purpose: "credential-claude".into(),
+                    policy: executable_policy(Owner::Host),
+                    alias_group: None,
+                }],
+            )
+            .expect("held inode");
+        let _guard = activate_program_map(
+            "make-home",
+            BTreeMap::from([(program.clone(), Arc::new(anchors.pop().expect("anchor")))]),
+        );
+        verify_program_digest(&program, &expected).expect("matching bytes");
+        let mut foreign = expected.clone();
+        foreign.replace_range(..1, if expected.starts_with('a') { "b" } else { "a" });
+        for wrong in [
+            foreign,
+            expected[..16].into(),
+            "A".repeat(64),
+            String::new(),
+        ] {
+            assert_eq!(
+                verify_program_digest(&program, &wrong)
+                    .expect_err("wrong binding")
+                    .kind,
+                "credential-program-pin"
+            );
+        }
+        let held_path = fixture.path().join("held-program");
+        fs::rename(&program, &held_path).expect("retain inode at another name");
+        fs::write(&program, b"replacement must never be hashed").expect("replacement pathname");
+        verify_program_digest(&program, &expected)
+            .expect("descriptor survives pathname replacement");
+        fs::write(&held_path, b"changed held bytes").expect("mutate test-owned executable");
+        assert_eq!(
+            verify_program_digest(&program, &expected)
+                .expect_err("same inode changed")
+                .kind,
+            "credential-program-pin"
+        );
     }
 
     const CHILD: &str = "SUPERLOOP_CONTAINER_ANCHOR_TEST";

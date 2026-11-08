@@ -576,6 +576,29 @@ fn installed_generation(owner_home: &Path, loop_name: &str) -> Result<Value, Lan
     Ok(record)
 }
 
+/// Return the complete owner-reviewed Claude program digest from the installed generation.
+/// The helper's executable supplier cannot replace this independent reference
+/// (´proto:superlooplane:claude-owner-program-binding´).
+pub(crate) fn reviewed_claude_program_digest(
+    owner_home: &Path,
+    loop_name: &str,
+) -> Result<String, LaneError> {
+    let record = installed_generation(owner_home, loop_name)?;
+    let expected = record["claude_sha256"].as_str().ok_or_else(|| {
+        LaneError::input(
+            "credential-program-pin",
+            "completed installation has no reviewed Claude SHA-256",
+        )
+    })?;
+    if expected != crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256 {
+        return Err(LaneError::input(
+            "credential-program-pin",
+            "completed installation's Claude program differs from the credential structure record",
+        ));
+    }
+    Ok(expected.to_owned())
+}
+
 fn installed_proxy(owner_home: &Path, request: &LaunchRequest) -> Result<PathBuf, LaneError> {
     let record = installed_generation(owner_home, &request.loop_name)?;
     let recorded = record["proxy_bin"].as_str().ok_or_else(|| {
@@ -7861,6 +7884,50 @@ mod tests {
             || Ok(true),
         )
         .expect("empty labelled query");
+    }
+
+    /// # Panics
+    /// Panics if a missing or incomplete installed reference can authorize a program.
+    /// ´test:unit:claude-program-reference-requires-completed-installation´
+    #[test]
+    fn claude_program_reference_requires_completed_installation() {
+        use super::{reviewed_claude_program_digest, settings_path};
+        let root = tempfile::tempdir().expect("fixture");
+        let path = settings_path(root.path(), "alpha").with_file_name("install-generation.json");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("loop directory");
+        assert!(reviewed_claude_program_digest(root.path(), "alpha").is_err());
+        let expected = crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256;
+        let mut complete = json!({"schema":1,"phase":"complete", "image_digest":format!("sha256:{}", "b".repeat(64)),
+            "claude_sha256":expected, "claude_image_program":"/opt/claude/bin/claude",
+            "claude_template_dir":format!("/owner/runner-templates/claude/{}", "b".repeat(64))});
+        std::fs::write(&path, serde_json::to_vec(&complete).expect("record")).expect("write");
+        assert_eq!(
+            reviewed_claude_program_digest(root.path(), "alpha").expect("completed reference"),
+            expected
+        );
+        let mut foreign = complete.clone();
+        foreign["claude_sha256"] = json!("a".repeat(64));
+        complete["phase"] = json!("preparing");
+        for (record, kind) in [
+            (complete, "install-generation"),
+            (foreign, "credential-program-pin"),
+            (
+                json!({"schema":1,"phase":"complete"}),
+                "credential-program-pin",
+            ),
+            (
+                json!({"schema":1,"phase":"preparing"}),
+                "install-generation",
+            ),
+        ] {
+            std::fs::write(&path, serde_json::to_vec(&record).expect("record")).expect("write");
+            assert_eq!(
+                reviewed_claude_program_digest(root.path(), "alpha")
+                    .expect_err("reference refusal")
+                    .kind,
+                kind
+            );
+        }
     }
 
     /// # Panics

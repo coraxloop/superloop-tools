@@ -19,6 +19,11 @@ use crate::error::LaneError;
 const AUTH_HOST: &str = "auth.openai.com";
 const AUTH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+/// Complete SHA-256 of the program behind the loop's reviewed credential structure record.
+/// An executable supplier cannot select the independent record; bind all program bytes
+/// before authority access (´proto:superlooplane:claude-owner-program-binding´).
+pub(crate) const CLAUDE_SCHEMA_PROGRAM_SHA256: &str =
+    "708c77b204db30086ff6f1ed34577bda03e1be74ced80557cbf7b54249ebf0bd";
 const REFRESH_AHEAD: Duration = Duration::from_secs(10 * 60);
 const MAX_AUTH_BYTES: u64 = 65_536;
 const MAX_EVIDENCE_BYTES: u64 = 65_536;
@@ -1134,7 +1139,7 @@ impl<F: Fn() -> Result<(), LaneError>> OwnerProvider for ClaudeOwnerProvider<'_,
     }
 }
 
-fn claude_refresh_program(home: &Path) -> Result<(), LaneError> {
+fn claude_refresh_program(home: &Path, expected_program: &str) -> Result<(), LaneError> {
     use std::os::unix::process::CommandExt as _;
     let program = Path::new("/usr/bin/claude");
     // Never fall back to an ambient program from the namespace/helper thread.
@@ -1144,6 +1149,7 @@ fn claude_refresh_program(home: &Path) -> Result<(), LaneError> {
             "Claude refresh requires its held owner program",
         )
     })??;
+    crate::container_entry::verify_program_digest(program, expected_program)?;
     let argv = vec!["--print".into(), "Reply with OK.".into()];
     let environment = BTreeMap::from([
         ("HOME".into(), home.to_string_lossy().into_owned()),
@@ -1211,6 +1217,14 @@ fn claude_refresh_program(home: &Path) -> Result<(), LaneError> {
     }
 }
 
+// Check the reviewed executable before opening any sign-in or publishing a worker
+// file, even when the current access token does not need a refresh.
+fn claude_program_pin(owner_home: &Path, loop_name: &str) -> Result<String, LaneError> {
+    let expected = crate::launch::reviewed_claude_program_digest(owner_home, loop_name)?;
+    crate::container_entry::verify_program_digest(Path::new("/usr/bin/claude"), &expected)?;
+    Ok(expected)
+}
+
 fn prepare_claude_run(
     owner_home: &Path,
     loop_name: &str,
@@ -1218,13 +1232,14 @@ fn prepare_claude_run(
     worker_uid: u32,
     now: u64,
 ) -> Result<(), LaneError> {
+    let expected_program = claude_program_pin(owner_home, loop_name)?;
     let home = claude_sign_in_dir(owner_home, loop_name);
     prepare_claude_run_at(
         &home,
         run_home,
         worker_uid,
         now,
-        || claude_refresh_program(&home),
+        || claude_refresh_program(&home, &expected_program),
         now_milliseconds,
     )
 }
@@ -1389,13 +1404,14 @@ pub(crate) fn publish_round(
 ) -> Result<Value, LaneError> {
     backend.require_runtime()?;
     if backend == crate::settings::BoxBackend::Claude {
+        let expected_program = claude_program_pin(owner_home, loop_name)?;
         let home = claude_sign_in_dir(owner_home, loop_name);
         return publish_claude_round_at(
             &home,
             run_home,
             worker_uid,
             now_seconds()?,
-            || claude_refresh_program(&home),
+            || claude_refresh_program(&home, &expected_program),
             now_milliseconds,
         );
     }
@@ -1431,11 +1447,12 @@ pub fn preflight(
 ) -> Result<(), LaneError> {
     backend.require_runtime()?;
     if backend == crate::settings::BoxBackend::Claude {
+        let expected_program = claude_program_pin(owner_home, loop_name)?;
         let home = claude_sign_in_dir(owner_home, loop_name);
         return with_claude_authority(
             &home,
             now_seconds()?,
-            || claude_refresh_program(&home),
+            || claude_refresh_program(&home, &expected_program),
             now_milliseconds,
             |_| Ok(()),
         );
@@ -1683,11 +1700,48 @@ mod tests {
     }
 
     /// # Panics
+    /// Panics if unheld executable custody can read authority or replace a worker file.
+    /// ´test:unit:claude-program-pin-precedes-owner-authority´
+    #[test]
+    fn claude_program_pin_precedes_owner_authority() {
+        let root = claude_fixture_root();
+        let loop_root = root.path().join(".config/loops/alpha");
+        fs::create_dir_all(&loop_root).expect("configuration fixture");
+        let record = json!({"schema":1,"phase":"complete", "image_digest":format!("sha256:{}", "b".repeat(64)),
+            "claude_sha256":CLAUDE_SCHEMA_PROGRAM_SHA256, "claude_image_program":"/opt/claude/bin/claude",
+            "claude_template_dir":format!("/owner/runner-templates/claude/{}", "b".repeat(64))});
+        fs::write(
+            loop_root.join("install-generation.json"),
+            serde_json::to_vec(&record).expect("record"),
+        )
+        .expect("configuration");
+        let worker = root.path().join("worker");
+        fs::create_dir_all(worker.join(".claude")).expect("worker directory");
+        let prior = worker.join(".claude/.credentials.json");
+        fs::write(&prior, b"synthetic prior worker file").expect("prior file");
+        let error = prepare_claude_run(
+            root.path(),
+            "alpha",
+            &worker,
+            owner_identity().0,
+            1_800_000_000,
+        )
+        .expect_err("unheld program precedes absent owner authority");
+        assert_eq!(error.kind, "credential-program-pin");
+        assert_eq!(error.detail, "Claude program has no held executable");
+        assert!(!claude_sign_in_dir(root.path(), "alpha").exists());
+        assert_eq!(
+            fs::read(prior).expect("prior worker"),
+            b"synthetic prior worker file"
+        );
+    }
+
+    /// # Panics
     /// Panics only if an unheld owner program is admitted for refresh.
     /// ´test:unit:claude-refresh-refuses-unheld-program´
     #[test]
     fn claude_refresh_refuses_unheld_program() {
-        let error = claude_refresh_program(Path::new("/unopened-helper-home"))
+        let error = claude_refresh_program(Path::new("/unopened-helper-home"), &"a".repeat(64))
             .expect_err("no ambient executable fallback");
         assert_eq!(error.kind, "credential-refresh");
         assert_eq!(
