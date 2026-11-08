@@ -5013,7 +5013,15 @@ mod tests {
         assert_eq!(first["class"]["setter"], "door-service");
         assert_eq!(first["class"]["floor"], "audit");
         label(&store, &id, "allow");
-        let final_frame = frame_read(&mut client).expect("final frame");
+        let until = Instant::now() + Duration::from_secs(5);
+        let final_frame = loop {
+            let frame = frame_read_until(&mut client, until).expect("reply or lock-wait credit");
+            if frame["type"] != "request-lock-wait" {
+                break frame;
+            }
+            assert_eq!(frame["schema"], 2);
+            assert!(frame["wait_ms"].as_u64().is_some_and(|wait| wait > 0));
+        };
         assert_eq!(final_frame["queue_state"], "answered");
         assert!(
             final_frame["queue_wall_seconds"]

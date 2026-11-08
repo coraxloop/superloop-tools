@@ -307,7 +307,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |Source and matching lines|Classification context|
 |-------------------------|----------------------|
 |``.linter/imports/orchestration.toml:87``|Prose/schema convention or imported label declaration: binding only with the named independent reference; otherwise handle, with current widths and follow-ups in the package’s definition rows. Imported policy changes require its owner.|
-|``CHANGELOG.md:19,103,105,107,205,411,413``|Change and work records repeat the named producer or reader contracts; these mentions introduce no independent digest authority or representation.|
+|``CHANGELOG.md:19,105,107,109,207,413,415``|Change and work records repeat the named producer or reader contracts; these mentions introduce no independent digest authority or representation.|
 |``docs/backlog.md:21,75,97,169,197,245,247,253,297,469,505,515,517,561,589,607,625,683,689,693,695,697,699,707,713,753,755,759,1243,1247,1317,1321,1375,1379,1391,1395,1501,1539,1541,1545,1653,1655,1657,1659,1661,1663,1665,1667,1669,1671,1785,1823``|Change and work records repeat the named producer or reader contracts; these mentions introduce no independent digest authority or representation.|
 |``docs/spec/build-contracts.md:11,17,21,23,82``|D174, D237; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``docs/spec/command-contracts.md:13,15,29``|D175; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
