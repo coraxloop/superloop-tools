@@ -283,7 +283,11 @@ fn read_plan_settings(home: &Path, loop_name: &str, run: &str) -> Result<Setting
         .join(".config/loops")
         .join(loop_name)
         .join("workers.toml");
-    let settings = Settings::read(&settings_path)?;
+    let settings = if let Some(configuration) = runtime_entry::plan_configuration(home)? {
+        configuration.read_settings(loop_name, &settings_path)?
+    } else {
+        Settings::read(&settings_path)?
+    };
     Ok(settings)
 }
 

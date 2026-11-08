@@ -511,6 +511,14 @@ impl Settings {
             }
             LaneError::input("settings-read", format!("{}: {error}", path.display()))
         })?);
+        Self::from_private_file(file, path)
+    }
+
+    /// Read and parse one held settings inode using the host reader's leaf checks.
+    /// # Errors
+    /// Refuses unsafe ownership, mode, kind, size or malformed settings.
+    pub(crate) fn from_private_file(file: File, path: &Path) -> Result<Self, LaneError> {
+        let owner = nix::unistd::Uid::effective().as_raw();
         let meta = file.metadata().map_err(|error| {
             LaneError::input("settings-read", format!("{}: {error}", path.display()))
         })?;

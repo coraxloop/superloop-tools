@@ -2,6 +2,7 @@
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::container_entry::executable_policy as executable;
@@ -240,8 +241,39 @@ pub(crate) fn core_pins(
 pub(crate) struct PlanConfiguration {
     home: std::path::PathBuf,
     operation: &'static str,
+    directory: Arc<Anchor>,
     pub(crate) registry: loop_home::registry::Registry,
     pub(crate) allocations: loop_home::allocations::Allocations,
+}
+impl PlanConfiguration {
+    pub(crate) fn read_settings(
+        &self,
+        scope: &str,
+        path: &Path,
+    ) -> Result<crate::Settings, LaneError> {
+        let file = self
+            .directory
+            .open_beneath(
+                &Path::new(scope).join("workers.toml"),
+                Policy {
+                    kind: Kind::File,
+                    owner: Owner::Host,
+                    mode: ModePolicy::Exact(0o600),
+                },
+                0o700,
+            )
+            .map_err(|error| {
+                LaneError::input(
+                    if self.operation == "make-home" {
+                        "creation-anchor"
+                    } else {
+                        "runtime-anchor"
+                    },
+                    error.to_string(),
+                )
+            })?;
+        crate::Settings::from_private_file(std::fs::File::from(file), path)
+    }
 }
 thread_local! {
     static PLAN_CONFIGURATION: std::cell::RefCell<Option<PlanConfiguration>> = const { std::cell::RefCell::new(None) };
@@ -258,11 +290,13 @@ impl Drop for ConfigurationGuard {
 fn activate_configuration(
     home: &Path,
     configuration: &Configuration,
+    directory: Arc<Anchor>,
     operation: &'static str,
 ) -> ConfigurationGuard {
     let snapshot = PlanConfiguration {
         home: home.to_path_buf(),
         operation,
+        directory,
         registry: configuration.registry.clone(),
         allocations: configuration.allocations.clone(),
     };
@@ -292,6 +326,7 @@ pub(crate) fn plan_configuration(home: &Path) -> Result<Option<PlanConfiguration
 /// Validated configuration and worker storage for the runtime's one birth check.
 pub struct Custody {
     pub(crate) configuration: Configuration,
+    pub(crate) configuration_root: Arc<Anchor>,
     pub(crate) root: Anchor,
     pub(crate) private: Anchor,
     pub(crate) executor: Anchor,
@@ -315,7 +350,12 @@ impl Custody {
         home: &Path,
         operation: &'static str,
     ) -> ConfigurationGuard {
-        activate_configuration(home, &self.configuration, operation)
+        activate_configuration(
+            home,
+            &self.configuration,
+            Arc::clone(&self.configuration_root),
+            operation,
+        )
     }
     pub(crate) fn create_birth(
         &self,
@@ -536,9 +576,10 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     let entry = next()?;
     let podman_anchor = next()?;
     let hash = next()?;
-    let _config = next()?;
+    let configuration_root = Arc::new(next()?);
     let custody = Custody {
         configuration,
+        configuration_root,
         root: next()?,
         private: next()?,
         executor: next()?,
@@ -570,6 +611,7 @@ pub(crate) fn preview() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
 
     /// # Panics
     /// Panics if synthetic configuration fields violate the registry or ledger grammar.
@@ -593,6 +635,40 @@ mod tests {
     }
 
     /// # Panics
+    /// Panics if the fixture directory cannot pass the production host and receiver checks.
+    fn configuration_directory(home: &Path, operation: &str) -> Arc<Anchor> {
+        let policy = directory(Owner::Host, 0o700);
+        let pin = HostVerifier::current()
+            .expect("host map")
+            .for_operation(operation)
+            .pin(home, "configuration", 0, policy)
+            .expect("configuration pin");
+        let manifest = Manifest {
+            version: 1,
+            transport: Transport::Rights,
+            operation: operation.into(),
+            loop_name: "alpha".into(),
+            records: vec![pin.record()],
+        };
+        let mut anchors = Receiver::current()
+            .expect("receiver map")
+            .validate(
+                &manifest,
+                vec![pin.into_fd()],
+                operation,
+                "alpha",
+                Transport::Rights,
+                &[Requirement {
+                    purpose: "configuration".into(),
+                    policy,
+                    alias_group: None,
+                }],
+            )
+            .expect("configuration receipt");
+        Arc::new(anchors.pop().expect("configuration anchor"))
+    }
+
+    /// # Panics
     /// Panics if plan readers reopen paths, widen a grant, leak a scope or accept another home.
     /// ´claim:superlooplane:runtime-plan-uses-anchored-configuration-snapshot´
     /// ´test:unit:runtime-plan-uses-anchored-configuration-snapshot´
@@ -600,6 +676,8 @@ mod tests {
     fn runtime_plan_uses_anchored_configuration_snapshot() {
         let directory = tempfile::tempdir().expect("home");
         let home = directory.path();
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))
+            .expect("private configuration");
         assert_eq!(
             crate::read_plan_registry(home)
                 .expect_err("no ambient registry")
@@ -607,7 +685,12 @@ mod tests {
             "registry-row"
         );
         let snapshot = configuration(64000, home);
-        let guard = activate_configuration(home, &snapshot, OPERATION);
+        let guard = activate_configuration(
+            home,
+            &snapshot,
+            configuration_directory(home, OPERATION),
+            OPERATION,
+        );
         assert_eq!(
             crate::read_plan_registry(home)
                 .expect("snapshot")
@@ -652,7 +735,12 @@ mod tests {
         );
         {
             let second = configuration(63000, home);
-            let _nested = activate_configuration(home, &second, "make-home");
+            let _nested = activate_configuration(
+                home,
+                &second,
+                configuration_directory(home, "make-home"),
+                "make-home",
+            );
             assert_eq!(
                 crate::read_plan_registry(home)
                     .expect("nested snapshot")

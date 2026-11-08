@@ -234,6 +234,10 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             "override-other",
             "plan-held",
             "plan-widened",
+            "plan-missing",
+            "plan-link",
+            "plan-mode",
+            "plan-large",
             "home-runs-alias",
             "letter-runs",
             "execute-held",
@@ -261,6 +265,9 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             } else {
                 &held_runs
             };
+            if case.starts_with("plan-") {
+                seed_held_settings(home, case);
+            }
             let mut request = if entry == "runtime" {
                 superloop_lane::runtime_entry::command(
                     Path::new("/usr/bin/podman"),
@@ -345,7 +352,7 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                 set_private(64000, 0o750);
             }
             if case.starts_with("plan-") {
-                substitute_plan_configuration(home, case == "plan-widened");
+                substitute_plan_configuration(home, case != "plan-widened");
             }
             let output = if case.starts_with("override-") {
                 let registry = if case == "override-canonical" {
@@ -361,6 +368,7 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                 fs::remove_dir_all(home.join(".config/loops")).expect("remove substitute");
                 fs::rename(home.join(".config/held-loops"), home.join(".config/loops"))
                     .expect("restore held configuration");
+                fs::remove_dir_all(home.join(".config/loops/alpha")).expect("remove held settings");
             }
             if case.starts_with("execute-") {
                 fs::remove_dir_all(home.join(".config/loops/alpha")).expect("remove hash settings");
@@ -378,10 +386,12 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             );
             match case {
                 "valid" | "letter-runs" => assert!(
-                    !report.contains("anchor-")
-                        && report.contains("unsafe-path:")
-                        && report.contains(".config/loops/alpha"),
-                    "validated runtime reaches settings: {report}"
+                    report.contains(if entry == "runtime" {
+                        "runtime-anchor: anchor-missing: operation=prepare-runtime purpose=configuration"
+                    } else {
+                        "creation-anchor: anchor-missing: operation=make-home purpose=configuration"
+                    }),
+                    "validated entry reaches held settings: {report}"
                 ),
                 "override-canonical" | "override-other" => assert!(
                     report.contains("anchor-declaration")
@@ -404,6 +414,18 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                     report.contains("settings-grant: runs_root differs"),
                     "anchored grant is enforced: {report}"
                 ),
+                "plan-missing" | "plan-link" | "plan-mode" => {
+                    let expected = match case {
+                        "plan-missing" => "anchor-missing",
+                        "plan-link" => "anchor-escape",
+                        _ => "anchor-mode",
+                    };
+                    assert!(
+                        report.contains(expected) && report.contains("purpose=configuration"),
+                        "{report}"
+                    );
+                }
+                "plan-large" => assert!(report.contains("settings-size"), "{report}"),
                 "home-runs-alias" => assert!(
                     report.contains("anchor-declaration") && report.contains("purpose=runs-root"),
                     "{report}"
@@ -585,6 +607,41 @@ fn runtime_override(request: &loop_home::CommandSpec, registry: &Path) -> loop_h
 }
 
 /// # Panics
+/// Panics if the held settings fixture cannot be prepared before the production composer pins it.
+fn seed_held_settings(home: &Path, case: &str) {
+    let directory = home.join(".config/loops/alpha");
+    fs::create_dir(&directory).expect("held settings directory");
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .expect("held directory mode");
+    let path = directory.join("workers.toml");
+    if case == "plan-missing" {
+        return;
+    }
+    if case == "plan-link" {
+        std::os::unix::fs::symlink(home.join("rotation-source"), path).expect("settings link");
+        return;
+    }
+    let source = if case == "plan-large" {
+        "x".repeat(65_537)
+    } else {
+        format!(
+            "{}driver_argv=['/usr/bin/true']\n[backend_argv]\ncodex=['/usr/bin/true']\n",
+            if case == "plan-widened" {
+                "runs_root='/ungranted-runs'\n"
+            } else {
+                ""
+            }
+        )
+    };
+    fs::write(&path, source).expect("held settings");
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(if case == "plan-mode" { 0o640 } else { 0o600 }),
+    )
+    .expect("held file mode");
+}
+
+/// # Panics
 /// Panics if the replacement configuration cannot isolate the held registry and ledger.
 fn substitute_plan_configuration(home: &Path, widened: bool) {
     let root = home.join(".config/loops");
@@ -761,4 +818,122 @@ fn runtime_hash_configuration(home: &Path) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// # Panics
+/// Panics if either host composer pins before refusing any ambient registry override.
+/// ´claim:superlooplane:host-composers-refuse-registry-overrides-before-pins´
+/// ´test:integration:host-composers-refuse-registry-overrides-before-pins´
+#[test]
+fn host_composers_refuse_registry_overrides_before_pins() {
+    if let Some(home) = std::env::var_os("SUPERLOOP_TEST_COMPOSER_HOME") {
+        composer_override_child(Path::new(&home));
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("home");
+    let home = fixture.path();
+    let canonical = home.join(".config/loops/registry.toml");
+    fs::create_dir_all(canonical.parent().expect("parent")).expect("configuration");
+    let source = "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[{name='alpha',uid=64000,launch='dev/alpha'}]\n";
+    fs::write(&canonical, source).expect("canonical registry");
+    let agreeing = home.join("agreeing.toml");
+    fs::write(&agreeing, source).expect("agreeing registry");
+    for registry in [
+        Path::new(""),
+        canonical.as_path(),
+        agreeing.as_path(),
+        &home.join("absent.toml"),
+    ] {
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "host_composers_refuse_registry_overrides_before_pins",
+                "--nocapture",
+            ])
+            .env("SUPERLOOP_TEST_COMPOSER_HOME", home)
+            .env("ENTER_LOOP_REGISTRY", registry)
+            .output()
+            .expect("isolated composer test");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child test must execute"
+        );
+    }
+}
+
+/// # Panics
+/// Panics if an override reaches a deliberately absent entry image or configuration pin.
+fn composer_override_child(home: &Path) {
+    let fd: OwnedFd = fs::File::open(home).expect("home descriptor").into();
+    let program = Path::new("/absent-composer-program");
+    let runtime = vec![
+        "unshare".into(),
+        "/absent-entry-image".into(),
+        "_prepare-runtime".into(),
+        "alpha".into(),
+        "R".into(),
+        "--owner-home".into(),
+        home.to_str().expect("home").into(),
+        "--podman-bin".into(),
+        program.to_str().expect("program").into(),
+    ];
+    let creation = vec![
+        "unshare".into(),
+        "/absent-entry-image".into(),
+        "_make-home".into(),
+        "alpha".into(),
+        "R".into(),
+        "--letter".into(),
+        home.join("letter").to_str().expect("letter").into(),
+        "--owner-home".into(),
+        home.to_str().expect("home").into(),
+        "--worker-uid".into(),
+        "64010".into(),
+        "--podman-bin".into(),
+        program.to_str().expect("program").into(),
+        "--model".into(),
+        "model".into(),
+        "--effort".into(),
+        "high".into(),
+        "--model-source".into(),
+        "argument".into(),
+        "--effort-source".into(),
+        "argument".into(),
+        "--door-scope".into(),
+        "work".into(),
+    ];
+    for (operation, result) in [
+        (
+            "prepare-runtime",
+            superloop_lane::runtime_entry::command(program, &runtime, home, &fd, home, &fd),
+        ),
+        (
+            "make-home",
+            superloop_lane::creation_entry::command(
+                program,
+                &creation,
+                (home, &fd),
+                (home, &fd),
+                (home, &fd),
+                None,
+            ),
+        ),
+    ] {
+        let Err(error) = result else {
+            panic!("override admitted");
+        };
+        assert!(
+            error.detail.contains(&format!(
+                "anchor-declaration: operation={operation} purpose=registry-override"
+            )),
+            "{error}"
+        );
+        assert!(!home.join(".var").exists(), "no custody preparation");
+    }
 }

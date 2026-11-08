@@ -193,9 +193,10 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     let entry = next()?;
     let podman = next()?;
     let hash = next()?;
-    let _config = next()?;
+    let configuration_root = Arc::new(next()?);
     let custody = crate::runtime_entry::Custody {
         configuration,
+        configuration_root,
         root: next()?,
         private: next()?,
         executor: next()?,
