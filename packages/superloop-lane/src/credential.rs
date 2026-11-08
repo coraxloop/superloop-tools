@@ -1237,6 +1237,18 @@ fn prepare_claude_run_at(
     refresh_program: impl Fn() -> Result<(), LaneError>,
     publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
 ) -> Result<(), LaneError> {
+    with_claude_authority(home, now, refresh_program, publication_time_ms, |source| {
+        write_claude_run(run_home, worker_uid, source)
+    })
+}
+
+fn with_claude_authority<T>(
+    home: &Path,
+    now: u64,
+    refresh_program: impl Fn() -> Result<(), LaneError>,
+    publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
+    action: impl FnOnce(&ClaudeSource) -> Result<T, LaneError>,
+) -> Result<T, LaneError> {
     let owner = owner_identity().0;
     let directory = open_dir(home, owner, owner, 0o700)?;
     let _guard = lock_with(&directory, FlockArg::LockExclusive)?;
@@ -1254,7 +1266,24 @@ fn prepare_claude_run_at(
             "Claude owner program left expired access authority",
         ));
     }
-    write_claude_run(run_home, worker_uid, &source)
+    action(&source)
+}
+
+fn publish_claude_round_at(
+    home: &Path,
+    run_home: &Path,
+    worker_uid: u32,
+    now: u64,
+    refresh_program: impl Fn() -> Result<(), LaneError>,
+    publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
+) -> Result<Value, LaneError> {
+    with_claude_authority(home, now, refresh_program, publication_time_ms, |source| {
+        let stamp = source
+            .stamp
+            .ok_or_else(|| failure("credential-publish", "Claude source inode is absent"))?;
+        write_claude_run(run_home, worker_uid, source)?;
+        publication_receipt(stamp)
+    })
 }
 
 fn write_claude_run(home: &Path, worker_uid: u32, source: &ClaudeSource) -> Result<(), LaneError> {
@@ -1359,6 +1388,17 @@ pub(crate) fn publish_round(
     backend: crate::settings::BoxBackend,
 ) -> Result<Value, LaneError> {
     backend.require_runtime()?;
+    if backend == crate::settings::BoxBackend::Claude {
+        let home = claude_sign_in_dir(owner_home, loop_name);
+        return publish_claude_round_at(
+            &home,
+            run_home,
+            worker_uid,
+            now_seconds()?,
+            || claude_refresh_program(&home),
+            now_milliseconds,
+        );
+    }
     let _guard = lock(owner_home, loop_name)?;
     let _refreshed = refresh_if_due(owner_home, loop_name, AUTH_ENDPOINT, now_seconds()?)?;
     // Reopen after a refresh so the evidence identifies the published owner inode.
@@ -1367,6 +1407,10 @@ pub(crate) fn publish_round(
         .stamp
         .ok_or_else(|| failure("credential-publish", "source inode is absent"))?;
     write_run(run_home, worker_uid, &source)?;
+    publication_receipt(stamp)
+}
+
+fn publication_receipt(stamp: FileStamp) -> Result<Value, LaneError> {
     let published = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| failure("credential-clock", error.to_string()))?;
@@ -1386,6 +1430,16 @@ pub fn preflight(
     backend: crate::settings::BoxBackend,
 ) -> Result<(), LaneError> {
     backend.require_runtime()?;
+    if backend == crate::settings::BoxBackend::Claude {
+        let home = claude_sign_in_dir(owner_home, loop_name);
+        return with_claude_authority(
+            &home,
+            now_seconds()?,
+            || claude_refresh_program(&home),
+            now_milliseconds,
+            |_| Ok(()),
+        );
+    }
     preflight_at(owner_home, loop_name, AUTH_ENDPOINT, now_seconds()?)
 }
 
@@ -1605,7 +1659,7 @@ fn refresh_live_at(
 mod tests {
     use super::*;
     use std::net::TcpListener;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
     use std::sync::{Arc, Mutex};
 
     fn fixture_root() -> tempfile::TempDir {
@@ -1695,6 +1749,165 @@ mod tests {
                 document.to_string()
             );
         }
+    }
+
+    /// # Panics
+    /// Panics if preflight publishes a worker file or admits expired owner authority.
+    /// ´test:unit:claude-preflight-checks-without-worker-publication´
+    #[test]
+    fn claude_preflight_checks_without_worker_publication() {
+        let fixture = claude_fixture_root();
+        let document = claude_document(1_800_000_000_000);
+        let home = fixture_claude(fixture.path(), &document);
+        with_claude_authority(
+            &home,
+            1_700_000_000,
+            || panic!("current source must not refresh"),
+            || Ok(1_700_000_000_000),
+            |_| Ok(()),
+        )
+        .expect("preflight");
+        assert!(!fixture.path().join("worker").exists());
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("source"),
+            document.to_string()
+        );
+        let error = with_claude_authority(
+            &home,
+            1_800_000_000,
+            || Ok(()),
+            || Ok(1_800_000_000_000),
+            |_| Ok(()),
+        )
+        .expect_err("expired authority");
+        assert_eq!(error.kind, "credential-refresh");
+        let absent = fixture.path().join("absent");
+        let backend = crate::settings::BoxBackend::Claude;
+        for result in [
+            preflight(&absent, "alpha", backend),
+            prepare_run(&absent, "alpha", &absent, owner_identity().0, backend),
+            publish_round(&absent, "alpha", &absent, owner_identity().0, backend).map(|_| ()),
+        ] {
+            assert_eq!(
+                result.expect_err("trial gate precedes custody").kind,
+                "backend-unavailable"
+            );
+        }
+        assert!(!absent.exists());
+    }
+
+    /// # Panics
+    /// Panics if a resumed round uses stale authority, leaks host state or publishes on refusal.
+    /// ´test:unit:claude-round-publication-reloads-owner-authority´
+    #[test]
+    fn claude_round_publication_reloads_owner_authority() {
+        let fixture = claude_fixture_root();
+        let old = claude_document(1_700_000_010_000);
+        let home = fixture_claude(fixture.path(), &old);
+        let prior_source_inode = fs::metadata(home.join(".credentials.json"))
+            .expect("prior source")
+            .ino();
+        let run = fixture.path().join("worker");
+        fs::create_dir_all(run.join(".claude")).expect("worker");
+        for path in [&run, &run.join(".claude")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let mut next = claude_document(1_800_000_000_000);
+        next["claudeAiOauth"]["accessToken"] = json!("N".repeat(108));
+        let calls = std::cell::Cell::new(0);
+        let receipt = publish_claude_round_at(
+            &home,
+            &run,
+            owner_identity().0,
+            1_700_000_000,
+            || {
+                calls.set(calls.get() + 1);
+                let directory = open_dir(&home, owner_identity().0, owner_identity().0, 0o700)?;
+                assert!(lock_with(&directory, FlockArg::LockExclusiveNonblock).is_err());
+                let replacement = home.join("owner-program-next");
+                fs::write(&replacement, next.to_string()).expect("stand-in owner program");
+                fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600))
+                    .expect("owner mode");
+                fs::rename(replacement, home.join(".credentials.json")).expect("owner publication");
+                Ok(())
+            },
+            || Ok(1_700_000_001_000),
+        )
+        .expect("round publication");
+        assert_eq!(calls.get(), 1);
+        assert_ne!(
+            fs::metadata(home.join(".credentials.json"))
+                .expect("new source")
+                .ino(),
+            prior_source_inode
+        );
+        let worker_path = run.join(".claude/.credentials.json");
+        let bytes = fs::read(&worker_path).expect("worker bytes");
+        assert_eq!(
+            bytes,
+            ClaudeSource::parse(&next).expect("shape").worker_file()
+        );
+        let encoded: Value = serde_json::from_slice(&bytes).expect("worker JSON");
+        assert_eq!(encoded["claudeAiOauth"]["accessToken"], "N".repeat(108));
+        assert_eq!(encoded.as_object().expect("worker object").len(), 1);
+        assert!(encoded["claudeAiOauth"].get("refreshToken").is_none());
+        assert!(
+            encoded["claudeAiOauth"]
+                .get("refreshTokenExpiresAt")
+                .is_none()
+        );
+        let worker_inode = fs::metadata(&worker_path).expect("worker inode").ino();
+        assert_eq!(
+            fs::metadata(&worker_path)
+                .expect("mode")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            receipt["source_inode"],
+            fs::metadata(home.join(".credentials.json"))
+                .expect("source inode")
+                .ino()
+        );
+        assert!(receipt["published_unix_ns"].as_u64().is_some_and(|n| n > 0));
+        assert_eq!(receipt.as_object().expect("publication receipt").len(), 2);
+        let error = publish_claude_round_at(
+            &home,
+            &run,
+            owner_identity().0,
+            1_800_000_000,
+            || Ok(()),
+            || Ok(1_800_000_000_000),
+        )
+        .expect_err("expired resumed source");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(fs::read(&worker_path).expect("unchanged worker"), bytes);
+        assert_eq!(
+            fs::metadata(&worker_path).expect("unchanged inode").ino(),
+            worker_inode
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("unchanged owner"),
+            next.to_string()
+        );
+        let error = publish_claude_round_at(
+            &home,
+            &run,
+            owner_identity().0,
+            1_800_000_000,
+            || Err(failure("credential-refresh", "synthetic refusal")),
+            || panic!("a failed refresh must not reach the publication clock"),
+        )
+        .expect_err("failed resumed refresh");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(error.detail, "synthetic refusal");
+        assert_eq!(fs::read(&worker_path).expect("unchanged worker"), bytes);
+        assert_eq!(
+            fs::metadata(&worker_path).expect("unchanged inode").ino(),
+            worker_inode
+        );
     }
 
     fn claude_document(expires_ms: u64) -> Value {
