@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Draft owner-operated Claude credential acceptance distinguishes external token-only startup, refresh attempts, same-process reload and the margin, binding-cost and contention measurements; it leaves vendor outcomes and activation unmeasured (``prob:box:claude-sign-in-and-endpoints-in-the-box``; ``prob:box:claude-print-probe-refresh-margin-measured-against-refresh-ahead``; ``sec:superlooplane:claude-credential-acceptance-draft``).
+
 - Gated Claude credential exercise payload observes the locked token-only projection and schema-2 provider evidence without reporting credential-derived digests; namespace and vendor acceptance remain unmeasured (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-credential-exercise-payload``).
 
 - Credential exercise selects one protected backend through the public and private forms, excludes foreign live runs and keeps Claude measurement gated before owner access (``prob:box:claude-boxed-workers``; ``proto:superlooplane:credential-exercise-backend``).
