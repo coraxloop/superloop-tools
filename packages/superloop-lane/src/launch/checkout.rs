@@ -33,6 +33,60 @@ pub struct CheckoutRequest {
     pub invocation_token: Option<String>,
 }
 
+/// Parse the private checkout form.
+/// # Errors
+/// Refuses an incomplete or invalid request vector.
+pub fn parse_private_argv(args: &[String]) -> Result<(CheckoutRequest, &Path), LaneError> {
+    let [
+        _,
+        loop_name,
+        run,
+        into_flag,
+        into,
+        home_flag,
+        owner_home,
+        repo_flag,
+        repo,
+        rest @ ..,
+    ] = args
+    else {
+        return Err(LaneError::input(
+            "checkout-private",
+            "private checkout form is incomplete",
+        ));
+    };
+    if into_flag != "--into" || home_flag != "--owner-home" || repo_flag != "--repo" {
+        return Err(LaneError::input(
+            "checkout-private",
+            "private checkout form is invalid",
+        ));
+    }
+    let mut words = vec![
+        loop_name.clone(),
+        run.clone(),
+        "--repo".into(),
+        repo.clone(),
+        "--into".into(),
+        into.clone(),
+    ];
+    let token = if rest == ["--dry-run"] {
+        words.push("--dry-run".into());
+        None
+    } else if let [flag, token] = rest
+        && flag == "--token"
+    {
+        Some(token.clone())
+    } else {
+        return Err(LaneError::input(
+            "checkout-private",
+            "private checkout form is invalid",
+        ));
+    };
+    let mut request = CheckoutRequest::parse(&words)?;
+    request.invocation_token = token;
+    Ok((request, Path::new(owner_home)))
+}
+
 /// Build the private checkout words used by the public command.
 ///
 /// # Errors
@@ -712,7 +766,7 @@ fn recover_pending(
 }
 
 #[allow(unsafe_code)]
-fn bind_git(command: &mut Command, directory: &OwnedFd) {
+fn bind_git(command: &mut Command, directory: &OwnedFd) -> Result<(), LaneError> {
     let raw = directory.as_raw_fd();
     // SAFETY: the held descriptor stays open through spawn and binds the child's cwd.
     unsafe {
@@ -724,15 +778,31 @@ fn bind_git(command: &mut Command, directory: &OwnedFd) {
             }
         });
     }
+    let argv = command
+        .get_args()
+        .map(|word| crate::pinned::path_word(Path::new(word), "checkout-git"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let environment = command
+        .get_envs()
+        .filter_map(|(key, value)| value.map(|value| (key, value)))
+        .map(|(key, value)| {
+            Ok((
+                crate::pinned::path_word(Path::new(key), "checkout-git")?,
+                crate::pinned::path_word(Path::new(value), "checkout-git")?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, LaneError>>()?;
+    crate::container_entry::configure(command, Path::new("/usr/bin/git"), &argv, &environment)
 }
 
 fn git(mut command: Command, directory: &OwnedFd, step: &str) -> Result<Vec<u8>, LaneError> {
-    bind_git(&mut command, directory);
-    let output = command
+    command
         .env_clear()
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    bind_git(&mut command, directory)?;
+    let output = command
         .output()
         .map_err(|error| LaneError::operation("checkout-git", format!("{step}: {error}")))?;
     if !output.status.success() {
@@ -769,10 +839,7 @@ fn clone_checkout(
     .env("GIT_CONFIG_GLOBAL", "/dev/null")
     .stdout(Stdio::piped())
     .stderr(Stdio::null());
-    bind_git(&mut pack, bare);
-    let mut source = pack.spawn().map_err(|error| {
-        LaneError::operation("checkout-git", format!("pack preserved bare: {error}"))
-    })?;
+    bind_git(&mut pack, bare)?;
     let mut index = Command::new("/usr/bin/git");
     index
         .args(["index-pack", "--stdin"])
@@ -782,7 +849,10 @@ fn clone_checkout(
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    bind_git(&mut index, target);
+    bind_git(&mut index, target)?;
+    let mut source = pack.spawn().map_err(|error| {
+        LaneError::operation("checkout-git", format!("pack preserved bare: {error}"))
+    })?;
     let mut receiver = index.spawn().map_err(|error| {
         drop(source.kill());
         drop(source.wait());

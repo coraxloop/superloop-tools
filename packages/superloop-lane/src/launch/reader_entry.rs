@@ -18,6 +18,7 @@ fn operation(word: &str) -> Option<&'static str> {
         "_observed-hosts" => Some("observed-hosts"),
         "_driver-report" => Some("driver-report"),
         "_checkpoint" => Some("checkpoint"),
+        "_checkout" => Some("checkout"),
         "_mark-imported" => Some("mark-imported"),
         "_harvest" => Some("harvest"),
         "_harvest-recover" => Some("harvest-recover"),
@@ -56,9 +57,13 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
             home,
         });
     }
-    if mode == "checkpoint" {
-        let (_, home) = super::checkpoint::parse_private_argv(args)
-            .map_err(|_| refused(mode, "anchor-declaration", "vector"))?;
+    if matches!(mode, "checkpoint" | "checkout") {
+        let home = if mode == "checkout" {
+            super::checkout::parse_private_argv(args).map(|(_, home)| home)
+        } else {
+            super::checkpoint::parse_private_argv(args).map(|(_, home)| home)
+        }
+        .map_err(|_| refused(mode, "anchor-declaration", "vector"))?;
         if !home.is_absolute() {
             return Err(LaneError::input(
                 "verified-prefix",
@@ -217,6 +222,7 @@ pub fn command(
     held_home: &OwnedFd,
     runs: &Path,
     held_runs: &OwnedFd,
+    destination: Option<(&Path, &OwnedFd)>,
 ) -> Result<CommandSpec, LaneError> {
     let [unshare, entry, body @ ..] = argv else {
         return Err(refused("exercise", "anchor-declaration", "vector"));
@@ -225,12 +231,18 @@ pub fn command(
     if unshare != "unshare" || selection.home != home {
         return Err(refused(selection.operation, "anchor-declaration", "vector"));
     }
+    if selection.operation == "checkout"
+        && destination.map(|(path, _)| path) != Path::new(&body[4]).parent()
+    {
+        return Err(refused("checkout", "anchor-identity", "destination-parent"));
+    }
     let bundle = container_entry::pin_reader(
         selection.operation,
         selection.scope,
         (home, held_home),
         (runs, held_runs),
         Path::new(entry),
+        destination,
     )
     .map_err(|error| container_entry::operation_error(selection.operation, error.detail))?;
     let (sender, input) = UnixStream::pair().map_err(|error| {
@@ -278,6 +290,7 @@ pub fn serve(args: &[String]) -> Result<String, LaneError> {
             "follow"
                 | "exercise-context"
                 | "checkpoint"
+                | "checkout"
                 | "harvest"
                 | "harvest-recover"
                 | "mark-imported"
@@ -324,6 +337,12 @@ pub fn serve(args: &[String]) -> Result<String, LaneError> {
     } else {
         Some(next()?)
     };
+    let destination = (mode == "checkout").then(&mut next).transpose()?;
+    let destination_path = if mode == "checkout" {
+        Path::new(&body[4]).parent()
+    } else {
+        None
+    };
     let mut programs = std::collections::BTreeMap::from([(
         std::path::PathBuf::from("/usr/bin/sha256sum"),
         std::sync::Arc::new(hash),
@@ -340,7 +359,9 @@ pub fn serve(args: &[String]) -> Result<String, LaneError> {
         &home_anchor,
         Path::new(root),
         &runs_anchor,
-        None,
+        destination_path
+            .zip(destination.as_ref())
+            .map(|(path, fd)| (path, fd as &dyn std::os::fd::AsFd)),
         0,
     )?;
     let _configuration = configuration
@@ -357,6 +378,10 @@ fn dispatch(selection: &Selection<'_>, body: &[String]) -> Result<serde_json::Va
     if mode == "mark-imported" {
         let (request, home) = super::imports::parse_private_argv(body)?;
         return super::imports::private_run(home, &request);
+    }
+    if mode == "checkout" {
+        let (request, home) = super::checkout::parse_private_argv(body)?;
+        return super::checkout::private_run(home, &request);
     }
     if mode == "checkpoint" {
         let (request, home) = super::checkpoint::parse_private_argv(body)?;

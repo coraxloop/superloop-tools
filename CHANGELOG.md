@@ -138,6 +138,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Private checkout retains configuration, hashing, Git and its external destination parent across namespace entry, refusing mismatched capabilities before state reads; settled checkpoint, checkout, import and harvest-preview cases distinguish execution through the received tools (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:checkout-entry-retains-custody``).
+
 - Completed driver captures retain advisory driver and monitor state after lock removal, bound to the current step and start marker and never treated as live PID authority (``prob:lanes:claude-lane-finished-state-null-driver``; ``proto:lanelifecycle:completed-step-observation``; ``proto:workermonitor:completed-driver-observation``).
 
 - Harvest recovery carries only its five used capabilities and requires no Git executable; checkpoint restores its relative-home refusal before descriptor receipt and has a focused coverage witness, and the namespace recovery fixture receives its hashing capability from the host (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:harvest-entry-retains-configuration``; ``claim:superlooplane:checkpoint-entry-retains-configuration``).

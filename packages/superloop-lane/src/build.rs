@@ -1031,8 +1031,9 @@ pub(crate) fn run_checked_with_private_launch(
         .get(2..)
         .is_some_and(crate::launch::reader_entry::handles)
     {
-        let request =
-            crate::launch::reader_entry::command(program, &argv, cwd, home, runs_root, runs)?;
+        let request = crate::launch::reader_entry::command(
+            program, &argv, cwd, home, runs_root, runs, letter,
+        )?;
         return run_checked_command(&request, environment, cwd, timeout_seconds, name);
     }
     if argv
@@ -1191,6 +1192,7 @@ fn hash_bytes(bytes: &[u8], spec: &ChildSpec) -> Result<String, LaneError> {
                     | "follow-private"
                     | "import-private"
                     | "checkpoint-private"
+                    | "checkout-private"
                     | "harvest-private"
             ) {
                 return error;

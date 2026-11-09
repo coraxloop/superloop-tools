@@ -52,8 +52,25 @@ fn checkpoint_entry_retains_configuration() {
     runtime_preparation::proof("SUPERLOOP_CHECKPOINT_PROOF", "PRIVATE-READERS-MEASURED");
 }
 
+/// # Panics
+/// Panics if checkout loses configuration or external destination-parent custody.
+/// (´claim:superlooplane:checkout-entry-retains-custody´)
+/// ´test:crate:checkout-entry-retains-custody´
+#[test]
+fn checkout_entry_retains_custody() {
+    runtime_preparation::proof("SUPERLOOP_CHECKOUT_PROOF", "PRIVATE-READERS-MEASURED");
+}
+
+/// # Panics
+/// Panics if the fixture home has no containing temporary directory.
+fn checkout_parent(home: &Path) -> std::path::PathBuf {
+    home.parent().expect("fixture root").join("destination")
+}
+
 fn selected_readers() -> &'static [&'static str] {
-    if std::env::var_os("SUPERLOOP_CHECKPOINT_PROOF").is_some() {
+    if std::env::var_os("SUPERLOOP_CHECKOUT_PROOF").is_some() {
+        &["checkout"]
+    } else if std::env::var_os("SUPERLOOP_CHECKPOINT_PROOF").is_some() {
         &["checkpoint"]
     } else if std::env::var_os("SUPERLOOP_IMPORT_PROOF").is_some() {
         &["import"]
@@ -92,10 +109,13 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
     )
     .expect("recorded proxy output");
     fs::set_permissions(observation, fs::Permissions::from_mode(0o600)).expect("observation mode");
+    let destination = checkout_parent(home);
+    fs::create_dir(&destination).expect("external destination parent");
+    fs::set_permissions(&destination, fs::Permissions::from_mode(0o700)).expect("parent mode");
     for &kind in selected_readers() {
         if matches!(
             kind,
-            "checkpoint" | "private-harvest" | "harvest-recover" | "import"
+            "checkout" | "checkpoint" | "private-harvest" | "harvest-recover" | "import"
         ) {
             for name in [".prepare-R.lock", ".letter-R.lock"] {
                 let path = runs.join(name);
@@ -110,6 +130,10 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
             "mode",
             "identity",
             "program-owner",
+            "git-owner",
+            "parent-identity",
+            "parent-mode",
+            "ancestor-mode",
             "short-frame",
             "excess-frame",
             "count",
@@ -124,12 +148,25 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
             "source-link",
             "source-large",
         ] {
-            if case == "relative-home" && kind != "checkpoint" {
+            if (case == "relative-home" && !matches!(kind, "checkpoint" | "checkout"))
+                || (matches!(case, "parent-identity" | "parent-mode" | "ancestor-mode")
+                    && kind != "checkout")
+                || (case == "git-owner"
+                    && !matches!(
+                        kind,
+                        "checkout"
+                            | "checkpoint"
+                            | "private-harvest"
+                            | "import"
+                            | "harvest"
+                            | "home-layout"
+                    ))
+            {
                 continue;
             }
             if (matches!(
                 kind,
-                "checkpoint" | "private-harvest" | "harvest-recover" | "import"
+                "checkout" | "checkpoint" | "private-harvest" | "harvest-recover" | "import"
             ) && case != "record"
                 && !case.starts_with("source-"))
                 || (kind == "measure" && case != "record")
@@ -145,6 +182,9 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
         live_measure(home, runs, &mut record);
         follow_round(home, runs, &mut record);
     }
+    if std::env::var_os("SUPERLOOP_CHECKOUT_PROOF").is_some() {
+        settled_readers(home, runs, &mut record);
+    }
     writeln!(std::io::stdout().lock(), "PRIVATE-READERS-MEASURED").expect("measured marker");
 }
 
@@ -153,7 +193,20 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
 fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::CommandSpec {
     let home_fd = fs::File::open(home).expect("home").into();
     let runs_fd = fs::File::open(runs).expect("runs").into();
-    let body = if kind == "import" {
+    let body = if kind == "checkout" {
+        crate::launch::checkout::private_checkout_argv(
+            &crate::launch::checkout::CheckoutRequest {
+                loop_name: "alpha".into(),
+                run: "R".into(),
+                repo: "tools".into(),
+                into: checkout_parent(home).join("checkout"),
+                dry_run: true,
+                invocation_token: None,
+            },
+            home,
+            None,
+        )
+    } else if kind == "import" {
         crate::launch::imports::private_import_argv(
             &crate::launch::imports::MarkImportedRequest {
                 loop_name: "alpha".into(),
@@ -223,6 +276,8 @@ fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::C
         runtime_preparation::binary().display().to_string(),
     ];
     argv.extend(body);
+    let destination = checkout_parent(home);
+    let held_destination = fs::File::open(&destination).expect("destination").into();
     reader_entry::command(
         Path::new("/usr/bin/podman"),
         &argv,
@@ -230,6 +285,7 @@ fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::C
         &home_fd,
         runs,
         &runs_fd,
+        (kind == "checkout").then_some((destination.as_path(), &held_destination)),
     )
     .expect("production reader composer")
 }
@@ -259,7 +315,9 @@ fn private_harvest_words(home: &Path, recovery: bool) -> Result<Vec<String>, cra
 fn assert_roles(manifest: &Value, kind: &str) {
     assert_eq!(
         manifest["records"].as_array().expect("roles").len(),
-        if matches!(kind, "report" | "locks") {
+        if kind == "checkout" {
+            7
+        } else if matches!(kind, "report" | "locks") {
             4
         } else if matches!(
             kind,
@@ -270,6 +328,26 @@ fn assert_roles(manifest: &Value, kind: &str) {
             6
         }
     );
+    if kind == "checkout" {
+        let roles: Vec<_> = manifest["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .map(|record| record["purpose"].as_str().expect("purpose"))
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                "owner-home",
+                "runs-root",
+                "entry-executable",
+                "hash-executable",
+                "git-executable",
+                "configuration",
+                "destination-parent"
+            ]
+        );
+    }
     if matches!(kind, "measure" | "harvest-recover") {
         let roles: Vec<_> = manifest["records"]
             .as_array()
@@ -303,35 +381,7 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
         },
         kind,
     );
-    if case == "program-owner" {
-        replace_tool(&mut request, home, runs, kind);
-    }
-    let source = request.argv.last_mut().expect("manifest");
-    let mut manifest: Value = serde_json::from_str(source).expect("manifest JSON");
-    assert_roles(&manifest, kind);
-    match case {
-        "identity" => manifest["records"][0]["inode"] = json!(0),
-        "count" => {
-            manifest["records"].as_array_mut().expect("records").pop();
-        }
-        "surplus-count" => {
-            let records = manifest["records"].as_array_mut().expect("records");
-            let mut extra = records.last().expect("configuration").clone();
-            extra["slot"] = json!(records.len());
-            extra["purpose"] = json!("surplus-configuration");
-            records.push(extra);
-        }
-        "operation" => manifest["operation"] = json!("foreign-operation"),
-        _ => {}
-    }
-    *source = manifest.to_string();
-    if matches!(case, "short-frame" | "excess-frame") {
-        replace_frame(
-            &mut request,
-            manifest["records"].as_array().expect("roles").len(),
-            case,
-        );
-    }
+    alter_bundle(&mut request, home, runs, kind, case);
     let config = home.join(".config/loops");
     let retained = home.join(".config/retained-loops");
     if case == "replaced" {
@@ -372,9 +422,20 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
         // No descriptor channel: this must refuse before attempting receipt.
         request.descriptors = loop_home::CommandDescriptors::default();
     }
+    let widened = match case {
+        "parent-mode" => Some(checkout_parent(home)),
+        "ancestor-mode" => Some(home.parent().expect("fixture root").to_path_buf()),
+        _ => None,
+    };
+    if let Some(path) = &widened {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o770)).expect("widen parent");
+    }
     let source = change_source(home, case);
     let output =
         runtime_preparation::run_with_registry(&request, (case == "override").then_some(""));
+    if let Some(path) = &widened {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("restore parent");
+    }
     if let Some(bytes) = source {
         let path = home.join(".config/loops/alpha/lanes/codex/auth.json");
         fs::remove_file(&path).expect("remove changed source");
@@ -395,8 +456,63 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
 }
 
 /// # Panics
+/// Panics if a refusal fixture cannot alter the production request's bundle.
+fn alter_bundle(
+    request: &mut loop_home::CommandSpec,
+    home: &Path,
+    runs: &Path,
+    kind: &str,
+    case: &str,
+) {
+    if matches!(case, "program-owner" | "git-owner") {
+        replace_tool(
+            request,
+            home,
+            runs,
+            kind,
+            if case == "git-owner" { 4 } else { 3 },
+            false,
+        );
+    }
+    let source = request.argv.last_mut().expect("manifest");
+    let mut manifest: Value = serde_json::from_str(source).expect("manifest JSON");
+    assert_roles(&manifest, kind);
+    match case {
+        "identity" => manifest["records"][0]["inode"] = json!(0),
+        "parent-identity" => manifest["records"][6]["inode"] = json!(0),
+        "count" => {
+            manifest["records"].as_array_mut().expect("records").pop();
+        }
+        "surplus-count" => {
+            let records = manifest["records"].as_array_mut().expect("records");
+            let mut extra = records.last().expect("configuration").clone();
+            extra["slot"] = json!(records.len());
+            extra["purpose"] = json!("surplus-configuration");
+            records.push(extra);
+        }
+        "operation" => manifest["operation"] = json!("foreign-operation"),
+        _ => {}
+    }
+    *source = manifest.to_string();
+    if matches!(case, "short-frame" | "excess-frame") {
+        replace_frame(
+            request,
+            manifest["records"].as_array().expect("roles").len(),
+            case,
+        );
+    }
+}
+
+/// # Panics
 /// Panics if a host-owned tool cannot be declared honestly to the real receiver.
-fn replace_tool(request: &mut loop_home::CommandSpec, home: &Path, runs: &Path, kind: &str) {
+fn replace_tool(
+    request: &mut loop_home::CommandSpec,
+    home: &Path,
+    runs: &Path,
+    kind: &str,
+    slot: usize,
+    root_program: bool,
+) {
     use loop_home::anchor::{HostVerifier, Manifest, Owner};
     let operation = match kind {
         "harvest" => "exercise-harvest",
@@ -406,6 +522,7 @@ fn replace_tool(request: &mut loop_home::CommandSpec, home: &Path, runs: &Path, 
         "follow" => "follow",
         "context" => "exercise-context",
         "checkpoint" => "checkpoint",
+        "checkout" => "checkout",
         "import" => "mark-imported",
         "private-harvest" => "harvest",
         "harvest-recover" => "harvest-recover",
@@ -413,30 +530,46 @@ fn replace_tool(request: &mut loop_home::CommandSpec, home: &Path, runs: &Path, 
     };
     let home_fd = fs::File::open(home).expect("home").into();
     let runs_fd = fs::File::open(runs).expect("runs").into();
+    let destination = checkout_parent(home);
+    let held_destination = fs::File::open(&destination).expect("destination").into();
     let mut bundle = crate::container_entry::pin_reader(
         operation,
         "alpha",
         (home, &home_fd),
         (runs, &runs_fd),
         &runtime_preparation::binary(),
+        (kind == "checkout").then_some((destination.as_path(), &held_destination)),
     )
     .expect("reader pins");
-    let path = home.join("host-hashing-program");
-    fs::copy("/usr/bin/sha256sum", &path).expect("native tool copy");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("host tool mode");
+    let path = if root_program {
+        std::path::PathBuf::from("/usr/bin/false")
+    } else {
+        let path = home.join("host-hashing-program");
+        fs::copy("/usr/bin/sha256sum", &path).expect("native tool copy");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("host tool mode");
+        path
+    };
     let pin = HostVerifier::current()
         .expect("host verifier")
         .for_operation(operation)
         .pin(
             &path,
-            "hash-executable",
-            3,
-            crate::container_entry::executable_policy(Owner::Host),
+            if slot == 3 {
+                "hash-executable"
+            } else {
+                "git-executable"
+            },
+            u32::try_from(slot).expect("slot"),
+            crate::container_entry::executable_policy(if root_program {
+                Owner::RootFile
+            } else {
+                Owner::Host
+            }),
         )
         .expect("honest host-owned tool");
     let mut manifest = Manifest::parse(&bundle.manifest).expect("manifest");
-    manifest.records[3] = pin.record();
-    bundle.descriptors[3] = pin.into_fd();
+    manifest.records[slot] = pin.record();
+    bundle.descriptors[slot] = pin.into_fd();
     *request.argv.last_mut().expect("manifest argument") =
         serde_json::to_string(&manifest).expect("declaration");
     let (sender, input) = std::os::unix::net::UnixStream::pair().expect("tool channel");
@@ -501,6 +634,14 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
         );
         return;
     }
+    if kind == "checkout" && matches!(case, "plain" | "replaced" | "ancestor-mode") {
+        assert!(!output.status.success(), "unsettled checkout accepted");
+        assert!(
+            stderr.contains("checkout-record: reservation is not this settled run"),
+            "{stderr}"
+        );
+        return;
+    }
     if matches!(kind, "private-harvest" | "harvest-recover") && matches!(case, "plain" | "replaced")
     {
         assert!(!output.status.success(), "unsettled harvest accepted");
@@ -533,11 +674,11 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
         assert!(!output.status.success(), "{kind}/{case} accepted");
         let expected = match case {
             "missing" => "anchor-missing",
-            "mode" | "source-mode" => "anchor-mode",
+            "mode" | "source-mode" | "parent-mode" => "anchor-mode",
             "source-link" => "anchor-escape",
             "source-large" => "exercise-path",
-            "identity" => "anchor-identity",
-            "program-owner" => "anchor-owner",
+            "identity" | "parent-identity" => "anchor-identity",
+            "program-owner" | "git-owner" => "anchor-owner",
             "short-frame" | "excess-frame" => "anchor-transport",
             "record" => {
                 if matches!(kind, "report" | "locks") {
@@ -556,6 +697,9 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
         };
         assert!(stderr.contains(expected), "{kind}/{case}: {stderr}{stdout}");
         let boundary = match case {
+            "parent-mode" | "parent-identity" => "purpose=destination-parent",
+            "program-owner" => "purpose=hash-executable",
+            "git-owner" => "purpose=git-executable",
             "count" | "surplus-count" => "purpose=count",
             "operation" => "purpose=bundle",
             "override" => "purpose=registry-override",
@@ -770,5 +914,204 @@ for name in ['events.jsonl','context.jsonl','.event-start']:
         ] {
             measure(home, runs, &identity, kind, case);
         }
+    }
+}
+
+// The seed and all reported Git objects come from this real program probe.
+const SETTLED_BARE: &str = r"
+import os,sys,json,subprocess,time
+from pathlib import Path
+home=Path(sys.argv[1]);inputs=json.loads(sys.argv[2]);record=inputs['record']
+worker=int(record['worker_uid']);loop_uid=int(inputs['loop_uid'])
+p=Path(record['plan']['home']);run=Path(record['plan']['driver_dir'])
+def directory(path,uid,mode):
+ path.mkdir(parents=True,exist_ok=True);os.chown(path,uid,uid);os.chmod(path,mode)
+directory(run,loop_uid,0o700)
+directory(p,0,0o750);directory(p/'.local',0,0o750)
+for name,uid,mode in [('inbox',0,0o750),('outbox',worker,0o750),('sources',worker,0o700)]:
+ directory(p/'.local'/name,uid,mode)
+bare=p/'.local/sources/tools.git';work=home/'seed-work'
+def git(path,*args):
+ return subprocess.check_output(['/usr/bin/git','-c','safe.directory=*',
+  '-c','user.name=Synthetic fixture','-c','user.email=fixture@localhost',*args],
+  cwd=path,stderr=subprocess.PIPE).decode().strip()
+git(home,'init',str(work));(work/'letter').write_text('synthetic settled source\n')
+git(work,'add','letter');git(work,'commit','-m','synthetic seed')
+seed=git(work,'rev-parse','HEAD');git(home,'init','--bare',str(bare))
+git(work,'push',str(bare),'HEAD:refs/heads/lane/R','HEAD:refs/seeds/tools')
+git(bare,'symbolic-ref','HEAD','refs/heads/lane/R')
+for root,dirs,files in os.walk(bare):
+ for item in [Path(root),*[Path(root)/name for name in dirs]]:
+  os.chown(item,worker,worker);os.chmod(item,0o700)
+ for name in files:
+  item=Path(root)/name;os.chown(item,worker,worker);os.chmod(item,0o600)
+st=os.stat(bare)
+print(json.dumps({'name':'tools','seed':seed,'seeded_at_unix_ns':time.time_ns(),
+ 'source_identity':{'device':st.st_dev,'inode':st.st_ino,'uid':st.st_uid,
+ 'gid':st.st_gid,'mode':st.st_mode&0o7777}}))
+";
+
+/// # Panics
+/// Panics if a settled bare cannot exercise the production checkpoint, checkout and import entries.
+fn settled_readers(home: &Path, runs: &Path, record: &mut Value) {
+    let inputs = json!({"record":record,
+        "loop_uid":crate::plan::loop_uid(&record["plan"]).expect("loop identity")});
+    let output = helper_service::namespace_python(home, SETTLED_BARE, &inputs.to_string())
+        .expect("seeded bare probe");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let source: Value = serde_json::from_slice(&output.stdout).expect("measured seed identity");
+    let object = source["seed"].as_str().expect("seed object").to_owned();
+    record["phase"] = json!("settled");
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled","ended_by":"by-report"}]);
+    record["declared_sources"] = json!([source]);
+    for key in [
+        "checkpoints",
+        "checkpoint_attempts",
+        "checkouts",
+        "checkout_attempts",
+        "imports",
+    ] {
+        record[key] = json!([]);
+    }
+    record["harvest_agreement"] = Value::Null;
+    record["collection"] = Value::Null;
+    record["attempts_omitted"] = json!(0);
+    record["checkouts_omitted"] = json!(0);
+    record["checkout_next_index"] = json!(1);
+    for key in ["checkpoint_pending", "checkout_pending"] {
+        record.as_object_mut().expect("record").remove(key);
+    }
+    crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
+        .expect("settled reservation");
+    for operation in ["checkpoint", "checkout", "mark-imported", "harvest"] {
+        assert_settled_tools(home, runs, operation, &object);
+        let request = settled_request(home, runs, operation, &object, false);
+        let output = runtime_preparation::run(&request);
+        assert!(
+            output.status.success(),
+            "{operation}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).expect("production report");
+        assert_eq!(report["command"], operation);
+        if operation == "checkout" {
+            assert_eq!(
+                fs::read(checkout_parent(home).join("checkout/letter")).expect("checkout"),
+                b"synthetic settled source\n"
+            );
+        }
+    }
+    let record: Value = serde_json::from_slice(
+        &fs::read(runs.join(".reservation-R.json")).expect("final reservation"),
+    )
+    .expect("record");
+    assert_eq!(record["checkpoints"][0]["bares"][0]["object"], object);
+    assert_eq!(record["checkouts"][0]["object"], object);
+    assert_eq!(record["imports"][0]["object"], object);
+}
+
+/// # Panics
+/// Panics if a complete production request cannot be composed for the settled fixture.
+fn settled_request(
+    home: &Path,
+    runs: &Path,
+    operation: &str,
+    object: &str,
+    preview: bool,
+) -> loop_home::CommandSpec {
+    let token = "a".repeat(32);
+    let body = match operation {
+        "checkpoint" => crate::launch::checkpoint::private_checkpoint_argv(
+            &crate::launch::checkpoint::CheckpointRequest {
+                loop_name: "alpha".into(),
+                run: "R".into(),
+                dry_run: preview,
+                invocation_token: Some(token.clone()),
+            },
+            home,
+            (!preview).then_some(token.as_str()),
+        ),
+        "checkout" => crate::launch::checkout::private_checkout_argv(
+            &crate::launch::checkout::CheckoutRequest {
+                loop_name: "alpha".into(),
+                run: "R".into(),
+                repo: "tools".into(),
+                into: checkout_parent(home).join("checkout"),
+                dry_run: preview,
+                invocation_token: Some(token.clone()),
+            },
+            home,
+            (!preview).then_some(token.as_str()),
+        ),
+        "mark-imported" => crate::launch::imports::private_import_argv(
+            &crate::launch::imports::MarkImportedRequest {
+                loop_name: "alpha".into(),
+                run: "R".into(),
+                object: object.into(),
+            },
+            home,
+        ),
+        "harvest" => crate::launch::harvest::private_harvest_argv(
+            &crate::launch::harvest::HarvestRequest {
+                loop_name: "alpha".into(),
+                run: "R".into(),
+                gate_object: object.into(),
+                dry_run: true,
+            },
+            home,
+            false,
+        ),
+        _ => unreachable!("settled operation"),
+    }
+    .expect("production vector");
+    let mut argv = vec![
+        "unshare".into(),
+        runtime_preparation::binary().display().to_string(),
+    ];
+    argv.extend(body);
+    let home_fd = fs::File::open(home).expect("home").into();
+    let runs_fd = fs::File::open(runs).expect("runs").into();
+    let destination = checkout_parent(home);
+    let destination_fd = fs::File::open(&destination).expect("destination").into();
+    reader_entry::command(
+        Path::new("/usr/bin/podman"),
+        &argv,
+        home,
+        &home_fd,
+        runs,
+        &runs_fd,
+        (operation == "checkout").then_some((destination.as_path(), &destination_fd)),
+    )
+    .expect("production settled composer")
+}
+
+/// # Panics
+/// Panics if a settled operation ignores either received executable or mutates on its refusal.
+fn assert_settled_tools(home: &Path, runs: &Path, operation: &str, object: &str) {
+    let kind = match operation {
+        "mark-imported" => "import",
+        "harvest" => "private-harvest",
+        other => other,
+    };
+    let path = runs.join(".reservation-R.json");
+    let before = fs::read(&path).expect("before executable refusal");
+    for slot in [3, 4] {
+        let mut request = settled_request(home, runs, operation, object, true);
+        replace_tool(&mut request, home, runs, kind, slot, true);
+        let output = runtime_preparation::run(&request);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{operation} ignored held tool {slot}"
+        );
+        assert!(
+            !stderr.contains("anchor-"),
+            "tool refused before execution: {stderr}"
+        );
+        assert_eq!(fs::read(&path).expect("after executable refusal"), before);
     }
 }

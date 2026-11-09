@@ -50,6 +50,15 @@ const READER_PURPOSES: [&str; 6] = [
     "git-executable",
     "configuration",
 ];
+const CHECKOUT_PURPOSES: [&str; 7] = [
+    "owner-home",
+    "runs-root",
+    "entry-executable",
+    "hash-executable",
+    "git-executable",
+    "configuration",
+    "destination-parent",
+];
 const EXERCISE_PURPOSES: [&str; 6] = [
     "owner-home",
     "runs-root",
@@ -75,7 +84,9 @@ pub(crate) const fn credential_client(backend: BoxBackend) -> &'static str {
     }
 }
 fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
-    if operation == "driver-report" {
+    if operation == "checkout" {
+        &CHECKOUT_PURPOSES
+    } else if operation == "driver-report" {
         &REPORT_PURPOSES
     } else if matches!(
         operation,
@@ -117,6 +128,7 @@ pub(crate) fn operation_error(operation: &str, error: impl std::fmt::Display) ->
         "driver-report" => "driver-report-private",
         "follow" => "follow-private",
         "checkpoint" => "checkpoint-private",
+        "checkout" => "checkout-private",
         "mark-imported" => "import-private",
         "harvest" | "harvest-recover" => "harvest-private",
         op if op.starts_with("exercise-") => "exercise-anchor",
@@ -291,8 +303,24 @@ pub(crate) fn core_pins(
 pub(crate) fn reader_needs_git(operation: &str) -> bool {
     matches!(
         operation,
-        "exercise-harvest" | "exercise-home-layout" | "checkpoint" | "harvest" | "mark-imported"
+        "exercise-harvest"
+            | "exercise-home-layout"
+            | "checkpoint"
+            | "harvest"
+            | "mark-imported"
+            | "checkout"
     )
+}
+
+fn reader_tool_pin(
+    verifier: &HostVerifier,
+    path: &Path,
+    purpose: &str,
+    slot: u32,
+) -> Result<anchor::HostPin, LaneError> {
+    verifier
+        .pin(path, purpose, slot, executable_policy(Owner::RootFile))
+        .map_err(refusal)
 }
 
 pub(crate) fn pin_reader(
@@ -301,6 +329,7 @@ pub(crate) fn pin_reader(
     home: (&Path, &OwnedFd),
     runs: (&Path, &OwnedFd),
     entry: &Path,
+    destination: Option<(&Path, &OwnedFd)>,
 ) -> Result<Bundle, LaneError> {
     registry_override(operation)?;
     let verifier = HostVerifier::current()
@@ -318,16 +347,12 @@ pub(crate) fn pin_reader(
         if purpose == "git-executable" && !reader_needs_git(operation) {
             continue;
         }
-        pins.push(
-            verifier
-                .pin(
-                    Path::new(path),
-                    purpose,
-                    u32::try_from(slot + 3).map_err(refusal)?,
-                    executable_policy(Owner::RootFile),
-                )
-                .map_err(refusal)?,
-        );
+        pins.push(reader_tool_pin(
+            &verifier,
+            Path::new(path),
+            purpose,
+            u32::try_from(slot + 3).map_err(refusal)?,
+        )?);
     }
     if operation != "driver-report" {
         pins.push(
@@ -341,6 +366,14 @@ pub(crate) fn pin_reader(
                 .map_err(refusal)?,
         );
     }
+    if operation == "checkout" {
+        let (path, held) = destination.ok_or_else(|| {
+            refusal("anchor-missing: operation=checkout purpose=destination-parent")
+        })?;
+        pins.push(destination_pin(&verifier, path, held)?);
+    } else if destination.is_some() {
+        return Err(refusal("anchor-declaration: purpose=destination-parent"));
+    }
     let manifest = Manifest {
         version: 1,
         transport: Transport::Rights,
@@ -352,6 +385,31 @@ pub(crate) fn pin_reader(
         manifest: serde_json::to_string(&manifest).map_err(refusal)?,
         descriptors: pins.into_iter().map(anchor::HostPin::into_fd).collect(),
     })
+}
+
+fn destination_pin(
+    verifier: &HostVerifier,
+    path: &Path,
+    held: &OwnedFd,
+) -> Result<anchor::HostPin, LaneError> {
+    let purpose = "destination-parent";
+    let pin = verifier
+        .pin(
+            path,
+            purpose,
+            6,
+            directory_policy("checkout", held, purpose)?,
+        )
+        .map_err(refusal)?;
+    let actual =
+        fstat(held).map_err(|error| io_refusal("checkout", purpose, "held-stat", error))?;
+    let record = pin.record();
+    if (record.device, record.inode) != (actual.st_dev, actual.st_ino) {
+        return Err(refusal(
+            "anchor-identity: operation=checkout purpose=destination-parent",
+        ));
+    }
+    Ok(pin)
 }
 
 pub(crate) fn pin_for(
@@ -937,7 +995,7 @@ pub(crate) fn receive_for(
             purpose: (*purpose).into(),
             policy: if *purpose == "configuration" {
                 configuration_policy()
-            } else if slot < 2 {
+            } else if slot < 2 || *purpose == "destination-parent" {
                 directory_policy(operation, &descriptors[slot], purpose)?
             } else {
                 executable_policy(
@@ -953,6 +1011,7 @@ pub(crate) fn receive_for(
                                 | "exercise-home-layout"
                                 | "exercise-measure"
                                 | "mark-imported"
+                                | "checkout"
                                 | "checkpoint"
                                 | "harvest"
                                 | "harvest-recover"
@@ -964,7 +1023,9 @@ pub(crate) fn receive_for(
                     },
                 )
             },
-            alias_group: None,
+            alias_group: (operation == "checkout"
+                && matches!(*purpose, "owner-home" | "destination-parent"))
+            .then(|| "checkout-parent".into()),
         });
     }
     crate::runtime_entry::distinct_roots(&manifest, operation)?;
@@ -1007,6 +1068,35 @@ mod tests {
     use std::process::Stdio;
 
     /// # Panics
+    /// Panics if either production reader-tool pin admits an unrelated executable owner.
+    /// ´test:unit:reader-launcher-refuses-host-owned-tools´
+    #[test]
+    fn reader_launcher_refuses_host_owned_tools() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = tempfile::tempdir().expect("fixture");
+        let path = fixture.path().join("tool");
+        std::fs::copy("/usr/bin/false", &path).expect("native fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        if nix::unistd::Uid::effective().is_root() {
+            nix::unistd::chown(&path, Some(nix::unistd::Uid::from_raw(65534)), None)
+                .expect("fixture unrelated owner");
+        }
+        let verifier = HostVerifier::current()
+            .expect("host verifier")
+            .for_operation("checkout");
+        for (slot, purpose) in [(3, "hash-executable"), (4, "git-executable")] {
+            let Err(error) = reader_tool_pin(&verifier, &path, purpose, slot) else {
+                panic!("unrelated {purpose} admitted")
+            };
+            assert!(error.detail.contains("anchor-owner"), "{error:?}");
+            assert!(
+                error.detail.contains(&format!("purpose={purpose}")),
+                "{error:?}"
+            );
+        }
+    }
+
+    /// # Panics
     /// Panics if an active operation loses its refusal envelope or failed custody check.
     /// ´claim:superlooplane:active-program-refusals-name-the-operation´
     /// ´test:unit:active-program-refusals-name-the-operation´
@@ -1020,6 +1110,7 @@ mod tests {
             ("driver-report", "driver-report-private"),
             ("follow", "follow-private"),
             ("checkpoint", "checkpoint-private"),
+            ("checkout", "checkout-private"),
             ("mark-imported", "import-private"),
             ("harvest", "harvest-private"),
             ("harvest-recover", "harvest-private"),

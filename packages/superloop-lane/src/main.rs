@@ -26,59 +26,6 @@ fn print_unsaved_launch_report(writer: impl io::Write, report: &serde_json::Valu
     drop(print_launch_report(writer, report));
 }
 
-fn parse_checkout_private_argv(
-    args: &[String],
-) -> Result<(launch::checkout::CheckoutRequest, &Path), LaneError> {
-    let [
-        _,
-        loop_name,
-        run,
-        into_flag,
-        into,
-        home_flag,
-        owner_home,
-        repo_flag,
-        repo,
-        rest @ ..,
-    ] = args
-    else {
-        return Err(LaneError::input(
-            "checkout-private",
-            "private checkout form is incomplete",
-        ));
-    };
-    if into_flag != "--into" || home_flag != "--owner-home" || repo_flag != "--repo" {
-        return Err(LaneError::input(
-            "checkout-private",
-            "private checkout form is invalid",
-        ));
-    }
-    let mut words = vec![
-        loop_name.clone(),
-        run.clone(),
-        "--repo".into(),
-        repo.clone(),
-        "--into".into(),
-        into.clone(),
-    ];
-    let token = if rest == ["--dry-run"] {
-        words.push("--dry-run".into());
-        None
-    } else if let [flag, token] = rest
-        && flag == "--token"
-    {
-        Some(token.clone())
-    } else {
-        return Err(LaneError::input(
-            "checkout-private",
-            "private checkout form is invalid",
-        ));
-    };
-    let mut request = launch::checkout::CheckoutRequest::parse(&words)?;
-    request.invocation_token = token;
-    Ok((request, Path::new(owner_home)))
-}
-
 fn parse_follow_options(rest: &[String]) -> Result<(Option<&str>, bool), LaneError> {
     let (round, round_only) = match rest {
         [] => (None, false),
@@ -104,14 +51,11 @@ fn parse_follow_options(rest: &[String]) -> Result<(Option<&str>, bool), LaneErr
 }
 
 fn validate_bite_private_argv(args: &[String]) -> Result<(), LaneError> {
-    match args.first().map(String::as_str) {
-        Some("_checkout") => {
-            parse_checkout_private_argv(args)?;
-        }
-        Some("_rotation-handover") => {
-            launch::rotation::parse_private_handover_argv(args)?;
-        }
-        _ => {}
+    if args
+        .first()
+        .is_some_and(|word| word == "_rotation-handover")
+    {
+        launch::rotation::parse_private_handover_argv(args)?;
     }
     Ok(())
 }
@@ -128,7 +72,6 @@ fn bind_private_launch_args<'a>(
             "_choose-uid"
                 | "_settle-evidence"
                 | "_make-home"
-                | "_checkout"
                 | "_bind-mail"
                 | "_bind-reply"
                 | "_inspect-round"
@@ -143,7 +86,7 @@ fn bind_private_launch_args<'a>(
         && args[args.len() - 2] == "--verified-letter-source-fd";
     let suffix_len = if rotation_source {
         12
-    } else if args[0] == "_make-home" || args[0] == "_checkout" {
+    } else if args[0] == "_make-home" {
         10
     } else {
         6
@@ -703,13 +646,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
-    if args.first().is_some_and(|value| value == "_checkout") {
-        let (request, owner_home) = parse_checkout_private_argv(args)?;
-        let report = launch::checkout::private_run(owner_home, &request)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
     if args.first().is_some_and(|value| value == "record-hosts") {
         let request = launch::RecordHostsRequest::parse(&args[1..])?;
         let report = launch::record_hosts(&caller_home()?, &request)?;
@@ -1219,6 +1155,7 @@ mod tests {
             &unusable(),
             std::path::Path::new("/absent-synthetic-runs"),
             &unusable(),
+            None,
         ) else {
             panic!("closed gate must precede the composed bundle");
         };
@@ -1571,57 +1508,6 @@ mod tests {
         assert!(
             USAGE.contains("triage LOOP [RUN (compatibility array)] (stdin cap 65,536 bytes; about 100 typical 600-byte label lines)")
         );
-    }
-
-    /// ´test:unit:private-checkout-binds-an-external-destination-parent´
-    #[test]
-    fn private_checkout_binds_an_external_destination_parent() {
-        let fixture = tempfile::TempDir::new_in("/tmp").expect("fixture");
-        let owner = nix::unistd::Uid::effective().as_raw();
-        let ancestor = fixture.path().join("namespace-overflow-ancestor");
-        fs::create_dir(&ancestor).expect("ancestor");
-        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o770))
-            .expect("untrusted ancestor mode");
-        let home = ancestor.join("owner");
-        let runs = home.join("runs");
-        let outside = ancestor.join("outside");
-        for path in [&home, &runs, &outside] {
-            fs::create_dir(path).expect("directory");
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
-        }
-        let home_fd = fs::File::open(&home).expect("home descriptor");
-        let runs_fd = fs::File::open(&runs).expect("runs descriptor");
-        let outside_fd = fs::File::open(&outside).expect("outside descriptor");
-        let body = super::launch::checkout::private_checkout_argv(
-            &super::launch::checkout::CheckoutRequest {
-                loop_name: "alpha".into(),
-                run: "R".into(),
-                repo: "tools".into(),
-                into: outside.join("R"),
-                dry_run: true,
-                invocation_token: None,
-            },
-            &home,
-            None,
-        )
-        .expect("public checkout builder");
-        let mut argv = body.clone();
-        argv.extend([
-            "--verified-home-fd".into(),
-            "0".into(),
-            "--verified-runs-root".into(),
-            runs.display().to_string(),
-            "--verified-runs-root-fd".into(),
-            runs_fd.as_raw_fd().to_string(),
-            "--verified-letter-dir".into(),
-            outside.display().to_string(),
-            "--verified-letter-fd".into(),
-            outside_fd.as_raw_fd().to_string(),
-        ]);
-        let (parsed, guard) =
-            bind_private_launch_args(&argv, &home_fd, owner).expect("bound checkout");
-        assert_eq!(parsed, body);
-        assert!(guard.is_some());
     }
 
     /// ´test:unit:refusal-line-reports-wall-seconds´

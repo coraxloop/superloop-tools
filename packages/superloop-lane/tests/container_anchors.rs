@@ -1149,7 +1149,7 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
             argv.extend(body);
         }
         let Err(error) =
-            superloop_lane::launch::reader_entry::command(program, &argv, home, fd, home, fd)
+            superloop_lane::launch::reader_entry::command(program, &argv, home, fd, home, fd, None)
         else {
             panic!("reader composer accepted registry override");
         };
