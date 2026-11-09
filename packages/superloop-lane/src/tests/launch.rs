@@ -2623,6 +2623,7 @@ fn proxy_refresh_preserves_live_helper_pins() {
         "SUPERLOOP_REPORT_PROOF",
         "SUPERLOOP_HARVEST_PROOF",
         "SUPERLOOP_IMPORT_PROOF",
+        "SUPERLOOP_CHECKPOINT_PROOF",
     ]
     .iter()
     .any(|key| std::env::var_os(key).is_some())

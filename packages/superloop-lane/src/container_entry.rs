@@ -79,17 +79,12 @@ fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
         &REPORT_PURPOSES
     } else if matches!(
         operation,
-        "observed-hosts" | "follow" | "exercise-context" | "exercise-measure"
+        "observed-hosts" | "follow" | "exercise-context" | "exercise-measure" | "harvest-recover"
     ) {
         &OBSERVATION_PURPOSES
     } else if matches!(
         operation,
-        "exercise-harvest"
-            | "exercise-home-layout"
-            | "checkpoint"
-            | "harvest"
-            | "harvest-recover"
-            | "mark-imported"
+        "exercise-harvest" | "exercise-home-layout" | "checkpoint" | "harvest" | "mark-imported"
     ) {
         &READER_PURPOSES
     } else if operation == OPERATION {
@@ -296,12 +291,7 @@ pub(crate) fn core_pins(
 pub(crate) fn reader_needs_git(operation: &str) -> bool {
     matches!(
         operation,
-        "exercise-harvest"
-            | "exercise-home-layout"
-            | "checkpoint"
-            | "harvest"
-            | "harvest-recover"
-            | "mark-imported"
+        "exercise-harvest" | "exercise-home-layout" | "checkpoint" | "harvest" | "mark-imported"
     )
 }
 

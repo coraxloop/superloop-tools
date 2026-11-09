@@ -59,6 +59,12 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
     if mode == "checkpoint" {
         let (_, home) = super::checkpoint::parse_private_argv(args)
             .map_err(|_| refused(mode, "anchor-declaration", "vector"))?;
+        if !home.is_absolute() {
+            return Err(LaneError::input(
+                "verified-prefix",
+                "private launch has duplicate or non-absolute owner home",
+            ));
+        }
         return Ok(Selection {
             operation: mode,
             scope: &args[1],

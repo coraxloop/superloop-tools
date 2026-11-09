@@ -43,21 +43,26 @@ fn import_entry_retains_configuration() {
     runtime_preparation::proof("SUPERLOOP_IMPORT_PROOF", "PRIVATE-READERS-MEASURED");
 }
 
+/// # Panics
+/// Panics if checkpoint custody or its pre-receipt owner-home refusal is lost.
+/// (´claim:superlooplane:checkpoint-entry-retains-configuration´)
+/// ´test:crate:checkpoint-entry-retains-configuration´
+#[test]
+fn checkpoint_entry_retains_configuration() {
+    runtime_preparation::proof("SUPERLOOP_CHECKPOINT_PROOF", "PRIVATE-READERS-MEASURED");
+}
+
 fn selected_readers() -> &'static [&'static str] {
-    if std::env::var_os("SUPERLOOP_IMPORT_PROOF").is_some() {
+    if std::env::var_os("SUPERLOOP_CHECKPOINT_PROOF").is_some() {
+        &["checkpoint"]
+    } else if std::env::var_os("SUPERLOOP_IMPORT_PROOF").is_some() {
         &["import"]
     } else if std::env::var_os("SUPERLOOP_REPORT_PROOF").is_some() {
         &["report", "locks"]
     } else if std::env::var_os("SUPERLOOP_HARVEST_PROOF").is_some() {
         &["private-harvest", "harvest-recover"]
     } else {
-        &[
-            "harvest",
-            "home-layout",
-            "measure",
-            "observed",
-            "checkpoint",
-        ]
+        &["harvest", "home-layout", "measure", "observed"]
     }
 }
 
@@ -114,10 +119,14 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
             "override",
             "missing",
             "vector",
+            "relative-home",
             "source-mode",
             "source-link",
             "source-large",
         ] {
+            if case == "relative-home" && kind != "checkpoint" {
+                continue;
+            }
             if (matches!(
                 kind,
                 "checkpoint" | "private-harvest" | "harvest-recover" | "import"
@@ -252,13 +261,16 @@ fn assert_roles(manifest: &Value, kind: &str) {
         manifest["records"].as_array().expect("roles").len(),
         if matches!(kind, "report" | "locks") {
             4
-        } else if matches!(kind, "observed" | "follow" | "context" | "measure") {
+        } else if matches!(
+            kind,
+            "observed" | "follow" | "context" | "measure" | "harvest-recover"
+        ) {
             5
         } else {
             6
         }
     );
-    if kind == "measure" {
+    if matches!(kind, "measure" | "harvest-recover") {
         let roles: Vec<_> = manifest["records"]
             .as_array()
             .expect("records")
@@ -349,6 +361,16 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
     }
     if case == "vector" {
         request.argv.insert(4, "surplus".into());
+    }
+    if case == "relative-home" {
+        let option = request
+            .argv
+            .iter()
+            .position(|word| word == "--owner-home")
+            .expect("home");
+        request.argv[option + 1] = "relative-home".into();
+        // No descriptor channel: this must refuse before attempting receipt.
+        request.descriptors = loop_home::CommandDescriptors::default();
     }
     let source = change_source(home, case);
     let output =
@@ -469,6 +491,16 @@ fn change_source(home: &Path, case: &str) -> Option<Vec<u8>> {
 fn observation(output: &std::process::Output, kind: &str, case: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
+    if case == "relative-home" {
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            stderr.contains(
+                "verified-prefix: private launch has duplicate or non-absolute owner home"
+            ),
+            "{stderr}"
+        );
+        return;
+    }
     if matches!(kind, "private-harvest" | "harvest-recover") && matches!(case, "plain" | "replaced")
     {
         assert!(!output.status.success(), "unsettled harvest accepted");

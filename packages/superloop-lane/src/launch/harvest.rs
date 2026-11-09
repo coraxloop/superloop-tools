@@ -1800,10 +1800,12 @@ pub(crate) mod tests {
         const MARKER: &str = "HARVEST-RECOVERY-GATE-MEASURED";
         if std::env::var_os("SUPERLOOP_HARVEST_RECOVERY_PROOF").is_some() {
             assert_eq!(Uid::effective().as_raw(), 0);
+            let _hash = receive_recovery_hash();
             gated_namespace_recovery();
             writeln!(std::io::stdout().lock(), "{MARKER}").expect("marker");
             return;
         }
+        let (manifest, input) = recovery_hash_handoff();
         let mut child = Command::new("/usr/bin/podman")
             .args(["unshare"])
             .arg(std::env::current_exe().expect("test executable"))
@@ -1816,6 +1818,8 @@ pub(crate) mod tests {
             .env_remove("_CONTAINERS_USERNS_CONFIGURED")
             .env_remove("_CONTAINERS_ROOTLESS_UID")
             .env("SUPERLOOP_HARVEST_RECOVERY_PROOF", "1")
+            .env("SUPERLOOP_RECOVERY_HASH_MANIFEST", manifest)
+            .stdin(Stdio::from(std::os::fd::OwnedFd::from(input)))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1840,6 +1844,76 @@ pub(crate) mod tests {
             stdout.contains(MARKER) && stdout.contains("1 passed"),
             "{stdout}"
         );
+    }
+
+    /// # Panics
+    /// Panics if the host cannot pin and transfer the recovery fixture's hashing executable.
+    fn recovery_hash_handoff() -> (String, std::os::unix::net::UnixStream) {
+        use loop_home::anchor::{HostVerifier, Manifest, Owner, Transport, transport};
+        let policy = crate::container_entry::executable_policy(Owner::RootFile);
+        let pin = HostVerifier::current()
+            .expect("host map")
+            .for_operation("harvest-recover")
+            .pin(
+                Path::new("/usr/bin/sha256sum"),
+                "hash-executable",
+                0,
+                policy,
+            )
+            .expect("host hashing pin");
+        let manifest = Manifest {
+            version: 1,
+            transport: Transport::Rights,
+            operation: "harvest-recover".into(),
+            loop_name: "alpha".into(),
+            records: vec![pin.record()],
+        };
+        let (sender, input) = std::os::unix::net::UnixStream::pair().expect("rights channel");
+        transport::send(&sender, &[pin.into_fd()]).expect("hash transfer");
+        (serde_json::to_string(&manifest).expect("manifest"), input)
+    }
+
+    /// # Panics
+    /// Panics if the namespace cannot validate the host's hashing capability.
+    fn receive_recovery_hash() -> crate::container_entry::ExecutableGuard {
+        use loop_home::anchor::{Manifest, Owner, Receiver, Requirement, Transport, transport};
+        use std::os::fd::AsFd as _;
+        let source = std::env::var("SUPERLOOP_RECOVERY_HASH_MANIFEST").expect("hash manifest");
+        let manifest = Manifest::parse(&source).expect("manifest");
+        let socket = std::os::unix::net::UnixStream::from(
+            std::io::stdin()
+                .as_fd()
+                .try_clone_to_owned()
+                .expect("rights input"),
+        );
+        let descriptors = transport::receive(&socket, 1, std::time::Duration::from_secs(30))
+            .expect("one hash descriptor");
+        transport::replace_stdin("harvest-recover").expect("null stdin");
+        let policy = crate::container_entry::executable_policy(Owner::RootFile);
+        let anchor = Receiver::current()
+            .expect("namespace map")
+            .validate(
+                &manifest,
+                descriptors,
+                "harvest-recover",
+                "alpha",
+                Transport::Rights,
+                &[Requirement {
+                    purpose: "hash-executable".into(),
+                    policy,
+                    alias_group: None,
+                }],
+            )
+            .expect("validated hash")
+            .pop()
+            .expect("hash capability");
+        crate::container_entry::activate_program_map(
+            "harvest-recover",
+            BTreeMap::from([(
+                PathBuf::from("/usr/bin/sha256sum"),
+                std::sync::Arc::new(anchor),
+            )]),
+        )
     }
 
     /// # Panics
