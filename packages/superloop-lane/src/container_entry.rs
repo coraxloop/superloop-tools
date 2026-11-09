@@ -82,7 +82,10 @@ fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
         "observed-hosts" | "follow" | "exercise-context" | "exercise-measure"
     ) {
         &OBSERVATION_PURPOSES
-    } else if matches!(operation, "exercise-harvest" | "exercise-home-layout") {
+    } else if matches!(
+        operation,
+        "exercise-harvest" | "exercise-home-layout" | "checkpoint"
+    ) {
         &READER_PURPOSES
     } else if operation == OPERATION {
         if backend == BoxBackend::Claude {
@@ -113,6 +116,7 @@ pub(crate) fn operation_error(operation: &str, error: impl std::fmt::Display) ->
         "observed-hosts" => "observation-anchor",
         "driver-report" => "driver-report-private",
         "follow" => "follow-private",
+        "checkpoint" => "checkpoint-private",
         op if op.starts_with("exercise-") => "exercise-anchor",
         _ => "container-anchor",
     };
@@ -283,7 +287,10 @@ pub(crate) fn core_pins(
 }
 
 pub(crate) fn reader_needs_git(operation: &str) -> bool {
-    matches!(operation, "exercise-harvest" | "exercise-home-layout")
+    matches!(
+        operation,
+        "exercise-harvest" | "exercise-home-layout" | "checkpoint"
+    )
 }
 
 pub(crate) fn pin_reader(
@@ -943,6 +950,7 @@ pub(crate) fn receive_for(
                                 | "exercise-harvest"
                                 | "exercise-home-layout"
                                 | "exercise-measure"
+                                | "checkpoint"
                         ) && matches!(*purpose, "hash-executable" | "git-executable"))
                     {
                         Owner::RootFile
@@ -1006,6 +1014,7 @@ mod tests {
             ("observed-hosts", "observation-anchor"),
             ("driver-report", "driver-report-private"),
             ("follow", "follow-private"),
+            ("checkpoint", "checkpoint-private"),
             ("exercise-context", "exercise-anchor"),
             (OPERATION, "container-anchor"),
         ] {

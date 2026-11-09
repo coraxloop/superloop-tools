@@ -49,7 +49,16 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
         "observed",
         "report",
         "locks",
+        "checkpoint",
     ] {
+        if kind == "checkpoint" {
+            for name in [".prepare-R.lock", ".letter-R.lock"] {
+                let path = runs.join(name);
+                fs::write(&path, b"").expect("checkpoint lock");
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                    .expect("checkpoint lock mode");
+            }
+        }
         for case in [
             "plain",
             "replaced",
@@ -68,7 +77,8 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
             "source-link",
             "source-large",
         ] {
-            if (kind == "measure" && case != "record")
+            if (kind == "checkpoint" && case != "record" && !case.starts_with("source-"))
+                || (kind == "measure" && case != "record")
                 || (kind == "observed" && case != "record" && !case.starts_with("source-"))
                 || (matches!(kind, "harvest" | "home-layout" | "report" | "locks")
                     && !case.starts_with("source-"))
@@ -87,7 +97,9 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
 fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::CommandSpec {
     let home_fd = fs::File::open(home).expect("home").into();
     let runs_fd = fs::File::open(runs).expect("runs").into();
-    let body = if kind == "measure" {
+    let body = if kind == "checkpoint" {
+        exercise_checkpoint_words(home)
+    } else if kind == "measure" {
         Ok(vec![
             "_exercise-measure".into(),
             "alpha".into(),
@@ -153,6 +165,16 @@ fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::C
         &runs_fd,
     )
     .expect("production reader composer")
+}
+
+fn exercise_checkpoint_words(home: &Path) -> Result<Vec<String>, crate::LaneError> {
+    let request = crate::launch::checkpoint::CheckpointRequest {
+        loop_name: "alpha".into(),
+        run: "R".into(),
+        dry_run: true,
+        invocation_token: None,
+    };
+    crate::launch::checkpoint::private_checkpoint_argv(&request, home, None)
 }
 
 /// # Panics
@@ -286,6 +308,7 @@ fn replace_tool(request: &mut loop_home::CommandSpec, home: &Path, runs: &Path, 
         "observed" => "observed-hosts",
         "follow" => "follow",
         "context" => "exercise-context",
+        "checkpoint" => "checkpoint",
         _ => "driver-report",
     };
     let home_fd = fs::File::open(home).expect("home").into();
@@ -368,6 +391,14 @@ fn change_source(home: &Path, case: &str) -> Option<Vec<u8>> {
 fn observation(output: &std::process::Output, kind: &str, case: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
+    if kind == "checkpoint" && matches!(case, "plain" | "replaced") {
+        assert!(!output.status.success(), "unsettled checkpoint accepted");
+        assert!(
+            stderr.contains("checkpoint-round: run has no settled final round"),
+            "{stderr}"
+        );
+        return;
+    }
     if matches!(case, "plain" | "replaced") {
         assert!(output.status.success(), "{kind}/{case}: {stderr}{stdout}");
         successful_observation(output, kind);
@@ -559,7 +590,8 @@ fn follow_round(home: &Path, runs: &Path, record: &mut Value) {
         .expect("follow reservation");
     let step = runs.join("R/dispatch");
     fs::create_dir_all(&step).expect("round directory");
-    // Recorded from ContextTracker::observe_durable on kranich; the event input is retained.
+    // Recorded by ContextTracker::observe_durable on kranich with TestBackend values.
+    // Only the reader runs under the namespace; the unit-probe event input is retained.
     let context = concat!(
         r#"{"state":"measured","used":50,"window":100,"fraction":0.5,"source":"test-field","#,
         r#""reason":"measured","turn":1,"event_end":26,"at":"2026-11-08T22:14:56Z"}"#,

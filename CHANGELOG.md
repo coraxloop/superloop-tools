@@ -134,6 +134,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Private checkpoint entry retains configuration, hashing and Git custody through namespace entry, refusing malformed bundles before checkpoint state reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:checkpoint-entry-retains-configuration``).
+
 - Private credential exercise refuses relative owner homes before reader custody; its digest inventory retires the removed reply comparison instead of pointing at an unrelated line (``proto:superlooplane:credential-exercise-backend``; ``rule:digests:inventory-evidence``).
 
 - Credential measurement no longer requires or transfers an unused Git executable; its exact five-capability frame retains configuration and hashing custody (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-exercise-readers-retain-configuration``).

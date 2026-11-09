@@ -1098,6 +1098,7 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
         "driver-report",
         "follow",
         "exercise-context",
+        "checkpoint",
     ] {
         let mut argv = vec![
             "unshare".into(),
@@ -1115,7 +1116,7 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
             argv[5] = "--backend".into();
             argv[6] = "codex".into();
         }
-        if operation == "observed-hosts" {
+        if matches!(operation, "observed-hosts" | "checkpoint") {
             argv.drain(5..7);
         }
         if operation == "driver-report" {
@@ -1148,6 +1149,8 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
                 "observation-anchor"
             } else if operation == "driver-report" {
                 "driver-report-private"
+            } else if operation == "checkpoint" {
+                "checkpoint-private"
             } else if operation == "follow" {
                 "follow-private"
             } else {

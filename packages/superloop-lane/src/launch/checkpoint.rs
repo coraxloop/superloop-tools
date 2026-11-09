@@ -68,6 +68,42 @@ pub fn private_checkpoint_argv(
     Ok(argv)
 }
 
+pub(crate) fn parse_private_argv(args: &[String]) -> Result<(CheckpointRequest, &Path), LaneError> {
+    let [_, loop_name, run, home_flag, owner_home, rest @ ..] = args else {
+        return Err(LaneError::input(
+            "checkpoint-private",
+            "private checkpoint form is incomplete",
+        ));
+    };
+    if home_flag != "--owner-home" {
+        return Err(LaneError::input(
+            "checkpoint-private",
+            "private checkpoint form is invalid",
+        ));
+    }
+    let (token, dry_run) = match rest {
+        [] => (None, false),
+        [dry] if dry == "--dry-run" => (None, true),
+        [flag, token] if flag == "--token" => (Some(token.clone()), false),
+        [flag, token, dry] if flag == "--token" && dry == "--dry-run" => {
+            (Some(token.clone()), true)
+        }
+        _ => {
+            return Err(LaneError::input(
+                "checkpoint-private",
+                "private checkpoint form is invalid",
+            ));
+        }
+    };
+    let mut words = vec![loop_name.clone(), run.clone()];
+    if dry_run {
+        words.push("--dry-run".to_owned());
+    }
+    let mut request = CheckpointRequest::parse(&words)?;
+    request.invocation_token = token;
+    Ok((request, Path::new(owner_home)))
+}
+
 impl CheckpointRequest {
     /// Parse one checkpoint request.
     ///

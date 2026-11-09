@@ -26,44 +26,6 @@ fn print_unsaved_launch_report(writer: impl io::Write, report: &serde_json::Valu
     drop(print_launch_report(writer, report));
 }
 
-fn parse_checkpoint_private_argv(
-    args: &[String],
-) -> Result<(launch::checkpoint::CheckpointRequest, &Path), LaneError> {
-    let [_, loop_name, run, home_flag, owner_home, rest @ ..] = args else {
-        return Err(LaneError::input(
-            "checkpoint-private",
-            "private checkpoint form is incomplete",
-        ));
-    };
-    if home_flag != "--owner-home" {
-        return Err(LaneError::input(
-            "checkpoint-private",
-            "private checkpoint form is invalid",
-        ));
-    }
-    let (token, dry_run) = match rest {
-        [] => (None, false),
-        [dry] if dry == "--dry-run" => (None, true),
-        [flag, token] if flag == "--token" => (Some(token.clone()), false),
-        [flag, token, dry] if flag == "--token" && dry == "--dry-run" => {
-            (Some(token.clone()), true)
-        }
-        _ => {
-            return Err(LaneError::input(
-                "checkpoint-private",
-                "private checkpoint form is invalid",
-            ));
-        }
-    };
-    let mut words = vec![loop_name.clone(), run.clone()];
-    if dry_run {
-        words.push("--dry-run".to_owned());
-    }
-    let mut request = launch::checkpoint::CheckpointRequest::parse(&words)?;
-    request.invocation_token = token;
-    Ok((request, Path::new(owner_home)))
-}
-
 fn parse_checkout_private_argv(
     args: &[String],
 ) -> Result<(launch::checkout::CheckoutRequest, &Path), LaneError> {
@@ -225,9 +187,6 @@ fn parse_follow_options(rest: &[String]) -> Result<(Option<&str>, bool), LaneErr
 
 fn validate_bite_private_argv(args: &[String]) -> Result<(), LaneError> {
     match args.first().map(String::as_str) {
-        Some("_checkpoint") => {
-            parse_checkpoint_private_argv(args)?;
-        }
         Some("_checkout") => {
             parse_checkout_private_argv(args)?;
         }
@@ -257,7 +216,6 @@ fn bind_private_launch_args<'a>(
             "_choose-uid"
                 | "_settle-evidence"
                 | "_make-home"
-                | "_checkpoint"
                 | "_harvest"
                 | "_harvest-recover"
                 | "_mark-imported"
@@ -853,13 +811,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
     if args.first().is_some_and(|value| value == "_mark-imported") {
         let (request, owner_home) = parse_import_private_argv(args)?;
         let report = launch::imports::private_run(owner_home, &request)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_checkpoint") {
-        let (request, owner_home) = parse_checkpoint_private_argv(args)?;
-        let report = launch::checkpoint::private_run(owner_home, &request)?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
