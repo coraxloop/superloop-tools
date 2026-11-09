@@ -471,11 +471,16 @@ fn other_bite_private_entries_bind_their_owner_home() {
     for (name, body, external) in forms {
         let output = enter(&body, &home, &runs, external.then_some(outside.as_path()));
         let refusal = String::from_utf8(output.stderr).expect("refusal text");
-        if matches!(name, "follow" | "checkpoint" | "harvest") {
+        if matches!(name, "follow" | "checkpoint" | "harvest" | "import") {
             assert_eq!(output.status.code(), Some(2));
+            let operation = if name == "import" {
+                "mark-imported"
+            } else {
+                name
+            };
             assert!(
                 refusal.contains(&format!(
-                    "{name}-private: anchor-missing: operation={name} purpose=manifest"
+                    "{name}-private: anchor-missing: operation={operation} purpose=manifest"
                 )),
                 "{refusal}"
             );
@@ -487,7 +492,6 @@ fn other_bite_private_entries_bind_their_owner_home() {
         assert!(!output.status.success(), "{name}: fixture has no run");
         let (flag_index, refusal_kind) = match name {
             "checkout" => (3, "checkout-private"),
-            "import" => (3, "import-private"),
             "rotation" => (5, "rotate-private"),
             _ => panic!("unexpected private form"),
         };

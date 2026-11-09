@@ -1101,6 +1101,7 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
         "checkpoint",
         "harvest",
         "harvest-recover",
+        "mark-imported",
     ] {
         let mut argv = vec![
             "unshare".into(),
@@ -1118,8 +1119,11 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
             argv[5] = "--backend".into();
             argv[6] = "codex".into();
         }
-        if matches!(operation, "observed-hosts" | "checkpoint") {
+        if matches!(operation, "observed-hosts" | "checkpoint" | "mark-imported") {
             argv.drain(5..7);
+        }
+        if operation == "mark-imported" {
+            argv.splice(5..5, ["--object".into(), "a".repeat(40)]);
         }
         if matches!(operation, "harvest" | "harvest-recover") {
             argv[5] = "--gate-object".into();
@@ -1155,6 +1159,8 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
                 "observation-anchor"
             } else if operation == "driver-report" {
                 "driver-report-private"
+            } else if operation == "mark-imported" {
+                "import-private"
             } else if operation == "checkpoint" {
                 "checkpoint-private"
             } else if matches!(operation, "harvest" | "harvest-recover") {

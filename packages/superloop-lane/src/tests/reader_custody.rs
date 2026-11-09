@@ -34,8 +34,19 @@ fn harvest_entry_retains_configuration() {
     runtime_preparation::proof("SUPERLOOP_HARVEST_PROOF", "PRIVATE-READERS-MEASURED");
 }
 
+/// # Panics
+/// Panics if import marking loses configuration custody or a named bundle refusal.
+/// (´claim:superlooplane:import-entry-retains-configuration´)
+/// ´test:crate:import-entry-retains-configuration´
+#[test]
+fn import_entry_retains_configuration() {
+    runtime_preparation::proof("SUPERLOOP_IMPORT_PROOF", "PRIVATE-READERS-MEASURED");
+}
+
 fn selected_readers() -> &'static [&'static str] {
-    if std::env::var_os("SUPERLOOP_REPORT_PROOF").is_some() {
+    if std::env::var_os("SUPERLOOP_IMPORT_PROOF").is_some() {
+        &["import"]
+    } else if std::env::var_os("SUPERLOOP_REPORT_PROOF").is_some() {
         &["report", "locks"]
     } else if std::env::var_os("SUPERLOOP_HARVEST_PROOF").is_some() {
         &["private-harvest", "harvest-recover"]
@@ -77,7 +88,10 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
     .expect("recorded proxy output");
     fs::set_permissions(observation, fs::Permissions::from_mode(0o600)).expect("observation mode");
     for &kind in selected_readers() {
-        if matches!(kind, "checkpoint" | "private-harvest" | "harvest-recover") {
+        if matches!(
+            kind,
+            "checkpoint" | "private-harvest" | "harvest-recover" | "import"
+        ) {
             for name in [".prepare-R.lock", ".letter-R.lock"] {
                 let path = runs.join(name);
                 fs::write(&path, b"").expect("checkpoint lock");
@@ -104,8 +118,10 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
             "source-link",
             "source-large",
         ] {
-            if (matches!(kind, "checkpoint" | "private-harvest" | "harvest-recover")
-                && case != "record"
+            if (matches!(
+                kind,
+                "checkpoint" | "private-harvest" | "harvest-recover" | "import"
+            ) && case != "record"
                 && !case.starts_with("source-"))
                 || (kind == "measure" && case != "record")
                 || (kind == "observed" && case != "record" && !case.starts_with("source-"))
@@ -128,7 +144,16 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
 fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::CommandSpec {
     let home_fd = fs::File::open(home).expect("home").into();
     let runs_fd = fs::File::open(runs).expect("runs").into();
-    let body = if matches!(kind, "private-harvest" | "harvest-recover") {
+    let body = if kind == "import" {
+        crate::launch::imports::private_import_argv(
+            &crate::launch::imports::MarkImportedRequest {
+                loop_name: "alpha".into(),
+                run: "R".into(),
+                object: "a".repeat(40),
+            },
+            home,
+        )
+    } else if matches!(kind, "private-harvest" | "harvest-recover") {
         private_harvest_words(home, kind == "harvest-recover")
     } else if kind == "checkpoint" {
         exercise_checkpoint_words(home)
@@ -359,6 +384,7 @@ fn replace_tool(request: &mut loop_home::CommandSpec, home: &Path, runs: &Path, 
         "follow" => "follow",
         "context" => "exercise-context",
         "checkpoint" => "checkpoint",
+        "import" => "mark-imported",
         "private-harvest" => "harvest",
         "harvest-recover" => "harvest-recover",
         _ => "driver-report",
@@ -448,6 +474,14 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
         assert!(!output.status.success(), "unsettled harvest accepted");
         assert!(
             stderr.contains("harvest-record: phase is preparing; expected settled"),
+            "{stderr}"
+        );
+        return;
+    }
+    if kind == "import" && matches!(case, "plain" | "replaced") {
+        assert!(!output.status.success(), "unsettled import accepted");
+        assert!(
+            stderr.contains("import-round: run is not settled for import marking"),
             "{stderr}"
         );
         return;

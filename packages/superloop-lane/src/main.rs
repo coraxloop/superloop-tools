@@ -79,39 +79,6 @@ fn parse_checkout_private_argv(
     Ok((request, Path::new(owner_home)))
 }
 
-fn parse_import_private_argv(
-    args: &[String],
-) -> Result<(launch::imports::MarkImportedRequest, &Path), LaneError> {
-    let [
-        _,
-        loop_name,
-        run,
-        object_flag,
-        object,
-        home_flag,
-        owner_home,
-    ] = args
-    else {
-        return Err(LaneError::input(
-            "import-private",
-            "private import form is incomplete",
-        ));
-    };
-    if object_flag != "--object" || home_flag != "--owner-home" {
-        return Err(LaneError::input(
-            "import-private",
-            "private import form is invalid",
-        ));
-    }
-    let request = launch::imports::MarkImportedRequest::parse(&[
-        loop_name.clone(),
-        run.clone(),
-        object_flag.clone(),
-        object.clone(),
-    ])?;
-    Ok((request, Path::new(owner_home)))
-}
-
 fn parse_follow_options(rest: &[String]) -> Result<(Option<&str>, bool), LaneError> {
     let (round, round_only) = match rest {
         [] => (None, false),
@@ -141,9 +108,6 @@ fn validate_bite_private_argv(args: &[String]) -> Result<(), LaneError> {
         Some("_checkout") => {
             parse_checkout_private_argv(args)?;
         }
-        Some("_mark-imported") => {
-            parse_import_private_argv(args)?;
-        }
         Some("_rotation-handover") => {
             launch::rotation::parse_private_handover_argv(args)?;
         }
@@ -164,7 +128,6 @@ fn bind_private_launch_args<'a>(
             "_choose-uid"
                 | "_settle-evidence"
                 | "_make-home"
-                | "_mark-imported"
                 | "_checkout"
                 | "_bind-mail"
                 | "_bind-reply"
@@ -736,13 +699,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
     if args.first().is_some_and(|value| value == "harvest") {
         let request = launch::harvest::HarvestRequest::parse(&args[1..])?;
         let report = launch::harvest::run(&caller_home()?, &request)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_mark-imported") {
-        let (request, owner_home) = parse_import_private_argv(args)?;
-        let report = launch::imports::private_run(owner_home, &request)?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
@@ -1758,43 +1714,6 @@ mod tests {
                 .expect("private inode")
                 .st_ino
         );
-    }
-
-    /// ´test:unit:private-import-binds-owner-home-after-object-argument´
-    #[test]
-    fn private_import_binds_owner_home_after_object_argument() {
-        let fixture = tempfile::TempDir::new().expect("fixture");
-        let owner = nix::unistd::Uid::effective().as_raw();
-        let home = fixture.path().join("home");
-        let runs = fixture.path().join("runs");
-        for path in [&home, &runs] {
-            fs::create_dir(path).expect("directory");
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("private mode");
-        }
-        let home_fd = fs::File::open(&home).expect("home descriptor");
-        let runs_fd = fs::File::open(&runs).expect("runs descriptor");
-        let body = vec![
-            "_mark-imported".into(),
-            "alpha".into(),
-            "R".into(),
-            "--object".into(),
-            "a".repeat(40),
-            "--owner-home".into(),
-            home.display().to_string(),
-        ];
-        let mut argv = body.clone();
-        argv.extend([
-            "--verified-home-fd".into(),
-            "0".into(),
-            "--verified-runs-root".into(),
-            runs.display().to_string(),
-            "--verified-runs-root-fd".into(),
-            runs_fd.as_raw_fd().to_string(),
-        ]);
-        let (parsed, guard) =
-            bind_private_launch_args(&argv, &home_fd, owner).expect("bound import request");
-        assert_eq!(parsed, body);
-        assert!(guard.is_some());
     }
 
     /// ´test:unit:private-make-home-requires-matching-letter-directory-descriptor´
