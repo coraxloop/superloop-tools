@@ -78,6 +78,7 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
         }
     }
     live_measure(home, runs, &mut record);
+    follow_round(home, runs, &mut record);
     writeln!(std::io::stdout().lock(), "PRIVATE-READERS-MEASURED").expect("measured marker");
 }
 
@@ -104,6 +105,20 @@ fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::C
             "--owner-home".into(),
             home.display().to_string(),
         ])
+    } else if matches!(kind, "follow" | "context") {
+        let mut words = crate::launch::follow::private_follow_argv(
+            home,
+            "alpha",
+            "R",
+            "dispatch",
+            &runs.join("R/dispatch"),
+            identity,
+        )
+        .expect("follow vector");
+        if kind == "context" {
+            words[0] = "_exercise-context-private".into();
+        }
+        Ok(words)
     } else if matches!(kind, "report" | "locks") {
         let mut words = vec![
             "_driver-report".into(),
@@ -162,7 +177,7 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
         manifest["records"].as_array().expect("roles").len(),
         if matches!(kind, "report" | "locks") {
             4
-        } else if kind == "observed" {
+        } else if matches!(kind, "observed" | "follow" | "context") {
             5
         } else {
             6
@@ -245,6 +260,8 @@ fn replace_tool(request: &mut loop_home::CommandSpec, home: &Path, runs: &Path, 
         "home-layout" => "exercise-home-layout",
         "measure" => "exercise-measure",
         "observed" => "observed-hosts",
+        "follow" => "follow",
+        "context" => "exercise-context",
         _ => "driver-report",
     };
     let home_fd = fs::File::open(home).expect("home").into();
@@ -329,45 +346,7 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     if matches!(case, "plain" | "replaced") {
         assert!(output.status.success(), "{kind}/{case}: {stderr}{stdout}");
-        let report: Value = serde_json::from_slice(&output.stdout).expect("reader report");
-        if matches!(kind, "report" | "locks") {
-            assert_eq!(
-                report["refusal"]["kind"],
-                if kind == "report" {
-                    "repin-door-state"
-                } else {
-                    "retire-uncertain"
-                },
-                "{report}"
-            );
-            return;
-        }
-        if kind == "observed" {
-            assert_eq!(report["mode"], "observing");
-            assert_eq!(report["enforcing"], false);
-            assert_eq!(report["connected_hosts"], json!(["api.example.com"]));
-            assert_eq!(
-                report["attempted_connect_hosts"],
-                json!({"api.example.com":true})
-            );
-            return;
-        }
-        if kind == "measure" {
-            assert!(
-                report["custody"]["digest"]
-                    .as_str()
-                    .is_some_and(|digest| digest.len() == 64),
-                "{report}"
-            );
-            assert_eq!(report["runs"], json!([]), "{report}");
-            return;
-        }
-        let reason = if kind == "harvest" {
-            "complete checkpoint is absent"
-        } else {
-            "run is not settled"
-        };
-        assert_eq!(report["reason"], reason, "{report}");
+        successful_observation(output, kind);
     } else {
         assert!(!output.status.success(), "{kind}/{case} accepted");
         let expected = match case {
@@ -381,6 +360,10 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
             "record" => {
                 if matches!(kind, "report" | "locks") {
                     "reservation differs from public report request"
+                } else if kind == "follow" {
+                    "follow-private-record"
+                } else if kind == "context" {
+                    "exercise-context-record"
                 } else if kind == "harvest" {
                     "exercise-harvest-record"
                 } else {
@@ -400,6 +383,71 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
         };
         assert!(stderr.contains(boundary), "{kind}/{case}: {stderr}{stdout}");
     }
+}
+
+/// # Panics
+/// Panics if a successful reader changes its public output or evidence boundary.
+fn successful_observation(output: &std::process::Output, kind: &str) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if kind == "follow" {
+        let lines: Vec<Value> = stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("raw follow line"))
+            .collect();
+        assert_eq!(lines.len(), 2, "{stdout}");
+        assert_eq!(lines[0]["kind"], "round-status");
+        assert_eq!(lines[1]["kind"], "event-delta");
+        assert_eq!(lines[1]["events"][0]["type"], "turn.completed");
+        assert!(stdout.ends_with('\n'));
+        return;
+    }
+    let report: Value = serde_json::from_slice(&output.stdout).expect("reader report");
+    if kind == "context" {
+        assert_eq!(report["state"], "measured");
+        assert_eq!(report["source"], "test-field");
+        assert_eq!(report["used"], 50);
+        assert_eq!(report["window"], 100);
+        assert_eq!(report["turn"], 1);
+        return;
+    }
+    if matches!(kind, "report" | "locks") {
+        assert_eq!(
+            report["refusal"]["kind"],
+            if kind == "report" {
+                "repin-door-state"
+            } else {
+                "retire-uncertain"
+            },
+            "{report}"
+        );
+        return;
+    }
+    if kind == "observed" {
+        assert_eq!(report["mode"], "observing");
+        assert_eq!(report["enforcing"], false);
+        assert_eq!(report["connected_hosts"], json!(["api.example.com"]));
+        assert_eq!(
+            report["attempted_connect_hosts"],
+            json!({"api.example.com":true})
+        );
+        return;
+    }
+    if kind == "measure" {
+        assert!(
+            report["custody"]["digest"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64),
+            "{report}"
+        );
+        assert_eq!(report["runs"], json!([]), "{report}");
+        return;
+    }
+    let reason = if kind == "harvest" {
+        "complete checkpoint is absent"
+    } else {
+        "run is not settled"
+    };
+    assert_eq!(report["reason"], reason, "{report}");
 }
 
 /// # Panics
@@ -476,4 +524,68 @@ os.chmod(a,0o600);os.chown(a,3000,3000)
         report["runs"][0]["helper_evidence"]["state"], "published",
         "{report}"
     );
+}
+
+/// # Panics
+/// Panics if production follow or context receipt reopens configuration or loses bounded evidence.
+fn follow_round(home: &Path, runs: &Path, record: &mut Value) {
+    record["rounds"] = json!([{"step":"dispatch","phase":"failed",
+        "settlement_error":"fixture-only","driver_dir":runs.join("R/dispatch")}]);
+    crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
+        .expect("follow reservation");
+    let step = runs.join("R/dispatch");
+    fs::create_dir_all(&step).expect("round directory");
+    // Recorded from ContextTracker::observe_durable on kranich; the event input is retained.
+    let context = concat!(
+        r#"{"state":"measured","used":50,"window":100,"fraction":0.5,"source":"test-field","#,
+        r#""reason":"measured","turn":1,"event_end":26,"at":"2026-11-08T22:14:56Z"}"#,
+        "\n",
+    );
+    for (name, data) in [
+        ("events.jsonl", "{\"type\":\"turn.completed\"}\n"),
+        ("context.jsonl", context),
+        (".event-start", "0\n"),
+    ] {
+        fs::write(step.join(name), data).expect("recorded round evidence");
+    }
+    let script = r"
+import os,sys,tomllib
+from pathlib import Path
+home=Path(sys.argv[1]);runs=Path(sys.argv[2]);root=runs/'R';step=root/'dispatch'
+uid=tomllib.loads((home/'.config/loops/registry.toml').read_text())['loops'][0]['uid']
+for p in [root,step]: os.chown(p,uid,uid);os.chmod(p,0o700)
+for name in ['events.jsonl','context.jsonl','.event-start']:
+ p=step/name;os.chown(p,uid,uid);os.chmod(p,0o600)
+";
+    let output = helper_service::namespace_python(home, script, runs.to_str().expect("runs"))
+        .expect("loop evidence");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = runs.join(".reservation-R.json");
+    let stat = fs::metadata(&path).expect("record identity");
+    let digest = crate::build::sha256_bytes(&fs::read(path).expect("record bytes"), home)
+        .expect("record digest");
+    let identity = format!("{}:{}:{digest}", stat.dev(), stat.ino());
+    for kind in ["follow", "context"] {
+        for case in [
+            "plain",
+            "replaced",
+            "mode",
+            "identity",
+            "count",
+            "operation",
+            "record",
+            "override",
+            "missing",
+            "vector",
+            "short-frame",
+            "excess-frame",
+            "program-owner",
+        ] {
+            measure(home, runs, &identity, kind, case);
+        }
+    }
 }

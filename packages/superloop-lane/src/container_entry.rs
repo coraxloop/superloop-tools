@@ -77,7 +77,7 @@ pub(crate) const fn credential_client(backend: BoxBackend) -> &'static str {
 fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
     if operation == "driver-report" {
         &REPORT_PURPOSES
-    } else if operation == "observed-hosts" {
+    } else if matches!(operation, "observed-hosts" | "follow" | "exercise-context") {
         &OBSERVATION_PURPOSES
     } else if matches!(
         operation,
@@ -112,6 +112,7 @@ pub(crate) fn operation_error(operation: &str, error: impl std::fmt::Display) ->
         "make-home" => "creation-anchor",
         "observed-hosts" => "observation-anchor",
         "driver-report" => "driver-report-private",
+        "follow" => "follow-private",
         op if op.starts_with("exercise-") => "exercise-anchor",
         _ => "container-anchor",
     };
@@ -301,7 +302,11 @@ pub(crate) fn pin_reader(
     .into_iter()
     .enumerate()
     {
-        if matches!(operation, "observed-hosts" | "driver-report") && purpose == "git-executable" {
+        if matches!(
+            operation,
+            "observed-hosts" | "driver-report" | "follow" | "exercise-context"
+        ) && purpose == "git-executable"
+        {
             continue;
         }
         pins.push(
@@ -933,6 +938,8 @@ pub(crate) fn receive_for(
                             operation,
                             "observed-hosts"
                                 | "driver-report"
+                                | "follow"
+                                | "exercise-context"
                                 | "exercise-harvest"
                                 | "exercise-home-layout"
                                 | "exercise-measure"
@@ -998,6 +1005,8 @@ mod tests {
             ("exercise-mounts", "exercise-anchor"),
             ("observed-hosts", "observation-anchor"),
             ("driver-report", "driver-report-private"),
+            ("follow", "follow-private"),
+            ("exercise-context", "exercise-anchor"),
             (OPERATION, "container-anchor"),
         ] {
             let _guard = activate_program_map(operation, BTreeMap::new());

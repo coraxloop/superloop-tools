@@ -17,6 +17,8 @@ fn operation(word: &str) -> Option<&'static str> {
     match word {
         "_observed-hosts" => Some("observed-hosts"),
         "_driver-report" => Some("driver-report"),
+        "_follow-private" => Some("follow"),
+        "_exercise-context-private" => Some("exercise-context"),
         "_exercise-measure" => Some("exercise-measure"),
         "_exercise-harvest" => Some("exercise-harvest"),
         "_exercise-home-layout" => Some("exercise-home-layout"),
@@ -58,6 +60,9 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
             home: Path::new(home),
         });
     }
+    if matches!(mode, "follow" | "exercise-context") {
+        return follow_selection(args, mode);
+    }
     if mode == "driver-report" {
         return report_selection(args);
     }
@@ -92,6 +97,45 @@ fn measure_selection(args: &[String]) -> Result<Selection<'_>, LaneError> {
         run: "all",
         identity: "",
         home,
+    })
+}
+
+fn follow_selection<'a>(
+    args: &'a [String],
+    mode: &'static str,
+) -> Result<Selection<'a>, LaneError> {
+    let [
+        _,
+        scope,
+        run,
+        home_flag,
+        home,
+        round_flag,
+        _,
+        directory_flag,
+        directory,
+        identity_flag,
+        identity,
+    ] = args
+    else {
+        return Err(refused(mode, "anchor-declaration", "vector"));
+    };
+    if home_flag != "--owner-home"
+        || round_flag != "--round"
+        || directory_flag != "--driver-dir"
+        || identity_flag != "--record-identity"
+        || !Path::new(directory).is_absolute()
+        || !crate::valid_run_name(run)
+        || loop_home::validate_name(scope).is_err()
+    {
+        return Err(refused(mode, "anchor-declaration", "vector"));
+    }
+    Ok(Selection {
+        operation: mode,
+        scope,
+        run,
+        identity,
+        home: Path::new(home),
     })
 }
 
@@ -180,12 +224,15 @@ pub fn command(
 /// Receive the exact reader bundle before any plan, report or reservation read.
 /// # Errors
 /// Refuses missing, substituted or mismatched capabilities and unsupported namespace identity.
-pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
+pub fn serve(args: &[String]) -> Result<String, LaneError> {
     let mode = args
         .first()
         .and_then(|word| operation(word))
         .unwrap_or("exercise");
-    if args.len() < 9 {
+    if args.len() < 9
+        || (matches!(mode, "follow" | "exercise-context")
+            && !args.iter().any(|word| word == "--anchor-manifest"))
+    {
         return Err(refused(mode, "anchor-missing", "manifest"));
     }
     let (body, suffix) = args.split_at(args.len() - 4);
@@ -217,7 +264,10 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     let runs_anchor = next()?;
     let _entry = next()?;
     let hash = next()?;
-    let git = if matches!(mode, "observed-hosts" | "driver-report") {
+    let git = if matches!(
+        mode,
+        "observed-hosts" | "driver-report" | "follow" | "exercise-context"
+    ) {
         None
     } else {
         Some(next()?)
@@ -249,7 +299,10 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     let _configuration = configuration
         .map(|anchor| container_entry::configuration(selection.home, selection.scope, mode, anchor))
         .transpose()?;
-    dispatch(&selection, body)
+    if matches!(mode, "follow" | "exercise-context") {
+        return follow_output(&selection, body);
+    }
+    dispatch(&selection, body).map(|report| format!("{report}\n"))
 }
 
 fn dispatch(selection: &Selection<'_>, body: &[String]) -> Result<serde_json::Value, LaneError> {
@@ -275,5 +328,31 @@ fn dispatch(selection: &Selection<'_>, body: &[String]) -> Result<serde_json::Va
             selection.run,
             selection.identity,
         )
+    }
+}
+
+fn follow_output(selection: &Selection<'_>, body: &[String]) -> Result<String, LaneError> {
+    // The complete vector has been checked before capability receipt.
+    let step = &body[6];
+    let directory = Path::new(&body[8]);
+    if selection.operation == "follow" {
+        super::follow::private_read(
+            selection.home,
+            selection.scope,
+            selection.run,
+            step,
+            directory,
+            selection.identity,
+        )
+    } else {
+        super::follow::private_context(
+            selection.home,
+            selection.scope,
+            selection.run,
+            step,
+            directory,
+            selection.identity,
+        )
+        .map(|report| format!("{report}\n"))
     }
 }

@@ -130,6 +130,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Follow and context readers retain configuration and runs custody across namespace entry; replaced configuration paths supply no input, while raw follow events and bounded context evidence keep their public formats (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Driver reports and retirement lock reads retain operation-bound home, runs, entry and hashing custody across namespace entry; reader tool ownership and exact descriptor frames refuse before state reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Private observed-host reads retain operation-bound configuration custody through namespace entry, preserving the protected reservation and observation checks when the configuration pathname is replaced (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-exercise-readers-retain-configuration``).

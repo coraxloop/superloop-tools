@@ -1096,6 +1096,8 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
         "exercise-measure",
         "observed-hosts",
         "driver-report",
+        "follow",
+        "exercise-context",
     ] {
         let mut argv = vec![
             "unshare".into(),
@@ -1108,14 +1110,32 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
             "--owner-home".into(),
             home.to_str().expect("home").into(),
         ];
-        if matches!(operation, "exercise-measure" | "observed-hosts") {
-            if operation == "exercise-measure" {
-                argv[4] = "all".into();
-            }
+        if operation == "exercise-measure" {
+            argv[4] = "all".into();
+            argv[5] = "--backend".into();
+            argv[6] = "codex".into();
+        }
+        if operation == "observed-hosts" {
             argv.drain(5..7);
         }
         if operation == "driver-report" {
             argv[5..9].rotate_right(2);
+        }
+        if matches!(operation, "follow" | "exercise-context") {
+            argv.truncate(2);
+            let mut body = superloop_lane::launch::follow::private_follow_argv(
+                home,
+                "alpha",
+                "R",
+                "dispatch",
+                &home.join("R/dispatch"),
+                "identity",
+            )
+            .expect("follow vector");
+            if operation == "exercise-context" {
+                body[0] = "_exercise-context-private".into();
+            }
+            argv.extend(body);
         }
         let Err(error) =
             superloop_lane::launch::reader_entry::command(program, &argv, home, fd, home, fd)
@@ -1128,6 +1148,8 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
                 "observation-anchor"
             } else if operation == "driver-report" {
                 "driver-report-private"
+            } else if operation == "follow" {
+                "follow-private"
             } else {
                 "exercise-anchor"
             }

@@ -199,8 +199,6 @@ fn parse_import_private_argv(
     Ok((request, Path::new(owner_home)))
 }
 
-type FollowPrivateForm<'a> = (&'a Path, &'a str, &'a str, &'a str, &'a Path, &'a str);
-
 fn parse_follow_options(rest: &[String]) -> Result<(Option<&str>, bool), LaneError> {
     let (round, round_only) = match rest {
         [] => (None, false),
@@ -225,46 +223,6 @@ fn parse_follow_options(rest: &[String]) -> Result<(Option<&str>, bool), LaneErr
     Ok((round, round_only))
 }
 
-fn parse_follow_private_argv(args: &[String]) -> Result<FollowPrivateForm<'_>, LaneError> {
-    let [
-        _,
-        loop_name,
-        run,
-        home_flag,
-        owner_home,
-        round_flag,
-        step,
-        directory_flag,
-        directory,
-        identity_flag,
-        identity,
-    ] = args
-    else {
-        return Err(LaneError::input(
-            "follow-private",
-            "private follow form is incomplete",
-        ));
-    };
-    if home_flag != "--owner-home"
-        || round_flag != "--round"
-        || directory_flag != "--driver-dir"
-        || identity_flag != "--record-identity"
-    {
-        return Err(LaneError::input(
-            "follow-private",
-            "private follow form is malformed",
-        ));
-    }
-    Ok((
-        Path::new(owner_home),
-        loop_name,
-        run,
-        step,
-        Path::new(directory),
-        identity,
-    ))
-}
-
 fn validate_bite_private_argv(args: &[String]) -> Result<(), LaneError> {
     match args.first().map(String::as_str) {
         Some("_checkpoint") => {
@@ -278,9 +236,6 @@ fn validate_bite_private_argv(args: &[String]) -> Result<(), LaneError> {
         }
         Some("_mark-imported") => {
             parse_import_private_argv(args)?;
-        }
-        Some("_follow-private") => {
-            parse_follow_private_argv(args)?;
         }
         Some("_rotation-handover") => {
             launch::rotation::parse_private_handover_argv(args)?;
@@ -310,8 +265,6 @@ fn bind_private_launch_args<'a>(
                 | "_bind-mail"
                 | "_bind-reply"
                 | "_inspect-round"
-                | "_follow-private"
-                | "_exercise-context-private"
                 | "_rotation-handover"
         )
     );
@@ -491,7 +444,9 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
     }
     if launch::reader_entry::handles(args) {
         let report = launch::reader_entry::serve(args)?;
-        writeln!(io::stdout().lock(), "{report}")
+        io::stdout()
+            .lock()
+            .write_all(report.as_bytes())
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
@@ -769,62 +724,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             run,
             runs_root,
             record_identity,
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_follow-private") {
-        let (owner_home, loop_name, run, step, directory, identity) =
-            parse_follow_private_argv(args)?;
-        let lines =
-            launch::follow::private_read(owner_home, loop_name, run, step, directory, identity)?;
-        io::stdout()
-            .lock()
-            .write_all(lines.as_bytes())
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-context-private")
-    {
-        let [
-            _,
-            loop_name,
-            run,
-            home_option,
-            owner_home,
-            round_option,
-            step,
-            directory_option,
-            directory,
-            identity_option,
-            identity,
-        ] = args
-        else {
-            return Err(LaneError::input(
-                "exercise-context",
-                "private context form is incomplete",
-            ));
-        };
-        if home_option != "--owner-home"
-            || round_option != "--round"
-            || directory_option != "--driver-dir"
-            || identity_option != "--record-identity"
-        {
-            return Err(LaneError::input(
-                "exercise-context",
-                "private context form is malformed",
-            ));
-        }
-        let report = launch::follow::private_context(
-            Path::new(owner_home),
-            loop_name,
-            run,
-            step,
-            Path::new(directory),
-            identity,
         )?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
