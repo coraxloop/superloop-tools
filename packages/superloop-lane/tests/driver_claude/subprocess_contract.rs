@@ -2640,3 +2640,37 @@ fn claude_finished_state_refuses_malformed_snapshots() {
     fs::write(&path, vec![b' '; 65_537]).expect("oversized snapshot");
     assert!(finished_state_capture(&run_dir)["driver"].is_null());
 }
+
+/// Invalid embedded monitor text loses only the monitor, not historical identity.
+/// # Panics
+/// Panics if the production snapshot or follower violates the partial-observation contract.
+/// ´test:integration:claude-finished-state-keeps-identity-with-invalid-monitor´
+#[test]
+fn claude_finished_state_keeps_identity_with_invalid_monitor() {
+    let harness = Harness::new("finished-invalid-monitor");
+    assert!(
+        harness
+            .run(&[OsStr::new("-t60"), OsStr::new("hello")])
+            .status
+            .success()
+    );
+    let run_dir = harness.run_dir("lane");
+    let expected = finished_state_capture(&run_dir);
+    assert!(expected["driver"].is_object());
+    assert!(expected["monitor"].is_object());
+    let path = run_dir.join(".finished-step.json");
+    let original = fs::read(&path).expect("production snapshot");
+    let mut record: serde_json::Value = serde_json::from_slice(&original).expect("snapshot object");
+    for invalid in ["", "not a monitor record\n"] {
+        record["monitor"] = invalid.into();
+        fs::write(&path, record.to_string()).expect("invalid monitor text");
+        let state = finished_state_capture(&run_dir);
+        assert_eq!(state["driver"], expected["driver"]);
+        assert_eq!(state["driver"]["alive"], false);
+        assert!(state["monitor"].is_null());
+    }
+    fs::write(&path, original).expect("restore valid monitor text");
+    let restored = finished_state_capture(&run_dir);
+    assert_eq!(restored["driver"], expected["driver"]);
+    assert_eq!(restored["monitor"], expected["monitor"]);
+}

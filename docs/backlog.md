@@ -312,6 +312,8 @@ On lane hcomphost (19:47Z to 20:03Z, across deploy #33) a resume whose helper ne
 
 (2026-11-09, review-w's notes) The estate's watcher glossary landed as aff5a346, so the glossary half the paragraphs above call open or pending is supplied (N2). It names `unifiedWindows.five_hour` `resetsAt`, which the captured events carry while the decoder reads only the `rate_limit_info`-level `resetsAt`, which is true of the capture (N3).
 
+(2026-11-09, lane r002g84, invalid monitor regression) Part (b) is met by the real-driver/follower case with empty and malformed string monitor text. The complete historical driver object stays equal to the production observation, remains non-live, and restoring the original snapshot restores its monitor (``test:integration:claude-finished-state-keeps-identity-with-invalid-monitor``, of superloop-lane). Part (c) remains open, so the item stays open.
+
 **Problem (a round whose turn ends without its reply of record is not resumed once by the driver)** · `prob:lanes:reply-of-record-one-resume-guard`
 
 **OPEN.** The charter line landed (docs/worker-charter.md:47, lane A); no driver guard found in tools main 3c0f1a13.

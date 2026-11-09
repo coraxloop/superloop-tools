@@ -4,6 +4,7 @@
 
 |Test|Area|Claim|
 |----|----|-----|
+|(`test:integration:claude-finished-state-keeps-identity-with-invalid-monitor`)|Subprocess|Invalid string monitor text retains the real completed driver identity while leaving only the monitor null; restoring the original text restores the monitor.|
 |(`test:integration:claude-finished-state-refuses-malformed-snapshots`)|Subprocess|Malformed and oversized completion records supply no historical identity.|
 |(`test:integration:claude-finished-state-retains-driver-and-monitor`)|Subprocess|The real driver publication feeds completed state, rejects stale markers and active locks, survives PID reuse as non-live evidence, and is archived on resume.|
 |(`test:integration:claude-fresh-step-records-utc-start`)|Subprocess|A fresh Claude step records its UTC start.|
