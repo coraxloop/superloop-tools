@@ -56,6 +56,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Pin restoration of the completed observation through resume-preparation rollback, retaining the production snapshot bytes in the retried archive (``prob:lanes:claude-lane-finished-state-null-driver``; ``test:integration:claude-rollback-restores-completed-snapshot``).
+
 - Pin completed driver identity retention when embedded monitor text is invalid, with the real driver publication and follower as the control (``prob:lanes:claude-lane-finished-state-null-driver``; ``test:integration:claude-finished-state-keeps-identity-with-invalid-monitor``).
 
 - Door enforcement, adjudication and incomplete-record regressions consume request-lock credit frames before their final-reply assertions, with deterministic multi-credit coverage (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:door-final-reply-follows-lock-wait-credits``).

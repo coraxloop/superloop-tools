@@ -314,6 +314,8 @@ On lane hcomphost (19:47Z to 20:03Z, across deploy #33) a resume whose helper ne
 
 (2026-11-09, lane r002g84, invalid monitor regression) Part (b) is met by the real-driver/follower case with empty and malformed string monitor text. The complete historical driver object stays equal to the production observation, remains non-live, and restoring the original snapshot restores its monitor (``test:integration:claude-finished-state-keeps-identity-with-invalid-monitor``, of superloop-lane). Part (c) remains open, so the item stays open.
 
+(2026-11-09, lane r002g84, completed snapshot rollback) Part (c) is met by a real-driver snapshot placed in the interrupted-preparation fixture. The production resume reports rollback, retries preparation and archives the restored snapshot byte for byte (``test:integration:claude-rollback-restores-completed-snapshot``, of superloop-lane). Parts (a), (b) and (c) now stand met and this paragraph closes nothing: the item, its register row and the holding stay until a later commit closes the item with its documentation record.
+
 **Problem (a round whose turn ends without its reply of record is not resumed once by the driver)** · `prob:lanes:reply-of-record-one-resume-guard`
 
 **OPEN.** The charter line landed (docs/worker-charter.md:47, lane A); no driver guard found in tools main 3c0f1a13.

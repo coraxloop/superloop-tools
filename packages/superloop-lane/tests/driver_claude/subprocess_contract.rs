@@ -2674,3 +2674,51 @@ fn claude_finished_state_keeps_identity_with_invalid_monitor() {
     assert_eq!(restored["driver"], expected["driver"]);
     assert_eq!(restored["monitor"], expected["monitor"]);
 }
+
+/// Resume rollback restores the prior production snapshot before retry archives it.
+/// # Panics
+/// Panics if the interrupted preparation loses the completed snapshot or skips rollback.
+/// ´test:integration:claude-rollback-restores-completed-snapshot´
+#[test]
+fn claude_rollback_restores_completed_snapshot() {
+    let harness = Harness::new("rollback-finished-snapshot");
+    assert!(
+        harness
+            .run(&[
+                OsStr::new("-t60"),
+                OsStr::new("-ngate"),
+                OsStr::new("hello")
+            ])
+            .status
+            .success()
+    );
+    let original = fs::read(harness.run_dir("gate").join(".finished-step.json"))
+        .expect("real completed snapshot");
+    let run_dir = harness.seed_preparation_window_after_removal("interrupted", "session-1", "work");
+    let archived = run_dir.join("steps/gate/finished-step.json");
+    fs::write(&archived, &original).expect("snapshot archived before interruption");
+    fs::copy(
+        harness.run_dir("gate").join(".started-at"),
+        run_dir.join("steps/gate/started-at.txt"),
+    )
+    .expect("archive the matching production start marker");
+    assert!(!run_dir.join(".finished-step.json").exists());
+    let result = output(
+        harness.command().env("ORACLE_MODE", "resume"),
+        &[
+            OsStr::new("-t60"),
+            OsStr::new("-rsession-1"),
+            OsStr::new("-d"),
+            argument(&run_dir),
+            OsStr::new("-nwork"),
+            OsStr::new("PROCEED"),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("resume_preparation_rolled_back"));
+    assert_report(&result, "work", 60, "ok");
+    assert_eq!(
+        fs::read(&archived).expect("restored snapshot re-archived"),
+        original
+    );
+}
