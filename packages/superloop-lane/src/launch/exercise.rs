@@ -1044,6 +1044,12 @@ pub fn parse_private_measure(args: &[String]) -> Result<(&str, &Path, BoxBackend
             "private exercise needs all, --backend and --owner-home",
         ));
     }
+    if !Path::new(owner_home).is_absolute() {
+        return Err(LaneError::input(
+            "exercise-private",
+            "private exercise needs an absolute owner home",
+        ));
+    }
     Ok((
         loop_name,
         Path::new(owner_home),
@@ -1584,6 +1590,16 @@ mod tests {
                     "exercise-private"
                 );
             }
+            for relative in ["", "owner", "./owner", "../owner"] {
+                let mut malformed = words.clone();
+                malformed[6] = relative.into();
+                let error = parse_private_measure(&malformed).expect_err("relative owner home");
+                assert_eq!(error.kind, "exercise-private");
+                assert_eq!(
+                    error.detail,
+                    "private exercise needs an absolute owner home"
+                );
+            }
             let mut unknown = words;
             unknown[4] = "foreign".into();
             assert_eq!(
@@ -1654,10 +1670,15 @@ mod tests {
         let pid = std::process::id();
         let start = crate::container_helper::process_start(pid).expect("helper tick");
         publish_reservation(&reservation_path(&root, "R"), &json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"helper_pid":pid,"helper_start":start,"plan":{"backend":"codex","home":owner_home.join("worker")}})).expect("reservation");
-        publish_reservation(&reservation_path(&root, "S"), &json!({
-            "schema":1,"phase":"started","loop":"alpha","run":"S","worker_uid":3001,
-            "helper_pid":pid,"helper_start":start,"plan":{"backend":"claude","home":owner_home.join("foreign-worker")}
-        })).expect("foreign live reservation");
+        publish_reservation(
+            &reservation_path(&root, "S"),
+            &json!({
+                "schema":1,"phase":"started","loop":"alpha","run":"S","worker_uid":3001,
+                "helper_pid":pid,"helper_start":start,
+                "plan":{"backend":"claude","home":owner_home.join("foreign-worker")}
+            }),
+        )
+        .expect("foreign live reservation");
         let report = run(owner_home, "alpha", true, BoxBackend::Codex).expect("preview");
         assert_eq!(report["backend"], "codex");
         assert_eq!(report["live_runs"], json!(["R"]));
