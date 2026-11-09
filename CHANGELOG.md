@@ -56,6 +56,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Five credential-exercise JSON macro bodies are split into reviewable lines without changing their fields or values (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-credential-exercise-payload``).
+
 - A mapped-identity fixture exercises Claude provider preparation, round publication and observation with synthetic authority, retaining the worker file on expired refresh and keeping the public runtime gate closed (``prob:box:claude-boxed-workers``; ``test:unit:claude-namespace-publication-keeps-worker-authority-separate``).
 
 - Credential binding regression checks isolate activation-start clearing and mid-activation anchor replacement, and census provider refusals pin their detail (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-program-binding-cadence``).

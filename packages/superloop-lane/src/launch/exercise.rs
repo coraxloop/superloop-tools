@@ -772,7 +772,10 @@ fn measured_open_with(
         .transpose()?;
     let document = serde_json::from_slice(&bytes)
         .map_err(|error| LaneError::input("exercise-path", error.to_string()))?;
-    let mut identity = json!({"path":path,"device":metadata.dev(),"inode":metadata.ino(),"uid":metadata.uid(),"mode":600,"modified_wall_unix_seconds":metadata.mtime()});
+    let mut identity = json!({
+        "path":path, "device":metadata.dev(), "inode":metadata.ino(),
+        "uid":metadata.uid(), "mode":600, "modified_wall_unix_seconds":metadata.mtime()
+    });
     if let Some(digest) = digest {
         identity["digest"] = digest.into();
     } else {
@@ -794,7 +797,10 @@ fn compared(custody: &Value, worker: &Value, projection_digest: &str, token_only
 
 fn changes(previous: Option<&Value>, current: &Value) -> Value {
     if current["backend"] == "claude" {
-        return json!({"state":"unmeasured","reason":"metadata and projection equality do not prove token rotation or worker reload"});
+        return json!({
+            "state":"unmeasured",
+            "reason":"metadata and projection equality do not prove token rotation or worker reload"
+        });
     }
     let Some(previous) = previous else {
         return json!({"state":"no-prior-sample"});
@@ -944,9 +950,18 @@ fn run_with(
         BoxBackend::Claude => "recorded expiresAt within ten minutes of expiry",
     };
     if dry_run {
-        return Ok(
-            json!({"schema":1,"command":"exercise","backend":backend.name(),"loop":loop_name,"dry_run":true,"live_runs":names,"refresh_trigger":refresh_trigger,"forced_refresh_available":false,"checks":["owner custody and worker token file identities","protected helper publication evidence","simultaneous live helpers","token-only projection"],"walls":{"started":started_wall,"scan":scan_wall},"changed":false,"wall_seconds":begun.elapsed().as_secs_f64()}),
-        );
+        return Ok(json!({
+            "schema":1, "command":"exercise", "backend":backend.name(), "loop":loop_name,
+            "dry_run":true, "live_runs":names, "refresh_trigger":refresh_trigger,
+            "forced_refresh_available":false,
+            "checks":[
+                "owner custody and worker token file identities",
+                "protected helper publication evidence",
+                "simultaneous live helpers", "token-only projection"
+            ],
+            "walls":{"started":started_wall,"scan":scan_wall},
+            "changed":false, "wall_seconds":begun.elapsed().as_secs_f64()
+        }));
     }
     if live.is_empty() {
         return Err(LaneError::input(
@@ -1211,9 +1226,10 @@ fn claude_evidence(document: &Value) -> Result<Value, LaneError> {
             "Claude helper evidence has a foreign provider",
         ));
     }
-    Ok(
-        json!({"schema":2,"backend":"claude","state":document["state"],"provider":document["provider"]}),
-    )
+    Ok(json!({
+        "schema":2, "backend":"claude", "state":document["state"],
+        "provider":document["provider"]
+    }))
 }
 
 fn measure_claude(
@@ -1275,7 +1291,10 @@ fn measure_claude(
                     }
                     None => json!({"state":"not-published"}),
                 };
-                runs.push(json!({"run":run,"worker":worker,"comparison":comparison,"helper_evidence":evidence}));
+                runs.push(json!({
+                    "run":run, "worker":worker, "comparison":comparison,
+                    "helper_evidence":evidence
+                }));
             }
             Ok(
                 json!({"schema":2,"backend":"claude","custody":custody,"refresh_due":refresh_due,
