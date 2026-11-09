@@ -4994,6 +4994,40 @@ mod tests {
         }
     }
 
+    // Keep one bounded read window across all request-lock credit frames.
+    fn fixture_final_frame(client: &mut UnixStream) -> Value {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            let frame = frame_read_until(client, until).expect("reply or lock-wait credit");
+            if frame["type"] != "request-lock-wait" {
+                return frame;
+            }
+            assert_eq!(frame["schema"], 2);
+            assert!(frame["wait_ms"].as_u64().is_some_and(|wait| wait > 0));
+        }
+    }
+
+    /// ´test:unit:door-final-reply-follows-lock-wait-credits´
+    #[test]
+    fn door_final_reply_follows_lock_wait_credits() {
+        for credits in [0, 1, 3] {
+            let (mut writer, mut reader) = UnixStream::pair().expect("reply channel");
+            for wait_ms in 1..=credits {
+                frame_write(
+                    &mut writer,
+                    &json!({"schema":2,"type":"request-lock-wait","wait_ms":wait_ms}),
+                )
+                .expect("credit frame");
+            }
+            let reply = super::connection_refusal(
+                &io::Error::other("synthetic framing case"),
+                Instant::now(),
+            );
+            super::frame_write_no_drain(&mut writer, &reply).expect("final reply");
+            assert_eq!(fixture_final_frame(&mut reader), reply);
+        }
+    }
+
     /// ´test:unit:door-audit-label-precedes-effect´
     #[test]
     fn door_audit_label_precedes_effect() {
@@ -5013,15 +5047,7 @@ mod tests {
         assert_eq!(first["class"]["setter"], "door-service");
         assert_eq!(first["class"]["floor"], "audit");
         label(&store, &id, "allow");
-        let until = Instant::now() + Duration::from_secs(5);
-        let final_frame = loop {
-            let frame = frame_read_until(&mut client, until).expect("reply or lock-wait credit");
-            if frame["type"] != "request-lock-wait" {
-                break frame;
-            }
-            assert_eq!(frame["schema"], 2);
-            assert!(frame["wait_ms"].as_u64().is_some_and(|wait| wait > 0));
-        };
+        let final_frame = fixture_final_frame(&mut client);
         assert_eq!(final_frame["queue_state"], "answered");
         assert!(
             final_frame["queue_wall_seconds"]
@@ -5082,7 +5108,7 @@ mod tests {
                 assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
                 label(&store, &id, "allow");
             }
-            let final_frame = frame_read(&mut client).expect("final frame");
+            let final_frame = fixture_final_frame(&mut client);
             server.join().expect("service").expect("reply");
             assert_eq!(final_frame["reason"], expected);
             assert_eq!(
@@ -5249,7 +5275,7 @@ mod tests {
         let mut client = send_probe(&socket, 2000);
         let id = wait_filed(&store);
         label(&store, &id, "refuse");
-        let reply = frame_read(&mut client).expect("refusal frame");
+        let reply = fixture_final_frame(&mut client);
         server.join().expect("service").expect("refusal");
         assert_eq!(reply["reason"], "door-adjudicated-refusal");
         assert_eq!(reply["queue_state"], "refused");
@@ -5296,7 +5322,7 @@ mod tests {
             if !allow {
                 label(&store, &id, "allow");
             }
-            let reply = frame_read(&mut client).expect("incomplete final frame");
+            let reply = fixture_final_frame(&mut client);
             server.join().expect("service").expect("incomplete reply");
             assert_eq!(reply["status"], 125);
             assert_eq!(reply["reason"], "door-record-incomplete");
