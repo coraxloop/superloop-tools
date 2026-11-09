@@ -18,6 +18,16 @@ pub(super) const OPERATION: &str = "mail-serve";
 fn refusal(kind: &str, purpose: &str) -> MailError {
     MailError::Entry(format!("{kind}: operation={OPERATION} purpose={purpose}"))
 }
+pub(super) fn descriptor_error(
+    operation: &str,
+    purpose: &str,
+    check: &str,
+    error: impl std::fmt::Display,
+) -> MailError {
+    MailError::Entry(format!(
+        "anchor-io: operation={operation} purpose={purpose} check={check}: {error}"
+    ))
+}
 const fn directory_policy() -> Policy {
     Policy {
         kind: Kind::Directory,
@@ -138,10 +148,13 @@ pub(super) fn receive(home: &Path, declaration: &str) -> Result<Entered> {
         return Err(refusal("anchor-declaration", "registry-override"));
     }
     let manifest = Manifest::parse(declaration).map_err(|e| e.context(OPERATION, "manifest"))?;
+    if manifest.records.len() != requirements(Owner::Host).len() {
+        return Err(refusal("anchor-declaration", "count"));
+    }
     let input = nix::unistd::dup(std::io::stdin().as_fd())
-        .map_err(|_| refusal("anchor-missing", "rights-socket"))?;
-    let stat =
-        nix::sys::stat::fstat(&input).map_err(|_| refusal("anchor-missing", "rights-socket"))?;
+        .map_err(|e| descriptor_error(OPERATION, "rights-socket", "duplicate", e))?;
+    let stat = nix::sys::stat::fstat(&input)
+        .map_err(|e| descriptor_error(OPERATION, "rights-socket", "stat", e))?;
     if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
         return Err(refusal("anchor-missing", "rights-socket"));
     }
@@ -151,7 +164,7 @@ pub(super) fn receive(home: &Path, declaration: &str) -> Result<Entered> {
             .map_err(|e| e.context(OPERATION, "rights"))?;
     drop(socket);
     // The private receiver owns stdin; the consumed socket is setup-only.
-    nix::unistd::close(0)?;
+    anchor::transport::replace_stdin(OPERATION)?;
     let receiver = Receiver::current().map_err(|e| e.context(OPERATION, "receiver-map"))?;
     let configuration = receiver.configuration(
         &manifest,
@@ -167,7 +180,8 @@ pub(super) fn receive(home: &Path, declaration: &str) -> Result<Entered> {
     let copies = descriptors
         .iter()
         .map(OwnedFd::try_clone)
-        .collect::<std::io::Result<Vec<_>>>()?;
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|e| descriptor_error(OPERATION, "rights", "duplicate", e))?;
     // The operation admits host-installed and system-installed entry executables.
     // A declaration cannot add another owner to this independent two-role policy.
     let mut anchors = match receiver.validate(

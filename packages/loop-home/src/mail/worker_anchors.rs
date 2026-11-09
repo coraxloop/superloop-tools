@@ -1,5 +1,6 @@
 //! Worker lifetime capabilities across namespace entry and identity children.
 use super::birth::Identity;
+use super::entry_anchors::descriptor_error;
 use super::journal::{MailError, Result};
 use crate::anchor::{
     self, Anchor, Configuration, HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver,
@@ -270,8 +271,14 @@ pub(super) fn receive(
 ) -> Result<Entered> {
     let operation = operation(mode, phase)?;
     let manifest = Manifest::parse(declaration).map_err(|e| e.context(&operation, "manifest"))?;
-    let input = nix::unistd::dup(std::io::stdin().as_fd())?;
-    if nix::sys::stat::fstat(&input)?.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+    let input = nix::unistd::dup(std::io::stdin().as_fd())
+        .map_err(|e| descriptor_error(&operation, "rights", "duplicate", e))?;
+    if nix::sys::stat::fstat(&input)
+        .map_err(|e| descriptor_error(&operation, "rights", "stat", e))?
+        .st_mode
+        & libc::S_IFMT
+        != libc::S_IFSOCK
+    {
         return Err(refusal(&operation, "rights", "anchor-missing"));
     }
     let descriptors = anchor::transport::receive(
@@ -304,7 +311,8 @@ pub(super) fn receive(
     let copies = descriptors
         .iter()
         .map(OwnedFd::try_clone)
-        .collect::<std::io::Result<Vec<_>>>()?;
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|e| descriptor_error(&operation, "rights", "duplicate", e))?;
     let anchors = match receiver.validate(
         &manifest,
         copies,
@@ -332,12 +340,7 @@ pub(super) fn receive(
     let entry = named
         .remove("entry-executable")
         .ok_or_else(|| refusal(&operation, "entry-executable", "anchor-missing"))?;
-    let image = File::open("/proc/self/exe")?;
-    let actual = nix::sys::stat::fstat(&image)?;
-    let expected = nix::sys::stat::fstat(entry.as_fd())?;
-    if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino) {
-        return Err(refusal(&operation, "entry-executable", "anchor-identity"));
-    }
+    check_entry_image(&entry, &operation)?;
     if mode == "_mail-worker-birth" && phase == "retire" {
         let config = named
             .get("configuration")
@@ -351,7 +354,10 @@ pub(super) fn receive(
     let root = named
         .remove("loop-storage")
         .ok_or_else(|| refusal(&operation, "loop-storage", "anchor-missing"))?;
-    let root = File::from(nix::unistd::dup(root.as_fd())?);
+    let root = File::from(
+        nix::unistd::dup(root.as_fd())
+            .map_err(|e| descriptor_error(&operation, "loop-storage", "duplicate", e))?,
+    );
     let root = super::io::child(&root, Path::new("."), true)?;
     Ok(Entered {
         row,
@@ -361,6 +367,16 @@ pub(super) fn receive(
         journal: named.remove("journal-storage"),
         identity_executable: named.remove("identity-executable"),
     })
+}
+
+fn check_entry_image(entry: &Anchor, operation: &str) -> Result<()> {
+    let image = File::open("/proc/self/exe")?;
+    let actual = nix::sys::stat::fstat(&image)?;
+    let expected = nix::sys::stat::fstat(entry.as_fd())?;
+    if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino) {
+        return Err(refusal(operation, "entry-executable", "anchor-identity"));
+    }
+    Ok(())
 }
 
 pub(super) fn relay(anchor: &Anchor, mode: &str) -> Result<(String, OwnedFd)> {
@@ -394,11 +410,21 @@ pub(super) fn receive_child(mode: &str, declaration: &str) -> Result<Anchor> {
     let fd = unsafe {
         let duplicate = libc::fcntl(number, libc::F_DUPFD_CLOEXEC, 3);
         if duplicate == -1 {
-            return Err(refusal(operation, "inherit", "anchor-missing"));
+            return Err(descriptor_error(
+                operation,
+                "inherit",
+                "duplicate",
+                std::io::Error::last_os_error(),
+            ));
         }
         let fd = OwnedFd::from_raw_fd(duplicate);
         if libc::fcntl(number, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
-            return Err(refusal(operation, "inherit", "anchor-missing"));
+            return Err(descriptor_error(
+                operation,
+                "inherit",
+                "close-on-exec",
+                std::io::Error::last_os_error(),
+            ));
         }
         fd
     };
@@ -468,4 +494,48 @@ pub(super) fn child(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// # Panics
+    /// Panics if a failed inherited-descriptor duplication loses its cause.
+    /// ´claim:loophome:inherited-descriptor-system-failure-keeps-its-check´
+    /// ´test:unit:inherited-descriptor-system-failure-keeps-its-check´
+    #[test]
+    fn inherited_descriptor_system_failure_keeps_its_check() {
+        // This intentionally unbacked declaration must fail at fcntl, before
+        // any declared identity can participate in receiver validation.
+        let record = anchor::Record {
+            purpose: "private-storage".into(),
+            slot: i32::MAX.cast_unsigned(),
+            kind: Kind::Directory,
+            device: 0,
+            inode: 0,
+            verifier_uid: 0,
+            owner_uid: 0,
+        };
+        let manifest = Manifest {
+            version: 1,
+            transport: Transport::Inherit,
+            operation: "mail-worker-state".into(),
+            loop_name: String::new(),
+            records: vec![record],
+        };
+        let declaration = serde_json::to_string(&manifest).expect("manifest");
+        let error = receive_child("_mail-worker-state", &declaration)
+            .expect_err("invalid descriptor must refuse")
+            .to_string();
+        assert!(
+            error.contains("anchor-io: operation=mail-worker-state purpose=inherit"),
+            "{error}"
+        );
+        assert!(error.contains("check=duplicate"), "{error}");
+        assert!(
+            error.contains(&std::io::Error::from_raw_os_error(libc::EBADF).to_string()),
+            "{error}"
+        );
+    }
 }

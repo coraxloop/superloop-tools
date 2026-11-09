@@ -343,3 +343,55 @@ fn mail_entry_refuses_configuration_escapes() {
     symlink(&outside, &settings).expect("link");
     refusal(command.output().expect("linked settings"), "anchor-escape:");
 }
+
+/// # Panics
+/// Panics if an inexact mail bundle reaches configuration reads.
+/// ´claim:superloop:mail-entry-requires-exact-records-and-rights-before-configuration´
+/// ´test:integration:mail-entry-requires-exact-records-and-rights-before-configuration´
+#[test]
+fn mail_entry_requires_exact_records_and_rights_before_configuration() {
+    partial_map();
+    let home = fixture();
+    for count in [1, 3] {
+        let mut command = raw(home.path(), |manifest, fds| {
+            if count == 1 {
+                manifest.records.pop();
+            } else {
+                let mut extra = manifest.records[1].clone();
+                extra.slot = 2;
+                extra.purpose = "extra".into();
+                manifest.records.push(extra);
+            }
+            fds.clear();
+        });
+        // A missing input must not mask the manifest's count refusal.
+        let ledger = home.path().join(".config/loops/allocations.toml");
+        let saved = fs::read(&ledger).expect("ledger");
+        fs::remove_file(&ledger).expect("remove ledger");
+        refusal(
+            command.output().expect("record count"),
+            "anchor-declaration: operation=mail-serve purpose=count",
+        );
+        fs::write(&ledger, saved).expect("restore ledger");
+        fs::set_permissions(&ledger, fs::Permissions::from_mode(0o600)).expect("ledger mode");
+    }
+    for (extra, frame) in [
+        (false, "received=1 malformed=false"),
+        (true, "malformed=true"),
+    ] {
+        let mut command = raw(home.path(), |_, fds| {
+            if extra {
+                fds.push(fds[0].try_clone().expect("extra descriptor"));
+            } else {
+                fds.pop();
+            }
+        });
+        let error = refusal(command.output().expect("rights count"), "anchor-transport:");
+        assert!(
+            error.contains("operation=mail-serve purpose=rights"),
+            "{error}"
+        );
+        assert!(error.contains("check=rights-frame"), "{error}");
+        assert!(error.contains(frame), "{error}");
+    }
+}
