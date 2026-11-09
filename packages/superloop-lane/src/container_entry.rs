@@ -77,12 +77,12 @@ pub(crate) const fn credential_client(backend: BoxBackend) -> &'static str {
 fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
     if operation == "driver-report" {
         &REPORT_PURPOSES
-    } else if matches!(operation, "observed-hosts" | "follow" | "exercise-context") {
-        &OBSERVATION_PURPOSES
     } else if matches!(
         operation,
-        "exercise-harvest" | "exercise-home-layout" | "exercise-measure"
+        "observed-hosts" | "follow" | "exercise-context" | "exercise-measure"
     ) {
+        &OBSERVATION_PURPOSES
+    } else if matches!(operation, "exercise-harvest" | "exercise-home-layout") {
         &READER_PURPOSES
     } else if operation == OPERATION {
         if backend == BoxBackend::Claude {
@@ -282,6 +282,10 @@ pub(crate) fn core_pins(
     Ok(pins)
 }
 
+pub(crate) fn reader_needs_git(operation: &str) -> bool {
+    matches!(operation, "exercise-harvest" | "exercise-home-layout")
+}
+
 pub(crate) fn pin_reader(
     operation: &'static str,
     scope: &str,
@@ -302,11 +306,7 @@ pub(crate) fn pin_reader(
     .into_iter()
     .enumerate()
     {
-        if matches!(
-            operation,
-            "observed-hosts" | "driver-report" | "follow" | "exercise-context"
-        ) && purpose == "git-executable"
-        {
+        if purpose == "git-executable" && !reader_needs_git(operation) {
             continue;
         }
         pins.push(

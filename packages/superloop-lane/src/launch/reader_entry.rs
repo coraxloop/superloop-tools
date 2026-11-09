@@ -264,13 +264,10 @@ pub fn serve(args: &[String]) -> Result<String, LaneError> {
     let runs_anchor = next()?;
     let _entry = next()?;
     let hash = next()?;
-    let git = if matches!(
-        mode,
-        "observed-hosts" | "driver-report" | "follow" | "exercise-context"
-    ) {
-        None
-    } else {
+    let git = if container_entry::reader_needs_git(mode) {
         Some(next()?)
+    } else {
+        None
     };
     let configuration = if mode == "driver-report" {
         None

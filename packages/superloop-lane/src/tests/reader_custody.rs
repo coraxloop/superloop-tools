@@ -156,6 +156,39 @@ fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::C
 }
 
 /// # Panics
+/// Panics if a composer transfers unused or missing capabilities.
+fn assert_roles(manifest: &Value, kind: &str) {
+    assert_eq!(
+        manifest["records"].as_array().expect("roles").len(),
+        if matches!(kind, "report" | "locks") {
+            4
+        } else if matches!(kind, "observed" | "follow" | "context" | "measure") {
+            5
+        } else {
+            6
+        }
+    );
+    if kind == "measure" {
+        let roles: Vec<_> = manifest["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .map(|record| record["purpose"].as_str().expect("purpose"))
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                "owner-home",
+                "runs-root",
+                "entry-executable",
+                "hash-executable",
+                "configuration"
+            ]
+        );
+    }
+}
+
+/// # Panics
 /// Panics if the private vector or its observation departs from the named reader contract.
 fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
     let mut request = request(
@@ -173,16 +206,7 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
     }
     let source = request.argv.last_mut().expect("manifest");
     let mut manifest: Value = serde_json::from_str(source).expect("manifest JSON");
-    assert_eq!(
-        manifest["records"].as_array().expect("roles").len(),
-        if matches!(kind, "report" | "locks") {
-            4
-        } else if matches!(kind, "observed" | "follow" | "context") {
-            5
-        } else {
-            6
-        }
-    );
+    assert_roles(&manifest, kind);
     match case {
         "identity" => manifest["records"][0]["inode"] = json!(0),
         "count" => {
