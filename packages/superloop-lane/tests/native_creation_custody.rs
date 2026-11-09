@@ -214,6 +214,23 @@ fn exercise_phases(
             ),
             "{error}"
         );
+        let error = loop_home::mail::worker_provision::hold_active_beneath(
+            home,
+            "alpha",
+            &identity,
+            true,
+            configuration,
+            root,
+            private,
+            executor,
+        )
+        .expect_err("lifetime refuses ambient registry");
+        assert!(
+            error
+                .to_string()
+                .contains("anchor-declaration: operation=mail-binding purpose=registry-override"),
+            "{error}"
+        );
         return;
     }
     let census = || {
@@ -236,6 +253,7 @@ fn exercise_phases(
         assert_eq!(census(), std::collections::BTreeSet::from([identity.uid]));
     }
     census_refusals(home, configuration, root, identity.uid);
+    lifetime_custody(home, &identity, configuration, root, private, executor);
     loop_home::mail::worker_provision::verify_beneath(
         home,
         "alpha",
@@ -262,6 +280,70 @@ fn exercise_phases(
         .contains("unknown creation phase")
     );
 }
+/// # Panics
+/// Panics if a renamed lifetime cannot retain its lock or refuses at the wrong boundary.
+fn lifetime_custody(
+    home: &Path,
+    identity: &loop_home::mail::birth::Identity,
+    configuration: &anchor::Configuration,
+    root: &Anchor,
+    private: &Anchor,
+    executor: &Anchor,
+) {
+    use nix::fcntl::{Flock, FlockArg};
+    let hold = |identity, verify_only| {
+        loop_home::mail::worker_provision::hold_active_beneath(
+            home,
+            "alpha",
+            identity,
+            verify_only,
+            configuration,
+            root,
+            private,
+            executor,
+        )
+    };
+    let storage = home.join(".var/loops/held-alpha");
+    for verify_only in [true, false] {
+        let guard = hold(identity, verify_only).expect("held lifetime after path replacement");
+        let probe = fs::File::open(storage.join(".mail-births")).expect("independent lock probe");
+        let (probe, error) = Flock::lock(probe, FlockArg::LockExclusiveNonblock)
+            .expect_err("lifetime must remain locked after verification");
+        assert_eq!(error, nix::errno::Errno::EWOULDBLOCK);
+        drop(guard);
+        drop(Flock::lock(probe, FlockArg::LockExclusiveNonblock).expect("drop releases lifetime"));
+    }
+    let mut changed = identity.clone();
+    changed.reservation.push_str("-changed");
+    let error = hold(&changed, true).expect_err("changed receipt identity");
+    assert!(
+        error
+            .to_string()
+            .contains("unsafe-storage: worker birth receipt"),
+        "{error}"
+    );
+    let lock = storage.join("private/.config/mail/loop.lock");
+    let saved = lock.with_extension("held");
+    fs::rename(&lock, &saved).expect("remove loop-owned lock");
+    let error = hold(identity, true).expect_err("loop binding must still be verified");
+    assert!(
+        error
+            .to_string()
+            .contains("unsafe-storage: identity provisioning step refused"),
+        "{error}"
+    );
+    assert!(
+        !lock.exists(),
+        "read-only verification must not recreate its lock"
+    );
+    fs::rename(saved, lock).expect("restore loop-owned lock");
+    fs::set_permissions(&storage, fs::Permissions::from_mode(0o731)).expect("widen storage");
+    let error = hold(identity, true).expect_err("received storage revalidated");
+    assert!(error.to_string().contains("anchor-mode"), "{error}");
+    fs::set_permissions(&storage, fs::Permissions::from_mode(0o711)).expect("restore storage");
+    drop(hold(identity, true).expect("restored custody"));
+}
+
 /// # Panics
 /// Panics if missing receipts, malformed receipts or linked history bypass the held census.
 fn census_refusals(home: &Path, configuration: &anchor::Configuration, root: &Anchor, uid: u32) {

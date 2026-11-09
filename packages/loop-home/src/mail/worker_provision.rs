@@ -646,15 +646,7 @@ fn coordinate_beneath(
         .registry
         .row(loop_name, home)
         .map_err(failure)?;
-    root.revalidate()?;
-    private.revalidate()?;
-    executor.revalidate()?;
-    let descriptor = File::from(
-        nix::unistd::dup(std::os::fd::AsFd::as_fd(root)).map_err(|error| {
-            failure(format!("anchor-io: operation={operation} purpose=loop-storage check=descriptor-duplicate: {error}"))
-        })?,
-    );
-    let parent = io::child(&descriptor, Path::new("."), true)?;
+    let parent = held_parent(root, private, executor, operation)?;
     coordinate_with(
         home,
         loop_name,
@@ -667,6 +659,23 @@ fn coordinate_beneath(
         None,
         Some(executor),
     )
+}
+
+fn held_parent(
+    root: &crate::anchor::Anchor,
+    private: &crate::anchor::Anchor,
+    executor: &crate::anchor::Anchor,
+    operation: &str,
+) -> Result<File> {
+    root.revalidate()?;
+    private.revalidate()?;
+    executor.revalidate()?;
+    let descriptor = File::from(
+        nix::unistd::dup(std::os::fd::AsFd::as_fd(root)).map_err(|error| {
+            failure(format!("anchor-io: operation={operation} purpose=loop-storage check=descriptor-duplicate: {error}"))
+        })?,
+    );
+    io::child(&descriptor, Path::new("."), true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -832,16 +841,7 @@ pub(super) fn hold_active(
     )?;
     let row = registered(home, loop_name)?;
     let parent = io::absolute(&row.home, true)?;
-    let births = io::child(&parent, Path::new(".mail-births"), true)?;
-    metadata(&births, 0, 0o700, true)?;
-    let guard = Flock::lock(births, FlockArg::LockExclusive)
-        .map_err(|(_, error)| MailError::from(error))?;
-    if !read_receipts(&guard, 0)?
-        .iter()
-        .any(|receipt| receipt.identity == *identity && !receipt.retired)
-    {
-        return Err(invalid());
-    }
+    let guard = active_receipt(&parent, identity)?;
     let allocations =
         Allocations::read(&home.join(".config/loops/allocations.toml")).map_err(failure)?;
     let service = allocations.mail_uid().ok_or_else(invalid)?;
@@ -854,6 +854,98 @@ pub(super) fn hold_active(
     )?;
     Ok(guard)
 }
+
+/// Keep an active worker lifetime locked beneath receiver-validated custody.
+///
+/// The caller retains this guard across the permanent service identity drop and
+/// delivery verification. Configuration is the entry's validated snapshot; root,
+/// private storage and the identity executable must be from that same bundle.
+/// No owner-home or registry path is reopened, and dropping the guard releases
+/// the lifetime lock. This is the storage prerequisite for anchored reply binding.
+///
+/// # Errors
+/// Refuses an ambient registry override, a non-root namespace caller, changed
+/// custody, an inactive receipt or a changed loop-owned worker binding.
+#[allow(clippy::too_many_arguments)]
+pub fn hold_active_beneath(
+    home: &Path,
+    loop_name: &str,
+    identity: &Identity,
+    verify_only: bool,
+    configuration: &crate::anchor::Configuration,
+    root: &crate::anchor::Anchor,
+    private: &crate::anchor::Anchor,
+    executor: &crate::anchor::Anchor,
+) -> Result<Flock<File>> {
+    const OPERATION: &str = "mail-binding";
+    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+        return Err(failure(format!(
+            "anchor-declaration: operation={OPERATION} purpose=registry-override"
+        )));
+    }
+    let row = configuration
+        .registry
+        .row(loop_name, home)
+        .map_err(failure)?;
+    let parent = held_parent(root, private, executor, OPERATION)?;
+    let phase = if verify_only { "verify-only" } else { "verify" };
+    coordinate_with(
+        home,
+        loop_name,
+        identity,
+        phase,
+        &row,
+        &configuration.allocations,
+        &parent,
+        Some(private),
+        None,
+        Some(executor),
+    )?;
+    hold_active_with(
+        &row,
+        &configuration.allocations,
+        &parent,
+        identity,
+        verify_only,
+        Some((private, executor)),
+    )
+}
+
+fn hold_active_with(
+    row: &crate::LoopRecord,
+    allocations: &Allocations,
+    parent: &File,
+    identity: &Identity,
+    verify_only: bool,
+    private: Option<(&crate::anchor::Anchor, &crate::anchor::Anchor)>,
+) -> Result<Flock<File>> {
+    let guard = active_receipt(parent, identity)?;
+    let service = allocations.mail_uid().ok_or_else(invalid)?;
+    configure_held(
+        row,
+        service,
+        allocations.mail_group(&row.name, None).map_err(failure)?,
+        if verify_only { "verify-only" } else { "verify" },
+        identity,
+        private,
+    )?;
+    Ok(guard)
+}
+
+fn active_receipt(parent: &File, identity: &Identity) -> Result<Flock<File>> {
+    let births = io::child(parent, Path::new(".mail-births"), true)?;
+    metadata(&births, 0, 0o700, true)?;
+    let guard = Flock::lock(births, FlockArg::LockExclusive)
+        .map_err(|(_, error)| MailError::from(error))?;
+    if !read_receipts(&guard, 0)?
+        .iter()
+        .any(|receipt| receipt.identity == *identity && !receipt.retired)
+    {
+        return Err(invalid());
+    }
+    Ok(guard)
+}
+
 fn release_pins(
     home: &Path,
     loop_name: &str,
