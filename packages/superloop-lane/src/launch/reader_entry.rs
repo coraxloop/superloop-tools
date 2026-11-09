@@ -1,4 +1,4 @@
-//! Configuration custody for private harvest and home-layout readers.
+//! Configuration custody for private exercise and host-observation readers.
 use super::exercise;
 use crate::{container_entry, error::LaneError};
 use loop_home::{CommandDescriptors, CommandSpec, IoMode};
@@ -15,6 +15,7 @@ struct Selection<'a> {
 }
 fn operation(word: &str) -> Option<&'static str> {
     match word {
+        "_observed-hosts" => Some("observed-hosts"),
         "_exercise-measure" => Some("exercise-measure"),
         "_exercise-harvest" => Some("exercise-harvest"),
         "_exercise-home-layout" => Some("exercise-home-layout"),
@@ -37,11 +38,16 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
         .first()
         .and_then(|word| operation(word))
         .ok_or_else(|| refused("exercise", "anchor-declaration", "operation"))?;
-    if mode == "exercise-measure" {
+    if matches!(mode, "exercise-measure" | "observed-hosts") {
         let [_, scope, run, option, home] = args else {
             return Err(refused(mode, "anchor-declaration", "vector"));
         };
-        if run != "all" || option != "--owner-home" {
+        let valid_run = if mode == "exercise-measure" {
+            run == "all"
+        } else {
+            crate::valid_run_name(run)
+        };
+        if !valid_run || option != "--owner-home" {
             return Err(refused(mode, "anchor-declaration", "vector"));
         }
         loop_home::validate_name(scope).map_err(|_| refused(mode, "anchor-declaration", "loop"))?;
@@ -167,23 +173,23 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     let runs_anchor = next()?;
     let _entry = next()?;
     let hash = next()?;
-    let git = next()?;
+    let git = if mode == "observed-hosts" {
+        None
+    } else {
+        Some(next()?)
+    };
     let configuration = next()?;
-    let _programs = container_entry::activate_program_map(
-        mode,
-        [
-            (
-                std::path::PathBuf::from("/usr/bin/sha256sum"),
-                std::sync::Arc::new(hash),
-            ),
-            (
-                std::path::PathBuf::from("/usr/bin/git"),
-                std::sync::Arc::new(git),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let mut programs = std::collections::BTreeMap::from([(
+        std::path::PathBuf::from("/usr/bin/sha256sum"),
+        std::sync::Arc::new(hash),
+    )]);
+    if let Some(git) = git {
+        programs.insert(
+            std::path::PathBuf::from("/usr/bin/git"),
+            std::sync::Arc::new(git),
+        );
+    }
+    let _programs = container_entry::activate_program_map(mode, programs);
     let _home = crate::home::activate_private_launch(
         selection.home,
         &home_anchor,
@@ -194,7 +200,9 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     )?;
     let _configuration =
         container_entry::configuration(selection.home, selection.scope, mode, configuration)?;
-    if mode == "exercise-measure" {
+    if mode == "observed-hosts" {
+        super::private_observed_hosts(selection.home, selection.scope, selection.run)
+    } else if mode == "exercise-measure" {
         exercise::private_measure(selection.home, selection.scope)
     } else if mode == "exercise-harvest" {
         exercise::private_harvest_audit(

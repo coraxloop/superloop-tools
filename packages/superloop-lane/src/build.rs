@@ -1182,7 +1182,11 @@ fn hash_bytes(bytes: &[u8], spec: &ChildSpec) -> Result<String, LaneError> {
             // the pathname route keeps its fixed remedy without kernel detail.
             if matches!(
                 error.kind,
-                "container-anchor" | "runtime-anchor" | "creation-anchor" | "exercise-anchor"
+                "container-anchor"
+                    | "runtime-anchor"
+                    | "creation-anchor"
+                    | "exercise-anchor"
+                    | "observation-anchor"
             ) {
                 return error;
             }

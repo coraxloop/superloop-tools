@@ -34,7 +34,15 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
     let digest = crate::build::sha256_bytes(&fs::read(path).expect("record bytes"), home)
         .expect("record digest");
     let identity = format!("{}:{}:{digest}", stat.dev(), stat.ino());
-    for kind in ["harvest", "home-layout", "measure"] {
+    // Recorded from Observation::note/publish by the real proxy writer probe.
+    let observation = runs.join(".observed-R.txt");
+    fs::write(
+        &observation,
+        "mode=observing run=R enforcing=false\napi.example.com:443 connected=1\n",
+    )
+    .expect("recorded proxy output");
+    fs::set_permissions(observation, fs::Permissions::from_mode(0o600)).expect("observation mode");
+    for kind in ["harvest", "home-layout", "measure", "observed"] {
         for case in [
             "plain",
             "replaced",
@@ -51,7 +59,8 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
             "source-large",
         ] {
             if (kind == "measure" && case != "record")
-                || (kind != "measure" && !case.starts_with("source-"))
+                || (kind == "observed" && case != "record" && !case.starts_with("source-"))
+                || (matches!(kind, "harvest" | "home-layout") && !case.starts_with("source-"))
             {
                 measure(home, runs, &identity, kind, case);
             }
@@ -66,11 +75,16 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
 fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::CommandSpec {
     let home_fd = fs::File::open(home).expect("home").into();
     let runs_fd = fs::File::open(runs).expect("runs").into();
-    let body = if kind == "measure" {
+    let body = if matches!(kind, "measure" | "observed") {
         Ok(vec![
-            "_exercise-measure".into(),
+            if kind == "measure" {
+                "_exercise-measure"
+            } else {
+                "_observed-hosts"
+            }
+            .into(),
             "alpha".into(),
-            "all".into(),
+            if kind == "measure" { "all" } else { "R" }.into(),
             "--owner-home".into(),
             home.display().to_string(),
         ])
@@ -111,7 +125,10 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
     );
     let source = request.argv.last_mut().expect("manifest");
     let mut manifest: Value = serde_json::from_str(source).expect("manifest JSON");
-    assert_eq!(manifest["records"].as_array().expect("roles").len(), 6);
+    assert_eq!(
+        manifest["records"].as_array().expect("roles").len(),
+        if kind == "observed" { 5 } else { 6 }
+    );
     match case {
         "identity" => manifest["records"][0]["inode"] = json!(0),
         "count" => {
@@ -191,6 +208,16 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
     if matches!(case, "plain" | "replaced") {
         assert!(output.status.success(), "{kind}/{case}: {stderr}{stdout}");
         let report: Value = serde_json::from_slice(&output.stdout).expect("reader report");
+        if kind == "observed" {
+            assert_eq!(report["mode"], "observing");
+            assert_eq!(report["enforcing"], false);
+            assert_eq!(report["connected_hosts"], json!(["api.example.com"]));
+            assert_eq!(
+                report["attempted_connect_hosts"],
+                json!({"api.example.com":true})
+            );
+            return;
+        }
         if kind == "measure" {
             assert!(
                 report["custody"]["digest"]

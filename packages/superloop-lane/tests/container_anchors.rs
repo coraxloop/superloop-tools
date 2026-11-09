@@ -1094,6 +1094,7 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
         "exercise-harvest",
         "exercise-home-layout",
         "exercise-measure",
+        "observed-hosts",
     ] {
         let mut argv = vec![
             "unshare".into(),
@@ -1106,8 +1107,10 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
             "--owner-home".into(),
             home.to_str().expect("home").into(),
         ];
-        if operation == "exercise-measure" {
-            argv[4] = "all".into();
+        if matches!(operation, "exercise-measure" | "observed-hosts") {
+            if operation == "exercise-measure" {
+                argv[4] = "all".into();
+            }
             argv.drain(5..7);
         }
         let Err(error) =
@@ -1115,7 +1118,14 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
         else {
             panic!("reader composer accepted registry override");
         };
-        assert_eq!(error.kind, "exercise-anchor");
+        assert_eq!(
+            error.kind,
+            if operation == "observed-hosts" {
+                "observation-anchor"
+            } else {
+                "exercise-anchor"
+            }
+        );
         assert!(
             error.detail.contains(&format!(
                 "anchor-declaration: operation={operation} purpose=registry-override"

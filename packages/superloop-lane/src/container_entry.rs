@@ -29,6 +29,13 @@ const PURPOSES: [&str; 8] = [
     "credential-clock",
     "configuration",
 ];
+const OBSERVATION_PURPOSES: [&str; 5] = [
+    "owner-home",
+    "runs-root",
+    "entry-executable",
+    "hash-executable",
+    "configuration",
+];
 const READER_PURPOSES: [&str; 6] = [
     "owner-home",
     "runs-root",
@@ -62,7 +69,9 @@ pub(crate) const fn credential_client(backend: BoxBackend) -> &'static str {
     }
 }
 fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
-    if matches!(
+    if operation == "observed-hosts" {
+        &OBSERVATION_PURPOSES
+    } else if matches!(
         operation,
         "exercise-harvest" | "exercise-home-layout" | "exercise-measure"
     ) {
@@ -93,6 +102,7 @@ pub(crate) fn operation_error(operation: &str, error: impl std::fmt::Display) ->
     let kind = match operation {
         "prepare-runtime" => "runtime-anchor",
         "make-home" => "creation-anchor",
+        "observed-hosts" => "observation-anchor",
         op if op.starts_with("exercise-") => "exercise-anchor",
         _ => "container-anchor",
     };
@@ -282,6 +292,9 @@ pub(crate) fn pin_reader(
     .into_iter()
     .enumerate()
     {
+        if operation == "observed-hosts" && purpose == "git-executable" {
+            continue;
+        }
         pins.push(
             verifier
                 .pin(
@@ -298,7 +311,7 @@ pub(crate) fn pin_reader(
             .pin(
                 &home.0.join(".config/loops"),
                 "configuration",
-                5,
+                u32::try_from(pins.len()).map_err(refusal)?,
                 configuration_policy(),
             )
             .map_err(refusal)?,
@@ -960,6 +973,7 @@ mod tests {
             ("prepare-runtime", "runtime-anchor"),
             ("make-home", "creation-anchor"),
             ("exercise-mounts", "exercise-anchor"),
+            ("observed-hosts", "observation-anchor"),
             (OPERATION, "container-anchor"),
         ] {
             let _guard = activate_program_map(operation, BTreeMap::new());
