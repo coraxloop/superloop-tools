@@ -2236,6 +2236,177 @@ mod tests {
         assert!(due.expect("held directory supplies the source"));
     }
 
+    /// # Panics
+    /// Panics if mapped owner publication loses worker ownership or exposes refresh authority.
+    /// ´test:unit:claude-namespace-publication-keeps-worker-authority-separate´
+    #[test]
+    fn claude_namespace_publication_keeps_worker_authority_separate() {
+        const MARKER: &str = "CLAUDE-NAMESPACE-PUBLICATION-MEASURED";
+        if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
+            claude_namespace_publication();
+            writeln!(std::io::stdout().lock(), "{MARKER}").expect("namespace marker");
+            return;
+        }
+        let mut child = Command::new("/usr/bin/podman")
+            .arg("unshare")
+            .arg(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "credential::tests::claude_namespace_publication_keeps_worker_authority_separate",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_remove("_CONTAINERS_USERNS_CONFIGURED")
+            .env_remove("_CONTAINERS_ROOTLESS_UID")
+            .env("SUPERLOOP_CLAUDE_NAMESPACE_PROOF", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("mapped namespace");
+        let began = std::time::Instant::now();
+        while child.try_wait().expect("namespace status").is_none() {
+            if began.elapsed() > Duration::from_secs(60) {
+                drop(child.kill());
+                drop(child.wait());
+                panic!("namespace publication exceeded 60 seconds");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().expect("namespace output");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains(MARKER) && stdout.contains("1 passed"),
+            "{stdout}"
+        );
+    }
+
+    /// # Panics
+    /// Panics if the real provider and publisher violate custody in the mapped namespace.
+    fn claude_namespace_publication() {
+        assert_eq!(owner_identity(), (0, 0));
+        let root = claude_fixture_root();
+        let owner_home = root.path().join("owner");
+        let runs = root.path().join("runs");
+        for path in [&owner_home, &runs] {
+            fs::create_dir(path).expect("fixture directory");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let _custody = crate::home::activate_private_launch(
+            &owner_home,
+            &File::open(&owner_home).expect("owner"),
+            &runs,
+            &File::open(&runs).expect("runs"),
+            None,
+            0,
+        )
+        .expect("received namespace roots");
+        let expiry = 1_800_000_000_u64;
+        let home = fixture_claude(&owner_home, &claude_document(expiry * 1000));
+        let run = runs.join("worker");
+        fs::create_dir(&run).expect("worker home");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o750)).expect("home mode");
+        let state = run.join(".claude");
+        fs::create_dir(&state).expect("worker state");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("state mode");
+        nix::unistd::chown(&state, Some(Uid::from_raw(3000)), Some(Gid::from_raw(3000)))
+            .expect("distinct mapped worker");
+        prepare_claude_run_at(
+            &home,
+            &run,
+            3000,
+            expiry - 3600,
+            || panic!("current fixture authority must not refresh"),
+            || Ok((expiry - 3600) * 1000),
+        )
+        .expect("mapped preparation");
+        let path = state.join(".credentials.json");
+        let before = fs::metadata(&path).expect("prepared worker");
+        assert_eq!(
+            (before.uid(), before.gid(), before.mode() & 0o777),
+            (3000, 3000, 0o600)
+        );
+        let receipt = publish_claude_round_at(
+            &home,
+            &run,
+            3000,
+            expiry - 10,
+            || claude_namespace_refresh(&home, expiry),
+            || Ok((expiry - 9) * 1000),
+        )
+        .expect("mapped round publication");
+        assert_eq!(receipt.as_object().expect("receipt").len(), 2);
+        let bytes = fs::read(&path).expect("published worker");
+        let metadata = fs::metadata(&path).expect("published identity");
+        assert_eq!(
+            (metadata.uid(), metadata.gid(), metadata.mode() & 0o777),
+            (3000, 3000, 0o600)
+        );
+        assert_ne!(metadata.ino(), before.ino());
+        let held = open_dir(&home, 0, 0, 0o700).expect("held sign-in");
+        with_claude_exercise_snapshot(&held, &home, expiry, |identity, projection, due| {
+            assert!(!due);
+            assert_ne!(identity["inode"], json!(metadata.ino()));
+            assert_eq!(bytes, format!("{projection}\n").as_bytes());
+            assert!(projection.get("mcpOAuth").is_none());
+            assert!(projection["claudeAiOauth"].get("refreshToken").is_none());
+            assert!(
+                projection["claudeAiOauth"]
+                    .get("refreshTokenExpiresAt")
+                    .is_none()
+            );
+            Ok(())
+        })
+        .expect("mapped exercise observation");
+        let error = publish_claude_round_at(
+            &home,
+            &run,
+            3000,
+            expiry + 3600,
+            || Ok(()),
+            || Ok((expiry + 3600) * 1000),
+        )
+        .expect_err("expired stand-in");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(
+            error.detail,
+            "Claude owner program left expired access authority"
+        );
+        assert_eq!(fs::read(&path).expect("unchanged worker"), bytes);
+        assert_eq!(
+            fs::metadata(&path).expect("unchanged inode").ino(),
+            metadata.ino()
+        );
+        assert_eq!(
+            preflight(&owner_home, "alpha", BoxBackend::Claude)
+                .expect_err("public gate remains closed")
+                .kind,
+            "backend-unavailable"
+        );
+    }
+
+    /// # Panics
+    /// Panics if the synthetic owner replacement loses the production refresh lock.
+    fn claude_namespace_refresh(home: &Path, expiry: u64) -> Result<(), LaneError> {
+        let directory = open_dir(home, 0, 0, 0o700)?;
+        let Err(error) = lock_with(&directory, FlockArg::LockExclusiveNonblock) else {
+            panic!("owner refresh lost the lock");
+        };
+        assert_eq!(error.kind, "credential-lock-busy");
+        // Stand-in for the owner's program; no vendor program or live sign-in is used.
+        let mut next = claude_document((expiry + 3600) * 1000);
+        next["claudeAiOauth"]["accessToken"] = json!("B".repeat(108));
+        let staged = home.join(".synthetic-replacement");
+        fs::write(&staged, next.to_string()).expect("synthetic replacement");
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o600)).expect("source mode");
+        fs::rename(staged, home.join(".credentials.json")).expect("owner publication");
+        Ok(())
+    }
+
     fn fixture_claude(home: &Path, document: &Value) -> PathBuf {
         fixture_sign_in(home, &source(1_900_000_000, "unused-codex"));
         let dir = claude_sign_in_dir(home, "alpha");
