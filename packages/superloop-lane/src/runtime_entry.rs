@@ -255,6 +255,12 @@ impl PlanConfiguration {
             .map_err(|error| crate::container_entry::operation_error(self.operation, error))
     }
 
+    pub(crate) fn open_private_directory(&self, relative: &Path) -> Result<OwnedFd, LaneError> {
+        self.directory
+            .open_beneath(relative, directory(Owner::Host, 0o700), 0o700)
+            .map_err(|error| crate::container_entry::operation_error(self.operation, error))
+    }
+
     pub(crate) fn read_generation(
         &self,
         scope: &str,

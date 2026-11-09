@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Gated Claude credential exercise payload observes the locked token-only projection and schema-2 provider evidence without reporting credential-derived digests; namespace and vendor acceptance remain unmeasured (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-credential-exercise-payload``).
+
 - Credential exercise selects one protected backend through the public and private forms, excludes foreign live runs and keeps Claude measurement gated before owner access (``prob:box:claude-boxed-workers``; ``proto:superlooplane:credential-exercise-backend``).
 
 - Add `superloop-capture-admit` for verified capture admission, manifest-bound identities, quota refusal and current/keep/lease-aware pruning (`prob:servers:capture-admit-admits-and-prunes-sealed-generations`).

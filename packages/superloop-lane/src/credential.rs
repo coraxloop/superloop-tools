@@ -472,8 +472,12 @@ fn read_source(owner_home: &Path, loop_name: &str) -> Result<Source, LaneError> 
 fn read_owner_document(path: &Path, filename: &str) -> Result<(Value, FileStamp), LaneError> {
     let owner = owner_identity().0;
     let dir = open_dir(path, owner, owner, 0o700)?;
+    read_owner_file(&dir, filename)
+}
+
+fn read_owner_file(dir: &OwnedFd, filename: &str) -> Result<(Value, FileStamp), LaneError> {
     let file = openat2(
-        &dir,
+        dir,
         filename,
         OpenHow::new()
             .flags(OFlag::O_RDONLY | OFlag::O_CLOEXEC)
@@ -1161,7 +1165,33 @@ impl ClaudeSource {
     }
 }
 
-fn claude_sign_in_dir(owner_home: &Path, loop_name: &str) -> PathBuf {
+/// Observe the validated Claude projection beneath a held sign-in directory while holding its
+/// publication lock. This does not refresh authority or expose a credential-derived digest.
+/// The caller enforces the runtime gate and supplies the directory's custody; `home` only
+/// names the reported source path and is never opened.
+///
+/// # Errors
+///
+/// Refuses unsafe owner custody, malformed source data, or a failed observation.
+pub(crate) fn with_claude_exercise_snapshot<T>(
+    directory: &OwnedFd,
+    home: &Path,
+    now: u64,
+    observe: impl FnOnce(Value, Value, bool) -> Result<T, LaneError>,
+) -> Result<T, LaneError> {
+    let _guard = lock_with(directory, FlockArg::LockExclusive)?;
+    let (document, stamp) = read_owner_file(directory, ".credentials.json")?;
+    let source = ClaudeSource::parse(&document)?;
+    let projection = serde_json::from_slice(&source.worker_file())
+        .map_err(|_| failure("credential-sign-in", "Claude projection cannot be encoded"))?;
+    let owner = owner_identity().0;
+    let identity = json!({"path":home.join(".credentials.json"),"device":stamp.device,
+        "inode":stamp.inode,"uid":owner,"mode":600,
+        "modified_wall_unix_seconds":stamp.modified,"modified_nanoseconds":stamp.modified_nsec});
+    observe(identity, projection, source.needs_refresh(now))
+}
+
+pub(crate) fn claude_sign_in_dir(owner_home: &Path, loop_name: &str) -> PathBuf {
     owner_home
         .join(".config/loops")
         .join(loop_name)
@@ -2165,6 +2195,45 @@ mod tests {
             },
             "mcpOAuth": {"fixture-plugin": {"accessToken": "", "discoveryState": {"oauthMetadataFound": true}}}
         })
+    }
+
+    /// ´test:unit:claude-exercise-snapshot-holds-publication-lock´
+    #[test]
+    fn claude_exercise_snapshot_holds_publication_lock() {
+        let root = tempfile::tempdir().expect("fixture");
+        let document = claude_document(1_800_000_000_000);
+        let home = fixture_claude(root.path(), &document);
+        let owner = owner_identity().0;
+        let held = open_dir(&home, owner, owner, 0o700).expect("held sign-in");
+        let result = with_claude_exercise_snapshot(
+            &held,
+            &home,
+            1_799_999_400,
+            |identity, projection, due| {
+                let directory = open_dir(&home, owner, owner, 0o700)?;
+                let Err(error) = lock_with(&directory, FlockArg::LockExclusiveNonblock) else {
+                    panic!("publication lock is not held");
+                };
+                assert_eq!(error.kind, "credential-lock-busy");
+                assert!(due);
+                assert_eq!(projection["claudeAiOauth"]["accessToken"], "A".repeat(108));
+                assert!(projection["claudeAiOauth"].get("refreshToken").is_none());
+                assert!(projection.get("mcpOAuth").is_none());
+                assert!(identity.get("digest").is_none());
+                assert!(!identity.to_string().contains(&"A".repeat(108)));
+                Ok(())
+            },
+        );
+        result.expect("locked read-only observation");
+        assert_eq!(
+            read_claude_source(&home).expect("unchanged").oauth,
+            document["claudeAiOauth"]
+        );
+        let due = with_claude_exercise_snapshot(&held, &home, 1_799_999_399, |_, _, due| Ok(due));
+        assert!(!due.expect("before margin"));
+        fs::rename(&home, root.path().join("retained")).expect("replace pathname");
+        let due = with_claude_exercise_snapshot(&held, &home, 1_799_999_400, |_, _, due| Ok(due));
+        assert!(due.expect("held directory supplies the source"));
     }
 
     fn fixture_claude(home: &Path, document: &Value) -> PathBuf {

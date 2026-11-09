@@ -689,6 +689,7 @@ fn measured_worker_file(
     home_path: &Path,
     owner: u32,
     worker: u32,
+    backend: BoxBackend,
 ) -> Result<(Value, Value), LaneError> {
     let parent = home_path
         .parent()
@@ -701,10 +702,14 @@ fn measured_worker_file(
         .to_str()
         .ok_or_else(|| LaneError::input("exercise-path", "worker home name is not UTF-8"))?;
     let home = checked_worker_directory(&held, home_name, owner, 0o750)?;
-    let codex = checked_worker_directory(&home, ".codex", worker, 0o700)?;
+    let (state, filename) = match backend {
+        BoxBackend::Codex => (".codex", "auth.json"),
+        BoxBackend::Claude => (".claude", ".credentials.json"),
+    };
+    let vendor = checked_worker_directory(&home, state, worker, 0o700)?;
     let opened = nix::fcntl::openat2(
-        &codex,
-        "auth.json",
+        &vendor,
+        filename,
         nix::fcntl::OpenHow::new()
             .flags(nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC)
             .resolve(
@@ -713,12 +718,13 @@ fn measured_worker_file(
             ),
     )
     .map_err(|error| LaneError::input("exercise-path", format!("worker credential: {error}")))?;
-    let path = home_path.join(".codex/auth.json");
-    measured_open(
+    let path = home_path.join(state).join(filename);
+    measured_open_with(
         fs::File::from(opened),
         &path,
-        &home_path.join(".codex"),
+        &home_path.join(state),
         worker,
+        backend == BoxBackend::Codex,
     )
 }
 
@@ -727,6 +733,16 @@ fn measured_open(
     path: &Path,
     parent: &Path,
     uid: u32,
+) -> Result<(Value, Value), LaneError> {
+    measured_open_with(file, path, parent, uid, true)
+}
+
+fn measured_open_with(
+    file: fs::File,
+    path: &Path,
+    parent: &Path,
+    uid: u32,
+    include_digest: bool,
 ) -> Result<(Value, Value), LaneError> {
     let metadata = file
         .metadata()
@@ -748,13 +764,18 @@ fn measured_open(
     file.take(65_537)
         .read_to_end(&mut bytes)
         .map_err(|error| LaneError::input("exercise-path", error.to_string()))?;
-    let digest = build::sha256_bytes(&bytes, parent)?;
+    let digest = include_digest
+        .then(|| build::sha256_bytes(&bytes, parent))
+        .transpose()?;
     let document = serde_json::from_slice(&bytes)
         .map_err(|error| LaneError::input("exercise-path", error.to_string()))?;
-    Ok((
-        json!({"path":path,"device":metadata.dev(),"inode":metadata.ino(),"uid":metadata.uid(),"mode":600,"digest":digest,"modified_wall_unix_seconds":metadata.mtime()}),
-        document,
-    ))
+    let mut identity = json!({"path":path,"device":metadata.dev(),"inode":metadata.ino(),"uid":metadata.uid(),"mode":600,"modified_wall_unix_seconds":metadata.mtime()});
+    if let Some(digest) = digest {
+        identity["digest"] = digest.into();
+    } else {
+        identity["modified_nanoseconds"] = metadata.mtime_nsec().into();
+    }
+    Ok((identity, document))
 }
 
 fn compared(custody: &Value, worker: &Value, projection_digest: &str, token_only: bool) -> Value {
@@ -762,6 +783,9 @@ fn compared(custody: &Value, worker: &Value, projection_digest: &str, token_only
 }
 
 fn changes(previous: Option<&Value>, current: &Value) -> Value {
+    if current["backend"] == "claude" {
+        return json!({"state":"unmeasured","reason":"metadata and projection equality do not prove token rotation or worker reload"});
+    }
     let Some(previous) = previous else {
         return json!({"state":"no-prior-sample"});
     };
@@ -905,9 +929,13 @@ fn run_with(
         .map(|record| record["run"].clone())
         .collect::<Vec<_>>();
     let scan_wall = wall()?;
+    let refresh_trigger = match backend {
+        BoxBackend::Codex => "access JWT within ten minutes of expiry",
+        BoxBackend::Claude => "recorded expiresAt within ten minutes of expiry",
+    };
     if dry_run {
         return Ok(
-            json!({"schema":1,"command":"exercise","backend":backend.name(),"loop":loop_name,"dry_run":true,"live_runs":names,"refresh_trigger":"access JWT within ten minutes of expiry","forced_refresh_available":false,"checks":["owner custody and worker token file identities","protected helper publication evidence","simultaneous live helpers","token-only projection"],"walls":{"started":started_wall,"scan":scan_wall},"changed":false,"wall_seconds":begun.elapsed().as_secs_f64()}),
+            json!({"schema":1,"command":"exercise","backend":backend.name(),"loop":loop_name,"dry_run":true,"live_runs":names,"refresh_trigger":refresh_trigger,"forced_refresh_available":false,"checks":["owner custody and worker token file identities","protected helper publication evidence","simultaneous live helpers","token-only projection"],"walls":{"started":started_wall,"scan":scan_wall},"changed":false,"wall_seconds":begun.elapsed().as_secs_f64()}),
         );
     }
     if live.is_empty() {
@@ -1074,6 +1102,9 @@ pub fn private_measure(
         .runs_root
         .as_deref()
         .ok_or_else(|| LaneError::input("exercise-grant", "runs_root is absent"))?;
+    if backend == BoxBackend::Claude {
+        return measure_claude(owner_home, loop_name, root, wall()?);
+    }
     let source_path = config.join("lanes/codex/auth.json");
     let owner = Uid::effective().as_raw();
     let configuration = crate::runtime_entry::plan_configuration(owner_home)?.ok_or_else(|| {
@@ -1108,7 +1139,7 @@ pub fn private_measure(
                 "custody source enters a collectable home",
             ));
         }
-        let (worker, document) = measured_worker_file(home_path, owner, uid)?;
+        let (worker, document) = measured_worker_file(home_path, owner, uid, BoxBackend::Codex)?;
         let token_only = document["auth_mode"] == "chatgptAuthTokens"
             && document["tokens"]["refresh_token"] == "";
         let comparison = compared(&custody, &worker, &expected, token_only);
@@ -1128,6 +1159,107 @@ pub fn private_measure(
     }
     Ok(
         json!({"schema":1,"custody":custody,"projection_digest":expected,"refresh_due":refresh_due,"overlap":runs.len() >= 2,"runs":runs,"checked_wall_unix_seconds":wall()?}),
+    )
+}
+
+fn claude_comparison(
+    custody: &Value,
+    worker: &Value,
+    expected: &Value,
+    document: &Value,
+) -> Result<Value, LaneError> {
+    let same_inode = custody["device"] == worker["device"] && custody["inode"] == worker["inode"];
+    if same_inode || document != expected {
+        return Err(LaneError::input(
+            "exercise-credential",
+            "Claude worker is not a separate token-only projection",
+        ));
+    }
+    Ok(
+        json!({"same_device":custody["device"] == worker["device"],"same_inode":false,
+        "worker_matches_projection":true,"worker_token_only":true}),
+    )
+}
+
+fn claude_evidence(document: &Value) -> Result<Value, LaneError> {
+    if document["schema"] != 2
+        || document["backend"] != "claude"
+        || document.get("host").is_some()
+        || document["provider"]
+            != json!({"kind":"owner-program","program":"/usr/bin/claude",
+            "required_sha256":crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256})
+    {
+        return Err(LaneError::input(
+            "exercise-evidence",
+            "Claude helper evidence has a foreign provider",
+        ));
+    }
+    Ok(
+        json!({"schema":2,"backend":"claude","state":document["state"],"provider":document["provider"]}),
+    )
+}
+
+fn measure_claude(
+    owner_home: &Path,
+    loop_name: &str,
+    root: &Path,
+    now: u64,
+) -> Result<Value, LaneError> {
+    let configuration = crate::runtime_entry::plan_configuration(owner_home)?.ok_or_else(|| {
+        LaneError::input(
+            "exercise-anchor",
+            "anchor-missing: operation=exercise-measure purpose=configuration",
+        )
+    })?;
+    let directory = configuration.open_private_directory(&Path::new(loop_name).join("claude"))?;
+    let sign_in = crate::credential::claude_sign_in_dir(owner_home, loop_name);
+    let owner = Uid::effective().as_raw();
+    let held = home::pin_parent(root, owner)?;
+    crate::credential::with_claude_exercise_snapshot(
+        &directory,
+        &sign_in,
+        now,
+        |custody, expected, refresh_due| {
+            let mut runs = Vec::new();
+            for record in candidates(root, loop_name, BoxBackend::Claude)? {
+                let run = record["run"].as_str().unwrap_or_default();
+                let uid = record["worker_uid"]
+                    .as_u64()
+                    .and_then(|uid| u32::try_from(uid).ok())
+                    .ok_or_else(|| LaneError::input("exercise-record", "worker uid is absent"))?;
+                let home_path =
+                    Path::new(record["plan"]["home"].as_str().ok_or_else(|| {
+                        LaneError::input("exercise-record", "worker home is absent")
+                    })?);
+                let source_path = Path::new(custody["path"].as_str().unwrap_or_default());
+                if !home_path.starts_with(owner_home) || source_path.starts_with(home_path) {
+                    return Err(LaneError::input(
+                        "exercise-path",
+                        "custody source enters a collectable home",
+                    ));
+                }
+                let (worker, document) =
+                    measured_worker_file(home_path, owner, uid, BoxBackend::Claude)?;
+                let comparison = claude_comparison(&custody, &worker, &expected, &document)?;
+                let evidence = match crate::credential::read_evidence(&held, run, owner)? {
+                    Some(crate::credential::EvidenceObservation::Current(document)) => {
+                        claude_evidence(&document)?
+                    }
+                    Some(crate::credential::EvidenceObservation::Historical(_)) => {
+                        return Err(LaneError::input(
+                            "exercise-evidence",
+                            "Claude helper evidence is historical",
+                        ));
+                    }
+                    None => json!({"state":"not-published"}),
+                };
+                runs.push(json!({"run":run,"worker":worker,"comparison":comparison,"helper_evidence":evidence}));
+            }
+            Ok(
+                json!({"schema":2,"backend":"claude","custody":custody,"refresh_due":refresh_due,
+            "overlap":runs.len() >= 2,"runs":runs,"checked_wall_unix_seconds":now}),
+            )
+        },
     )
 }
 
@@ -1194,6 +1326,105 @@ mod tests {
         assert_eq!(
             measured_evidence(&root, "R", owner)
                 .expect_err("unsafe parent")
+                .kind,
+            "exercise-path"
+        );
+    }
+
+    /// ´test:unit:claude-exercise-refuses-worker-authority-and-foreign-evidence´
+    #[test]
+    fn claude_exercise_refuses_worker_authority_and_foreign_evidence() {
+        let custody = json!({"device":1,"inode":2});
+        let worker = json!({"device":1,"inode":3});
+        let expected = json!({"claudeAiOauth":{"accessToken":"synthetic"}});
+        let result =
+            claude_comparison(&custody, &worker, &expected, &expected).expect("separate worker");
+        assert_eq!(result["worker_token_only"], true);
+        for field in ["refreshToken", "refreshTokenExpiresAt"] {
+            let mut foreign = expected.clone();
+            foreign["claudeAiOauth"][field] = "synthetic-owner-authority".into();
+            let error =
+                claude_comparison(&custody, &worker, &expected, &foreign).expect_err("owner field");
+            assert_eq!(error.kind, "exercise-credential");
+            assert!(!error.detail.contains("synthetic"));
+        }
+        let mut plugin = expected.clone();
+        plugin["mcpOAuth"] = json!({});
+        assert!(claude_comparison(&custody, &worker, &expected, &plugin).is_err());
+        assert!(claude_comparison(&custody, &custody, &expected, &expected).is_err());
+        let evidence = json!({"schema":2,"backend":"claude","state":"published","provider":{
+            "kind":"owner-program","program":"/usr/bin/claude",
+            "required_sha256":crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256}});
+        assert_eq!(claude_evidence(&evidence).expect("provider"), evidence);
+        for field in ["schema", "backend", "provider", "host"] {
+            let mut foreign = evidence.clone();
+            foreign[field] = "foreign".into();
+            assert_eq!(
+                claude_evidence(&foreign)
+                    .expect_err("foreign provider")
+                    .kind,
+                "exercise-evidence"
+            );
+        }
+        assert_eq!(
+            changes(None, &json!({"backend":"claude"}))["state"],
+            "unmeasured"
+        );
+        let absent = Path::new("/synthetic-absent");
+        assert_eq!(
+            measure_claude(absent, "alpha", absent, 0)
+                .expect_err("configuration custody")
+                .kind,
+            "exercise-anchor"
+        );
+    }
+
+    /// ´test:unit:claude-exercise-file-metadata-excludes-credential-digests´
+    #[test]
+    fn claude_exercise_file_metadata_excludes_credential_digests() {
+        let fixture = tempfile::NamedTempFile::new().expect("fixture");
+        let document = json!({"claudeAiOauth":{"accessToken":"A".repeat(108)}});
+        fs::write(fixture.path(), document.to_string()).expect("synthetic worker");
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o600)).expect("mode");
+        let (identity, read) = measured_open_with(
+            fixture.reopen().expect("open"),
+            fixture.path(),
+            fixture.path().parent().expect("parent"),
+            Uid::effective().as_raw(),
+            false,
+        )
+        .expect("metadata");
+        assert_eq!(read, document);
+        assert!(identity.get("digest").is_none());
+        assert!(identity["modified_nanoseconds"].is_i64());
+        assert!(!identity.to_string().contains(&"A".repeat(108)));
+    }
+
+    /// ´test:unit:claude-exercise-worker-leaf-uses-selected-directory´
+    #[test]
+    fn claude_exercise_worker_leaf_uses_selected_directory() {
+        let root = tempfile::tempdir().expect("fixture");
+        let home = root.path().join("worker");
+        fs::create_dir(&home).expect("worker home");
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o750)).expect("home mode");
+        let state = home.join(".claude");
+        fs::create_dir(&state).expect("Claude state");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("state mode");
+        let path = state.join(".credentials.json");
+        let document = json!({"claudeAiOauth":{"accessToken":"A".repeat(108)}});
+        fs::write(&path, document.to_string()).expect("synthetic credential");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("file mode");
+        let uid = Uid::effective().as_raw();
+        let (identity, read) =
+            measured_worker_file(&home, uid, uid, BoxBackend::Claude).expect("selected leaf");
+        assert_eq!(read, document);
+        assert_eq!(identity["path"], path.to_string_lossy().as_ref());
+        assert!(identity.get("digest").is_none());
+        fs::rename(&path, state.join("foreign")).expect("rename");
+        std::os::unix::fs::symlink("foreign", &path).expect("symlink");
+        assert_eq!(
+            measured_worker_file(&home, uid, uid, BoxBackend::Claude)
+                .expect_err("linked leaf")
                 .kind,
             "exercise-path"
         );
