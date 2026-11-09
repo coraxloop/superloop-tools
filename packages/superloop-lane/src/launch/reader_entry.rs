@@ -18,6 +18,8 @@ fn operation(word: &str) -> Option<&'static str> {
         "_observed-hosts" => Some("observed-hosts"),
         "_driver-report" => Some("driver-report"),
         "_checkpoint" => Some("checkpoint"),
+        "_harvest" => Some("harvest"),
+        "_harvest-recover" => Some("harvest-recover"),
         "_follow-private" => Some("follow"),
         "_exercise-context-private" => Some("exercise-context"),
         "_exercise-measure" => Some("exercise-measure"),
@@ -44,6 +46,17 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
         .ok_or_else(|| refused("exercise", "anchor-declaration", "operation"))?;
     if mode == "checkpoint" {
         let (_, home) = super::checkpoint::parse_private_argv(args)
+            .map_err(|_| refused(mode, "anchor-declaration", "vector"))?;
+        return Ok(Selection {
+            operation: mode,
+            scope: &args[1],
+            run: &args[2],
+            identity: "",
+            home,
+        });
+    }
+    if matches!(mode, "harvest" | "harvest-recover") {
+        let (_, home, _) = super::harvest::parse_private_argv(args)
             .map_err(|_| refused(mode, "anchor-declaration", "vector"))?;
         return Ok(Selection {
             operation: mode,
@@ -242,8 +255,10 @@ pub fn serve(args: &[String]) -> Result<String, LaneError> {
         .and_then(|word| operation(word))
         .unwrap_or("exercise");
     if args.len() < 9
-        || (matches!(mode, "follow" | "exercise-context" | "checkpoint")
-            && !args.iter().any(|word| word == "--anchor-manifest"))
+        || (matches!(
+            mode,
+            "follow" | "exercise-context" | "checkpoint" | "harvest" | "harvest-recover"
+        ) && !args.iter().any(|word| word == "--anchor-manifest"))
     {
         return Err(refused(mode, "anchor-missing", "manifest"));
     }
@@ -319,6 +334,14 @@ fn dispatch(selection: &Selection<'_>, body: &[String]) -> Result<serde_json::Va
     if mode == "checkpoint" {
         let (request, home) = super::checkpoint::parse_private_argv(body)?;
         return super::checkpoint::private_run(home, &request);
+    }
+    if matches!(mode, "harvest" | "harvest-recover") {
+        let (request, home, recovery) = super::harvest::parse_private_argv(body)?;
+        return if recovery {
+            super::harvest::private_recover(home, &request)
+        } else {
+            super::harvest::private_run(home, &request)
+        };
     }
     if mode == "driver-report" {
         super::driver_report::private(body)

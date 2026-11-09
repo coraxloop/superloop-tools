@@ -47,6 +47,55 @@ pub fn private_harvest_argv(
     Ok(argv)
 }
 
+pub(crate) fn parse_private_argv(
+    args: &[String],
+) -> Result<(HarvestRequest, &Path, bool), LaneError> {
+    let [
+        kind,
+        loop_name,
+        run,
+        object_flag,
+        object,
+        home_flag,
+        owner_home,
+        rest @ ..,
+    ] = args
+    else {
+        return Err(LaneError::input(
+            "harvest-private",
+            "private harvest form is incomplete",
+        ));
+    };
+    if (kind != "_harvest" && kind != "_harvest-recover")
+        || object_flag != "--gate-object"
+        || home_flag != "--owner-home"
+    {
+        return Err(LaneError::input(
+            "harvest-private",
+            "private harvest form is invalid",
+        ));
+    }
+    let mut words = vec![
+        loop_name.clone(),
+        run.clone(),
+        object_flag.clone(),
+        object.clone(),
+    ];
+    if rest == ["--dry-run"] {
+        words.push("--dry-run".into());
+    } else if !rest.is_empty() {
+        return Err(LaneError::input(
+            "harvest-private",
+            "private harvest form is invalid",
+        ));
+    }
+    Ok((
+        HarvestRequest::parse(&words)?,
+        Path::new(owner_home),
+        kind == "_harvest-recover",
+    ))
+}
+
 fn valid_object(object: &str) -> bool {
     [40, 64].contains(&object.len())
         && object

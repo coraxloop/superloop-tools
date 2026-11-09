@@ -79,55 +79,6 @@ fn parse_checkout_private_argv(
     Ok((request, Path::new(owner_home)))
 }
 
-fn parse_harvest_private_argv(
-    args: &[String],
-) -> Result<(launch::harvest::HarvestRequest, &Path, bool), LaneError> {
-    let [
-        kind,
-        loop_name,
-        run,
-        object_flag,
-        object,
-        home_flag,
-        owner_home,
-        rest @ ..,
-    ] = args
-    else {
-        return Err(LaneError::input(
-            "harvest-private",
-            "private harvest form is incomplete",
-        ));
-    };
-    if (kind != "_harvest" && kind != "_harvest-recover")
-        || object_flag != "--gate-object"
-        || home_flag != "--owner-home"
-    {
-        return Err(LaneError::input(
-            "harvest-private",
-            "private harvest form is invalid",
-        ));
-    }
-    let mut words = vec![
-        loop_name.clone(),
-        run.clone(),
-        object_flag.clone(),
-        object.clone(),
-    ];
-    if rest == ["--dry-run"] {
-        words.push("--dry-run".into());
-    } else if !rest.is_empty() {
-        return Err(LaneError::input(
-            "harvest-private",
-            "private harvest form is invalid",
-        ));
-    }
-    Ok((
-        launch::harvest::HarvestRequest::parse(&words)?,
-        Path::new(owner_home),
-        kind == "_harvest-recover",
-    ))
-}
-
 fn parse_import_private_argv(
     args: &[String],
 ) -> Result<(launch::imports::MarkImportedRequest, &Path), LaneError> {
@@ -190,9 +141,6 @@ fn validate_bite_private_argv(args: &[String]) -> Result<(), LaneError> {
         Some("_checkout") => {
             parse_checkout_private_argv(args)?;
         }
-        Some("_harvest" | "_harvest-recover") => {
-            parse_harvest_private_argv(args)?;
-        }
         Some("_mark-imported") => {
             parse_import_private_argv(args)?;
         }
@@ -216,8 +164,6 @@ fn bind_private_launch_args<'a>(
             "_choose-uid"
                 | "_settle-evidence"
                 | "_make-home"
-                | "_harvest"
-                | "_harvest-recover"
                 | "_mark-imported"
                 | "_checkout"
                 | "_bind-mail"
@@ -790,20 +736,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
     if args.first().is_some_and(|value| value == "harvest") {
         let request = launch::harvest::HarvestRequest::parse(&args[1..])?;
         let report = launch::harvest::run(&caller_home()?, &request)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_harvest" || value == "_harvest-recover")
-    {
-        let (request, owner_home, recovery) = parse_harvest_private_argv(args)?;
-        let report = if recovery {
-            launch::harvest::private_recover(owner_home, &request)?
-        } else {
-            launch::harvest::private_run(owner_home, &request)?
-        };
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);

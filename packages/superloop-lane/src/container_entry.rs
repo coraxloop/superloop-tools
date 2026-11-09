@@ -84,7 +84,7 @@ fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
         &OBSERVATION_PURPOSES
     } else if matches!(
         operation,
-        "exercise-harvest" | "exercise-home-layout" | "checkpoint"
+        "exercise-harvest" | "exercise-home-layout" | "checkpoint" | "harvest" | "harvest-recover"
     ) {
         &READER_PURPOSES
     } else if operation == OPERATION {
@@ -117,6 +117,7 @@ pub(crate) fn operation_error(operation: &str, error: impl std::fmt::Display) ->
         "driver-report" => "driver-report-private",
         "follow" => "follow-private",
         "checkpoint" => "checkpoint-private",
+        "harvest" | "harvest-recover" => "harvest-private",
         op if op.starts_with("exercise-") => "exercise-anchor",
         _ => "container-anchor",
     };
@@ -289,7 +290,7 @@ pub(crate) fn core_pins(
 pub(crate) fn reader_needs_git(operation: &str) -> bool {
     matches!(
         operation,
-        "exercise-harvest" | "exercise-home-layout" | "checkpoint"
+        "exercise-harvest" | "exercise-home-layout" | "checkpoint" | "harvest" | "harvest-recover"
     )
 }
 
@@ -951,6 +952,8 @@ pub(crate) fn receive_for(
                                 | "exercise-home-layout"
                                 | "exercise-measure"
                                 | "checkpoint"
+                                | "harvest"
+                                | "harvest-recover"
                         ) && matches!(*purpose, "hash-executable" | "git-executable"))
                     {
                         Owner::RootFile
@@ -1015,6 +1018,8 @@ mod tests {
             ("driver-report", "driver-report-private"),
             ("follow", "follow-private"),
             ("checkpoint", "checkpoint-private"),
+            ("harvest", "harvest-private"),
+            ("harvest-recover", "harvest-private"),
             ("exercise-context", "exercise-anchor"),
             (OPERATION, "container-anchor"),
         ] {

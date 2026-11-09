@@ -17,6 +17,40 @@ fn private_exercise_readers_retain_configuration() {
 }
 
 /// # Panics
+/// Panics if report or lock reads lose their received custody or named refusals.
+/// (´claim:superlooplane:private-reports-retain-received-custody´)
+/// ´test:crate:private-reports-retain-received-custody´
+#[test]
+fn private_reports_retain_received_custody() {
+    runtime_preparation::proof("SUPERLOOP_REPORT_PROOF", "PRIVATE-READERS-MEASURED");
+}
+
+/// # Panics
+/// Panics if harvest or recovery reopens replaced configuration or loses a bundle check.
+/// (´claim:superlooplane:harvest-entry-retains-configuration´)
+/// ´test:crate:harvest-entry-retains-configuration´
+#[test]
+fn harvest_entry_retains_configuration() {
+    runtime_preparation::proof("SUPERLOOP_HARVEST_PROOF", "PRIVATE-READERS-MEASURED");
+}
+
+fn selected_readers() -> &'static [&'static str] {
+    if std::env::var_os("SUPERLOOP_REPORT_PROOF").is_some() {
+        &["report", "locks"]
+    } else if std::env::var_os("SUPERLOOP_HARVEST_PROOF").is_some() {
+        &["private-harvest", "harvest-recover"]
+    } else {
+        &[
+            "harvest",
+            "home-layout",
+            "measure",
+            "observed",
+            "checkpoint",
+        ]
+    }
+}
+
+/// # Panics
 /// Panics if either production reader loses its operation, configuration or reservation binding.
 pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
     let mut record = helper_service::prepare(home, runs, program);
@@ -42,16 +76,8 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
     )
     .expect("recorded proxy output");
     fs::set_permissions(observation, fs::Permissions::from_mode(0o600)).expect("observation mode");
-    for kind in [
-        "harvest",
-        "home-layout",
-        "measure",
-        "observed",
-        "report",
-        "locks",
-        "checkpoint",
-    ] {
-        if kind == "checkpoint" {
+    for &kind in selected_readers() {
+        if matches!(kind, "checkpoint" | "private-harvest" | "harvest-recover") {
             for name in [".prepare-R.lock", ".letter-R.lock"] {
                 let path = runs.join(name);
                 fs::write(&path, b"").expect("checkpoint lock");
@@ -68,6 +94,7 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
             "short-frame",
             "excess-frame",
             "count",
+            "surplus-count",
             "operation",
             "record",
             "override",
@@ -77,7 +104,9 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
             "source-link",
             "source-large",
         ] {
-            if (kind == "checkpoint" && case != "record" && !case.starts_with("source-"))
+            if (matches!(kind, "checkpoint" | "private-harvest" | "harvest-recover")
+                && case != "record"
+                && !case.starts_with("source-"))
                 || (kind == "measure" && case != "record")
                 || (kind == "observed" && case != "record" && !case.starts_with("source-"))
                 || (matches!(kind, "harvest" | "home-layout" | "report" | "locks")
@@ -87,8 +116,10 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
             }
         }
     }
-    live_measure(home, runs, &mut record);
-    follow_round(home, runs, &mut record);
+    if std::env::var_os("SUPERLOOP_READER_PROOF").is_some() {
+        live_measure(home, runs, &mut record);
+        follow_round(home, runs, &mut record);
+    }
     writeln!(std::io::stdout().lock(), "PRIVATE-READERS-MEASURED").expect("measured marker");
 }
 
@@ -97,7 +128,9 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
 fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::CommandSpec {
     let home_fd = fs::File::open(home).expect("home").into();
     let runs_fd = fs::File::open(runs).expect("runs").into();
-    let body = if kind == "checkpoint" {
+    let body = if matches!(kind, "private-harvest" | "harvest-recover") {
+        private_harvest_words(home, kind == "harvest-recover")
+    } else if kind == "checkpoint" {
         exercise_checkpoint_words(home)
     } else if kind == "measure" {
         Ok(vec![
@@ -177,6 +210,16 @@ fn exercise_checkpoint_words(home: &Path) -> Result<Vec<String>, crate::LaneErro
     crate::launch::checkpoint::private_checkpoint_argv(&request, home, None)
 }
 
+fn private_harvest_words(home: &Path, recovery: bool) -> Result<Vec<String>, crate::LaneError> {
+    let request = crate::launch::harvest::HarvestRequest {
+        loop_name: "alpha".into(),
+        run: "R".into(),
+        gate_object: "a".repeat(40),
+        dry_run: !recovery,
+    };
+    crate::launch::harvest::private_harvest_argv(&request, home, recovery)
+}
+
 /// # Panics
 /// Panics if a composer transfers unused or missing capabilities.
 fn assert_roles(manifest: &Value, kind: &str) {
@@ -233,6 +276,13 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
         "identity" => manifest["records"][0]["inode"] = json!(0),
         "count" => {
             manifest["records"].as_array_mut().expect("records").pop();
+        }
+        "surplus-count" => {
+            let records = manifest["records"].as_array_mut().expect("records");
+            let mut extra = records.last().expect("configuration").clone();
+            extra["slot"] = json!(records.len());
+            extra["purpose"] = json!("surplus-configuration");
+            records.push(extra);
         }
         "operation" => manifest["operation"] = json!("foreign-operation"),
         _ => {}
@@ -309,6 +359,8 @@ fn replace_tool(request: &mut loop_home::CommandSpec, home: &Path, runs: &Path, 
         "follow" => "follow",
         "context" => "exercise-context",
         "checkpoint" => "checkpoint",
+        "private-harvest" => "harvest",
+        "harvest-recover" => "harvest-recover",
         _ => "driver-report",
     };
     let home_fd = fs::File::open(home).expect("home").into();
@@ -391,6 +443,15 @@ fn change_source(home: &Path, case: &str) -> Option<Vec<u8>> {
 fn observation(output: &std::process::Output, kind: &str, case: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
+    if matches!(kind, "private-harvest" | "harvest-recover") && matches!(case, "plain" | "replaced")
+    {
+        assert!(!output.status.success(), "unsettled harvest accepted");
+        assert!(
+            stderr.contains("harvest-record: phase is preparing; expected settled"),
+            "{stderr}"
+        );
+        return;
+    }
     if kind == "checkpoint" && matches!(case, "plain" | "replaced") {
         assert!(!output.status.success(), "unsettled checkpoint accepted");
         assert!(
@@ -429,7 +490,7 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
         };
         assert!(stderr.contains(expected), "{kind}/{case}: {stderr}{stdout}");
         let boundary = match case {
-            "count" => "purpose=count",
+            "count" | "surplus-count" => "purpose=count",
             "operation" => "purpose=bundle",
             "override" => "purpose=registry-override",
             "vector" => "purpose=vector",
