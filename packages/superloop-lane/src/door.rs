@@ -4897,10 +4897,7 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(reply["reason"], "door-request-record-refusal");
             assert_eq!(reply["request_id"], rows[0].id());
-            assert_eq!(
-                frame_read(&mut peer).expect("worker receives refusal"),
-                reply
-            );
+            assert_eq!(fixture_final_frame(&mut peer), reply);
             assert!(rows[0].value()["agent_status"].is_null());
             assert!(rows[0].value()["state"].is_null());
             assert_incomplete(&fixture, rows[0].id());
@@ -4969,7 +4966,7 @@ mod tests {
                 Instant::now(),
             )
             .expect("learned request");
-            let frame = frame_read(&mut peer).expect("final frame");
+            let frame = fixture_final_frame(&mut peer);
             assert_eq!(frame["would_do"], reply["would_do"]);
             assert_eq!(frame["reason"], "door-complete");
             assert_eq!(frame["status"], 0);
@@ -5204,7 +5201,7 @@ mod tests {
             if disconnect {
                 drop(client);
             } else {
-                let final_frame = frame_read(&mut client).expect("deadline frame");
+                let final_frame = fixture_final_frame(&mut client);
                 assert_eq!(final_frame["reason"], "door-request-deadline");
                 assert_eq!(final_frame["queue_state"], "deadline");
             }
@@ -5356,7 +5353,7 @@ mod tests {
                 true,
             );
             let mut client = send_probe(&socket, 2000);
-            let reply = frame_read(&mut client).expect("incomplete enforce frame");
+            let reply = fixture_final_frame(&mut client);
             server.join().expect("service").expect("reply");
             assert_eq!(reply["reason"], "door-record-incomplete");
             assert_eq!(reply["status"], 125);
@@ -5458,7 +5455,7 @@ mod tests {
             if answer == "disconnect" {
                 drop(client);
             } else {
-                let reply = frame_read(&mut client).expect("wait error frame");
+                let reply = fixture_final_frame(&mut client);
                 assert_eq!(
                     reply["reason"],
                     if answer == "read" {

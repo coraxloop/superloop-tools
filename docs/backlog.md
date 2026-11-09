@@ -872,6 +872,8 @@ Folded from ``open:homes:claude-lane-home-sandbox-redirects``, whose question th
 
 (2026-11-09, gate b86 and lane r002g79's step an) Part (p) grows to five single-frame reads: `door_decided_enforce_record_failures_remain_incomplete` (``door.rs`` line 5361) and `door_repeated_learned_hits_skip_agent` (line 4973) join the three named above, and `door_wait_errors_send_final_and_record_incomplete`, one of those three, went red intermittently in that lane's bar, the first reply frame's reason null, and passed exact reruns on the candidate and both bases.
 
+(2026-11-09, lane r002g84, remaining credit-frame readers) Part (p) is met: the merge-failure, wait-deadline, wait-error, decided-enforce and learned-hit regressions read through the same bounded final-frame helper as part (f), preserving every outcome assertion and validating each progress frame. All these reads share one 5 s window; it bounds the read rather than restarting a timeout per credit, as part (i) records (``test:unit:door-final-reply-follows-lock-wait-credits``, of superloop-lane).
+
 ### Tests under load · `sec:toolsbacklog:open-gates`
 
 **Problem (Timing-bound tests of the lane gateway fail under load in gates of candidates that do not touch it)** · `prob:gates:gate-timing-flakes`
