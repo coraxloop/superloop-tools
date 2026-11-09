@@ -29,6 +29,12 @@ const PURPOSES: [&str; 8] = [
     "credential-clock",
     "configuration",
 ];
+const REPORT_PURPOSES: [&str; 4] = [
+    "owner-home",
+    "runs-root",
+    "entry-executable",
+    "hash-executable",
+];
 const OBSERVATION_PURPOSES: [&str; 5] = [
     "owner-home",
     "runs-root",
@@ -69,7 +75,9 @@ pub(crate) const fn credential_client(backend: BoxBackend) -> &'static str {
     }
 }
 fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
-    if operation == "observed-hosts" {
+    if operation == "driver-report" {
+        &REPORT_PURPOSES
+    } else if operation == "observed-hosts" {
         &OBSERVATION_PURPOSES
     } else if matches!(
         operation,
@@ -103,6 +111,7 @@ pub(crate) fn operation_error(operation: &str, error: impl std::fmt::Display) ->
         "prepare-runtime" => "runtime-anchor",
         "make-home" => "creation-anchor",
         "observed-hosts" => "observation-anchor",
+        "driver-report" => "driver-report-private",
         op if op.starts_with("exercise-") => "exercise-anchor",
         _ => "container-anchor",
     };
@@ -292,7 +301,7 @@ pub(crate) fn pin_reader(
     .into_iter()
     .enumerate()
     {
-        if operation == "observed-hosts" && purpose == "git-executable" {
+        if matches!(operation, "observed-hosts" | "driver-report") && purpose == "git-executable" {
             continue;
         }
         pins.push(
@@ -306,16 +315,18 @@ pub(crate) fn pin_reader(
                 .map_err(refusal)?,
         );
     }
-    pins.push(
-        verifier
-            .pin(
-                &home.0.join(".config/loops"),
-                "configuration",
-                u32::try_from(pins.len()).map_err(refusal)?,
-                configuration_policy(),
-            )
-            .map_err(refusal)?,
-    );
+    if operation != "driver-report" {
+        pins.push(
+            verifier
+                .pin(
+                    &home.0.join(".config/loops"),
+                    "configuration",
+                    u32::try_from(pins.len()).map_err(refusal)?,
+                    configuration_policy(),
+                )
+                .map_err(refusal)?,
+        );
+    }
     let manifest = Manifest {
         version: 1,
         transport: Transport::Rights,
@@ -915,11 +926,23 @@ pub(crate) fn receive_for(
             } else if slot < 2 {
                 directory_policy(operation, &descriptors[slot], purpose)?
             } else {
-                executable_policy(if slot >= 5 || record.owner_uid == 0 {
-                    Owner::RootFile
-                } else {
-                    Owner::Host
-                })
+                executable_policy(
+                    if slot >= 5
+                        || record.owner_uid == 0
+                        || (matches!(
+                            operation,
+                            "observed-hosts"
+                                | "driver-report"
+                                | "exercise-harvest"
+                                | "exercise-home-layout"
+                                | "exercise-measure"
+                        ) && matches!(*purpose, "hash-executable" | "git-executable"))
+                    {
+                        Owner::RootFile
+                    } else {
+                        Owner::Host
+                    },
+                )
             },
             alias_group: None,
         });
@@ -974,6 +997,7 @@ mod tests {
             ("make-home", "creation-anchor"),
             ("exercise-mounts", "exercise-anchor"),
             ("observed-hosts", "observation-anchor"),
+            ("driver-report", "driver-report-private"),
             (OPERATION, "container-anchor"),
         ] {
             let _guard = activate_program_map(operation, BTreeMap::new());

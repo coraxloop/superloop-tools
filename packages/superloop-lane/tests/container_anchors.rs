@@ -1095,6 +1095,7 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
         "exercise-home-layout",
         "exercise-measure",
         "observed-hosts",
+        "driver-report",
     ] {
         let mut argv = vec![
             "unshare".into(),
@@ -1113,6 +1114,9 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
             }
             argv.drain(5..7);
         }
+        if operation == "driver-report" {
+            argv[5..9].rotate_right(2);
+        }
         let Err(error) =
             superloop_lane::launch::reader_entry::command(program, &argv, home, fd, home, fd)
         else {
@@ -1122,6 +1126,8 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
             error.kind,
             if operation == "observed-hosts" {
                 "observation-anchor"
+            } else if operation == "driver-report" {
+                "driver-report-private"
             } else {
                 "exercise-anchor"
             }

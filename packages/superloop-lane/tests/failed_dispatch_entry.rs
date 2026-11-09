@@ -334,10 +334,21 @@ impl ReportFixture {
         executable(
             &self.fixture.podman,
             &format!(
-                "#!/bin/sh\nif [ \"$1 $2\" = 'image inspect' ]; then printf '%s\\n' '{}'; exit 0; fi\nif [ \"$1\" = ps ]; then exit 0; fi\nif [ \"$1\" = unshare ]; then shift; exec env LD_PRELOAD='{}' REPORT_FIXTURE_PRIVATE=1 REPORT_FIXTURE_RUN='{}' {extra} \"$@\"; fi\nexit 9\n",
-                "a".repeat(64),
-                self.library.display(),
-                self.run.display()
+                concat!(
+                    "#!/bin/sh\n",
+                    "if [ \"$1 $2\" = 'image inspect' ]; then printf '%s\\n' '{image}'; exit 0; fi\n",
+                    "if [ \"$1\" = ps ]; then exit 0; fi\n",
+                    "if [ \"$1\" = unshare ]; then\n  shift\n",
+                    "  exec /usr/bin/env -u LD_PRELOAD -u REPORT_FIXTURE_PRIVATE \\\n",
+                    "    -u _CONTAINERS_USERNS_CONFIGURED -u _CONTAINERS_ROOTLESS_UID \\\n",
+                    "    /usr/bin/podman unshare /usr/bin/env LD_PRELOAD='{library}' \\\n",
+                    "    REPORT_FIXTURE_PRIVATE=1 REPORT_FIXTURE_RUN='{run}' {extra} \"$@\"\n",
+                    "fi\nexit 9\n"
+                ),
+                image = "a".repeat(64),
+                library = self.library.display(),
+                run = self.run.display(),
+                extra = extra,
             ),
         );
     }

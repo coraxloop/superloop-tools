@@ -42,12 +42,22 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
     )
     .expect("recorded proxy output");
     fs::set_permissions(observation, fs::Permissions::from_mode(0o600)).expect("observation mode");
-    for kind in ["harvest", "home-layout", "measure", "observed"] {
+    for kind in [
+        "harvest",
+        "home-layout",
+        "measure",
+        "observed",
+        "report",
+        "locks",
+    ] {
         for case in [
             "plain",
             "replaced",
             "mode",
             "identity",
+            "program-owner",
+            "short-frame",
+            "excess-frame",
             "count",
             "operation",
             "record",
@@ -60,7 +70,8 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
         ] {
             if (kind == "measure" && case != "record")
                 || (kind == "observed" && case != "record" && !case.starts_with("source-"))
-                || (matches!(kind, "harvest" | "home-layout") && !case.starts_with("source-"))
+                || (matches!(kind, "harvest" | "home-layout" | "report" | "locks")
+                    && !case.starts_with("source-"))
             {
                 measure(home, runs, &identity, kind, case);
             }
@@ -88,6 +99,20 @@ fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::C
             "--owner-home".into(),
             home.display().to_string(),
         ])
+    } else if matches!(kind, "report" | "locks") {
+        let mut words = vec![
+            "_driver-report".into(),
+            "alpha".into(),
+            "R".into(),
+            "--owner-home".into(),
+            home.display().to_string(),
+            "--expect-record".into(),
+            identity.into(),
+        ];
+        if kind == "locks" {
+            words.push("--locks".into());
+        }
+        Ok(words)
     } else if kind == "harvest" {
         exercise::harvest_private_argv("alpha", "R", identity, home)
     } else {
@@ -123,11 +148,20 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
         },
         kind,
     );
+    if case == "program-owner" {
+        replace_tool(&mut request, home, runs, kind);
+    }
     let source = request.argv.last_mut().expect("manifest");
     let mut manifest: Value = serde_json::from_str(source).expect("manifest JSON");
     assert_eq!(
         manifest["records"].as_array().expect("roles").len(),
-        if kind == "observed" { 5 } else { 6 }
+        if matches!(kind, "report" | "locks") {
+            4
+        } else if kind == "observed" {
+            5
+        } else {
+            6
+        }
     );
     match case {
         "identity" => manifest["records"][0]["inode"] = json!(0),
@@ -138,6 +172,13 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
         _ => {}
     }
     *source = manifest.to_string();
+    if matches!(case, "short-frame" | "excess-frame") {
+        replace_frame(
+            &mut request,
+            manifest["records"].as_array().expect("roles").len(),
+            case,
+        );
+    }
     let config = home.join(".config/loops");
     let retained = home.join(".config/retained-loops");
     if case == "replaced" {
@@ -148,8 +189,19 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
             .expect("replacement registry");
     }
     if case == "mode" {
-        fs::set_permissions(&config, fs::Permissions::from_mode(0o750))
-            .expect("widen configuration");
+        fs::set_permissions(
+            if matches!(kind, "report" | "locks") {
+                runs
+            } else {
+                &config
+            },
+            fs::Permissions::from_mode(if matches!(kind, "report" | "locks") {
+                0o770
+            } else {
+                0o750
+            }),
+        )
+        .expect("widen configuration");
     }
     if case == "missing" {
         request.argv.truncate(request.argv.len() - 4);
@@ -174,8 +226,73 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
         fs::remove_dir_all(&config).expect("remove replacement");
         fs::rename(&retained, &config).expect("restore held configuration");
     }
+    fs::set_permissions(runs, fs::Permissions::from_mode(0o711)).expect("restore runs mode");
     fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).expect("restore mode");
     observation(&output, kind, case);
+}
+
+/// # Panics
+/// Panics if a host-owned tool cannot be declared honestly to the real receiver.
+fn replace_tool(request: &mut loop_home::CommandSpec, home: &Path, runs: &Path, kind: &str) {
+    use loop_home::anchor::{HostVerifier, Manifest, Owner};
+    let operation = match kind {
+        "harvest" => "exercise-harvest",
+        "home-layout" => "exercise-home-layout",
+        "measure" => "exercise-measure",
+        "observed" => "observed-hosts",
+        _ => "driver-report",
+    };
+    let home_fd = fs::File::open(home).expect("home").into();
+    let runs_fd = fs::File::open(runs).expect("runs").into();
+    let mut bundle = crate::container_entry::pin_reader(
+        operation,
+        "alpha",
+        (home, &home_fd),
+        (runs, &runs_fd),
+        &runtime_preparation::binary(),
+    )
+    .expect("reader pins");
+    let path = home.join("host-hashing-program");
+    fs::copy("/usr/bin/sha256sum", &path).expect("native tool copy");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("host tool mode");
+    let pin = HostVerifier::current()
+        .expect("host verifier")
+        .for_operation(operation)
+        .pin(
+            &path,
+            "hash-executable",
+            3,
+            crate::container_entry::executable_policy(Owner::Host),
+        )
+        .expect("honest host-owned tool");
+    let mut manifest = Manifest::parse(&bundle.manifest).expect("manifest");
+    manifest.records[3] = pin.record();
+    bundle.descriptors[3] = pin.into_fd();
+    *request.argv.last_mut().expect("manifest argument") =
+        serde_json::to_string(&manifest).expect("declaration");
+    let (sender, input) = std::os::unix::net::UnixStream::pair().expect("tool channel");
+    loop_home::anchor::transport::send(&sender, &bundle.descriptors).expect("host tool frame");
+    request.descriptors = loop_home::CommandDescriptors::default().with_input(input.into());
+}
+
+/// # Panics
+/// Panics if the malformed frame cannot reach the production receiver.
+fn replace_frame(request: &mut loop_home::CommandSpec, count: usize, case: &str) {
+    let count = if case == "short-frame" {
+        count - 1
+    } else {
+        count + 1
+    };
+    let descriptors: Vec<_> = (0..count)
+        .map(|_| {
+            fs::File::open("/dev/null")
+                .expect("frame descriptor")
+                .into()
+        })
+        .collect();
+    let (sender, input) = std::os::unix::net::UnixStream::pair().expect("frame channel");
+    loop_home::anchor::transport::send(&sender, &descriptors).expect("malformed count frame");
+    request.descriptors = loop_home::CommandDescriptors::default().with_input(input.into());
 }
 
 /// # Panics
@@ -208,6 +325,18 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
     if matches!(case, "plain" | "replaced") {
         assert!(output.status.success(), "{kind}/{case}: {stderr}{stdout}");
         let report: Value = serde_json::from_slice(&output.stdout).expect("reader report");
+        if matches!(kind, "report" | "locks") {
+            assert_eq!(
+                report["refusal"]["kind"],
+                if kind == "report" {
+                    "repin-door-state"
+                } else {
+                    "retire-uncertain"
+                },
+                "{report}"
+            );
+            return;
+        }
         if kind == "observed" {
             assert_eq!(report["mode"], "observing");
             assert_eq!(report["enforcing"], false);
@@ -242,8 +371,12 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
             "source-link" => "anchor-escape",
             "source-large" => "exercise-path",
             "identity" => "anchor-identity",
+            "program-owner" => "anchor-owner",
+            "short-frame" | "excess-frame" => "anchor-transport",
             "record" => {
-                if kind == "harvest" {
+                if matches!(kind, "report" | "locks") {
+                    "reservation differs from public report request"
+                } else if kind == "harvest" {
                     "exercise-harvest-record"
                 } else {
                     "exercise-home-layout-record"
@@ -257,6 +390,7 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
             "operation" => "purpose=bundle",
             "override" => "purpose=registry-override",
             "vector" => "purpose=vector",
+            "short-frame" | "excess-frame" => "purpose=rights check=rights-frame",
             _ => "",
         };
         assert!(stderr.contains(boundary), "{kind}/{case}: {stderr}{stdout}");

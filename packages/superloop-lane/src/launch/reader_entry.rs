@@ -1,4 +1,4 @@
-//! Configuration custody for private exercise and host-observation readers.
+//! Operation-bound custody for private exercise, report and observation readers.
 use super::exercise;
 use crate::{container_entry, error::LaneError};
 use loop_home::{CommandDescriptors, CommandSpec, IoMode};
@@ -16,13 +16,14 @@ struct Selection<'a> {
 fn operation(word: &str) -> Option<&'static str> {
     match word {
         "_observed-hosts" => Some("observed-hosts"),
+        "_driver-report" => Some("driver-report"),
         "_exercise-measure" => Some("exercise-measure"),
         "_exercise-harvest" => Some("exercise-harvest"),
         "_exercise-home-layout" => Some("exercise-home-layout"),
         _ => None,
     }
 }
-/// Identify the private readers requiring configuration custody.
+/// Identify private readers requiring an operation-bound capability bundle.
 #[must_use]
 pub fn handles(args: &[String]) -> bool {
     args.first().is_some_and(|word| operation(word).is_some())
@@ -59,6 +60,9 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
             home: Path::new(home),
         });
     }
+    if mode == "driver-report" {
+        return report_selection(args);
+    }
     if args.len() != 7 {
         return Err(refused(mode, "anchor-declaration", "vector"));
     }
@@ -76,7 +80,32 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
     })
 }
 
-/// Bind the reader's configuration alongside the existing home, runs and entry identities.
+fn report_selection(args: &[String]) -> Result<Selection<'_>, LaneError> {
+    let body = if args.last().is_some_and(|word| word == "--locks") {
+        &args[..args.len() - 1]
+    } else {
+        args
+    };
+    let [_, scope, run, home_flag, home, record_flag, identity] = body else {
+        return Err(refused("driver-report", "anchor-declaration", "vector"));
+    };
+    if home_flag != "--owner-home"
+        || record_flag != "--expect-record"
+        || !crate::valid_run_name(run)
+        || loop_home::validate_name(scope).is_err()
+    {
+        return Err(refused("driver-report", "anchor-declaration", "vector"));
+    }
+    Ok(Selection {
+        operation: "driver-report",
+        scope,
+        run,
+        identity,
+        home: Path::new(home),
+    })
+}
+
+/// Bind reader tools and, when required, configuration alongside home, runs and entry.
 /// # Errors
 /// Refuses unsafe custody, ambient registry overrides or a mismatched private vector.
 pub fn command(
@@ -133,7 +162,7 @@ pub fn command(
     })
 }
 
-/// Receive the exact reader bundle before any plan or reservation read.
+/// Receive the exact reader bundle before any plan, report or reservation read.
 /// # Errors
 /// Refuses missing, substituted or mismatched capabilities and unsupported namespace identity.
 pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
@@ -173,12 +202,16 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     let runs_anchor = next()?;
     let _entry = next()?;
     let hash = next()?;
-    let git = if mode == "observed-hosts" {
+    let git = if matches!(mode, "observed-hosts" | "driver-report") {
         None
     } else {
         Some(next()?)
     };
-    let configuration = next()?;
+    let configuration = if mode == "driver-report" {
+        None
+    } else {
+        Some(next()?)
+    };
     let mut programs = std::collections::BTreeMap::from([(
         std::path::PathBuf::from("/usr/bin/sha256sum"),
         std::sync::Arc::new(hash),
@@ -198,9 +231,17 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
         None,
         0,
     )?;
-    let _configuration =
-        container_entry::configuration(selection.home, selection.scope, mode, configuration)?;
-    if mode == "observed-hosts" {
+    let _configuration = configuration
+        .map(|anchor| container_entry::configuration(selection.home, selection.scope, mode, anchor))
+        .transpose()?;
+    dispatch(&selection, body)
+}
+
+fn dispatch(selection: &Selection<'_>, body: &[String]) -> Result<serde_json::Value, LaneError> {
+    let mode = selection.operation;
+    if mode == "driver-report" {
+        super::driver_report::private(body)
+    } else if mode == "observed-hosts" {
         super::private_observed_hosts(selection.home, selection.scope, selection.run)
     } else if mode == "exercise-measure" {
         exercise::private_measure(selection.home, selection.scope)

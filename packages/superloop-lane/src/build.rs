@@ -1187,6 +1187,7 @@ fn hash_bytes(bytes: &[u8], spec: &ChildSpec) -> Result<String, LaneError> {
                     | "creation-anchor"
                     | "exercise-anchor"
                     | "observation-anchor"
+                    | "driver-report-private"
             ) {
                 return error;
             }

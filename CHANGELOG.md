@@ -122,6 +122,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Driver reports and retirement lock reads retain operation-bound home, runs, entry and hashing custody across namespace entry; reader tool ownership and exact descriptor frames refuse before state reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Private observed-host reads retain operation-bound configuration custody through namespace entry, preserving the protected reservation and observation checks when the configuration pathname is replaced (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-exercise-readers-retain-configuration``).
 
 - Private credential measurement retains configuration, reservation and helper-evidence custody across namespace entry and pathname replacement, preserving worker token checks and refusing a disappearing census entry (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-exercise-readers-retain-configuration``; ``claim:superlooplane:reservation-census-stays-beneath-received-root``).

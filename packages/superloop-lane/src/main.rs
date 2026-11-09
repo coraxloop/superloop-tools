@@ -301,11 +301,6 @@ fn bind_private_launch_args<'a>(
         Some(
             "_choose-uid"
                 | "_settle-evidence"
-                | "_driver-report"
-                | "_exercise-measure"
-                | "_exercise-home-layout"
-                | "_exercise-harvest"
-                | "_observed-hosts"
                 | "_make-home"
                 | "_checkpoint"
                 | "_harvest"
@@ -347,15 +342,6 @@ fn bind_private_launch_args<'a>(
             "verified-prefix",
             "private launch requires bound home, runs root and letter descriptors",
         ));
-    }
-    if body
-        .first()
-        .is_some_and(|word| word == "_exercise-home-layout")
-    {
-        launch::exercise::parse_home_layout_private_argv(body)?;
-    }
-    if body.first().is_some_and(|word| word == "_exercise-harvest") {
-        launch::exercise::parse_harvest_private_argv(body)?;
     }
     validate_bite_private_argv(body)?;
     let mut homes = body.windows(2).filter(|pair| pair[0] == "--owner-home");
@@ -1020,12 +1006,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
-    if args.first().is_some_and(|value| value == "_driver-report") {
-        let report = launch::driver_report::private(args)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
     if args
         .first()
         .is_some_and(|value| value == "_settle-evidence")
@@ -1075,51 +1055,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
     }
     if args
         .first()
-        .is_some_and(|value| value == "_exercise-measure")
-    {
-        let [_, loop_name, run, option, owner_home] = args else {
-            return Err(LaneError::input(
-                "exercise-private",
-                "private exercise form is incomplete",
-            ));
-        };
-        if run != "all" || option != "--owner-home" {
-            return Err(LaneError::input(
-                "exercise-private",
-                "private exercise needs all and --owner-home",
-            ));
-        }
-        let report = launch::exercise::private_measure(Path::new(owner_home), loop_name)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-home-layout")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::parse_home_layout_private_argv(args)?;
-        let report =
-            launch::exercise::private_home_layout(owner_home, loop_name, run, expected_record)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-harvest")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::parse_harvest_private_argv(args)?;
-        let report =
-            launch::exercise::private_harvest_audit(owner_home, loop_name, run, expected_record)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
         .is_some_and(|value| value == "_exercise-layout-canary")
     {
         let [_, directory, worker, group] = args else {
@@ -1135,24 +1070,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .parse::<u32>()
             .map_err(|error| LaneError::input("exercise-layout-canary", error.to_string()))?;
         let report = launch::exercise::worker_layout_canary(directory, worker, group)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_observed-hosts") {
-        let [_, loop_name, run, option, owner_home] = args else {
-            return Err(LaneError::input(
-                "hosts-private",
-                "private observation form is incomplete",
-            ));
-        };
-        if option != "--owner-home" {
-            return Err(LaneError::input(
-                "hosts-private",
-                "private observation needs --owner-home",
-            ));
-        }
-        let report = launch::private_observed_hosts(Path::new(owner_home), loop_name, run)?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
