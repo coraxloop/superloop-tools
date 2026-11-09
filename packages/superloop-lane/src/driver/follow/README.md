@@ -56,6 +56,12 @@ The first record of every successful document has these fields in this order. It
 
 The sidecar has one grammar: `awaiting`, context, budget, and expiry are optional ordered suffixes on the same line, so older sidecars still parse. A partial or malformed budget or expiry suffix is rejected; `superloop-lane driver follow` discards an invalid capture and publishes `monitor: null` when no valid capture qualifies.
 
+**Protocol (Completed driver observation)** · `proto:workermonitor:completed-driver-observation`
+
+When no backend lock exists and a run report is present, the state reader may use the lifecycle's ``.finished-step.json``. The input is bounded to 64 KiB and its seven-member shape is checked. Its schema, backend lock name, step-name bytes and start-marker bytes must match the current step. An existing malformed or inaccessible lock prevents this fallback. The retained driver object has `alive: false` even if either PID is now live, and the embedded monitor text uses the normal monitor parser. Active-lock selection and budget-notice delivery continue to use current locks alone. A missing, malformed or mismatched completion snapshot does not supply historical state.
+
+Compatibility: schema-two capture fields are unchanged; a completed step with the new advisory publication now retains driver and monitor objects where an absent active lock formerly gave nulls. The snapshot is observation only and supplies no authority to resume, signal or reclaim a process.
+
 ## Standard-output data plane · `sec:workermonitor:standard-output-data-plane`
 
 Every completed invocation writes exactly one compact JSON document followed by LF. The envelope has schema version 2. The following examples show state alone, state with a delta, state with completion, and all three records in order:

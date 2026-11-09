@@ -836,10 +836,14 @@ fn sample_state_cost(run_dir: &Path, offset: u64, cost: &Cost) -> String {
     )
     .expect("writing to a String cannot fail");
 
-    let driver = read_driver(run_dir);
-    let monitor = driver.and_then(|(_, pid, _, _)| read_monitor(run_dir, pid));
+    let DriverObservation {
+        driver,
+        monitor,
+        finished,
+    } = driver_observation(run_dir);
     if let Some((name, pid, child, driver_alive)) = driver {
-        let alive = driver_alive || child.is_some_and(monitor_lock::pid_live_from_proc);
+        let alive =
+            !finished && (driver_alive || child.is_some_and(monitor_lock::pid_live_from_proc));
         write!(
             &mut state,
             "{{\"lock\":{},\"pid\":{pid},\"child\":{},\"alive\":{alive}}}",
@@ -967,6 +971,98 @@ fn read_trimmed(path: &Path) -> Option<String> {
     fs::read_to_string(path)
         .ok()
         .map(|raw| raw.trim().to_owned())
+}
+
+struct DriverObservation {
+    driver: Option<monitor_lock::DriverLock>,
+    monitor: Option<MonitorState>,
+    finished: bool,
+}
+
+fn driver_observation(run_dir: &Path) -> DriverObservation {
+    let live_driver = read_driver(run_dir);
+    let completed = live_driver
+        .is_none()
+        .then(|| read_finished_state(run_dir))
+        .flatten();
+    let driver = live_driver.or_else(|| completed.as_ref().map(|(driver, _)| *driver));
+    let monitor = if let Some((_, monitor)) = &completed {
+        monitor
+            .as_deref()
+            .and_then(|bytes| parse_monitor(bytes).ok())
+    } else {
+        driver.and_then(|(_, pid, _, _)| read_monitor(run_dir, pid))
+    };
+    DriverObservation {
+        driver,
+        monitor,
+        finished: completed.is_some(),
+    }
+}
+
+// A completed snapshot is scoped to this exact step and is never a live lock.
+fn read_finished_state(run_dir: &Path) -> Option<(monitor_lock::DriverLock, Option<Vec<u8>>)> {
+    let names = [".codex-lane.lock", ".claude-lane.lock"];
+    if names
+        .iter()
+        .any(|name| match fs::symlink_metadata(run_dir.join(name)) {
+            Ok(_) => true,
+            Err(error) => error.kind() != io::ErrorKind::NotFound,
+        })
+        || !run_dir.join("run-report.txt").is_file()
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    File::open(run_dir.join(".finished-step.json"))
+        .ok()?
+        .take(65_537)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 65_536 {
+        return None;
+    }
+    let record: Value = serde_json::from_slice(&bytes).ok()?;
+    let object = record.as_object()?;
+    if object.len() != 7
+        || ![
+            "schema",
+            "step",
+            "started_at",
+            "lock",
+            "pid",
+            "child",
+            "monitor",
+        ]
+        .iter()
+        .all(|key| object.contains_key(*key))
+    {
+        return None;
+    }
+    if record["schema"] != 1
+        || record["step"].as_str()? != fs::read_to_string(run_dir.join(".step-name")).ok()?
+        || record["started_at"].as_str()? != fs::read_to_string(run_dir.join(".started-at")).ok()?
+    {
+        return None;
+    }
+    let name = names
+        .into_iter()
+        .find(|name| Some(*name) == record["lock"].as_str())?;
+    let pid = u32::try_from(record["pid"].as_u64()?).ok()?;
+    let child = if record["child"].is_null() {
+        None
+    } else {
+        Some(u32::try_from(record["child"].as_u64()?).ok()?)
+    };
+    if pid == 0 || child == Some(0) {
+        return None;
+    }
+    let monitor = if record["monitor"].is_null() {
+        None
+    } else {
+        Some(record["monitor"].as_str()?.as_bytes().to_vec())
+    };
+    Some(((name, pid, child, false), monitor))
 }
 
 fn read_driver(run_dir: &Path) -> Option<monitor_lock::DriverLock> {

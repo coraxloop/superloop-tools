@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt::Write as _;
@@ -1705,6 +1706,7 @@ fn undo_preparation(run_dir: &Path, prior: &str, step: &str) -> io::Result<()> {
         (RATE_LIMIT_FILE, RATE_LIMIT_FILE),
         (CAPACITY_ATTEMPTS_FILE, CAPACITY_ATTEMPTS_FILE),
         ("kill-evidence.txt", "kill-evidence.txt"),
+        ("finished-step.json", ".finished-step.json"),
     ] {
         restore_optional(&history.join(archived), &run_dir.join(live))?;
     }
@@ -2333,6 +2335,9 @@ fn execute_with_clock(
         execution_settings::annotate(&mut report, evidence);
     }
     let publication = atomic_write(&run_dir.join("run-report.txt"), &report);
+    if publication.is_ok() {
+        let _ignored = lock.record_finished(&run_dir);
+    }
     drop(lock);
     if publication.is_err() {
         let mut failed_report = report_bytes(
@@ -2684,6 +2689,11 @@ fn prepare_resume_with_size<F: FnOnce(&Path) -> io::Result<u64>>(
     )
     .map_err(|_error| PreparationFailure::Runtime { live: false })?;
     archive_optional(
+        &run_dir.join(".finished-step.json"),
+        &history.join("finished-step.json"),
+    )
+    .map_err(|_error| PreparationFailure::Runtime { live: false })?;
+    archive_optional(
         &run_dir.join("backend-settings.json"),
         &history.join("backend-settings.json"),
     )
@@ -2739,7 +2749,8 @@ fn prepare_resume_with_size<F: FnOnce(&Path) -> io::Result<u64>>(
     .and_then(|()| write_started_at(run_dir))
     .map_err(|_error| PreparationFailure::Runtime { live: false })?;
 
-    remove_optional(run_dir.join(".feed-offset"))
+    remove_optional(run_dir.join(".finished-step.json"))
+        .and_then(|()| remove_optional(run_dir.join(".feed-offset")))
         .and_then(|()| remove_optional(run_dir.join("last-message.txt")))
         .and_then(|()| remove_optional(run_dir.join(RECONSTRUCTED_FILE)))
         .and_then(|()| remove_optional(run_dir.join(RATE_LIMIT_FILE)))
@@ -3808,7 +3819,9 @@ fn run_child(
             Some((context_state, context_turn, &context_at)),
             Some((readings, expiry, decision)),
         );
-        let _ignored = atomic_write(&monitor_file, &sidecar);
+        if atomic_write(&monitor_file, &sidecar).is_ok() {
+            lock.monitor.replace(Some(monitor_file.clone()));
+        }
         if let Some(status) = child_status {
             if let Some(error) = context_error {
                 return Err(format!("context record: {error}"));
@@ -4890,6 +4903,7 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 
 struct StepLock {
     path: PathBuf,
+    monitor: RefCell<Option<PathBuf>>,
 }
 
 impl StepLock {
@@ -4904,7 +4918,32 @@ impl StepLock {
                 file.sync_all()
             })
             .map_err(|_error| ())?;
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            monitor: RefCell::new(None),
+        })
+    }
+
+    // Advisory completion evidence, never authority to resume or reclaim a PID.
+    fn record_finished(&self, run_dir: &Path) -> io::Result<()> {
+        let bytes = fs::read(&self.path)?;
+        let (pid, child) = parse_lock(&bytes)
+            .ok_or_else(|| io::Error::other("completed driver lock is malformed"))?;
+        let monitor = self
+            .monitor
+            .borrow()
+            .as_ref()
+            .and_then(|path| fs::read_to_string(path).ok());
+        let record = serde_json::json!({
+            "schema":1, "step":fs::read_to_string(run_dir.join(STEP_NAME_FILE))?,
+            "started_at":fs::read_to_string(run_dir.join(STARTED_AT_FILE))?,
+            "lock":self.path.file_name().and_then(OsStr::to_str),
+            "pid":pid, "child":child, "monitor":monitor
+        });
+        atomic_write(
+            &run_dir.join(".finished-step.json"),
+            record.to_string().as_bytes(),
+        )
     }
 
     /// Name the spawned child beneath the driver that holds this lock.

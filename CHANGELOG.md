@@ -138,6 +138,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Completed driver captures retain advisory driver and monitor state after lock removal, bound to the current step and start marker and never treated as live PID authority (``prob:lanes:claude-lane-finished-state-null-driver``; ``proto:lanelifecycle:completed-step-observation``; ``proto:workermonitor:completed-driver-observation``).
+
 - Harvest recovery carries only its five used capabilities and requires no Git executable; checkpoint restores its relative-home refusal before descriptor receipt and has a focused coverage witness, and the namespace recovery fixture receives its hashing capability from the host (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:harvest-entry-retains-configuration``; ``claim:superlooplane:checkpoint-entry-retains-configuration``).
 
 - Private import marking retains configuration, hashing and Git custody across namespace entry before validating the preserved checkpoint and import journal (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:import-entry-retains-configuration``).

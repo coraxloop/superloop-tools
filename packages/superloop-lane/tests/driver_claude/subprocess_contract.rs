@@ -2520,3 +2520,123 @@ fn pure_mode_constructs_and_refuses_contaminated_homes() {
     assert_eq!(refusal.status.code(), Some(2));
     assert_eq!(contaminated.read("argv"), Vec::<u8>::new());
 }
+
+/// Completed state reads the real driver's publication without live PID authority.
+/// # Panics
+/// Panics if the driver fixture or its completed-state reader violates the contract.
+/// ´test:integration:claude-finished-state-retains-driver-and-monitor´
+#[test]
+fn claude_finished_state_retains_driver_and_monitor() {
+    let harness = Harness::new("finished-state");
+    let result = harness.run(&[OsStr::new("-t60"), OsStr::new("hello")]);
+    assert_eq!(result.status.code(), Some(0));
+    let run_dir = harness.run_dir("lane");
+    let capture = || finished_state_capture(&run_dir);
+    assert!(!run_dir.join(".claude-lane.lock").exists());
+    let state = capture();
+    assert_eq!(state["driver"]["lock"], ".claude-lane.lock");
+    assert_eq!(state["driver"]["alive"], false);
+    assert!(state["driver"]["pid"].as_u64().is_some_and(|pid| pid > 0));
+    assert!(state["driver"]["child"].as_u64().is_some_and(|pid| pid > 0));
+    assert!(state["monitor"]["wall"].is_u64());
+    assert!(
+        state["monitor"]["event_size"]
+            .as_u64()
+            .is_some_and(|size| size > 0)
+    );
+    let path = run_dir.join(".finished-step.json");
+    let original = fs::read(&path).expect("production completion");
+    let mut record: serde_json::Value = serde_json::from_slice(&original).expect("completion");
+    record["pid"] = std::process::id().into();
+    record["child"] = std::process::id().into();
+    fs::write(&path, record.to_string()).expect("simulate PID reuse");
+    assert_eq!(capture()["driver"]["alive"], false);
+    fs::write(run_dir.join(".codex-lane.lock"), b"malformed").expect("active boundary");
+    assert!(capture()["driver"].is_null());
+    fs::remove_file(run_dir.join(".codex-lane.lock")).expect("remove boundary");
+    record["step"] = "another-step\n".into();
+    fs::write(&path, record.to_string()).expect("stale step");
+    assert!(capture()["driver"].is_null());
+    record["step"] =
+        serde_json::from_slice::<serde_json::Value>(&original).expect("original")["step"].clone();
+    record["started_at"] = "another-start\n".into();
+    fs::write(&path, record.to_string()).expect("stale start");
+    assert!(capture()["driver"].is_null());
+    fs::write(&path, &original).expect("restore production record");
+    let session = fs::read_to_string(run_dir.join("thread-id.txt")).expect("session");
+    let resumed = harness.run(&[
+        OsStr::new("-t60"),
+        OsStr::new("-r"),
+        OsStr::new(session.trim()),
+        OsStr::new("-d"),
+        run_dir.as_os_str(),
+        OsStr::new("-nnext"),
+        OsStr::new("continue"),
+    ]);
+    assert_eq!(resumed.status.code(), Some(0), "{resumed:?}");
+    assert_eq!(
+        fs::read(run_dir.join("steps/lane/finished-step.json")).expect("archive"),
+        original
+    );
+    let next = capture();
+    assert_eq!(next["step"], "next");
+    assert_eq!(next["driver"]["alive"], false);
+    assert!(next["monitor"].is_object());
+}
+
+fn finished_state_capture(run_dir: &Path) -> serde_json::Value {
+    let config = superloop_lane::driver::follow::Config {
+        run_dir: run_dir.to_path_buf(),
+        cap: 50_000,
+        bounce: 0,
+        wait: 1,
+        save_offset: false,
+    };
+    let mut bytes = Vec::new();
+    superloop_lane::driver::follow::poll_once(&config, &mut bytes).expect("state reader");
+    let document: serde_json::Value = serde_json::from_slice(&bytes).expect("capture");
+    document["records"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .find(|record| record["kind"] == "state")
+        .expect("state")
+        .clone()
+}
+
+/// Malformed completed observations never supply historical identity.
+/// # Panics
+/// Panics if the production fixture or malformed-record checks fail.
+/// ´test:integration:claude-finished-state-refuses-malformed-snapshots´
+#[test]
+fn claude_finished_state_refuses_malformed_snapshots() {
+    let harness = Harness::new("finished-shape");
+    assert!(
+        harness
+            .run(&[OsStr::new("-t60"), OsStr::new("hello")])
+            .status
+            .success()
+    );
+    let run_dir = harness.run_dir("lane");
+    let path = run_dir.join(".finished-step.json");
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("snapshot")).expect("production snapshot");
+    for (key, value) in [
+        ("schema", serde_json::json!(2)),
+        ("pid", serde_json::json!(0)),
+        ("child", serde_json::json!(0)),
+        ("lock", serde_json::json!("foreign")),
+        ("monitor", serde_json::json!(3)),
+        ("extra", serde_json::json!(true)),
+    ] {
+        let mut changed = original.clone();
+        changed[key] = value;
+        fs::write(&path, changed.to_string()).expect("malformed shape");
+        assert!(
+            finished_state_capture(&run_dir)["driver"].is_null(),
+            "field {key}"
+        );
+    }
+    fs::write(&path, vec![b' '; 65_537]).expect("oversized snapshot");
+    assert!(finished_state_capture(&run_dir)["driver"].is_null());
+}

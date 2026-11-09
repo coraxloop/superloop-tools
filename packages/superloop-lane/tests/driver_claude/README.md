@@ -4,6 +4,8 @@
 
 |Test|Area|Claim|
 |----|----|-----|
+|(`test:integration:claude-finished-state-refuses-malformed-snapshots`)|Subprocess|Malformed and oversized completion records supply no historical identity.|
+|(`test:integration:claude-finished-state-retains-driver-and-monitor`)|Subprocess|The real driver publication feeds completed state, rejects stale markers and active locks, survives PID reuse as non-live evidence, and is archived on resume.|
 |(`test:integration:claude-fresh-step-records-utc-start`)|Subprocess|A fresh Claude step records its UTC start.|
 |(`test:integration:a-fresh-claude-run-records-its-thread-id`)|Subprocess|A fresh Claude run records the session id carried by its init event.|
 |(`test:integration:claude-fresh-launch-uses-lane-runs-root-and-reports-its-directory`)|Subprocess|The override allocates and reports the selected run directory, while invalid values retain the usage envelope.|
