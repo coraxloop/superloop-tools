@@ -34,7 +34,7 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
     let digest = crate::build::sha256_bytes(&fs::read(path).expect("record bytes"), home)
         .expect("record digest");
     let identity = format!("{}:{}:{digest}", stat.dev(), stat.ino());
-    for kind in ["harvest", "home-layout"] {
+    for kind in ["harvest", "home-layout", "measure"] {
         for case in [
             "plain",
             "replaced",
@@ -46,24 +46,35 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
             "override",
             "missing",
             "vector",
+            "source-mode",
+            "source-link",
+            "source-large",
         ] {
-            measure(home, runs, &identity, kind, case);
+            if (kind == "measure" && case != "record")
+                || (kind != "measure" && !case.starts_with("source-"))
+            {
+                measure(home, runs, &identity, kind, case);
+            }
         }
     }
+    live_measure(home, runs, &mut record);
     writeln!(std::io::stdout().lock(), "PRIVATE-READERS-MEASURED").expect("measured marker");
 }
 
 /// # Panics
-/// Panics if the private vector or its observation departs from the named reader contract.
-fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
+/// Panics if the fixture cannot compose the production descriptor transfer.
+fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::CommandSpec {
     let home_fd = fs::File::open(home).expect("home").into();
     let runs_fd = fs::File::open(runs).expect("runs").into();
-    let identity = if case == "record" {
-        "changed"
-    } else {
-        identity
-    };
-    let body = if kind == "harvest" {
+    let body = if kind == "measure" {
+        Ok(vec![
+            "_exercise-measure".into(),
+            "alpha".into(),
+            "all".into(),
+            "--owner-home".into(),
+            home.display().to_string(),
+        ])
+    } else if kind == "harvest" {
         exercise::harvest_private_argv("alpha", "R", identity, home)
     } else {
         exercise::home_layout_private_argv("alpha", "R", identity, home)
@@ -74,7 +85,7 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
         runtime_preparation::binary().display().to_string(),
     ];
     argv.extend(body);
-    let mut request = reader_entry::command(
+    reader_entry::command(
         Path::new("/usr/bin/podman"),
         &argv,
         home,
@@ -82,7 +93,22 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
         runs,
         &runs_fd,
     )
-    .expect("production reader composer");
+    .expect("production reader composer")
+}
+
+/// # Panics
+/// Panics if the private vector or its observation departs from the named reader contract.
+fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
+    let mut request = request(
+        home,
+        runs,
+        if case == "record" {
+            "changed"
+        } else {
+            identity
+        },
+        kind,
+    );
     let source = request.argv.last_mut().expect("manifest");
     let mut manifest: Value = serde_json::from_str(source).expect("manifest JSON");
     assert_eq!(manifest["records"].as_array().expect("roles").len(), 6);
@@ -114,8 +140,15 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
     if case == "vector" {
         request.argv.insert(4, "surplus".into());
     }
+    let source = change_source(home, case);
     let output =
         runtime_preparation::run_with_registry(&request, (case == "override").then_some(""));
+    if let Some(bytes) = source {
+        let path = home.join(".config/loops/alpha/lanes/codex/auth.json");
+        fs::remove_file(&path).expect("remove changed source");
+        fs::write(&path, bytes).expect("restore source");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("source mode");
+    }
     if case == "replaced" {
         assert_eq!(
             fs::read_to_string(config.join("registry.toml")).expect("replacement"),
@@ -129,6 +162,28 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
 }
 
 /// # Panics
+/// Panics if a synthetic source cannot be changed for one refusal measurement.
+fn change_source(home: &Path, case: &str) -> Option<Vec<u8>> {
+    if !case.starts_with("source-") {
+        return None;
+    }
+    let path = home.join(".config/loops/alpha/lanes/codex/auth.json");
+    let bytes = fs::read(&path).expect("original source");
+    match case {
+        "source-mode" => {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("source mode");
+        }
+        "source-link" => {
+            fs::remove_file(&path).expect("remove source");
+            std::os::unix::fs::symlink("/dev/null", &path).expect("linked source");
+        }
+        "source-large" => fs::write(&path, vec![b' '; 65_537]).expect("oversized source"),
+        _ => unreachable!("known source case"),
+    }
+    Some(bytes)
+}
+
+/// # Panics
 /// Panics if the reader fails before its intended audit boundary or loses a named refusal.
 fn observation(output: &std::process::Output, kind: &str, case: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -136,6 +191,16 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
     if matches!(case, "plain" | "replaced") {
         assert!(output.status.success(), "{kind}/{case}: {stderr}{stdout}");
         let report: Value = serde_json::from_slice(&output.stdout).expect("reader report");
+        if kind == "measure" {
+            assert!(
+                report["custody"]["digest"]
+                    .as_str()
+                    .is_some_and(|digest| digest.len() == 64),
+                "{report}"
+            );
+            assert_eq!(report["runs"], json!([]), "{report}");
+            return;
+        }
         let reason = if kind == "harvest" {
             "complete checkpoint is absent"
         } else {
@@ -146,7 +211,9 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
         assert!(!output.status.success(), "{kind}/{case} accepted");
         let expected = match case {
             "missing" => "anchor-missing",
-            "mode" => "anchor-mode",
+            "mode" | "source-mode" => "anchor-mode",
+            "source-link" => "anchor-escape",
+            "source-large" => "exercise-path",
             "identity" => "anchor-identity",
             "record" => {
                 if kind == "harvest" {
@@ -167,4 +234,80 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
         };
         assert!(stderr.contains(boundary), "{kind}/{case}: {stderr}{stdout}");
     }
+}
+
+/// # Panics
+/// Panics if the complete private measurement reads replaced roots or loses helper evidence.
+fn live_measure(home: &Path, runs: &Path, record: &mut Value) {
+    let script = r"
+import os,json,sys
+from pathlib import Path
+h=Path(sys.argv[1]);w=Path(sys.argv[2]);os.chmod(w,0o750)
+s=json.loads((h/'.config/loops/alpha/lanes/codex/auth.json').read_text())
+t=dict(s['tokens']);t['refresh_token']=''
+p={'auth_mode':'chatgptAuthTokens','OPENAI_API_KEY':None,
+   'tokens':t,'last_refresh':s['last_refresh']}
+a=w/'.codex/auth.json'
+a.write_text(json.dumps(p,sort_keys=True,separators=(',',':'))+'\n')
+os.chmod(a,0o600);os.chown(a,3000,3000)
+";
+    let output = helper_service::namespace_python(
+        home,
+        script,
+        record["plan"]["home"].as_str().expect("worker"),
+    )
+    .expect("worker fixture");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    record["phase"] = json!("started");
+    record["helper_pid"] = json!(std::process::id());
+    record["helper_start"] = json!(
+        crate::container_helper::process_start(std::process::id()).expect("live fixture process")
+    );
+    crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
+        .expect("live reservation");
+    let evidence = runs.join(".launch-R/credential-refresh.json");
+    fs::write(
+        &evidence,
+        r#"{"state":"published","host":"fixture.invalid"}"#,
+    )
+    .expect("helper evidence");
+    fs::set_permissions(&evidence, fs::Permissions::from_mode(0o600)).expect("evidence mode");
+    let composed = request(home, runs, "", "measure");
+    let held = runs.with_file_name("retained-runs");
+    fs::rename(runs, &held).expect("retain runs");
+    fs::create_dir(runs).expect("replacement runs");
+    fs::write(runs.join(".reservation-R.json"), "invalid replacement").expect("replacement record");
+    let output = runtime_preparation::run(&composed);
+    fs::remove_dir_all(runs).expect("remove replacement");
+    fs::rename(&held, runs).expect("restore runs");
+    assert!(
+        !output.status.success(),
+        "replaced runs root accepted at receipt"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("socket-dir-handoff"));
+    let output = runtime_preparation::run(&request(home, runs, "", "measure"));
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("measurement");
+    assert_eq!(
+        report["runs"].as_array().expect("runs").len(),
+        1,
+        "{report}"
+    );
+    assert_eq!(
+        report["runs"][0]["comparison"]["worker_matches_projection"], true,
+        "{report}"
+    );
+    assert_eq!(
+        report["runs"][0]["helper_evidence"]["state"], "published",
+        "{report}"
+    );
 }

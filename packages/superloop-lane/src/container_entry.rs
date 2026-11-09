@@ -62,7 +62,10 @@ pub(crate) const fn credential_client(backend: BoxBackend) -> &'static str {
     }
 }
 fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
-    if matches!(operation, "exercise-harvest" | "exercise-home-layout") {
+    if matches!(
+        operation,
+        "exercise-harvest" | "exercise-home-layout" | "exercise-measure"
+    ) {
         &READER_PURPOSES
     } else if operation == OPERATION {
         if backend == BoxBackend::Claude {

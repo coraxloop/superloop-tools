@@ -1084,8 +1084,18 @@ fn composer_override_child(home: &Path) {
         );
         assert!(!home.join(".var").exists(), "no custody preparation");
     }
-    for operation in ["exercise-harvest", "exercise-home-layout"] {
-        let argv = vec![
+    reader_composers_refuse_override(home, program, &fd);
+}
+
+/// # Panics
+/// Panics if a reader composer inspects pins before refusing an ambient override.
+fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
+    for operation in [
+        "exercise-harvest",
+        "exercise-home-layout",
+        "exercise-measure",
+    ] {
+        let mut argv = vec![
             "unshare".into(),
             "/absent-entry-image".into(),
             format!("_{operation}"),
@@ -1096,8 +1106,12 @@ fn composer_override_child(home: &Path) {
             "--owner-home".into(),
             home.to_str().expect("home").into(),
         ];
+        if operation == "exercise-measure" {
+            argv[4] = "all".into();
+            argv.drain(5..7);
+        }
         let Err(error) =
-            superloop_lane::launch::reader_entry::command(program, &argv, home, &fd, home, &fd)
+            superloop_lane::launch::reader_entry::command(program, &argv, home, fd, home, fd)
         else {
             panic!("reader composer accepted registry override");
         };

@@ -595,6 +595,58 @@ fn measured_file(path: &Path, uid: u32) -> Result<(Value, Value), LaneError> {
     measured_open(fs::File::from(opened), path, parent, uid)
 }
 
+fn measured_evidence(root: &Path, run: &str, owner: u32) -> Result<Value, LaneError> {
+    use nix::fcntl::{OFlag, OpenHow, ResolveFlag, openat2};
+    let root_fd = home::pin_parent(root, owner)?;
+    let resolve = ResolveFlag::RESOLVE_BENEATH
+        | ResolveFlag::RESOLVE_NO_SYMLINKS
+        | ResolveFlag::RESOLVE_NO_MAGICLINKS;
+    let name = format!(".launch-{run}");
+    let directory = match openat2(
+        &root_fd,
+        name.as_str(),
+        OpenHow::new()
+            .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+            .resolve(resolve),
+    ) {
+        Ok(fd) => fd,
+        Err(nix::errno::Errno::ENOENT) => return Ok(json!({"state":"not-published"})),
+        Err(error) => {
+            return Err(LaneError::input(
+                "exercise-path",
+                format!("{name}: {error}"),
+            ));
+        }
+    };
+    let stat = nix::sys::stat::fstat(&directory)
+        .map_err(|error| LaneError::input("exercise-path", error.to_string()))?;
+    if stat.st_uid != owner || stat.st_mode & 0o022 != 0 {
+        return Err(LaneError::input(
+            "exercise-path",
+            "helper evidence directory is not owner-controlled",
+        ));
+    }
+    let file = match openat2(
+        &directory,
+        "credential-refresh.json",
+        OpenHow::new()
+            .flags(OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)
+            .resolve(resolve),
+    ) {
+        Ok(fd) => fs::File::from(fd),
+        Err(nix::errno::Errno::ENOENT) => return Ok(json!({"state":"not-published"})),
+        Err(error) => {
+            return Err(LaneError::input(
+                "exercise-path",
+                format!("helper evidence: {error}"),
+            ));
+        }
+    };
+    let path = root.join(name).join("credential-refresh.json");
+    let (identity, document) = measured_open(file, &path, root, owner)?;
+    Ok(json!({"identity":identity,"state":document["state"],"host":document["host"]}))
+}
+
 fn checked_worker_directory(
     fd: &impl std::os::fd::AsFd,
     name: &str,
@@ -750,26 +802,7 @@ fn projection(source: &Value) -> Result<Vec<u8>, LaneError> {
 
 fn candidates(root: &Path, loop_name: &str) -> Result<Vec<Value>, LaneError> {
     let mut rows = Vec::new();
-    for entry in
-        fs::read_dir(root).map_err(|error| LaneError::input("exercise-root", error.to_string()))?
-    {
-        let entry = entry.map_err(|error| LaneError::input("exercise-root", error.to_string()))?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let Some(run) = name
-            .strip_prefix(".reservation-")
-            .and_then(|part| part.strip_suffix(".json"))
-        else {
-            continue;
-        };
-        if !valid_run_name(run) {
-            return Err(LaneError::input(
-                "exercise-record",
-                format!("invalid reservation name {name}"),
-            ));
-        }
-        let record = read_reservation(&entry.path())?
-            .ok_or_else(|| LaneError::input("exercise-record", format!("{name} vanished")))?;
+    for (run, record) in super::reservation_census::records(root)? {
         if record["loop"] != loop_name || record["run"] != run || record["phase"] != "started" {
             continue;
         }
@@ -938,7 +971,7 @@ pub fn private_measure(owner_home: &Path, loop_name: &str) -> Result<Value, Lane
         ));
     }
     let config = owner_home.join(".config/loops").join(loop_name);
-    let settings = Settings::read_beneath(&config.join("workers.toml"), owner_home)?;
+    let settings = crate::read_worker_settings(owner_home, loop_name)?;
     settings.validate_grant(owner_home, loop_name)?;
     let root = settings
         .runs_root
@@ -946,7 +979,15 @@ pub fn private_measure(owner_home: &Path, loop_name: &str) -> Result<Value, Lane
         .ok_or_else(|| LaneError::input("exercise-grant", "runs_root is absent"))?;
     let source_path = config.join("lanes/codex/auth.json");
     let owner = Uid::effective().as_raw();
-    let (custody, source) = measured_file(&source_path, owner)?;
+    let configuration = crate::runtime_entry::plan_configuration(owner_home)?.ok_or_else(|| {
+        LaneError::input(
+            "exercise-anchor",
+            "anchor-missing: operation=exercise-measure purpose=configuration",
+        )
+    })?;
+    let source_file =
+        configuration.open_private_file(&Path::new(loop_name).join("lanes/codex/auth.json"))?;
+    let (custody, source) = measured_open(source_file, &source_path, owner_home, owner)?;
     let expected = build::sha256_bytes(&projection(&source)?, owner_home)?;
     let access = source["tokens"]["access_token"]
         .as_str()
@@ -983,13 +1024,7 @@ pub fn private_measure(owner_home: &Path, loop_name: &str) -> Result<Value, Lane
                 format!("run {run} has an unexpected credential identity"),
             ));
         }
-        let evidence_path = root.join(format!(".launch-{run}/credential-refresh.json"));
-        let evidence = if evidence_path.exists() {
-            let (identity, document) = measured_file(&evidence_path, owner)?;
-            json!({"identity":identity,"state":document["state"],"host":document["host"]})
-        } else {
-            json!({"state":"not-published"})
-        };
+        let evidence = measured_evidence(root, run, owner)?;
         runs.push(
             json!({"run":run,"worker":worker,"comparison":comparison,"helper_evidence":evidence}),
         );
@@ -1002,6 +1037,70 @@ pub fn private_measure(owner_home: &Path, loop_name: &str) -> Result<Value, Lane
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// # Panics
+    /// Panics if evidence lookup observes a replacement runs directory after binding.
+    /// ´test:unit:exercise-evidence-stays-beneath-received-root´
+    #[test]
+    fn exercise_evidence_stays_beneath_received_root() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("fixture");
+        let home = temp.path().join("home");
+        let root = temp.path().join("runs");
+        let held = temp.path().join("held");
+        for path in [&home, &root, &root.join(".launch-R")] {
+            fs::create_dir(path).expect("directory");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let file = root.join(".launch-R/credential-refresh.json");
+        fs::write(&file, r#"{"state":"published","host":"fixture.invalid"}"#).expect("evidence");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).expect("file mode");
+        let owner = Uid::effective().as_raw();
+        let _guard = home::activate_private_launch(
+            &home,
+            &fs::File::open(&home).expect("home"),
+            &root,
+            &fs::File::open(&root).expect("runs"),
+            None,
+            owner,
+        )
+        .expect("received roots");
+        fs::rename(&root, &held).expect("retain root");
+        fs::create_dir(&root).expect("replacement");
+        assert_eq!(
+            measured_evidence(&root, "R", owner).expect("held evidence")["state"],
+            "published"
+        );
+        let file = held.join(".launch-R/credential-refresh.json");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).expect("widen file");
+        assert_eq!(
+            measured_evidence(&root, "R", owner)
+                .expect_err("unsafe file")
+                .kind,
+            "exercise-path"
+        );
+        fs::remove_file(&file).expect("remove evidence");
+        assert_eq!(
+            measured_evidence(&root, "R", owner).expect("absent evidence")["state"],
+            "not-published"
+        );
+        symlink("/dev/null", &file).expect("linked evidence");
+        assert_eq!(
+            measured_evidence(&root, "R", owner)
+                .expect_err("linked file")
+                .kind,
+            "exercise-path"
+        );
+        fs::remove_file(&file).expect("remove link");
+        fs::set_permissions(held.join(".launch-R"), fs::Permissions::from_mode(0o770))
+            .expect("widen parent");
+        assert_eq!(
+            measured_evidence(&root, "R", owner)
+                .expect_err("unsafe parent")
+                .kind,
+            "exercise-path"
+        );
+    }
 
     struct RestoreDriver(std::path::PathBuf);
 

@@ -240,6 +240,21 @@ pub(crate) struct PlanConfiguration {
     pub(crate) allocations: loop_home::allocations::Allocations,
 }
 impl PlanConfiguration {
+    pub(crate) fn open_private_file(&self, relative: &Path) -> Result<std::fs::File, LaneError> {
+        self.directory
+            .open_beneath(
+                relative,
+                Policy {
+                    kind: Kind::File,
+                    owner: Owner::Host,
+                    mode: ModePolicy::Exact(0o600),
+                },
+                0o700,
+            )
+            .map(std::fs::File::from)
+            .map_err(|error| crate::container_entry::operation_error(self.operation, error))
+    }
+
     pub(crate) fn read_generation(
         &self,
         scope: &str,

@@ -15,6 +15,7 @@ struct Selection<'a> {
 }
 fn operation(word: &str) -> Option<&'static str> {
     match word {
+        "_exercise-measure" => Some("exercise-measure"),
         "_exercise-harvest" => Some("exercise-harvest"),
         "_exercise-home-layout" => Some("exercise-home-layout"),
         _ => None,
@@ -36,6 +37,22 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
         .first()
         .and_then(|word| operation(word))
         .ok_or_else(|| refused("exercise", "anchor-declaration", "operation"))?;
+    if mode == "exercise-measure" {
+        let [_, scope, run, option, home] = args else {
+            return Err(refused(mode, "anchor-declaration", "vector"));
+        };
+        if run != "all" || option != "--owner-home" {
+            return Err(refused(mode, "anchor-declaration", "vector"));
+        }
+        loop_home::validate_name(scope).map_err(|_| refused(mode, "anchor-declaration", "loop"))?;
+        return Ok(Selection {
+            operation: mode,
+            scope,
+            run,
+            identity: "",
+            home: Path::new(home),
+        });
+    }
     if args.len() != 7 {
         return Err(refused(mode, "anchor-declaration", "vector"));
     }
@@ -118,7 +135,7 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
         .first()
         .and_then(|word| operation(word))
         .unwrap_or("exercise");
-    if args.len() < 11 {
+    if args.len() < 9 {
         return Err(refused(mode, "anchor-missing", "manifest"));
     }
     let (body, suffix) = args.split_at(args.len() - 4);
@@ -177,7 +194,9 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
     )?;
     let _configuration =
         container_entry::configuration(selection.home, selection.scope, mode, configuration)?;
-    if mode == "exercise-harvest" {
+    if mode == "exercise-measure" {
+        exercise::private_measure(selection.home, selection.scope)
+    } else if mode == "exercise-harvest" {
         exercise::private_harvest_audit(
             selection.home,
             selection.scope,

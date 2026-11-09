@@ -369,6 +369,15 @@ pub(crate) fn private_is_active() -> bool {
     PRIVATE_HOME.with(|active| active.borrow().is_some())
 }
 
+pub(crate) fn private_runs_path() -> Option<PathBuf> {
+    PRIVATE_HOME.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .map(|anchors| anchors.runs.0.clone())
+    })
+}
+
 pub(crate) fn private_runs() -> Result<(PathBuf, OwnedFd), LaneError> {
     PRIVATE_HOME.with(|active| {
         let active = active.borrow();

@@ -18,7 +18,8 @@ struct Census<'a> {
 impl<'a> Census<'a> {
     fn open(path: &'a Path) -> Result<Self, LaneError> {
         let root = if home::private_is_active() {
-            let (declared, _received) = home::private_runs()?;
+            let declared = home::private_runs_path()
+                .ok_or_else(|| LaneError::input("runs-root", "received runs root is absent"))?;
             if declared != path {
                 return Err(LaneError::input(
                     "runs-root",
@@ -68,6 +69,14 @@ impl<'a> Census<'a> {
             )),
         }
     }
+    fn enumerated_mode(&self, name: &OsStr) -> Result<SFlag, LaneError> {
+        self.mode(name)?.ok_or_else(|| {
+            LaneError::input(
+                "runs-root",
+                format!("{} vanished during census", self.path.join(name).display()),
+            )
+        })
+    }
     fn names(&self) -> Result<Vec<OsString>, LaneError> {
         let fd = openat2(
             &self.root,
@@ -109,6 +118,31 @@ impl<'a> Census<'a> {
         Ok(())
     }
 }
+pub(super) fn records(root: &Path) -> Result<Vec<(String, Value)>, LaneError> {
+    let census = Census::open(root)?;
+    let mut rows = Vec::new();
+    for name in census.names()? {
+        let text = name.to_string_lossy();
+        let Some(run) = text
+            .strip_prefix(".reservation-")
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if !crate::valid_run_name(run) {
+            return Err(LaneError::input(
+                "exercise-record",
+                format!("invalid reservation name {text}"),
+            ));
+        }
+        let record = census
+            .reservation(&name)?
+            .ok_or_else(|| LaneError::input("exercise-record", format!("{text} vanished")))?;
+        rows.push((run.to_owned(), record));
+    }
+    Ok(rows)
+}
+
 fn pending(record: Option<&Value>, base: u32, count: u32) -> Result<Option<u32>, LaneError> {
     let Some(record) = record.filter(|record| {
         record["phase"] == "preparing"
@@ -164,7 +198,7 @@ pub(super) fn select(
                 .and_then(|uid| u32::try_from(uid).ok())
                 .ok_or_else(|| LaneError::input("uid-table", "reservation has no worker UID"))?;
             used.insert(uid);
-        } else if !text.starts_with('.') && census.mode(&name)? == Some(SFlag::S_IFDIR) {
+        } else if !text.starts_with('.') && census.enumerated_mode(&name)? == SFlag::S_IFDIR {
             let Some(record) = census.run_reservation(&text)? else {
                 skipped.push(text.into_owned());
                 continue;
@@ -259,6 +293,20 @@ mod tests {
         let fixture = fixture();
         let runs = &fixture.runs;
         let held = &fixture.held;
+        assert_eq!(records(runs).expect("held records")[0].0, "A");
+        let census = Census::open(runs).expect("received census");
+        fs::write(held.join("vanishing"), "entry").expect("entry");
+        let enumerated = census.names().expect("enumeration");
+        assert!(enumerated.iter().any(|name| name == "vanishing"));
+        fs::remove_file(held.join("vanishing")).expect("remove entry after enumeration");
+        assert_eq!(
+            census
+                .enumerated_mode(OsStr::new("vanishing"))
+                .expect_err("vanished entry refuses")
+                .kind,
+            "runs-root"
+        );
+
         assert_eq!(
             select(runs, "../escape", 3000, 3, &BTreeSet::new())
                 .expect_err("path escape")
