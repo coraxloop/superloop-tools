@@ -316,13 +316,29 @@ pub fn run(owner_home: &Path, request: &HarvestRequest) -> Result<Value, LaneErr
         .runs_root
         .as_deref()
         .ok_or_else(|| LaneError::input("harvest-grant", "runs_root is absent"))?;
+    let owner = Uid::effective().as_raw();
+    let home_fd = home::verify_host_prefix_from(Path::new("/"), owner_home, owner, 0)?;
+    let runs_fd = home::verify_host_launch_root(Path::new("/"), owner_home, root, owner, 0)?;
+    run_with_custody(owner_home, request, &plan, root, &home_fd, &runs_fd)
+}
+
+fn run_with_custody(
+    owner_home: &Path,
+    request: &HarvestRequest,
+    plan: &Plan,
+    root: &Path,
+    home_fd: &OwnedFd,
+    runs_fd: &OwnedFd,
+) -> Result<Value, LaneError> {
+    let owner = Uid::effective().as_raw();
+    let record = checkout::read_record(runs_fd, &request.run, owner)
+        .map_err(|error| LaneError::input("harvest-record", error.line()))?;
+    settled_reservation(&record, plan, &request.loop_name, &request.run)?;
+    BoxBackend::from_plan(&record["plan"])?.require_runtime()?;
     let program = plan.document["runtime_argv"][0]
         .as_str()
         .ok_or_else(|| LaneError::input("harvest-record", "container program is absent"))?;
-    let owner = Uid::effective().as_raw();
     crate::pinned::owner_executable(Path::new(program), owner)?;
-    let home_fd = home::verify_host_prefix_from(Path::new("/"), owner_home, owner, 0)?;
-    let runs_fd = home::verify_host_launch_root(Path::new("/"), owner_home, root, owner, 0)?;
     let exe = std::env::current_exe()
         .map_err(|error| LaneError::operation("harvest-program", error.to_string()))?;
     crate::pinned::owner_executable(&exe, owner)?;
@@ -342,9 +358,9 @@ pub fn run(owner_home: &Path, request: &HarvestRequest) -> Result<Value, LaneErr
         owner_home,
         300,
         "harvest-private",
-        &home_fd,
+        home_fd,
         root,
-        &runs_fd,
+        runs_fd,
         None,
     );
     let output = output.map_err(|error| {
@@ -356,9 +372,9 @@ pub fn run(owner_home: &Path, request: &HarvestRequest) -> Result<Value, LaneErr
                 owner_home,
                 300,
                 "harvest-recovery",
-                &home_fd,
+                home_fd,
                 root,
-                &runs_fd,
+                runs_fd,
                 None,
             );
             if let Err(recovery_error) = recovered {
@@ -1237,8 +1253,7 @@ pub fn private_recover(owner_home: &Path, request: &HarvestRequest) -> Result<Va
             "rootless namespace root is required",
         ));
     }
-    let (plan, settings) =
-        crate::load_plan_for_record(owner_home, &request.loop_name, &request.run, (0, 0))?;
+    let (plan, settings) = private_inputs(owner_home, request)?;
     let root = settings
         .runs_root
         .as_deref()
@@ -1680,6 +1695,179 @@ pub(crate) mod tests {
             assert!(error.detail.contains(".local/inbox"));
             assert!(plan.home.join(".local/inbox").exists());
         }
+    }
+
+    /// # Panics
+    /// Panics if the public route hides the backend refusal behind a child or recovery failure.
+    /// ´test:unit:harvest-public-preserves-the-backend-refusal´
+    #[test]
+    fn harvest_public_preserves_the_backend_refusal() {
+        for backend in [Some("claude"), None, Some("codex")] {
+            for dry_run in [false, true] {
+                let (fixture, settings, worker) = gated_harvest_fixture();
+                let root = settings.runs_root.as_deref().expect("runs");
+                let (plan, record) = gated_harvest_record(root, &worker, backend);
+                let reservation = super::super::reservation_path(root, "R");
+                super::super::publish_reservation(&reservation, &record).expect("record");
+                let before = fs::read(&reservation).expect("record bytes");
+                let identity = fs::metadata(&reservation).expect("identity").ino();
+                let home_fd = fs::File::open(fixture.path()).expect("fixture home").into();
+                let runs_fd = fs::File::open(root).expect("fixture runs").into();
+                let error = run_with_custody(
+                    fixture.path(),
+                    &gated_harvest_request(dry_run),
+                    &plan,
+                    root,
+                    &home_fd,
+                    &runs_fd,
+                )
+                .expect_err("no private child is reachable");
+                let expected = match backend {
+                    Some("claude") => BoxBackend::Claude.require_runtime().unwrap_err(),
+                    None => BoxBackend::from_plan(&record["plan"]).unwrap_err(),
+                    _ => LaneError::input("harvest-record", "container program is absent"),
+                };
+                assert_eq!(error.line(), expected.line());
+                assert_eq!(fs::read(&reservation).expect("unchanged"), before);
+                assert_eq!(
+                    fs::metadata(&reservation).expect("identity").ino(),
+                    identity
+                );
+                assert_eq!(
+                    fs::read(worker.join("retained")).expect("worker"),
+                    b"synthetic worker state"
+                );
+            }
+        }
+    }
+
+    /// # Panics
+    /// Panics if the recovery entry loses its independent gate in the rootless namespace.
+    /// ´test:unit:harvest-recovery-keeps-its-own-runtime-gate´
+    #[test]
+    fn harvest_recovery_keeps_its_own_runtime_gate() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        const MARKER: &str = "HARVEST-RECOVERY-GATE-MEASURED";
+        if std::env::var_os("SUPERLOOP_HARVEST_RECOVERY_PROOF").is_some() {
+            assert_eq!(Uid::effective().as_raw(), 0);
+            gated_namespace_recovery();
+            writeln!(std::io::stdout().lock(), "{MARKER}").expect("marker");
+            return;
+        }
+        let mut child = Command::new("/usr/bin/podman")
+            .args(["unshare"])
+            .arg(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "launch::harvest::tests::harvest_recovery_keeps_its_own_runtime_gate",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_remove("_CONTAINERS_USERNS_CONFIGURED")
+            .env_remove("_CONTAINERS_ROOTLESS_UID")
+            .env("SUPERLOOP_HARVEST_RECOVERY_PROOF", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("namespace child");
+        let began = std::time::Instant::now();
+        while child.try_wait().expect("child status").is_none() {
+            if began.elapsed() > std::time::Duration::from_secs(60) {
+                drop(child.kill());
+                drop(child.wait());
+                panic!("recovery proof exceeded 60 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().expect("namespace result");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains(MARKER) && stdout.contains("1 passed"),
+            "{stdout}"
+        );
+    }
+
+    /// # Panics
+    /// Panics if a protected recovery record changes before backend admission.
+    fn gated_namespace_recovery() {
+        for backend in [Some("claude"), None, Some("codex")] {
+            let (fixture, settings, worker) = gated_harvest_fixture();
+            let root = settings.runs_root.as_deref().expect("runs");
+            let _custody = home::activate_private_launch(
+                fixture.path(),
+                &fs::File::open(fixture.path()).expect("home"),
+                root,
+                &fs::File::open(root).expect("runs"),
+                None,
+                0,
+            )
+            .expect("received roots");
+            let (plan, record) = gated_harvest_record(root, &worker, backend);
+            let reservation = super::super::reservation_path(root, "R");
+            super::super::publish_reservation(&reservation, &record).expect("record");
+            let before = fs::read(&reservation).expect("record bytes");
+            let identity = fs::metadata(&reservation).expect("identity").ino();
+            PRIVATE_RUN_FIXTURE.with(|slot| {
+                assert!(slot.borrow().is_none());
+                *slot.borrow_mut() = Some((plan, settings.clone()));
+            });
+            let result = private_recover(fixture.path(), &gated_harvest_request(false));
+            if backend == Some("codex") {
+                assert_eq!(result.expect("Codex recovery")["pending"], false);
+            } else {
+                let expected = BoxBackend::from_plan(&record["plan"])
+                    .and_then(BoxBackend::require_runtime)
+                    .unwrap_err();
+                assert_eq!(
+                    result.expect_err("protected backend").line(),
+                    expected.line()
+                );
+            }
+            assert_eq!(fs::read(&reservation).expect("unchanged"), before);
+            assert_eq!(
+                fs::metadata(&reservation).expect("identity").ino(),
+                identity
+            );
+            assert_eq!(
+                fs::read(worker.join("retained")).expect("worker"),
+                b"synthetic worker state"
+            );
+        }
+    }
+
+    fn gated_harvest_request(dry_run: bool) -> HarvestRequest {
+        HarvestRequest {
+            loop_name: "alpha".into(),
+            run: "R".into(),
+            gate_object: "a".repeat(40),
+            dry_run,
+        }
+    }
+
+    fn gated_harvest_record(root: &Path, worker: &Path, backend: Option<&str>) -> (Plan, Value) {
+        let mut document = json!({"home":worker,"driver_dir":root.join("R")});
+        if let Some(backend) = backend {
+            document["backend"] = backend.into();
+        }
+        let record = json!({"schema":1,"loop":"alpha","run":"R","phase":"settled",
+            "plan":document,"worker_uid":3000,"harvest_agreement":null,"collection":null,
+            "rounds":[{"step":"dispatch","phase":"settled","ended_by":"by-report"}],
+            "active_round":"dispatch"});
+        (
+            Plan {
+                home: worker.into(),
+                driver_dir: root.join("R"),
+                letter: worker.join("brief.txt"),
+                document,
+            },
+            record,
+        )
     }
 
     fn gated_harvest_fixture() -> (tempfile::TempDir, Settings, PathBuf) {

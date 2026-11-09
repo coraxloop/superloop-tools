@@ -134,6 +134,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Public harvest preserves protected backend refusals before child execution; namespace recovery independently pins its closed Claude gate and unchanged state (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:harvest-selected-worker-state``).
+
 - Private checkpoint entry retains configuration, hashing and Git custody through namespace entry, refusing malformed bundles before checkpoint state reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:checkpoint-entry-retains-configuration``).
 
 - Private credential exercise refuses relative owner homes before reader custody; its digest inventory retires the removed reply comparison instead of pointing at an unrelated line (``proto:superlooplane:credential-exercise-backend``; ``rule:digests:inventory-evidence``).
