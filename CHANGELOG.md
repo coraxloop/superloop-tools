@@ -132,6 +132,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Gated Claude exercise refuses worker files whose bytes differ from the token-only encoding, including duplicate members hidden by JSON value equality (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-credential-exercise-payload``).
+
 - Follow and context readers retain configuration and runs custody across namespace entry; replaced configuration paths supply no input, while raw follow events and bounded context evidence keep their public formats (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Driver reports and retirement lock reads retain operation-bound home, runs, entry and hashing custody across namespace entry; reader tool ownership and exact descriptor frames refuse before state reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).

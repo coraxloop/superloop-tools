@@ -690,6 +690,7 @@ fn measured_worker_file(
     owner: u32,
     worker: u32,
     backend: BoxBackend,
+    expected: Option<&Value>,
 ) -> Result<(Value, Value), LaneError> {
     let parent = home_path
         .parent()
@@ -725,6 +726,7 @@ fn measured_worker_file(
         &home_path.join(state),
         worker,
         backend == BoxBackend::Codex,
+        expected,
     )
 }
 
@@ -734,7 +736,7 @@ fn measured_open(
     parent: &Path,
     uid: u32,
 ) -> Result<(Value, Value), LaneError> {
-    measured_open_with(file, path, parent, uid, true)
+    measured_open_with(file, path, parent, uid, true, None)
 }
 
 fn measured_open_with(
@@ -743,6 +745,7 @@ fn measured_open_with(
     parent: &Path,
     uid: u32,
     include_digest: bool,
+    expected: Option<&Value>,
 ) -> Result<(Value, Value), LaneError> {
     let metadata = file
         .metadata()
@@ -774,6 +777,13 @@ fn measured_open_with(
         identity["digest"] = digest.into();
     } else {
         identity["modified_nanoseconds"] = metadata.mtime_nsec().into();
+        identity["projection_encoding_matches"] = expected
+            .is_some_and(|projection| {
+                let mut canonical = projection.to_string().into_bytes();
+                canonical.push(b'\n');
+                bytes == canonical
+            })
+            .into();
     }
     Ok((identity, document))
 }
@@ -1139,7 +1149,8 @@ pub fn private_measure(
                 "custody source enters a collectable home",
             ));
         }
-        let (worker, document) = measured_worker_file(home_path, owner, uid, BoxBackend::Codex)?;
+        let (worker, document) =
+            measured_worker_file(home_path, owner, uid, BoxBackend::Codex, None)?;
         let token_only = document["auth_mode"] == "chatgptAuthTokens"
             && document["tokens"]["refresh_token"] == "";
         let comparison = compared(&custody, &worker, &expected, token_only);
@@ -1169,7 +1180,7 @@ fn claude_comparison(
     document: &Value,
 ) -> Result<Value, LaneError> {
     let same_inode = custody["device"] == worker["device"] && custody["inode"] == worker["inode"];
-    if same_inode || document != expected {
+    if same_inode || document != expected || worker["projection_encoding_matches"] != true {
         return Err(LaneError::input(
             "exercise-credential",
             "Claude worker is not a separate token-only projection",
@@ -1238,8 +1249,13 @@ fn measure_claude(
                         "custody source enters a collectable home",
                     ));
                 }
-                let (worker, document) =
-                    measured_worker_file(home_path, owner, uid, BoxBackend::Claude)?;
+                let (worker, document) = measured_worker_file(
+                    home_path,
+                    owner,
+                    uid,
+                    BoxBackend::Claude,
+                    Some(&expected),
+                )?;
                 let comparison = claude_comparison(&custody, &worker, &expected, &document)?;
                 let evidence = match crate::credential::read_evidence(&held, run, owner)? {
                     Some(crate::credential::EvidenceObservation::Current(document)) => {
@@ -1335,7 +1351,7 @@ mod tests {
     #[test]
     fn claude_exercise_refuses_worker_authority_and_foreign_evidence() {
         let custody = json!({"device":1,"inode":2});
-        let worker = json!({"device":1,"inode":3});
+        let worker = json!({"device":1,"inode":3,"projection_encoding_matches":true});
         let expected = json!({"claudeAiOauth":{"accessToken":"synthetic"}});
         let result =
             claude_comparison(&custody, &worker, &expected, &expected).expect("separate worker");
@@ -1392,6 +1408,7 @@ mod tests {
             fixture.path().parent().expect("parent"),
             Uid::effective().as_raw(),
             false,
+            Some(&document),
         )
         .expect("metadata");
         assert_eq!(read, document);
@@ -1412,22 +1429,59 @@ mod tests {
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("state mode");
         let path = state.join(".credentials.json");
         let document = json!({"claudeAiOauth":{"accessToken":"A".repeat(108)}});
-        fs::write(&path, document.to_string()).expect("synthetic credential");
+        fs::write(&path, format!("{document}\n")).expect("synthetic credential");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("file mode");
         let uid = Uid::effective().as_raw();
         let (identity, read) =
-            measured_worker_file(&home, uid, uid, BoxBackend::Claude).expect("selected leaf");
+            measured_worker_file(&home, uid, uid, BoxBackend::Claude, Some(&document))
+                .expect("selected leaf");
         assert_eq!(read, document);
         assert_eq!(identity["path"], path.to_string_lossy().as_ref());
+        assert_eq!(identity["projection_encoding_matches"], true);
         assert!(identity.get("digest").is_none());
         fs::rename(&path, state.join("foreign")).expect("rename");
         std::os::unix::fs::symlink("foreign", &path).expect("symlink");
         assert_eq!(
-            measured_worker_file(&home, uid, uid, BoxBackend::Claude)
+            measured_worker_file(&home, uid, uid, BoxBackend::Claude, Some(&document))
                 .expect_err("linked leaf")
                 .kind,
             "exercise-path"
         );
+    }
+
+    /// ´test:unit:claude-exercise-refuses-shadowed-token-encoding´
+    #[test]
+    fn claude_exercise_refuses_shadowed_token_encoding() {
+        let fixture = tempfile::NamedTempFile::new().expect("fixture");
+        let expected = json!({"claudeAiOauth":{"accessToken":"A".repeat(108)}});
+        let bytes = format!(
+            "{{\"claudeAiOauth\":{{\"accessToken\":\"{}\",\"accessToken\":\"{}\"}}}}\n",
+            "R".repeat(108),
+            "A".repeat(108)
+        );
+        fs::write(fixture.path(), bytes).expect("synthetic duplicate member");
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o600)).expect("mode");
+        let (worker, document) = measured_open_with(
+            fixture.reopen().expect("open"),
+            fixture.path(),
+            fixture.path().parent().expect("parent"),
+            Uid::effective().as_raw(),
+            false,
+            Some(&expected),
+        )
+        .expect("bounded file");
+        assert_eq!(
+            document, expected,
+            "JSON value equality hides the first member"
+        );
+        assert_eq!(worker["projection_encoding_matches"], false);
+        let custody =
+            json!({"device":worker["device"],"inode":worker["inode"].as_u64().expect("inode")+1});
+        let error = claude_comparison(&custody, &worker, &expected, &document)
+            .expect_err("shadowed authority");
+        assert_eq!(error.kind, "exercise-credential");
+        assert!(!error.detail.contains(&"R".repeat(108)));
+        assert!(worker.get("digest").is_none());
     }
 
     /// ´test:unit:credential-exercise-selects-only-protected-backend´
