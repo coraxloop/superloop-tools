@@ -104,6 +104,151 @@ impl BindingInventory {
     }
 }
 
+/// Receiver-validated capabilities for an anchored reply session.
+///
+/// The entry must validate these as one mail-binding bundle before construction.
+/// No path in this value substitutes for a received descriptor.
+pub struct ReplyCustody<'a> {
+    pub configuration: &'a crate::anchor::Configuration,
+    pub configuration_directory: &'a crate::anchor::Anchor,
+    pub loop_storage: std::sync::Arc<crate::anchor::Anchor>,
+    pub private_storage: std::sync::Arc<crate::anchor::Anchor>,
+    pub identity_executable: &'a crate::anchor::Anchor,
+    pub journal: std::sync::Arc<crate::anchor::Anchor>,
+}
+
+/// A service-identity reply session retaining the protected worker lifetime lock.
+/// Dropping this value releases the lease. The caller must not exec or change
+/// identity again while relying on this session.
+#[must_use = "keep the session alive through reply binding"]
+pub struct ReplySession {
+    inventory: BindingInventory,
+    journal: std::sync::Arc<crate::anchor::Anchor>,
+    identity: Identity,
+    service: u32,
+    _lifetime: nix::fcntl::Flock<std::fs::File>,
+}
+impl ReplyCustody<'_> {
+    /// Acquire the lease, permanently drop to the reserved service identity,
+    /// and open the reply inventory beneath the same received storage.
+    /// Call only in a short-lived namespace-root entry process.
+    /// # Errors
+    /// Refuses changed custody, settings, lifetime, identity drop or inventory.
+    pub fn enter(
+        self,
+        home: &Path,
+        loop_name: &str,
+        identity: &Identity,
+        verify_only: bool,
+    ) -> Result<ReplySession> {
+        let lifetime = worker_provision::hold_active_beneath(
+            home,
+            loop_name,
+            identity,
+            verify_only,
+            self.configuration,
+            &self.loop_storage,
+            &self.private_storage,
+            self.identity_executable,
+        )?;
+        let file = super::entry_anchors::configuration_file(
+            self.configuration_directory,
+            Path::new("mail-service.toml"),
+        )?;
+        let settings = command::parse_settings(&io::bounded(&file, 4096)?)?;
+        self.journal.revalidate()?;
+        command::enter_with(
+            home,
+            &settings,
+            &self.configuration.registry,
+            &self.configuration.allocations,
+        )?;
+        let inventory = BindingInventory::open_beneath(
+            home,
+            loop_name,
+            self.configuration,
+            self.loop_storage,
+            self.private_storage,
+            Durability {
+                crash_consistent_rename: settings.crash_consistent_rename,
+                durable_sync: settings.durable_sync,
+            },
+        )?;
+        inventory.verify_worker(identity)?;
+        Ok(ReplySession {
+            inventory,
+            journal: self.journal,
+            identity: identity.clone(),
+            service: settings.uid,
+            _lifetime: lifetime,
+        })
+    }
+}
+impl ReplySession {
+    /// Bind a worker-to-principal delivery while retaining the lifetime lease.
+    /// # Errors
+    /// Refuses changed inventory, delivery evidence or journal custody.
+    pub fn reply(&self, step: &str, delivery: &Instant) -> Result<(Record, Vec<u8>)> {
+        self.resolve(step, delivery, false)
+    }
+    /// Verify an existing reply pin without creating one.
+    /// # Errors
+    /// Refuses an absent pin or any changed inventory or delivery evidence.
+    pub fn verify_reply(&self, step: &str, delivery: &Instant) -> Result<(Record, Vec<u8>)> {
+        self.resolve(step, delivery, true)
+    }
+    fn resolve(
+        &self,
+        step: &str,
+        delivery: &Instant,
+        verify_only: bool,
+    ) -> Result<(Record, Vec<u8>)> {
+        binding_step(step)?;
+        self.inventory.verify_worker(&self.identity)?;
+        let loop_name = &self.inventory.loop_name;
+        let recipient =
+            Address::parse(loop_name).map_err(|_| MailError::Invalid("invalid-name: loop"))?;
+        let actor = self
+            .inventory
+            .inventory
+            .actors
+            .get(&recipient)
+            .ok_or(MailError::Invalid(
+                "invalid-directory: recipient endpoint unavailable",
+            ))?;
+        let sender = format!("{loop_name}+{}", self.identity.name);
+        let verify = |record: &Record| {
+            self.inventory.verify_worker(&self.identity)?;
+            verified_payload(actor, self.service, &sender, &recipient, record)
+        };
+        let family = self.identity.pin_family(loop_name);
+        let reference = format!("reply:{step}");
+        if verify_only {
+            journal::verify_reservation_beneath(
+                &self.journal,
+                &family,
+                &reference,
+                delivery,
+                verify,
+            )
+        } else {
+            journal::bind_reservation_beneath(&self.journal, &family, &reference, delivery, verify)
+        }
+    }
+}
+
+fn binding_step(step: &str) -> Result<()> {
+    if step.is_empty()
+        || step.len() > 64
+        || !step
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(MailError::Invalid("invalid-name: round step"));
+    }
+    Ok(())
+}
+
 /// Resolve one delivery under namespace-root entry, then drop permanently to
 /// the service identity before journal verification and pin publication.
 ///
@@ -157,14 +302,7 @@ fn bind_direction(
     reply: bool,
     verify_only: bool,
 ) -> Result<(Record, Vec<u8>)> {
-    if step.is_empty()
-        || step.len() > 64
-        || !step
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(MailError::Invalid("invalid-name: round step"));
-    }
+    binding_step(step)?;
     let _lifetime = worker_provision::hold_active(home, loop_name, identity, verify_only)?;
     let settings = command::settings(home)?;
     command::enter(home, &settings)?;

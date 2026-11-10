@@ -56,6 +56,7 @@ pkg_loop_home_rust = files(
   'src/tests/mod.rs',
   'src/verify.rs',
   'src/workers_settings.rs',
+  'tests/reply_custody.rs',
 )
 
 pkg_loop_home_prose = files(
@@ -141,4 +142,13 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/mail/configuration_tests.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Rootless inventory fixture enters the real test binary with the received configuration and storage descriptors, then drops to the reserved service identity"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Remove only the fixture root created by the parent through rootless namespace cleanup; no environment-supplied cleanup path"}
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/podman\"#2","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Run the received reply-session library fixture under the real rootless namespace and reserved service identity"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Install the principal mailbox fixture's exact named service ACL inside the test namespace"}
 ''']

@@ -896,7 +896,8 @@ pub fn hold_active_beneath(
 /// A completed first verification, not a lifetime lease.
 ///
 /// `hold` reacquires the protected receipt lock and rechecks the loop-owned
-/// binding. State may change before that call, so this value grants no admission.
+/// binding. It revalidates custody before acquisition and the loop-storage root
+/// again after the lock wait. State may change before that call, so this value grants no admission.
 #[must_use = "first verification is not a lease; call hold before admission"]
 pub struct VerifiedLifetime<'a> {
     row: crate::LoopRecord,
@@ -914,6 +915,7 @@ impl VerifiedLifetime<'_> {
     pub fn hold(self) -> Result<Flock<File>> {
         let parent = held_parent(self.root, self.private, self.executor, "mail-binding")?;
         let guard = active_receipt(&parent, self.identity)?;
+        self.root.revalidate()?;
         let service = self.allocations.mail_uid().ok_or_else(invalid)?;
         configure_held(
             &self.row,
@@ -937,7 +939,9 @@ impl VerifiedLifetime<'_> {
 ///
 /// The returned value is deliberately not a guard: callers must call `hold`
 /// before relying on admission. The combined `hold_active_beneath` route uses
-/// these same two phases without interposed work.
+/// these same two phases without interposed work. With `verify_only` false, the
+/// first phase may create or repair receipt storage, service ACLs, worker mail
+/// directories and the loop-owned lock; it is not a read-only probe.
 /// # Errors
 /// Refuses the same override, namespace, receipt and binding errors as the combined route.
 #[allow(clippy::too_many_arguments)]

@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Reply sessions can retain a worker lifetime lease across the service identity drop and bind or verify delivery pins through received configuration, storage, endpoint and journal custody, as a library prerequisite for the reply entry (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Reply-binding inventory can retain received configuration and storage custody through loop snapshots, mailbox metadata and endpoint freshness, sharing one loop-storage capability between endpoints (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:loophome:binding-inventory-retains-received-custody``).
 
 - Active lifetime verification exposes a non-admitting stage whose lease acquisition rechecks custody, receipts and loop-owned bindings, with rootless interleaving and read-only journal metadata regressions (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
@@ -169,6 +171,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Two-identity request fixtures exercise valid documents and marked requests and assert named registry and state-root owner mismatches for both mapped callers; their ignore reasons name the required UID/GID map and fixture capability (``test:integration:requests-entry-requires-one-account-for-door-and-permission-custody``).
 
 ### Fixed
+
+- Anchored lifetime admission revalidates loop-storage after waiting for its receipt lock, refusing custody changes during the wait before returning a lease (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Interrupted-settlement report tests compare measured walls within JSON floating-point precision while keeping every other report field exact, including resumed rounds and older socket evidence (``prob:lanes:settle-report-wall-survives-json-round-trip``).
 

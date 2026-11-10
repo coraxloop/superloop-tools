@@ -27,3 +27,7 @@ workspace = true
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+
+[[test]]
+name = "reply_custody"
+harness = false

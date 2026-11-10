@@ -60,7 +60,7 @@ pub(super) fn enter(home: &Path, settings: &Settings) -> Result<()> {
             .map_err(|_| MailError::Invalid("invalid-directory: allocations"))?;
     enter_with(home, settings, &registry, &allocations)
 }
-fn enter_with(
+pub(super) fn enter_with(
     home: &Path,
     settings: &Settings,
     registry: &crate::Registry,
