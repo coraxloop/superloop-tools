@@ -1974,12 +1974,7 @@ pub(crate) struct CredentialThreadGuard {
     _home: crate::home::PrivateHomeGuard,
 }
 impl CredentialThreadCustody {
-    #[cfg(test)]
-    pub(crate) fn capture(backend: BoxBackend) -> Result<Self, LaneError> {
-        Self::capture_admitted(backend, &RuntimeAdmission::Gate)
-    }
-
-    fn capture_admitted(
+    pub(crate) fn capture_admitted(
         backend: BoxBackend,
         admission: &RuntimeAdmission,
     ) -> Result<Self, LaneError> {
@@ -2059,19 +2054,16 @@ fn spawn_credential_authority_at(
                     &endpoint,
                     &custody.admission,
                 );
-                let evidence = if backend == BoxBackend::Claude {
-                    crate::credential::evidence_for_check_bound(
-                        &result,
-                        !checked,
-                        backend,
-                        custody.admission.program_binding(),
-                    )
-                } else {
-                    crate::credential::evidence_for_check(&result, !checked, backend)
-                };
+                let binding = custody.admission.program_binding();
+                let evidence = crate::credential::evidence_for_check_bound(
+                    &result, !checked, backend, binding,
+                );
                 if let Some(evidence) = evidence
-                    && let Err(error) =
-                        crate::credential::publish_evidence(&refresh_driver_dir, &evidence)
+                    && let Err(error) = crate::credential::publish_evidence_bound(
+                        &refresh_driver_dir,
+                        &evidence,
+                        binding,
+                    )
                 {
                     refresh_cancelled.store(true, Ordering::Release);
                     return Err(error);

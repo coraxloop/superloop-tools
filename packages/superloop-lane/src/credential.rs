@@ -593,7 +593,20 @@ fn write_run(home: &Path, worker_uid: u32, source: &Source) -> Result<(), LaneEr
 ///
 /// Refuses an unsafe directory or failed atomic replacement.
 pub(crate) fn publish_evidence(driver_dir: &Path, document: &Value) -> Result<(), LaneError> {
-    validate_evidence(document)?;
+    publish_evidence_bound(
+        driver_dir,
+        document,
+        &crate::runtime_admission::ReviewedProgramBinding::Schema,
+    )
+}
+
+/// Publish evidence using the same binding that shaped the helper observation.
+pub(crate) fn publish_evidence_bound(
+    driver_dir: &Path,
+    document: &Value,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> Result<(), LaneError> {
+    validate_evidence(document, binding)?;
     let directory = crate::plan::protected_identity_dir(driver_dir)?;
     let bytes = serde_json::to_vec(document)
         .map_err(|_| failure("credential-evidence", "refresh evidence cannot be encoded"))?;
@@ -617,7 +630,10 @@ pub(crate) fn publish_evidence(driver_dir: &Path, document: &Value) -> Result<()
     .map_err(|error| failure("credential-evidence", error.detail))
 }
 
-fn evidence_provider_valid(document: &Value) -> bool {
+fn evidence_provider_valid(
+    document: &Value,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> bool {
     match document["schema"].as_u64() {
         Some(1) => {
             document["host"] == REFRESH_HOST
@@ -630,15 +646,18 @@ fn evidence_provider_valid(document: &Value) -> bool {
                 && document["provider"]
                     == json!({
                         "kind":"owner-program", "program":"/usr/bin/claude",
-                        "required_sha256":CLAUDE_SCHEMA_PROGRAM_SHA256,
+                        "required_sha256":binding.required_sha256(),
                     })
         }
         _ => false,
     }
 }
 
-fn validate_evidence(document: &Value) -> Result<(), LaneError> {
-    if !evidence_provider_valid(document)
+fn validate_evidence(
+    document: &Value,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> Result<(), LaneError> {
+    if !evidence_provider_valid(document, binding)
         || !matches!(
             document["state"].as_str(),
             Some("current" | "published" | "partial" | "refused")
@@ -811,12 +830,13 @@ pub(crate) fn read_evidence_bytes(
 
 // Census observes temporal defects; publication still uses validate_evidence.
 fn validate_evidence_envelope(document: &Value) -> Result<(), LaneError> {
-    if !evidence_provider_valid(document)
-        || !matches!(
-            document["state"].as_str(),
-            Some("current" | "published" | "partial" | "refused")
-        )
-        || !document["run_refusals"].is_array()
+    if !evidence_provider_valid(
+        document,
+        &crate::runtime_admission::ReviewedProgramBinding::Schema,
+    ) || !matches!(
+        document["state"].as_str(),
+        Some("current" | "published" | "partial" | "refused")
+    ) || !document["run_refusals"].is_array()
         || !document["run_refusals_omitted"].is_u64()
         || !matches!(
             (document.get("kind"), document.get("detail")),
@@ -1589,7 +1609,8 @@ pub(crate) struct RefreshReport {
     pub authority_failure: Option<LaneError>,
 }
 
-/// Shape the result of one helper check for protected owner evidence.
+/// Shape evidence under the compiled schema binding for regressions.
+#[cfg(test)]
 pub(crate) fn evidence_for_check(
     result: &Result<RefreshReport, LaneError>,
     first_check: bool,
@@ -1603,6 +1624,7 @@ pub(crate) fn evidence_for_check(
     )
 }
 
+/// Shape the result of one helper check for protected owner evidence.
 pub(crate) fn evidence_for_check_bound(
     result: &Result<RefreshReport, LaneError>,
     first_check: bool,
@@ -3097,8 +3119,11 @@ mod tests {
         for byte in Sha256::digest(fs::read("/usr/bin/true").expect("public root-owned stand-in")) {
             write!(&mut digest, "{byte:02x}").expect("hex digest");
         }
-        let custody = crate::container_helper::CredentialThreadCustody::capture(BoxBackend::Claude)
-            .expect("production transfer");
+        let custody = crate::container_helper::CredentialThreadCustody::capture_admitted(
+            BoxBackend::Claude,
+            &Gate,
+        )
+        .expect("production transfer");
         writeln!(
             std::io::stdout().lock(),
             "CLAUDE-STANDIN-PROGRAM sha256={digest}"
@@ -4192,22 +4217,93 @@ mod tests {
     /// ´test:unit:claude-reviewed-binding-keeps-schema-evidence´
     #[test]
     fn claude_reviewed_binding_keeps_schema_evidence() {
+        let root = claude_fixture_root();
+        let runs = root.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+        let driver = runs.join("pilot");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected path");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("mode");
+        let held =
+            open_dir(&runs, owner_identity().0, owner_identity().0, 0o700).expect("held runs");
         let binding = Gate.program_binding();
-        for result in [
-            Ok(fixture_report(1_900_000_000)),
-            Err(failure("credential-refresh", "synthetic refusal")),
-        ] {
-            let evidence = evidence_for_check_bound(&result, true, BoxBackend::Claude, binding)
-                .expect("production evidence");
-            assert_eq!(
-                evidence["provider"]["required_sha256"],
-                CLAUDE_SCHEMA_PROGRAM_SHA256
-            );
-            assert_eq!(
-                Some(evidence),
-                evidence_for_check(&result, true, BoxBackend::Claude)
-            );
+        for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+            for result in [
+                Ok(fixture_report(1_900_000_000)),
+                Err(failure("credential-refresh", "synthetic refusal")),
+            ] {
+                let evidence = evidence_for_check_bound(&result, true, backend, binding)
+                    .expect("production evidence");
+                if backend == BoxBackend::Claude {
+                    assert_eq!(
+                        evidence["provider"]["required_sha256"],
+                        CLAUDE_SCHEMA_PROGRAM_SHA256
+                    );
+                }
+                let mut expected = match &result {
+                    Ok(_) => json!({
+                        "schema":1, "host":REFRESH_HOST, "state":"current",
+                        "run_refusals":[], "run_refusals_omitted":0,
+                        "expires_unix":1_900_000_000_u64, "refresh_due_unix":1_899_999_400_u64,
+                        "kind":null, "detail":null,
+                    }),
+                    Err(_) => json!({
+                        "schema":1, "host":REFRESH_HOST, "state":"refused",
+                        "run_refusals":[], "run_refusals_omitted":0,
+                        "expires_unix":null, "refresh_due_unix":null,
+                        "kind":"credential-refresh", "detail":"synthetic refusal",
+                    }),
+                };
+                if backend == BoxBackend::Claude {
+                    expected.as_object_mut().expect("object").remove("host");
+                    expected["schema"] = json!(2);
+                    expected["backend"] = json!("claude");
+                    expected["provider"] = json!({
+                        "kind":"owner-program", "program":"/usr/bin/claude",
+                        "required_sha256":CLAUDE_SCHEMA_PROGRAM_SHA256,
+                    });
+                }
+                assert_eq!(
+                    serde_json::to_vec(&evidence).expect("evidence bytes"),
+                    serde_json::to_vec(&expected).expect("expected bytes")
+                );
+                let original = evidence_for_check(&result, true, backend).expect("original form");
+                publish_evidence(&driver, &original).expect("compiled writer");
+                let original_bytes =
+                    fs::read(protected.join("credential-refresh.json")).expect("original bytes");
+                publish_evidence_bound(&driver, &evidence, binding).expect("bound writer");
+                assert_eq!(
+                    fs::read(protected.join("credential-refresh.json")).expect("bound bytes"),
+                    original_bytes
+                );
+                assert_eq!(
+                    serde_json::to_vec(&evidence).expect("encoding"),
+                    original_bytes
+                );
+                assert_eq!(
+                    read_evidence(&held, "pilot", owner_identity().0).expect("census"),
+                    Some(EvidenceObservation::Current(evidence))
+                );
+            }
         }
+        let mut foreign = evidence_for_check_bound(
+            &Ok(fixture_report(1_900_000_000)),
+            true,
+            BoxBackend::Claude,
+            binding,
+        )
+        .expect("production evidence");
+        let retained = fs::read(protected.join("credential-refresh.json")).expect("retained");
+        foreign["provider"]["required_sha256"] = json!("0".repeat(64));
+        let error = publish_evidence_bound(&driver, &foreign, binding)
+            .expect_err("bound writer validates before writing");
+        assert_eq!(error.kind, "credential-evidence");
+        assert_eq!(error.detail, "schema, provider or state is invalid");
+        assert_eq!(
+            fs::read(protected.join("credential-refresh.json")).expect("evidence retained"),
+            retained
+        );
     }
 
     /// # Panics
@@ -4866,8 +4962,11 @@ mod tests {
     #[test]
     fn credential_thread_refreshes_through_held_executables() {
         let (_home, _private, _guard) = helper_custody_fixture("/usr/bin/curl");
-        let custody = crate::container_helper::CredentialThreadCustody::capture(BoxBackend::Codex)
-            .expect("production helper thread handoff");
+        let custody = crate::container_helper::CredentialThreadCustody::capture_admitted(
+            BoxBackend::Codex,
+            &Gate,
+        )
+        .expect("production helper thread handoff");
         let (endpoint, server) = fixture_endpoint(
             "200 OK",
             json!({"id_token":token(1_900_000_000),"access_token":token(1_900_000_000),"refresh_token":"fixture-rotated"}),
@@ -5207,8 +5306,11 @@ mod tests {
     #[test]
     fn credential_client_executes_the_received_file() {
         let (_home, _private, _programs) = helper_custody_fixture("/usr/bin/true");
-        let custody = crate::container_helper::CredentialThreadCustody::capture(BoxBackend::Codex)
-            .expect("production handoff");
+        let custody = crate::container_helper::CredentialThreadCustody::capture_admitted(
+            BoxBackend::Codex,
+            &Gate,
+        )
+        .expect("production handoff");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("endpoint");
         listener.set_nonblocking(true).expect("bounded observation");
         let endpoint = format!("http://{}/refresh", listener.local_addr().expect("address"));

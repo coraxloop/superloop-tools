@@ -867,8 +867,9 @@ mod tests {
             nix::unistd::Uid::effective().as_raw(),
         )
         .expect("held home");
-        let custody = crate::container_helper::CredentialThreadCustody::capture(
+        let custody = crate::container_helper::CredentialThreadCustody::capture_admitted(
             crate::settings::BoxBackend::Claude,
+            &crate::runtime_admission::RuntimeAdmission::Gate,
         )
         .expect("production thread capture");
         let retained = home.join(".config/retained-loops");
