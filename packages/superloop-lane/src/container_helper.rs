@@ -25,7 +25,7 @@ use crate::launch::{
     publish_reservation, read_reservation, reservation_path,
 };
 use crate::plan::protected_identifier_path;
-use crate::runtime_admission::{RuntimeAdmission, RuntimeAdmissionThread};
+use crate::runtime_admission::RuntimeAdmission;
 use crate::settings::BoxBackend;
 use crate::{caller_home, load_plan, valid_run_name};
 
@@ -1957,6 +1957,9 @@ pub(crate) fn publish_round_credential_admitted(
     Ok(())
 }
 
+// Only custody capture constructs this token; activation moves its admission into the guard.
+struct RuntimeAdmissionThread(RuntimeAdmission);
+
 /// The authority thread holds home and configuration custody and only two credential executables.
 pub(crate) struct CredentialThreadCustody {
     admission: RuntimeAdmissionThread,
@@ -1984,7 +1987,9 @@ impl CredentialThreadCustody {
             home: crate::home::snapshot_private_home()?,
             configuration: crate::runtime_entry::snapshot_configuration(),
             programs: crate::container_entry::credential_programs(backend)?,
-            admission: admission.thread_token(),
+            admission: RuntimeAdmissionThread(match admission {
+                RuntimeAdmission::Gate => RuntimeAdmission::Gate,
+            }),
         })
     }
     pub(crate) fn activate(self) -> Result<CredentialThreadGuard, LaneError> {
@@ -1996,7 +2001,7 @@ impl CredentialThreadCustody {
             _programs: self.programs.map(|programs| {
                 crate::container_entry::activate_program_map("container-helper", programs)
             }),
-            admission: self.admission.activate(),
+            admission: self.admission.0,
         })
     }
 }
@@ -2059,7 +2064,7 @@ fn spawn_credential_authority_at(
                         &result,
                         !checked,
                         backend,
-                        &custody.admission.program_binding(),
+                        custody.admission.program_binding(),
                     )
                 } else {
                     crate::credential::evidence_for_check(&result, !checked, backend)

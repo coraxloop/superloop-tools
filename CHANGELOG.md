@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Helper-service custody alone constructs and consumes the admission thread token; program binding is borrowed from the admission without producing another owned proof (``proto:superlooplane:helper-runtime-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
+
 - Helper-service refusal tests call the admitted production cores with the gate explicitly; the six test-only forwarding wrappers are removed and the core documentation names the actual endpoint selection (``proto:superlooplane:helper-runtime-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
 
 - Claude fixture cleanup rechecks retained identity after mapped cleanup and refuses a linked runs directory, with precise replacement regressions (``prob:gates:lane-fixture-homes-leave-no-temporary-root-behind``; ``test:unit:claude-cleanup-rechecks-host-identity-after-mapped-removal``; ``test:unit:claude-cleanup-refuses-a-linked-runs-directory``).

@@ -1515,7 +1515,7 @@ pub(crate) fn publish_round_admitted(
     admission.check(backend)?;
     if backend == BoxBackend::Claude {
         let expected_program =
-            claude_program_pin_bound(owner_home, loop_name, &admission.program_binding())?;
+            claude_program_pin_bound(owner_home, loop_name, admission.program_binding())?;
         let home = claude_sign_in_dir(owner_home, loop_name);
         return publish_claude_round_at(
             &home,
@@ -1686,7 +1686,7 @@ pub(crate) fn refresh_live_admitted(
     admission.check(backend)?;
     if backend == BoxBackend::Claude {
         let expected_program =
-            claude_program_pin_bound(owner_home, loop_name, &admission.program_binding())?;
+            claude_program_pin_bound(owner_home, loop_name, admission.program_binding())?;
         let home = claude_sign_in_dir(owner_home, loop_name);
         return refresh_claude_live_at(
             &home,
@@ -4197,7 +4197,7 @@ mod tests {
             Ok(fixture_report(1_900_000_000)),
             Err(failure("credential-refresh", "synthetic refusal")),
         ] {
-            let evidence = evidence_for_check_bound(&result, true, BoxBackend::Claude, &binding)
+            let evidence = evidence_for_check_bound(&result, true, BoxBackend::Claude, binding)
                 .expect("production evidence");
             assert_eq!(
                 evidence["provider"]["required_sha256"],

@@ -910,6 +910,8 @@ Folded from ``open:homes:claude-lane-home-sandbox-redirects``, whose question th
 
 (2026-11-10, lane r002g84, admitted-core baseline) Review-ad N5 and N3 are met: the baseline calls the admitted cores with the production gate directly, its six test-only forwarding wrappers are removed, and their documentation sits on the production cores; custody tests still capture through the test-only `CredentialThreadCustody::capture`, which supplies `Gate`. The periodic endpoint comment distinguishes the fixed Codex endpoint and its pre-capture test hook from Claude's owner program. Shared production wrappers retain their signatures; gate positions and refusal text are unchanged (``proto:superlooplane:helper-runtime-admission``).
 
+(2026-11-10, lane r002g84, admission transfer boundary) Review-ad M1 is met for the present gate-only form: the thread token is private to helper custody, capture derives it explicitly and activation consumes its admission into the guard. No crate-wide token factory and activation pair remains. Program binding is borrowed from the admission rather than returned as another owned proof. A future fixture arm must derive its scoped thread token explicitly at capture; no fixture constructor or scope bypass is introduced (``proto:superlooplane:helper-runtime-admission``).
+
 ### Tests under load · `sec:toolsbacklog:open-gates`
 
 **Problem (Timing-bound tests of the lane gateway fail under load in gates of candidates that do not touch it)** · `prob:gates:gate-timing-flakes`

@@ -16,25 +16,10 @@ impl RuntimeAdmission {
         }
     }
 
-    pub(crate) const fn program_binding(&self) -> ReviewedProgramBinding {
+    pub(crate) const fn program_binding(&self) -> &ReviewedProgramBinding {
         match self {
-            Self::Gate => ReviewedProgramBinding::Schema,
+            Self::Gate => &ReviewedProgramBinding::Schema,
         }
-    }
-
-    pub(crate) const fn thread_token(&self) -> RuntimeAdmissionThread {
-        match self {
-            Self::Gate => RuntimeAdmissionThread(Self::Gate),
-        }
-    }
-}
-
-/// A non-cloneable transfer consumed when credential custody is activated.
-pub struct RuntimeAdmissionThread(RuntimeAdmission);
-
-impl RuntimeAdmissionThread {
-    pub(crate) const fn activate(self) -> RuntimeAdmission {
-        self.0
     }
 }
 
