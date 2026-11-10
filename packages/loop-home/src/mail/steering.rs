@@ -141,6 +141,12 @@ impl ReplyCustody<'_> {
         identity: &Identity,
         verify_only: bool,
     ) -> Result<ReplySession> {
+        // Keep the composed entry's lifetime refusal envelope independent of call order.
+        if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+            return Err(MailError::Io(std::io::Error::other(
+                "anchor-declaration: operation=mail-binding purpose=registry-override",
+            )));
+        }
         let lifetime = worker_provision::hold_active_beneath(
             home,
             loop_name,

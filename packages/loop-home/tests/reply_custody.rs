@@ -297,7 +297,16 @@ fn parent(case: &str) {
         records: pins.iter().map(anchor::HostPin::record).collect(),
     };
     let (send, receive) = std::os::unix::net::UnixStream::pair().expect("rights socket");
-    let child = child_command(home, case)
+    let mut command = child_command(home, case);
+    if case == "override-empty" {
+        command.env("ENTER_LOOP_REGISTRY", "");
+    } else if case == "override-canonical" {
+        command.env(
+            "ENTER_LOOP_REGISTRY",
+            home.join(".config/loops/registry.toml"),
+        );
+    }
+    let child = command
         .env(
             "LOOP_HOME_REPLY_MANIFEST",
             serde_json::to_string(&manifest).expect("manifest"),
@@ -378,6 +387,20 @@ fn child(home: &Path, case: &str) {
         name: "worker".into(),
         reservation: "reply-fixture".into(),
     };
+    if case.starts_with("override-") {
+        for verify_only in [false, true] {
+            let custody = ReplyCustody {
+                configuration: &configuration,
+                configuration_directory: &config,
+                loop_storage: Arc::clone(&storage),
+                private_storage: Arc::clone(&private),
+                identity_executable: &executor,
+                journal: Arc::clone(&journal),
+            };
+            override_refusal(custody, home, &identity, verify_only);
+        }
+        return;
+    }
     for phase in ["reserve", "finish"] {
         worker_provision::creation_beneath(
             home,
@@ -435,6 +458,31 @@ fn child(home: &Path, case: &str) {
             .expect("session drop releases lease"),
     );
 }
+fn override_refusal(
+    custody: ReplyCustody<'_>,
+    home: &Path,
+    identity: &Identity,
+    verify_only: bool,
+) {
+    let before = nix::unistd::Uid::effective();
+    let Err(error) = custody.enter(home, "alpha", identity, verify_only) else {
+        panic!("registry override admitted");
+    };
+    assert!(
+        matches!(error, loop_home::mail::journal::MailError::Io(_)),
+        "{error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "io-failure: anchor-declaration: operation=mail-binding purpose=registry-override"
+    );
+    assert_eq!(nix::unistd::Uid::effective(), before, "no identity change");
+    assert!(
+        !home.join(".var/loops/alpha/.mail-births").exists(),
+        "no lifetime writes"
+    );
+}
+
 fn post_lock_check(
     home: &Path,
     identity: &Identity,
@@ -664,14 +712,29 @@ fn reply_session_retains_custody() {
             seed(&home);
         } else {
             assert!(
-                ["held", "repair", "journal-mode", "payload"].contains(&phase.as_str()),
+                [
+                    "held",
+                    "repair",
+                    "journal-mode",
+                    "payload",
+                    "override-empty",
+                    "override-canonical"
+                ]
+                .contains(&phase.as_str()),
                 "unsupported fixture phase {phase}"
             );
             child(&home, &phase);
         }
         return;
     }
-    for case in ["held", "repair", "journal-mode", "payload"] {
+    for case in [
+        "held",
+        "repair",
+        "journal-mode",
+        "payload",
+        "override-empty",
+        "override-canonical",
+    ] {
         parent(case);
     }
 }
