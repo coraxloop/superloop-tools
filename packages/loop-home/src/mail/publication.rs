@@ -128,16 +128,13 @@ struct EndpointPaths {
 }
 
 struct HeldEndpoint {
-    storage: crate::anchor::Anchor,
+    storage: std::sync::Arc<crate::anchor::Anchor>,
     mailbox: PathBuf,
     staging: PathBuf,
 }
 impl HeldEndpoint {
     fn open(&self, path: &Path) -> Result<File> {
-        let (_, descriptor) = self
-            .storage
-            .relay()
-            .map_err(|e| MailError::Entry(e.to_string()))?;
+        let (_, descriptor) = self.storage.relay()?;
         child(
             &File::from(descriptor),
             path.to_str()
@@ -194,6 +191,37 @@ impl Endpoint {
         actor_group: u32,
         durability: Durability,
     ) -> Result<Self> {
+        Self::open_shared_beneath(
+            &std::sync::Arc::new(storage),
+            row,
+            address,
+            actor_group,
+            durability,
+        )
+    }
+
+    /// Retain a shared received capability for opening and every freshness check.
+    /// Multiple endpoints borrow the same capability; no extra manifest slot or alias is needed.
+    /// # Errors
+    /// Refuses the same scope, custody and durability failures as `open_beneath`.
+    pub fn open_shared_beneath(
+        storage: &std::sync::Arc<crate::anchor::Anchor>,
+        row: &crate::registry::LoopRecord,
+        address: Address,
+        actor_group: u32,
+        durability: Durability,
+    ) -> Result<Self> {
+        Self::open_held(storage, row, address, actor_group, durability, false)
+    }
+
+    pub(super) fn open_held(
+        storage: &std::sync::Arc<crate::anchor::Anchor>,
+        row: &crate::registry::LoopRecord,
+        address: Address,
+        actor_group: u32,
+        durability: Durability,
+        retired: bool,
+    ) -> Result<Self> {
         Self::durability(durability)?;
         if address.loop_name() != row.name
             || !row.home.is_absolute()
@@ -220,12 +248,12 @@ impl Endpoint {
             staging: row.home.join(&staging),
         };
         let held = HeldEndpoint {
-            storage,
+            storage: std::sync::Arc::clone(storage),
             mailbox,
             staging,
         };
         let mailbox = held.open(&held.mailbox)?;
-        Self::finish(paths, &mailbox, address, actor_group, false, Some(held))
+        Self::finish(paths, &mailbox, address, actor_group, retired, Some(held))
     }
 
     const fn durability(durability: Durability) -> Result<()> {
@@ -319,7 +347,7 @@ impl Endpoint {
         })
     }
 
-    fn fresh(&self) -> Result<()> {
+    pub(super) fn fresh(&self) -> Result<()> {
         let mailbox = match &self.held {
             Some(root) => root.open(&root.mailbox)?,
             None => absolute_directory(&self.mailbox_path)?,

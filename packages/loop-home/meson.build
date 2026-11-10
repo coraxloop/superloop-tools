@@ -138,3 +138,7 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:& image#1","caller":"loop-home","owner":"LOOPHOME","selector":"& image","callee":"external:anchor-fixture-executable","lookup":"configured-external","setting":"anchor_fixture_image","contract":"Prepare held execution under descriptor exhaustion without spawning a child"}
 {"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:std :: env :: current_exe () . expect (\"test executable\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Isolate descriptor exhaustion and stdin replacement in the same test binary"}
 ''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/mail/configuration_tests.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Rootless inventory fixture enters the real test binary with the received configuration and storage descriptors, then drops to the reserved service identity"}
+''']

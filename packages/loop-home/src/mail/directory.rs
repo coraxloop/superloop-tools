@@ -29,16 +29,25 @@ pub(super) struct Snapshot {
     pub digest: String,
     _lock: Flock<File>,
     path: PathBuf,
+    held: Option<Arc<crate::anchor::Anchor>>,
+    home: PathBuf,
     identity: (u64, u64),
     service: u32,
     owner: u32,
 }
 impl Snapshot {
     fn open(row: &LoopRecord, service: u32) -> Result<Self> {
+        Self::open_with(row, service, None)
+    }
+    pub(super) fn open_with(
+        row: &LoopRecord,
+        service: u32,
+        held: Option<Arc<crate::anchor::Anchor>>,
+    ) -> Result<Self> {
         let mut path = row.home.join("private");
         for component in ["", ".config", "mail"] {
             path = path.join(component);
-            let directory = io::search_directory(&path)?;
+            let directory = snapshot_file(&path, &row.home, held.as_deref(), true)?;
             if directory.metadata()?.uid() != row.uid {
                 return Err(MailError::Invalid(
                     "unsafe-storage: mail configuration ancestor owner",
@@ -47,7 +56,7 @@ impl Snapshot {
             acl::verify(&directory, service, true)?;
         }
         path = path.join("loop.toml");
-        let file = io::absolute(&path, false)?;
+        let file = snapshot_file(&path, &row.home, held.as_deref(), false)?;
         if file.metadata()?.uid() != row.uid {
             return Err(MailError::Invalid(
                 "unsafe-storage: mail configuration owner",
@@ -74,13 +83,15 @@ impl Snapshot {
             digest: digest(&bytes),
             _lock: lock,
             path,
+            held,
+            home: row.home.clone(),
             identity: (info.dev(), info.ino()),
             service,
             owner: row.uid,
         })
     }
-    fn current(&self) -> Result<()> {
-        let file = io::absolute(&self.path, false)?;
+    pub(super) fn current(&self) -> Result<()> {
+        let file = snapshot_file(&self.path, &self.home, self.held.as_deref(), false)?;
         let info = file.metadata()?;
         acl::verify(&file, self.service, false)?;
         if (info.dev(), info.ino()) != self.identity
@@ -101,6 +112,77 @@ impl Snapshot {
         Ok(())
     }
 }
+fn held_file(anchor: &crate::anchor::Anchor, path: &Path, search: bool) -> Result<File> {
+    let (_, descriptor) = anchor.relay()?;
+    let root = File::from(descriptor);
+    if search {
+        io::search_child(&root, path)
+    } else {
+        io::child(&root, path, true)
+    }
+}
+fn snapshot_file(
+    path: &Path,
+    home: &Path,
+    anchor: Option<&crate::anchor::Anchor>,
+    search: bool,
+) -> Result<File> {
+    if let Some(anchor) = anchor {
+        let relative = path
+            .strip_prefix(home.join("private"))
+            .map_err(|_| MailError::Invalid("anchor-escape: private snapshot"))?;
+        let relative = if relative.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            relative
+        };
+        let (_, descriptor) = anchor.relay()?;
+        let root = File::from(descriptor);
+        if search {
+            io::search_child(&root, relative)
+        } else {
+            io::child(&root, relative, false)
+        }
+    } else if search {
+        io::search_directory(path)
+    } else {
+        io::absolute(path, false)
+    }
+}
+pub(super) struct LoopCustody {
+    pub row: LoopRecord,
+    pub storage: Arc<crate::anchor::Anchor>,
+    pub private: Arc<crate::anchor::Anchor>,
+}
+impl LoopCustody {
+    fn open(&self, path: &Path, search: bool) -> Result<File> {
+        let relative = path
+            .strip_prefix(&self.row.home)
+            .map_err(|_| MailError::Invalid("anchor-escape: loop inventory"))?;
+        held_file(
+            &self.storage,
+            if relative.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                relative
+            },
+            search,
+        )
+    }
+}
+fn storage_file(path: &Path, custody: Option<&LoopCustody>, search: bool) -> Result<File> {
+    custody.map_or_else(
+        || {
+            if search {
+                io::search_directory(path)
+            } else {
+                io::absolute(path, true)
+            }
+        },
+        |custody| custody.open(path, search),
+    )
+}
+
 pub(super) struct Actor {
     pub endpoint: Endpoint,
     pub outbox: File,
@@ -283,8 +365,32 @@ impl Directory {
         let _span = tracing::debug_span!("mail.inventory", home = %self.home.display()).entered();
         let (registry, _, _) = self.registry()?;
         let allocations = self.allocations()?;
-        let rows = registry.rows(&self.home);
-        self.verify_credentials(&rows, &allocations)?;
+        self.inventory_with(&registry, &allocations, None)
+    }
+    pub(super) fn inventory_beneath(
+        &self,
+        configuration: &crate::anchor::Configuration,
+        custody: &LoopCustody,
+    ) -> Result<Inventory> {
+        custody.storage.revalidate()?;
+        custody.private.revalidate()?;
+        self.inventory_with(
+            &configuration.registry,
+            &configuration.allocations,
+            Some(custody),
+        )
+    }
+    fn inventory_with(
+        &self,
+        registry: &Registry,
+        allocations: &Allocations,
+        custody: Option<&LoopCustody>,
+    ) -> Result<Inventory> {
+        let mut rows = registry.rows(&self.home);
+        self.verify_credentials(&rows, allocations)?;
+        if let Some(custody) = custody {
+            rows.retain(|row| row.name == custody.row.name);
+        }
         let loops: BTreeSet<_> = rows.iter().map(|row| row.name.clone()).collect();
         let mut actors = BTreeMap::new();
         let mut identities = BTreeSet::from([self.service, self.owner]);
@@ -308,25 +414,19 @@ impl Directory {
                         address,
                         (row.uid, group),
                         true,
+                        custody,
                     )
                 });
             observe_admission(&added, &row.name, &label, "loop");
             if let Err(error) = added {
                 failures.push(format!("{label}: {error}"));
             }
-            let config = Snapshot::open(&row, self.service);
+            let config =
+                Snapshot::open_with(&row, self.service, custody.map(|c| Arc::clone(&c.private)));
             if let Ok(snapshot) = &config {
-                for worker in &snapshot.config.workers {
-                    if worker.state == WorkerState::Retired {
-                        retired.insert(
-                            Address::parse(&format!("{}+{}", row.name, worker.name)).map_err(
-                                |_| MailError::Invalid("invalid-directory: retired worker address"),
-                            )?,
-                        );
-                    }
-                }
+                collect_retired(&row.name, snapshot, &mut retired)?;
             }
-            let workers = match io::absolute(&row.home.join("workers"), true) {
+            let workers = match storage_file(&row.home.join("workers"), custody, false) {
                 Ok(workers) => workers,
                 Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                     tracing::trace!(loop_name = %row.name, "no worker directory");
@@ -358,8 +458,15 @@ impl Directory {
                         .map_err(|_| MailError::Invalid("unsafe-storage: worker folder name"))?;
                     let active = !retired.contains(&address);
                     let (uid, group) =
-                        self.worker_identity(&allocations, &row, &address, active)?;
-                    self.add_actor(&mut actors, &mut identities, address, (uid, group), active)
+                        self.worker_identity(allocations, &row, &address, active, custody)?;
+                    self.add_actor(
+                        &mut actors,
+                        &mut identities,
+                        address,
+                        (uid, group),
+                        active,
+                        custody,
+                    )
                 })();
                 observe_admission(&added, &row.name, &label, "worker");
                 if let Err(error) = added {
@@ -367,13 +474,7 @@ impl Directory {
                 }
             }
         }
-        tracing::debug!(
-            loops = loops.len(),
-            actors = actors.len(),
-            skipped = failures.len(),
-            retired = retired.len(),
-            "inventory refreshed"
-        );
+        inventory_trace(loops.len(), actors.len(), failures.len(), retired.len());
         Ok(Inventory {
             loops,
             actors,
@@ -387,14 +488,16 @@ impl Directory {
         row: &LoopRecord,
         address: &Address,
         active: bool,
+        custody: Option<&LoopCustody>,
     ) -> Result<(u32, u32)> {
-        let outbox = io::absolute(
+        let outbox = storage_file(
             &self
                 .home
                 .join(".var/loops")
                 .join(address.relative_mailbox())
                 .join("outbox"),
-            true,
+            custody,
+            false,
         )?;
         let uid = outbox.metadata()?.uid();
         let group = if active {
@@ -413,13 +516,14 @@ impl Directory {
             if uid != self.service {
                 return Err(MailError::Invalid("unsafe-storage: retired outbox custody"));
             }
-            let inbox = io::absolute(
+            let inbox = storage_file(
                 &self
                     .home
                     .join(".var/loops")
                     .join(address.relative_mailbox())
                     .join("inbox"),
-                true,
+                custody,
+                false,
             )?;
             let group = inbox.metadata()?.gid();
             if !allocations.get(&row.name).is_some_and(|block| {
@@ -444,6 +548,7 @@ impl Directory {
         address: Address,
         identity: (u32, u32),
         active: bool,
+        custody: Option<&LoopCustody>,
     ) -> Result<()> {
         let (uid, group) = identity;
         if active && !identities.insert(uid) {
@@ -455,18 +560,18 @@ impl Directory {
         let path = root.join(address.relative_mailbox());
         let mut ancestor = path.parent();
         while let Some(parent) = ancestor {
-            let info = io::search_directory(parent)?.metadata()?;
+            let info = storage_file(parent, custody, true)?.metadata()?;
             if ![self.owner, self.service].contains(&info.uid()) || info.mode() & 0o022 != 0 {
                 return Err(MailError::Invalid(
                     "unsafe-storage: actor-replaceable mailbox ancestor",
                 ));
             }
-            if parent == root {
+            if parent == custody.map_or(root.as_path(), |c| c.row.home.as_path()) {
                 break;
             }
             ancestor = parent.parent();
         }
-        let mailbox = io::absolute(&path, true)?;
+        let mailbox = storage_file(&path, custody, false)?;
         let mut names = io::names(&mailbox)?;
         names.sort();
         if names != ["draft", "inbox", "outbox", "read", "sent"].map(std::ffi::OsString::from) {
@@ -475,7 +580,7 @@ impl Directory {
             ));
         }
         for name in ["draft", "read"] {
-            let folder = io::search_directory(&path.join(name))?;
+            let folder = storage_file(&path.join(name), custody, true)?;
             let info = folder.metadata()?;
             if info.uid() != uid || info.gid() != uid || info.mode() & 0o777 != 0o700 {
                 return Err(MailError::Invalid(
@@ -484,7 +589,7 @@ impl Directory {
             }
             acl::transport(&folder)?;
         }
-        let outbox = io::absolute(&path.join("outbox"), true)?;
+        let outbox = storage_file(&path.join("outbox"), custody, false)?;
         let info = outbox.metadata()?;
         if info.uid() != uid || info.gid() != uid || info.mode() & 0o007 != 0 {
             return Err(MailError::Invalid("unsafe-storage: actor outbox custody"));
@@ -498,21 +603,31 @@ impl Directory {
             acl::transport(&outbox)?;
         }
         for directory in [&path, &path.join("inbox"), &path.join("sent")] {
-            acl::transport(&io::absolute(directory, true)?)?;
+            acl::transport(&storage_file(directory, custody, false)?)?;
         }
-        let endpoint = if active {
+        let endpoint = if let Some(custody) = custody {
+            Endpoint::open_held(
+                &custody.storage,
+                &custody.row,
+                address.clone(),
+                group,
+                self.durability,
+                !active,
+            )?
+        } else if active {
             Endpoint::open(&root, address.clone(), group, self.durability)?
         } else {
             Endpoint::open_retired(&root, address.clone(), group, self.durability)?
         };
-        let staging = io::absolute(
+        let staging = storage_file(
             &path
                 .parent()
                 .ok_or(MailError::Invalid("endpoint parent"))?
                 .join(".mail-staging"),
-            true,
+            custody,
+            false,
         )?;
-        let inbox = io::absolute(&path.join("inbox"), true)?;
+        let inbox = storage_file(&path.join("inbox"), custody, false)?;
         actors.insert(
             address,
             Actor {
@@ -527,6 +642,22 @@ impl Directory {
         );
         Ok(())
     }
+}
+
+fn collect_retired(name: &str, snapshot: &Snapshot, retired: &mut BTreeSet<Address>) -> Result<()> {
+    for worker in &snapshot.config.workers {
+        if worker.state == WorkerState::Retired {
+            retired.insert(
+                Address::parse(&format!("{name}+{}", worker.name))
+                    .map_err(|_| MailError::Invalid("invalid-directory: retired worker address"))?,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn inventory_trace(loops: usize, actors: usize, skipped: usize, retired: usize) {
+    tracing::debug!(loops, actors, skipped, retired, "inventory refreshed");
 }
 
 fn observe_admission(result: &Result<()>, loop_name: &str, address: &str, kind: &str) {

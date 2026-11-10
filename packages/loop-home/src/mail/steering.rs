@@ -14,6 +14,96 @@ use std::io::Read as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
+/// Selected-loop inventory retained beneath receiver-validated storage and private custody.
+/// This is an endpoint inventory, not a lifetime lease or a published reply binding.
+pub struct BindingInventory {
+    inventory: super::directory::Inventory,
+    snapshot: super::directory::Snapshot,
+    loop_name: String,
+}
+impl BindingInventory {
+    /// Open the selected loop using a validated configuration snapshot and held directories.
+    /// The caller must receive loop-storage and private-storage under their declared policies
+    /// and enter the reserved service identity before calling this function.
+    /// Global credential collision checks still use every registry row and allocation.
+    /// # Errors
+    /// Refuses an override, wrong service identity, invalid snapshot or unsafe mailbox storage.
+    pub fn open_beneath(
+        home: &Path,
+        loop_name: &str,
+        configuration: &crate::anchor::Configuration,
+        storage: std::sync::Arc<crate::anchor::Anchor>,
+        private: std::sync::Arc<crate::anchor::Anchor>,
+        durability: Durability,
+    ) -> Result<Self> {
+        use super::directory::{LoopCustody, Snapshot};
+        if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+            return Err(MailError::Entry(
+                "anchor-declaration: operation=mail-binding purpose=registry-override".into(),
+            ));
+        }
+        let service = nix::unistd::Uid::effective().as_raw();
+        if configuration.allocations.mail_uid() != Some(service) {
+            return Err(MailError::Invalid(
+                "unsafe-storage: service identity reservation mismatch",
+            ));
+        }
+        let row = configuration
+            .registry
+            .row(loop_name, home)
+            .map_err(|_| MailError::Invalid("invalid-directory: registered loop"))?;
+        let (_, descriptor) = storage.relay()?;
+        let owner = std::fs::File::from(descriptor).metadata()?.uid();
+        let directory = Directory {
+            configuration: None,
+            home: home.to_owned(),
+            service,
+            owner,
+            durability,
+        };
+        let snapshot = Snapshot::open_with(&row, service, Some(std::sync::Arc::clone(&private)))?;
+        let custody = LoopCustody {
+            row,
+            storage,
+            private,
+        };
+        let inventory = directory.inventory_beneath(configuration, &custody)?;
+        Ok(Self {
+            inventory,
+            snapshot,
+            loop_name: loop_name.into(),
+        })
+    }
+
+    /// Recheck the retained configuration and active principal/worker endpoint pair.
+    /// # Errors
+    /// Refuses a missing, retired, changed or differently owned endpoint or configuration.
+    pub fn verify_worker(&self, identity: &Identity) -> Result<()> {
+        self.snapshot.current()?;
+        self.snapshot.config.active(&identity.name)?;
+        let worker = Address::parse(&format!("{}+{}", self.loop_name, identity.name))
+            .map_err(|_| MailError::Invalid("invalid-name: worker address"))?;
+        for address in [
+            Address::parse(&self.loop_name)
+                .map_err(|_| MailError::Invalid("invalid-name: loop"))?,
+            worker,
+        ] {
+            let actor = self
+                .inventory
+                .actors
+                .get(&address)
+                .filter(|actor| {
+                    actor.active && (address.worker().is_none() || actor.uid == identity.uid)
+                })
+                .ok_or(MailError::Invalid(
+                    "invalid-directory: binding endpoint unavailable",
+                ))?;
+            actor.endpoint.fresh()?;
+        }
+        Ok(())
+    }
+}
+
 /// Resolve one delivery under namespace-root entry, then drop permanently to
 /// the service identity before journal verification and pin publication.
 ///
