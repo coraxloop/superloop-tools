@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The custom reply-session acceptance lists its test without entering the namespace and refuses unsupported filter arguments (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Mail inventory and reply-session acceptances bound subprocess waits, inherited output pipes and cleanup, reporting retained fixture paths on cleanup failure (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Helper credential pins and Claude evidence consume an explicit reviewed program binding while retaining the compiled reference and closed runtime gate (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-owner-program-binding``).

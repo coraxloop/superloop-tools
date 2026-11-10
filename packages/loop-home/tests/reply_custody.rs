@@ -676,6 +676,41 @@ fn reply_session_retains_custody() {
     }
 }
 
+fn argument_checks() {
+    for (args, success, text) in [
+        (vec!["--list"], true, "reply_session_retains_custody: test"),
+        (
+            vec!["unrelated-filter"],
+            false,
+            "reply-custody: unsupported test arguments",
+        ),
+        (
+            vec!["--exact"],
+            false,
+            "reply-custody: unsupported test arguments",
+        ),
+    ] {
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("reply fixture executable"))
+                .args(args)
+                .env(PHASE, "cleanup")
+                .env_remove(HOME)
+                .fixture_output("reply argument admission", Duration::from_secs(10))
+                .expect("bounded argument probe");
+        assert_eq!(output.status.success(), success);
+        if !success {
+            assert_eq!(output.status.code(), Some(2));
+        }
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(report.contains(text), "{report}");
+        assert!(!report.contains("reply custody passed"), "{report}");
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|word| {
@@ -686,6 +721,22 @@ fn main() -> std::process::ExitCode {
             &args,
             &mut std::io::stderr().lock(),
         ));
+    }
+    if args.len() == 1 && args[0] == "--list" {
+        std::io::stdout()
+            .write_all(b"reply_session_retains_custody: test\n")
+            .expect("list result");
+        return std::process::ExitCode::SUCCESS;
+    }
+    if !args.iter().all(|arg| arg == "--nocapture") {
+        let _reported = writeln!(
+            std::io::stderr().lock(),
+            "reply-custody: unsupported test arguments; use no filter or --list"
+        );
+        return std::process::ExitCode::from(2);
+    }
+    if std::env::var_os(PHASE).is_none() {
+        argument_checks();
     }
     reply_session_retains_custody();
     std::io::stdout()

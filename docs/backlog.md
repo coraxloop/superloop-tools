@@ -1540,6 +1540,8 @@ Codex preparation resolves its nodes from the loop's active rows (``prob:homes:c
 
 (2026-11-10) Part (ak), review-an L7, is met: the inventory and reply fixtures now bound parent subprocess waits and cleanup, cap each output pipe at 1 MiB and kill the owned process group on timeout. Cleanup failure names the retained parent-created path and is never silently successful; an existing panic keeps its original failure while cleanup reports separately. Deadline and inherited-pipe cases plus the cleanup-failure pin cover it and review-ao L4 and N7.
 
+(2026-11-10) Part (an), review-ao L5, is met: the custom reply target now handles `--list` without entering Podman and refuses unsupported filters or flags before fixture dispatch; isolated probes set an unsupported fixture phase to distinguish argument admission from an accidental full run. Private worker identity arguments still dispatch first. Part (al), the earlier mutations’ search-barrier limitation, is unchanged.
+
 **Problem (The host lane-home scans are removed with the host forms)** · `prob:homes:host-lane-home-scans-removed`
 
 **OPEN.** (2026-11-05, a part of (`prob:lanes:non-boxed-worker-support-removed`)) The scans that guard a host lane home, the Claude home move's live-driver scan over the owner uid's processes and the Codex home's scans for a live host driver, exist because a host driver may hold a home that a move or a repair rewrites; once no host driver runs, they are removed with the commands that call them, and the open question of the Claude scan's process evidence (`open:homes:claude-home-scan-process-evidence`) closes with them. The loop's sign-in homes stay, as the source the box's vendor proxy reads.
