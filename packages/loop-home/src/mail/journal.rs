@@ -1107,6 +1107,57 @@ fn reservation_admission(root: &File) -> Result<Flock<File>> {
         .map_err(|(_, error)| MailError::from(error))
 }
 
+/// Admit a reservation binding through a receiver-validated journal capability.
+///
+/// The service identity opens only the held directory, never its absolute path.
+/// The existing compaction admission lock and delivery validation remain shared
+/// with pathname callers; this does not acquire the service's writer lock.
+/// # Errors
+/// Refuses changed anchor custody, unsafe journal storage or invalid delivery evidence.
+pub fn bind_reservation_beneath<T>(
+    anchor: &crate::anchor::Anchor,
+    family: &str,
+    reference: &str,
+    instant: &Instant,
+    verify: impl FnOnce(&Record) -> Result<T>,
+) -> Result<T> {
+    bind_reservation(
+        &reservation_root_beneath(anchor)?,
+        family,
+        reference,
+        instant,
+        verify,
+    )
+}
+
+/// Verify an existing reservation pin through the received journal capability.
+///
+/// Verification creates or replaces no journal evidence.
+/// # Errors
+/// Refuses changed anchor custody, unsafe storage, an absent pin or invalid evidence.
+pub fn verify_reservation_beneath<T>(
+    anchor: &crate::anchor::Anchor,
+    family: &str,
+    reference: &str,
+    instant: &Instant,
+    verify: impl FnOnce(&Record) -> Result<T>,
+) -> Result<T> {
+    verify_reservation(
+        &reservation_root_beneath(anchor)?,
+        family,
+        reference,
+        instant,
+        verify,
+    )
+}
+
+fn reservation_root_beneath(anchor: &crate::anchor::Anchor) -> Result<File> {
+    let (_, descriptor) = anchor
+        .relay()
+        .map_err(|error| MailError::Entry(error.to_string()))?;
+    store::open(&File::from(descriptor), ".", true)
+}
+
 /// Verify a terminal delivery and durably pin it before exposing its binding.
 ///
 /// The caller runs under the service identity; actors cannot access this root.

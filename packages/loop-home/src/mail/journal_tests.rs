@@ -938,3 +938,126 @@ fn reservation_projection_bound_preserves_existing_bindings() {
         BTreeSet::from([first()])
     );
 }
+
+/// # Panics
+/// Panics if a private fixture cannot be pinned and validated under the live UID map.
+fn reservation_anchor(path: &std::path::Path) -> crate::anchor::Anchor {
+    use crate::anchor::{
+        HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement, Transport,
+    };
+    let policy = Policy {
+        kind: Kind::Directory,
+        owner: Owner::Host,
+        mode: ModePolicy::Exact(0o700),
+    };
+    let pin = HostVerifier::current()
+        .expect("host verifier")
+        .pin(path, "journal-storage", 0, policy)
+        .expect("journal pin");
+    let manifest = Manifest {
+        version: 1,
+        transport: Transport::Rights,
+        operation: "mail-bind".into(),
+        loop_name: "alpha".into(),
+        records: vec![pin.record()],
+    };
+    Receiver::current()
+        .expect("receiver")
+        .validate(
+            &manifest,
+            vec![pin.into_fd()],
+            "mail-bind",
+            "alpha",
+            Transport::Rights,
+            &[Requirement {
+                purpose: "journal-storage".into(),
+                policy,
+                alias_group: None,
+            }],
+        )
+        .expect("validated journal")
+        .pop()
+        .expect("journal capability")
+}
+
+/// # Panics
+/// Panics if binding follows a replacement path or verification changes durable state.
+/// ´claim:loophome:journal-reservation-binding-retains-custody´
+/// ´test:unit:journal-reservation-binding-retains-custody´
+#[test]
+fn journal_reservation_binding_retains_custody() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("journal");
+    fs::create_dir(&path).expect("journal directory");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("mode");
+    let mut journal = Journal::create(File::open(&path).expect("root")).expect("journal");
+    let record = record(&first());
+    journal.reserve(first()).expect("reserve");
+    journal.accept(&record).expect("accept");
+    complete(&mut journal, &record);
+    let anchor = reservation_anchor(&path);
+    let retained = fixture.0.join("retained");
+    fs::rename(&path, &retained).expect("retain journal");
+    fs::create_dir(&path).expect("replacement");
+    fs::write(path.join("checkpoint.toml"), b"not a journal").expect("replacement sentinel");
+    let value = bind_reservation_beneath(&anchor, "alpha:run", "step", &first(), |record| {
+        Ok(record.digest.clone())
+    })
+    .expect("bind through received journal while the service writer remains open");
+    assert_eq!(value, record.digest);
+    let pins = retained.join("reservation-pins.toml");
+    let before = fs::read(&pins).expect("pins");
+    let metadata = fs::metadata(&pins).expect("pin metadata");
+    verify_reservation_beneath(&anchor, "alpha:run", "step", &first(), |_| Ok(()))
+        .expect("verify received journal");
+    assert_eq!(fs::read(&pins).expect("unchanged pins"), before);
+    let after = fs::metadata(&pins).expect("unchanged metadata");
+    assert_eq!(
+        (after.ino(), after.mtime(), after.mtime_nsec()),
+        (metadata.ino(), metadata.mtime(), metadata.mtime_nsec())
+    );
+    assert!(!path.join("reservation-pins.toml").exists());
+    assert_eq!(
+        fs::read(path.join("checkpoint.toml")).expect("sentinel"),
+        b"not a journal"
+    );
+    assert_eq!(
+        journal
+            .prune(&later(), &Pins::default())
+            .expect("pinned history"),
+        0
+    );
+    fs::remove_file(&pins).expect("remove pin projection");
+    assert!(!pins.exists());
+    let missing = verify_reservation_beneath(&anchor, "alpha:run", "step", &first(), |_| Ok(()))
+        .expect_err("missing projection");
+    let absent = Some(nix::errno::Errno::ENOENT as i32);
+    assert!(
+        matches!(missing, MailError::Io(ref error) if error.raw_os_error() == absent),
+        "{missing}"
+    );
+    assert!(
+        !pins.exists(),
+        "verification does not recreate the projection"
+    );
+    fs::write(&pins, &before).expect("restore projection");
+    fs::set_permissions(&pins, fs::Permissions::from_mode(0o600)).expect("projection mode");
+    verify_reservation_beneath(&anchor, "alpha:run", "step", &first(), |_| Ok(()))
+        .expect("restored projection verifies");
+    fs::set_permissions(&retained, fs::Permissions::from_mode(0o750)).expect("widen root");
+    for verify_only in [false, true] {
+        let callback = |_: &Record| -> Result<()> { panic!("unsafe root reached verification") };
+        let error = if verify_only {
+            verify_reservation_beneath(&anchor, "alpha:run", "step", &first(), callback)
+        } else {
+            bind_reservation_beneath(&anchor, "alpha:run", "step", &first(), callback)
+        }
+        .expect_err("changed journal mode refused");
+        assert!(
+            matches!(error, MailError::Entry(ref detail) if detail.contains("anchor-mode")
+            && detail.contains("purpose=journal-storage")),
+            "{error}"
+        );
+    }
+    fs::set_permissions(&retained, fs::Permissions::from_mode(0o700)).expect("restore mode");
+}
