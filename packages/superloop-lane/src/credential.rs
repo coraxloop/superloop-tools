@@ -1493,6 +1493,7 @@ pub fn prepare_run(
 /// # Errors
 ///
 /// Refuses unavailable authority, unsafe custody or failed publication and clock evidence.
+#[cfg(test)]
 pub(crate) fn publish_round(
     owner_home: &Path,
     loop_name: &str,
@@ -1500,7 +1501,25 @@ pub(crate) fn publish_round(
     worker_uid: u32,
     backend: BoxBackend,
 ) -> Result<Value, LaneError> {
-    backend.require_runtime()?;
+    publish_round_admitted(
+        owner_home,
+        loop_name,
+        run_home,
+        worker_uid,
+        backend,
+        &crate::runtime_admission::RuntimeAdmission::Gate,
+    )
+}
+
+pub(crate) fn publish_round_admitted(
+    owner_home: &Path,
+    loop_name: &str,
+    run_home: &Path,
+    worker_uid: u32,
+    backend: BoxBackend,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+) -> Result<Value, LaneError> {
+    admission.check(backend)?;
     if backend == BoxBackend::Claude {
         let expected_program = claude_program_pin(owner_home, loop_name)?;
         let home = claude_sign_in_dir(owner_home, loop_name);
@@ -1647,6 +1666,7 @@ pub(crate) const fn fixture_report(expires_unix: u64) -> RefreshReport {
 /// # Errors
 ///
 /// Reports a failed authority request or publication without exposing token bytes.
+#[cfg(test)]
 pub(crate) fn refresh_live(
     owner_home: &Path,
     loop_name: &str,
@@ -1655,7 +1675,27 @@ pub(crate) fn refresh_live(
     backend: BoxBackend,
     endpoint: &str,
 ) -> Result<RefreshReport, LaneError> {
-    backend.require_runtime()?;
+    refresh_live_admitted(
+        owner_home,
+        loop_name,
+        runs_root,
+        published,
+        backend,
+        endpoint,
+        &crate::runtime_admission::RuntimeAdmission::Gate,
+    )
+}
+
+pub(crate) fn refresh_live_admitted(
+    owner_home: &Path,
+    loop_name: &str,
+    runs_root: &Path,
+    published: &mut BTreeMap<PathBuf, Vec<u8>>,
+    backend: BoxBackend,
+    endpoint: &str,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+) -> Result<RefreshReport, LaneError> {
+    admission.check(backend)?;
     if backend == BoxBackend::Claude {
         let expected_program = claude_program_pin(owner_home, loop_name)?;
         let home = claude_sign_in_dir(owner_home, loop_name);

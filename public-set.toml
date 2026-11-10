@@ -2072,6 +2072,9 @@ pattern = "packages/superloop-lane/src/requests/test_helper.rs"
 pattern = "packages/superloop-lane/src/routes.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/runtime_admission.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/runtime_entry.rs"
 
 [[include.rows]]

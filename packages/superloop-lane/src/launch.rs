@@ -6678,10 +6678,34 @@ pub(crate) fn pinned_plan_from_record(
     podman: &Path,
     record: &Value,
 ) -> Result<(Plan, Settings), LaneError> {
+    pinned_plan_from_record_admitted(
+        owner_home,
+        loop_name,
+        run,
+        podman,
+        record,
+        &crate::runtime_admission::RuntimeAdmission::Gate,
+    )
+}
+
+pub(crate) fn pinned_plan_from_record_admitted(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    podman: &Path,
+    record: &Value,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+) -> Result<(Plan, Settings), LaneError> {
     let backend = crate::settings::BoxBackend::from_plan(&record["plan"])?;
-    backend.require_runtime()?;
-    let (mut plan, settings) =
-        crate::load_launch_plan(owner_home, loop_name, run, (0, 0), Some(backend))?;
+    admission.check(backend)?;
+    let (mut plan, settings) = crate::load_launch_plan_admitted(
+        owner_home,
+        loop_name,
+        run,
+        (0, 0),
+        Some(backend),
+        admission,
+    )?;
     if record["loop"] != loop_name
         || record["run"] != run
         || record["plan"]["driver_dir"] != plan.driver_dir.display().to_string()

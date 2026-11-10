@@ -23,6 +23,7 @@ pub mod prepare;
 pub mod repair;
 pub mod requests;
 pub mod routes;
+mod runtime_admission;
 pub mod runtime_entry;
 pub mod settings;
 pub mod sign_in;
@@ -232,9 +233,27 @@ pub(crate) fn load_launch_plan(
     caller: (u32, u32),
     backend: Option<settings::BoxBackend>,
 ) -> Result<(Plan, Settings), LaneError> {
+    load_launch_plan_admitted(
+        home,
+        loop_name,
+        run,
+        caller,
+        backend,
+        &runtime_admission::RuntimeAdmission::Gate,
+    )
+}
+
+pub(crate) fn load_launch_plan_admitted(
+    home: &Path,
+    loop_name: &str,
+    run: &str,
+    caller: (u32, u32),
+    backend: Option<settings::BoxBackend>,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+) -> Result<(Plan, Settings), LaneError> {
     let settings = read_plan_settings(home, loop_name, run)?;
     let backend = settings.launch_backend(backend)?;
-    backend.require_runtime()?;
+    admission.check(backend)?;
     load_plan_with_settings(home, loop_name, run, caller, true, settings, backend)
 }
 

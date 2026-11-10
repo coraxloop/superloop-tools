@@ -1164,7 +1164,14 @@ pub(crate) fn verify_home_layout(document: &Value) -> Result<(), LaneError> {
 ///
 /// Refuses a changed vector or gate result.
 pub(crate) fn verify_box_attestation(document: &Value) -> Result<(), LaneError> {
-    crate::settings::BoxBackend::from_plan(document)?.require_runtime()?;
+    verify_box_attestation_admitted(document, &crate::runtime_admission::RuntimeAdmission::Gate)
+}
+
+pub(crate) fn verify_box_attestation_admitted(
+    document: &Value,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+) -> Result<(), LaneError> {
+    admission.check(crate::settings::BoxBackend::from_plan(document)?)?;
     if document["box_gate"] != box_gate(document)? {
         return Err(LaneError::input(
             "box-gate",

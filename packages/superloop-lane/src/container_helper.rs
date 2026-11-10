@@ -25,6 +25,7 @@ use crate::launch::{
     publish_reservation, read_reservation, reservation_path,
 };
 use crate::plan::protected_identifier_path;
+use crate::runtime_admission::{RuntimeAdmission, RuntimeAdmissionThread};
 use crate::settings::BoxBackend;
 use crate::{caller_home, load_plan, valid_run_name};
 
@@ -792,11 +793,22 @@ pub(crate) fn fixture_reserved_program_attempt(home: &Path, run: &Path) {
     tests::reserved_program_attempt(home, run);
 }
 
+#[cfg(test)]
 fn pinned_request(
     owner_home: &Path,
     loop_name: &str,
     run: &str,
     podman: &Path,
+) -> Result<PinnedRequest, LaneError> {
+    pinned_request_admitted(owner_home, loop_name, run, podman, &RuntimeAdmission::Gate)
+}
+
+fn pinned_request_admitted(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    podman: &Path,
+    admission: &RuntimeAdmission,
 ) -> Result<PinnedRequest, LaneError> {
     crate::pinned::owner_executable(podman, Uid::effective().as_raw())?;
     let (initial, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
@@ -829,12 +841,13 @@ fn pinned_request(
             "launcher's recorded process is absent",
         ));
     }
-    let (plan, settings) =
-        crate::launch::pinned_plan_from_record(owner_home, loop_name, run, podman, &record)
-            .map_err(|error| LaneError::input("helper-pin", error.line()))?;
+    let (plan, settings) = crate::launch::pinned_plan_from_record_admitted(
+        owner_home, loop_name, run, podman, &record, admission,
+    )
+    .map_err(|error| LaneError::input("helper-pin", error.line()))?;
     let loop_uid = crate::plan::loop_uid(&plan.document)?;
     let observing = record["plan"]["vendor_mode"].is_string();
-    crate::plan::verify_box_attestation(&plan.document)?;
+    crate::plan::verify_box_attestation_admitted(&plan.document, admission)?;
     let argv = plan.document["runtime_argv"]
         .as_array()
         .ok_or_else(|| LaneError::input("helper-pin", "plan has no runtime vector"))?
@@ -1700,6 +1713,20 @@ fn run_identity_at(
     run_dir: &Path,
     namespace_owner: u32,
 ) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
+    run_identity_at_admitted(
+        owner_home,
+        run_dir,
+        namespace_owner,
+        &RuntimeAdmission::Gate,
+    )
+}
+
+fn run_identity_at_admitted(
+    owner_home: &Path,
+    run_dir: &Path,
+    namespace_owner: u32,
+    admission: &RuntimeAdmission,
+) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
     let invalid = || {
         LaneError::input(
             "helper-pin",
@@ -1744,9 +1771,10 @@ fn run_identity_at(
             "reserved runtime program is not absolute",
         ));
     }
-    let (plan, _settings) =
-        crate::launch::pinned_plan_from_record(owner_home, &loop_name, &run, &program, &record)
-            .map_err(|error| LaneError::input("helper-pin", error.line()))?;
+    let (plan, _settings) = crate::launch::pinned_plan_from_record_admitted(
+        owner_home, &loop_name, &run, &program, &record, admission,
+    )
+    .map_err(|error| LaneError::input("helper-pin", error.line()))?;
     if plan.driver_dir != run_dir {
         return Err(invalid());
     }
@@ -1907,13 +1935,23 @@ fn authorize_peer(stream: &UnixStream, loop_uid: u32, reservation: &Path) -> Res
 }
 
 /// Publish the round's credential before exposing the helper's ready socket.
+#[cfg(test)]
 pub(crate) fn publish_round_credential(
     owner_home: &Path,
     loop_name: &str,
     record: &mut Value,
 ) -> Result<(), LaneError> {
+    publish_round_credential_admitted(owner_home, loop_name, record, &RuntimeAdmission::Gate)
+}
+
+pub(crate) fn publish_round_credential_admitted(
+    owner_home: &Path,
+    loop_name: &str,
+    record: &mut Value,
+    admission: &RuntimeAdmission,
+) -> Result<(), LaneError> {
     let backend = BoxBackend::from_plan(&record["plan"])?;
-    backend.require_runtime()?;
+    admission.check(backend)?;
     let home = record["plan"]["home"]
         .as_str()
         .ok_or_else(|| LaneError::input("credential-publish", "run home is absent"))?;
@@ -1931,28 +1969,40 @@ pub(crate) fn publish_round_credential(
         .and_then(|rounds| rounds.last_mut())
         .filter(|round| round["step"] == step)
         .ok_or_else(|| LaneError::input("credential-publish", "active round differs"))?;
-    round["credential_publication"] =
-        crate::credential::publish_round(owner_home, loop_name, &home, uid, backend)?;
+    round["credential_publication"] = crate::credential::publish_round_admitted(
+        owner_home, loop_name, &home, uid, backend, admission,
+    )?;
     Ok(())
 }
 
 /// The authority thread holds home and configuration custody and only two credential executables.
 pub(crate) struct CredentialThreadCustody {
+    admission: RuntimeAdmissionThread,
     home: crate::home::PrivateHomeSnapshot,
     configuration: Option<crate::runtime_entry::PlanConfiguration>,
     programs: Option<BTreeMap<PathBuf, Arc<loop_home::anchor::Anchor>>>,
 }
 pub(crate) struct CredentialThreadGuard {
+    admission: RuntimeAdmission,
     _configuration: crate::runtime_entry::ConfigurationGuard,
     _programs: Option<crate::container_entry::ExecutableGuard>,
     _home: crate::home::PrivateHomeGuard,
 }
 impl CredentialThreadCustody {
+    #[cfg(test)]
     pub(crate) fn capture(backend: BoxBackend) -> Result<Self, LaneError> {
+        Self::capture_admitted(backend, &RuntimeAdmission::Gate)
+    }
+
+    fn capture_admitted(
+        backend: BoxBackend,
+        admission: &RuntimeAdmission,
+    ) -> Result<Self, LaneError> {
         Ok(Self {
             home: crate::home::snapshot_private_home()?,
             configuration: crate::runtime_entry::snapshot_configuration(),
             programs: crate::container_entry::credential_programs(backend)?,
+            admission: admission.thread_token(),
         })
     }
     pub(crate) fn activate(self) -> Result<CredentialThreadGuard, LaneError> {
@@ -1964,11 +2014,13 @@ impl CredentialThreadCustody {
             _programs: self.programs.map(|programs| {
                 crate::container_entry::activate_program_map("container-helper", programs)
             }),
+            admission: self.admission.activate(),
         })
     }
 }
 
 /// Spawn credential authority with its held home, configuration and selected programs.
+#[cfg(test)]
 pub(crate) fn spawn_credential_authority(
     refresh_home: PathBuf,
     refresh_loop: String,
@@ -1977,6 +2029,26 @@ pub(crate) fn spawn_credential_authority(
     backend: BoxBackend,
     refresh_cancelled: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError> {
+    spawn_credential_authority_admitted(
+        refresh_home,
+        refresh_loop,
+        refresh_root,
+        refresh_driver_dir,
+        backend,
+        refresh_cancelled,
+        &RuntimeAdmission::Gate,
+    )
+}
+
+pub(crate) fn spawn_credential_authority_admitted(
+    refresh_home: PathBuf,
+    refresh_loop: String,
+    refresh_root: PathBuf,
+    refresh_driver_dir: PathBuf,
+    backend: BoxBackend,
+    refresh_cancelled: Arc<AtomicBool>,
+    admission: &RuntimeAdmission,
+) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError> {
     spawn_credential_authority_at(
         refresh_home,
         refresh_loop,
@@ -1984,7 +2056,10 @@ pub(crate) fn spawn_credential_authority(
         refresh_driver_dir,
         backend,
         refresh_cancelled,
-        crate::credential::service_endpoint(),
+        (
+            crate::credential::service_endpoint(),
+            CredentialThreadCustody::capture_admitted(backend, admission)?,
+        ),
     )
 }
 
@@ -1997,23 +2072,24 @@ fn spawn_credential_authority_at(
     refresh_driver_dir: PathBuf,
     backend: BoxBackend,
     refresh_cancelled: Arc<AtomicBool>,
-    endpoint: String,
+    authority: (String, CredentialThreadCustody),
 ) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError> {
-    let refresh_custody = CredentialThreadCustody::capture(backend)?;
+    let (endpoint, refresh_custody) = authority;
     std::thread::Builder::new()
         .name("credential-authority".into())
         .spawn(move || -> Result<(), LaneError> {
-            let _custody = refresh_custody.activate()?;
+            let custody = refresh_custody.activate()?;
             let mut published = BTreeMap::new();
             let mut checked = false;
             while !refresh_cancelled.load(Ordering::Acquire) {
-                let result = crate::credential::refresh_live(
+                let result = crate::credential::refresh_live_admitted(
                     &refresh_home,
                     &refresh_loop,
                     &refresh_root,
                     &mut published,
                     backend,
                     &endpoint,
+                    &custody.admission,
                 );
                 if let Some(evidence) =
                     crate::credential::evidence_for_check(&result, !checked, backend)
@@ -2038,11 +2114,22 @@ fn spawn_credential_authority_at(
 
 // Keep the selected credential capability check in the same transaction as the
 // helper PID, round receipt and reservation publication.
+#[cfg(test)]
 fn publish_helper_identity(
     owner_home: &Path,
     loop_name: &str,
     run: &str,
     root: &Path,
+) -> Result<BoxBackend, LaneError> {
+    publish_helper_identity_admitted(owner_home, loop_name, run, root, &RuntimeAdmission::Gate)
+}
+
+fn publish_helper_identity_admitted(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    root: &Path,
+    admission: &RuntimeAdmission,
 ) -> Result<BoxBackend, LaneError> {
     let reservation = reservation_path(root, run);
     let _lock = crate::launch::lock_runs_root(root, true, Uid::effective().as_raw())?;
@@ -2056,12 +2143,12 @@ fn publish_helper_identity(
         ));
     }
     let backend = BoxBackend::from_plan(&record["plan"])?;
-    backend.require_runtime()?;
+    admission.check(backend)?;
     let _credentials = crate::container_entry::credential_programs(backend)?;
     let pid = std::process::id();
     record["helper_pid"] = json!(pid);
     record["helper_start"] = json!(process_start(pid)?);
-    publish_round_credential(owner_home, loop_name, &mut record)?;
+    publish_round_credential_admitted(owner_home, loop_name, &mut record, admission)?;
     crate::launch::publish_reservation(&reservation, &record)?;
     Ok(backend)
 }
@@ -2071,16 +2158,25 @@ fn publish_helper_identity(
 /// # Errors
 ///
 /// Refuses a changed saved request, a foreign peer, or a failed bounded child.
-#[allow(clippy::too_many_lines)]
 pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
+    serve_admitted(run_dir, &RuntimeAdmission::Gate)
+}
+
+#[allow(clippy::too_many_lines)]
+fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), LaneError> {
     if !Uid::effective().is_root() {
         return Err(LaneError::input(
             "helper-identity",
             "rootless namespace owner is required",
         ));
     }
-    let (owner_home, loop_name, run, podman) = run_identity(run_dir)?;
-    let initial = pinned_request(&owner_home, &loop_name, &run, &podman)?;
+    let (owner_home, loop_name, run, podman) = run_identity_at_admitted(
+        &caller_home()?,
+        run_dir,
+        Uid::effective().as_raw(),
+        admission,
+    )?;
+    let initial = pinned_request_admitted(&owner_home, &loop_name, &run, &podman, admission)?;
     attempt_vector(&initial.argv, &initial.driver_dir, 1)?;
     let loop_uid = initial.loop_uid;
     let driver_dir = initial.driver_dir;
@@ -2110,7 +2206,7 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
         .parent()
         .ok_or_else(|| LaneError::input("helper-pin", "runs root absent"))?;
     let reservation = reservation_path(root, &run);
-    let backend = publish_helper_identity(&owner_home, &loop_name, &run, root)?;
+    let backend = publish_helper_identity_admitted(&owner_home, &loop_name, &run, root, admission)?;
     let listener = UnixListener::bind(socket_slot.address())
         .map_err(|error| LaneError::operation("helper-socket", error.to_string()))?;
     socket_slot
@@ -2128,13 +2224,14 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
     let control_cancelled = Arc::clone(&cancelled);
     let controller =
         std::thread::spawn(move || control_loop(&control_listener, &control_cancelled, 0));
-    let refresher = spawn_credential_authority(
+    let refresher = spawn_credential_authority_admitted(
         owner_home.clone(),
         loop_name.clone(),
         root.to_path_buf(),
         driver_dir.clone(),
         backend,
         Arc::clone(&cancelled),
+        admission,
     )?;
     let result = (|| {
         let mut previous_capacity = false;
@@ -2162,7 +2259,8 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
                     "the loop-group socket changed during the run",
                 ));
             }
-            let request = pinned_request(&owner_home, &loop_name, &run, &podman)?;
+            let request =
+                pinned_request_admitted(&owner_home, &loop_name, &run, &podman, admission)?;
             if request.loop_uid != loop_uid || request.driver_dir != driver_dir {
                 return Err(LaneError::input(
                     "helper-pin",
