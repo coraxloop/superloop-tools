@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Helper credential pins and Claude evidence consume an explicit reviewed program binding while retaining the compiled reference and closed runtime gate (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-owner-program-binding``).
+
 - Claude helper-service refusal regressions distinguish publication custody, launcher identity and periodic refused evidence through cancellation (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:helper-service-periodic-claude-gate-publishes-refusal``).
 
 - Held mail inventory acceptance pins empty and canonical registry-override refusals and checks the service’s credentials against every registered loop before narrowing to the selected loop (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).

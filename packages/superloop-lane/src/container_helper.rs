@@ -2091,8 +2091,17 @@ fn spawn_credential_authority_at(
                     &endpoint,
                     &custody.admission,
                 );
-                if let Some(evidence) =
+                let evidence = if backend == BoxBackend::Claude {
+                    crate::credential::evidence_for_check_bound(
+                        &result,
+                        !checked,
+                        backend,
+                        &custody.admission.program_binding(),
+                    )
+                } else {
                     crate::credential::evidence_for_check(&result, !checked, backend)
+                };
+                if let Some(evidence) = evidence
                     && let Err(error) =
                         crate::credential::publish_evidence(&refresh_driver_dir, &evidence)
                 {

@@ -585,6 +585,18 @@ pub(crate) fn reviewed_claude_program_digest(
     owner_home: &Path,
     loop_name: &str,
 ) -> Result<String, LaneError> {
+    reviewed_claude_program_digest_bound(
+        owner_home,
+        loop_name,
+        &crate::runtime_admission::ReviewedProgramBinding::Schema,
+    )
+}
+
+pub(crate) fn reviewed_claude_program_digest_bound(
+    owner_home: &Path,
+    loop_name: &str,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> Result<String, LaneError> {
     let configuration = crate::runtime_entry::plan_configuration(owner_home)?.ok_or_else(|| {
         LaneError::input(
             "credential-program-pin",
@@ -605,7 +617,7 @@ pub(crate) fn reviewed_claude_program_digest(
             "completed installation has no reviewed Claude SHA-256",
         )
     })?;
-    if expected != crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256 {
+    if expected != binding.required_sha256() {
         return Err(LaneError::input(
             "credential-program-pin",
             "completed installation's Claude program differs from the credential structure record",

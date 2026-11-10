@@ -1323,6 +1323,17 @@ fn claude_program_pin(owner_home: &Path, loop_name: &str) -> Result<String, Lane
     Ok(expected)
 }
 
+fn claude_program_pin_bound(
+    owner_home: &Path,
+    loop_name: &str,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> Result<String, LaneError> {
+    let expected =
+        crate::launch::reviewed_claude_program_digest_bound(owner_home, loop_name, binding)?;
+    crate::container_entry::verify_program_digest(Path::new("/usr/bin/claude"), &expected)?;
+    Ok(expected)
+}
+
 fn prepare_claude_run(
     owner_home: &Path,
     loop_name: &str,
@@ -1521,7 +1532,8 @@ pub(crate) fn publish_round_admitted(
 ) -> Result<Value, LaneError> {
     admission.check(backend)?;
     if backend == BoxBackend::Claude {
-        let expected_program = claude_program_pin(owner_home, loop_name)?;
+        let expected_program =
+            claude_program_pin_bound(owner_home, loop_name, &admission.program_binding())?;
         let home = claude_sign_in_dir(owner_home, loop_name);
         return publish_claude_round_at(
             &home,
@@ -1601,6 +1613,20 @@ pub(crate) fn evidence_for_check(
     first_check: bool,
     backend: BoxBackend,
 ) -> Option<Value> {
+    evidence_for_check_bound(
+        result,
+        first_check,
+        backend,
+        &crate::runtime_admission::ReviewedProgramBinding::Schema,
+    )
+}
+
+pub(crate) fn evidence_for_check_bound(
+    result: &Result<RefreshReport, LaneError>,
+    first_check: bool,
+    backend: BoxBackend,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> Option<Value> {
     let mut evidence = match result {
         Err(error) => Some(json!({
             "schema":1,"host":REFRESH_HOST,"state":"refused",
@@ -1643,7 +1669,7 @@ pub(crate) fn evidence_for_check(
         evidence["backend"] = json!("claude");
         evidence["provider"] = json!({
             "kind":"owner-program", "program":"/usr/bin/claude",
-            "required_sha256":CLAUDE_SCHEMA_PROGRAM_SHA256,
+            "required_sha256":binding.required_sha256(),
         });
     }
     Some(evidence)
@@ -1697,7 +1723,8 @@ pub(crate) fn refresh_live_admitted(
 ) -> Result<RefreshReport, LaneError> {
     admission.check(backend)?;
     if backend == BoxBackend::Claude {
-        let expected_program = claude_program_pin(owner_home, loop_name)?;
+        let expected_program =
+            claude_program_pin_bound(owner_home, loop_name, &admission.program_binding())?;
         let home = claude_sign_in_dir(owner_home, loop_name);
         return refresh_claude_live_at(
             &home,
@@ -4066,6 +4093,29 @@ mod tests {
             let error = read_evidence(&held, "pilot", owner).expect_err("mixed provider reader");
             assert_eq!(error.kind, "credential-evidence");
             assert_eq!(error.detail, "credential evidence envelope is invalid");
+        }
+    }
+
+    /// # Panics
+    /// Panics if production evidence differs from its reviewed program binding.
+    /// ´test:unit:claude-reviewed-binding-keeps-schema-evidence´
+    #[test]
+    fn claude_reviewed_binding_keeps_schema_evidence() {
+        let binding = crate::runtime_admission::RuntimeAdmission::Gate.program_binding();
+        for result in [
+            Ok(fixture_report(1_900_000_000)),
+            Err(failure("credential-refresh", "synthetic refusal")),
+        ] {
+            let evidence = evidence_for_check_bound(&result, true, BoxBackend::Claude, &binding)
+                .expect("production evidence");
+            assert_eq!(
+                evidence["provider"]["required_sha256"],
+                CLAUDE_SCHEMA_PROGRAM_SHA256
+            );
+            assert_eq!(
+                Some(evidence),
+                evidence_for_check(&result, true, BoxBackend::Claude)
+            );
         }
     }
 

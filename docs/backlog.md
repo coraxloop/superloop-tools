@@ -904,6 +904,8 @@ Folded from ``open:homes:claude-lane-home-sandbox-redirects``, whose question th
 
 (2026-11-10, lane r002g84, refusal baseline follow-ups) Review-ac's publication row now holds a program map without Claude, distinguishing its gate from the shadowing round gate; the spawner row pins exact schema-2 refused evidence, absent worker authority and clean cancellation; the reader rows pin absent start and mismatched process identity. The vacuous absent-run assertions are removed, the publication row lists the runs-root entries, and launcher and wrong-digest statuses are pinned. These tests call the pre-admission entry names and introduce no production change (``test:unit:helper-service-periodic-claude-gate-publishes-refusal``, of the superloop-lane package). The admitted transaction and its shadowed-gate refusal cases remain open.
 
+(2026-11-10, lane r002g84, reviewed program binding) As the seam's third step, the helper's admitted round and periodic paths carry the production program binding into the held-configuration install comparison and into schema-2 evidence. The existing executable verifier and the gate and pin positions are unchanged. A regression pins successful and refused evidence to the compiled record's digest. Only the reviewed production binding exists; the scoped fixture constructor, its refusal cases and full helper-service acceptance remain open (``test:unit:claude-reviewed-binding-keeps-schema-evidence``, of the superloop-lane package).
+
 ### Tests under load · `sec:toolsbacklog:open-gates`
 
 **Problem (Timing-bound tests of the lane gateway fail under load in gates of candidates that do not touch it)** · `prob:gates:gate-timing-flakes`
