@@ -62,6 +62,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Contain Claude namespace fixture descendants across process-group changes with a per-case PID namespace and a watchdog regression (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-namespace-watchdog-contains-detached-descendant``).
+
 - Record a synthetic probe of the namespace watchdog's kill sequence, in which a descendant in a process group of its own survives, keeping descendant cleanup and its regression through the namespace wrapper open (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
 
 - Bound the Claude trial draft's worker-file observations, same-process rejection evidence and expired print-call regime without selecting a repair policy (``prob:box:claude-sign-in-and-endpoints-in-the-box``; ``prob:box:claude-print-probe-refresh-margin-measured-against-refresh-ahead``).

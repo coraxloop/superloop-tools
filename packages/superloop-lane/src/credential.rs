@@ -2261,11 +2261,22 @@ mod tests {
     }
 
     fn claude_namespace_case(name: &str, marker: &str, body: fn()) {
+        assert!(
+            !claude_namespace_run(name, marker, body, None),
+            "{name} exceeded its 60-second namespace watchdog"
+        );
+    }
+
+    fn claude_namespace_run(name: &str, marker: &str, body: fn(), probe: Option<&Path>) -> bool {
         use std::os::unix::process::CommandExt as _;
         if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
-            body();
-            writeln!(std::io::stdout().lock(), "{marker}").expect("namespace marker");
-            return;
+            if std::env::var_os("CLAUDE_NAMESPACE_INIT").is_some() {
+                body();
+                writeln!(std::io::stdout().lock(), "{marker}").expect("namespace marker");
+            } else {
+                claude_pid_namespace(name);
+            }
+            return false;
         }
         let standin = (name == "claude_namespace_held_program_standin").then(claude_standin_host);
         let mut command = Command::new("/usr/bin/podman");
@@ -2277,6 +2288,9 @@ mod tests {
                 .stdin(Stdio::from(OwnedFd::from(input)));
             sender
         });
+        if let Some(root) = probe {
+            command.env("CLAUDE_WATCHDOG_ROOT", root);
+        }
         let mut child = command
             .arg("unshare")
             .arg(std::env::current_exe().expect("test executable"))
@@ -2300,7 +2314,9 @@ mod tests {
         }
         let began = std::time::Instant::now();
         while child.try_wait().expect("namespace status").is_none() {
-            if began.elapsed() > Duration::from_secs(60) {
+            if began.elapsed() > Duration::from_secs(60)
+                || probe.is_some_and(|root| root.join("ready").exists())
+            {
                 let group = i32::try_from(child.id()).expect("process group");
                 let _ignored = nix::sys::signal::killpg(
                     nix::unistd::Pid::from_raw(group),
@@ -2308,7 +2324,7 @@ mod tests {
                 );
                 drop(child.kill());
                 drop(child.wait());
-                panic!("namespace publication exceeded 60 seconds");
+                return true;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -2323,6 +2339,11 @@ mod tests {
             stdout.contains(marker) && stdout.contains("1 passed"),
             "{stdout}"
         );
+        claude_namespace_output(name, &stdout);
+        false
+    }
+
+    fn claude_namespace_output(name: &str, stdout: &str) {
         if name == "claude_namespace_held_program_standin" {
             let record = stdout
                 .lines()
@@ -2333,6 +2354,129 @@ mod tests {
                 .expect("stand-in digest record");
             writeln!(std::io::stdout().lock(), "{record}").expect("record fixture digest");
         }
+    }
+
+    fn claude_pid_namespace(name: &str) {
+        let status = Command::new("/usr/bin/unshare")
+            .args(["--pid", "--fork", "--kill-child"])
+            .arg(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                &format!("credential::tests::{name}"),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("CLAUDE_NAMESPACE_INIT", "1")
+            .status()
+            .expect("fixture PID namespace");
+        assert!(status.success(), "fixture PID namespace: {status}");
+    }
+
+    /// # Panics
+    /// Panics if the wrapper watchdog leaves a separate-group descendant alive.
+    /// ´test:unit:claude-namespace-watchdog-contains-detached-descendant´
+    #[test]
+    fn claude_namespace_watchdog_contains_detached_descendant() {
+        if std::env::var_os("CLAUDE_WATCHDOG_DESCENDANT").is_some() {
+            claude_watchdog_descendant();
+        }
+        if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
+            claude_namespace_run(
+                "claude_namespace_watchdog_contains_detached_descendant",
+                "WATCHDOG-UNREACHABLE",
+                claude_watchdog_body,
+                None,
+            );
+            return;
+        }
+        let root = claude_fixture_root();
+        assert!(claude_namespace_run(
+            "claude_namespace_watchdog_contains_detached_descendant",
+            "WATCHDOG-UNREACHABLE",
+            claude_watchdog_body,
+            Some(root.path()),
+        ));
+        let record: Value = serde_json::from_slice(
+            &fs::read(root.path().join("ready")).expect("descendant readiness"),
+        )
+        .expect("synthetic process identity");
+        let pid = u32::try_from(record["pid"].as_u64().expect("pid")).expect("u32 pid");
+        let start = record["start"].as_u64().expect("start");
+        let cleanup = ClaudeWatchdogDescendant(pid, start);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while crate::container_helper::process_alive(pid, start)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let survived = crate::container_helper::process_alive(pid, start);
+        drop(cleanup);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while crate::container_helper::process_alive(pid, start)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !crate::container_helper::process_alive(pid, start),
+            "negative-control descendant cleanup"
+        );
+        assert!(
+            !survived,
+            "separate-group descendant survived the wrapper watchdog"
+        );
+    }
+
+    struct ClaudeWatchdogDescendant(u32, u64);
+    impl Drop for ClaudeWatchdogDescendant {
+        fn drop(&mut self) {
+            if crate::container_helper::process_alive(self.0, self.1) {
+                let pid = i32::try_from(self.0).expect("fixture pid");
+                let _ignored = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+    }
+
+    fn claude_watchdog_body() {
+        use std::os::unix::process::CommandExt as _;
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "credential::tests::claude_namespace_watchdog_contains_detached_descendant",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("CLAUDE_WATCHDOG_DESCENDANT", "1")
+            .process_group(0)
+            .spawn()
+            .expect("separate-group descendant");
+        let status = child.wait().expect("descendant wait");
+        panic!("watchdog descendant exited early: {status}");
+    }
+
+    fn claude_watchdog_descendant() -> ! {
+        let root = PathBuf::from(std::env::var_os("CLAUDE_WATCHDOG_ROOT").expect("probe root"));
+        assert_eq!(
+            nix::unistd::getpgrp().as_raw().unsigned_abs(),
+            std::process::id()
+        );
+        // The retained host proc mount names the identity the host observer can check.
+        let pid: u32 = fs::read_link("/proc/self")
+            .expect("host proc identity")
+            .to_str()
+            .expect("numeric identity")
+            .parse()
+            .expect("pid");
+        let start = crate::container_helper::process_start(pid).expect("process start");
+        let record = serde_json::json!({"pid": pid, "start": start});
+        fs::write(root.join("pending"), record.to_string()).expect("process record");
+        fs::rename(root.join("pending"), root.join("ready")).expect("ready publication");
+        // A host killed without unwinding leaves this descendant for at most two minutes.
+        std::thread::sleep(Duration::from_secs(120));
+        panic!("synthetic descendant outlived its 120-second bound");
     }
 
     struct ClaudeStandinWorker(PathBuf);
