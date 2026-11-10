@@ -2262,12 +2262,18 @@ mod tests {
 
     fn claude_namespace_case(name: &str, marker: &str, body: fn()) {
         assert!(
-            !claude_namespace_run(name, marker, body, None),
+            !claude_namespace_run(name, marker, body, None, None),
             "{name} exceeded its 60-second namespace watchdog"
         );
     }
 
-    fn claude_namespace_run(name: &str, marker: &str, body: fn(), probe: Option<&Path>) -> bool {
+    fn claude_namespace_run(
+        name: &str,
+        marker: &str,
+        body: fn(),
+        probe: Option<&Path>,
+        observation: Option<&std::sync::Mutex<Option<ClaudeFixtureIdentity>>>,
+    ) -> bool {
         use std::os::unix::process::CommandExt as _;
         if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
             if std::env::var_os("CLAUDE_NAMESPACE_INIT").is_some() {
@@ -2291,6 +2297,7 @@ mod tests {
             .as_ref()
             .map(|(root, _)| root.path())
             .or_else(|| publication.as_ref().map(tempfile::TempDir::path));
+        claude_retain_fixture(observation, fixture_root);
         let identity = fixture_root
             .or(probe)
             .map(|root| root.join("namespace-init"));
@@ -2560,11 +2567,16 @@ mod tests {
     fn claude_namespace_fixture_cleanup_survives_timeout_and_panic() {
         let name = "claude_namespace_fixture_cleanup_survives_timeout_and_panic";
         if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
-            claude_namespace_run(name, "CLEANUP-UNREACHABLE", claude_cleanup_body, None);
+            claude_namespace_run(name, "CLEANUP-UNREACHABLE", claude_cleanup_body, None, None);
             return;
         }
         for panic in [false, true] {
             let probe = claude_fixture_root();
+            let outside = claude_fixture_root();
+            let sentinel = outside.path().join("sentinel");
+            fs::write(&sentinel, b"outside fixture").expect("outside sentinel");
+            let inode = fs::metadata(&sentinel).expect("sentinel identity").ino();
+            let observation = std::sync::Mutex::new(None);
             if panic {
                 fs::write(probe.path().join("panic"), b"inject").expect("panic trigger");
             }
@@ -2574,10 +2586,26 @@ mod tests {
                     "CLEANUP-UNREACHABLE",
                     claude_cleanup_body,
                     Some(probe.path()),
+                    Some(&observation),
                 )
             });
             let ready = probe.path().join("ready").exists();
-            claude_cleanup_observation(probe.path());
+            fs::write(
+                probe.path().join("fixture"),
+                outside.path().as_os_str().as_encoded_bytes(),
+            )
+            .expect("namespace-writable target replaced");
+            let fixture = observation
+                .lock()
+                .expect("host observation")
+                .take()
+                .expect("fixture");
+            claude_cleanup_observation(probe.path(), &fixture);
+            assert_eq!(
+                fs::read(&sentinel).expect("outside retained"),
+                b"outside fixture"
+            );
+            assert_eq!(fs::metadata(&sentinel).expect("same sentinel").ino(), inode);
             assert!(ready, "mapped worker existed before interruption");
             if panic {
                 assert!(result.is_err(), "host panic reached");
@@ -2601,7 +2629,67 @@ mod tests {
         panic!("cleanup body outlived its 120-second bound");
     }
 
-    fn claude_cleanup_observation(probe: &Path) {
+    struct ClaudeFixtureIdentity {
+        path: PathBuf,
+        directory: fs::File,
+    }
+
+    fn claude_retain_fixture(
+        observation: Option<&std::sync::Mutex<Option<ClaudeFixtureIdentity>>>,
+        root: Option<&Path>,
+    ) {
+        if let Some(observation) = observation {
+            let path = root.expect("host-created fixture").to_owned();
+            let directory = fs::File::open(&path).expect("retain host-created directory");
+            *observation.lock().expect("host observation") =
+                Some(ClaudeFixtureIdentity { path, directory });
+        }
+    }
+
+    fn claude_remove_retained_fixture(fixture: &ClaudeFixtureIdentity) -> bool {
+        let current = match fs::symlink_metadata(&fixture.path) {
+            Ok(current) => current,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(error) => panic!("fixture identity: {error}"),
+        };
+        let held = fixture.directory.metadata().expect("held fixture identity");
+        assert!(current.is_dir(), "fixture root replaced");
+        assert_eq!(
+            (current.dev(), current.ino()),
+            (held.dev(), held.ino()),
+            "fixture root replaced"
+        );
+        claude_cleanup_fixture(&fixture.path).expect("negative-control mapped cleanup");
+        fs::remove_dir_all(&fixture.path).expect("negative-control host cleanup");
+        true
+    }
+
+    /// # Panics
+    /// Panics if a replaced host fixture pathname authorizes removal of another directory.
+    /// ´test:unit:claude-cleanup-retains-host-fixture-identity´
+    #[test]
+    fn claude_cleanup_retains_host_fixture_identity() {
+        let parent = claude_fixture_root();
+        let path = parent.path().join("fixture");
+        fs::create_dir(&path).expect("fixture directory");
+        let fixture = ClaudeFixtureIdentity {
+            directory: fs::File::open(&path).expect("held fixture"),
+            path: path.clone(),
+        };
+        fs::rename(&path, parent.path().join("retained")).expect("move original");
+        fs::create_dir(&path).expect("foreign replacement");
+        let sentinel = path.join("sentinel");
+        fs::write(&sentinel, b"foreign directory").expect("sentinel");
+        let inode = fs::metadata(&sentinel).expect("sentinel identity").ino();
+        assert!(std::panic::catch_unwind(|| claude_remove_retained_fixture(&fixture)).is_err());
+        assert_eq!(
+            fs::read(&sentinel).expect("retained sentinel"),
+            b"foreign directory"
+        );
+        assert_eq!(fs::metadata(&sentinel).expect("same sentinel").ino(), inode);
+    }
+
+    fn claude_cleanup_observation(probe: &Path, fixture: &ClaudeFixtureIdentity) {
         let record: Value =
             serde_json::from_slice(&fs::read(probe.join("supervisor")).expect("supervisor"))
                 .expect("identity");
@@ -2628,16 +2716,11 @@ mod tests {
             nix::unistd::Pid::from_raw(i32::try_from(pid).expect("supervisor")),
             Some(nix::sys::wait::WaitPidFlag::WNOHANG),
         );
-        let fixture = PathBuf::from(fs::read_to_string(probe.join("fixture")).expect("fixture"));
         assert!(
-            claude_namespace_exited(Some(&fixture.join("namespace-init"))),
+            claude_namespace_exited(Some(&fixture.path.join("namespace-init"))),
             "negative-control namespace cleanup"
         );
-        let retained = fixture.exists();
-        claude_cleanup_fixture(&fixture).expect("negative-control mapped cleanup");
-        if fixture.exists() {
-            fs::remove_dir_all(&fixture).expect("negative-control host cleanup");
-        }
+        let retained = claude_remove_retained_fixture(fixture);
         assert!(!alive, "fixture supervisor survived host unwind");
         assert!(!retained, "mapped fixture home survived wrapper cleanup");
     }
@@ -2685,6 +2768,7 @@ mod tests {
                 "WATCHDOG-UNREACHABLE",
                 claude_watchdog_body,
                 None,
+                None,
             );
             return;
         }
@@ -2694,6 +2778,7 @@ mod tests {
             "WATCHDOG-UNREACHABLE",
             claude_watchdog_body,
             Some(root.path()),
+            None,
         ));
         let record: Value = serde_json::from_slice(
             &fs::read(root.path().join("ready")).expect("descendant readiness"),

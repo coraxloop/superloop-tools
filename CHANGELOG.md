@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Claude namespace mutation cleanup retains the host fixture identity instead of trusting a namespace-writable path record, with redirection and directory-replacement regressions (``prob:gates:lane-fixture-homes-leave-no-temporary-root-behind``; ``test:unit:claude-cleanup-retains-host-fixture-identity``).
+
 - Pin Claude helper-service gate refusals and their existing validation order before introducing fixture admission (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:helper-service-claude-gate-baseline``).
 
 - Pin the wrong-program digest refusal through a due Claude round publication, including retained worker bytes and inode (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-namespace-held-program-standin``).
