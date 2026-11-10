@@ -2241,31 +2241,71 @@ mod tests {
     /// ´test:unit:claude-namespace-publication-keeps-worker-authority-separate´
     #[test]
     fn claude_namespace_publication_keeps_worker_authority_separate() {
-        const MARKER: &str = "CLAUDE-NAMESPACE-PUBLICATION-MEASURED";
+        claude_namespace_case(
+            "claude_namespace_publication_keeps_worker_authority_separate",
+            "CLAUDE-NAMESPACE-PUBLICATION-MEASURED",
+            claude_namespace_publication,
+        );
+    }
+
+    /// # Panics
+    /// Panics if held stand-in execution or transferred publication loses its boundary.
+    /// ´test:unit:claude-namespace-held-program-standin´
+    #[test]
+    fn claude_namespace_held_program_standin() {
+        claude_namespace_case(
+            "claude_namespace_held_program_standin",
+            "CLAUDE-NAMESPACE-HELD-STANDIN-MEASURED",
+            claude_namespace_standin,
+        );
+    }
+
+    fn claude_namespace_case(name: &str, marker: &str, body: fn()) {
+        use std::os::unix::process::CommandExt as _;
         if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
-            claude_namespace_publication();
-            writeln!(std::io::stdout().lock(), "{MARKER}").expect("namespace marker");
+            body();
+            writeln!(std::io::stdout().lock(), "{marker}").expect("namespace marker");
             return;
         }
-        let mut child = Command::new("/usr/bin/podman")
+        let standin = (name == "claude_namespace_held_program_standin").then(claude_standin_host);
+        let mut command = Command::new("/usr/bin/podman");
+        let channel = standin.as_ref().map(|(root, bundle)| {
+            let (sender, input) = std::os::unix::net::UnixStream::pair().expect("rights channel");
+            command
+                .env("CLAUDE_STANDIN_ROOT", root.path())
+                .env("CLAUDE_STANDIN_MANIFEST", &bundle.manifest)
+                .stdin(Stdio::from(OwnedFd::from(input)));
+            sender
+        });
+        let mut child = command
             .arg("unshare")
             .arg(std::env::current_exe().expect("test executable"))
             .args([
                 "--exact",
-                "credential::tests::claude_namespace_publication_keeps_worker_authority_separate",
+                &format!("credential::tests::{name}"),
                 "--nocapture",
                 "--test-threads=1",
             ])
             .env_remove("_CONTAINERS_USERNS_CONFIGURED")
             .env_remove("_CONTAINERS_ROOTLESS_UID")
             .env("SUPERLOOP_CLAUDE_NAMESPACE_PROOF", "1")
+            .process_group(0)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("mapped namespace");
+        if let (Some(channel), Some((_, bundle))) = (channel, standin.as_ref()) {
+            loop_home::anchor::transport::send(&channel, &bundle.descriptors)
+                .expect("complete helper capability frame");
+        }
         let began = std::time::Instant::now();
         while child.try_wait().expect("namespace status").is_none() {
             if began.elapsed() > Duration::from_secs(60) {
+                let group = i32::try_from(child.id()).expect("process group");
+                let _ignored = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(group),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
                 drop(child.kill());
                 drop(child.wait());
                 panic!("namespace publication exceeded 60 seconds");
@@ -2280,8 +2320,201 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            stdout.contains(MARKER) && stdout.contains("1 passed"),
+            stdout.contains(marker) && stdout.contains("1 passed"),
             "{stdout}"
+        );
+        if name == "claude_namespace_held_program_standin" {
+            let record = stdout
+                .lines()
+                .find_map(|line| {
+                    line.find("CLAUDE-STANDIN-PROGRAM ")
+                        .map(|index| &line[index..])
+                })
+                .expect("stand-in digest record");
+            writeln!(std::io::stdout().lock(), "{record}").expect("record fixture digest");
+        }
+    }
+
+    struct ClaudeStandinWorker(PathBuf);
+    impl Drop for ClaudeStandinWorker {
+        fn drop(&mut self) {
+            drop(fs::remove_dir_all(&self.0));
+        }
+    }
+
+    fn claude_standin_host() -> (tempfile::TempDir, crate::container_entry::Bundle) {
+        let root = claude_fixture_root();
+        let owner = root.path().join("owner");
+        let runs = root.path().join("runs");
+        for path in [&owner, &runs] {
+            fs::create_dir(path).expect("fixture directory");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        fixture_claude(&owner, &claude_document(1_800_000_000_000));
+        let config = owner.join(".config/loops");
+        for (name, text) in [
+            (
+                "registry.toml",
+                concat!(
+                    "namespace='org.superloop-tools.loophome.registry'\n",
+                    "version=[1,0,0]\n",
+                    "loops=[{name='alpha',uid=64000,launch='dev/alpha'}]\n"
+                ),
+            ),
+            (
+                "allocations.toml",
+                concat!(
+                    "mail_uid=64001\n[alpha]\n",
+                    "uids={base=64010,count=2}\n",
+                    "mail_gids={base=64020,count=3}\n"
+                ),
+            ),
+        ] {
+            fs::write(config.join(name), text).expect("synthetic configuration");
+            fs::set_permissions(config.join(name), fs::Permissions::from_mode(0o600))
+                .expect("private configuration");
+        }
+        let bundle = crate::container_entry::fixture_claude_helper_bundle(&owner, &runs);
+        (root, bundle)
+    }
+
+    // Native true returns success without rotating the synthetic authority.
+    // No vendor response or refresh behavior is emulated.
+    fn claude_namespace_standin() {
+        use sha2::{Digest as _, Sha256};
+        use std::fmt::Write as _;
+        assert_eq!(owner_identity(), (0, 0));
+        let root = PathBuf::from(std::env::var_os("CLAUDE_STANDIN_ROOT").expect("host root"));
+        let owner = root.join("owner");
+        let runs = root.join("runs");
+        let source = std::env::var("CLAUDE_STANDIN_MANIFEST").expect("host manifest");
+        let (_, mut anchors) = crate::container_entry::receive_for(
+            &source,
+            &std::io::stdin(),
+            "container-helper",
+            Some("alpha"),
+        )
+        .expect("production eight-role receiver");
+        loop_home::anchor::transport::replace_stdin("container-helper").expect("close setup input");
+        let _configuration = crate::container_entry::configuration(
+            &owner,
+            "alpha",
+            "container-helper",
+            anchors.pop().expect("configuration"),
+        )
+        .expect("held configuration");
+        let (_runtime, programs) =
+            crate::container_entry::take_support_programs(&mut anchors, BoxBackend::Claude)
+                .expect("selected credential roles");
+        let _home =
+            crate::home::activate_private_launch(&owner, &anchors[0], &runs, &anchors[1], None, 0)
+                .expect("received roots");
+        let _programs = crate::container_entry::activate_program_map("container-helper", programs);
+        let home = claude_sign_in_dir(&owner, "alpha");
+        let run = claude_standin_worker(&runs);
+        let _cleanup = ClaudeStandinWorker(run.clone());
+        let mut digest = String::with_capacity(64);
+        for byte in Sha256::digest(fs::read("/usr/bin/true").expect("public root-owned stand-in")) {
+            write!(&mut digest, "{byte:02x}").expect("hex digest");
+        }
+        let custody = crate::container_helper::CredentialThreadCustody::capture(BoxBackend::Claude)
+            .expect("production transfer");
+        writeln!(
+            std::io::stdout().lock(),
+            "CLAUDE-STANDIN-PROGRAM sha256={digest}"
+        )
+        .expect("public fixture digest");
+        std::thread::spawn(move || {
+            let _custody = custody.activate().expect("authority thread activation");
+            assert!(
+                crate::container_entry::check(Path::new("/usr/bin/sha256sum"))
+                    .expect("active credential map")
+                    .is_err()
+            );
+            claude_standin_publication(&home, &run, &digest);
+            let configuration = crate::runtime_entry::snapshot_configuration().expect("snapshot");
+            let held = configuration
+                .open_private_directory(Path::new("alpha/claude"))
+                .expect("production configuration opener");
+            with_claude_exercise_snapshot(&held, &home, 1_799_999_990, |_, projection, due| {
+                assert!(due);
+                assert_eq!(
+                    fs::read(run.join(".claude/.credentials.json")).expect("worker"),
+                    format!("{projection}\n").as_bytes()
+                );
+                Ok(())
+            })
+            .expect("held exercise read");
+        })
+        .join()
+        .expect("namespace authority thread");
+        assert_eq!(
+            preflight(&owner, "alpha", BoxBackend::Claude)
+                .expect_err("public gate remains closed")
+                .kind,
+            "backend-unavailable"
+        );
+    }
+
+    fn claude_standin_worker(runs: &Path) -> PathBuf {
+        let run = runs.join("worker");
+        fs::create_dir(&run).expect("worker home");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o750)).expect("home mode");
+        fs::create_dir(run.join(".claude")).expect("worker state");
+        fs::set_permissions(run.join(".claude"), fs::Permissions::from_mode(0o700))
+            .expect("state mode");
+        nix::unistd::chown(
+            &run.join(".claude"),
+            Some(Uid::from_raw(3000)),
+            Some(Gid::from_raw(3000)),
+        )
+        .expect("distinct worker");
+        run
+    }
+
+    fn claude_standin_publication(home: &Path, run: &Path, digest: &str) {
+        let refresh = || {
+            let held = open_dir(home, 0, 0, 0o700)?;
+            let error = lock_with(&held, FlockArg::LockExclusiveNonblock)
+                .expect_err("owner lock stays held across program execution");
+            assert_eq!(error.kind, "credential-lock-busy");
+            claude_refresh_program(home, digest)
+        };
+        prepare_claude_run_at(home, run, 3000, 1_799_999_990, refresh, || {
+            Ok(1_799_999_990_000)
+        })
+        .expect("real held print and publication");
+        let path = run.join(".claude/.credentials.json");
+        let bytes = fs::read(&path).expect("projection");
+        let metadata = fs::metadata(&path).expect("worker identity");
+        assert_eq!(
+            (metadata.uid(), metadata.gid(), metadata.mode() & 0o777),
+            (3000, 3000, 0o600)
+        );
+        let projection: Value = serde_json::from_slice(&bytes).expect("projection JSON");
+        assert!(projection.get("mcpOAuth").is_none());
+        for field in ["refreshToken", "refreshTokenExpiresAt"] {
+            assert!(projection["claudeAiOauth"].get(field).is_none());
+        }
+        assert_eq!(
+            claude_refresh_program(home, &"0".repeat(64))
+                .expect_err("wrong digest before execution")
+                .kind,
+            "credential-program-pin"
+        );
+        let error = publish_claude_round_at(home, run, 3000, 1_800_000_000, refresh, || {
+            Ok(1_800_000_000_000)
+        })
+        .expect_err("successful stand-in is not refreshed authority");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(
+            error.detail,
+            "Claude owner program left expired access authority"
+        );
+        assert_eq!(fs::read(&path).expect("retained bytes"), bytes);
+        assert_eq!(
+            fs::metadata(path).expect("retained identity").ino(),
+            metadata.ino()
         );
     }
 

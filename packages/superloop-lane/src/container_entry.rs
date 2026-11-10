@@ -488,6 +488,39 @@ fn pin_for_backend(
     })
 }
 
+/// Pin the production helper bundle with a root-owned native Claude stand-in.
+/// # Panics
+/// Panics if host custody or the synthetic role replacement fails.
+#[cfg(test)]
+pub(crate) fn fixture_claude_helper_bundle(home: &Path, runs: &Path) -> Bundle {
+    let owner = std::fs::File::open(home).expect("owner").into();
+    let storage = std::fs::File::open(runs).expect("runs").into();
+    let mut bundle = pin(
+        "alpha",
+        (home, &owner),
+        (runs, &storage),
+        &std::env::current_exe().expect("entry"),
+        Path::new("/usr/bin/podman"),
+        BoxBackend::Codex,
+    )
+    .expect("production host composer");
+    let pin = HostVerifier::current()
+        .expect("host map")
+        .for_operation(OPERATION)
+        .pin(
+            Path::new("/usr/bin/true"),
+            "credential-claude",
+            5,
+            executable_policy(Owner::RootFile),
+        )
+        .expect("root-owned stand-in");
+    let mut manifest = Manifest::parse(&bundle.manifest).expect("manifest");
+    manifest.records[5] = pin.record();
+    bundle.descriptors[5] = pin.into_fd();
+    bundle.manifest = serde_json::to_string(&manifest).expect("Claude role manifest");
+    bundle
+}
+
 thread_local! {
     static ACTIVE_OPERATION: Cell<&'static str> = const { Cell::new(OPERATION) };
     static EXECUTABLE: RefCell<Option<BTreeMap<PathBuf, Arc<Anchor>>>> = const { RefCell::new(None) };
