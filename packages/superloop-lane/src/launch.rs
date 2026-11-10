@@ -8948,6 +8948,35 @@ mod tests {
         assert_eq!(pending["retirement_to_journal"], next["current_retirement"]);
     }
 
+    /// ´test:unit:helper-service-driver-contract-keeps-runtime-gate´
+    #[test]
+    fn helper_service_driver_contract_keeps_runtime_gate() {
+        let fixture = tempfile::TempDir::new().expect("private fixture");
+        let missing = fixture.path().join("absent-driver");
+        let error = driver_runtime_contract(
+            &missing,
+            fixture.path(),
+            &BTreeMap::new(),
+            crate::settings::BoxBackend::Claude,
+        )
+        .expect_err("gate before driver probe");
+        assert_eq!(error.status, 2);
+        assert_eq!(error.kind, "backend-unavailable");
+        assert_eq!(
+            error.detail,
+            concat!(
+                "claude boxed launch awaits its credential adapter, ",
+                "trial acceptance and runtime paths"
+            )
+        );
+        assert_eq!(
+            fs::read_dir(fixture.path())
+                .expect("unchanged fixture")
+                .count(),
+            0
+        );
+    }
+
     /// ´test:unit:driver-contract-refuses-old-and-silent-drivers´
     #[test]
     fn driver_contract_refuses_old_and_silent_drivers() {

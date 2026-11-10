@@ -884,6 +884,8 @@ Folded from ``open:homes:claude-lane-home-sandbox-redirects``, whose question th
 
 (2026-11-10, lane r002g84, due-round wrong digest) Part (t), review-z F7, is pinned through the due round-publication path. A mismatching digest refuses with its exact kind and detail before publication, retaining the prior worker bytes and inode. Removing the print-boundary digest verification makes that same stand-in case publish and fail its refusal assertion; the restored case passes. This strengthens the fixture boundary without claiming vendor behavior (``test:unit:claude-namespace-held-program-standin``, of the superloop-lane package).
 
+(2026-11-10, lane r002g84, helper-service refusal baseline) The first seam-contract commit pins the direct credential, plan, launch-loader and driver-contract gates, the helper publication transaction's earlier identity checks, and the saved-plan readers' wrapped refusal. The tests retain reservation bytes and inode, round state and publication cache, with absent owner and worker paths unchanged. No production code or gate position changes; the fixture proof and full-service acceptance remain open (``test:unit:helper-service-claude-gate-baseline``, of the superloop-lane package).
+
 ### Tests under load · `sec:toolsbacklog:open-gates`
 
 **Problem (Timing-bound tests of the lane gateway fail under load in gates of candidates that do not touch it)** · `prob:gates:gate-timing-flakes`

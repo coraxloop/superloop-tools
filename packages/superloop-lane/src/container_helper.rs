@@ -2743,7 +2743,7 @@ mod tests {
     }
 
     fn custom_runs_fixture() -> (TempDir, PathBuf, PathBuf) {
-        let fixture = TempDir::new_in("/tmp").expect("fixture");
+        let fixture = TempDir::new().expect("fixture");
         let home = fixture.path();
         fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("owner home");
         let custody = home.join(".config/loops/alpha");
@@ -2815,6 +2815,213 @@ mod tests {
         )
         .expect("reservation mode");
         (fixture, run_dir, letter)
+    }
+
+    const CLAUDE_GATE_DETAIL: &str = concat!(
+        "claude boxed launch awaits its credential adapter, ",
+        "trial acceptance and runtime paths"
+    );
+
+    fn assert_claude_gate(site: &str, error: &crate::error::LaneError, wrapped: bool) {
+        assert_eq!(error.status, 2, "{site}");
+        assert_eq!(
+            error.kind,
+            if wrapped {
+                "helper-pin"
+            } else {
+                "backend-unavailable"
+            },
+            "{site}"
+        );
+        let detail = if wrapped {
+            format!("backend-unavailable: {CLAUDE_GATE_DETAIL}")
+        } else {
+            CLAUDE_GATE_DETAIL.to_owned()
+        };
+        assert_eq!(error.detail, detail, "{site}");
+    }
+
+    /// ´test:unit:helper-service-claude-gate-baseline´
+    #[test]
+    fn helper_service_claude_gate_baseline() {
+        let fixture = TempDir::new().expect("private fixture");
+        let home = fixture.path().join("absent-owner");
+        let runs = fixture.path().join("absent-runs");
+        let worker = runs.join("absent-worker");
+        let backend = BoxBackend::Claude;
+        let mut published = BTreeMap::from([(worker.clone(), b"synthetic prior".to_vec())]);
+        let prior = published.clone();
+        let mut record = json!({"plan":{"backend":"claude"}});
+        let original = record.clone();
+        let cases = [
+            (
+                "preflight",
+                crate::credential::preflight(&home, "alpha", backend),
+            ),
+            (
+                "prepare_run",
+                crate::credential::prepare_run(&home, "alpha", &worker, 3000, backend),
+            ),
+            (
+                "publish_round",
+                crate::credential::publish_round(&home, "alpha", &worker, 3000, backend)
+                    .map(|_| ()),
+            ),
+            (
+                "refresh_live",
+                crate::credential::refresh_live(
+                    &home,
+                    "alpha",
+                    &runs,
+                    &mut published,
+                    backend,
+                    "not-an-endpoint",
+                )
+                .map(|_| ()),
+            ),
+            (
+                "publish_round_credential",
+                super::publish_round_credential(&home, "alpha", &mut record),
+            ),
+            (
+                "verify_box_attestation",
+                crate::plan::verify_box_attestation(&record["plan"]),
+            ),
+            (
+                "pinned_plan_from_record",
+                crate::launch::pinned_plan_from_record(
+                    &home,
+                    "alpha",
+                    "R",
+                    Path::new("/absent-podman"),
+                    &record,
+                )
+                .map(|_| ()),
+            ),
+        ];
+        for (site, result) in cases {
+            assert_claude_gate(site, &result.expect_err("closed runtime gate"), false);
+        }
+        assert_eq!(published, prior);
+        assert_eq!(record, original);
+        assert!(!home.exists());
+        assert!(!runs.exists());
+        assert_eq!(
+            fs::read_dir(fixture.path())
+                .expect("untouched fixture")
+                .count(),
+            0
+        );
+    }
+
+    /// ´test:unit:helper-service-publication-gate-keeps-identity-precedence´
+    #[test]
+    fn helper_service_publication_gate_keeps_identity_precedence() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let fixture = TempDir::new().expect("private fixture");
+        let root = fixture.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).expect("root mode");
+        fs::create_dir(root.join("R")).expect("run");
+        fs::set_permissions(root.join("R"), fs::Permissions::from_mode(0o700)).expect("run mode");
+        let reservation = crate::launch::reservation_path(root, "R");
+        for (field, value) in [
+            ("phase", "started"),
+            ("loop", "other"),
+            ("run", "S"),
+            ("phase", "preparing"),
+        ] {
+            let mut record = json!({"schema":1,"phase":"preparing","loop":"alpha",
+                "run":"R","worker_uid":3000,"plan":{"backend":"claude"}});
+            record[field] = json!(value);
+            assert!(record.get("helper_pid").is_none());
+            crate::launch::publish_reservation(&reservation, &record).expect("reservation");
+            let bytes = fs::read(&reservation).expect("prior bytes");
+            let inode = fs::metadata(&reservation).expect("prior inode").ino();
+            let error = super::publish_helper_identity(root, "alpha", "R", root)
+                .expect_err("no helper publication");
+            if value == "preparing" {
+                assert_claude_gate("publish_helper_identity", &error, false);
+            } else {
+                assert_eq!(error.status, 2);
+                assert_eq!(error.kind, "helper-pin");
+                assert_eq!(error.detail, "reservation names another run");
+            }
+            assert_eq!(fs::read(&reservation).expect("unchanged bytes"), bytes);
+            assert_eq!(
+                fs::metadata(&reservation).expect("unchanged inode").ino(),
+                inode
+            );
+        }
+    }
+
+    /// ´test:unit:helper-service-plan-readers-keep-wrapped-gate´
+    #[test]
+    fn helper_service_plan_readers_keep_wrapped_gate() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let (fixture, run, _) = custom_runs_fixture();
+        let root = run.parent().expect("runs root");
+        let reservation = crate::launch::reservation_path(root, "R");
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&reservation).expect("record bytes")).expect("record");
+        record["plan"]["backend"] = json!("claude");
+        crate::launch::publish_reservation(&reservation, &record).expect("Claude record");
+        let error =
+            super::pinned_request(fixture.path(), "alpha", "R", Path::new("/usr/bin/podman"))
+                .err()
+                .expect("launcher check precedes gate");
+        assert_eq!(error.kind, "helper-pin");
+        assert_eq!(error.detail, "reservation has no launcher PID");
+        record["launcher_pid"] = json!(std::process::id());
+        record["launcher_start"] =
+            json!(super::process_start(std::process::id()).expect("current start"));
+        crate::launch::publish_reservation(&reservation, &record).expect("launcher identity");
+        let bytes = fs::read(&reservation).expect("prior bytes");
+        let inode = fs::metadata(&reservation).expect("prior inode").ino();
+        for (site, result) in [
+            (
+                "run_identity_at",
+                super::run_identity_at(
+                    fixture.path(),
+                    &run,
+                    nix::unistd::Uid::effective().as_raw(),
+                )
+                .map(|_| ()),
+            ),
+            (
+                "pinned_request",
+                super::pinned_request(fixture.path(), "alpha", "R", Path::new("/usr/bin/podman"))
+                    .map(|_| ()),
+            ),
+        ] {
+            assert_claude_gate(site, &result.expect_err("wrapped gate"), true);
+        }
+        assert_eq!(fs::read(&reservation).expect("unchanged bytes"), bytes);
+        assert_eq!(
+            fs::metadata(&reservation).expect("unchanged inode").ino(),
+            inode
+        );
+        assert!(!run.exists());
+    }
+
+    /// ´test:unit:helper-service-launch-loader-keeps-selected-gate´
+    #[test]
+    fn helper_service_launch_loader_keeps_selected_gate() {
+        let (fixture, run, _) = custom_runs_fixture();
+        let settings = fixture.path().join(".config/loops/alpha/workers.toml");
+        let text = fs::read_to_string(&settings).expect("settings");
+        assert!(text.contains("codex = ["));
+        fs::write(&settings, text.replace("codex = [", "claude = [")).expect("Claude settings");
+        for backend in [None, Some(BoxBackend::Claude)] {
+            let result = crate::load_launch_plan(fixture.path(), "alpha", "R", (0, 0), backend);
+            assert_claude_gate(
+                "load_launch_plan",
+                &result.expect_err("selected gate"),
+                false,
+            );
+        }
+        assert!(!run.exists());
     }
 
     fn foreign_credential_custody() -> crate::container_entry::ExecutableGuard {

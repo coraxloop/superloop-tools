@@ -66,6 +66,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Pin Claude helper-service gate refusals and their existing validation order before introducing fixture admission (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:helper-service-claude-gate-baseline``).
+
 - Pin the wrong-program digest refusal through a due Claude round publication, including retained worker bytes and inode (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-namespace-held-program-standin``).
 
 - Pin Claude namespace fixture cleanup across timeout and host panic, including subordinate-owned worker storage (``prob:gates:lane-fixture-homes-leave-no-temporary-root-behind``; ``test:unit:claude-namespace-fixture-cleanup-survives-timeout-and-panic``).
