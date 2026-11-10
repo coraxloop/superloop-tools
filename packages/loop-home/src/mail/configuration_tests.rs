@@ -1,7 +1,11 @@
+#[path = "../../tests/support/bounded.rs"]
+mod bounded;
 use super::*;
+use bounded::CommandOutput as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 struct Fixture {
     root: PathBuf,
@@ -868,8 +872,13 @@ fn inventory_mutate(home: &Path, storage: &Path, case: &str) {
 struct InventoryFixture(PathBuf);
 impl Drop for InventoryFixture {
     fn drop(&mut self) {
-        let _cleanup = inventory_command(&self.0, "cleanup").output();
-        let _removed = fs::remove_dir_all(&self.0);
+        if self.0.exists() {
+            bounded::cleanup(
+                &self.0,
+                inventory_command(&self.0, "cleanup")
+                    .fixture_output("inventory cleanup", Duration::from_secs(30)),
+            );
+        }
     }
 }
 fn inventory_configuration(home: &Path) -> PathBuf {
@@ -913,7 +922,7 @@ fn inventory_parent(case: &str) {
     fs::write(home.join(INVENTORY_MARKER), b"").expect("fixture marker");
     let config = inventory_configuration(home);
     let output = inventory_command(home, "seed")
-        .output()
+        .fixture_output("inventory seed", Duration::from_secs(60))
         .expect("namespace seed");
     assert!(
         output.status.success(),
@@ -968,7 +977,7 @@ fn inventory_parent(case: &str) {
         )))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
+        .fixture_spawn("inventory receipt", Duration::from_secs(120))
         .expect("namespace receiver");
     crate::anchor::transport::send(
         &send,
@@ -978,9 +987,9 @@ fn inventory_parent(case: &str) {
             .collect::<Vec<_>>(),
     )
     .expect("send rights");
-    let output = child.wait_with_output().expect("measurement");
+    let output = child.wait().expect("measurement");
     let cleanup = inventory_command(home, "cleanup")
-        .output()
+        .fixture_output("inventory cleanup", Duration::from_secs(30))
         .expect("cleanup");
     assert!(
         cleanup.status.success(),
@@ -1013,6 +1022,7 @@ fn binding_inventory_retains_storage() {
                         fs::remove_dir_all(path).expect("fixture cleanup");
                     }
                 }
+                fs::remove_dir_all(&home).expect("parent-owned fixture root cleanup");
             }
             case => inventory_case(&home, case),
         }

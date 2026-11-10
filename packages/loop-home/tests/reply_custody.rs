@@ -1,3 +1,6 @@
+#[path = "support/bounded.rs"]
+mod bounded;
+use bounded::CommandOutput as _;
 use loop_home::anchor::{
     self, Anchor, HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement,
     Transport,
@@ -21,6 +24,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Duration;
 
 const PHASE: &str = "LOOP_HOME_REPLY_PHASE";
 const HOME: &str = "LOOP_HOME_REPLY_HOME";
@@ -48,7 +52,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         // This path is the parent's create_dir result, never taken from an environment variable.
-        let _cleanup = std::process::Command::new("/usr/bin/podman")
+        let cleanup = std::process::Command::new("/usr/bin/podman")
             .args([
                 "unshare",
                 "/usr/bin/python3",
@@ -59,7 +63,8 @@ impl Drop for Fixture {
             .arg(&self.0)
             .env_remove("_CONTAINERS_USERNS_CONFIGURED")
             .env_remove("_CONTAINERS_ROOTLESS_UID")
-            .output();
+            .fixture_output("reply cleanup", Duration::from_secs(30));
+        bounded::cleanup(&self.0, cleanup);
     }
 }
 fn child_command(home: &Path, phase: &str) -> std::process::Command {
@@ -154,7 +159,7 @@ os.setxattr(sys.argv[1],'system.posix_acl_access',encoded)
 ",
         ])
         .arg(root.join("mail/outbox"))
-        .output()
+        .fixture_output("reply principal ACL", Duration::from_secs(60))
         .expect("fixture ACL");
     assert!(
         output.status.success(),
@@ -234,7 +239,7 @@ fn requirements() -> Vec<Requirement> {
 }
 fn refuse_cleanup(home: &Path) {
     let output = child_command(home, "cleanup")
-        .output()
+        .fixture_output("reply cleanup refusal", Duration::from_secs(60))
         .expect("unsupported cleanup phase");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -254,7 +259,7 @@ fn parent(case: &str) {
         refuse_cleanup(home);
     }
     let output = child_command(home, "seed")
-        .output()
+        .fixture_output("reply seed", Duration::from_secs(60))
         .expect("seed namespace");
     assert!(
         output.status.success(),
@@ -302,7 +307,7 @@ fn parent(case: &str) {
         )))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
+        .fixture_spawn("reply receipt", Duration::from_secs(120))
         .expect("receiver");
     anchor::transport::send(
         &send,
@@ -312,7 +317,7 @@ fn parent(case: &str) {
             .collect::<Vec<_>>(),
     )
     .expect("rights");
-    let output = child.wait_with_output().expect("measurement");
+    let output = child.wait().expect("measurement");
     assert!(
         output.status.success()
             && String::from_utf8_lossy(&output.stdout).contains("reply custody passed"),

@@ -467,6 +467,9 @@ pattern = "packages/loop-home/src/workers_settings.rs"
 pattern = "packages/loop-home/tests/reply_custody.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/tests/support/bounded.rs"
+
+[[include.rows]]
 pattern = "packages/permission-triage/Cargo.toml"
 
 [[include.rows]]
