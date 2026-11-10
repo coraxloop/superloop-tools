@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Held mail inventory acceptance pins empty and canonical registry-override refusals and checks the service’s credentials against every registered loop before narrowing to the selected loop (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Helper-service runtime gates use explicit admission cores and a custody-bound thread token, retaining the existing refusals and introducing no fixture admission (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:helper-runtime-admission``).
 
 - Claude namespace mutation cleanup retains the host fixture identity instead of trusting a namespace-writable path record, with redirection and directory-replacement regressions (``prob:gates:lane-fixture-homes-leave-no-temporary-root-behind``; ``test:unit:claude-cleanup-retains-host-fixture-identity``).

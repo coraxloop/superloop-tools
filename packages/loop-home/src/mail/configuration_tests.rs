@@ -541,7 +541,8 @@ fn inventory_command(home: &Path, phase: &str) -> std::process::Command {
         .env(INVENTORY_PHASE, phase)
         .env("LOOP_HOME_INVENTORY_HOME", home)
         .env_remove("_CONTAINERS_USERNS_CONFIGURED")
-        .env_remove("_CONTAINERS_ROOTLESS_UID");
+        .env_remove("_CONTAINERS_ROOTLESS_UID")
+        .env_remove("ENTER_LOOP_REGISTRY");
     command
 }
 fn inventory_owned(path: &Path, uid: u32, mode: u32) {
@@ -680,8 +681,17 @@ fn inventory_case(home: &Path, case: &str) {
         .open(home.join("held-private/.config/mail/loop.toml"))
         .expect("fixture writer");
     let mailbox = File::open(held.join("workers/worker/mail")).expect("fixture mailbox");
-    nix::unistd::setgroups(&[64001, 64020, 64021, 64022].map(nix::unistd::Gid::from_raw))
-        .expect("mail groups");
+    let mut groups = vec![64001, 64020, 64021, 64022];
+    if case == "other-private" {
+        groups.push(64100);
+    }
+    nix::unistd::setgroups(
+        &groups
+            .into_iter()
+            .map(nix::unistd::Gid::from_raw)
+            .collect::<Vec<_>>(),
+    )
+    .expect("mail groups");
     let gid = nix::unistd::Gid::from_raw(64001);
     nix::unistd::setresgid(gid, gid, gid).expect("service group");
     let uid = nix::unistd::Uid::from_raw(64001);
@@ -725,6 +735,15 @@ fn inventory_case(home: &Path, case: &str) {
         }
         inventory.verify_worker(&identity)
     });
+    inventory_result(case, result);
+}
+fn inventory_result(case: &str, result: super::super::journal::Result<()>) {
+    if case.starts_with("override-") {
+        assert!(matches!(
+            &result,
+            Err(super::super::journal::MailError::Entry(_))
+        ));
+    }
     if case == "held" {
         result.expect("held inventory and freshness");
     } else {
@@ -736,6 +755,10 @@ fn inventory_case(home: &Path, case: &str) {
                 "changed-source:"
             } else if case == "snapshot-mode" {
                 "exact service ACL"
+            } else if case.starts_with("override-") {
+                "anchor-declaration: operation=mail-binding purpose=registry-override"
+            } else if case == "other-private" {
+                "unsafe-storage: service holds an actor private credential"
             } else if case == "anchor-mode" {
                 "anchor-mode"
             } else {
@@ -745,6 +768,7 @@ fn inventory_case(home: &Path, case: &str) {
         );
     }
 }
+
 fn inventory_anchor_refusal(
     home: &Path,
     case: &str,
@@ -795,7 +819,8 @@ fn inventory_anchor_refusal(
 fn inventory_mutate(home: &Path, storage: &Path, case: &str) {
     let worker = storage.join("workers/worker");
     match case {
-        "held" | "fresh-inbox" | "fresh-snapshot" => {}
+        "held" | "fresh-inbox" | "fresh-snapshot" | "other-private" | "override-empty"
+        | "override-canonical" => {}
         "anchor-mode" => {
             fs::set_permissions(storage, fs::Permissions::from_mode(0o731)).expect("widen anchor");
         }
@@ -836,7 +861,12 @@ fn inventory_configuration(home: &Path) -> PathBuf {
     for (name, bytes) in [
         (
             "registry.toml",
-            "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[{name='alpha',uid=64000,launch='dev/alpha'}]\n",
+            concat!(
+                "namespace='org.superloop-tools.loophome.registry'\n",
+                "version=[1,0,0]\n",
+                "loops=[{name='alpha',uid=64000,launch='dev/alpha'},",
+                "{name='beta',uid=64100,launch='dev/beta'}]\n",
+            ),
         ),
         (
             "allocations.toml",
@@ -899,7 +929,16 @@ fn inventory_parent(case: &str) {
         records: pins.iter().map(crate::anchor::HostPin::record).collect(),
     };
     let (send, receive) = std::os::unix::net::UnixStream::pair().expect("socket pair");
-    let child = inventory_command(home, case)
+    let mut command = inventory_command(home, case);
+    if case == "override-empty" {
+        command.env("ENTER_LOOP_REGISTRY", "");
+    } else if case == "override-canonical" {
+        command.env(
+            "ENTER_LOOP_REGISTRY",
+            home.join(".config/loops/registry.toml"),
+        );
+    }
+    let child = command
         .env(
             "LOOP_HOME_INVENTORY_MANIFEST",
             serde_json::to_string(&manifest).expect("render"),
@@ -961,6 +1000,9 @@ fn binding_inventory_retains_storage() {
     }
     for case in [
         "held",
+        "other-private",
+        "override-empty",
+        "override-canonical",
         "scan-storage",
         "scan-private",
         "anchor-mode",
