@@ -26,10 +26,10 @@ cases = 0
 begun = time.monotonic()
 
 
-def probe(run):
+def probe(run, node_root=root):
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        status = node["absence_probe"](str(mirror), run, "alpha")
+        status = node["absence_probe"](str(mirror), run, "alpha", str(node_root))
     evidence = json.loads(output.getvalue().removeprefix("NODE-ABSENCE "))
     return status, evidence
 
@@ -67,6 +67,67 @@ finally:
     named.terminate()
     named.wait()
 cases += 5
+
+
+# Drive the production /proc scan with colliding and exact argv bindings.
+for word, busy in [
+    (str(lanes / "R2"), False),
+    (str(lanes / "R-x"), False),
+    (str(lanes / "R-build2"), False),
+    (str(lanes / "R-tmp-x"), False),
+    (str(root / "lane-alpha-R2"), False),
+    (str(root / "lane-alpha-R-x"), False),
+    ("--home=" + str(root / "lane-alpha-R2"), False),
+    ("print('" + str(lanes / "R") + "')", False),
+    ("echo lane-alpha-R", False),
+    ("lanes/R", False),
+    ("", False),
+    ("--argument=R", False),
+    ("--name=superloop-lane-alpha-R2-attempt-1", False),
+    ("R", True),
+    ("lane-alpha-R", True),
+    (str(lanes / "R"), True),
+    (str(lanes / "R") + "/", True),
+    (str(lanes / "R/file"), True),
+    (str(lanes / "R-build"), True),
+    (str(lanes / "R-build/object"), True),
+    ("--tmp=" + str(lanes / "R-tmp/work"), True),
+    ("--cwd=" + str(lanes / "R/file"), True),
+    (str(root / "lane-alpha-R/work"), True),
+    ("--home=" + str(root / "lane-alpha-R"), True),
+]:
+    entry = Path("/proc/100000003")
+    with patch.object(Path, "iterdir", return_value=iter([entry])), \
+            patch.object(Path, "read_bytes", return_value=word.encode() + b"\0"):
+        status, proof = probe("R")
+    assert status == (2 if busy else 0), (word, proof)
+    assert proof["state"] == ("present" if busy else "absent"), (word, proof)
+    assert proof["processes"] == ([100000003] if busy else []), (word, proof)
+    assert proof["lock"] == "absent", proof
+    cases += 1
+
+
+# A registered node root apart from the mirrors' home owns the build and temporary roots.
+registered = root / "loop-a"
+for word, busy in [
+    (str(registered / "lanes/R-build/debug/deps"), True),
+    ("--tmp=" + str(registered / "lanes/R-tmp"), True),
+    (str(lanes / "R-build"), False),
+    (str(registered / "lanes/R"), False),
+]:
+    entry = Path("/proc/100000003")
+    with patch.object(Path, "iterdir", return_value=iter([entry])), \
+            patch.object(Path, "read_bytes", return_value=word.encode() + b"\0"):
+        status, proof = probe("R", registered)
+    assert status == (2 if busy else 0), (word, proof)
+    assert proof["state"] == ("present" if busy else "absent"), (word, proof)
+    assert proof["processes"] == ([100000003] if busy else []), (word, proof)
+    assert proof["lock"] == "absent", proof
+    cases += 1
+status, proof = probe("R", "loop-a")
+assert status == 2 and proof["state"] == "unmeasured", proof
+assert proof["error"] == "node_root must be absolute: loop-a", proof
+cases += 1
 
 
 # Complete the process scan regardless of whether unreadable or busy comes first.

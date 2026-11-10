@@ -114,7 +114,7 @@ def remove(path):
 def main():
     mirror_word, run, loop, node_root = sys.argv[1:]
     if run.startswith("--absence="):
-        return absence_probe(mirror_word, run.removeprefix("--absence="), loop)
+        return absence_probe(mirror_word, run.removeprefix("--absence="), loop, node_root)
     started = time.monotonic()
     evidence = dict(schema=1, run=run, loop=loop, before=None, after=None,
                     bytes_freed=None, wall_seconds=None, helper_exit=125,
@@ -172,7 +172,21 @@ def main():
     return evidence["helper_exit"]
 
 
-def absence_probe(mirror_word, run, loop):
+def names_run(word, owned, run, loop):
+    """Bind whole argv words or option values, never substrings of script text."""
+    if word == run:
+        return True
+    value = word.split("=", 1)[1] if word.startswith("-") and "=" in word else word
+    if value == f"lane-{loop}-{run}":
+        return True
+    path = Path(value)
+    return path.is_absolute() and (
+        any(path.is_relative_to(directory) for directory in owned)
+        or f"lane-{loop}-{run}" in path.parts
+    )
+
+
+def absence_probe(mirror_word, run, loop, node_root):
     """Read process and existing lock evidence without creating any node path."""
     started = time.monotonic()
     evidence = dict(schema=1, run=run, loop=loop, state="unmeasured")
@@ -180,6 +194,12 @@ def absence_probe(mirror_word, run, loop):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", run):
             raise ValueError("invalid run name")
         root = Path(os.path.expanduser(mirror_word)).parent.parent / "lanes"
+        artifacts = Path(os.path.expanduser(node_root)) / "lanes"
+        if not artifacts.is_absolute():
+            raise ValueError("node_root must be absolute: " + node_root)
+        # The directories retirement removes: the checkout beside the mirrors,
+        # and the build and temporary roots beneath the registered node root.
+        owned = (root / run, artifacts / (run + "-build"), artifacts / (run + "-tmp"))
         ignored = set()
         pid = os.getpid()
         while pid > 0 and pid not in ignored:
@@ -194,8 +214,7 @@ def absence_probe(mirror_word, run, loop):
             try:
                 words = (entry / "cmdline").read_bytes().split(b"\0")
                 tokens = [word.decode(errors="surrogateescape") for word in words]
-                if any(word == run or str(root / run) in word
-                       or f"lane-{loop}-{run}" in word for word in tokens):
+                if any(names_run(word, owned, run, loop) for word in tokens):
                     processes.append(int(entry.name))
             except (FileNotFoundError, ProcessLookupError):
                 continue

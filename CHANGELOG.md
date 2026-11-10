@@ -196,6 +196,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The node absence probe matches the paths retirement removes, the checkout beside the mirrors and the build and temporary directories beneath the registered node root, and worker-home components in whole arguments or option values, so a sibling run’s prefix collision or script text no longer holds retirement (``prob:lanes:node-absence-probe-binds-the-run-at-component-boundaries``).
+
 - Composed reply entry explicitly refuses registry overrides in its existing lifetime error envelope before lifetime admission or changing identity (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Held mail inventories preserve every snapshot refusal, including invalid service ACLs, rather than losing the cause and retirement state; pathname inventories retain their existing skip behavior (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
