@@ -146,6 +146,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Retirement process scans bind driver paths at argument and component boundaries and leave container-name ownership to the labelled container scan, so sibling fixtures and unrelated hub commands do not hold a run by a shared name substring (``prob:lanes:retire-busy-census-binds-to-the-runs-own-processes``).
+
 - Active worker lifetime leases can retain receiver-validated configuration, storage and identity-execution custody while verifying and locking the receipt, without reopening the owner-home paths; reply binding keeps its existing route until its journal and endpoint custody move (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Mail entry requires its exact two-record declaration before descriptor receipt and configuration reads, replaces the consumed stdin socket with the null binding, and preserves descriptor duplication and rights-socket inspection failure causes in mail and worker entry refusals (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
