@@ -1504,24 +1504,6 @@ pub fn prepare_run(
 /// # Errors
 ///
 /// Refuses unavailable authority, unsafe custody or failed publication and clock evidence.
-#[cfg(test)]
-pub(crate) fn publish_round(
-    owner_home: &Path,
-    loop_name: &str,
-    run_home: &Path,
-    worker_uid: u32,
-    backend: BoxBackend,
-) -> Result<Value, LaneError> {
-    publish_round_admitted(
-        owner_home,
-        loop_name,
-        run_home,
-        worker_uid,
-        backend,
-        &crate::runtime_admission::RuntimeAdmission::Gate,
-    )
-}
-
 pub(crate) fn publish_round_admitted(
     owner_home: &Path,
     loop_name: &str,
@@ -1692,26 +1674,6 @@ pub(crate) const fn fixture_report(expires_unix: u64) -> RefreshReport {
 /// # Errors
 ///
 /// Reports a failed authority request or publication without exposing token bytes.
-#[cfg(test)]
-pub(crate) fn refresh_live(
-    owner_home: &Path,
-    loop_name: &str,
-    runs_root: &Path,
-    published: &mut BTreeMap<PathBuf, Vec<u8>>,
-    backend: BoxBackend,
-    endpoint: &str,
-) -> Result<RefreshReport, LaneError> {
-    refresh_live_admitted(
-        owner_home,
-        loop_name,
-        runs_root,
-        published,
-        backend,
-        endpoint,
-        &crate::runtime_admission::RuntimeAdmission::Gate,
-    )
-}
-
 pub(crate) fn refresh_live_admitted(
     owner_home: &Path,
     loop_name: &str,
@@ -1899,6 +1861,7 @@ fn publish_live_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime_admission::RuntimeAdmission::Gate;
 
     /// # Panics
     /// Panics if a fixture can select a vendor endpoint without its thread-local guard.
@@ -2109,7 +2072,15 @@ mod tests {
         for result in [
             preflight(&absent, "alpha", backend),
             prepare_run(&absent, "alpha", &absent, owner_identity().0, backend),
-            publish_round(&absent, "alpha", &absent, owner_identity().0, backend).map(|_| ()),
+            publish_round_admitted(
+                &absent,
+                "alpha",
+                &absent,
+                owner_identity().0,
+                backend,
+                &Gate,
+            )
+            .map(|_| ()),
         ] {
             assert_eq!(
                 result.expect_err("trial gate precedes custody").kind,
@@ -3673,8 +3644,13 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        crate::container_helper::publish_round_credential(home, "alpha", &mut record)
-            .expect("first round barrier");
+        crate::container_helper::publish_round_credential_admitted(
+            home,
+            "alpha",
+            &mut record,
+            &Gate,
+        )
+        .expect("first round barrier");
         let first =
             crate::launch::report::credential_publication(&record).expect("first report evidence");
         let published: Value = serde_json::from_slice(
@@ -3697,8 +3673,13 @@ mod tests {
             .as_array_mut()
             .expect("rounds")
             .push(json!({"step":"resume"}));
-        crate::container_helper::publish_round_credential(home, "alpha", &mut record)
-            .expect("resumed round barrier");
+        crate::container_helper::publish_round_credential_admitted(
+            home,
+            "alpha",
+            &mut record,
+            &Gate,
+        )
+        .expect("resumed round barrier");
         let second =
             crate::launch::report::credential_publication(&record).expect("second report evidence");
         let published: Value = serde_json::from_slice(
@@ -4137,13 +4118,14 @@ mod tests {
         }
         let absent = root.path().join("absent-owner");
         assert_eq!(
-            refresh_live(
+            refresh_live_admitted(
                 &absent,
                 "alpha",
                 &runs,
                 &mut cache,
                 BoxBackend::Claude,
-                AUTH_ENDPOINT
+                AUTH_ENDPOINT,
+                &Gate
             )
             .expect_err("closed gate")
             .kind,
@@ -4210,7 +4192,7 @@ mod tests {
     /// ´test:unit:claude-reviewed-binding-keeps-schema-evidence´
     #[test]
     fn claude_reviewed_binding_keeps_schema_evidence() {
-        let binding = crate::runtime_admission::RuntimeAdmission::Gate.program_binding();
+        let binding = Gate.program_binding();
         for result in [
             Ok(fixture_report(1_900_000_000)),
             Err(failure("credential-refresh", "synthetic refusal")),
@@ -5000,13 +4982,14 @@ mod tests {
             |(endpoint, _)| endpoint.clone(),
         );
         let _endpoint = fixture_service_endpoint(endpoint);
-        let authority = crate::container_helper::spawn_credential_authority(
+        let authority = crate::container_helper::spawn_credential_authority_admitted(
             home.path().to_path_buf(),
             "alpha".into(),
             runs,
             driver,
             BoxBackend::Codex,
             Arc::clone(&cancelled),
+            &Gate,
         )
         .expect("service authority spawn");
         drop(programs);
@@ -5108,13 +5091,14 @@ mod tests {
             refusal.local_addr().expect("address")
         ));
         let driver = home.path().join("runs/R");
-        let authority = crate::container_helper::spawn_credential_authority(
+        let authority = crate::container_helper::spawn_credential_authority_admitted(
             home.path().to_path_buf(),
             "alpha".into(),
             home.path().join("runs"),
             driver.clone(),
             BoxBackend::Codex,
             Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            &Gate,
         )
         .expect("cancelled service spawn");
         finish_service_authority(authority).expect("cancelled before first check");

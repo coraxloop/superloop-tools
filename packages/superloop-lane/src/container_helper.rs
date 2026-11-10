@@ -785,22 +785,13 @@ pub(crate) fn fixture_pinned_request(
     run: &str,
     podman: &Path,
 ) -> Result<Value, LaneError> {
-    pinned_request(owner_home, "alpha", run, podman).map(|request| request.record)
+    pinned_request_admitted(owner_home, "alpha", run, podman, &RuntimeAdmission::Gate)
+        .map(|request| request.record)
 }
 
 #[cfg(test)]
 pub(crate) fn fixture_reserved_program_attempt(home: &Path, run: &Path) {
     tests::reserved_program_attempt(home, run);
-}
-
-#[cfg(test)]
-fn pinned_request(
-    owner_home: &Path,
-    loop_name: &str,
-    run: &str,
-    podman: &Path,
-) -> Result<PinnedRequest, LaneError> {
-    pinned_request_admitted(owner_home, loop_name, run, podman, &RuntimeAdmission::Gate)
 }
 
 fn pinned_request_admitted(
@@ -1935,15 +1926,6 @@ fn authorize_peer(stream: &UnixStream, loop_uid: u32, reservation: &Path) -> Res
 }
 
 /// Publish the round's credential before exposing the helper's ready socket.
-#[cfg(test)]
-pub(crate) fn publish_round_credential(
-    owner_home: &Path,
-    loop_name: &str,
-    record: &mut Value,
-) -> Result<(), LaneError> {
-    publish_round_credential_admitted(owner_home, loop_name, record, &RuntimeAdmission::Gate)
-}
-
 pub(crate) fn publish_round_credential_admitted(
     owner_home: &Path,
     loop_name: &str,
@@ -2020,26 +2002,6 @@ impl CredentialThreadCustody {
 }
 
 /// Spawn credential authority with its held home, configuration and selected programs.
-#[cfg(test)]
-pub(crate) fn spawn_credential_authority(
-    refresh_home: PathBuf,
-    refresh_loop: String,
-    refresh_root: PathBuf,
-    refresh_driver_dir: PathBuf,
-    backend: BoxBackend,
-    refresh_cancelled: Arc<AtomicBool>,
-) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError> {
-    spawn_credential_authority_admitted(
-        refresh_home,
-        refresh_loop,
-        refresh_root,
-        refresh_driver_dir,
-        backend,
-        refresh_cancelled,
-        &RuntimeAdmission::Gate,
-    )
-}
-
 pub(crate) fn spawn_credential_authority_admitted(
     refresh_home: PathBuf,
     refresh_loop: String,
@@ -2064,7 +2026,8 @@ pub(crate) fn spawn_credential_authority_admitted(
 }
 
 /// Run the service authority with an explicit internal refresh endpoint.
-/// The public service always supplies the fixed vendor endpoint; fixtures supply loopback.
+/// Codex uses the fixed vendor endpoint; its tests inject loopback before thread capture.
+/// Claude uses its owner program and does not use this endpoint.
 fn spawn_credential_authority_at(
     refresh_home: PathBuf,
     refresh_loop: String,
@@ -2123,16 +2086,6 @@ fn spawn_credential_authority_at(
 
 // Keep the selected credential capability check in the same transaction as the
 // helper PID, round receipt and reservation publication.
-#[cfg(test)]
-fn publish_helper_identity(
-    owner_home: &Path,
-    loop_name: &str,
-    run: &str,
-    root: &Path,
-) -> Result<BoxBackend, LaneError> {
-    publish_helper_identity_admitted(owner_home, loop_name, run, root, &RuntimeAdmission::Gate)
-}
-
 fn publish_helper_identity_admitted(
     owner_home: &Path,
     loop_name: &str,
@@ -2427,6 +2380,7 @@ pub fn client(run_dir: &Path) -> Result<i32, LaneError> {
 
 #[cfg(test)]
 mod tests {
+    use super::RuntimeAdmission::Gate;
     const TEST_CONTAINER_ID: &str =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const TEST_OTHER_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -2434,9 +2388,9 @@ mod tests {
         AttemptOutcome, ClientSocketIdentity, LauncherIdentity, STREAM_DRAIN_GRACE, STREAM_LIMIT,
         STREAM_STOP_GRACE, attempt_vector, attested_client_socket, capacity_event,
         command_for_request, control_loop, decode_round_request, in_driver_session, launcher_alive,
-        open_client_runs_root_with, pinned_request, process_start, read_words, remove_container,
-        retry_after, run_attempt, run_attempt_with, run_identity_at, start_after_reservation,
-        stop_container, verify_vector,
+        open_client_runs_root_with, pinned_request_admitted, process_start, read_words,
+        remove_container, retry_after, run_attempt, run_attempt_with, run_identity_at,
+        start_after_reservation, stop_container, verify_vector,
     };
 
     /// ´test:unit:boxed-claude-helper-resumes-saved-session-without-quota-retry´
@@ -2971,37 +2925,41 @@ mod tests {
             ),
             (
                 "publish_round",
-                crate::credential::publish_round(&home, "alpha", &worker, 3000, backend)
-                    .map(|_| ()),
+                crate::credential::publish_round_admitted(
+                    &home, "alpha", &worker, 3000, backend, &Gate,
+                )
+                .map(|_| ()),
             ),
             (
                 "refresh_live",
-                crate::credential::refresh_live(
+                crate::credential::refresh_live_admitted(
                     &home,
                     "alpha",
                     &runs,
                     &mut published,
                     backend,
                     "not-an-endpoint",
+                    &Gate,
                 )
                 .map(|_| ()),
             ),
             (
                 "publish_round_credential",
-                super::publish_round_credential(&home, "alpha", &mut record),
+                super::publish_round_credential_admitted(&home, "alpha", &mut record, &Gate),
             ),
             (
                 "verify_box_attestation",
-                crate::plan::verify_box_attestation(&record["plan"]),
+                crate::plan::verify_box_attestation_admitted(&record["plan"], &Gate),
             ),
             (
                 "pinned_plan_from_record",
-                crate::launch::pinned_plan_from_record(
+                crate::launch::pinned_plan_from_record_admitted(
                     &home,
                     "alpha",
                     "R",
                     Path::new("/absent-podman"),
                     &record,
+                    &Gate,
                 )
                 .map(|_| ()),
             ),
@@ -3047,7 +3005,7 @@ mod tests {
             crate::launch::publish_reservation(&reservation, &record).expect("reservation");
             let bytes = fs::read(&reservation).expect("prior bytes");
             let inode = fs::metadata(&reservation).expect("prior inode").ino();
-            let error = super::publish_helper_identity(root, "alpha", "R", root)
+            let error = super::publish_helper_identity_admitted(root, "alpha", "R", root, &Gate)
                 .expect_err("no helper publication");
             if value == "preparing" {
                 assert_claude_gate("publish_helper_identity", &error, false);
@@ -3084,10 +3042,15 @@ mod tests {
             serde_json::from_slice(&fs::read(&reservation).expect("record bytes")).expect("record");
         record["plan"]["backend"] = json!("claude");
         crate::launch::publish_reservation(&reservation, &record).expect("Claude record");
-        let error =
-            super::pinned_request(fixture.path(), "alpha", "R", Path::new("/usr/bin/podman"))
-                .err()
-                .expect("launcher check precedes gate");
+        let error = super::pinned_request_admitted(
+            fixture.path(),
+            "alpha",
+            "R",
+            Path::new("/usr/bin/podman"),
+            &Gate,
+        )
+        .err()
+        .expect("launcher check precedes gate");
         assert_eq!(error.status, 2);
         assert_eq!(error.kind, "helper-pin");
         assert_eq!(error.detail, "reservation has no launcher PID");
@@ -3099,10 +3062,15 @@ mod tests {
         ] {
             record["launcher_start"] = tick;
             crate::launch::publish_reservation(&reservation, &record).expect("launcher fixture");
-            let error =
-                super::pinned_request(fixture.path(), "alpha", "R", Path::new("/usr/bin/podman"))
-                    .err()
-                    .expect("identity precedes runtime gate");
+            let error = super::pinned_request_admitted(
+                fixture.path(),
+                "alpha",
+                "R",
+                Path::new("/usr/bin/podman"),
+                &Gate,
+            )
+            .err()
+            .expect("identity precedes runtime gate");
             assert_eq!(error.status, 2);
             assert_eq!(error.kind, "helper-pin");
             assert_eq!(error.detail, detail);
@@ -3114,17 +3082,24 @@ mod tests {
         for (site, result) in [
             (
                 "run_identity_at",
-                super::run_identity_at(
+                super::run_identity_at_admitted(
                     fixture.path(),
                     &run,
                     nix::unistd::Uid::effective().as_raw(),
+                    &Gate,
                 )
                 .map(|_| ()),
             ),
             (
                 "pinned_request",
-                super::pinned_request(fixture.path(), "alpha", "R", Path::new("/usr/bin/podman"))
-                    .map(|_| ()),
+                super::pinned_request_admitted(
+                    fixture.path(),
+                    "alpha",
+                    "R",
+                    Path::new("/usr/bin/podman"),
+                    &Gate,
+                )
+                .map(|_| ()),
             ),
         ] {
             assert_claude_gate(site, &result.expect_err("wrapped gate"), true);
@@ -3145,7 +3120,14 @@ mod tests {
         assert!(text.contains("codex = ["));
         fs::write(&settings, text.replace("codex = [", "claude = [")).expect("Claude settings");
         for backend in [None, Some(BoxBackend::Claude)] {
-            let result = crate::load_launch_plan(fixture.path(), "alpha", "R", (0, 0), backend);
+            let result = crate::load_launch_plan_admitted(
+                fixture.path(),
+                "alpha",
+                "R",
+                (0, 0),
+                backend,
+                &Gate,
+            );
             assert_claude_gate(
                 "load_launch_plan",
                 &result.expect_err("selected gate"),
@@ -3174,13 +3156,14 @@ mod tests {
         let _endpoint =
             crate::credential::fixture_service_endpoint("http://127.0.0.1:1/unused".into());
         let cancelled = Arc::new(AtomicBool::new(false));
-        let authority = super::spawn_credential_authority(
+        let authority = super::spawn_credential_authority_admitted(
             home.to_path_buf(),
             "alpha".into(),
             runs.clone(),
             driver,
             BoxBackend::Claude,
             Arc::clone(&cancelled),
+            &Gate,
         )
         .expect("production periodic spawner");
         drop(private);
@@ -3296,7 +3279,7 @@ mod tests {
         let bytes = fs::read(&reservation).expect("prior bytes");
         let inode = fs::metadata(&reservation).expect("prior inode").ino();
         let _guard = foreign_credential_custody();
-        let error = super::publish_helper_identity(root, "alpha", "R", root)
+        let error = super::publish_helper_identity_admitted(root, "alpha", "R", root, &Gate)
             .expect_err("foreign client at the production publication transaction");
         assert_eq!(error.kind, "container-anchor");
         assert_eq!(
@@ -3441,7 +3424,7 @@ mod tests {
             .expect("ready helper sees the program");
         fs::remove_file(&program).expect("replace between readiness and request");
         std::os::unix::fs::symlink("/usr/bin/true", &program).expect("replacement link");
-        let refusal = pinned_request(fixture.path(), "alpha", "R", &program)
+        let refusal = pinned_request_admitted(fixture.path(), "alpha", "R", &program, &Gate)
             .err()
             .expect("request checks the executable before reading the run");
         assert_eq!(refusal.kind, "owner-program");

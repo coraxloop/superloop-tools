@@ -1,3 +1,4 @@
+use crate::runtime_admission::RuntimeAdmission::Gate;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 
@@ -657,8 +658,13 @@ fn boxed_backend_credential_refusal_precedes_custody_access() {
         .expect_err("Claude has no adapter");
     assert_eq!(error.kind, "backend-unavailable");
     let mut record = json!({"plan":{"backend":"claude","home":run},"worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch"}]});
-    let error = crate::container_helper::publish_round_credential(&missing, "alpha", &mut record)
-        .expect_err("wrong credential adapter");
+    let error = crate::container_helper::publish_round_credential_admitted(
+        &missing,
+        "alpha",
+        &mut record,
+        &Gate,
+    )
+    .expect_err("wrong credential adapter");
     assert_eq!(error.kind, "backend-unavailable");
     assert!(record["rounds"][0]["credential_publication"].is_null());
     assert!(!missing.exists());
