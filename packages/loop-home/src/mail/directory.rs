@@ -24,6 +24,14 @@ fn directory_bound(error: MailError, reason: &'static str) -> MailError {
     }
 }
 
+fn inventory_failure(error: MailError, label: &str, failures: &mut Vec<String>) -> Result<()> {
+    if matches!(error, MailError::Entry(_)) {
+        return Err(error);
+    }
+    failures.push(format!("{label}: {error}"));
+    Ok(())
+}
+
 pub(super) struct Snapshot {
     pub config: Configuration,
     pub digest: String,
@@ -71,6 +79,9 @@ impl Snapshot {
                 MailError::from(error)
             }
         })?;
+        if let Some(anchor) = &held {
+            anchor.revalidate()?;
+        }
         let bytes = io::bounded(&lock, MAX_CONFIGURATION_BYTES).map_err(|error| {
             directory_bound(
                 error,
@@ -419,12 +430,14 @@ impl Directory {
                 });
             observe_admission(&added, &row.name, &label, "loop");
             if let Err(error) = added {
-                failures.push(format!("{label}: {error}"));
+                inventory_failure(error, &label, &mut failures)?;
             }
             let config =
                 Snapshot::open_with(&row, self.service, custody.map(|c| Arc::clone(&c.private)));
-            if let Ok(snapshot) = &config {
-                collect_retired(&row.name, snapshot, &mut retired)?;
+            match config {
+                Ok(snapshot) => collect_retired(&row.name, &snapshot, &mut retired)?,
+                Err(error @ MailError::Entry(_)) => return Err(error),
+                Err(_) => {}
             }
             let workers = match storage_file(&row.home.join("workers"), custody, false) {
                 Ok(workers) => workers,
@@ -434,7 +447,7 @@ impl Directory {
                 }
                 Err(error) => {
                     tracing::warn!(loop_name = %row.name, reason = %error, "workers skipped");
-                    failures.push(format!("{}: {error}", row.name));
+                    inventory_failure(error, &row.name, &mut failures)?;
                     continue;
                 }
             };
@@ -442,7 +455,7 @@ impl Directory {
                 Ok(names) => names,
                 Err(error) => {
                     tracing::warn!(loop_name = %row.name, reason = %error, "workers skipped");
-                    failures.push(format!("{}: {error}", row.name));
+                    inventory_failure(error, &row.name, &mut failures)?;
                     continue;
                 }
             };
@@ -470,7 +483,7 @@ impl Directory {
                 })();
                 observe_admission(&added, &row.name, &label, "worker");
                 if let Err(error) = added {
-                    failures.push(format!("{label}: {error}"));
+                    inventory_failure(error, &label, &mut failures)?;
                 }
             }
         }

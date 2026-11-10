@@ -658,6 +658,10 @@ fn inventory_case(home: &Path, case: &str) {
     let (configuration, mut anchors) = inventory_receive(home);
     let private = Arc::new(anchors.pop().expect("private"));
     let storage = Arc::new(anchors.pop().expect("storage"));
+    if matches!(case, "scan-storage" | "scan-private") {
+        inventory_anchor_refusal(home, case, &configuration, storage, private);
+        return;
+    }
     let held = home.join("held-storage");
     fs::rename(home.join(".var/loops/alpha"), &held).expect("retain storage");
     fs::rename(home.join(".config/loops"), home.join("held-configuration"))
@@ -741,6 +745,53 @@ fn inventory_case(home: &Path, case: &str) {
         );
     }
 }
+fn inventory_anchor_refusal(
+    home: &Path,
+    case: &str,
+    configuration: &crate::anchor::Configuration,
+    storage: Arc<crate::anchor::Anchor>,
+    private: Arc<crate::anchor::Anchor>,
+) {
+    let path = home.join(if case == "scan-storage" {
+        ".var/loops/alpha"
+    } else {
+        ".var/loops/alpha/private"
+    });
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o777))
+        .expect("change custody after receipt");
+    let directory = Directory {
+        configuration: None,
+        home: home.to_owned(),
+        service: 64001,
+        owner: 0,
+        durability: Durability {
+            crash_consistent_rename: true,
+            durable_sync: true,
+        },
+    };
+    // Drive the scan directly: BindingInventory's preflight must not mask a swallowed error.
+    let result = directory.inventory_with(
+        &configuration.registry,
+        &configuration.allocations,
+        Some(&LoopCustody {
+            row: configuration.registry.row("alpha", home).expect("row"),
+            storage,
+            private,
+        }),
+    );
+    let Err(super::super::journal::MailError::Entry(reason)) = result else {
+        panic!("scan must preserve the entry refusal");
+    };
+    assert!(reason.starts_with("anchor-mode:"), "{case}: {reason}");
+    assert!(reason.contains("operation=mail-binding"), "{reason}");
+    let purpose = if case == "scan-storage" {
+        "loop-storage"
+    } else {
+        "private-storage"
+    };
+    assert!(reason.contains(&format!("purpose={purpose}")), "{reason}");
+}
+
 fn inventory_mutate(home: &Path, storage: &Path, case: &str) {
     let worker = storage.join("workers/worker");
     match case {
@@ -910,6 +961,8 @@ fn binding_inventory_retains_storage() {
     }
     for case in [
         "held",
+        "scan-storage",
+        "scan-private",
         "anchor-mode",
         "snapshot-mode",
         "outbox-mode",
