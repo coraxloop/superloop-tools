@@ -2944,11 +2944,24 @@ mod tests {
         for field in ["refreshToken", "refreshTokenExpiresAt"] {
             assert!(projection["claudeAiOauth"].get(field).is_none());
         }
+        let error = publish_claude_round_at(
+            home,
+            run,
+            3000,
+            1_799_999_991,
+            || claude_refresh_program(home, &"0".repeat(64)),
+            || Ok(1_799_999_991_000),
+        )
+        .expect_err("wrong digest during due round publication");
+        assert_eq!(error.kind, "credential-program-pin");
         assert_eq!(
-            claude_refresh_program(home, &"0".repeat(64))
-                .expect_err("wrong digest before execution")
-                .kind,
-            "credential-program-pin"
+            error.detail,
+            "held Claude program differs from the reviewed SHA-256"
+        );
+        assert_eq!(fs::read(&path).expect("wrong-pin retained bytes"), bytes);
+        assert_eq!(
+            fs::metadata(&path).expect("wrong-pin retained inode").ino(),
+            metadata.ino()
         );
         let error = publish_claude_round_at(home, run, 3000, 1_800_000_000, refresh, || {
             Ok(1_800_000_000_000)
