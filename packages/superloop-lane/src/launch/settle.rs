@@ -912,6 +912,63 @@ mod tests {
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
 
+    /// # Panics
+    /// Panics if a wall changes beyond JSON precision or any other report field changes.
+    fn assert_report_roundtrip(mut actual: Value, mut expected: Value) {
+        let actual_wall = actual["wall_seconds"].as_f64().expect("actual wall");
+        let expected_wall = expected["wall_seconds"].as_f64().expect("expected wall");
+        let tolerance = 4.0 * f64::EPSILON * expected_wall.abs().max(1.0);
+        assert!(
+            actual_wall.is_finite()
+                && expected_wall.is_finite()
+                && (actual_wall - expected_wall).abs() <= tolerance,
+            "report wall changed: {actual_wall} != {expected_wall}"
+        );
+        actual
+            .as_object_mut()
+            .expect("actual report")
+            .remove("wall_seconds");
+        expected
+            .as_object_mut()
+            .expect("expected report")
+            .remove("wall_seconds");
+        assert_eq!(actual, expected);
+    }
+
+    /// # Panics
+    /// Panics if JSON precision changes fail or changed report evidence passes.
+    /// ´test:unit:settle-report-roundtrip-compares-only-wall-with-tolerance´
+    #[test]
+    fn settle_report_roundtrip_compares_only_wall_with_tolerance() {
+        // Each pair is a wall as Duration::as_secs_f64 wrote it and the value the gate parsed
+        // back from its JSON, one ULP apart.
+        for (wall, recorded) in [
+            (1.327_694_488_000_000_1, 1.327_694_488),
+            (1.782_030_800_999_999_9, 1.782_030_801),
+        ] {
+            let report = json!({"wall_seconds":wall,"evidence":{"state":"complete"}});
+            let bytes = serde_json::to_vec(&report).expect("serialized report");
+            let actual = serde_json::from_slice(&bytes).expect("parsed report");
+            assert_report_roundtrip(actual, report.clone());
+            // These parsed values are the discrepancies recorded by the gates.
+            let recorded = json!({"wall_seconds":recorded,"evidence":{"state":"complete"}});
+            assert_ne!(recorded["wall_seconds"], report["wall_seconds"]);
+            assert_report_roundtrip(recorded, report.clone());
+            for changed in [
+                json!({"wall_seconds":wall + 0.001,"evidence":{"state":"complete"}}),
+                json!({"wall_seconds":wall,"evidence":{"state":"changed"}}),
+                json!({"evidence":{"state":"complete"}}),
+            ] {
+                assert!(
+                    std::panic::catch_unwind(|| {
+                        assert_report_roundtrip(changed, report.clone());
+                    })
+                    .is_err()
+                );
+            }
+        }
+    }
+
     fn collected_record(record: &mut Value) {
         record["run_scope"] = json!({"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"proxy.service","proxy_invocation":"fixture"});
         for (pid, start) in [
@@ -2177,10 +2234,10 @@ mod tests {
                 .get("removed_helper_sockets")
                 .is_none()
         );
-        assert_eq!(
+        assert_report_roundtrip(
             super::super::report::read_bound(&root, "R", Some("work-2"), owner)
                 .expect("second report"),
-            second
+            second,
         );
         assert_eq!(
             super::super::report::read_bound(&root, "R", Some("work-1"), owner)
@@ -2209,10 +2266,10 @@ mod tests {
         let paths = bind_dead_sockets(&plan);
         request.dry_run = false;
         let report = complete_socket_fixture(h, &plan, &request).expect("completion");
-        assert_eq!(
+        assert_report_roundtrip(
             super::super::report::read_bound(&root, "R", Some("work-1"), owner)
                 .expect("valid report"),
-            report
+            report.clone(),
         );
         let path = h.join(".report=R=work-1.json");
         for invalid in [
@@ -2255,18 +2312,18 @@ mod tests {
             .expect("completion")
             .remove("removed_helper_sockets");
         std::fs::write(&path, serde_json::to_vec(&older).expect("report bytes")).expect("report");
-        assert_eq!(
+        assert_report_roundtrip(
             super::super::report::read_bound(&root, "R", Some("work-1"), owner)
                 .expect("older report"),
-            older
+            older,
         );
         let mut single = report;
         single["interrupted_settlement"]["removed_helper_sockets"] = json!([paths[0]]);
         std::fs::write(&path, serde_json::to_vec(&single).expect("report bytes")).expect("report");
-        assert_eq!(
+        assert_report_roundtrip(
             super::super::report::read_bound(&root, "R", Some("work-1"), owner)
                 .expect("one removed socket"),
-            single
+            single,
         );
     }
 
@@ -2372,7 +2429,7 @@ mod tests {
             super::super::reaping::recovery_verdict(&failed).expect("same measured proof");
             let published = super::super::report::read_bound(&root, "R", Some("work-1"), owner)
                 .expect("recovered report");
-            assert_eq!(published, recovered);
+            assert_report_roundtrip(published, recovered);
             let mut settle = SettleRequest {
                 loop_name: "alpha".into(),
                 run: "R".into(),
