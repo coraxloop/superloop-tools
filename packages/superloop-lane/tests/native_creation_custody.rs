@@ -214,23 +214,25 @@ fn exercise_phases(
             ),
             "{error}"
         );
-        let error = loop_home::mail::worker_provision::hold_active_beneath(
-            home,
-            "alpha",
-            &identity,
-            true,
-            configuration,
-            root,
-            private,
-            executor,
-        )
-        .expect_err("lifetime refuses ambient registry");
-        assert!(
-            error
-                .to_string()
-                .contains("anchor-declaration: operation=mail-binding purpose=registry-override"),
-            "{error}"
-        );
+        for verify_only in [true, false] {
+            let error = loop_home::mail::worker_provision::hold_active_beneath(
+                home,
+                "alpha",
+                &identity,
+                verify_only,
+                configuration,
+                root,
+                private,
+                executor,
+            )
+            .expect_err("lifetime refuses ambient registry");
+            assert!(
+                error.to_string().contains(
+                    "anchor-declaration: operation=mail-binding purpose=registry-override"
+                ),
+                "{error}"
+            );
+        }
         return;
     }
     let census = || {
@@ -313,6 +315,7 @@ fn lifetime_custody(
         drop(guard);
         drop(Flock::lock(probe, FlockArg::LockExclusiveNonblock).expect("drop releases lifetime"));
     }
+    lifetime_recheck(home, identity, configuration, root, private, executor);
     let mut changed = identity.clone();
     changed.reservation.push_str("-changed");
     let error = hold(&changed, true).expect_err("changed receipt identity");
@@ -325,6 +328,7 @@ fn lifetime_custody(
     let lock = storage.join("private/.config/mail/loop.lock");
     let saved = lock.with_extension("held");
     fs::rename(&lock, &saved).expect("remove loop-owned lock");
+    assert!(!lock.exists(), "fixture removes the original lock");
     let error = hold(identity, true).expect_err("loop binding must still be verified");
     assert!(
         error
@@ -337,11 +341,93 @@ fn lifetime_custody(
         "read-only verification must not recreate its lock"
     );
     fs::rename(saved, lock).expect("restore loop-owned lock");
+    drop(hold(identity, true).expect("restored binding verifies"));
     fs::set_permissions(&storage, fs::Permissions::from_mode(0o731)).expect("widen storage");
     let error = hold(identity, true).expect_err("received storage revalidated");
     assert!(error.to_string().contains("anchor-mode"), "{error}");
     fs::set_permissions(&storage, fs::Permissions::from_mode(0o711)).expect("restore storage");
     drop(hold(identity, true).expect("restored custody"));
+}
+
+/// # Panics
+/// Panics if the retained-guard recheck trusts either receipt or binding from the first pass.
+fn lifetime_recheck(
+    home: &Path,
+    identity: &loop_home::mail::birth::Identity,
+    configuration: &anchor::Configuration,
+    root: &Anchor,
+    private: &Anchor,
+    executor: &Anchor,
+) {
+    let storage = home.join(".var/loops/held-alpha");
+    let receipt = storage.join(".mail-births").join(format!(
+        "name-{}.toml",
+        loop_home::mail::journal::digest(identity.name.as_bytes())
+    ));
+    let binding = storage.join("private/.config/mail/loop.toml");
+    for verify_only in [true, false] {
+        for (path, refusal) in [
+            (&receipt, "unsafe-storage: worker birth receipt"),
+            (
+                &binding,
+                "unsafe-storage: identity provisioning step refused",
+            ),
+        ] {
+            let verified = loop_home::mail::worker_provision::verify_active_beneath(
+                home,
+                "alpha",
+                identity,
+                verify_only,
+                configuration,
+                root,
+                private,
+                executor,
+            )
+            .expect("first verification succeeds before the change");
+            let original = fs::read_to_string(path).expect("binding bytes");
+            assert!(original.contains(&identity.reservation));
+            let changed = original.replace(
+                &identity.reservation,
+                &format!("{}-changed", identity.reservation),
+            );
+            fs::write(path, changed).expect("change between the two acquisitions");
+            let result = verified.hold();
+            fs::write(path, original).expect("restore binding before asserting");
+            let error = result.expect_err("retained-guard recheck refuses the changed binding");
+            assert!(error.to_string().contains(refusal), "{error}");
+            drop(
+                loop_home::mail::worker_provision::hold_active_beneath(
+                    home,
+                    "alpha",
+                    identity,
+                    verify_only,
+                    configuration,
+                    root,
+                    private,
+                    executor,
+                )
+                .expect("restored binding admits the complete route"),
+            );
+        }
+        let verified = loop_home::mail::worker_provision::verify_active_beneath(
+            home,
+            "alpha",
+            identity,
+            verify_only,
+            configuration,
+            root,
+            private,
+            executor,
+        )
+        .expect("first verification before mode change");
+        fs::set_permissions(&storage, fs::Permissions::from_mode(0o731))
+            .expect("widen storage between phases");
+        let result = verified.hold();
+        fs::set_permissions(&storage, fs::Permissions::from_mode(0o711))
+            .expect("restore storage before asserting");
+        let error = result.expect_err("lease revalidates storage after the first pass");
+        assert!(error.to_string().contains("anchor-mode"), "{error}");
+    }
 }
 
 /// # Panics

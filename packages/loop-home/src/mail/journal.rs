@@ -1152,9 +1152,7 @@ pub fn verify_reservation_beneath<T>(
 }
 
 fn reservation_root_beneath(anchor: &crate::anchor::Anchor) -> Result<File> {
-    let (_, descriptor) = anchor
-        .relay()
-        .map_err(|error| MailError::Entry(error.to_string()))?;
+    let (_, descriptor) = anchor.relay()?;
     store::open(&File::from(descriptor), ".", true)
 }
 

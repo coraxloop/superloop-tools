@@ -947,7 +947,7 @@ fn reservation_anchor(path: &std::path::Path) -> crate::anchor::Anchor {
     };
     let policy = Policy {
         kind: Kind::Directory,
-        owner: Owner::Host,
+        owner: Owner::Mapped(nix::unistd::geteuid().as_raw()),
         mode: ModePolicy::Exact(0o700),
     };
     let pin = HostVerifier::current()
@@ -957,7 +957,7 @@ fn reservation_anchor(path: &std::path::Path) -> crate::anchor::Anchor {
     let manifest = Manifest {
         version: 1,
         transport: Transport::Rights,
-        operation: "mail-bind".into(),
+        operation: "mail-binding".into(),
         loop_name: "alpha".into(),
         records: vec![pin.record()],
     };
@@ -966,7 +966,7 @@ fn reservation_anchor(path: &std::path::Path) -> crate::anchor::Anchor {
         .validate(
             &manifest,
             vec![pin.into_fd()],
-            "mail-bind",
+            "mail-binding",
             "alpha",
             Transport::Rights,
             &[Requirement {
@@ -978,6 +978,36 @@ fn reservation_anchor(path: &std::path::Path) -> crate::anchor::Anchor {
         .expect("validated journal")
         .pop()
         .expect("journal capability")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReservationState {
+    entries: Vec<std::ffi::OsString>,
+    inode: u64,
+    mode: u32,
+    modified: (i64, i64),
+    changed: (i64, i64),
+    directory_modified: (i64, i64),
+}
+
+/// # Panics
+/// Panics if the retained projection or directory cannot be inspected.
+fn reservation_state(root: &std::path::Path) -> ReservationState {
+    let mut entries = fs::read_dir(root)
+        .expect("journal entries")
+        .map(|entry| entry.expect("journal entry").file_name())
+        .collect::<Vec<_>>();
+    entries.sort();
+    let pin = fs::metadata(root.join("reservation-pins.toml")).expect("pin metadata");
+    let directory = fs::metadata(root).expect("journal metadata");
+    ReservationState {
+        entries,
+        inode: pin.ino(),
+        mode: pin.mode(),
+        modified: (pin.mtime(), pin.mtime_nsec()),
+        changed: (pin.ctime(), pin.ctime_nsec()),
+        directory_modified: (directory.mtime(), directory.mtime_nsec()),
+    }
 }
 
 /// # Panics
@@ -1007,15 +1037,15 @@ fn journal_reservation_binding_retains_custody() {
     assert_eq!(value, record.digest);
     let pins = retained.join("reservation-pins.toml");
     let before = fs::read(&pins).expect("pins");
-    let metadata = fs::metadata(&pins).expect("pin metadata");
+    File::open(&retained)
+        .expect("retained directory")
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .expect("old directory timestamp distinguishes transient writes");
+    let state = reservation_state(&retained);
     verify_reservation_beneath(&anchor, "alpha:run", "step", &first(), |_| Ok(()))
         .expect("verify received journal");
     assert_eq!(fs::read(&pins).expect("unchanged pins"), before);
-    let after = fs::metadata(&pins).expect("unchanged metadata");
-    assert_eq!(
-        (after.ino(), after.mtime(), after.mtime_nsec()),
-        (metadata.ino(), metadata.mtime(), metadata.mtime_nsec())
-    );
+    assert_eq!(reservation_state(&retained), state);
     assert!(!path.join("reservation-pins.toml").exists());
     assert_eq!(
         fs::read(path.join("checkpoint.toml")).expect("sentinel"),

@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Active lifetime verification exposes a non-admitting stage whose lease acquisition rechecks custody, receipts and loop-owned bindings, with rootless interleaving and read-only journal metadata regressions (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Mail endpoints can open and recheck freshness beneath received loop-storage custody, retaining canonical journal paths and existing endpoint identity, mode, group and filesystem checks (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:loophome:endpoint-opening-and-freshness-retain-loop-storage``).
 
 - Mail reservation binding and verification can use received journal custody without reopening the journal path, retaining delivery checks and compaction admission while the service writer remains active (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:loophome:journal-reservation-binding-retains-custody``).

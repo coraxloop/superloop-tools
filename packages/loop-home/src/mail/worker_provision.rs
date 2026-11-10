@@ -670,11 +670,14 @@ fn held_parent(
     root.revalidate()?;
     private.revalidate()?;
     executor.revalidate()?;
-    let descriptor = File::from(
-        nix::unistd::dup(std::os::fd::AsFd::as_fd(root)).map_err(|error| {
-            failure(format!("anchor-io: operation={operation} purpose=loop-storage check=descriptor-duplicate: {error}"))
-        })?,
-    );
+    let descriptor = File::from(nix::unistd::dup(std::os::fd::AsFd::as_fd(root)).map_err(
+        |error| {
+            failure(format!(
+                "anchor-io: operation={operation} purpose=loop-storage \
+                 check=descriptor-duplicate: {error}"
+            ))
+        },
+    )?);
     io::child(&descriptor, Path::new("."), true)
 }
 
@@ -877,6 +880,77 @@ pub fn hold_active_beneath(
     private: &crate::anchor::Anchor,
     executor: &crate::anchor::Anchor,
 ) -> Result<Flock<File>> {
+    verify_active_beneath(
+        home,
+        loop_name,
+        identity,
+        verify_only,
+        configuration,
+        root,
+        private,
+        executor,
+    )?
+    .hold()
+}
+
+/// A completed first verification, not a lifetime lease.
+///
+/// `hold` reacquires the protected receipt lock and rechecks the loop-owned
+/// binding. State may change before that call, so this value grants no admission.
+#[must_use = "first verification is not a lease; call hold before admission"]
+pub struct VerifiedLifetime<'a> {
+    row: crate::LoopRecord,
+    allocations: &'a Allocations,
+    identity: &'a Identity,
+    verify_only: bool,
+    root: &'a crate::anchor::Anchor,
+    private: &'a crate::anchor::Anchor,
+    executor: &'a crate::anchor::Anchor,
+}
+impl VerifiedLifetime<'_> {
+    /// Acquire the lifetime lease only after the protected receipt and binding recheck.
+    /// # Errors
+    /// Refuses changed custody, a changed receipt or a changed loop-owned binding.
+    pub fn hold(self) -> Result<Flock<File>> {
+        let parent = held_parent(self.root, self.private, self.executor, "mail-binding")?;
+        let guard = active_receipt(&parent, self.identity)?;
+        let service = self.allocations.mail_uid().ok_or_else(invalid)?;
+        configure_held(
+            &self.row,
+            service,
+            self.allocations
+                .mail_group(&self.row.name, None)
+                .map_err(failure)?,
+            if self.verify_only {
+                "verify-only"
+            } else {
+                "verify"
+            },
+            self.identity,
+            Some((self.private, self.executor)),
+        )?;
+        Ok(guard)
+    }
+}
+
+/// Verify a lifetime before acquiring its retained lease.
+///
+/// The returned value is deliberately not a guard: callers must call `hold`
+/// before relying on admission. The combined `hold_active_beneath` route uses
+/// these same two phases without interposed work.
+/// # Errors
+/// Refuses the same override, namespace, receipt and binding errors as the combined route.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_active_beneath<'a>(
+    home: &Path,
+    loop_name: &str,
+    identity: &'a Identity,
+    verify_only: bool,
+    configuration: &'a crate::anchor::Configuration,
+    root: &'a crate::anchor::Anchor,
+    private: &'a crate::anchor::Anchor,
+    executor: &'a crate::anchor::Anchor,
+) -> Result<VerifiedLifetime<'a>> {
     const OPERATION: &str = "mail-binding";
     if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
         return Err(failure(format!(
@@ -901,35 +975,15 @@ pub fn hold_active_beneath(
         None,
         Some(executor),
     )?;
-    hold_active_with(
-        &row,
-        &configuration.allocations,
-        &parent,
+    Ok(VerifiedLifetime {
+        row,
+        allocations: &configuration.allocations,
         identity,
         verify_only,
-        Some((private, executor)),
-    )
-}
-
-fn hold_active_with(
-    row: &crate::LoopRecord,
-    allocations: &Allocations,
-    parent: &File,
-    identity: &Identity,
-    verify_only: bool,
-    private: Option<(&crate::anchor::Anchor, &crate::anchor::Anchor)>,
-) -> Result<Flock<File>> {
-    let guard = active_receipt(parent, identity)?;
-    let service = allocations.mail_uid().ok_or_else(invalid)?;
-    configure_held(
-        row,
-        service,
-        allocations.mail_group(&row.name, None).map_err(failure)?,
-        if verify_only { "verify-only" } else { "verify" },
-        identity,
+        root,
         private,
-    )?;
-    Ok(guard)
+        executor,
+    })
 }
 
 fn active_receipt(parent: &File, identity: &Identity) -> Result<Flock<File>> {
