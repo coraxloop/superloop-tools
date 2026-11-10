@@ -436,7 +436,7 @@ impl Directory {
                 Snapshot::open_with(&row, self.service, custody.map(|c| Arc::clone(&c.private)));
             match config {
                 Ok(snapshot) => collect_retired(&row.name, &snapshot, &mut retired)?,
-                Err(error @ MailError::Entry(_)) => return Err(error),
+                Err(error) if custody.is_some() => return Err(error),
                 Err(_) => {}
             }
             let workers = match storage_file(&row.home.join("workers"), custody, false) {
@@ -446,7 +446,8 @@ impl Directory {
                     continue;
                 }
                 Err(error) => {
-                    tracing::warn!(loop_name = %row.name, reason = %error, "workers skipped");
+                    let action = admission_action(&error);
+                    tracing::warn!(loop_name = %row.name, reason = %error, "workers {action}");
                     inventory_failure(error, &row.name, &mut failures)?;
                     continue;
                 }
@@ -455,7 +456,7 @@ impl Directory {
                 Ok(names) => names,
                 Err(error) => {
                     tracing::warn!(loop_name = %row.name, reason = %error, "workers skipped");
-                    inventory_failure(error, &row.name, &mut failures)?;
+                    failures.push(format!("{}: {error}", row.name));
                     continue;
                 }
             };
@@ -673,9 +674,18 @@ fn inventory_trace(loops: usize, actors: usize, skipped: usize, retired: usize) 
     tracing::debug!(loops, actors, skipped, retired, "inventory refreshed");
 }
 
+const fn admission_action(error: &MailError) -> &'static str {
+    if matches!(error, MailError::Entry(_)) {
+        "refused"
+    } else {
+        "skipped"
+    }
+}
+
 fn observe_admission(result: &Result<()>, loop_name: &str, address: &str, kind: &str) {
     if let Err(error) = result {
-        tracing::warn!(loop_name, address, reason = %error, "{kind} skipped");
+        let action = admission_action(error);
+        tracing::warn!(loop_name, address, reason = %error, "{kind} {action}");
     } else {
         tracing::debug!(loop_name, address, "{kind} admitted");
     }

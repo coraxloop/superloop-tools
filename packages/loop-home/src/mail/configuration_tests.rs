@@ -659,7 +659,7 @@ fn inventory_case(home: &Path, case: &str) {
     let (configuration, mut anchors) = inventory_receive(home);
     let private = Arc::new(anchors.pop().expect("private"));
     let storage = Arc::new(anchors.pop().expect("storage"));
-    if matches!(case, "scan-storage" | "scan-private") {
+    if matches!(case, "scan-storage" | "scan-private" | "scan-private-acl") {
         inventory_anchor_refusal(home, case, &configuration, storage, private);
         return;
     }
@@ -781,8 +781,16 @@ fn inventory_anchor_refusal(
     } else {
         ".var/loops/alpha/private"
     });
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o777))
-        .expect("change custody after receipt");
+    if case == "scan-private-acl" {
+        acl::install(&File::open(&path).expect("private root"), 64101, true)
+            .expect("replace service grant");
+        private
+            .revalidate()
+            .expect("generic preserved mode still admits the ACL");
+    } else {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o777))
+            .expect("change custody after receipt");
+    }
     let directory = Directory {
         configuration: None,
         home: home.to_owned(),
@@ -803,6 +811,18 @@ fn inventory_anchor_refusal(
             private,
         }),
     );
+    if case == "scan-private-acl" {
+        assert!(
+            matches!(
+                result,
+                Err(super::super::journal::MailError::Invalid(
+                    "unsafe-storage: exact service ACL required"
+                ))
+            ),
+            "scan must preserve the snapshot refusal"
+        );
+        return;
+    }
     let Err(super::super::journal::MailError::Entry(reason)) = result else {
         panic!("scan must preserve the entry refusal");
     };
@@ -1005,6 +1025,7 @@ fn binding_inventory_retains_storage() {
         "override-canonical",
         "scan-storage",
         "scan-private",
+        "scan-private-acl",
         "anchor-mode",
         "snapshot-mode",
         "outbox-mode",

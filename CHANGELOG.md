@@ -182,6 +182,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Held mail inventories preserve every snapshot refusal, including invalid service ACLs, rather than losing the cause and retirement state; pathname inventories retain their existing skip behavior (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Held mail inventories preserve namespace-entry and anchor refusals instead of reducing them to per-actor skips, and revalidate private-storage custody after acquiring the configuration's read lock (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Anchored lifetime admission revalidates loop-storage after waiting for its receipt lock, refusing custody changes during the wait before returning a lease (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
