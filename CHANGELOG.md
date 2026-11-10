@@ -60,6 +60,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Bound the Claude trial draft's worker-file observations, same-process rejection evidence and expired print-call regime without selecting a repair policy (``prob:box:claude-sign-in-and-endpoints-in-the-box``; ``prob:box:claude-print-probe-refresh-margin-measured-against-refresh-ahead``).
+
 - Pin held Claude owner-program execution in the mapped namespace with a recorded-digest native stand-in, transferred custody and expired-result preservation (`prob:box:claude-program-binding-formats-pins-and-measures-its-hash`).
 
 - The capture state record specifies the completed-step driver and monitor fallback, and the finished-state observation item closes there on its retained historical observations, invalid-monitor and rollback regressions, corrected lock-name wording and the supplied watcher glossary (`prob:lanes:claude-lane-finished-state-null-driver`).
