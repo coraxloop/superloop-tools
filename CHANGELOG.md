@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Dead-process fixtures use distinct positive process IDs above Linux’s PID ceiling, with a live-lock control, so PID counter wrap cannot turn a recovery fixture into a live-owner refusal (``prob:gates:fixtures-name-a-dead-process-by-a-number-no-process-can-hold``; ``test:unit:dead-lock-fixture-pid-exceeds-kernel-limit-and-live-lock-refuses``).
+
 - The helper runtime-admission protocol uses the lane manual's bold protocol-statement form, retaining its label and contract (``proto:superlooplane:helper-runtime-admission``).
 
 - Helper-service custody alone constructs and consumes the admission thread token; program binding is borrowed from the admission without producing another owned proof (``proto:superlooplane:helper-runtime-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).

@@ -1942,7 +1942,7 @@ mod tests {
     }
 
     fn reservation() -> Value {
-        json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"plan":{"loop_uid":41001,"worker_uid":3000},"launcher_pid":4_000_000,"launcher_start":1,"driver_entry_pid":4_000_001,"driver_entry_start":1,"rounds":[{"step":"dispatch","phase":"running"}],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/superloop-lane-run-fixture.service/work","device":1,"inode":1,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture-invocation"}})
+        json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"plan":{"loop_uid":41001,"worker_uid":3000},"launcher_pid":2_147_483_640,"launcher_start":1,"driver_entry_pid":2_147_483_641,"driver_entry_start":1,"rounds":[{"step":"dispatch","phase":"running"}],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/superloop-lane-run-fixture.service/work","device":1,"inode":1,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture-invocation"}})
     }
 
     /// ´test:unit:scope-command-retains-proxy-pin-and-caller-environment´
@@ -2083,7 +2083,7 @@ mod tests {
         let mut driver = reservation();
         let cause =
             reconciliation_cause(&driver, Some(("active", "fixture-invocation")), |pid, _| {
-                if pid == 4_000_000 {
+                if pid == 2_147_483_640 {
                     crate::container_helper::ProcessPresence::Absent
                 } else {
                     crate::container_helper::ProcessPresence::Present
@@ -2110,7 +2110,7 @@ mod tests {
             &settling,
             Some(("active", "fixture-invocation")),
             |pid, _| {
-                if pid == 4_000_001 {
+                if pid == 2_147_483_641 {
                     crate::container_helper::ProcessPresence::Absent
                 } else {
                     crate::container_helper::ProcessPresence::Present
@@ -2266,11 +2266,11 @@ mod tests {
             record["worker_uid"] = json!(worker);
             record["plan"]["worker_uid"] = json!(worker);
             record["phase"] = json!("settled");
-            record["helper_pid"] = json!(4_000_002);
+            record["helper_pid"] = json!(2_147_483_642);
             record["helper_start"] = json!(1);
-            record["helper_parent_pid"] = json!(4_000_003);
+            record["helper_parent_pid"] = json!(2_147_483_643);
             record["helper_parent_start"] = json!(1);
-            record["reaping_recovery"] = json!({"state":"collected","cgroup":record["run_scope"]["cgroup"],"scope":record["run_scope"],"presence":"all-absent","container_payload":{"state":"absent","by":"loop-and-run-label"},"identities":{"launcher":[4_000_000,1],"driver":[4_000_001,1],"helper":[4_000_002,1],"helper_parent":[4_000_003,1],"observer":null}});
+            record["reaping_recovery"] = json!({"state":"collected","cgroup":record["run_scope"]["cgroup"],"scope":record["run_scope"],"presence":"all-absent","container_payload":{"state":"absent","by":"loop-and-run-label"},"identities":{"launcher":[2_147_483_640,1],"driver":[2_147_483_641,1],"helper":[2_147_483_642,1],"helper_parent":[2_147_483_643,1],"observer":null}});
             for (presence, verdict) in [("all-absent", "pass"), ("unknown", "unmeasured")] {
                 record["reaping_recovery"]["presence"] = json!(presence);
                 let report = measure_case_at(

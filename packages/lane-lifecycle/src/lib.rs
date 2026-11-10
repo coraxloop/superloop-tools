@@ -5655,6 +5655,35 @@ mod tests {
         ));
     }
 
+    // The fixture IDs 2_147_483_640..=2_147_483_644 are positive pid_t values,
+    // above Linux's PID_MAX_LIMIT (4_194_304), even after the PID counter wraps.
+    const DEAD_LOCK_PID: &[u8] = b"2147483640\n";
+
+    /// ´claim:lifecycle:dead-lock-fixture-pid-exceeds-kernel-limit-and-live-lock-refuses´
+    /// ´test:unit:dead-lock-fixture-pid-exceeds-kernel-limit-and-live-lock-refuses´
+    #[test]
+    fn dead_lock_fixture_pid_exceeds_kernel_limit_and_live_lock_refuses() {
+        let limit: u32 = fs::read_to_string("/proc/sys/kernel/pid_max")
+            .expect("kernel PID limit")
+            .trim()
+            .parse()
+            .expect("numeric PID limit");
+        let (dead, child) = parse_lock(DEAD_LOCK_PID).expect("ordinary positive PID");
+        assert!(child.is_none());
+        assert!(dead > 4_194_304);
+        assert!(dead > limit);
+        assert!(!super::process_exists(dead));
+        let fixture = FreshRunFixture::new("live-lock-control");
+        let lock = fixture.0.join(".test-lane.lock");
+        let live = std::process::id();
+        fs::write(&lock, format!("{live}\n")).expect("live driver lock");
+        assert!(matches!(
+            recover_dead_lock(&TestBackend, &fixture.0),
+            Err(ResumeRefusal::LiveLock { pid: Some(pid), .. }) if pid == live
+        ));
+        assert!(lock.exists(), "a live driver's lock must remain");
+    }
+
     /// ´claim:lifecycle:dead-driver-reconciles-unrecorded-turn-by-event-boundary´
     /// ´test:unit:dead-driver-reconciles-unrecorded-turn-by-event-boundary´
     #[test]
@@ -5670,7 +5699,7 @@ mod tests {
             .expect("events")
             .write_all(b"{\"type\":\"turn.completed\"}\n")
             .expect("second turn");
-        fs::write(fixture.0.join(".test-lane.lock"), b"4000000\n").expect("dead lock");
+        fs::write(fixture.0.join(".test-lane.lock"), DEAD_LOCK_PID).expect("dead lock");
         fs::write(
             fixture.0.join("run-report.txt"),
             b"RUN-REPORT lane=lane exit=0\n",
@@ -5701,7 +5730,7 @@ mod tests {
         fs::write(history.join("event-end.txt"), format!("{}\n", events.len()))
             .expect("archived prior end");
         let lock = fixture.0.join(".test-lane.lock");
-        fs::write(&lock, b"4000000\n").expect("dead driver lock");
+        fs::write(&lock, DEAD_LOCK_PID).expect("dead driver lock");
 
         let recovery = recover_dead_lock(&TestBackend, &fixture.0)
             .expect("rollback then reconciliation succeeds");
@@ -5820,7 +5849,7 @@ mod tests {
         );
         assert_eq!(fs::read(&context_path).expect("record survives"), before);
 
-        fs::write(fixture.0.join(".test-lane.lock"), b"4000000\n").expect("dead driver");
+        fs::write(fixture.0.join(".test-lane.lock"), DEAD_LOCK_PID).expect("dead driver");
         let refusal = recover_dead_lock(&TestBackend, &fixture.0).expect_err("recovery refuses");
         assert!(
             String::from_utf8_lossy(&refusal.diagnostic("test-lane"))

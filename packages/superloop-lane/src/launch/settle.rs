@@ -976,13 +976,13 @@ mod tests {
             ("helper_pid", "helper_start"),
             ("helper_parent_pid", "helper_parent_start"),
         ] {
-            record[pid] = json!(4_000_001);
+            record[pid] = json!(2_147_483_641);
             record[start] = json!(1);
         }
         record["driver_end"] = json!({"state":"absent-on-recovery"});
         record["helper_end"] = json!({"state":"absent-on-recovery"});
         record["reaping"] = Value::Null;
-        record["reaping_recovery"] = json!({"state":"collected","cgroup":record["run_scope"]["cgroup"],"scope":record["run_scope"],"container_payload":{"state":"absent","by":"loop-and-run-label"},"presence":"all-absent","identities":{"launcher":[4_000_001,1],"driver":[4_000_000,1],"helper":[4_000_001,1],"helper_parent":[4_000_001,1],"observer":null},"attempt_evidence":{"state":"absence-confirmed-with-missing-evidence","attempts":[],"container_absence_checked":true}});
+        record["reaping_recovery"] = json!({"state":"collected","cgroup":record["run_scope"]["cgroup"],"scope":record["run_scope"],"container_payload":{"state":"absent","by":"loop-and-run-label"},"presence":"all-absent","identities":{"launcher":[2_147_483_641,1],"driver":[2_147_483_640,1],"helper":[2_147_483_641,1],"helper_parent":[2_147_483_641,1],"observer":null},"attempt_evidence":{"state":"absence-confirmed-with-missing-evidence","attempts":[],"container_absence_checked":true}});
     }
 
     fn custody_plan(fixture: &Path, old: &crate::plan::Plan) -> crate::plan::Plan {
@@ -1649,7 +1649,7 @@ mod tests {
         collected_record(&mut record);
         record["plan"] = plan.document.clone();
         record["worker_uid"] = json!(owner);
-        record["reaping_recovery"]["identities"]["driver"] = json!([4_000_002, 1]);
+        record["reaping_recovery"]["identities"]["driver"] = json!([2_147_483_642, 1]);
         record["model_selection"] = selection;
         record["phase"] = json!(phase);
         record["active_round"] = json!("work-1");
@@ -3521,7 +3521,7 @@ else:
     }
 
     fn failed_record(worker_uid: u32) -> Value {
-        json!({"schema":1,"phase":"failed","active_round":"work","worker_uid":worker_uid,"driver_entry_pid":4_000_000,"driver_entry_start":1,"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"observation_end":"completed","observer_state":"not-started","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}},"settlement_uncertain":false,"reaping":{"state":"verified-empty","container_payload":{"state":"absent"}},"readback_end":"settle-evidence: old refusal","rounds":[{"step":"work","phase":"failed"}]})
+        json!({"schema":1,"phase":"failed","active_round":"work","worker_uid":worker_uid,"driver_entry_pid":2_147_483_640,"driver_entry_start":1,"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"observation_end":"completed","observer_state":"not-started","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}},"settlement_uncertain":false,"reaping":{"state":"verified-empty","container_payload":{"state":"absent"}},"readback_end":"settle-evidence: old refusal","rounds":[{"step":"work","phase":"failed"}]})
     }
 
     fn fail_completed_round(plan: &crate::plan::Plan, record: &mut Value) {
