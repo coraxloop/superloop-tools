@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Claude fixture cleanup rechecks retained identity after mapped cleanup and refuses a linked runs directory, with precise replacement regressions (``prob:gates:lane-fixture-homes-leave-no-temporary-root-behind``; ``test:unit:claude-cleanup-rechecks-host-identity-after-mapped-removal``; ``test:unit:claude-cleanup-refuses-a-linked-runs-directory``).
+
 - The custom reply-session acceptance lists its test without entering the namespace and refuses unsupported filter arguments (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Mail inventory and reply-session acceptances bound subprocess waits, inherited output pipes and cleanup, reporting retained fixture paths on cleanup failure (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).

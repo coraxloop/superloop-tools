@@ -2574,21 +2574,42 @@ mod tests {
     }
 
     fn claude_cleanup_fixture(root: &Path) -> std::io::Result<()> {
-        use std::os::unix::process::CommandExt as _;
-        let worker = root.join("runs/worker");
-        if !worker.is_absolute() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        if !root.is_absolute() {
             return Err(std::io::Error::other("mapped fixture root is not absolute"));
         }
-        if !worker.try_exists()? {
-            return Ok(());
-        }
-        // The removed path is an argument built from the host's own fixture root.
+        let directory = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(root)
+        {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        claude_cleanup_fixture_at(&directory)
+    }
+
+    fn claude_cleanup_fixture_at(directory: &fs::File) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        // Enter the held directory before execution; no namespace-written path is followed.
         let child = Command::new("/usr/bin/podman")
             .args(["unshare", "/usr/bin/python3", "-I", "-c"])
-            .arg("import shutil,sys\nshutil.rmtree(sys.argv[1])\n")
-            .arg(&worker)
+            .arg(concat!(
+                "import os,shutil\n",
+                "root=os.open('.',os.O_RDONLY|os.O_DIRECTORY)\n",
+                "try:\n",
+                " r=os.open('runs',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=root)\n",
+                "except FileNotFoundError: pass\n",
+                "else:\n",
+                " try: shutil.rmtree('worker',dir_fd=r)\n",
+                " except FileNotFoundError: pass\n",
+                " finally: os.close(r)\n",
+            ))
             .env_remove("_CONTAINERS_USERNS_CONFIGURED")
             .env_remove("_CONTAINERS_ROOTLESS_UID")
+            .current_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -2713,22 +2734,44 @@ mod tests {
         }
     }
 
-    fn claude_remove_retained_fixture(fixture: &ClaudeFixtureIdentity) -> bool {
+    fn claude_fixture_identity_matches(fixture: &ClaudeFixtureIdentity) -> bool {
         let current = match fs::symlink_metadata(&fixture.path) {
             Ok(current) => current,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
             Err(error) => panic!("fixture identity: {error}"),
         };
         let held = fixture.directory.metadata().expect("held fixture identity");
-        assert!(current.is_dir(), "fixture root replaced");
-        assert_eq!(
-            (current.dev(), current.ino()),
-            (held.dev(), held.ino()),
+        assert!(
+            current.is_dir() && (current.dev(), current.ino()) == (held.dev(), held.ino()),
             "fixture root replaced"
         );
-        claude_cleanup_fixture(&fixture.path).expect("negative-control mapped cleanup");
+        true
+    }
+
+    fn claude_remove_retained_fixture(fixture: &ClaudeFixtureIdentity) -> bool {
+        claude_remove_retained_fixture_with(fixture, |directory| {
+            claude_cleanup_fixture_at(directory).expect("negative-control mapped cleanup");
+        })
+    }
+
+    fn claude_remove_retained_fixture_with(
+        fixture: &ClaudeFixtureIdentity,
+        cleanup: impl FnOnce(&fs::File),
+    ) -> bool {
+        if !claude_fixture_identity_matches(fixture) {
+            return false;
+        }
+        cleanup(&fixture.directory);
+        if !claude_fixture_identity_matches(fixture) {
+            return false;
+        }
         fs::remove_dir_all(&fixture.path).expect("negative-control host cleanup");
         true
+    }
+
+    fn claude_assert_replaced(result: std::thread::Result<bool>) {
+        let panic = result.expect_err("replacement must refuse");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"fixture root replaced"));
     }
 
     /// # Panics
@@ -2748,12 +2791,78 @@ mod tests {
         let sentinel = path.join("sentinel");
         fs::write(&sentinel, b"foreign directory").expect("sentinel");
         let inode = fs::metadata(&sentinel).expect("sentinel identity").ino();
-        assert!(std::panic::catch_unwind(|| claude_remove_retained_fixture(&fixture)).is_err());
+        claude_assert_replaced(std::panic::catch_unwind(|| {
+            claude_remove_retained_fixture(&fixture)
+        }));
         assert_eq!(
             fs::read(&sentinel).expect("retained sentinel"),
             b"foreign directory"
         );
         assert_eq!(fs::metadata(&sentinel).expect("same sentinel").ino(), inode);
+    }
+
+    /// # Panics
+    /// Panics if a non-directory replacement or a replacement during cleanup is removed.
+    /// ´test:unit:claude-cleanup-rechecks-host-identity-after-mapped-removal´
+    #[test]
+    fn claude_cleanup_rechecks_host_identity_after_mapped_removal() {
+        for (during, directory) in [(false, false), (true, false), (true, true)] {
+            let parent = claude_fixture_root();
+            let path = parent.path().join("fixture");
+            fs::create_dir(&path).expect("fixture");
+            let fixture = ClaudeFixtureIdentity {
+                directory: fs::File::open(&path).expect("held directory"),
+                path: path.clone(),
+            };
+            let replace = || {
+                fs::rename(&path, parent.path().join("retained")).expect("retain original");
+                if directory {
+                    fs::create_dir(&path).expect("foreign directory");
+                    fs::write(path.join("sentinel"), b"foreign file").expect("sentinel");
+                } else {
+                    fs::write(&path, b"foreign file").expect("non-directory replacement");
+                }
+            };
+            if !during {
+                replace();
+            }
+            claude_assert_replaced(std::panic::catch_unwind(|| {
+                claude_remove_retained_fixture_with(&fixture, |_| {
+                    assert!(during, "initial replacement must refuse before cleanup");
+                    replace();
+                })
+            }));
+            let sentinel = if directory {
+                path.join("sentinel")
+            } else {
+                path
+            };
+            assert_eq!(
+                fs::read(sentinel).expect("replacement retained"),
+                b"foreign file"
+            );
+        }
+    }
+
+    /// # Panics
+    /// Panics if mapped cleanup follows a namespace-written runs symlink.
+    /// ´test:unit:claude-cleanup-refuses-a-linked-runs-directory´
+    #[test]
+    fn claude_cleanup_refuses_a_linked_runs_directory() {
+        let root = claude_fixture_root();
+        let outside = claude_fixture_root();
+        fs::create_dir(outside.path().join("worker")).expect("outside worker");
+        let sentinel = outside.path().join("worker/sentinel");
+        fs::write(&sentinel, b"outside worker").expect("sentinel");
+        let inode = fs::metadata(&sentinel).expect("identity").ino();
+        symlink(outside.path(), root.path().join("runs")).expect("namespace link");
+        let error = claude_cleanup_fixture(root.path()).expect_err("linked runs must refuse");
+        assert_eq!(error.to_string(), "mapped fixture cleanup refused");
+        assert_eq!(
+            fs::read(&sentinel).expect("outside retained"),
+            b"outside worker"
+        );
+        assert_eq!(fs::metadata(&sentinel).expect("same inode").ino(), inode);
     }
 
     fn claude_cleanup_observation(probe: &Path, fixture: &ClaudeFixtureIdentity) {
