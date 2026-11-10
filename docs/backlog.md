@@ -912,6 +912,8 @@ Folded from ``open:homes:claude-lane-home-sandbox-redirects``, whose question th
 
 (2026-11-10, lane r002g84, admission transfer boundary) Review-ad M1 is met for the present gate-only form: the thread token is private to helper custody, capture derives it explicitly and activation consumes its admission into the guard. No crate-wide token factory and activation pair remains. Program binding is borrowed from the admission rather than returned as another owned proof. A future fixture arm must derive its scoped thread token explicitly at capture; no fixture constructor or scope bypass is introduced (``proto:superlooplane:helper-runtime-admission``).
 
+(2026-11-10, lane r002g84, admission protocol form) Review-ad N4 is met: the helper runtime-admission protocol uses the manual's bold statement form with its existing label and unchanged contract (``proto:superlooplane:helper-runtime-admission``).
+
 ### Tests under load · `sec:toolsbacklog:open-gates`
 
 **Problem (Timing-bound tests of the lane gateway fail under load in gates of candidates that do not touch it)** · `prob:gates:gate-timing-flakes`
