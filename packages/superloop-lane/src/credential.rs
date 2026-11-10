@@ -3078,6 +3078,7 @@ mod tests {
             || Ok(1_799_999_991_000),
         )
         .expect_err("wrong digest during due round publication");
+        assert_eq!(error.status, 2);
         assert_eq!(error.kind, "credential-program-pin");
         assert_eq!(
             error.detail,
