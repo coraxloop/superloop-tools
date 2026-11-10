@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Mail endpoints can open and recheck freshness beneath received loop-storage custody, retaining canonical journal paths and existing endpoint identity, mode, group and filesystem checks (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:loophome:endpoint-opening-and-freshness-retain-loop-storage``).
+
 - Mail reservation binding and verification can use received journal custody without reopening the journal path, retaining delivery checks and compaction admission while the service writer remains active (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:loophome:journal-reservation-binding-retains-custody``).
 
 - Draft owner-operated Claude credential acceptance distinguishes external token-only startup, refresh attempts, same-process reload and the margin, binding-cost and contention measurements; it leaves vendor outcomes and activation unmeasured (``prob:box:claude-sign-in-and-endpoints-in-the-box``; ``prob:box:claude-print-probe-refresh-margin-measured-against-refresh-ahead``; ``sec:superlooplane:claude-credential-acceptance-draft``).
