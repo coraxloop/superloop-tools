@@ -2271,6 +2271,7 @@ mod tests {
         use std::os::unix::process::CommandExt as _;
         if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
             if std::env::var_os("CLAUDE_NAMESPACE_INIT").is_some() {
+                claude_record_namespace_init();
                 body();
                 writeln!(std::io::stdout().lock(), "{marker}").expect("namespace marker");
             } else {
@@ -2278,8 +2279,29 @@ mod tests {
             }
             return false;
         }
-        let standin = (name == "claude_namespace_held_program_standin").then(claude_standin_host);
+        let standin = matches!(
+            name,
+            "claude_namespace_held_program_standin"
+                | "claude_namespace_fixture_cleanup_survives_timeout_and_panic"
+        )
+        .then(claude_standin_host);
+        let publication = (name == "claude_namespace_publication_keeps_worker_authority_separate")
+            .then(claude_fixture_root);
+        let fixture_root = standin
+            .as_ref()
+            .map(|(root, _)| root.path())
+            .or_else(|| publication.as_ref().map(tempfile::TempDir::path));
+        let identity = fixture_root
+            .or(probe)
+            .map(|root| root.join("namespace-init"));
         let mut command = Command::new("/usr/bin/podman");
+        if let Some(root) = &publication {
+            command.env("CLAUDE_PUBLICATION_ROOT", root.path());
+        }
+        if let Some(path) = &identity {
+            command.env("CLAUDE_NAMESPACE_IDENTITY", path);
+        }
+        command.stdin(Stdio::null());
         let channel = standin.as_ref().map(|(root, bundle)| {
             let (sender, input) = std::os::unix::net::UnixStream::pair().expect("rights channel");
             command
@@ -2291,7 +2313,7 @@ mod tests {
         if let Some(root) = probe {
             command.env("CLAUDE_WATCHDOG_ROOT", root);
         }
-        let mut child = command
+        let child = command
             .arg("unshare")
             .arg(std::env::current_exe().expect("test executable"))
             .args([
@@ -2308,25 +2330,19 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .expect("mapped namespace");
+        let mut child = ClaudeNamespaceChild {
+            child: Some(child),
+            root: fixture_root.map(Path::to_owned),
+            identity,
+            stopped: None,
+        };
+        claude_namespace_probe(probe, &child);
         if let (Some(channel), Some((_, bundle))) = (channel, standin.as_ref()) {
             loop_home::anchor::transport::send(&channel, &bundle.descriptors)
                 .expect("complete helper capability frame");
         }
-        let began = std::time::Instant::now();
-        while child.try_wait().expect("namespace status").is_none() {
-            if began.elapsed() > Duration::from_secs(60)
-                || probe.is_some_and(|root| root.join("ready").exists())
-            {
-                let group = i32::try_from(child.id()).expect("process group");
-                let _ignored = nix::sys::signal::killpg(
-                    nix::unistd::Pid::from_raw(group),
-                    nix::sys::signal::Signal::SIGKILL,
-                );
-                drop(child.kill());
-                drop(child.wait());
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        if claude_namespace_wait(&mut child, probe) {
+            return true;
         }
         let output = child.wait_with_output().expect("namespace output");
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2341,6 +2357,289 @@ mod tests {
         );
         claude_namespace_output(name, &stdout);
         false
+    }
+
+    fn claude_namespace_wait(child: &mut ClaudeNamespaceChild, probe: Option<&Path>) -> bool {
+        let began = std::time::Instant::now();
+        while child.try_wait().expect("namespace status").is_none() {
+            assert!(
+                !probe.is_some_and(|root| {
+                    root.join("ready").exists() && root.join("panic").exists()
+                }),
+                "injected host panic after namespace readiness"
+            );
+            if began.elapsed() > Duration::from_secs(60)
+                || probe.is_some_and(|root| root.join("ready").exists())
+            {
+                assert!(child.stop(), "namespace fixture did not terminate");
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    struct ClaudeNamespaceChild {
+        child: Option<std::process::Child>,
+        root: Option<PathBuf>,
+        identity: Option<PathBuf>,
+        stopped: Option<bool>,
+    }
+
+    impl std::ops::Deref for ClaudeNamespaceChild {
+        type Target = std::process::Child;
+        fn deref(&self) -> &Self::Target {
+            self.child.as_ref().expect("owned namespace child")
+        }
+    }
+
+    impl std::ops::DerefMut for ClaudeNamespaceChild {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.child.as_mut().expect("owned namespace child")
+        }
+    }
+
+    impl ClaudeNamespaceChild {
+        fn stop(&mut self) -> bool {
+            if let Some(stopped) = self.stopped {
+                return stopped;
+            }
+            if let Some(child) = &mut self.child {
+                if let Ok(group) = i32::try_from(child.id()) {
+                    let _ignored = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(group),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+                drop(child.kill());
+                drop(child.wait());
+            }
+            let stopped = claude_namespace_exited(self.identity.as_deref());
+            self.stopped = Some(stopped);
+            stopped
+        }
+
+        fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
+            let output = self
+                .child
+                .take()
+                .expect("owned namespace child")
+                .wait_with_output()?;
+            self.stopped = Some(true);
+            if let Some(root) = self.root.take() {
+                claude_cleanup_fixture(&root)?;
+            }
+            Ok(output)
+        }
+    }
+
+    impl Drop for ClaudeNamespaceChild {
+        fn drop(&mut self) {
+            if !self.stop() {
+                let _ignored = writeln!(
+                    std::io::stderr().lock(),
+                    "namespace fixture termination unconfirmed; mapped storage retained"
+                );
+                return;
+            }
+            if let Some(root) = self.root.take()
+                && let Err(error) = claude_cleanup_fixture(&root)
+            {
+                let _ignored = writeln!(
+                    std::io::stderr().lock(),
+                    "namespace fixture cleanup failed: {error}"
+                );
+            }
+        }
+    }
+
+    fn claude_namespace_exited(identity: Option<&Path>) -> bool {
+        use crate::container_helper::{ProcessPresence, process_presence};
+        let Some(path) = identity else {
+            return true;
+        };
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
+        };
+        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
+            return false;
+        };
+        let Some(pid) = record["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+        else {
+            return false;
+        };
+        let Some(start) = record["start"].as_u64() else {
+            return false;
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            match process_presence(pid, start) {
+                ProcessPresence::Absent => return true,
+                ProcessPresence::Unknown => return false,
+                ProcessPresence::Present => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn claude_record_namespace_init() {
+        if let Some(path) = std::env::var_os("CLAUDE_NAMESPACE_IDENTITY") {
+            let path = PathBuf::from(path);
+            let (pid, start) = claude_host_identity();
+            let record = serde_json::json!({"pid": pid, "start": start});
+            let pending = path.with_extension("pending");
+            fs::write(&pending, record.to_string()).expect("namespace identity");
+            fs::rename(pending, path).expect("namespace ready before fixture work");
+        }
+    }
+
+    fn claude_cleanup_fixture(root: &Path) -> std::io::Result<()> {
+        use std::os::unix::process::CommandExt as _;
+        let worker = root.join("runs/worker");
+        if !worker.is_absolute() {
+            return Err(std::io::Error::other("mapped fixture root is not absolute"));
+        }
+        if !worker.try_exists()? {
+            return Ok(());
+        }
+        // The removed path is an argument built from the host's own fixture root.
+        let child = Command::new("/usr/bin/podman")
+            .args(["unshare", "/usr/bin/python3", "-I", "-c"])
+            .arg("import shutil,sys\nshutil.rmtree(sys.argv[1])\n")
+            .arg(&worker)
+            .env_remove("_CONTAINERS_USERNS_CONFIGURED")
+            .env_remove("_CONTAINERS_ROOTLESS_UID")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()?;
+        let mut child = ClaudeNamespaceChild {
+            child: Some(child),
+            root: None,
+            identity: None,
+            stopped: None,
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while child.try_wait()?.is_none() {
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::other("mapped fixture cleanup timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.stopped = Some(true);
+        if !child.wait()?.success() {
+            return Err(std::io::Error::other("mapped fixture cleanup refused"));
+        }
+        Ok(())
+    }
+
+    fn claude_namespace_probe(probe: Option<&Path>, child: &ClaudeNamespaceChild) {
+        if let Some(root) = probe {
+            let pid = child.id();
+            let start = crate::container_helper::process_start(pid).expect("supervisor start");
+            let record = serde_json::json!({"pid": pid, "start": start});
+            fs::write(root.join("supervisor"), record.to_string()).expect("supervisor record");
+            if let Some(fixture) = &child.root {
+                fs::write(root.join("fixture"), fixture.as_os_str().as_encoded_bytes())
+                    .expect("fixture location");
+            }
+        }
+    }
+
+    /// # Panics
+    /// Panics if timeout or host unwind retains a supervisor or mapped fixture storage.
+    /// ´test:unit:claude-namespace-fixture-cleanup-survives-timeout-and-panic´
+    #[test]
+    fn claude_namespace_fixture_cleanup_survives_timeout_and_panic() {
+        let name = "claude_namespace_fixture_cleanup_survives_timeout_and_panic";
+        if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
+            claude_namespace_run(name, "CLEANUP-UNREACHABLE", claude_cleanup_body, None);
+            return;
+        }
+        for panic in [false, true] {
+            let probe = claude_fixture_root();
+            if panic {
+                fs::write(probe.path().join("panic"), b"inject").expect("panic trigger");
+            }
+            let result = std::panic::catch_unwind(|| {
+                claude_namespace_run(
+                    name,
+                    "CLEANUP-UNREACHABLE",
+                    claude_cleanup_body,
+                    Some(probe.path()),
+                )
+            });
+            let ready = probe.path().join("ready").exists();
+            claude_cleanup_observation(probe.path());
+            assert!(ready, "mapped worker existed before interruption");
+            if panic {
+                assert!(result.is_err(), "host panic reached");
+            } else {
+                assert!(
+                    result.expect("timeout without host panic"),
+                    "watchdog reached"
+                );
+            }
+        }
+    }
+
+    fn claude_cleanup_body() {
+        let root = PathBuf::from(std::env::var_os("CLAUDE_STANDIN_ROOT").expect("fixture root"));
+        let run = claude_standin_worker(&root.join("runs"));
+        fs::write(run.join(".claude/synthetic"), b"fixture storage").expect("worker storage");
+        let probe = PathBuf::from(std::env::var_os("CLAUDE_WATCHDOG_ROOT").expect("probe root"));
+        fs::write(probe.join("ready"), b"ready").expect("worker ready");
+        // A host killed without unwinding leaves this body for at most two minutes.
+        std::thread::sleep(Duration::from_secs(120));
+        panic!("cleanup body outlived its 120-second bound");
+    }
+
+    fn claude_cleanup_observation(probe: &Path) {
+        let record: Value =
+            serde_json::from_slice(&fs::read(probe.join("supervisor")).expect("supervisor"))
+                .expect("identity");
+        let pid = u32::try_from(record["pid"].as_u64().expect("pid")).expect("u32 pid");
+        let start = record["start"].as_u64().expect("start");
+        let alive = crate::container_helper::process_alive(pid, start);
+        if alive {
+            let _ignored = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(i32::try_from(pid).expect("group")),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while crate::container_helper::process_alive(pid, start)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !crate::container_helper::process_alive(pid, start),
+            "negative-control supervisor cleanup"
+        );
+        let _ignored = nix::sys::wait::waitpid(
+            nix::unistd::Pid::from_raw(i32::try_from(pid).expect("supervisor")),
+            Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+        );
+        let fixture = PathBuf::from(fs::read_to_string(probe.join("fixture")).expect("fixture"));
+        assert!(
+            claude_namespace_exited(Some(&fixture.join("namespace-init"))),
+            "negative-control namespace cleanup"
+        );
+        let retained = fixture.exists();
+        claude_cleanup_fixture(&fixture).expect("negative-control mapped cleanup");
+        if fixture.exists() {
+            fs::remove_dir_all(&fixture).expect("negative-control host cleanup");
+        }
+        assert!(!alive, "fixture supervisor survived host unwind");
+        assert!(!retained, "mapped fixture home survived wrapper cleanup");
     }
 
     fn claude_namespace_output(name: &str, stdout: &str) {
@@ -2463,6 +2762,16 @@ mod tests {
             nix::unistd::getpgrp().as_raw().unsigned_abs(),
             std::process::id()
         );
+        let (pid, start) = claude_host_identity();
+        let record = serde_json::json!({"pid": pid, "start": start});
+        fs::write(root.join("pending"), record.to_string()).expect("process record");
+        fs::rename(root.join("pending"), root.join("ready")).expect("ready publication");
+        // A host killed without unwinding leaves this descendant for at most two minutes.
+        std::thread::sleep(Duration::from_secs(120));
+        panic!("synthetic descendant outlived its 120-second bound");
+    }
+
+    fn claude_host_identity() -> (u32, u64) {
         // The retained host proc mount names the identity the host observer can check.
         let pid: u32 = fs::read_link("/proc/self")
             .expect("host proc identity")
@@ -2471,12 +2780,7 @@ mod tests {
             .parse()
             .expect("pid");
         let start = crate::container_helper::process_start(pid).expect("process start");
-        let record = serde_json::json!({"pid": pid, "start": start});
-        fs::write(root.join("pending"), record.to_string()).expect("process record");
-        fs::rename(root.join("pending"), root.join("ready")).expect("ready publication");
-        // A host killed without unwinding leaves this descendant for at most two minutes.
-        std::thread::sleep(Duration::from_secs(120));
-        panic!("synthetic descendant outlived its 120-second bound");
+        (pid, start)
     }
 
     struct ClaudeStandinWorker(PathBuf);
@@ -2662,13 +2966,19 @@ mod tests {
         );
     }
 
+    fn claude_publication_root() -> PathBuf {
+        PathBuf::from(
+            std::env::var_os("CLAUDE_PUBLICATION_ROOT").expect("host-owned publication fixture"),
+        )
+    }
+
     /// # Panics
     /// Panics if the real provider and publisher violate custody in the mapped namespace.
     fn claude_namespace_publication() {
         assert_eq!(owner_identity(), (0, 0));
-        let root = claude_fixture_root();
-        let owner_home = root.path().join("owner");
-        let runs = root.path().join("runs");
+        let root = claude_publication_root();
+        let owner_home = root.join("owner");
+        let runs = root.join("runs");
         for path in [&owner_home, &runs] {
             fs::create_dir(path).expect("fixture directory");
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");

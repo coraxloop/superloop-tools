@@ -62,6 +62,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Pin Claude namespace fixture cleanup across timeout and host panic, including subordinate-owned worker storage (``prob:gates:lane-fixture-homes-leave-no-temporary-root-behind``; ``test:unit:claude-namespace-fixture-cleanup-survives-timeout-and-panic``).
+
 - Contain Claude namespace fixture descendants across process-group changes with a per-case PID namespace and a watchdog regression (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-namespace-watchdog-contains-detached-descendant``).
 
 - Record a synthetic probe of the namespace watchdog's kill sequence, in which a descendant in a process group of its own survives, keeping descendant cleanup and its regression through the namespace wrapper open (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
