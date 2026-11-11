@@ -1268,7 +1268,7 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
         .parent()
         .expect("runs")
         .join(".reservation-R.json");
-    let record = json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":request.letter,"launcher_pid":2_147_483_640,"launcher_start":1,"driver_entry_pid":2_147_483_641,"driver_entry_start":1,"helper_pid":2_147_483_642,"helper_start":1,"helper_parent_pid":2_147_483_643,"helper_parent_start":1,"observer_state":"running","observer_pid":2_147_483_644,"observer_start":1});
+    let record = json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":request.letter,"launcher_pid":crate::dead_pid::DEAD_LOCK_PID,"launcher_start":1,"driver_entry_pid":crate::dead_pid::DEAD_LOCK_PID + 1,"driver_entry_start":1,"helper_pid":crate::dead_pid::DEAD_LOCK_PID + 2,"helper_start":1,"helper_parent_pid":crate::dead_pid::DEAD_LOCK_PID + 3,"helper_parent_start":1,"observer_state":"running","observer_pid":crate::dead_pid::DEAD_LOCK_PID + 4,"observer_start":1});
     crate::launch::publish_reservation(&path, &record).expect("dead dispatch");
     let custody = crate::plan::protected_identity_dir(&plan.driver_dir).expect("custody path");
     fs::create_dir(&custody).expect("custody");
@@ -1839,7 +1839,7 @@ exit 2
     let reservation = runs.join(".reservation-R.json");
     crate::launch::publish_reservation(
         &reservation,
-        &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":old_plan,"letter_source":request.letter,"launcher_pid":2_147_483_640,"launcher_start":1,"observer_state":"running","observer_pid":2_147_483_641,"observer_start":1,"helper_spawn_state":"not-started","reservation_census":preview["plan"]["reservation_census"]}),
+        &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":old_plan,"letter_source":request.letter,"launcher_pid":crate::dead_pid::DEAD_LOCK_PID,"launcher_start":1,"observer_state":"running","observer_pid":crate::dead_pid::DEAD_LOCK_PID + 1,"observer_start":1,"helper_spawn_state":"not-started","reservation_census":preview["plan"]["reservation_census"]}),
     )
     .expect("dead preparation");
     let dead = run(home, &request).expect("public preview reads owner custody only");

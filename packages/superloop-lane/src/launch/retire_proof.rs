@@ -790,7 +790,7 @@ mod tests {
             decode_locks(&absent.to_string(), 41001).expect("absent")["driver_directory"],
             "absent"
         );
-        let present = json!({"locks":{"measurement":{"state":"absent","driver_locks":[{"name":".codex-lane.lock","state":"absent","pids":[2_147_483_640,2_147_483_641]},{"name":".claude-lane.lock","state":"absent"}],"retirement_locks":"held-by-measurer"},"directory_identity":{"device":1,"inode":2,"uid":41001}}});
+        let present = json!({"locks":{"measurement":{"state":"absent","driver_locks":[{"name":".codex-lane.lock","state":"absent","pids":[crate::dead_pid::DEAD_LOCK_PID,crate::dead_pid::DEAD_LOCK_PID + 1]},{"name":".claude-lane.lock","state":"absent"}],"retirement_locks":"held-by-measurer"},"directory_identity":{"device":1,"inode":2,"uid":41001}}});
         assert_eq!(
             decode_locks(&present.to_string(), 41001).expect("locks"),
             present["locks"]["measurement"]

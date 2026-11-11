@@ -7621,8 +7621,7 @@ mod tests {
     /// ´test:unit:failed-driver-recovery-admission-is-narrow´
     #[test]
     fn failed_driver_recovery_admission_is_narrow() {
-        let record =
-            json!({"phase":"failed","driver_entry_pid":2_147_483_640,"driver_entry_start":1});
+        let record = json!({"phase":"failed","driver_entry_pid":crate::dead_pid::DEAD_LOCK_PID,"driver_entry_start":1});
         assert!(super::failed_driver_recovery(&record));
         for (key, value) in [
             ("phase", json!("started")),

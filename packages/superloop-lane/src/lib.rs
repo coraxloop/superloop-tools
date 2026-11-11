@@ -11,6 +11,10 @@ pub mod door_sign_in;
 pub mod driver;
 pub mod error;
 mod fixture_exec;
+
+#[cfg(test)]
+#[path = "../../lane-lifecycle/src/dead_pid.rs"]
+mod dead_pid;
 pub mod gateway_dispatch;
 pub mod home;
 pub mod install;

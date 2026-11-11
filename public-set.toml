@@ -395,6 +395,9 @@ pattern = "packages/lane-lifecycle/README.md"
 pattern = "packages/lane-lifecycle/meson.build"
 
 [[include.rows]]
+pattern = "packages/lane-lifecycle/src/dead_pid.rs"
+
+[[include.rows]]
 pattern = "packages/lane-lifecycle/src/execution_settings.rs"
 
 [[include.rows]]

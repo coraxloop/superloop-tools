@@ -5,6 +5,9 @@ mod entry;
 
 use entry::retry_busy_entry;
 
+#[path = "../../lane-lifecycle/src/dead_pid.rs"]
+mod dead_pid;
+
 #[path = "support/registry_entry.rs"]
 mod registry_fixture;
 
@@ -218,7 +221,7 @@ fn fixture() -> Fixture {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("retained mode");
     }
     let reservation = runs.join(".reservation-R.json");
-    let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":letter,"active_round":"dispatch","launcher_pid":2_147_483_640,"launcher_start":1,"driver_entry_pid":2_147_483_641,"driver_entry_start":1,"helper_pid":2_147_483_642,"helper_start":1,"helper_parent_pid":2_147_483_643,"helper_parent_start":1,"observer_state":"not-started","settlement_uncertain":false,"rounds":[{"step":"dispatch","phase":"failed","settlement_error":"settle-evidence: reply absent"}],"mail":[],"mail_replies":[],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture"}});
+    let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":letter,"active_round":"dispatch","launcher_pid":dead_pid::DEAD_LOCK_PID,"launcher_start":1,"driver_entry_pid":dead_pid::DEAD_LOCK_PID + 1,"driver_entry_start":1,"helper_pid":dead_pid::DEAD_LOCK_PID + 2,"helper_start":1,"helper_parent_pid":dead_pid::DEAD_LOCK_PID + 3,"helper_parent_start":1,"observer_state":"not-started","settlement_uncertain":false,"rounds":[{"step":"dispatch","phase":"failed","settlement_error":"settle-evidence: reply absent"}],"mail":[],"mail_replies":[],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture"}});
     fs::write(&reservation, serde_json::to_vec(&record).expect("JSON")).expect("reservation");
     fs::set_permissions(&reservation, fs::Permissions::from_mode(0o600)).expect("record mode");
     let mailbox = runs.join(".letter-R.lock");

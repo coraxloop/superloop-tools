@@ -2077,7 +2077,7 @@ mod tests {
         let lease = root.join(".prepare-R.lock");
         fs::write(&lease, "").expect("lease");
         fs::set_permissions(&lease, fs::Permissions::from_mode(0o600)).expect("lease mode");
-        let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"imports":[],"harvest_agreement":null,"collection":null,"plan":{"home":fixture.path().join(".cache/tmp/lane-alpha-R"),"driver_dir":root.join("R"),"runtime_argv":["/usr/bin/true"]},"launcher_pid":321,"launcher_start":88,"observer_state":"failed","observer_end":{"state":"uncertain","socket":{"state":"uncertain"}},"settlement_uncertain":false,"pre_driver_failure":"proxy-start","driver_end":{"state":"not-started"},"helper_end":{"state":"not-started"},"helper_spawn_state":"not-started"});
+        let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"imports":[],"harvest_agreement":null,"collection":null,"plan":{"home":fixture.path().join(".cache/tmp/lane-alpha-R"),"driver_dir":root.join("R"),"runtime_argv":["/usr/bin/true"]},"launcher_pid":crate::dead_pid::DEAD_LOCK_PID,"launcher_start":88,"observer_state":"failed","observer_end":{"state":"uncertain","socket":{"state":"uncertain"}},"settlement_uncertain":false,"pre_driver_failure":"proxy-start","driver_end":{"state":"not-started"},"helper_end":{"state":"not-started"},"helper_spawn_state":"not-started"});
         let reservation = reservation_path(&root, "R");
         publish_reservation(&reservation, &record).expect("reservation");
         let error = run(fixture.path(), &request).expect_err("unidentified observer");

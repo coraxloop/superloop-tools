@@ -204,6 +204,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Process-absence fixtures share the kernel-impossible PID constant, including public retirement's real presence check (``prob:gates:fixtures-name-a-dead-process-by-a-number-no-process-can-hold``; ``test:unit:dead-lock-fixture-pid-exceeds-kernel-limit-and-live-lock-refuses``).
+
 - The node absence probe matches the paths retirement removes, the checkout beside the mirrors and the build and temporary directories beneath the registered node root, and worker-home components in whole arguments or option values, so a sibling run’s prefix collision or script text no longer holds retirement (``prob:lanes:node-absence-probe-binds-the-run-at-component-boundaries``).
 
 - Composed reply entry explicitly refuses registry overrides in its existing lifetime error envelope before lifetime admission or changing identity (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
