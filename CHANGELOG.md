@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Check the mapped fixture cleanup's current-directory identity against its held enclosure before removal, retaining stderr on refusal and measuring renamed-directory custody (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-cleanup-checks-mapped-enclosing-identity``).
+
 - Make the private credential-authority wait injectable for event-driven pass boundaries, retaining the production thirty-second cancellable interval (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:helper-authority-waits-for-pass-release``).
 
 - Inventory fixture cleanup reports metadata-query errors when checking that the parent-owned root and marker remain, retaining the directory and regular-file checks (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).

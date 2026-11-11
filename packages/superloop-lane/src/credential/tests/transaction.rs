@@ -309,10 +309,11 @@ fn round_body(enclosing: &Path) {
     let mut record = staged_record(&owner, &runs, pid, start);
     round_contract(&owner, &worker, &mut record, &admission, &document);
     drop(admission);
-    assert_eq!(
-        Arc::strong_count(&root),
-        1,
-        "thread cannot own fixture cleanup"
+    let removed = root.path().to_path_buf();
+    drop(root);
+    assert!(
+        !removed.exists(),
+        "factory root is really removed after the round"
     );
 }
 

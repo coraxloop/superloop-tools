@@ -2626,15 +2626,29 @@ mod tests {
     }
 
     fn claude_cleanup_contents_at(directory: &fs::File, all: bool) -> std::io::Result<()> {
+        let held = directory.metadata()?;
+        claude_cleanup_identity_at(directory, all, (held.dev(), held.ino()))
+    }
+
+    fn claude_cleanup_identity_at(
+        directory: &fs::File,
+        all: bool,
+        expected: (u64, u64),
+    ) -> std::io::Result<()> {
         use std::os::fd::AsRawFd as _;
         use std::os::unix::process::CommandExt as _;
         // Enter the held directory before execution; no namespace-written path is followed.
         let child = Command::new("/usr/bin/podman")
             .args(["unshare", "/usr/bin/python3", "-I", "-c"])
-            .arg(if all {
+            .arg(format!("{}{}", concat!(
+                "import os,sys\n",
+                "root=os.open('.',os.O_RDONLY|os.O_DIRECTORY)\n",
+                "held=os.fstat(root)\n",
+                "if (held.st_dev,held.st_ino)!=(int(sys.argv[1]),int(sys.argv[2])):\n",
+                " raise RuntimeError('mapped fixture cleanup identity differs')\n",
+            ), if all {
                 concat!(
                     "import os,shutil,stat\n",
-                    "root=os.open('.',os.O_RDONLY|os.O_DIRECTORY)\n",
                     "for name in os.listdir(root):\n",
                     " if stat.S_ISDIR(os.stat(name,dir_fd=root,follow_symlinks=False).st_mode):\n",
                     "  shutil.rmtree(name,dir_fd=root)\n",
@@ -2643,7 +2657,6 @@ mod tests {
             } else {
                 concat!(
                     "import os,shutil\n",
-                    "root=os.open('.',os.O_RDONLY|os.O_DIRECTORY)\n",
                     "try:\n",
                     " r=os.open('runs',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=root)\n",
                     "except FileNotFoundError: pass\n",
@@ -2652,13 +2665,14 @@ mod tests {
                     " except FileNotFoundError: pass\n",
                     " finally: os.close(r)\n",
                 )
-            })
+            }))
+            .args([expected.0.to_string(), expected.1.to_string()])
             .env_remove("_CONTAINERS_USERNS_CONFIGURED")
             .env_remove("_CONTAINERS_ROOTLESS_UID")
             .current_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .process_group(0)
             .spawn()?;
         let mut child = ClaudeNamespaceChild {
@@ -2675,8 +2689,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         child.stopped = Some(true);
-        if !child.wait()?.success() {
-            return Err(std::io::Error::other("mapped fixture cleanup refused"));
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "mapped fixture cleanup refused: {}",
+                String::from_utf8_lossy(&output.stderr),
+            )));
         }
         Ok(())
     }
@@ -2891,6 +2909,66 @@ mod tests {
     }
 
     /// # Panics
+    /// Panics if a mapped cleanup can remove entries after a changed cwd identity.
+    /// ´test:unit:claude-cleanup-checks-mapped-enclosing-identity´
+    #[test]
+    fn claude_cleanup_checks_mapped_enclosing_identity() {
+        for all in [false, true] {
+            let root = claude_fixture_root();
+            fs::create_dir_all(root.path().join("runs/worker")).expect("worker");
+            let sentinel = root.path().join("runs/worker/sentinel");
+            fs::write(&sentinel, b"retained fixture").expect("sentinel");
+            let inode = fs::metadata(&sentinel).expect("sentinel identity").ino();
+            let held = fs::File::open(root.path()).expect("held root");
+            let identity = held.metadata().expect("identity");
+            let error = claude_cleanup_identity_at(
+                &held,
+                all,
+                (
+                    identity.dev(),
+                    identity.ino().checked_add(1).expect("foreign inode"),
+                ),
+            )
+            .expect_err("mapped cwd must match held identity");
+            assert!(
+                error
+                    .to_string()
+                    .contains("mapped fixture cleanup identity differs"),
+                "cleanup stderr: {error}"
+            );
+            assert_eq!(fs::read(&sentinel).expect("retained"), b"retained fixture");
+            assert_eq!(fs::metadata(&sentinel).expect("same inode").ino(), inode);
+            claude_cleanup_contents_at(&held, all).expect("matching mapped cwd");
+            assert!(!sentinel.exists());
+        }
+    }
+
+    /// # Panics
+    /// Panics if Podman's mapped cleanup loses the renamed held directory.
+    /// ´test:unit:claude-cleanup-measures-renamed-cwd-custody´
+    #[test]
+    fn claude_cleanup_measures_renamed_cwd_custody() {
+        let parent = claude_fixture_root();
+        let original = parent.path().join("enclosure");
+        let retained = parent.path().join("retained");
+        fs::create_dir(&original).expect("enclosure");
+        fs::write(original.join("synthetic"), b"fixture").expect("fixture file");
+        let held = fs::File::open(&original).expect("held enclosure");
+        fs::rename(&original, &retained).expect("rename before re-exec");
+        fs::create_dir(&original).expect("replacement");
+        fs::write(original.join("sentinel"), b"outside held enclosure").expect("sentinel");
+        claude_cleanup_contents_at(&held, true).expect("re-exec retains cwd identity");
+        assert_eq!(
+            fs::read_dir(&retained).expect("retained directory").count(),
+            0
+        );
+        assert_eq!(
+            fs::read(original.join("sentinel")).expect("replacement retained"),
+            b"outside held enclosure"
+        );
+    }
+
+    /// # Panics
     /// Panics if mapped cleanup follows a namespace-written runs symlink.
     /// ´test:unit:claude-cleanup-refuses-a-linked-runs-directory´
     #[test]
@@ -2903,7 +2981,15 @@ mod tests {
         let inode = fs::metadata(&sentinel).expect("identity").ino();
         symlink(outside.path(), root.path().join("runs")).expect("namespace link");
         let error = claude_cleanup_fixture(root.path()).expect_err("linked runs must refuse");
-        assert_eq!(error.to_string(), "mapped fixture cleanup refused");
+        assert!(
+            error
+                .to_string()
+                .contains("mapped fixture cleanup refused:")
+        );
+        assert!(
+            error.to_string().contains("'runs'"),
+            "cleanup stderr: {error}"
+        );
         assert_eq!(
             fs::read(&sentinel).expect("outside retained"),
             b"outside worker"

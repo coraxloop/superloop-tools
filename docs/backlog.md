@@ -942,6 +942,8 @@ Folded from ``open:homes:claude-lane-home-sandbox-redirects``, whose question th
 
 (2026-11-11, lane r002g84, event-driven authority wait) The private spawner accepts a wait between completed passes; production retains its thirty-second cancellable interval. A Gate-only case observes two refused-evidence publications separated by explicit pass/release events and joins after cancellation. It establishes the wait seam, not fixture publication, live reservation filtering or the second-pass scope controls. Those and the periodic mint and reader mutations remain with the transaction (``test:unit:helper-authority-waits-for-pass-release``).
 
+(2026-11-11, lane r002g84, mapped cleanup re-exec identity) The isolated cleanup checks its actual cwd device and inode against the host-held enclosure before listing or removal, in both cleanup forms. A wrong identity refuses with stderr retained and sentinel bytes and inode unchanged; a renamed-held-directory case measures the node's re-exec behavior while preserving a replacement pathname's sentinel. The round now checks actual factory-root removal instead of its type-guaranteed strong count. The source-directory comparison/rename window and the transaction watchdog's child-output diagnostics remain open (``test:unit:claude-cleanup-checks-mapped-enclosing-identity``; ``test:unit:claude-cleanup-measures-renamed-cwd-custody``).
+
 ### Tests under load · `sec:toolsbacklog:open-gates`
 
 **Problem (Timing-bound tests of the lane gateway fail under load in gates of candidates that do not touch it)** · `prob:gates:gate-timing-flakes`
