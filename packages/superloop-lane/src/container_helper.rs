@@ -2045,6 +2045,32 @@ pub(crate) fn spawn_credential_authority_admitted(
     )
 }
 
+/// Use the private pass wait in an in-crate namespace transaction.
+#[cfg(test)]
+pub(crate) fn fixture_authority_with_wait<W>(
+    paths: (&Path, &Path, &Path),
+    cancelled: Arc<AtomicBool>,
+    admission: &RuntimeAdmission,
+    wait: W,
+) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError>
+where
+    W: FnMut(&AtomicBool) + Send + 'static,
+{
+    spawn_credential_authority_at(
+        paths.0.to_path_buf(),
+        "alpha".into(),
+        paths.1.to_path_buf(),
+        paths.2.to_path_buf(),
+        BoxBackend::Claude,
+        cancelled,
+        (
+            crate::credential::service_endpoint(),
+            CredentialThreadCustody::capture_admitted(BoxBackend::Claude, admission)?,
+            wait,
+        ),
+    )
+}
+
 // Service liveness must not outlast its authority, including an activation refusal.
 struct CredentialAuthorityCancellation(Arc<AtomicBool>);
 impl Drop for CredentialAuthorityCancellation {
@@ -3361,7 +3387,10 @@ mod tests {
         let first = fs::read(&evidence).expect("first evidence");
         let inode = fs::metadata(&evidence).expect("first inode").ino();
         assert!(observed.try_recv().is_err(), "second pass awaits release");
-        assert!(!cancelled.load(Ordering::Acquire));
+        assert!(
+            !cancelled.load(Ordering::Acquire),
+            "authority cancelled before first release"
+        );
         release.send(()).expect("release first pass");
         observed
             .recv_timeout(Duration::from_secs(15))
@@ -3370,13 +3399,12 @@ mod tests {
         assert_eq!(fs::read(&evidence).expect("second evidence"), first);
         cancelled.store(true, Ordering::Release);
         release.send(()).expect("release final pass");
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !authority.is_finished() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
         assert!(
-            authority.is_finished(),
-            "cancelled authority joins after release"
+            matches!(
+                observed.recv_timeout(Duration::from_secs(15)),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+            ),
+            "cancelled authority drops the pass channel after release"
         );
         authority
             .join()

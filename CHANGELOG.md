@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Exercise the test-only Claude periodic authority over a live fixture reservation, including event-controlled evidence and configuration scope loss, mapped worker publication and exact enclosing-storage inventory; production remains gated (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-periodic-publication``).
+
 - Keep a replacement enclosure intact when mapped fixture cleanup fails during host drop, disarming automatic pathname-recursive removal before fallible cleanup (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-cleanup-failure-keeps-replacement``).
 
 - Check the mapped fixture cleanup's current-directory identity against its held enclosure before removal, retaining stderr on refusal and measuring renamed-directory custody (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-cleanup-checks-mapped-enclosing-identity``).

@@ -236,9 +236,29 @@ fn claude_fixture_admitted_round() {
     assert!(!path.exists());
 }
 
+type TransactionAction = fn(
+    &FixtureRoot,
+    &Path,
+    &Path,
+    &Path,
+    &mut Value,
+    &crate::runtime_admission::RuntimeAdmission,
+    &Value,
+);
+
 fn round_body(enclosing: &Path) {
+    transaction_body(
+        enclosing,
+        |_, owner, _, worker, record, admission, document| {
+            round_contract(owner, worker, record, admission, document);
+        },
+    );
+}
+
+fn transaction_body(enclosing: &Path, action: TransactionAction) {
     use sha2::{Digest as _, Sha256};
     use std::fmt::Write as _;
+    let _endpoint = fixture_service_endpoint("http://127.0.0.1:1/unused".into());
     let (root, mut anchors) = moved_root(enclosing);
     let owner = root.path().join("owner");
     let runs = root.path().join("runs");
@@ -305,14 +325,26 @@ fn round_body(enclosing: &Path) {
         crate::container_helper::process_presence(pid, start),
         crate::container_helper::ProcessPresence::Present
     ));
+    for path in [runs.join("R"), runs.join(".launch-R")] {
+        fs::create_dir(&path).expect("driver directory");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("driver mode");
+    }
     let mut record = staged_record(&owner, &runs, pid, start);
-    round_contract(&owner, &worker, &mut record, &admission, &document);
+    action(
+        &root,
+        &owner,
+        &runs,
+        &worker,
+        &mut record,
+        &admission,
+        &document,
+    );
     drop(admission);
     let removed = root.path().to_path_buf();
     drop(root);
     assert!(
         !removed.exists(),
-        "factory root is really removed after the round"
+        "factory root is really removed after the transaction"
     );
 }
 
@@ -543,5 +575,455 @@ fn claude_fixture_cleanup_failure_keeps_replacement() {
     assert!(
         displaced.is_dir(),
         "cleanup failure retains the original enclosure"
+    );
+}
+
+struct PeriodicThread {
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    done: Option<std::sync::mpsc::Receiver<std::thread::Result<Result<(), LaneError>>>>,
+}
+impl PeriodicThread {
+    fn observe(
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        thread: std::thread::JoinHandle<Result<(), LaneError>>,
+    ) -> Self {
+        let (send, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _received = send.send(thread.join());
+        });
+        Self {
+            cancelled,
+            done: Some(done),
+        }
+    }
+    #[allow(clippy::exit)]
+    fn finish(&mut self) -> Result<(), LaneError> {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = self
+            .done
+            .take()
+            .expect("one authority join")
+            .recv_timeout(Duration::from_secs(30));
+        let Ok(result) = result else {
+            // End this fixture's PID namespace before the root can drop under a live thread.
+            let _reported = writeln!(
+                std::io::stderr(),
+                "periodic authority join event failed: {result:?}"
+            );
+            std::process::exit(125);
+        };
+        result.unwrap_or_else(|_| {
+            Err(LaneError::operation(
+                "fixture-thread",
+                "authority thread panicked",
+            ))
+        })
+    }
+}
+impl Drop for PeriodicThread {
+    fn drop(&mut self) {
+        if self.done.is_some() {
+            let _result = self.finish();
+        }
+    }
+}
+
+fn periodic_case(name: &str, body: fn(&Path)) {
+    if enter(name, body) {
+        return;
+    }
+    let mut host = launch(name);
+    let path = host.root.as_ref().expect("E").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists(), "periodic enclosure removed");
+}
+
+/// # Panics
+/// Panics if the production spawner fails to publish the live fixture's projection.
+/// ´test:unit:claude-fixture-periodic-publication´
+#[test]
+fn claude_fixture_periodic_publication() {
+    periodic_case("claude_fixture_periodic_publication", |enclosing| {
+        transaction_body(
+            enclosing,
+            |root, owner, runs, worker, record, admission, source| {
+                periodic_success(root, owner, runs, worker, record, admission, source);
+            },
+        );
+    });
+}
+
+/// # Panics
+/// Panics if an evidence destination escaping the fixture permits a second envelope.
+/// ´test:unit:claude-fixture-periodic-evidence-escape´
+#[test]
+fn claude_fixture_periodic_evidence_escape() {
+    periodic_case("claude_fixture_periodic_evidence_escape", |enclosing| {
+        transaction_body(
+            enclosing,
+            |root, owner, runs, worker, record, admission, source| {
+                periodic_scope_loss(
+                    (root, owner, runs, worker),
+                    record,
+                    admission,
+                    source,
+                    false,
+                );
+            },
+        );
+    });
+}
+
+/// # Panics
+/// Panics if a replaced configuration permits refused evidence after scope is lost.
+/// ´test:unit:claude-fixture-periodic-configuration-replacement´
+#[test]
+fn claude_fixture_periodic_configuration_replacement() {
+    periodic_case(
+        "claude_fixture_periodic_configuration_replacement",
+        |enclosing| {
+            transaction_body(
+                enclosing,
+                |root, owner, runs, worker, record, admission, source| {
+                    periodic_scope_loss(
+                        (root, owner, runs, worker),
+                        record,
+                        admission,
+                        source,
+                        true,
+                    );
+                },
+            );
+        },
+    );
+}
+
+fn periodic_stage(owner: &Path, runs: &Path, record: &mut Value) {
+    let error =
+        crate::container_helper::publish_round_credential_admitted(owner, "alpha", record, &Gate)
+            .expect_err("public refusal before periodic transaction");
+    assert_eq!((error.status, error.kind), (2, "backend-unavailable"));
+    record["schema"] = json!(1);
+    crate::launch::publish_reservation(&crate::launch::reservation_path(runs, "R"), record)
+        .expect("live started reservation");
+}
+
+fn periodic_leaf(worker: &Path, source: &Value, prior: u64) -> u64 {
+    let path = worker.join(".claude/.credentials.json");
+    let metadata = fs::metadata(&path).expect("periodic worker leaf");
+    assert_ne!(
+        metadata.ino(),
+        prior,
+        "periodic publication replaces the leaf"
+    );
+    assert_eq!(
+        (metadata.uid(), metadata.gid(), metadata.mode() & 0o777),
+        (3000, 3000, 0o600)
+    );
+    let bytes = fs::read(path).expect("periodic projection");
+    let projected: Value = serde_json::from_slice(&bytes).expect("projection shape");
+    assert_eq!(projected.as_object().expect("object").len(), 1);
+    assert_eq!(
+        projected["claudeAiOauth"].as_object().expect("OAuth").len(),
+        6
+    );
+    assert_eq!(
+        bytes,
+        ClaudeSource::parse(source).expect("source").worker_file()
+    );
+    metadata.ino()
+}
+
+fn periodic_prior(worker: &Path) -> u64 {
+    let path = worker.join(".claude/.credentials.json");
+    fs::write(&path, b"prior synthetic projection").expect("prior leaf");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("prior mode");
+    nix::unistd::chown(&path, Some(Uid::from_raw(3000)), Some(Gid::from_raw(3000)))
+        .expect("prior ownership");
+    fs::metadata(path).expect("prior inode").ino()
+}
+
+fn periodic_evidence(runs: &Path) -> (Vec<u8>, u64) {
+    let path = runs.join(".launch-R/credential-refresh.json");
+    let bytes = fs::read(&path).expect("actual periodic evidence");
+    let value: Value = serde_json::from_slice(&bytes).expect("evidence JSON");
+    assert_eq!(value["state"], "published", "first live publication");
+    assert_eq!(value["schema"], 2);
+    (bytes, fs::metadata(path).expect("evidence inode").ino())
+}
+
+fn periodic_success(
+    root: &FixtureRoot,
+    owner: &Path,
+    runs: &Path,
+    worker: &Path,
+    record: &mut Value,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+    source: &Value,
+) {
+    periodic_stage(owner, runs, record);
+    let prior = periodic_prior(worker);
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread = crate::container_helper::spawn_credential_authority_admitted(
+        owner.to_path_buf(),
+        "alpha".into(),
+        runs.to_path_buf(),
+        runs.join("R"),
+        BoxBackend::Claude,
+        Arc::clone(&cancelled),
+        admission,
+    )
+    .expect("production spawner with uncancelled fixture admission");
+    let mut thread = PeriodicThread::observe(cancelled, thread);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !runs.join(".launch-R/credential-refresh.json").exists() {
+        assert!(
+            !thread.cancelled.load(std::sync::atomic::Ordering::Acquire),
+            "authority ended before first publication"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first evidence publication event timed out"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    thread
+        .finish()
+        .expect("clean authority cancellation and join");
+    periodic_evidence(runs);
+    periodic_leaf(worker, source, prior);
+    let error =
+        crate::container_helper::publish_round_credential_admitted(owner, "alpha", record, &Gate)
+            .expect_err("public refusal after periodic transaction");
+    assert_eq!((error.status, error.kind), (2, "backend-unavailable"));
+    periodic_inventory(root, "success");
+}
+
+fn periodic_scope_loss(
+    paths: (&FixtureRoot, &Path, &Path, &Path),
+    record: &mut Value,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+    source: &Value,
+    configuration: bool,
+) {
+    let (root, owner, runs, worker) = paths;
+    periodic_stage(owner, runs, record);
+    let prior = periodic_prior(worker);
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (pass, observed) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let thread = crate::container_helper::fixture_authority_with_wait(
+        (owner, runs, &runs.join("R")),
+        Arc::clone(&cancelled),
+        admission,
+        move |_: &std::sync::atomic::AtomicBool| {
+            pass.send(()).expect("pass-complete event");
+            resume
+                .recv_timeout(Duration::from_secs(30))
+                .expect("pass-release event");
+        },
+    )
+    .expect("event-driven fixture authority");
+    let mut thread = PeriodicThread::observe(Arc::clone(&cancelled), thread);
+    observed
+        .recv_timeout(Duration::from_secs(30))
+        .expect("first periodic pass event");
+    assert!(
+        !cancelled.load(std::sync::atomic::Ordering::Acquire),
+        "first pass remains live"
+    );
+    let (evidence, inode) = periodic_evidence(runs);
+    let worker_inode = periodic_leaf(worker, source, prior);
+    let retained = periodic_replace(root, owner, runs, source, configuration);
+    release.send(()).expect("release second periodic pass");
+    assert!(
+        matches!(
+            observed.recv_timeout(Duration::from_secs(30)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        ),
+        "scope loss must end before a second pass-complete event"
+    );
+    assert!(
+        cancelled.load(std::sync::atomic::Ordering::Acquire),
+        "in-loop refusal cancels service"
+    );
+    let error = thread.finish().expect_err("in-loop scope refusal");
+    assert_eq!((error.status, error.kind), (2, "fixture-scope"));
+    assert_eq!(
+        error.detail,
+        format!(
+            "{}: refuses {}",
+            fixture::SENTINEL,
+            if configuration {
+                "anchor identity"
+            } else {
+                "directory containment"
+            }
+        )
+    );
+    let path = retained.join("credential-refresh.json");
+    assert_eq!(fs::read(&path).expect("retained evidence"), evidence);
+    assert_eq!(
+        fs::metadata(path).expect("retained evidence inode").ino(),
+        inode
+    );
+    if configuration {
+        assert_eq!(
+            fs::metadata(worker.join(".claude/.credentials.json"))
+                .expect("prior leaf")
+                .ino(),
+            worker_inode,
+            "scope loss precedes worker publication"
+        );
+    } else {
+        let mut next = source.clone();
+        next["claudeAiOauth"]["accessToken"] = json!("C".repeat(108));
+        periodic_leaf(worker, &next, worker_inode);
+        let outside = root.path().parent().expect("E").join("outside");
+        assert_eq!(
+            fs::read(outside.join("sentinel")).expect("outside sentinel"),
+            b"outside root"
+        );
+        assert!(!outside.join("credential-refresh.json").exists());
+    }
+    let error =
+        crate::container_helper::publish_round_credential_admitted(owner, "alpha", record, &Gate)
+            .expect_err("public refusal after scope-loss transaction");
+    assert_eq!((error.status, error.kind), (2, "backend-unavailable"));
+    periodic_inventory(
+        root,
+        if configuration {
+            "configuration"
+        } else {
+            "destination"
+        },
+    );
+}
+
+fn periodic_replace(
+    root: &FixtureRoot,
+    owner: &Path,
+    runs: &Path,
+    source: &Value,
+    configuration: bool,
+) -> PathBuf {
+    let mut changed = source.clone();
+    changed["claudeAiOauth"]["accessToken"] = json!("C".repeat(108));
+    fixture_claude(owner, &changed);
+    if configuration {
+        let config = owner.join(".config/loops");
+        fs::rename(&config, owner.join(".config/loops-retained")).expect("replace configuration");
+        fs::create_dir(&config).expect("replacement configuration");
+        fs::set_permissions(config, fs::Permissions::from_mode(0o700)).expect("configuration mode");
+        runs.join(".launch-R")
+    } else {
+        let protected = runs.join(".launch-R");
+        let retained = runs.join(".launch-R-retained");
+        fs::rename(&protected, &retained).expect("retain prior evidence");
+        let outside = root.path().parent().expect("E").join("outside");
+        fs::create_dir(&outside).expect("outside target");
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).expect("outside mode");
+        fs::write(outside.join("sentinel"), b"outside root").expect("outside sentinel");
+        std::os::unix::fs::symlink(&outside, protected).expect("escaping evidence destination");
+        retained
+    }
+}
+
+fn periodic_inventory(root: &FixtureRoot, variant: &str) {
+    fn walk(path: &Path, base: &Path, entries: &mut Vec<String>) {
+        for entry in fs::read_dir(path).expect("whole enclosure inventory") {
+            let entry = entry.expect("entry");
+            let metadata = fs::symlink_metadata(entry.path()).expect("entry kind");
+            let kind = if metadata.is_symlink() {
+                "link"
+            } else if metadata.is_dir() {
+                "dir"
+            } else {
+                "file"
+            };
+            entries.push(format!(
+                "{kind} {}",
+                entry.path().strip_prefix(base).expect("relative").display()
+            ));
+            if metadata.is_dir() {
+                walk(&entry.path(), base, entries);
+            }
+        }
+    }
+    let enclosing = root.path().parent().expect("E");
+    let name = root
+        .path()
+        .file_name()
+        .expect("root name")
+        .to_str()
+        .expect("UTF8");
+    let mut entries = Vec::new();
+    walk(enclosing, enclosing, &mut entries);
+    for entry in &mut entries {
+        *entry = entry.replace(name, "fixture");
+    }
+    entries.sort();
+    let mut expected: Vec<String> = [
+        "dir fixture",
+        "dir fixture/owner",
+        "dir fixture/owner/.cache",
+        "dir fixture/owner/.cache/tmp",
+        "dir fixture/owner/.cache/tmp/lane-alpha-R",
+        "dir fixture/owner/.cache/tmp/lane-alpha-R/.claude",
+        "dir fixture/owner/.config",
+        "dir fixture/owner/.config/loops",
+        "dir fixture/owner/.config/loops/alpha",
+        "dir fixture/owner/.config/loops/alpha/claude",
+        "dir fixture/owner/.config/loops/alpha/lanes",
+        "dir fixture/owner/.config/loops/alpha/lanes/codex",
+        "dir fixture/runs",
+        "dir fixture/runs/.launch-R",
+        "dir fixture/runs/R",
+        "dir live",
+        "file fixture/owner/.cache/tmp/lane-alpha-R/.claude/.credentials.json",
+        "file fixture/owner/.cache/tmp/lane-alpha-R/.claude/synthetic",
+        "file fixture/owner/.config/loops/allocations.toml",
+        "file fixture/owner/.config/loops/alpha/claude/.credentials.json",
+        "file fixture/owner/.config/loops/alpha/claude/.refresh.lock",
+        "file fixture/owner/.config/loops/alpha/install-generation.json",
+        "file fixture/owner/.config/loops/alpha/lanes/codex/auth.json",
+        "file fixture/owner/.config/loops/registry.toml",
+        "file fixture/runs/.launch-R/credential-refresh.json",
+        "file fixture/runs/.reservation-R.json",
+        "file namespace-init",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    match variant {
+        "success" => {}
+        "configuration" => {
+            for entry in &mut expected {
+                *entry = entry.replace("/owner/.config/loops", "/owner/.config/loops-retained");
+            }
+            expected.push("dir fixture/owner/.config/loops".into());
+        }
+        "destination" => {
+            for entry in &mut expected {
+                *entry = entry.replace("/runs/.launch-R", "/runs/.launch-R-retained");
+            }
+            expected.extend(
+                [
+                    "link fixture/runs/.launch-R",
+                    "dir outside",
+                    "file outside/sentinel",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+        }
+        _ => panic!("unknown inventory case"),
+    }
+    expected.sort();
+    assert_eq!(
+        entries, expected,
+        "exact whole-enclosure inventory {variant}"
     );
 }

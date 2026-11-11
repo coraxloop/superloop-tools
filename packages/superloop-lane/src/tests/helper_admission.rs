@@ -324,6 +324,7 @@ fn fixture_admission_thread_part_is_one_shot_and_periodic_only() {
         "thread already transferred",
     );
     directory(&f.runs.join("R"));
+    directory(&f.runs.join(".launch-R"));
     let owner = f.owner.clone();
     let runs = f.runs.clone();
     let digest = f.digest.clone();
@@ -573,6 +574,7 @@ fn fixture_admission_spawner_checks_actual_thread_inputs() {
     let _endpoint = crate::credential::fixture_service_endpoint("http://127.0.0.1:1/unused".into());
     let f = Fixture::new();
     directory(&f.runs.join("R"));
+    directory(&f.runs.join(".launch-R"));
     directory(&f.runs.join("S"));
     for (owner, name, runs, driver, backend, reason) in [
         (

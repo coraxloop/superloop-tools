@@ -431,6 +431,8 @@ impl FixtureAdmission {
             return Err(refusal("evidence directory"));
         }
         directory_identity(&authority.root, driver)?;
+        let protected = crate::plan::protected_identity_dir(driver)?;
+        directory_identity(&authority.root, &protected)?;
         Ok(())
     }
     pub(crate) fn take_thread(
