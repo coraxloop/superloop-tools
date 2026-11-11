@@ -739,39 +739,139 @@ fn reply_session_retains_custody() {
     }
 }
 
+const TEST_NAME: &str = "reply_session_retains_custody";
+// The libtest options whose value follows as the next word or after `=` in the same word.
+const VALUED_OPTIONS: [&str; 4] = ["--skip", "--format", "--color", "--test-threads"];
+
+#[derive(Default)]
+struct TestArguments {
+    filters: Vec<String>,
+    skips: Vec<String>,
+    exact: bool,
+    list: bool,
+    ignored: bool,
+}
+impl TestArguments {
+    fn parse(args: &[std::ffi::OsString]) -> Result<Self, String> {
+        let mut result = Self::default();
+        let mut words = args.iter();
+        while let Some(word) = words.next() {
+            let word = word.to_str().ok_or("non-UTF-8 test argument")?;
+            let (option, attached) = word
+                .split_once('=')
+                .filter(|(option, _)| option.starts_with("--"))
+                .map_or((word, None), |(option, value)| (option, Some(value)));
+            let value = match (VALUED_OPTIONS.contains(&option), attached) {
+                (true, Some(value)) => Some(value),
+                (true, None) => words.next().and_then(|word| word.to_str()),
+                (false, Some(_)) => return Err(format!("unsupported test argument {word}")),
+                (false, None) => None,
+            };
+            match option {
+                "--list" => result.list = true,
+                "--exact" => result.exact = true,
+                "--ignored" => result.ignored = true,
+                "--quiet" | "-q" | "--nocapture" | "--show-output" | "--include-ignored" => {}
+                "--skip" => {
+                    let filter = value.ok_or("--skip requires a filter")?;
+                    result.skips.push(filter.to_owned());
+                }
+                "--format" => {
+                    if !matches!(value, Some("pretty" | "terse")) {
+                        return Err("--format requires pretty or terse".into());
+                    }
+                }
+                "--color" => {
+                    if !matches!(value, Some("auto" | "always" | "never")) {
+                        return Err("--color requires auto, always or never".into());
+                    }
+                }
+                "--test-threads" => {
+                    let count = value.and_then(|word| word.parse::<usize>().ok());
+                    if count.is_none_or(|count| count == 0) {
+                        return Err("--test-threads requires a positive count".into());
+                    }
+                }
+                _ if word.starts_with('-') => {
+                    return Err(format!("unsupported test argument {word}"));
+                }
+                _ => result.filters.push(word.to_owned()),
+            }
+        }
+        Ok(result)
+    }
+    fn selected(&self) -> bool {
+        let matches = |filter: &String| {
+            if self.exact {
+                TEST_NAME == filter
+            } else {
+                TEST_NAME.contains(filter)
+            }
+        };
+        !self.ignored
+            && (self.filters.is_empty() || self.filters.iter().any(matches))
+            && !self.skips.iter().any(matches)
+    }
+}
+
 fn argument_checks() {
-    for (args, success, text) in [
-        (vec!["--list"], true, "reply_session_retains_custody: test"),
+    for (args, text) in [
+        (vec!["--list"], "reply_session_retains_custody: test"),
         (
-            vec!["unrelated-filter"],
-            false,
-            "reply-custody: unsupported test arguments",
+            vec!["--list", "--format", "terse", "-q"],
+            "reply_session_retains_custody: test",
+        ),
+        (vec!["unrelated-filter"], "0 passed"),
+        (vec!["retains", "--exact"], "0 passed"),
+        (vec![TEST_NAME, "--skip", "retains"], "0 passed"),
+        (vec!["--ignored", "--quiet"], "0 passed"),
+        (
+            vec!["unrelated-filter", "--test-threads", "1", "--nocapture"],
+            "0 passed",
         ),
         (
-            vec!["--exact"],
-            false,
-            "reply-custody: unsupported test arguments",
+            vec!["--list", "--format=terse", "--color", "never"],
+            "reply_session_retains_custody: test",
+        ),
+        (
+            vec![TEST_NAME, "--skip=retains", "--test-threads=1"],
+            "0 passed",
         ),
     ] {
-        let output =
-            std::process::Command::new(std::env::current_exe().expect("reply fixture executable"))
-                .args(args)
-                .env(PHASE, "cleanup")
-                .env_remove(HOME)
-                .fixture_output("reply argument admission", Duration::from_secs(10))
-                .expect("bounded argument probe");
-        assert_eq!(output.status.success(), success);
-        if !success {
-            assert_eq!(output.status.code(), Some(2));
-        }
-        let report = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        let output = argument_probe(&args);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(text),
+            "{output:?}"
         );
-        assert!(report.contains(text), "{report}");
-        assert!(!report.contains("reply custody passed"), "{report}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("reply custody passed"));
     }
+    for args in [
+        vec!["retains", "--quiet"],
+        vec![TEST_NAME, "--exact", "-q"],
+        vec!["no-match", TEST_NAME],
+        vec![TEST_NAME, "--skip=no-match", "--test-threads=1"],
+    ] {
+        let output = argument_probe(&args);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("fixture home"),
+            "{output:?}"
+        );
+    }
+    for args in [["--unsupported"], ["--exact=yes"]] {
+        let output = argument_probe(&args);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported test argument"));
+    }
+}
+fn argument_probe(args: &[&str]) -> std::process::Output {
+    std::process::Command::new(std::env::current_exe().expect("reply fixture executable"))
+        .args(args)
+        .env(PHASE, "cleanup")
+        .env_remove(HOME)
+        .fixture_output("reply argument admission", Duration::from_secs(10))
+        .expect("bounded argument probe")
 }
 
 fn main() -> std::process::ExitCode {
@@ -785,18 +885,26 @@ fn main() -> std::process::ExitCode {
             &mut std::io::stderr().lock(),
         ));
     }
-    if args.len() == 1 && args[0] == "--list" {
-        std::io::stdout()
-            .write_all(b"reply_session_retains_custody: test\n")
-            .expect("list result");
+    let selection = match TestArguments::parse(&args) {
+        Ok(selection) => selection,
+        Err(error) => {
+            let _reported = writeln!(std::io::stderr().lock(), "reply-custody: {error}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    if selection.list {
+        if selection.selected() {
+            writeln!(std::io::stdout().lock(), "{TEST_NAME}: test").expect("list result");
+        }
         return std::process::ExitCode::SUCCESS;
     }
-    if !args.iter().all(|arg| arg == "--nocapture") {
-        let _reported = writeln!(
-            std::io::stderr().lock(),
-            "reply-custody: unsupported test arguments; use no filter or --list"
-        );
-        return std::process::ExitCode::from(2);
+    if !selection.selected() {
+        writeln!(
+            std::io::stdout().lock(),
+            "test result: ok. 0 passed; 0 failed; 1 filtered out"
+        )
+        .expect("filtered result");
+        return std::process::ExitCode::SUCCESS;
     }
     if std::env::var_os(PHASE).is_none() {
         argument_checks();
