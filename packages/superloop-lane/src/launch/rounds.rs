@@ -19,25 +19,66 @@ use crate::error::LaneError;
 use crate::plan::Plan;
 use crate::{build, home, load_plan};
 
-fn step_event_thread(
-    backend: crate::settings::BoxBackend,
-    dir: &Path,
-) -> Result<String, LaneError> {
+fn round_evidence_uid(plan: &Plan) -> Result<u32, LaneError> {
+    if home::private_is_active() {
+        crate::plan::loop_uid(&plan.document)
+    } else {
+        Ok(Uid::effective().as_raw())
+    }
+}
+
+fn held_round_directory(path: &Path, loop_uid: u32) -> Result<std::fs::File, LaneError> {
+    let root = home::private_runs_path()
+        .ok_or_else(|| LaneError::input("verified-prefix", "private runs anchor is absent"))?;
+    home::pin_loop_round(&root, path, Uid::effective().as_raw(), loop_uid).map(std::fs::File::from)
+}
+
+fn thread_evidence(dir: &Path, loop_uid: u32) -> Result<(std::fs::File, usize, usize), LaneError> {
     let path = dir.join("events.jsonl");
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)
+    let pinned = if home::private_is_active() {
+        Some(held_round_directory(dir, loop_uid)?)
+    } else {
+        None
+    };
+    let file = pinned
+        .as_ref()
+        .map_or_else(
+            || {
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(&path)
+            },
+            |directory| {
+                nix::fcntl::openat2(
+                    directory,
+                    "events.jsonl",
+                    nix::fcntl::OpenHow::new()
+                        .flags(
+                            nix::fcntl::OFlag::O_RDONLY
+                                | nix::fcntl::OFlag::O_CLOEXEC
+                                | nix::fcntl::OFlag::O_NONBLOCK,
+                        )
+                        .resolve(
+                            nix::fcntl::ResolveFlag::RESOLVE_BENEATH
+                                | nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS,
+                        ),
+                )
+                .map(std::fs::File::from)
+                .map_err(std::io::Error::from)
+            },
+        )
         .map_err(|error| {
             LaneError::input("round-thread", format!("{}: {error}", path.display()))
         })?;
+    let parent = pinned
+        .as_ref()
+        .map_or_else(|| std::fs::symlink_metadata(dir), std::fs::File::metadata)
+        .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
     let meta = file
         .metadata()
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
-    let owner = std::fs::symlink_metadata(dir)
-        .map_err(|error| LaneError::input("round-thread", error.to_string()))?
-        .uid();
-    if !meta.is_file() || meta.uid() != owner {
+    if !meta.is_file() || meta.uid() != parent.uid() {
         return Err(LaneError::input(
             "round-thread",
             "events are not directory-owned regular evidence",
@@ -45,11 +86,25 @@ fn step_event_thread(
     }
     let size = usize::try_from(meta.len())
         .map_err(|_| LaneError::input("round-thread", "event size exceeds addressable range"))?;
-    let boundaries = lane_lifecycle::validated_event_boundaries(dir, size)
-        .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
-    let start = *boundaries
-        .last()
-        .ok_or_else(|| LaneError::input("round-thread", "step event boundary is absent"))?;
+    let start = if let Some(directory) = &pinned {
+        lane_lifecycle::validated_event_boundaries_at(directory, size, loop_uid)
+            .map_err(|error| LaneError::input("round-thread", error.to_string()))?
+            .current_start
+    } else {
+        *lane_lifecycle::validated_event_boundaries(dir, size)
+            .map_err(|error| LaneError::input("round-thread", error.to_string()))?
+            .last()
+            .ok_or_else(|| LaneError::input("round-thread", "step event boundary is absent"))?
+    };
+    Ok((file, size, start))
+}
+
+fn step_event_thread(
+    backend: crate::settings::BoxBackend,
+    dir: &Path,
+    loop_uid: u32,
+) -> Result<String, LaneError> {
+    let (mut file, size, start) = thread_evidence(dir, loop_uid)?;
     file.seek(SeekFrom::Start(start as u64))
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
     let mut reader = BufReader::new(file.take((size - start) as u64));
@@ -204,9 +259,12 @@ fn recorded_step_dir(plan: &Plan, record: &Value, round: &Value) -> Result<PathB
             "round directory differs from row",
         ));
     }
-    let meta = std::fs::symlink_metadata(&path).map_err(|error| {
-        LaneError::input("round-directory", format!("{}: {error}", path.display()))
-    })?;
+    let meta = if home::private_is_active() {
+        held_round_directory(&path, crate::plan::loop_uid(&plan.document)?)?.metadata()
+    } else {
+        std::fs::symlink_metadata(&path)
+    }
+    .map_err(|error| LaneError::input("round-directory", format!("{}: {error}", path.display())))?;
     if !meta.is_dir() || meta.file_type().is_symlink() {
         return Err(LaneError::input(
             "round-directory",
@@ -301,6 +359,7 @@ pub(super) fn recovery_thread(
     let actual = step_event_thread(
         crate::settings::BoxBackend::from_plan(&plan.document)?,
         &directory,
+        round_evidence_uid(plan)?,
     )?;
     if let Some(expected) = record["thread_id"].as_str() {
         if expected != actual {
@@ -461,6 +520,7 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
     let actual = step_event_thread(
         crate::settings::BoxBackend::from_plan(&plan.document)?,
         &recorded_step_dir(plan, record, round)?,
+        round_evidence_uid(plan)?,
     )?;
     if actual != saved {
         return Err(LaneError::input(
@@ -469,6 +529,58 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
         ));
     }
     Ok(())
+}
+
+type InspectionSelection<'a> = (&'a Path, Option<(&'a str, u64)>);
+
+/// Parse the operation body before receiving round inspection custody.
+/// # Errors
+/// Refuses an incomplete vector, relative home or malformed round evidence selection.
+pub(super) fn parse_private_inspect(args: &[String]) -> Result<InspectionSelection<'_>, LaneError> {
+    let [mode, loop_name, run, option, owner_home, rest @ ..] = args else {
+        return Err(LaneError::input(
+            "round-private",
+            "private round inspection is incomplete",
+        ));
+    };
+    if mode != "_inspect-round"
+        || option != "--owner-home"
+        || !crate::valid_run_name(run)
+        || loop_home::validate_name(loop_name).is_err()
+    {
+        return Err(LaneError::input(
+            "round-private",
+            "private round inspection vector is malformed",
+        ));
+    }
+    let home = Path::new(owner_home);
+    if !home.is_absolute() {
+        return Err(LaneError::input(
+            "verified-prefix",
+            "private launch has duplicate or non-absolute owner home",
+        ));
+    }
+    let evidence = match rest {
+        [] => None,
+        [record_option, step, budget_option, seconds]
+            if record_option == "--record" && budget_option == "--budget" =>
+        {
+            super::letters::valid_step(step)?;
+            Some((
+                step.as_str(),
+                seconds
+                    .parse::<u64>()
+                    .map_err(|_| LaneError::input("round-private", "budget is malformed"))?,
+            ))
+        }
+        _ => {
+            return Err(LaneError::input(
+                "round-private",
+                "private round evidence form is malformed",
+            ));
+        }
+    };
+    Ok((home, evidence))
 }
 
 /// Check the driver thread from the namespace that owns the protected directory.
@@ -550,26 +662,41 @@ pub(super) fn publish_round_request(
     step: &str,
     budget: u64,
 ) -> Result<(), LaneError> {
-    let parent = std::fs::symlink_metadata(&plan.driver_dir)
+    let directory = if home::private_is_active() {
+        held_round_directory(&plan.driver_dir, crate::plan::loop_uid(&plan.document)?)?
+    } else {
+        let parent = std::fs::symlink_metadata(&plan.driver_dir)
+            .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+        if !parent.is_dir() || parent.file_type().is_symlink() {
+            return Err(LaneError::input(
+                "round-evidence",
+                "run directory is not a directory",
+            ));
+        }
+        std::fs::File::open(&plan.driver_dir)
+            .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?
+    };
+    let parent = directory
+        .metadata()
         .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    if !parent.is_dir() || parent.file_type().is_symlink() {
-        return Err(LaneError::input(
-            "round-evidence",
-            "run directory is not a directory",
-        ));
-    }
     let name = format!("round-launch-{step}.json");
     let temporary = format!(".round-launch-{step}-{}.tmp", std::process::id());
     let path = plan.driver_dir.join(&temporary);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)
-        .map_err(|error| {
-            LaneError::operation("round-evidence", format!("{}: {error}", path.display()))
-        })?;
+    let mut file = nix::fcntl::openat(
+        &directory,
+        temporary.as_str(),
+        nix::fcntl::OFlag::O_WRONLY
+            | nix::fcntl::OFlag::O_CREAT
+            | nix::fcntl::OFlag::O_EXCL
+            | nix::fcntl::OFlag::O_NOFOLLOW
+            | nix::fcntl::OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::from_bits_truncate(0o600),
+    )
+    .map(std::fs::File::from)
+    .map_err(std::io::Error::from)
+    .map_err(|error| {
+        LaneError::operation("round-evidence", format!("{}: {error}", path.display()))
+    })?;
     let binding = record["mail"]
         .as_array()
         .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
@@ -587,8 +714,6 @@ pub(super) fn publish_round_request(
     )
     .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
     file.sync_all()
-        .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    let directory = std::fs::File::open(&plan.driver_dir)
         .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
     renameat2(
         &directory,
@@ -654,6 +779,7 @@ pub(super) fn record_settlement_with_recovery(
         let actual = step_event_thread(
             crate::settings::BoxBackend::from_plan(&plan.document)?,
             &directory,
+            round_evidence_uid(plan)?,
         )?;
         if record["thread_id"] != actual {
             return Err(LaneError::input(
@@ -694,6 +820,7 @@ pub(super) fn record_settlement_with_recovery(
         let actual = step_event_thread(
             crate::settings::BoxBackend::from_plan(&plan.document)?,
             &step_dir?,
+            round_evidence_uid(plan)?,
         )?;
         if let Some(saved) = record["thread_id"].as_str() {
             if saved != actual {
@@ -1504,11 +1631,21 @@ mod tests {
         stream.push(b'\n');
         std::fs::write(&path, &stream).expect("events");
         assert_eq!(
-            super::step_event_thread(BoxBackend::Codex, fixture.path()).expect("Codex event"),
+            super::step_event_thread(
+                BoxBackend::Codex,
+                fixture.path(),
+                nix::unistd::Uid::effective().as_raw()
+            )
+            .expect("Codex event"),
             "codex-thread"
         );
         assert_eq!(
-            super::step_event_thread(BoxBackend::Claude, fixture.path()).expect("Claude event"),
+            super::step_event_thread(
+                BoxBackend::Claude,
+                fixture.path(),
+                nix::unistd::Uid::effective().as_raw()
+            )
+            .expect("Claude event"),
             "22222222-2222-4222-8222-222222222222"
         );
         let changed = String::from_utf8(init.to_vec())
@@ -1521,13 +1658,24 @@ mod tests {
         stream.push(b'\n');
         std::fs::write(&path, stream).expect("conflicting event");
         assert_eq!(
-            super::step_event_thread(BoxBackend::Claude, fixture.path())
-                .expect_err("session changed")
-                .kind,
+            super::step_event_thread(
+                BoxBackend::Claude,
+                fixture.path(),
+                nix::unistd::Uid::effective().as_raw()
+            )
+            .expect_err("session changed")
+            .kind,
             "round-thread"
         );
         std::fs::write(&path, init).expect("incomplete event");
-        assert!(super::step_event_thread(BoxBackend::Claude, fixture.path()).is_err());
+        assert!(
+            super::step_event_thread(
+                BoxBackend::Claude,
+                fixture.path(),
+                nix::unistd::Uid::effective().as_raw()
+            )
+            .is_err()
+        );
     }
 
     /// # Panics
@@ -1715,6 +1863,88 @@ mod tests {
                 .expect_err("changed model refuses")
                 .kind,
             "round-selection"
+        );
+    }
+
+    /// # Panics
+    /// Panics if event reads or request publication reopen the replaced runs pathname.
+    /// ´claim:superlooplane:private-round-evidence-retains-replaced-runs´
+    /// ´test:unit:private-round-evidence-retains-replaced-runs´
+    #[test]
+    fn private_round_evidence_retains_replaced_runs() {
+        let (fixture, plan) = client_environment_fixture();
+        let root = fixture.path().join("runs");
+        let held = fs::File::open(&root).expect("root descriptor");
+        let owner = nix::unistd::Uid::effective().as_raw();
+        let loop_uid = crate::plan::loop_uid(&plan.document).expect("loop identity");
+        let _anchor = crate::home::activate_handed_home(&root, &held, owner).expect("root anchor");
+        let retained = fixture.path().join("retained-runs");
+        fs::rename(&root, &retained).expect("retain received root");
+        fs::create_dir_all(root.join("R")).expect("replacement path");
+        let directory = retained.join("R");
+        fs::write(directory.join(".event-start"), b"0\n").expect("boundary");
+        fs::write(
+            directory.join("events.jsonl"),
+            b"{\"type\":\"thread.started\",\"thread_id\":\"held-thread\"}\n",
+        )
+        .expect("held events");
+        for name in [".event-start", "events.jsonl"] {
+            nix::unistd::chown(
+                &directory.join(name),
+                Some(nix::unistd::Uid::from_raw(loop_uid)),
+                Some(nix::unistd::Gid::from_raw(loop_uid)),
+            )
+            .expect("evidence owner");
+            fs::set_permissions(directory.join(name), fs::Permissions::from_mode(0o600))
+                .expect("evidence mode");
+        }
+        fs::write(root.join("R/events.jsonl"), b"not held evidence").expect("replacement");
+        assert_eq!(
+            super::step_event_thread(
+                crate::settings::BoxBackend::Codex,
+                &plan.driver_dir,
+                loop_uid
+            )
+            .expect("held thread"),
+            "held-thread"
+        );
+        let archives = directory.join("steps");
+        fs::create_dir(&archives).expect("archive directory");
+        nix::unistd::chown(
+            &archives,
+            Some(nix::unistd::Uid::from_raw(loop_uid)),
+            Some(nix::unistd::Gid::from_raw(loop_uid)),
+        )
+        .expect("archive owner");
+        fs::set_permissions(&archives, fs::Permissions::from_mode(0o770))
+            .expect("widen archive directory");
+        let error = super::step_event_thread(
+            crate::settings::BoxBackend::Codex,
+            &plan.driver_dir,
+            loop_uid,
+        )
+        .expect_err("writable boundary archive");
+        assert_eq!(error.kind, "round-thread");
+        assert!(
+            error.detail.contains("context-boundary: steps:"),
+            "{error:?}"
+        );
+        fs::set_permissions(&archives, fs::Permissions::from_mode(0o700))
+            .expect("restore archive directory");
+        let record = json!({"phase":"preparing","active_round":"review",
+            "thread_id":"held-thread","worker_uid":3000,
+            "rounds":[{"step":"review","budget_seconds":900}],
+            "mail":[{"step":"review","inbox_name":"fixture-letter"}]});
+        inspect_loaded_round(&plan, &record, Some(("review", 900))).expect("held publication");
+        let published: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("round-launch-review.json")).expect("held request"),
+        )
+        .expect("request JSON");
+        assert_eq!(published["thread_id"], "held-thread");
+        assert!(!root.join("R/round-launch-review.json").exists());
+        assert_eq!(
+            fs::read(root.join("R/events.jsonl")).expect("replacement survives"),
+            b"not held evidence"
         );
     }
 

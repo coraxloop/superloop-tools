@@ -15,6 +15,7 @@ struct Selection<'a> {
 }
 fn operation(word: &str) -> Option<&'static str> {
     match word {
+        "_inspect-round" => Some("inspect-round"),
         "_observed-hosts" => Some("observed-hosts"),
         "_driver-report" => Some("driver-report"),
         "_checkpoint" => Some("checkpoint"),
@@ -46,6 +47,9 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
         .first()
         .and_then(|word| operation(word))
         .ok_or_else(|| refused("exercise", "anchor-declaration", "operation"))?;
+    if mode == "inspect-round" {
+        return inspect_selection(args);
+    }
     if mode == "mark-imported" {
         let (_, home) = super::imports::parse_private_argv(args)
             .map_err(|_| refused(mode, "anchor-declaration", "vector"))?;
@@ -127,6 +131,24 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
         scope,
         run,
         identity,
+        home,
+    })
+}
+
+fn inspect_selection(args: &[String]) -> Result<Selection<'_>, LaneError> {
+    let mode = "inspect-round";
+    let (home, _) = super::rounds::parse_private_inspect(args).map_err(|error| {
+        if error.kind == "verified-prefix" {
+            error
+        } else {
+            refused(mode, "anchor-declaration", "vector")
+        }
+    })?;
+    Ok(Selection {
+        operation: mode,
+        scope: &args[1],
+        run: &args[2],
+        identity: "",
         home,
     })
 }
@@ -287,7 +309,8 @@ pub fn serve(args: &[String]) -> Result<String, LaneError> {
     if args.len() < 9
         || (matches!(
             mode,
-            "follow"
+            "inspect-round"
+                | "follow"
                 | "exercise-context"
                 | "checkpoint"
                 | "checkout"
@@ -375,6 +398,10 @@ pub fn serve(args: &[String]) -> Result<String, LaneError> {
 
 fn dispatch(selection: &Selection<'_>, body: &[String]) -> Result<serde_json::Value, LaneError> {
     let mode = selection.operation;
+    if mode == "inspect-round" {
+        let (home, evidence) = super::rounds::parse_private_inspect(body)?;
+        return super::rounds::private_inspect(home, selection.scope, selection.run, evidence);
+    }
     if mode == "mark-imported" {
         let (request, home) = super::imports::parse_private_argv(body)?;
         return super::imports::private_run(home, &request);

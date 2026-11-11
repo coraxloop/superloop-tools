@@ -10,6 +10,7 @@ use std::path::Path;
 /// # Panics
 /// Panics if the real reader entry reopens replaced configuration or accepts a changed capability.
 /// ´claim:superlooplane:private-exercise-readers-retain-configuration´
+/// (´claim:superlooplane:round-inspection-retains-custody´)
 /// ´test:crate:private-exercise-readers-retain-configuration´
 #[test]
 fn private_exercise_readers_retain_configuration() {
@@ -66,6 +67,31 @@ fn checkout_entry_retains_custody() {
 fn checkout_parent(home: &Path) -> std::path::PathBuf {
     home.parent().expect("fixture root").join("destination")
 }
+
+const READER_CASES: &[&str] = &[
+    "plain",
+    "replaced",
+    "mode",
+    "identity",
+    "program-owner",
+    "git-owner",
+    "parent-identity",
+    "parent-mode",
+    "ancestor-mode",
+    "short-frame",
+    "excess-frame",
+    "count",
+    "surplus-count",
+    "operation",
+    "record",
+    "override",
+    "missing",
+    "vector",
+    "relative-home",
+    "source-mode",
+    "source-link",
+    "source-large",
+];
 
 fn selected_readers() -> &'static [&'static str] {
     if std::env::var_os("SUPERLOOP_CHECKOUT_PROOF").is_some() {
@@ -124,56 +150,8 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
                     .expect("checkpoint lock mode");
             }
         }
-        for case in [
-            "plain",
-            "replaced",
-            "mode",
-            "identity",
-            "program-owner",
-            "git-owner",
-            "parent-identity",
-            "parent-mode",
-            "ancestor-mode",
-            "short-frame",
-            "excess-frame",
-            "count",
-            "surplus-count",
-            "operation",
-            "record",
-            "override",
-            "missing",
-            "vector",
-            "relative-home",
-            "source-mode",
-            "source-link",
-            "source-large",
-        ] {
-            if (case == "relative-home" && !matches!(kind, "checkpoint" | "checkout"))
-                || (matches!(case, "parent-identity" | "parent-mode" | "ancestor-mode")
-                    && kind != "checkout")
-                || (case == "git-owner"
-                    && !matches!(
-                        kind,
-                        "checkout"
-                            | "checkpoint"
-                            | "private-harvest"
-                            | "import"
-                            | "harvest"
-                            | "home-layout"
-                    ))
-            {
-                continue;
-            }
-            if (matches!(
-                kind,
-                "checkout" | "checkpoint" | "private-harvest" | "harvest-recover" | "import"
-            ) && case != "record"
-                && !case.starts_with("source-"))
-                || (kind == "measure" && case != "record")
-                || (kind == "observed" && case != "record" && !case.starts_with("source-"))
-                || (matches!(kind, "harvest" | "home-layout" | "report" | "locks")
-                    && !case.starts_with("source-"))
-            {
+        for &case in READER_CASES {
+            if reader_case(kind, case) {
                 measure(home, runs, &identity, kind, case);
             }
         }
@@ -181,6 +159,8 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
     if std::env::var_os("SUPERLOOP_READER_PROOF").is_some() {
         live_measure(home, runs, &mut record);
         follow_round(home, runs, &mut record);
+        inspection_cases(home, runs, &mut record);
+        inspect_record(home, runs, &mut record);
     }
     if std::env::var_os("SUPERLOOP_CHECKOUT_PROOF").is_some() {
         settled_readers(home, runs, &mut record);
@@ -188,12 +168,68 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
     writeln!(std::io::stdout().lock(), "PRIVATE-READERS-MEASURED").expect("measured marker");
 }
 
+fn reader_case(kind: &str, case: &str) -> bool {
+    if (case == "relative-home" && !matches!(kind, "checkpoint" | "checkout" | "inspect"))
+        || (matches!(case, "parent-identity" | "parent-mode" | "ancestor-mode")
+            && kind != "checkout")
+        || (case == "git-owner"
+            && !matches!(
+                kind,
+                "checkout"
+                    | "checkpoint"
+                    | "private-harvest"
+                    | "import"
+                    | "harvest"
+                    | "home-layout"
+            ))
+    {
+        return false;
+    }
+    (matches!(
+        kind,
+        "checkout" | "checkpoint" | "private-harvest" | "harvest-recover" | "import"
+    ) && case != "record"
+        && !case.starts_with("source-"))
+        || (kind == "measure" && case != "record")
+        || (matches!(kind, "observed" | "inspect")
+            && case != "record"
+            && !case.starts_with("source-"))
+        || (matches!(kind, "harvest" | "home-layout" | "report" | "locks")
+            && !case.starts_with("source-"))
+}
+
 /// # Panics
 /// Panics if the fixture cannot compose the production descriptor transfer.
 fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::CommandSpec {
     let home_fd = fs::File::open(home).expect("home").into();
     let runs_fd = fs::File::open(runs).expect("runs").into();
-    let body = if kind == "checkout" {
+    let body = request_words(home, runs, identity, kind).expect("private vector");
+    let mut argv = vec![
+        "unshare".into(),
+        runtime_preparation::binary().display().to_string(),
+    ];
+    argv.extend(body);
+    let destination = checkout_parent(home);
+    let held_destination = fs::File::open(&destination).expect("destination").into();
+    reader_entry::command(
+        Path::new("/usr/bin/podman"),
+        &argv,
+        home,
+        &home_fd,
+        runs,
+        &runs_fd,
+        (kind == "checkout").then_some((destination.as_path(), &held_destination)),
+    )
+    .expect("production reader composer")
+}
+
+fn request_words(
+    home: &Path,
+    runs: &Path,
+    identity: &str,
+    kind: &str,
+) -> Result<Vec<String>, crate::LaneError> {
+    if kind == "checkout" {
         crate::launch::checkout::private_checkout_argv(
             &crate::launch::checkout::CheckoutRequest {
                 loop_name: "alpha".into(),
@@ -229,9 +265,14 @@ fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::C
             "--owner-home".into(),
             home.display().to_string(),
         ])
-    } else if kind == "observed" {
+    } else if matches!(kind, "observed" | "inspect") {
         Ok(vec![
-            "_observed-hosts".into(),
+            if kind == "inspect" {
+                "_inspect-round"
+            } else {
+                "_observed-hosts"
+            }
+            .into(),
             "alpha".into(),
             "R".into(),
             "--owner-home".into(),
@@ -245,8 +286,7 @@ fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::C
             "dispatch",
             &runs.join("R/dispatch"),
             identity,
-        )
-        .expect("follow vector");
+        )?;
         if kind == "context" {
             words[0] = "_exercise-context-private".into();
         }
@@ -270,24 +310,6 @@ fn request(home: &Path, runs: &Path, identity: &str, kind: &str) -> loop_home::C
     } else {
         exercise::home_layout_private_argv("alpha", "R", identity, home)
     }
-    .expect("private vector");
-    let mut argv = vec![
-        "unshare".into(),
-        runtime_preparation::binary().display().to_string(),
-    ];
-    argv.extend(body);
-    let destination = checkout_parent(home);
-    let held_destination = fs::File::open(&destination).expect("destination").into();
-    reader_entry::command(
-        Path::new("/usr/bin/podman"),
-        &argv,
-        home,
-        &home_fd,
-        runs,
-        &runs_fd,
-        (kind == "checkout").then_some((destination.as_path(), &held_destination)),
-    )
-    .expect("production reader composer")
 }
 
 fn exercise_checkpoint_words(home: &Path) -> Result<Vec<String>, crate::LaneError> {
@@ -321,7 +343,7 @@ fn assert_roles(manifest: &Value, kind: &str) {
             4
         } else if matches!(
             kind,
-            "observed" | "follow" | "context" | "measure" | "harvest-recover"
+            "inspect" | "observed" | "follow" | "context" | "measure" | "harvest-recover"
         ) {
             5
         } else {
@@ -348,7 +370,7 @@ fn assert_roles(manifest: &Value, kind: &str) {
             ]
         );
     }
-    if matches!(kind, "measure" | "harvest-recover") {
+    if matches!(kind, "measure" | "harvest-recover" | "inspect") {
         let roles: Vec<_> = manifest["records"]
             .as_array()
             .expect("records")
@@ -519,6 +541,7 @@ fn replace_tool(
         "home-layout" => "exercise-home-layout",
         "measure" => "exercise-measure",
         "observed" => "observed-hosts",
+        "inspect" => "inspect-round",
         "follow" => "follow",
         "context" => "exercise-context",
         "checkpoint" => "checkpoint",
@@ -714,6 +737,13 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
 /// # Panics
 /// Panics if a successful reader changes its public output or evidence boundary.
 fn successful_observation(output: &std::process::Output, kind: &str) {
+    if kind == "inspect" {
+        let report: Value = serde_json::from_slice(&output.stdout).expect("inspection JSON");
+        assert_eq!(report["command"], "inspect-round", "{report}");
+        assert_eq!(report["thread_id"], "fixture-thread", "{report}");
+        return;
+    }
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     if kind == "follow" {
         let lines: Vec<Value> = stdout
@@ -915,6 +945,116 @@ for name in ['events.jsonl','context.jsonl','.event-start']:
             measure(home, runs, &identity, kind, case);
         }
     }
+}
+
+/// # Panics
+/// Panics if production round inspection loses a capability or reads replacement configuration.
+fn inspection_cases(home: &Path, runs: &Path, record: &mut Value) {
+    seed_inspection(home, runs, record);
+    for &case in READER_CASES {
+        if reader_case("inspect", case) {
+            measure(home, runs, "", "inspect", case);
+        }
+    }
+}
+
+/// # Panics
+/// Panics if the namespace cannot seed loop-owned round evidence for production inspection.
+fn seed_inspection(home: &Path, runs: &Path, record: &mut Value) {
+    let step = runs.join("R/fixture-dispatch");
+    record["thread_id"] = json!("fixture-thread");
+    record["phase"] = json!("preparing");
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled","driver_dir":step}]);
+    crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
+        .expect("inspection reservation");
+    let script = r#"
+import os,sys,tomllib
+from pathlib import Path
+home=Path(sys.argv[1]);runs=Path(sys.argv[2]);root=runs/'R';step=root/'fixture-dispatch'
+uid=tomllib.loads((home/'.config/loops/registry.toml').read_text())['loops'][0]['uid']
+step.mkdir(exist_ok=True)
+for p in [root,step]: os.chown(p,uid,uid);os.chmod(p,0o700)
+for name,data in [('events.jsonl','{"type":"thread.started","thread_id":"fixture-thread"}\n'),
+                  ('.event-start','0\n')]:
+ p=step/name;p.write_text(data);os.chown(p,uid,uid);os.chmod(p,0o600)
+"#;
+    let output = helper_service::namespace_python(home, script, runs.to_str().expect("runs"))
+        .expect("seed inspection");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// # Panics
+/// Panics if the production inspection entry cannot publish its next-round request.
+fn inspect_record(home: &Path, runs: &Path, record: &mut Value) {
+    seed_inspection(home, runs, record);
+    record["active_round"] = json!("work");
+    record["rounds"]
+        .as_array_mut()
+        .expect("rounds")
+        .push(json!({"step":"work","phase":"preparing","budget_seconds":60}));
+    record["mail"] = json!([{"step":"work","delivery":"fixture-delivery"}]);
+    crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
+        .expect("recording reservation");
+    let script = r"
+import os,sys,tomllib
+from pathlib import Path
+home=Path(sys.argv[1]);runs=Path(sys.argv[2]);root=runs/'R';runtime=root/'launch'
+uid=tomllib.loads((home/'.config/loops/registry.toml').read_text())['loops'][0]['uid']
+runtime.mkdir(exist_ok=True);os.chown(runtime,uid,uid);os.chmod(runtime,0o700)
+f=runtime/'runtime.env'
+f.write_bytes(('HOME='+str(root)+'\0SUPERLOOP_CLIENT_ROOT_DEV=0\0'
+ +'SUPERLOOP_CLIENT_ROOT_INO=0\0SUPERLOOP_CLIENT_SOCKET_NAME=.container-R.sock\0').encode())
+os.chown(f,0,uid);os.chmod(f,0o440)
+";
+    let output = helper_service::namespace_python(home, script, runs.to_str().expect("runs"))
+        .expect("runtime evidence");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut command = request(home, runs, "", "inspect");
+    let position = command
+        .argv
+        .iter()
+        .position(|word| word == "--verified-runs-root")
+        .expect("suffix");
+    command.argv.splice(
+        position..position,
+        ["--record", "work", "--budget", "60"].map(String::from),
+    );
+    let output = runtime_preparation::run(&command);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    successful_observation(&output, "inspect");
+    let readback = r"
+import os,sys,json
+from pathlib import Path
+p=Path(sys.argv[2])/'R/round-launch-work.json'
+s=p.stat();print(json.dumps({'record':json.loads(p.read_text()),'mode':s.st_mode&0o7777,
+ 'uid':s.st_uid,'directory_uid':p.parent.stat().st_uid}))
+";
+    let output = helper_service::namespace_python(home, readback, runs.to_str().expect("runs"))
+        .expect("request readback");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let observed: Value = serde_json::from_slice(&output.stdout).expect("request JSON");
+    assert_eq!(observed["mode"], 0o600);
+    assert_eq!(observed["uid"], observed["directory_uid"]);
+    assert_eq!(observed["record"]["step"], "work");
+    assert_eq!(observed["record"]["thread_id"], "fixture-thread");
+    assert_eq!(observed["record"]["budget_seconds"], 60);
+    assert_eq!(observed["record"]["mail"], record["mail"][0]);
 }
 
 // The seed and all reported Git objects come from this real program probe.

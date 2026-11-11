@@ -2557,15 +2557,7 @@ mod tests {
 
         if std::env::var("SUPERLOOP_RESUME_ENTRY_FIXTURE").as_deref() == Ok("inspect") {
             let h = PathBuf::from(std::env::var_os("HOME").expect("fixture home"));
-            let owner = Uid::effective().as_raw();
-            let fds = home::receive_private_descriptors(&std::io::stdin(), 2)
-                .expect("inspection descriptors");
-            let _guard = home::activate_private_launch(&h, &fds[0], &h, &fds[1], None, owner)
-                .expect("mapped custody");
-            let result = rounds::inspect_current_round(&h, "alpha", "R", None)
-                .expect("production private inspection");
-            std::fs::write(h.join("inspection.json"), result.to_string())
-                .expect("inspection result");
+            threadless_inspection(&h);
             return;
         }
         if std::env::var_os("SUPERLOOP_RESUME_ENTRY_FIXTURE").is_none() {
@@ -2617,6 +2609,90 @@ mod tests {
         row_144_cleanup_uses_owner_not_worker();
     }
 
+    fn threadless_inspection(h: &Path) {
+        use loop_home::anchor::{
+            Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement, Transport,
+        };
+        let manifest = Manifest::parse(
+            &std::env::var("SUPERLOOP_RESUME_ANCHORS").expect("inspection manifest"),
+        )
+        .expect("manifest");
+        let socket = std::os::unix::net::UnixStream::from(
+            nix::unistd::dup(std::io::stdin()).expect("input socket"),
+        );
+        let descriptors =
+            loop_home::anchor::transport::receive(&socket, 5, std::time::Duration::from_secs(30))
+                .expect("inspection rights frame");
+        // This host-identity stand-in deliberately shares its home and runs root.
+        // The real namespace acceptance separately requires distinct roots.
+        let requirements = [
+            "owner-home",
+            "runs-root",
+            "entry-executable",
+            "hash-executable",
+            "configuration",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(slot, purpose)| {
+            let program = matches!(slot, 2 | 3);
+            Requirement {
+                purpose: purpose.into(),
+                policy: Policy {
+                    kind: if program { Kind::File } else { Kind::Directory },
+                    owner: if slot == 3 {
+                        Owner::RootFile
+                    } else {
+                        Owner::Host
+                    },
+                    mode: if program {
+                        ModePolicy::Executable
+                    } else {
+                        ModePolicy::Exact(0o700)
+                    },
+                },
+                alias_group: (slot < 2).then(|| "fixture-root".into()),
+            }
+        })
+        .collect::<Vec<_>>();
+        let mut anchors = Receiver::current()
+            .expect("receiver")
+            .validate(
+                &manifest,
+                descriptors,
+                "inspect-round",
+                "alpha",
+                Transport::Rights,
+                &requirements,
+            )
+            .expect("inspection custody");
+        crate::container_entry::check_image("inspect-round", &anchors[2]).expect("entry image");
+        let configuration = anchors.pop().expect("configuration");
+        let hash = anchors.pop().expect("hash");
+        let _programs = crate::container_entry::activate_program_map(
+            "inspect-round",
+            std::collections::BTreeMap::from([(
+                PathBuf::from("/usr/bin/sha256sum"),
+                std::sync::Arc::new(hash),
+            )]),
+        );
+        let _home = home::activate_private_launch(
+            h,
+            &anchors[0],
+            h,
+            &anchors[1],
+            None,
+            Uid::effective().as_raw(),
+        )
+        .expect("mapped custody");
+        let _configuration =
+            crate::container_entry::configuration(h, "alpha", "inspect-round", configuration)
+                .expect("configuration custody");
+        let result = rounds::inspect_current_round(h, "alpha", "R", None)
+            .expect("production inspection reader");
+        std::fs::write(h.join("inspection.json"), result.to_string()).expect("inspection result");
+    }
+
     fn exited_container_runtime(h: &Path, program: &Path) -> Value {
         let container = json!({"id":"a".repeat(64),"name":"superloop-lane-alpha-R-attempt-1",
             "labels":{"org.superloop.loop":"alpha","org.superloop.run":"R"},
@@ -2650,7 +2726,8 @@ elif args[0] == 'unshare':
         if '--record' in args:
             print('fixture-round-evidence-stop', file=sys.stderr)
             sys.exit(17)
-        env = dict(os.environ, SUPERLOOP_RESUME_ENTRY_FIXTURE='inspect')
+        env = dict(os.environ, SUPERLOOP_RESUME_ENTRY_FIXTURE='inspect',
+                   SUPERLOOP_RESUME_ANCHORS=args[-1])
         result = subprocess.run([args[1], '--exact', 'launch::settle::tests::interrupted_dispatch_without_thread_continues_in_same_run'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode:
             sys.stderr.buffer.write(result.stdout + result.stderr)

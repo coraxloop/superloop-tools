@@ -1191,6 +1191,7 @@ fn hash_bytes(bytes: &[u8], spec: &ChildSpec) -> Result<String, LaneError> {
                     | "driver-report-private"
                     | "follow-private"
                     | "import-private"
+                    | "round-private"
                     | "checkpoint-private"
                     | "checkout-private"
                     | "harvest-private"

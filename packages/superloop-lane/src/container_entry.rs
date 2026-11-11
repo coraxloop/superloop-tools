@@ -90,7 +90,12 @@ fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
         &REPORT_PURPOSES
     } else if matches!(
         operation,
-        "observed-hosts" | "follow" | "exercise-context" | "exercise-measure" | "harvest-recover"
+        "inspect-round"
+            | "observed-hosts"
+            | "follow"
+            | "exercise-context"
+            | "exercise-measure"
+            | "harvest-recover"
     ) {
         &OBSERVATION_PURPOSES
     } else if matches!(
@@ -127,6 +132,7 @@ pub(crate) fn operation_error(operation: &str, error: impl std::fmt::Display) ->
         "observed-hosts" => "observation-anchor",
         "driver-report" => "driver-report-private",
         "follow" => "follow-private",
+        "inspect-round" => "round-private",
         "checkpoint" => "checkpoint-private",
         "checkout" => "checkout-private",
         "mark-imported" => "import-private",
@@ -1036,7 +1042,8 @@ pub(crate) fn receive_for(
                         || record.owner_uid == 0
                         || (matches!(
                             operation,
-                            "observed-hosts"
+                            "inspect-round"
+                                | "observed-hosts"
                                 | "driver-report"
                                 | "follow"
                                 | "exercise-context"
@@ -1142,6 +1149,7 @@ mod tests {
             ("observed-hosts", "observation-anchor"),
             ("driver-report", "driver-report-private"),
             ("follow", "follow-private"),
+            ("inspect-round", "round-private"),
             ("checkpoint", "checkpoint-private"),
             ("checkout", "checkout-private"),
             ("mark-imported", "import-private"),

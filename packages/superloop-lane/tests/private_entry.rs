@@ -390,7 +390,18 @@ fn other_bite_private_entries_bind_their_owner_home() {
     fs::create_dir(&outside).expect("outside");
     let home_word = home.display().to_string();
     let object = "a".repeat(40);
-    let forms: [(&str, Vec<String>, bool); 6] = [
+    let forms: [(&str, Vec<String>, bool); 7] = [
+        (
+            "round",
+            vec![
+                "_inspect-round".into(),
+                "alpha".into(),
+                "R".into(),
+                "--owner-home".into(),
+                home_word.clone(),
+            ],
+            false,
+        ),
         (
             "checkpoint",
             superloop_lane::launch::checkpoint::private_checkpoint_argv(
@@ -473,11 +484,13 @@ fn other_bite_private_entries_bind_their_owner_home() {
         let refusal = String::from_utf8(output.stderr).expect("refusal text");
         if matches!(
             name,
-            "follow" | "checkpoint" | "checkout" | "harvest" | "import"
+            "round" | "follow" | "checkpoint" | "checkout" | "harvest" | "import"
         ) {
             assert_eq!(output.status.code(), Some(2));
             let operation = if name == "import" {
                 "mark-imported"
+            } else if name == "round" {
+                "inspect-round"
             } else {
                 name
             };

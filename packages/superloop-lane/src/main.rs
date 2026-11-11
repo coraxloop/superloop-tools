@@ -74,7 +74,6 @@ fn bind_private_launch_args<'a>(
                 | "_make-home"
                 | "_bind-mail"
                 | "_bind-reply"
-                | "_inspect-round"
                 | "_rotation-handover"
         )
     );
@@ -786,44 +785,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             args[0] == "_bind-reply",
             verify_only,
         )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_inspect-round") {
-        let [_, loop_name, run, option, owner_home, rest @ ..] = args else {
-            return Err(LaneError::input(
-                "round-private",
-                "private round inspection is incomplete",
-            ));
-        };
-        if option != "--owner-home" {
-            return Err(LaneError::input(
-                "round-private",
-                "private round inspection needs --owner-home",
-            ));
-        }
-        let evidence = match rest {
-            [] => None,
-            [record_option, step, budget_option, seconds]
-                if record_option == "--record" && budget_option == "--budget" =>
-            {
-                Some((
-                    step.as_str(),
-                    seconds
-                        .parse::<u64>()
-                        .map_err(|_| LaneError::input("round-private", "budget is malformed"))?,
-                ))
-            }
-            _ => {
-                return Err(LaneError::input(
-                    "round-private",
-                    "private round evidence form is malformed",
-                ));
-            }
-        };
-        let report =
-            launch::rounds::private_inspect(Path::new(owner_home), loop_name, run, evidence)?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);

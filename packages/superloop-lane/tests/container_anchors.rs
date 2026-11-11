@@ -1087,6 +1087,19 @@ fn composer_override_child(home: &Path) {
     reader_composers_refuse_override(home, program, &fd);
 }
 
+fn reader_refusal_kind(operation: &str) -> &str {
+    match operation {
+        "observed-hosts" => "observation-anchor",
+        "driver-report" => "driver-report-private",
+        "mark-imported" => "import-private",
+        "inspect-round" => "round-private",
+        "checkpoint" => "checkpoint-private",
+        "harvest" | "harvest-recover" => "harvest-private",
+        "follow" => "follow-private",
+        _ => "exercise-anchor",
+    }
+}
+
 /// # Panics
 /// Panics if a reader composer inspects pins before refusing an ambient override.
 fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
@@ -1094,6 +1107,7 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
         "exercise-harvest",
         "exercise-home-layout",
         "exercise-measure",
+        "inspect-round",
         "observed-hosts",
         "driver-report",
         "follow",
@@ -1119,7 +1133,10 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
             argv[5] = "--backend".into();
             argv[6] = "codex".into();
         }
-        if matches!(operation, "observed-hosts" | "checkpoint" | "mark-imported") {
+        if matches!(
+            operation,
+            "inspect-round" | "observed-hosts" | "checkpoint" | "mark-imported"
+        ) {
             argv.drain(5..7);
         }
         if operation == "mark-imported" {
@@ -1153,24 +1170,7 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
         else {
             panic!("reader composer accepted registry override");
         };
-        assert_eq!(
-            error.kind,
-            if operation == "observed-hosts" {
-                "observation-anchor"
-            } else if operation == "driver-report" {
-                "driver-report-private"
-            } else if operation == "mark-imported" {
-                "import-private"
-            } else if operation == "checkpoint" {
-                "checkpoint-private"
-            } else if matches!(operation, "harvest" | "harvest-recover") {
-                "harvest-private"
-            } else if operation == "follow" {
-                "follow-private"
-            } else {
-                "exercise-anchor"
-            }
-        );
+        assert_eq!(error.kind, reader_refusal_kind(operation));
         assert!(
             error.detail.contains(&format!(
                 "anchor-declaration: operation={operation} purpose=registry-override"
