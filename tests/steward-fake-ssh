@@ -47,6 +47,9 @@ if [ -n "${FAKE_STEWARD_SSH_SNAPSHOT:-}" ]; then
   read -r exporter verb rest <<< "$1"
   case $verb in
     list)
+      if [ "${FAKE_STEWARD_LIST_DELAY_SECONDS:-0}" != 0 ]; then
+        sleep "$FAKE_STEWARD_LIST_DELAY_SECONDS"
+      fi
       while IFS= read -r line; do printf '%s\n' "$line"; done < "$FAKE_STEWARD_SSH_SNAPSHOT/list"
       ;;
     read)

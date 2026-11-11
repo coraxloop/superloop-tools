@@ -9,6 +9,7 @@ struct Fixture {
     data: RefCell<Vec<u8>>,
     elapsed: Cell<Duration>,
     reads: Cell<usize>,
+    lists: Cell<usize>,
 }
 
 impl Fixture {
@@ -21,12 +22,14 @@ impl Fixture {
             data: RefCell::new(b"{\"type\":\"user\",\"message\":\"first\"}\n".to_vec()),
             elapsed: Cell::new(Duration::ZERO),
             reads: Cell::new(0),
+            lists: Cell::new(0),
         }
     }
 
     fn run(&self, watch: bool, advance: bool) -> (u8, String) {
         self.elapsed.set(Duration::ZERO);
         self.reads.set(0);
+        self.lists.set(0);
         let args = Poll {
             connection: Connection {
                 ssh_config: Some(self.root.path().join("config")),
@@ -40,7 +43,7 @@ impl Fixture {
         let settings = Settings {
             feed: Duration::from_millis(4000),
             total: Duration::from_millis(if watch { 300 } else { 4000 }),
-            pause: Duration::from_millis(300),
+            pause: Duration::from_millis(100),
             timeout: Duration::from_millis(1000),
             chunk: 65536,
             tail: 4096,
@@ -77,7 +80,10 @@ impl transcript::Runtime for Fixture {
         let words: Vec<_> = command.split_whitespace().collect();
         let data = self.data.borrow();
         let stdout = match words[1] {
-            "list" => format!("project/session.jsonl\t{}\t1:1\t1:1\n", data.len()).into_bytes(),
+            "list" => {
+                self.lists.set(self.lists.get() + 1);
+                format!("project/session.jsonl\t{}\t1:1\t1:1\n", data.len()).into_bytes()
+            }
             "read" => {
                 assert_eq!(words[2], "'project/session.jsonl'");
                 let offset: usize = words[3].parse().unwrap();
@@ -143,4 +149,15 @@ fn controlled_clock_preserves_bare_inspection_and_second_caller_cursor() {
     assert!(!output.contains("first") && !output.contains("partial"));
     assert_eq!(metadata(&beta), beta_before);
     assert!(!f.run(false, false).1.contains("second"));
+}
+
+/// ´test:unit:controlled-clock-repeats-empty-feeds-before-watch-expiry´
+#[test]
+fn controlled_clock_repeats_empty_feeds_before_watch_expiry() {
+    let fixture = Fixture::new();
+    assert_eq!(fixture.run(false, true).0, 0);
+    let (status, output) = fixture.run(true, false);
+    assert_eq!(status, 2);
+    assert_eq!(fixture.lists.get(), 3);
+    assert_eq!(output, "STEWARD-TRANSCRIPT-DURATION-MS 300 server=alpha\n");
 }
