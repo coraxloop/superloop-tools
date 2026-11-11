@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Pin the Claude fixture transaction's bound-evidence read-back, dead-helper exclusion and authority panic cancellation, and retain uncertain source custody and child output on fixture failures; production behavior is unchanged (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``prob:box:helper-service-cancels-when-its-authority-thread-exits``; ``test:unit:claude-fixture-periodic-dead-helper``; ``test:unit:helper-authority-panic-cancels-service``; ``test:unit:claude-fixture-move-rechecks-custody-before-drop``; ``test:unit:claude-fixture-watchdog-retains-child-output``).
+
 - The inbox watcher readiness problem is closed with its record in the hook package's README: a loop takes the fix by restarting its inbox watcher from the updated recipe with the same command, and a watcher that is not restarted keeps working on its previous recipe (``prob:hooks:inbox-recipe-resets-its-readiness-before-each-watcher-launch``).
 
 - Exercise the test-only Claude periodic authority over a live fixture reservation, including event-controlled evidence and configuration scope loss, mapped worker publication and exact enclosing-storage inventory; production remains gated (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-periodic-publication``).

@@ -3338,6 +3338,54 @@ mod tests {
         );
     }
 
+    /// ´test:unit:helper-authority-panic-cancels-service´
+    #[test]
+    fn helper_authority_panic_cancels_service() {
+        let fixture = TempDir::new().expect("fixture");
+        let home = fixture.path();
+        fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("mode");
+        let runs = home.join("runs");
+        let driver = runs.join("R");
+        fs::create_dir_all(&driver).expect("driver");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("mode");
+        let held = fs::File::open(home).expect("held home");
+        let _private =
+            crate::home::activate_handed_home(home, &held, nix::unistd::Uid::effective().as_raw())
+                .expect("private home");
+        let custody = super::CredentialThreadCustody::capture_admitted(BoxBackend::Claude, &Gate)
+            .expect("Gate custody");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread = super::spawn_credential_authority_at(
+            home.to_path_buf(),
+            "alpha".into(),
+            runs,
+            driver,
+            BoxBackend::Claude,
+            Arc::clone(&cancelled),
+            (
+                "http://127.0.0.1:1/unused".into(),
+                custody,
+                |_: &AtomicBool| panic!("injected authority wait panic"),
+            ),
+        )
+        .expect("actual spawner");
+        let panic = thread.join().expect_err("authority wait panics");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"injected authority wait panic")
+        );
+        assert!(
+            cancelled.load(Ordering::Acquire),
+            "authority panic cancels service"
+        );
+        assert!(
+            protected.join("credential-refresh.json").is_file(),
+            "wait follows real pass"
+        );
+    }
+
     /// ´test:unit:helper-authority-waits-for-pass-release´
     #[test]
     fn helper_authority_waits_for_pass_release() {

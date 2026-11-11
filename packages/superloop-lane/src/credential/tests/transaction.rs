@@ -8,6 +8,7 @@ struct Host {
     root: Option<tempfile::TempDir>,
     held: fs::File,
     identity: (u64, u64),
+    sources: Option<[(u64, u64); 2]>,
     child: Option<ClaudeNamespaceChild>,
 }
 impl Host {
@@ -17,12 +18,44 @@ impl Host {
         if let Some(mut child) = self.child.take() {
             assert!(child.stop(), "transaction namespace did not stop");
         }
+        self.check_sources()
+            .expect("enclosing source custody before removal");
         claude_cleanup_contents_at(&self.held, true).expect("whole enclosing mapped cleanup");
         let same = fs::symlink_metadata(&path)
             .is_ok_and(|m| m.is_dir() && (m.dev(), m.ino()) == self.identity);
         if same {
             fs::remove_dir(path).expect("remove unchanged emptied enclosure");
         }
+    }
+    fn check_sources(&self) -> Result<(), &'static str> {
+        let Some(expected) = self.sources else {
+            return Ok(());
+        };
+        let enclosing = PathBuf::from(format!("/proc/self/fd/{}", self.held.as_raw_fd()));
+        let mut parents = vec![enclosing.clone()];
+        for entry in fs::read_dir(&enclosing).map_err(|_| "enclosing directory")? {
+            let entry = entry.map_err(|_| "enclosing entry")?;
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("lane-claude-admission-")
+            {
+                if !entry.file_type().map_err(|_| "root kind")?.is_dir() {
+                    return Err("factory root kind");
+                }
+                parents.push(entry.path());
+            }
+        }
+        for parent in parents {
+            for (name, identity) in ["owner", "runs"].into_iter().zip(expected) {
+                match fs::symlink_metadata(parent.join(name)) {
+                    Ok(m) if m.is_dir() && (m.dev(), m.ino()) == identity => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return Err("moved directory identity differs"),
+                }
+            }
+        }
+        Ok(())
     }
 }
 impl Drop for Host {
@@ -54,10 +87,15 @@ fn launch(name: &str) -> Host {
         .open(root.path())
         .expect("held E");
     let m = held.metadata().expect("E identity");
+    let sources = ["owner", "runs"].map(|name| {
+        let m = fs::symlink_metadata(root.path().join(name)).expect("host-created source");
+        (m.dev(), m.ino())
+    });
     let mut host = Host {
         root: Some(root),
         held,
         identity: (m.dev(), m.ino()),
+        sources: Some(sources),
         child: None,
     };
     let enclosing = host.root.as_ref().expect("E").path();
@@ -133,24 +171,42 @@ fn wait_event(host: &mut Host, name: &str) {
         if root.join(name).exists() {
             return;
         }
-        assert!(
-            host.child
-                .as_mut()
-                .expect("child")
-                .try_wait()
-                .expect("status")
-                .is_none(),
-            "transaction exited before event {name}"
-        );
-        assert!(
-            std::time::Instant::now() < deadline,
-            "transaction event {name} timed out"
-        );
+        if host
+            .child
+            .as_mut()
+            .expect("child")
+            .try_wait()
+            .expect("status")
+            .is_some()
+        {
+            fail_with_output(host, &format!("transaction exited before event {name}"));
+        }
+        if std::time::Instant::now() >= deadline {
+            fail_with_output(host, &format!("transaction event {name} timed out"));
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+fn fail_with_output(host: &mut Host, event: &str) -> ! {
+    let mut child = host.child.take().expect("diagnostic child");
+    let stopped = child.stop();
+    let output = child.wait_with_output().expect("failed child output");
+    panic!(
+        "{event}; namespace stopped={stopped}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn finish(host: &mut Host, success: bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    finish_until(
+        host,
+        success,
+        std::time::Instant::now() + Duration::from_secs(180),
+    );
+}
+
+fn finish_until(host: &mut Host, success: bool, deadline: std::time::Instant) {
     while host
         .child
         .as_mut()
@@ -159,10 +215,9 @@ fn finish(host: &mut Host, success: bool) {
         .expect("status")
         .is_none()
     {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "transaction outer watchdog"
-        );
+        if std::time::Instant::now() >= deadline {
+            fail_with_output(host, "transaction outer watchdog");
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
     let output = host
@@ -186,6 +241,13 @@ fn finish(host: &mut Host, success: bool) {
 }
 
 fn moved_root(enclosing: &Path) -> (Arc<FixtureRoot>, Vec<loop_home::anchor::Anchor>) {
+    moved_root_after(enclosing, || {})
+}
+
+fn moved_root_after(
+    enclosing: &Path,
+    before_move: impl FnOnce(),
+) -> (Arc<FixtureRoot>, Vec<loop_home::anchor::Anchor>) {
     let manifest = std::env::var("CLAUDE_STANDIN_MANIFEST").expect("manifest");
     let (_, anchors) = crate::container_entry::receive_for(
         &manifest,
@@ -203,11 +265,33 @@ fn moved_root(enclosing: &Path) -> (Arc<FixtureRoot>, Vec<loop_home::anchor::Anc
         assert_eq!((named.dev(), named.ino()), (held.st_dev, held.st_ino));
     }
     let root = FixtureRoot::create(&enclosing.join("live")).expect("child-created root");
-    for name in ["owner", "runs"] {
-        fs::rename(enclosing.join(name), root.path().join(name)).expect("move held directory");
+    before_move();
+    let moved = move_sources(enclosing, &root, &anchors);
+    if let Err(error) = moved {
+        // No recursive drop is authorized for an unverified directory moved into the root.
+        // The host checks the retained source identities after stopping the namespace, too.
+        std::mem::forget(root);
+        panic!("injected child unwind: {error}");
     }
     (root, anchors)
 }
+fn move_sources(
+    enclosing: &Path,
+    root: &FixtureRoot,
+    anchors: &[loop_home::anchor::Anchor],
+) -> Result<(), &'static str> {
+    for (name, anchor) in ["owner", "runs"].into_iter().zip(anchors) {
+        let destination = root.path().join(name);
+        fs::rename(enclosing.join(name), &destination).map_err(|_| "source rename")?;
+        let named = fs::symlink_metadata(destination).map_err(|_| "moved directory metadata")?;
+        let held = nix::sys::stat::fstat(anchor).map_err(|_| "held source metadata")?;
+        if !named.is_dir() || (named.dev(), named.ino()) != (held.st_dev, held.st_ino) {
+            return Err("moved directory identity differs");
+        }
+    }
+    Ok(())
+}
+
 fn mapped_storage(root: &FixtureRoot) -> PathBuf {
     let old = claude_standin_worker(&root.path().join("runs"));
     let parent = root.path().join("owner/.cache/tmp");
@@ -262,6 +346,7 @@ fn transaction_body(enclosing: &Path, action: TransactionAction) {
     let (root, mut anchors) = moved_root(enclosing);
     let owner = root.path().join("owner");
     let runs = root.path().join("runs");
+    census_settings(&owner, &runs);
     let _configuration = crate::container_entry::configuration(
         &owner,
         "alpha",
@@ -435,7 +520,6 @@ fn cleanup_body(enclosing: &Path, panic: bool) {
     let (root, _anchors) = moved_root(enclosing);
     let _worker = mapped_storage(&root);
     fs::write(enclosing.join("ready"), b"ready").expect("ready");
-    assert_eq!(Arc::strong_count(&root), 1);
     assert!(!panic, "injected child unwind");
     std::thread::sleep(Duration::from_secs(120));
     panic!("case exceeded absolute deadline");
@@ -554,6 +638,7 @@ fn claude_fixture_cleanup_failure_keeps_replacement() {
         root: Some(root),
         held: fs::File::open(invalid).expect("non-directory descriptor"),
         identity: (metadata.dev(), metadata.ino()),
+        sources: None,
         child: None,
     };
     let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(host)))
@@ -581,6 +666,7 @@ fn claude_fixture_cleanup_failure_keeps_replacement() {
 struct PeriodicThread {
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     done: Option<std::sync::mpsc::Receiver<std::thread::Result<Result<(), LaneError>>>>,
+    release: Option<std::sync::mpsc::Sender<()>>,
 }
 impl PeriodicThread {
     fn observe(
@@ -594,10 +680,12 @@ impl PeriodicThread {
         Self {
             cancelled,
             done: Some(done),
+            release: None,
         }
     }
     #[allow(clippy::exit)]
     fn finish(&mut self) -> Result<(), LaneError> {
+        drop(self.release.take());
         self.cancelled
             .store(true, std::sync::atomic::Ordering::Release);
         let result = self
@@ -745,13 +833,73 @@ fn periodic_prior(worker: &Path) -> u64 {
     fs::metadata(path).expect("prior inode").ino()
 }
 
-fn periodic_evidence(runs: &Path) -> (Vec<u8>, u64) {
+fn periodic_evidence(
+    owner: &Path,
+    runs: &Path,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+    state: &str,
+) -> (Vec<u8>, u64) {
     let path = runs.join(".launch-R/credential-refresh.json");
     let bytes = fs::read(&path).expect("actual periodic evidence");
     let value: Value = serde_json::from_slice(&bytes).expect("evidence JSON");
-    assert_eq!(value["state"], "published", "first live publication");
-    assert_eq!(value["schema"], 2);
+    assert_eq!(value["state"], state, "first periodic evidence: {value}");
+    let binding = admission
+        .round_binding(owner, "alpha", &owner.join(".cache/tmp/lane-alpha-R"), 3000)
+        .expect("scoped evidence binding");
+    assert_eq!(
+        value["provider"]["required_sha256"],
+        binding.required_sha256(),
+        "published evidence carries the fixture binding"
+    );
+    validate_evidence(&value, binding).expect("actual bytes accepted by bound validator");
+    let held = crate::home::pin_parent(runs, 0).expect("held runs for production reader");
+    let error = read_evidence(&held, "R", 0).expect_err("production reader refuses fixture digest");
+    evidence_refusal(&error);
+    let error = crate::launch::census::run(owner, "alpha")
+        .expect_err("production census refuses fixture digest");
+    evidence_refusal(&error);
     (bytes, fs::metadata(path).expect("evidence inode").ino())
+}
+
+fn evidence_refusal(error: &LaneError) {
+    assert_eq!(
+        (error.status, error.kind),
+        (2, "credential-evidence"),
+        "{error:?}"
+    );
+    assert_eq!(error.detail, "credential evidence envelope is invalid");
+}
+
+fn census_settings(owner: &Path, runs: &Path) {
+    let config = owner.join(".config/loops/alpha");
+    let settings = format!(
+        concat!(
+            "runs_root = {:?}\nentry_bin = '/usr/bin/true'\ndriver_argv = ['/usr/bin/true']\n",
+            "image_digest = 'sha256:{}'\ntemplate_dir = {:?}\nsocket_dir = {:?}\n",
+            "resources = {{ memory_bytes = 2147483648, pids_max = 128, cpu_shares = 512 }}\n"
+        ),
+        runs,
+        "a".repeat(64),
+        owner.join("template"),
+        owner.join("sockets")
+    );
+    let registry = format!(
+        concat!(
+            "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\n",
+            "loops=[{{name='alpha',uid=64000,launch='dev/alpha',runs_root={:?}}}]\n"
+        ),
+        runs
+    );
+    for (path, text) in [
+        (config.join("workers.toml"), settings),
+        (
+            config.parent().expect("loops").join("registry.toml"),
+            registry,
+        ),
+    ] {
+        fs::write(&path, text).expect("synthetic census inputs");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("census mode");
+    }
 }
 
 fn periodic_success(
@@ -763,6 +911,26 @@ fn periodic_success(
     admission: &crate::runtime_admission::RuntimeAdmission,
     source: &Value,
 ) {
+    periodic_first(
+        (root, owner, runs, worker),
+        record,
+        admission,
+        source,
+        false,
+    );
+}
+
+fn periodic_first(
+    paths: (&FixtureRoot, &Path, &Path, &Path),
+    record: &mut Value,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+    source: &Value,
+    dead: bool,
+) {
+    let (root, owner, runs, worker) = paths;
+    if dead {
+        record["helper_pid"] = json!(crate::dead_pid::DEAD_LOCK_PID);
+    }
     periodic_stage(owner, runs, record);
     let prior = periodic_prior(worker);
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -792,8 +960,25 @@ fn periodic_success(
     thread
         .finish()
         .expect("clean authority cancellation and join");
-    periodic_evidence(runs);
-    periodic_leaf(worker, source, prior);
+    periodic_evidence(
+        owner,
+        runs,
+        admission,
+        if dead { "current" } else { "published" },
+    );
+    if dead {
+        let leaf = worker.join(".claude/.credentials.json");
+        assert_eq!(
+            fs::read(&leaf).expect("dead helper prior bytes"),
+            b"prior synthetic projection"
+        );
+        assert_eq!(
+            fs::metadata(leaf).expect("dead helper prior inode").ino(),
+            prior
+        );
+    } else {
+        periodic_leaf(worker, source, prior);
+    }
     let error =
         crate::container_helper::publish_round_credential_admitted(owner, "alpha", record, &Gate)
             .expect_err("public refusal after periodic transaction");
@@ -818,15 +1003,20 @@ fn periodic_scope_loss(
         (owner, runs, &runs.join("R")),
         Arc::clone(&cancelled),
         admission,
-        move |_: &std::sync::atomic::AtomicBool| {
+        move |cancelled: &std::sync::atomic::AtomicBool| {
             pass.send(()).expect("pass-complete event");
-            resume
-                .recv_timeout(Duration::from_secs(30))
-                .expect("pass-release event");
+            match resume.recv_timeout(Duration::from_secs(30)) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    cancelled.store(true, std::sync::atomic::Ordering::Release);
+                }
+                Err(error) => panic!("pass-release event: {error}"),
+            }
         },
     )
     .expect("event-driven fixture authority");
     let mut thread = PeriodicThread::observe(Arc::clone(&cancelled), thread);
+    thread.release = Some(release);
     observed
         .recv_timeout(Duration::from_secs(30))
         .expect("first periodic pass event");
@@ -834,22 +1024,54 @@ fn periodic_scope_loss(
         !cancelled.load(std::sync::atomic::Ordering::Acquire),
         "first pass remains live"
     );
-    let (evidence, inode) = periodic_evidence(runs);
+    let (evidence, inode) = periodic_evidence(owner, runs, admission, "published");
     let worker_inode = periodic_leaf(worker, source, prior);
     let retained = periodic_replace(root, owner, runs, source, configuration);
-    release.send(()).expect("release second periodic pass");
-    assert!(
-        matches!(
-            observed.recv_timeout(Duration::from_secs(30)),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
-        ),
-        "scope loss must end before a second pass-complete event"
-    );
+    thread
+        .release
+        .as_ref()
+        .expect("release sender")
+        .send(())
+        .expect("release second periodic pass");
+    scope_exit(&observed, &retained, &evidence);
     assert!(
         cancelled.load(std::sync::atomic::Ordering::Acquire),
         "in-loop refusal cancels service"
     );
     let error = thread.finish().expect_err("in-loop scope refusal");
+    scope_result(
+        (root, owner, runs, worker),
+        record,
+        source,
+        configuration,
+        (error, retained, evidence, inode, worker_inode),
+    );
+}
+
+fn scope_exit(observed: &std::sync::mpsc::Receiver<()>, retained: &Path, evidence: &[u8]) {
+    match observed.recv_timeout(Duration::from_secs(30)) {
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+        Ok(()) => {
+            assert_eq!(
+                fs::read(retained.join("credential-refresh.json")).expect("retained evidence"),
+                evidence,
+                "scope loss retains evidence before any second envelope"
+            );
+            panic!("scope loss must end before a second pass-complete event");
+        }
+        Err(error) => panic!("scope-exit event: {error}"),
+    }
+}
+
+fn scope_result(
+    paths: (&FixtureRoot, &Path, &Path, &Path),
+    record: &mut Value,
+    source: &Value,
+    configuration: bool,
+    result: (LaneError, PathBuf, Vec<u8>, u64, u64),
+) {
+    let (root, owner, _runs, worker) = paths;
+    let (error, retained, evidence, inode, worker_inode) = result;
     assert_eq!((error.status, error.kind), (2, "fixture-scope"));
     assert_eq!(
         error.detail,
@@ -988,6 +1210,7 @@ fn periodic_inventory(root: &FixtureRoot, variant: &str) {
         "file fixture/owner/.config/loops/alpha/claude/.credentials.json",
         "file fixture/owner/.config/loops/alpha/claude/.refresh.lock",
         "file fixture/owner/.config/loops/alpha/install-generation.json",
+        "file fixture/owner/.config/loops/alpha/workers.toml",
         "file fixture/owner/.config/loops/alpha/lanes/codex/auth.json",
         "file fixture/owner/.config/loops/registry.toml",
         "file fixture/runs/.launch-R/credential-refresh.json",
@@ -1026,4 +1249,116 @@ fn periodic_inventory(root: &FixtureRoot, variant: &str) {
         entries, expected,
         "exact whole-enclosure inventory {variant}"
     );
+}
+
+/// # Panics
+/// Panics if a dead host-view helper receives a periodic worker projection.
+/// ´test:unit:claude-fixture-periodic-dead-helper´
+#[test]
+fn claude_fixture_periodic_dead_helper() {
+    periodic_case("claude_fixture_periodic_dead_helper", |enclosing| {
+        transaction_body(
+            enclosing,
+            |root, owner, runs, worker, record, admission, source| {
+                periodic_first((root, owner, runs, worker), record, admission, source, true);
+            },
+        );
+    });
+}
+
+/// # Panics
+/// Panics if a source replaced after comparison is recursively removed during unwind.
+/// ´test:unit:claude-fixture-move-rechecks-custody-before-drop´
+#[test]
+fn claude_fixture_move_rechecks_custody_before_drop() {
+    if enter(
+        "claude_fixture_move_rechecks_custody_before_drop",
+        |enclosing| {
+            let _root = moved_root_after(enclosing, || {
+                fs::rename(enclosing.join("owner"), enclosing.join("owner-retained"))
+                    .expect("replace after comparison");
+                fs::create_dir(enclosing.join("owner")).expect("foreign directory");
+                fs::write(enclosing.join("owner/sentinel"), b"not in received custody")
+                    .expect("foreign sentinel");
+            });
+            panic!("injected child unwind after unchecked move");
+        },
+    ) {
+        return;
+    }
+    let mut host = launch("claude_fixture_move_rechecks_custody_before_drop");
+    let enclosing = host.root.as_ref().expect("E").path().to_path_buf();
+    finish(&mut host, false);
+    let factory = fs::read_dir(&enclosing)
+        .expect("retained E")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| {
+            path.file_name()
+                .expect("name")
+                .to_string_lossy()
+                .starts_with("lane-claude-admission-")
+        })
+        .expect("retained uncertain root");
+    let sentinel = factory.join("owner/sentinel");
+    let inode = fs::metadata(&sentinel).expect("retained sentinel").ino();
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.cleanup()))
+        .expect_err("host also refuses unreceived source");
+    let message = error.downcast_ref::<String>().expect("panic text");
+    assert!(
+        message.contains("moved directory identity differs"),
+        "{message}"
+    );
+    assert_eq!(
+        fs::read(&sentinel).expect("foreign bytes"),
+        b"not in received custody"
+    );
+    assert_eq!(fs::metadata(&sentinel).expect("foreign inode").ino(), inode);
+    // Dispose only this test's synthetic replacement; restore the host-created source.
+    fs::remove_file(&sentinel).expect("own synthetic sentinel");
+    fs::remove_dir(factory.join("owner")).expect("own empty replacement");
+    fs::rename(enclosing.join("owner-retained"), factory.join("owner"))
+        .expect("restore host-created source");
+    host.check_sources().expect("restored custody");
+    claude_cleanup_contents_at(&host.held, true).expect("cleanup restored fixture");
+    let named = fs::symlink_metadata(&enclosing).expect("same E");
+    assert_eq!((named.dev(), named.ino()), host.identity);
+    fs::remove_dir(&enclosing).expect("empty E");
+}
+
+/// # Panics
+/// Panics if a watchdog diagnostic discards the namespace child's output.
+/// ´test:unit:claude-fixture-watchdog-retains-child-output´
+#[test]
+fn claude_fixture_watchdog_retains_child_output() {
+    if enter(
+        "claude_fixture_watchdog_retains_child_output",
+        |enclosing| {
+            let (root, _anchors) = moved_root(enclosing);
+            writeln!(std::io::stdout(), "fixture-watchdog-stdout").expect("stdout");
+            writeln!(std::io::stderr(), "fixture-watchdog-stderr").expect("stderr");
+            fs::write(enclosing.join("ready"), b"ready").expect("ready");
+            std::thread::sleep(Duration::from_secs(120));
+            drop(root);
+            panic!("watchdog fixture exceeded bound");
+        },
+    ) {
+        return;
+    }
+    let mut host = launch("claude_fixture_watchdog_retains_child_output");
+    let enclosing = host.root.as_ref().expect("E").path().to_path_buf();
+    wait_event(&mut host, "ready");
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        finish_until(&mut host, true, std::time::Instant::now());
+    }))
+    .expect_err("watchdog refusal");
+    let message = error.downcast_ref::<String>().expect("diagnostic text");
+    for marker in [
+        "transaction outer watchdog",
+        "fixture-watchdog-stdout",
+        "fixture-watchdog-stderr",
+    ] {
+        assert!(message.contains(marker), "missing {marker}: {message}");
+    }
+    host.cleanup();
+    assert!(!enclosing.exists(), "watchdog cleanup removes real root");
 }
