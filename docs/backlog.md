@@ -1582,6 +1582,8 @@ Codex preparation resolves its nodes from the loop's active rows (``prob:homes:c
 
 (2026-11-10) Part (aq) is met: the custom reply target applies substring or exact filters, skips and ignored selection before entering the fixture, lists only a selected test, and accepts quiet flags. Isolated self-probes distinguish selected fixture dispatch from zero-test success and pin invalid arguments at exit 2. Production worker identity arguments still dispatch before test options.
 
+(2026-11-10) Part (ar) is met: bounded output explicitly replaces stdin with the null device; the separate spawn form keeps its supplied rights socket. A non-null `/dev/zero` control fails if output inherits that input. Timeout diagnostics retain stdout and stderr, and the inherited-pipe case pins both. The self-executable ledger keys use the common order. The support tests execute in the unit binary but retain the linter-required integration labels derived from their `tests/` path; changing them to unit labels produced two `wrong_inventory_label` refusals.
+
 **Problem (The host lane-home scans are removed with the host forms)** · `prob:homes:host-lane-home-scans-removed`
 
 **OPEN.** (2026-11-05, a part of (`prob:lanes:non-boxed-worker-support-removed`)) The scans that guard a host lane home, the Claude home move's live-driver scan over the owner uid's processes and the Codex home's scans for a live host driver, exist because a host driver may hold a home that a move or a repair rewrites; once no host driver runs, they are removed with the commands that call them, and the open question of the Claude scan's process evidence (`open:homes:claude-home-scan-process-evidence`) closes with them. The loop's sign-in homes stay, as the source the box's vendor proxy reads.

@@ -47,7 +47,8 @@ pub fn spawn(command: &mut Command, name: &str, limit: Duration) -> Result<Child
 }
 
 pub fn output(command: &mut Command, name: &str, limit: Duration) -> Result<Output, String> {
-    spawn(command, name, limit)?.wait()
+    // Output never gives the child input: a configured stdin is replaced by the null device.
+    spawn(command.stdin(Stdio::null()), name, limit)?.wait()
 }
 
 fn drain<R: std::io::Read>(pipe: &mut Option<R>, bytes: &mut Vec<u8>) -> Result<(), String> {
@@ -100,9 +101,10 @@ impl Child {
             }
             if Instant::now() >= self.deadline {
                 return Err(format!(
-                    "{}: fixture timeout; killing process group {}; stderr={}",
+                    "{}: fixture timeout; killing process group {}; stdout={}; stderr={}",
                     self.name,
                     self.process.id(),
+                    String::from_utf8_lossy(&stdout),
                     String::from_utf8_lossy(&stderr)
                 ));
             }
@@ -207,6 +209,12 @@ mod tests {
             command
         }
 
+        let mut reader = python("import sys; assert sys.stdin.buffer.read(1) == b''");
+        reader.stdin(std::fs::File::open("/dev/zero").expect("non-null control"));
+        let closed =
+            output(&mut reader, "null input", Duration::from_secs(5)).expect("bounded stdin read");
+        assert!(closed.status.success(), "{closed:?}");
+
         let child = spawn(
             &mut python("import time; time.sleep(30)"),
             "sleep",
@@ -226,6 +234,7 @@ mod tests {
             "import os,sys,time\n",
             "if os.fork() == 0:\n",
             " print('inherited pipe', file=sys.stderr, flush=True)\n",
+            " print('child trace', flush=True)\n",
             " time.sleep(30)\n",
             "else: os._exit(0)\n",
         );
@@ -234,6 +243,7 @@ mod tests {
             .expect_err("descendant keeps pipes open after the parent exits");
         assert!(error.contains("pipe: fixture timeout"), "{error}");
         assert!(error.contains("inherited pipe"), "{error}");
+        assert!(error.contains("stdout=child trace"), "{error}");
         assert!(start.elapsed() < Duration::from_secs(6));
     }
 

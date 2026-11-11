@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Bounded fixture output always gives the child the null device as standard input, as the replaced `Command::output` call did by default, instead of the test's own input, and retains both output streams in timeout diagnostics, with a non-null input control (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - The reply-session acceptance honours matching and nonmatching libtest filters, exact and skipped selections, listing, quiet and colour flags and libtest's `--option=value` spellings without accidentally running a filtered fixture (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Helper authority carries the same borrowed program binding through evidence construction and publication, retaining production evidence bytes and the compiled census boundary while custody tests pass an explicit runtime admission (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:helper-runtime-admission``).
