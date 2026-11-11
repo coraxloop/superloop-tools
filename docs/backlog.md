@@ -1621,6 +1621,8 @@ Codex preparation resolves its nodes from the loop's active rows (``prob:homes:c
 
 (2026-11-11) Private round inspection now receives the shared five-role reader bundle: home, runs, entry, hashing and configuration. Its plan's settings, registry and allocations come from the validated snapshot, step events and boundaries are opened beneath received runs custody, and recording a next-round request retains that directory through publication; private settlement's step-directory check and thread read take the same held walk. Namespace cases exercise read-only and recording forms and configuration replacement; a held-runs regression keeps event reads and publication on the renamed root. Rotation handover and the mail/reply entry remain separate migrations.
 
+(2026-11-11, lane r002g79) The inventory fixture’s cleanup assertions now surface metadata-query errors with `try_exists` before retaining their directory and regular-file checks. The parent alone still removes the home root; the previously recorded deleting-phase residual is unchanged.
+
 **Problem (The host lane-home scans are removed with the host forms)** · `prob:homes:host-lane-home-scans-removed`
 
 **OPEN.** (2026-11-05, a part of (`prob:lanes:non-boxed-worker-support-removed`)) The scans that guard a host lane home, the Claude home move's live-driver scan over the owner uid's processes and the Codex home's scans for a live host driver, exist because a host driver may hold a home that a move or a repair rewrites; once no host driver runs, they are removed with the commands that call them, and the open question of the Claude scan's process evidence (`open:homes:claude-home-scan-process-evidence`) closes with them. The loop's sign-in homes stay, as the source the box's vendor proxy reads.

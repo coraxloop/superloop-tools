@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Inventory fixture cleanup reports metadata-query errors when checking that the parent-owned root and marker remain, retaining the directory and regular-file checks (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - The closed dead-pid fixture record now preserves the dated measurement of recurring collision windows at the node’s pid churn (``prob:gates:fixtures-name-a-dead-process-by-a-number-no-process-can-hold``).
 
 - Exercise one test-only Claude helper round through held namespace custody, with mapped worker publication and enclosing-storage cleanup controls; production remains gated (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-admitted-round``).

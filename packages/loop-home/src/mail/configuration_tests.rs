@@ -923,7 +923,8 @@ fn inventory_configuration(home: &Path) -> PathBuf {
     config
 }
 /// # Panics
-/// Panics if mapped cleanup fails or removes the parent-owned root.
+/// Panics if mapped cleanup fails, removes the parent-owned root or its marker, or a metadata
+/// query on either fails.
 fn inventory_cleanup(home: &Path) {
     let cleanup = inventory_command(home, "cleanup")
         .fixture_output("inventory cleanup", Duration::from_secs(30))
@@ -934,11 +935,19 @@ fn inventory_cleanup(home: &Path) {
         String::from_utf8_lossy(&cleanup.stderr)
     );
     assert!(
-        home.is_dir(),
+        home.try_exists().expect("inspect retained root")
+            && home.metadata().expect("stat retained root").is_dir(),
         "cleanup phase must retain the parent-owned root"
     );
     assert!(
-        home.join(INVENTORY_MARKER).is_file(),
+        home.join(INVENTORY_MARKER)
+            .try_exists()
+            .expect("inspect retained marker")
+            && home
+                .join(INVENTORY_MARKER)
+                .metadata()
+                .expect("stat retained marker")
+                .is_file(),
         "cleanup must retain the marker"
     );
 }
