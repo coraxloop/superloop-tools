@@ -512,16 +512,19 @@ const INVENTORY_TEST: &str = "mail::directory::tests::binding_inventory_retains_
 const INVENTORY_PHASE: &str = "LOOP_HOME_INVENTORY_FIXTURE";
 const INVENTORY_MARKER: &str = "loop-home-inventory-fixture";
 
-/// A phase acts only on a home the parent created under the fixture name and marked.
+/// A phase acts only on a home the parent created: a directory, not a symlink, directly beneath
+/// the temporary directory, under the fixture name and marked.
 fn inventory_home() -> PathBuf {
     let home = PathBuf::from(std::env::var_os("LOOP_HOME_INVENTORY_HOME").expect("fixture home"));
     let named = home
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with("mail-inventory-"));
+    let placed = home.is_absolute() && home.parent() == Some(std::env::temp_dir().as_path());
+    let directory = fs::symlink_metadata(&home).is_ok_and(|info| info.is_dir());
     let marker = fs::symlink_metadata(home.join(INVENTORY_MARKER));
     assert!(
-        named && marker.is_ok_and(|info| info.is_file()),
+        named && placed && directory && marker.is_ok_and(|info| info.is_file()),
         "unmarked fixture home: {}",
         home.display()
     );
@@ -872,15 +875,26 @@ fn inventory_mutate(home: &Path, storage: &Path, case: &str) {
 struct InventoryFixture(PathBuf);
 impl Drop for InventoryFixture {
     fn drop(&mut self) {
-        if self.0.exists() {
-            bounded::cleanup(
-                &self.0,
-                inventory_command(&self.0, "cleanup")
-                    .fixture_output("inventory cleanup", Duration::from_secs(30)),
-            );
+        match self.0.try_exists() {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(error) => {
+                bounded::cleanup_failure(&self.0, &format!("inspect fixture: {error}"));
+                return;
+            }
+        }
+        let cleanup = inventory_command(&self.0, "cleanup")
+            .fixture_output("inventory cleanup", Duration::from_secs(30));
+        let mapped = cleanup.as_ref().is_ok_and(|out| out.status.success());
+        bounded::cleanup(&self.0, cleanup);
+        // Only the parent owns the create_dir result. A failed phase leaves the root whole, as
+        // the cleanup report's "retained" says, rather than half removed by the host user.
+        if mapped && let Err(error) = fs::remove_dir_all(&self.0) {
+            bounded::cleanup_failure(&self.0, &format!("remove parent root: {error}"));
         }
     }
 }
+
 fn inventory_configuration(home: &Path) -> PathBuf {
     let config = home.join(".config/loops");
     fs::create_dir_all(&config).expect("config");
@@ -907,6 +921,26 @@ fn inventory_configuration(home: &Path) -> PathBuf {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("mode");
     }
     config
+}
+/// # Panics
+/// Panics if mapped cleanup fails or removes the parent-owned root.
+fn inventory_cleanup(home: &Path) {
+    let cleanup = inventory_command(home, "cleanup")
+        .fixture_output("inventory cleanup", Duration::from_secs(30))
+        .expect("cleanup");
+    assert!(
+        cleanup.status.success(),
+        "cleanup: {}",
+        String::from_utf8_lossy(&cleanup.stderr)
+    );
+    assert!(
+        home.is_dir(),
+        "cleanup phase must retain the parent-owned root"
+    );
+    assert!(
+        home.join(INVENTORY_MARKER).is_file(),
+        "cleanup must retain the marker"
+    );
 }
 fn inventory_parent(case: &str) {
     use crate::anchor::{HostVerifier, Manifest, Transport};
@@ -988,14 +1022,7 @@ fn inventory_parent(case: &str) {
     )
     .expect("send rights");
     let output = child.wait().expect("measurement");
-    let cleanup = inventory_command(home, "cleanup")
-        .fixture_output("inventory cleanup", Duration::from_secs(30))
-        .expect("cleanup");
-    assert!(
-        cleanup.status.success(),
-        "cleanup: {}",
-        String::from_utf8_lossy(&cleanup.stderr)
-    );
+    inventory_cleanup(home);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success()
@@ -1018,11 +1045,10 @@ fn binding_inventory_retains_storage() {
             "cleanup" => {
                 for name in [".var", "held-storage", "held-private"] {
                     let path = home.join(name);
-                    if path.exists() {
+                    if path.try_exists().expect("inspect mapped fixture child") {
                         fs::remove_dir_all(path).expect("fixture cleanup");
                     }
                 }
-                fs::remove_dir_all(&home).expect("parent-owned fixture root cleanup");
             }
             case => inventory_case(&home, case),
         }

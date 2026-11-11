@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The inventory fixture removes its home root only from the parent that created it, and only after namespace cleanup has removed the mapped children; that cleanup retains the root and marker, its phases admit only a real directory directly beneath the temporary directory, and metadata failures are reported instead of treated as absence (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Bounded fixture output always gives the child the null device as standard input, as the replaced `Command::output` call did by default, instead of the test's own input, and retains both output streams in timeout diagnostics, with a non-null input control (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - The reply-session acceptance honours matching and nonmatching libtest filters, exact and skipped selections, listing, quiet and colour flags and libtest's `--option=value` spellings without accidentally running a filtered fixture (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
