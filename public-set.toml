@@ -2081,6 +2081,9 @@ pattern = "packages/superloop-lane/src/routes.rs"
 pattern = "packages/superloop-lane/src/runtime_admission.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/runtime_admission/fixture.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/runtime_entry.rs"
 
 [[include.rows]]
@@ -2112,6 +2115,9 @@ pattern = "packages/superloop-lane/src/signin_home/reconcile.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/signin_home/repair.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/tests/helper_admission.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/tests/helper_service.rs"

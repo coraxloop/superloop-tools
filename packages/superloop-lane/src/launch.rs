@@ -6710,6 +6710,10 @@ pub(crate) fn pinned_plan_from_record_admitted(
 ) -> Result<(Plan, Settings), LaneError> {
     let backend = crate::settings::BoxBackend::from_plan(&record["plan"])?;
     admission.check(backend)?;
+    #[cfg(test)]
+    admission.scope_names(owner_home, loop_name, run)?;
+    #[cfg(test)]
+    admission.scope_record(record)?;
     let (mut plan, settings) = crate::load_launch_plan_admitted(
         owner_home,
         loop_name,

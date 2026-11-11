@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Helper unit tests carry opaque fixture scope through consumer refusals and one-shot periodic custody, with root creation and held-anchor identity checks; production retains its closed Claude gate (``proto:superlooplane:helper-runtime-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
+
 - The inventory fixture removes its home root only from the parent that created it, and only after namespace cleanup has removed the mapped children; that cleanup retains the root and marker, its phases admit only a real directory directly beneath the temporary directory, and metadata failures are reported instead of treated as absence (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - Bounded fixture output always gives the child the null device as standard input, as the replaced `Command::output` call did by default, instead of the test's own input, and retains both output streams in timeout diagnostics, with a non-null input control (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).

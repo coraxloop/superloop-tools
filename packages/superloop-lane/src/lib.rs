@@ -258,7 +258,12 @@ pub(crate) fn load_launch_plan_admitted(
     let settings = read_plan_settings(home, loop_name, run)?;
     let backend = settings.launch_backend(backend)?;
     admission.check(backend)?;
-    load_plan_with_settings(home, loop_name, run, caller, true, settings, backend)
+    #[cfg(test)]
+    admission.scope_names(home, loop_name, run)?;
+    let loaded = load_plan_with_settings(home, loop_name, run, caller, true, settings, backend)?;
+    #[cfg(test)]
+    admission.scope_plan(&loaded.0.document)?;
+    Ok(loaded)
 }
 
 /// Load a protected run's paths without consulting a current door generation.

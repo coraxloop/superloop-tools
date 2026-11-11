@@ -1533,6 +1533,8 @@ pub(crate) fn publish_round_admitted(
     admission: &crate::runtime_admission::RuntimeAdmission,
 ) -> Result<Value, LaneError> {
     admission.check(backend)?;
+    #[cfg(test)]
+    admission.scope_round(owner_home, loop_name, run_home, worker_uid)?;
     if backend == BoxBackend::Claude {
         let expected_program =
             claude_program_pin_bound(owner_home, loop_name, admission.program_binding())?;
@@ -1706,18 +1708,23 @@ pub(crate) fn refresh_live_admitted(
     admission: &crate::runtime_admission::RuntimeAdmission,
 ) -> Result<RefreshReport, LaneError> {
     admission.check(backend)?;
+    #[cfg(test)]
+    admission.scope_periodic(owner_home, loop_name, runs_root)?;
     if backend == BoxBackend::Claude {
         let expected_program =
             claude_program_pin_bound(owner_home, loop_name, admission.program_binding())?;
         let home = claude_sign_in_dir(owner_home, loop_name);
-        return refresh_claude_live_at(
+        return refresh_claude_live_admitted_at(
             &home,
             loop_name,
             runs_root,
             now_seconds()?,
             published,
-            || claude_refresh_program(&home, &expected_program),
-            now_milliseconds,
+            (
+                || claude_refresh_program(&home, &expected_program),
+                now_milliseconds,
+                admission,
+            ),
         );
     }
     refresh_live_at(
@@ -1770,6 +1777,7 @@ fn refresh_live_at(
     )
 }
 
+#[cfg(test)]
 fn refresh_claude_live_at(
     home: &Path,
     loop_name: &str,
@@ -1779,6 +1787,35 @@ fn refresh_claude_live_at(
     refresh_program: impl Fn() -> Result<(), LaneError>,
     publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
 ) -> Result<RefreshReport, LaneError> {
+    refresh_claude_live_admitted_at(
+        home,
+        loop_name,
+        runs_root,
+        now,
+        published,
+        (
+            refresh_program,
+            publication_time_ms,
+            &crate::runtime_admission::RuntimeAdmission::Gate,
+        ),
+    )
+}
+
+fn refresh_claude_live_admitted_at(
+    home: &Path,
+    loop_name: &str,
+    runs_root: &Path,
+    now: u64,
+    published: &mut BTreeMap<PathBuf, Vec<u8>>,
+    provider: (
+        impl Fn() -> Result<(), LaneError>,
+        impl FnOnce() -> Result<u64, LaneError>,
+        &crate::runtime_admission::RuntimeAdmission,
+    ),
+) -> Result<RefreshReport, LaneError> {
+    let (refresh_program, publication_time_ms, admission) = provider;
+    #[cfg(not(test))]
+    let _ = admission;
     with_claude_authority(home, now, refresh_program, publication_time_ms, |source| {
         publish_live_snapshot(
             runs_root,
@@ -1787,7 +1824,11 @@ fn refresh_claude_live_at(
             published,
             &source.worker_file(),
             source.expires_ms / 1000,
-            |home, uid| write_claude_run(home, uid, source),
+            |home, uid| {
+                #[cfg(test)]
+                admission.scope_recipient(home)?;
+                write_claude_run(home, uid, source)
+            },
         )
     })
 }

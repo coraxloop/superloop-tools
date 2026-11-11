@@ -240,6 +240,14 @@ pub(crate) struct PlanConfiguration {
     pub(crate) allocations: loop_home::allocations::Allocations,
 }
 impl PlanConfiguration {
+    #[cfg(test)]
+    pub(crate) fn fixture_scope_identity(&self) -> Result<(u64, u64), LaneError> {
+        self.directory.revalidate().map_err(refusal)?;
+        let stat = nix::sys::stat::fstat(self.directory.as_fd())
+            .map_err(|e| LaneError::input("fixture-scope", e.to_string()))?;
+        Ok((stat.st_dev, stat.st_ino))
+    }
+
     pub(crate) fn open_private_file(&self, relative: &Path) -> Result<std::fs::File, LaneError> {
         self.directory
             .open_beneath(

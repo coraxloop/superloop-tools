@@ -922,6 +922,8 @@ Folded from ``open:homes:claude-lane-home-sandbox-redirects``, whose question th
 
 (2026-11-10, lane r002g84's step al, pending its review) Piece 1 of the fourth commit, d253e3c9, binds helper evidence publication to its admission: one bound evidence path for both backends, the writer validating against the binding that shaped the evidence while the reader and the census keep the compiled digest, the periodic thread's branch on the backend gone and the test-only capture forwarder replaced by an explicit admission at its four callers, production evidence pinned byte for byte for success and refusal on both backends. Piece 2, the fixture variants and their constructor without the transaction, is the lane's next step.
 
+(2026-11-11, lane r002g84, fixture scope and one-shot custody) The seam's fourth step now has test-only opaque fixture variants, a root-creating constructor with the never-unlock refusals, the four held anchor identities, and scope checks at the helper consumers. A separately minted periodic part moves once through custody capture and is rechecked at activation; it cannot admit a run. The tests exercise constructor, consumer and activation refusals without admitting any round or periodic pass. Production keeps the gate, pin and compiled census boundary. The admitted transaction, its mutation controls, the release-suite absence test, vendor behavior and owner measurements remain open (``proto:superlooplane:helper-runtime-admission``; ``test:crate:fixture-admission-scope-refuses-foreign-consumers``, of the superloop-lane package).
+
 ### Tests under load · `sec:toolsbacklog:open-gates`
 
 **Problem (Timing-bound tests of the lane gateway fail under load in gates of candidates that do not touch it)** · `prob:gates:gate-timing-flakes`

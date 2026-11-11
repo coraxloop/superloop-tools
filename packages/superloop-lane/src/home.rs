@@ -1592,6 +1592,24 @@ fn make_home_pinned_with_sources(
 }
 
 #[cfg(test)]
+pub(crate) fn fixture_scope_identities() -> Result<[(u64, u64); 2], LaneError> {
+    PRIVATE_HOME.with(|active| {
+        let active = active.borrow();
+        let held = active
+            .as_ref()
+            .ok_or_else(|| LaneError::input("fixture-scope", "home custody absent"))?;
+        let inspect = |fd: &OwnedFd| {
+            let stat = fstat(fd).map_err(|e| LaneError::input("fixture-scope", e.to_string()))?;
+            if stat.st_uid != Uid::effective().as_raw() || stat.st_mode & 0o7777 != 0o700 {
+                return Err(LaneError::input("fixture-scope", "root custody changed"));
+            }
+            Ok((stat.st_dev, stat.st_ino))
+        };
+        Ok([inspect(&held.home.1)?, inspect(&held.runs.1)?])
+    })
+}
+
+#[cfg(test)]
 mod prefix_tests {
     use super::{
         activate_private_launch, bind_private_directory, bind_private_home, bind_socket_directory,

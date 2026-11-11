@@ -1172,6 +1172,8 @@ pub(crate) fn verify_box_attestation_admitted(
     admission: &crate::runtime_admission::RuntimeAdmission,
 ) -> Result<(), LaneError> {
     admission.check(crate::settings::BoxBackend::from_plan(document)?)?;
+    #[cfg(test)]
+    admission.scope_plan(document)?;
     if document["box_gate"] != box_gate(document)? {
         return Err(LaneError::input(
             "box-gate",

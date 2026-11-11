@@ -1934,6 +1934,8 @@ pub(crate) fn publish_round_credential_admitted(
 ) -> Result<(), LaneError> {
     let backend = BoxBackend::from_plan(&record["plan"])?;
     admission.check(backend)?;
+    #[cfg(test)]
+    admission.scope_record(record)?;
     let home = record["plan"]["home"]
         .as_str()
         .ok_or_else(|| LaneError::input("credential-publish", "run home is absent"))?;
@@ -1958,7 +1960,15 @@ pub(crate) fn publish_round_credential_admitted(
 }
 
 // Only custody capture constructs this token; activation moves its admission into the guard.
-struct RuntimeAdmissionThread(RuntimeAdmission);
+enum RuntimeAdmissionThread {
+    Gate,
+    #[cfg(test)]
+    Fixture(crate::runtime_admission::fixture::FixtureThreadPart),
+}
+#[cfg(test)]
+pub(crate) struct CapturePermit(());
+#[cfg(test)]
+pub(crate) struct ActivationPermit(());
 
 /// The authority thread holds home and configuration custody and only two credential executables.
 pub(crate) struct CredentialThreadCustody {
@@ -1982,9 +1992,14 @@ impl CredentialThreadCustody {
             home: crate::home::snapshot_private_home()?,
             configuration: crate::runtime_entry::snapshot_configuration(),
             programs: crate::container_entry::credential_programs(backend)?,
-            admission: RuntimeAdmissionThread(match admission {
-                RuntimeAdmission::Gate => RuntimeAdmission::Gate,
-            }),
+            admission: match admission {
+                RuntimeAdmission::Gate => RuntimeAdmissionThread::Gate,
+                #[cfg(test)]
+                RuntimeAdmission::Fixture(proof) => RuntimeAdmissionThread::Fixture({
+                    admission.check(backend)?;
+                    proof.take_thread(&CapturePermit(()))?
+                }),
+            },
         })
     }
     pub(crate) fn activate(self) -> Result<CredentialThreadGuard, LaneError> {
@@ -1996,7 +2011,11 @@ impl CredentialThreadCustody {
             _programs: self.programs.map(|programs| {
                 crate::container_entry::activate_program_map("container-helper", programs)
             }),
-            admission: self.admission.0,
+            admission: match self.admission {
+                RuntimeAdmissionThread::Gate => RuntimeAdmission::Gate,
+                #[cfg(test)]
+                RuntimeAdmissionThread::Fixture(part) => part.activate(&ActivationPermit(()))?,
+            },
         })
     }
 }
@@ -2042,6 +2061,12 @@ fn spawn_credential_authority_at(
         .name("credential-authority".into())
         .spawn(move || -> Result<(), LaneError> {
             let custody = refresh_custody.activate()?;
+            #[cfg(test)]
+            custody
+                .admission
+                .scope_periodic(&refresh_home, &refresh_loop, &refresh_root)?;
+            #[cfg(test)]
+            custody.admission.scope_evidence(&refresh_driver_dir)?;
             let mut published = BTreeMap::new();
             let mut checked = false;
             while !refresh_cancelled.load(Ordering::Acquire) {
@@ -2054,6 +2079,8 @@ fn spawn_credential_authority_at(
                     &endpoint,
                     &custody.admission,
                 );
+                #[cfg(test)]
+                custody.admission.scope_evidence(&refresh_driver_dir)?;
                 let binding = custody.admission.program_binding();
                 let evidence = crate::credential::evidence_for_check_bound(
                     &result, !checked, backend, binding,
@@ -2103,6 +2130,12 @@ fn publish_helper_identity_admitted(
     }
     let backend = BoxBackend::from_plan(&record["plan"])?;
     admission.check(backend)?;
+    #[cfg(test)]
+    admission.scope_names(owner_home, loop_name, run)?;
+    #[cfg(test)]
+    admission.scope_record(&record)?;
+    #[cfg(test)]
+    admission.scope_roots(owner_home, loop_name, root)?;
     let _credentials = crate::container_entry::credential_programs(backend)?;
     let pid = std::process::id();
     record["helper_pid"] = json!(pid);
@@ -2372,6 +2405,13 @@ pub fn client(run_dir: &Path) -> Result<i32, LaneError> {
             _ => return Err(LaneError::input("helper-channel", "unknown frame channel")),
         }
         .map_err(|error| LaneError::operation("helper-channel", error.to_string()))?;
+    }
+}
+
+#[cfg(test)]
+impl CredentialThreadGuard {
+    pub(crate) fn fixture_admission(&self) -> &RuntimeAdmission {
+        &self.admission
     }
 }
 
@@ -3201,6 +3241,50 @@ mod tests {
         assert!(!home.join(".config").exists());
         assert!(crate::home::snapshot_private_home().is_err());
         assert!(crate::container_entry::check(Path::new("/usr/bin/claude")).is_none());
+    }
+
+    /// ´test:unit:helper-fixture-publication-refuses-scope-before-effects´
+    #[test]
+    fn helper_fixture_publication_refuses_scope_before_effects() {
+        use std::os::unix::fs::MetadataExt as _;
+        let fixture = crate::tests::helper_admission::Fixture::new();
+        let admission = fixture.admission();
+        let reservation = crate::launch::reservation_path(&fixture.runs, "R");
+        let mut plan = fixture.plan();
+        plan["worker_uid"] = json!(3001);
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha",
+            "run":"R","worker_uid":3000,"plan":plan});
+        crate::launch::publish_reservation(&reservation, &record).expect("fixture reservation");
+        let before = fs::read(&reservation).expect("bytes");
+        let inode = fs::metadata(&reservation).expect("metadata").ino();
+        let error = super::publish_helper_identity_admitted(
+            &fixture.owner,
+            "alpha",
+            "R",
+            &fixture.runs,
+            &admission,
+        )
+        .expect_err("scope before helper identity");
+        assert_eq!(error.status, 2);
+        assert_eq!(error.kind, "fixture-scope");
+        assert_eq!(
+            error.detail,
+            format!(
+                "{}: refuses worker uid",
+                crate::runtime_admission::fixture::SENTINEL
+            )
+        );
+        assert_eq!(fs::read(&reservation).expect("retained bytes"), before);
+        assert_eq!(
+            fs::metadata(&reservation).expect("retained inode").ino(),
+            inode
+        );
+        let mut entries: Vec<_> = fs::read_dir(&fixture.runs)
+            .expect("whole runs root")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, [".letter-R.lock", ".reservation-R.json"]);
     }
 
     fn foreign_credential_custody() -> crate::container_entry::ExecutableGuard {
