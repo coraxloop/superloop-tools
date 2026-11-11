@@ -2061,12 +2061,13 @@ fn spawn_credential_authority_at(
         .name("credential-authority".into())
         .spawn(move || -> Result<(), LaneError> {
             let custody = refresh_custody.activate()?;
-            #[cfg(test)]
-            custody
-                .admission
-                .scope_periodic(&refresh_home, &refresh_loop, &refresh_root)?;
-            #[cfg(test)]
-            custody.admission.scope_evidence(&refresh_driver_dir)?;
+            custody.admission.evidence_binding(
+                &refresh_home,
+                &refresh_loop,
+                &refresh_root,
+                &refresh_driver_dir,
+                backend,
+            )?;
             let mut published = BTreeMap::new();
             let mut checked = false;
             while !refresh_cancelled.load(Ordering::Acquire) {
@@ -2079,9 +2080,13 @@ fn spawn_credential_authority_at(
                     &endpoint,
                     &custody.admission,
                 );
-                #[cfg(test)]
-                custody.admission.scope_evidence(&refresh_driver_dir)?;
-                let binding = custody.admission.program_binding();
+                let binding = custody.admission.evidence_binding(
+                    &refresh_home,
+                    &refresh_loop,
+                    &refresh_root,
+                    &refresh_driver_dir,
+                    backend,
+                )?;
                 let evidence = crate::credential::evidence_for_check_bound(
                     &result, !checked, backend, binding,
                 );

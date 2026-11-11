@@ -117,7 +117,7 @@ impl Fixture {
         }
     }
     pub(crate) fn admission(&self) -> RuntimeAdmission {
-        fixture::construct(Arc::clone(&self.root), self.declaration()).expect("scoped constructor")
+        fixture::construct(&self.root, self.declaration()).expect("scoped constructor")
     }
     pub(crate) fn plan(&self) -> Value {
         json!({"loop":"alpha", "run":"R", "home":self.worker, "worker_uid":3000,
@@ -138,7 +138,10 @@ fn refused(error: crate::error::LaneError, field: &str) {
 #[test]
 fn fixture_admission_constructor_never_unlocks_live_authority() {
     let f = Fixture::new();
-    let account = crate::caller_home().expect("account home");
+    let account = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+        .expect("password lookup")
+        .expect("account")
+        .dir;
     for (target, path, reason) in [
         ("home", PathBuf::from("/outside-fixture"), "outside root"),
         ("runs", PathBuf::from("/outside-fixture"), "outside root"),
@@ -154,26 +157,20 @@ fn fixture_admission_constructor_never_unlocks_live_authority() {
             d.runs = path;
         }
         refused(
-            fixture::construct(Arc::clone(&f.root), d)
-                .err()
-                .expect("refusal"),
+            fixture::construct(&f.root, d).err().expect("refusal"),
             reason,
         );
     }
     let mut d = f.declaration();
     d.backend = BoxBackend::Codex;
     refused(
-        fixture::construct(Arc::clone(&f.root), d)
-            .err()
-            .expect("Codex"),
+        fixture::construct(&f.root, d).err().expect("Codex"),
         "Codex backend",
     );
     let mut d = f.declaration();
     d.digest = crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256.into();
     refused(
-        fixture::construct(Arc::clone(&f.root), d)
-            .err()
-            .expect("schema"),
+        fixture::construct(&f.root, d).err().expect("schema"),
         "reviewed vendor digest",
     );
     for program in [
@@ -184,22 +181,23 @@ fn fixture_admission_constructor_never_unlocks_live_authority() {
         let mut d = f.declaration();
         d.stand_in = program.into();
         refused(
-            fixture::construct(Arc::clone(&f.root), d)
-                .err()
-                .expect("program"),
+            fixture::construct(&f.root, d).err().expect("program"),
             "stand-in name",
         );
     }
     let mut d = f.declaration();
     d.digest = "0".repeat(64);
     assert_eq!(
-        fixture::construct(Arc::clone(&f.root), d)
-            .err()
-            .expect("digest")
-            .kind,
+        fixture::construct(&f.root, d).err().expect("digest").kind,
         "credential-program-pin"
     );
-    assert_eq!(f.admission().program_binding().required_sha256(), f.digest);
+    assert_eq!(
+        f.admission()
+            .round_binding(&f.owner, "alpha", &f.worker, 3000)
+            .expect("binding")
+            .required_sha256(),
+        f.digest
+    );
     assert_eq!(
         RuntimeAdmission::Gate
             .check(BoxBackend::Claude)
@@ -325,8 +323,36 @@ fn fixture_admission_thread_part_is_one_shot_and_periodic_only() {
         .expect("second capture"),
         "thread already transferred",
     );
+    directory(&f.runs.join("R"));
+    let owner = f.owner.clone();
+    let runs = f.runs.clone();
+    let digest = f.digest.clone();
     std::thread::spawn(move || {
         let guard = custody.activate().expect("rechecked activation");
+        assert_eq!(
+            guard
+                .fixture_admission()
+                .periodic_binding(&owner, "alpha", &runs)
+                .expect("same validated periodic fields")
+                .required_sha256(),
+            digest
+        );
+        assert_eq!(
+            guard
+                .fixture_admission()
+                .evidence_binding(&owner, "alpha", &runs, &runs.join("R"), BoxBackend::Claude)
+                .expect("same driver and backend")
+                .required_sha256(),
+            digest
+        );
+        refused(
+            guard
+                .fixture_admission()
+                .evidence_binding(&owner, "alpha", &runs, &runs.join("R"), BoxBackend::Codex)
+                .err()
+                .expect("actual foreign backend"),
+            "backend",
+        );
         refused(
             guard
                 .fixture_admission()
@@ -369,9 +395,7 @@ fn fixture_admission_rechecks_anchor_and_root_identity() {
     let mut d = f.declaration();
     d.owner_home = link;
     refused(
-        fixture::construct(Arc::clone(&f.root), d)
-            .err()
-            .expect("no links"),
+        fixture::construct(&f.root, d).err().expect("no links"),
         "directory containment",
     );
 }
@@ -489,7 +513,7 @@ fn fixture_admission_constructor_refuses_host_owned_program() {
     );
     let _foreign = crate::container_entry::activate_program_map("container-helper", programs);
     refused(
-        fixture::construct(Arc::clone(&f.root), f.declaration())
+        fixture::construct(&f.root, f.declaration())
             .err()
             .expect("non-root"),
         "root-owned stand-in",
@@ -514,9 +538,119 @@ fn fixture_admission_rejects_replaced_program_anchor() {
         "anchor identity",
     );
     refused(
-        fixture::construct(Arc::clone(&f.root), f.declaration())
+        fixture::construct(&f.root, f.declaration())
             .err()
             .expect("foreign program"),
         "held stand-in",
     );
+}
+
+/// ´test:crate:fixture-admission-refuses-noncanonical-digest´
+#[test]
+fn fixture_admission_refuses_noncanonical_digest() {
+    let f = Fixture::new();
+    for digest in [
+        String::new(),
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64),
+        "g".repeat(64),
+    ] {
+        let mut d = f.declaration();
+        d.digest = digest;
+        refused(
+            fixture::construct(&f.root, d)
+                .err()
+                .expect("syntax refusal"),
+            "digest syntax",
+        );
+    }
+}
+
+/// ´test:crate:fixture-admission-spawner-checks-actual-thread-inputs´
+#[test]
+fn fixture_admission_spawner_checks_actual_thread_inputs() {
+    let _endpoint = crate::credential::fixture_service_endpoint("http://127.0.0.1:1/unused".into());
+    let f = Fixture::new();
+    directory(&f.runs.join("R"));
+    directory(&f.runs.join("S"));
+    for (owner, name, runs, driver, backend, reason) in [
+        (
+            f.owner.join("foreign"),
+            "alpha",
+            f.runs.clone(),
+            f.runs.join("R"),
+            BoxBackend::Claude,
+            "owner home",
+        ),
+        (
+            f.owner.clone(),
+            "beta",
+            f.runs.clone(),
+            f.runs.join("R"),
+            BoxBackend::Claude,
+            "loop",
+        ),
+        (
+            f.owner.clone(),
+            "alpha",
+            f.owner.clone(),
+            f.runs.join("R"),
+            BoxBackend::Claude,
+            "runs root",
+        ),
+        (
+            f.owner.clone(),
+            "alpha",
+            f.runs.clone(),
+            f.runs.join("S"),
+            BoxBackend::Claude,
+            "evidence directory",
+        ),
+    ] {
+        let result = crate::container_helper::spawn_credential_authority_admitted(
+            owner,
+            name.into(),
+            runs,
+            driver,
+            backend,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            &f.admission(),
+        );
+        let error = match result {
+            Ok(thread) => thread
+                .join()
+                .expect("clean join")
+                .expect_err("before cancelled loop"),
+            Err(error) => error,
+        };
+        refused(error, reason);
+    }
+    assert_eq!(fs::read_dir(f.runs.join("R")).expect("R").count(), 0);
+    assert_eq!(fs::read_dir(f.runs.join("S")).expect("S").count(), 0);
+}
+
+/// ´test:crate:fixture-admission-thread-cannot-own-root-cleanup´
+#[test]
+fn fixture_admission_thread_cannot_own_root_cleanup() {
+    let f = Fixture::new();
+    let path = f.root.path().to_path_buf();
+    let admission = f.admission();
+    let custody = crate::container_helper::CredentialThreadCustody::capture_admitted(
+        BoxBackend::Claude,
+        &admission,
+    )
+    .expect("captured witnesses");
+    assert_eq!(Arc::strong_count(&f.root), 1);
+    drop(f);
+    assert!(
+        !path.exists(),
+        "host owner cleans up even while the thread part remains"
+    );
+    let error = std::thread::spawn(move || custody.activate().err())
+        .join()
+        .expect("joined")
+        .expect("root no longer exists");
+    refused(error, "root pathname");
+    drop(admission);
 }

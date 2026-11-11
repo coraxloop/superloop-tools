@@ -4,7 +4,6 @@
 
 use crate::error::LaneError;
 use crate::settings::BoxBackend;
-#[cfg(test)]
 use std::path::Path;
 
 #[cfg(test)]
@@ -25,7 +24,7 @@ impl RuntimeAdmission {
         }
     }
 
-    pub(crate) const fn program_binding(&self) -> &ReviewedProgramBinding {
+    const fn program_binding(&self) -> &ReviewedProgramBinding {
         match self {
             Self::Gate => &ReviewedProgramBinding::Schema,
             #[cfg(test)]
@@ -155,5 +154,63 @@ impl RuntimeAdmission {
             Self::Gate => Ok(()),
             Self::Fixture(proof) => proof.record(record),
         }
+    }
+}
+
+impl RuntimeAdmission {
+    // The release arm is infallible; unit-test scope checks use this same Result boundary.
+    #[cfg_attr(
+        not(test),
+        allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn)
+    )]
+    pub(crate) fn round_binding(
+        &self,
+        home: &Path,
+        scope: &str,
+        worker: &Path,
+        uid: u32,
+    ) -> Result<&ReviewedProgramBinding, LaneError> {
+        #[cfg(test)]
+        self.scope_round(home, scope, worker, uid)?;
+        let _ = (home, scope, worker, uid);
+        Ok(self.program_binding())
+    }
+    // The release arm is infallible; unit-test scope checks use this same Result boundary.
+    #[cfg_attr(
+        not(test),
+        allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn)
+    )]
+    pub(crate) fn periodic_binding(
+        &self,
+        home: &Path,
+        scope: &str,
+        runs: &Path,
+    ) -> Result<&ReviewedProgramBinding, LaneError> {
+        #[cfg(test)]
+        self.scope_periodic(home, scope, runs)?;
+        let _ = (home, scope, runs);
+        Ok(self.program_binding())
+    }
+    // The release arm is infallible; unit-test scope checks use this same Result boundary.
+    #[cfg_attr(
+        not(test),
+        allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn)
+    )]
+    pub(crate) fn evidence_binding(
+        &self,
+        home: &Path,
+        scope: &str,
+        runs: &Path,
+        driver: &Path,
+        backend: BoxBackend,
+    ) -> Result<&ReviewedProgramBinding, LaneError> {
+        #[cfg(test)]
+        if let Self::Fixture(proof) = self {
+            proof.backend(backend)?;
+            proof.periodic(home, scope, runs)?;
+            proof.evidence(driver)?;
+        }
+        let _ = (home, scope, runs, driver, backend);
+        Ok(self.program_binding())
     }
 }

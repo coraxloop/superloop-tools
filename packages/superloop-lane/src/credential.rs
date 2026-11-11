@@ -1533,11 +1533,9 @@ pub(crate) fn publish_round_admitted(
     admission: &crate::runtime_admission::RuntimeAdmission,
 ) -> Result<Value, LaneError> {
     admission.check(backend)?;
-    #[cfg(test)]
-    admission.scope_round(owner_home, loop_name, run_home, worker_uid)?;
+    let binding = admission.round_binding(owner_home, loop_name, run_home, worker_uid)?;
     if backend == BoxBackend::Claude {
-        let expected_program =
-            claude_program_pin_bound(owner_home, loop_name, admission.program_binding())?;
+        let expected_program = claude_program_pin_bound(owner_home, loop_name, binding)?;
         let home = claude_sign_in_dir(owner_home, loop_name);
         return publish_claude_round_at(
             &home,
@@ -1708,11 +1706,9 @@ pub(crate) fn refresh_live_admitted(
     admission: &crate::runtime_admission::RuntimeAdmission,
 ) -> Result<RefreshReport, LaneError> {
     admission.check(backend)?;
-    #[cfg(test)]
-    admission.scope_periodic(owner_home, loop_name, runs_root)?;
+    let binding = admission.periodic_binding(owner_home, loop_name, runs_root)?;
     if backend == BoxBackend::Claude {
-        let expected_program =
-            claude_program_pin_bound(owner_home, loop_name, admission.program_binding())?;
+        let expected_program = claude_program_pin_bound(owner_home, loop_name, binding)?;
         let home = claude_sign_in_dir(owner_home, loop_name);
         return refresh_claude_live_admitted_at(
             &home,
@@ -4268,7 +4264,7 @@ mod tests {
         fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("mode");
         let held =
             open_dir(&runs, owner_identity().0, owner_identity().0, 0o700).expect("held runs");
-        let binding = Gate.program_binding();
+        let binding = &crate::runtime_admission::ReviewedProgramBinding::Schema;
         for backend in [BoxBackend::Codex, BoxBackend::Claude] {
             for result in [
                 Ok(fixture_report(1_900_000_000)),

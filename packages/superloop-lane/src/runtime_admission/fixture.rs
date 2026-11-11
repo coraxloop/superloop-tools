@@ -1,5 +1,5 @@
 //! Unit-test fixture proofs. No item in this module exists in a release build.
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsFd as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
@@ -16,15 +16,21 @@ pub const SENTINEL: &str = "SUPERLOOP_CLAUDE_FIXTURE_ADMISSION_V1_ONLY_UNIT_TEST
 
 pub struct FixtureRoot {
     temporary: Option<tempfile::TempDir>,
-    path: PathBuf,
-    directory: File,
-    identity: (u64, u64),
+    witness: Arc<RootIdentity>,
     account_home: PathBuf,
     configured_runs: PathBuf,
 }
+struct RootIdentity {
+    path: PathBuf,
+    directory: File,
+    identity: (u64, u64),
+}
 impl FixtureRoot {
     pub(crate) fn create(configured_runs: &Path) -> Result<Arc<Self>, LaneError> {
-        let account_home = crate::caller_home()?;
+        let account_home = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+            .map_err(|_| refusal("account database"))?
+            .ok_or_else(|| refusal("account database"))?
+            .dir;
         let temporary = tempfile::Builder::new()
             .prefix("lane-claude-admission-")
             .tempdir()
@@ -40,14 +46,21 @@ impl FixtureRoot {
         let stat = fstat(&directory).map_err(|_| refusal("root metadata"))?;
         Ok(Arc::new(Self {
             temporary: Some(temporary),
-            path,
-            directory,
-            identity: (stat.st_dev, stat.st_ino),
+            witness: Arc::new(RootIdentity {
+                path,
+                directory,
+                identity: (stat.st_dev, stat.st_ino),
+            }),
             account_home,
             configured_runs: configured_runs.to_path_buf(),
         }))
     }
     pub(crate) fn path(&self) -> &Path {
+        &self.witness.path
+    }
+}
+impl RootIdentity {
+    fn path(&self) -> &Path {
         &self.path
     }
     fn revalidate(&self) -> Result<(), LaneError> {
@@ -67,7 +80,7 @@ impl FixtureRoot {
 impl Drop for FixtureRoot {
     fn drop(&mut self) {
         // Never let TempDir delete a replacement supplied by another fixture process.
-        if self.revalidate().is_err()
+        if self.witness.revalidate().is_err()
             && let Some(directory) = self.temporary.take()
         {
             let _retained = directory.keep();
@@ -96,7 +109,7 @@ impl FixtureBinding {
     }
 }
 struct Authority {
-    root: Arc<FixtureRoot>,
+    root: Arc<RootIdentity>,
     owner_home: PathBuf,
     runs: PathBuf,
     loop_name: String,
@@ -111,20 +124,24 @@ struct RunKey {
 }
 enum Scope {
     Run(RunKey),
-    Periodic(Authority),
+    Periodic(PeriodicAuthority),
+}
+struct PeriodicAuthority {
+    authority: Authority,
+    driver: PathBuf,
 }
 pub struct FixtureAdmission {
     scope: Scope,
-    thread: RefCell<Option<FixtureThreadPart>>,
+    thread: Cell<Option<FixtureThreadPart>>,
 }
 pub struct FixtureThreadPart {
-    admission: RuntimeAdmission,
+    periodic: PeriodicAuthority,
 }
 
 fn refusal(field: &str) -> LaneError {
     LaneError::input("fixture-scope", format!("{SENTINEL}: refuses {field}"))
 }
-fn directory_identity(root: &FixtureRoot, path: &Path) -> Result<(u64, u64), LaneError> {
+fn directory_identity(root: &RootIdentity, path: &Path) -> Result<(u64, u64), LaneError> {
     root.revalidate()?;
     let relative = path
         .strip_prefix(root.path())
@@ -171,6 +188,14 @@ fn validate(root: &FixtureRoot, declaration: &Declaration) -> Result<[(u64, u64)
     if declaration.backend != BoxBackend::Claude {
         return Err(refusal("Codex backend"));
     }
+    if declaration.digest.len() != 64
+        || !declaration
+            .digest
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err(refusal("digest syntax"));
+    }
     if declaration.digest == crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256 {
         return Err(refusal("reviewed vendor digest"));
     }
@@ -189,12 +214,13 @@ fn validate(root: &FixtureRoot, declaration: &Declaration) -> Result<[(u64, u64)
     if !crate::valid_run_name(&declaration.run) {
         return Err(refusal("run name"));
     }
-    let home = directory_identity(root, &declaration.owner_home)?;
-    let runs = directory_identity(root, &declaration.runs)?;
+    let home = directory_identity(&root.witness, &declaration.owner_home)?;
+    let runs = directory_identity(&root.witness, &declaration.runs)?;
     if home == runs {
         return Err(refusal("distinct roots"));
     }
-    let configuration = directory_identity(root, &declaration.owner_home.join(".config/loops"))?;
+    let configuration =
+        directory_identity(&root.witness, &declaration.owner_home.join(".config/loops"))?;
     let expected_home = declaration.owner_home.join(".cache/tmp").join(format!(
         "lane-{}-{}",
         declaration.loop_name, declaration.run
@@ -202,7 +228,7 @@ fn validate(root: &FixtureRoot, declaration: &Declaration) -> Result<[(u64, u64)
     if declaration.plan_home != expected_home {
         return Err(refusal("plan home mapping"));
     }
-    directory_identity(root, &declaration.plan_home)?;
+    directory_identity(&root.witness, &declaration.plan_home)?;
     let anchors = held_identities(&declaration.owner_home)?;
     if anchors[..3] != [home, runs, configuration] {
         return Err(refusal("held roots"));
@@ -223,7 +249,7 @@ fn validate(root: &FixtureRoot, declaration: &Declaration) -> Result<[(u64, u64)
     Ok(anchors)
 }
 fn authority(
-    root: Arc<FixtureRoot>,
+    root: Arc<RootIdentity>,
     declaration: &Declaration,
     anchors: [(u64, u64); 4],
 ) -> Authority {
@@ -240,25 +266,23 @@ fn authority(
 }
 
 pub fn construct(
-    root: Arc<FixtureRoot>,
+    root: &FixtureRoot,
     declaration: Declaration,
 ) -> Result<RuntimeAdmission, LaneError> {
-    let anchors = validate(&root, &declaration)?;
+    let anchors = validate(root, &declaration)?;
     // The two authorities are minted here, once; neither can be copied from a borrowed proof.
-    let periodic = RuntimeAdmission::Fixture(Box::new(FixtureAdmission {
-        scope: Scope::Periodic(authority(Arc::clone(&root), &declaration, anchors)),
-        thread: RefCell::new(None),
-    }));
+    let periodic = PeriodicAuthority {
+        authority: authority(Arc::clone(&root.witness), &declaration, anchors),
+        driver: declaration.runs.join(&declaration.run),
+    };
     Ok(RuntimeAdmission::Fixture(Box::new(FixtureAdmission {
         scope: Scope::Run(RunKey {
-            authority: authority(root, &declaration, anchors),
+            authority: authority(Arc::clone(&root.witness), &declaration, anchors),
             run: declaration.run,
             worker_uid: declaration.worker_uid,
             plan_home: declaration.plan_home,
         }),
-        thread: RefCell::new(Some(FixtureThreadPart {
-            admission: periodic,
-        })),
+        thread: Cell::new(Some(FixtureThreadPart { periodic })),
     })))
 }
 impl Authority {
@@ -287,7 +311,7 @@ impl FixtureAdmission {
     const fn authority(&self) -> &Authority {
         match &self.scope {
             Scope::Run(run) => &run.authority,
-            Scope::Periodic(authority) => authority,
+            Scope::Periodic(periodic) => &periodic.authority,
         }
     }
     fn run(&self) -> Result<&RunKey, LaneError> {
@@ -392,6 +416,13 @@ impl FixtureAdmission {
     pub(super) fn evidence(&self, driver: &Path) -> Result<(), LaneError> {
         let authority = self.authority();
         authority.check(&authority.owner_home, &authority.loop_name, &authority.runs)?;
+        let expected = match &self.scope {
+            Scope::Run(run) => authority.runs.join(&run.run),
+            Scope::Periodic(periodic) => periodic.driver.clone(),
+        };
+        if driver != expected {
+            return Err(refusal("evidence directory"));
+        }
         let run = driver
             .file_name()
             .and_then(|name| name.to_str())
@@ -409,7 +440,6 @@ impl FixtureAdmission {
         let authority = self.authority();
         authority.check(&authority.owner_home, &authority.loop_name, &authority.runs)?;
         self.thread
-            .borrow_mut()
             .take()
             .ok_or_else(|| refusal("thread already transferred"))
     }
@@ -419,10 +449,11 @@ impl FixtureThreadPart {
         self,
         _: &crate::container_helper::ActivationPermit,
     ) -> Result<RuntimeAdmission, LaneError> {
-        if let RuntimeAdmission::Fixture(proof) = &self.admission {
-            let authority = proof.authority();
-            authority.check(&authority.owner_home, &authority.loop_name, &authority.runs)?;
-        }
-        Ok(self.admission)
+        let authority = &self.periodic.authority;
+        authority.check(&authority.owner_home, &authority.loop_name, &authority.runs)?;
+        Ok(RuntimeAdmission::Fixture(Box::new(FixtureAdmission {
+            scope: Scope::Periodic(self.periodic),
+            thread: Cell::new(None),
+        })))
     }
 }
