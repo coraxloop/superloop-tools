@@ -469,12 +469,12 @@ fn override_refusal(
         panic!("registry override admitted");
     };
     assert!(
-        matches!(error, loop_home::mail::journal::MailError::Io(_)),
+        matches!(error, loop_home::mail::journal::MailError::Entry(_)),
         "{error}"
     );
     assert_eq!(
         error.to_string(),
-        "io-failure: anchor-declaration: operation=mail-binding purpose=registry-override"
+        "anchor-declaration: operation=mail-binding purpose=registry-override"
     );
     assert_eq!(nix::unistd::Uid::effective(), before, "no identity change");
     assert!(

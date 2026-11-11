@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The anchored reply session refuses ambient registry overrides as entry declarations rather than backing-store I/O, converging on mail exit 2 before the command migration (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Fixture admissions validate actual helper-thread inputs and exact evidence destinations before exposing a binding, retain cleanup with the host, and reject noncanonical digests and password-database account roots (``proto:superlooplane:helper-runtime-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
 
 - Helper unit tests carry opaque fixture scope through consumer refusals and one-shot periodic custody, with root creation and held-anchor identity checks; production retains its closed Claude gate (``proto:superlooplane:helper-runtime-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).

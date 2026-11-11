@@ -141,11 +141,11 @@ impl ReplyCustody<'_> {
         identity: &Identity,
         verify_only: bool,
     ) -> Result<ReplySession> {
-        // Keep the composed entry's lifetime refusal envelope independent of call order.
+        // An ambient override is an invalid entry declaration, not a retryable I/O failure.
         if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
-            return Err(MailError::Io(std::io::Error::other(
-                "anchor-declaration: operation=mail-binding purpose=registry-override",
-            )));
+            return Err(MailError::Entry(
+                "anchor-declaration: operation=mail-binding purpose=registry-override".into(),
+            ));
         }
         let lifetime = worker_provision::hold_active_beneath(
             home,
