@@ -15,6 +15,7 @@ struct Selection<'a> {
 }
 fn operation(word: &str) -> Option<&'static str> {
     match word {
+        "_rotation-handover" => Some("rotation-handover"),
         "_inspect-round" => Some("inspect-round"),
         "_observed-hosts" => Some("observed-hosts"),
         "_driver-report" => Some("driver-report"),
@@ -47,6 +48,9 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
         .first()
         .and_then(|word| operation(word))
         .ok_or_else(|| refused("exercise", "anchor-declaration", "operation"))?;
+    if mode == "rotation-handover" {
+        return rotation_selection(args);
+    }
     if mode == "inspect-round" {
         return inspect_selection(args);
     }
@@ -126,6 +130,22 @@ fn parse(args: &[String]) -> Result<Selection<'_>, LaneError> {
     } else {
         exercise::parse_home_layout_private_argv(args)?
     };
+    Ok(Selection {
+        operation: mode,
+        scope,
+        run,
+        identity,
+        home,
+    })
+}
+
+fn rotation_selection(args: &[String]) -> Result<Selection<'_>, LaneError> {
+    let mode = "rotation-handover";
+    let (scope, run, home, _, identity) = super::rotation::parse_private_handover_argv(args)
+        .map_err(|_| refused(mode, "anchor-declaration", "vector"))?;
+    if !crate::valid_run_name(run) || loop_home::validate_name(scope).is_err() {
+        return Err(refused(mode, "anchor-declaration", "vector"));
+    }
     Ok(Selection {
         operation: mode,
         scope,
@@ -258,6 +278,9 @@ pub fn command(
     {
         return Err(refused("checkout", "anchor-identity", "destination-parent"));
     }
+    if selection.operation == "rotation-handover" && Path::new(&body[6]) != runs {
+        return Err(refused("rotation-handover", "anchor-identity", "runs-root"));
+    }
     let bundle = container_entry::pin_reader(
         selection.operation,
         selection.scope,
@@ -309,7 +332,8 @@ pub fn serve(args: &[String]) -> Result<String, LaneError> {
     if args.len() < 9
         || (matches!(
             mode,
-            "inspect-round"
+            "rotation-handover"
+                | "inspect-round"
                 | "follow"
                 | "exercise-context"
                 | "checkpoint"
@@ -331,6 +355,9 @@ pub fn serve(args: &[String]) -> Result<String, LaneError> {
         || !Path::new(root).is_absolute()
     {
         return Err(refused(mode, "anchor-declaration", "vector"));
+    }
+    if mode == "rotation-handover" && Path::new(&body[6]) != Path::new(root) {
+        return Err(refused(mode, "anchor-identity", "runs-root"));
     }
     if !nix::unistd::Uid::effective().is_root() {
         return Err(refused(mode, "anchor-owner", "namespace"));
@@ -398,6 +425,11 @@ pub fn serve(args: &[String]) -> Result<String, LaneError> {
 
 fn dispatch(selection: &Selection<'_>, body: &[String]) -> Result<serde_json::Value, LaneError> {
     let mode = selection.operation;
+    if mode == "rotation-handover" {
+        let (scope, run, home, root, identity) =
+            super::rotation::parse_private_handover_argv(body)?;
+        return super::rotation::private_handover(home, scope, run, root, identity);
+    }
     if mode == "inspect-round" {
         let (home, evidence) = super::rounds::parse_private_inspect(body)?;
         return super::rounds::private_inspect(home, selection.scope, selection.run, evidence);

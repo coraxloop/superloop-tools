@@ -50,16 +50,6 @@ fn parse_follow_options(rest: &[String]) -> Result<(Option<&str>, bool), LaneErr
     Ok((round, round_only))
 }
 
-fn validate_bite_private_argv(args: &[String]) -> Result<(), LaneError> {
-    if args
-        .first()
-        .is_some_and(|word| word == "_rotation-handover")
-    {
-        launch::rotation::parse_private_handover_argv(args)?;
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_lines)]
 fn bind_private_launch_args<'a>(
     args: &'a [String],
@@ -68,14 +58,7 @@ fn bind_private_launch_args<'a>(
 ) -> Result<(&'a [String], Option<home::PrivateHomeGuard>), LaneError> {
     let private_launch = matches!(
         args.first().map(String::as_str),
-        Some(
-            "_choose-uid"
-                | "_settle-evidence"
-                | "_make-home"
-                | "_bind-mail"
-                | "_bind-reply"
-                | "_rotation-handover"
-        )
+        Some("_choose-uid" | "_settle-evidence" | "_make-home" | "_bind-mail" | "_bind-reply")
     );
     if !private_launch {
         return Ok((args, None));
@@ -105,7 +88,6 @@ fn bind_private_launch_args<'a>(
             "private launch requires bound home, runs root and letter descriptors",
         ));
     }
-    validate_bite_private_argv(body)?;
     let mut homes = body.windows(2).filter(|pair| pair[0] == "--owner-home");
     let owner_home = homes.next().map(|pair| &pair[1]).ok_or_else(|| {
         LaneError::input("verified-prefix", "private launch is missing --owner-home")
@@ -517,23 +499,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
     if args.first().is_some_and(|value| value == "rotate") {
         let request = launch::rotation::RotateRequest::parse(&args[1..])?;
         let report = launch::rotation::run(&caller_home()?, &request)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_rotation-handover")
-    {
-        let (loop_name, run, owner_home, runs_root, record_identity) =
-            launch::rotation::parse_private_handover_argv(args)?;
-        let report = launch::rotation::private_handover(
-            owner_home,
-            loop_name,
-            run,
-            runs_root,
-            record_identity,
-        )?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);

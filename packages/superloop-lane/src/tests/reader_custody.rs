@@ -10,10 +10,27 @@ use std::path::Path;
 /// # Panics
 /// Panics if the real reader entry reopens replaced configuration or accepts a changed capability.
 /// ´claim:superlooplane:private-exercise-readers-retain-configuration´
-/// (´claim:superlooplane:round-inspection-retains-custody´)
 /// ´test:crate:private-exercise-readers-retain-configuration´
 #[test]
 fn private_exercise_readers_retain_configuration() {
+    runtime_preparation::proof("SUPERLOOP_READER_PROOF", "PRIVATE-READERS-MEASURED");
+}
+
+/// # Panics
+/// Panics if production inspection loses its received configuration or runs custody.
+/// (´claim:superlooplane:round-inspection-retains-custody´)
+/// ´test:crate:round-inspection-retains-custody´
+#[test]
+fn round_inspection_retains_custody() {
+    runtime_preparation::proof("SUPERLOOP_READER_PROOF", "PRIVATE-READERS-MEASURED");
+}
+
+/// # Panics
+/// Panics if production rotation handover loses its settled evidence or capabilities.
+/// (´claim:superlooplane:rotation-handover-retains-custody´)
+/// ´test:crate:rotation-handover-retains-custody´
+#[test]
+fn rotation_handover_retains_custody() {
     runtime_preparation::proof("SUPERLOOP_READER_PROOF", "PRIVATE-READERS-MEASURED");
 }
 
@@ -161,6 +178,7 @@ pub(super) fn exercise(home: &Path, runs: &Path, program: &Path) {
         follow_round(home, runs, &mut record);
         inspection_cases(home, runs, &mut record);
         inspect_record(home, runs, &mut record);
+        rotation_cases(home, runs, &mut record);
     }
     if std::env::var_os("SUPERLOOP_CHECKOUT_PROOF").is_some() {
         settled_readers(home, runs, &mut record);
@@ -191,6 +209,7 @@ fn reader_case(kind: &str, case: &str) -> bool {
     ) && case != "record"
         && !case.starts_with("source-"))
         || (kind == "measure" && case != "record")
+        || (kind == "rotation" && !case.starts_with("source-"))
         || (matches!(kind, "observed" | "inspect")
             && case != "record"
             && !case.starts_with("source-"))
@@ -265,6 +284,8 @@ fn request_words(
             "--owner-home".into(),
             home.display().to_string(),
         ])
+    } else if kind == "rotation" {
+        crate::launch::rotation::private_handover_argv("alpha", "R", home, runs, identity)
     } else if matches!(kind, "observed" | "inspect") {
         Ok(vec![
             if kind == "inspect" {
@@ -343,7 +364,13 @@ fn assert_roles(manifest: &Value, kind: &str) {
             4
         } else if matches!(
             kind,
-            "inspect" | "observed" | "follow" | "context" | "measure" | "harvest-recover"
+            "rotation"
+                | "inspect"
+                | "observed"
+                | "follow"
+                | "context"
+                | "measure"
+                | "harvest-recover"
         ) {
             5
         } else {
@@ -370,7 +397,7 @@ fn assert_roles(manifest: &Value, kind: &str) {
             ]
         );
     }
-    if matches!(kind, "measure" | "harvest-recover" | "inspect") {
+    if matches!(kind, "measure" | "harvest-recover" | "inspect" | "rotation") {
         let roles: Vec<_> = manifest["records"]
             .as_array()
             .expect("records")
@@ -433,6 +460,15 @@ fn measure(home: &Path, runs: &Path, identity: &str, kind: &str, case: &str) {
     }
     if case == "vector" {
         request.argv.insert(4, "surplus".into());
+    }
+    if case == "runs-path" {
+        let position = request
+            .argv
+            .iter()
+            .position(|word| word == "--runs-root")
+            .expect("rotation runs argument");
+        request.argv[position + 1] = runs.join("different").display().to_string();
+        request.descriptors = loop_home::CommandDescriptors::default();
     }
     if case == "relative-home" {
         let option = request
@@ -542,6 +578,7 @@ fn replace_tool(
         "measure" => "exercise-measure",
         "observed" => "observed-hosts",
         "inspect" => "inspect-round",
+        "rotation" => "rotation-handover",
         "follow" => "follow",
         "context" => "exercise-context",
         "checkpoint" => "checkpoint",
@@ -647,6 +684,14 @@ fn change_source(home: &Path, case: &str) -> Option<Vec<u8>> {
 fn observation(output: &std::process::Output, kind: &str, case: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
+    if case == "runs-path" {
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            stderr.contains("anchor-identity: operation=rotation-handover purpose=runs-root"),
+            "{stderr}"
+        );
+        return;
+    }
     if case == "relative-home" {
         assert_eq!(output.status.code(), Some(2));
         assert!(
@@ -700,12 +745,14 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
             "mode" | "source-mode" | "parent-mode" => "anchor-mode",
             "source-link" => "anchor-escape",
             "source-large" => "exercise-path",
-            "identity" | "parent-identity" => "anchor-identity",
+            "identity" | "parent-identity" | "runs-path" => "anchor-identity",
             "program-owner" | "git-owner" => "anchor-owner",
             "short-frame" | "excess-frame" => "anchor-transport",
             "record" => {
                 if matches!(kind, "report" | "locks") {
                     "reservation differs from public report request"
+                } else if kind == "rotation" {
+                    "rotate-private-record"
                 } else if kind == "follow" {
                     "follow-private-record"
                 } else if kind == "context" {
@@ -737,6 +784,16 @@ fn observation(output: &std::process::Output, kind: &str, case: &str) {
 /// # Panics
 /// Panics if a successful reader changes its public output or evidence boundary.
 fn successful_observation(output: &std::process::Output, kind: &str) {
+    if kind == "rotation" {
+        let report: Value = serde_json::from_slice(&output.stdout).expect("handover JSON");
+        assert_eq!(report["replies"][0]["body"], "retained reply\n", "{report}");
+        assert_eq!(
+            report["replies"][0]["inbox_letters"][0]["body"],
+            "retained brief\n"
+        );
+        assert_eq!(report["context"], json!({"state":"measured"}));
+        return;
+    }
     if kind == "inspect" {
         let report: Value = serde_json::from_slice(&output.stdout).expect("inspection JSON");
         assert_eq!(report["command"], "inspect-round", "{report}");
@@ -1055,6 +1112,62 @@ s=p.stat();print(json.dumps({'record':json.loads(p.read_text()),'mode':s.st_mode
     assert_eq!(observed["record"]["thread_id"], "fixture-thread");
     assert_eq!(observed["record"]["budget_seconds"], 60);
     assert_eq!(observed["record"]["mail"], record["mail"][0]);
+}
+
+/// # Panics
+/// Panics if production rotation handover reopens configuration, loses its saved evidence or
+/// hashes through a program other than the received one.
+fn rotation_cases(home: &Path, runs: &Path, record: &mut Value) {
+    let reply = b"retained reply\n";
+    let brief = b"retained brief\n";
+    let reply_hash = crate::build::sha256_bytes(reply, home).expect("reply digest");
+    let brief_hash = crate::build::sha256_bytes(brief, home).expect("brief digest");
+    record["phase"] = json!("settled");
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled",
+        "driver_dir":runs.join("R/fixture-dispatch"),
+        "reply":{"bytes":reply.len(),"sha256":reply_hash}}]);
+    record["initial_brief"] = json!({"bytes":brief.len(),"sha256":brief_hash});
+    let path = runs.join(".reservation-R.json");
+    crate::launch::publish_reservation(&path, record).expect("handover record");
+    let stat = fs::metadata(&path).expect("record identity");
+    let digest = crate::build::sha256_bytes(&fs::read(&path).expect("record bytes"), home)
+        .expect("record digest");
+    let identity = format!("{}:{}:{digest}", stat.dev(), stat.ino());
+    let script = r#"
+import os,sys,tomllib
+from pathlib import Path
+home=Path(sys.argv[1]);runs=Path(sys.argv[2]);root=runs/'R';step=root/'fixture-dispatch'
+uid=tomllib.loads((home/'.config/loops/registry.toml').read_text())['loops'][0]['uid']
+for p,data in [(root/'reply-dispatch.txt',b'retained reply\n'),
+               (step/'step-dispatch.txt',b'retained brief\n'),
+               (step/'context.jsonl',b'{"state":"measured"}\n')]:
+ p.write_bytes(data);os.chown(p,uid,uid);os.chmod(p,0o600)
+"#;
+    let output = helper_service::namespace_python(home, script, runs.to_str().expect("runs"))
+        .expect("seed handover");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for &case in READER_CASES {
+        if reader_case("rotation", case) {
+            measure(home, runs, &identity, "rotation", case);
+        }
+    }
+    measure(home, runs, &identity, "rotation", "runs-path");
+    let mut substituted = request(home, runs, &identity, "rotation");
+    replace_tool(&mut substituted, home, runs, "rotation", 3, true);
+    let output = runtime_preparation::run(&substituted);
+    assert!(
+        !output.status.success(),
+        "rotation ignored its received hashing file"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("anchor-"),
+        "hashing file refused before execution: {stderr}"
+    );
 }
 
 // The seed and all reported Git objects come from this real program probe.

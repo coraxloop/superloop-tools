@@ -1093,6 +1093,7 @@ fn reader_refusal_kind(operation: &str) -> &str {
         "driver-report" => "driver-report-private",
         "mark-imported" => "import-private",
         "inspect-round" => "round-private",
+        "rotation-handover" => "rotate-private",
         "checkpoint" => "checkpoint-private",
         "harvest" | "harvest-recover" => "harvest-private",
         "follow" => "follow-private",
@@ -1108,6 +1109,7 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
         "exercise-home-layout",
         "exercise-measure",
         "inspect-round",
+        "rotation-handover",
         "observed-hosts",
         "driver-report",
         "follow",
@@ -1128,6 +1130,15 @@ fn reader_composers_refuse_override(home: &Path, program: &Path, fd: &OwnedFd) {
             "--owner-home".into(),
             home.to_str().expect("home").into(),
         ];
+        if operation == "rotation-handover" {
+            argv.truncate(2);
+            argv.extend(
+                superloop_lane::launch::rotation::private_handover_argv(
+                    "alpha", "R", home, home, "identity",
+                )
+                .expect("rotation vector"),
+            );
+        }
         if operation == "exercise-measure" {
             argv[4] = "all".into();
             argv[5] = "--backend".into();
@@ -1287,4 +1298,41 @@ fn exercise_executes_the_held_selected_program() {
         );
         assert_eq!(fs::read(record_path).expect("record retained"), bytes);
     }
+}
+
+/// # Panics
+/// Panics if the host composer pins before binding the explicit runs root.
+/// ´test:integration:rotation-composer-binds-declared-runs-root´
+#[test]
+fn rotation_composer_binds_declared_runs_root() {
+    let fixture = tempfile::tempdir().expect("home");
+    let home = fixture.path();
+    let held: OwnedFd = fs::File::open(home).expect("home descriptor").into();
+    let mut argv = vec!["unshare".into(), "/absent-entry".into()];
+    argv.extend(
+        superloop_lane::launch::rotation::private_handover_argv(
+            "alpha",
+            "R",
+            home,
+            &home.join("different"),
+            "identity",
+        )
+        .expect("vector"),
+    );
+    let Err(error) = superloop_lane::launch::reader_entry::command(
+        Path::new("/absent-namespace"),
+        &argv,
+        home,
+        &held,
+        home,
+        &held,
+        None,
+    ) else {
+        panic!("mismatched runs root admitted");
+    };
+    assert_eq!(error.kind, "rotate-private");
+    assert_eq!(
+        error.detail,
+        "anchor-identity: operation=rotation-handover purpose=runs-root"
+    );
 }

@@ -1882,10 +1882,21 @@ mod tests {
         fs::rename(&root, &retained).expect("retain received root");
         fs::create_dir_all(root.join("R")).expect("replacement path");
         let directory = retained.join("R");
-        fs::write(directory.join(".event-start"), b"0\n").expect("boundary");
+        let earlier = b"{\"type\":\"thread.started\",\"thread_id\":\"earlier-thread\"}\n";
+        fs::write(
+            directory.join(".event-start"),
+            format!("{}\n", earlier.len()),
+        )
+        .expect("held boundary");
+        fs::write(root.join("R/.event-start"), b"0\n").expect("replacement boundary");
+        seed_prior_boundary(&directory, earlier.len(), loop_uid);
         fs::write(
             directory.join("events.jsonl"),
-            b"{\"type\":\"thread.started\",\"thread_id\":\"held-thread\"}\n",
+            [
+                earlier.as_slice(),
+                b"{\"type\":\"thread.started\",\"thread_id\":\"held-thread\"}\n",
+            ]
+            .concat(),
         )
         .expect("held events");
         for name in [".event-start", "events.jsonl"] {
@@ -1909,7 +1920,7 @@ mod tests {
             "held-thread"
         );
         let archives = directory.join("steps");
-        fs::create_dir(&archives).expect("archive directory");
+
         nix::unistd::chown(
             &archives,
             Some(nix::unistd::Uid::from_raw(loop_uid)),
@@ -1945,6 +1956,61 @@ mod tests {
         assert_eq!(
             fs::read(root.join("R/events.jsonl")).expect("replacement survives"),
             b"not held evidence"
+        );
+    }
+
+    fn seed_prior_boundary(directory: &Path, end: usize, uid: u32) {
+        let archives = directory.join("steps");
+        let prior = archives.join("earlier");
+        fs::create_dir_all(&prior).expect("prior archive");
+        fs::write(prior.join("event-start.txt"), b"0\n").expect("prior start");
+        fs::write(prior.join("event-end.txt"), format!("{end}\n")).expect("prior end");
+        for path in [
+            archives,
+            prior.clone(),
+            prior.join("event-start.txt"),
+            prior.join("event-end.txt"),
+        ] {
+            nix::unistd::chown(
+                &path,
+                Some(nix::unistd::Uid::from_raw(uid)),
+                Some(nix::unistd::Gid::from_raw(uid)),
+            )
+            .expect("prior owner");
+            let mode = if path.is_dir() { 0o700 } else { 0o600 };
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("prior mode");
+        }
+    }
+
+    /// # Panics
+    /// Panics if the recorded-directory check observes the replacement pathname.
+    /// ´test:unit:recorded-step-directory-check-retains-custody´
+    #[test]
+    fn recorded_step_directory_check_retains_custody() {
+        let (fixture, plan) = client_environment_fixture();
+        let root = fixture.path().join("runs");
+        let path = plan.driver_dir.join("fixture-dispatch");
+        fs::create_dir(&path).expect("step directory");
+        let loop_uid = crate::plan::loop_uid(&plan.document).expect("loop identity");
+        nix::unistd::chown(
+            &path,
+            Some(nix::unistd::Uid::from_raw(loop_uid)),
+            Some(nix::unistd::Gid::from_raw(loop_uid)),
+        )
+        .expect("step owner");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("step mode");
+        let held = fs::File::open(&root).expect("root descriptor");
+        let _anchor =
+            crate::home::activate_handed_home(&root, &held, nix::unistd::Uid::effective().as_raw())
+                .expect("root anchor");
+        fs::rename(&root, fixture.path().join("retained-runs")).expect("retain root");
+        fs::create_dir_all(root.join("R")).expect("replacement root");
+        fs::write(&path, b"not a directory").expect("replacement step");
+        let record = json!({"rounds":[{"step":"dispatch","driver_dir":path}]});
+        assert_eq!(
+            super::recorded_step_dir(&plan, &record, &record["rounds"][0])
+                .expect("held recorded directory"),
+            path
         );
     }
 

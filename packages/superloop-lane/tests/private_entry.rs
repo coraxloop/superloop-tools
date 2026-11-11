@@ -398,7 +398,7 @@ fn other_bite_private_entries_bind_their_owner_home() {
                 "alpha".into(),
                 "R".into(),
                 "--owner-home".into(),
-                home_word.clone(),
+                home_word,
             ],
             false,
         ),
@@ -482,44 +482,44 @@ fn other_bite_private_entries_bind_their_owner_home() {
     for (name, body, external) in forms {
         let output = enter(&body, &home, &runs, external.then_some(outside.as_path()));
         let refusal = String::from_utf8(output.stderr).expect("refusal text");
-        if matches!(
-            name,
-            "round" | "follow" | "checkpoint" | "checkout" | "harvest" | "import"
-        ) {
-            assert_eq!(output.status.code(), Some(2));
-            let operation = if name == "import" {
-                "mark-imported"
-            } else if name == "round" {
-                "inspect-round"
-            } else {
-                name
-            };
+        assert_eq!(output.status.code(), Some(2));
+        let (operation, kind) = match name {
+            "import" => ("mark-imported", "import-private"),
+            "round" => ("inspect-round", "round-private"),
+            "rotation" => ("rotation-handover", "rotate-private"),
+            _ => (name, ""),
+        };
+        let kind = if kind.is_empty() {
+            format!("{name}-private")
+        } else {
+            kind.into()
+        };
+        assert!(
+            refusal.contains(&format!(
+                "{kind}: anchor-missing: operation={operation} purpose=manifest"
+            )),
+            "{refusal}"
+        );
+        if name == "rotation" {
+            let mut drifted = body;
+            drifted[5] = "--wrong-option".into();
+            drifted.extend([
+                "--verified-runs-root".into(),
+                runs.display().to_string(),
+                "--anchor-manifest".into(),
+                "{}".into(),
+            ]);
+            let output = Command::new(env!("CARGO_BIN_EXE_superloop-lane"))
+                .args(&drifted)
+                .output()
+                .expect("malformed vector");
+            let refusal = String::from_utf8(output.stderr).expect("drifted refusal");
             assert!(
-                refusal.contains(&format!(
-                    "{name}-private: anchor-missing: operation={operation} purpose=manifest"
-                )),
+                refusal.contains(
+                    "rotate-private: anchor-declaration: operation=rotation-handover purpose=vector"
+                ),
                 "{refusal}"
             );
-            continue;
         }
-        assert!(refusal.contains(&home_word), "{name}: {refusal}");
-        assert!(!refusal.contains("verified-prefix:"), "{name}: {refusal}");
-        assert!(!refusal.contains("private form is"), "{name}: {refusal}");
-        assert!(!output.status.success(), "{name}: fixture has no run");
-        let (flag_index, refusal_kind) = match name {
-            "rotation" => (5, "rotate-private"),
-            _ => panic!("unexpected private form"),
-        };
-        let mut drifted = body;
-        drifted[flag_index] = "--wrong-option".into();
-        let output = enter(
-            &drifted,
-            &home,
-            &runs,
-            external.then_some(outside.as_path()),
-        );
-        let refusal = String::from_utf8(output.stderr).expect("drifted form refusal");
-        assert!(refusal.contains(refusal_kind), "{name}: {refusal}");
-        assert!(!refusal.contains("verified-prefix:"), "{name}: {refusal}");
     }
 }
