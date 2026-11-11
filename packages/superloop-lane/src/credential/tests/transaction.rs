@@ -12,17 +12,16 @@ struct Host {
 }
 impl Host {
     fn cleanup(&mut self) {
+        // Disarm path-recursive TempDir drop before any fallible stop or mapped cleanup.
+        let path = self.root.take().expect("retained enclosing root").keep();
         if let Some(mut child) = self.child.take() {
             assert!(child.stop(), "transaction namespace did not stop");
         }
         claude_cleanup_contents_at(&self.held, true).expect("whole enclosing mapped cleanup");
-        let root = self.root.take().expect("retained enclosing root");
-        let same = fs::symlink_metadata(root.path())
+        let same = fs::symlink_metadata(&path)
             .is_ok_and(|m| m.is_dir() && (m.dev(), m.ino()) == self.identity);
         if same {
-            fs::remove_dir(root.keep()).expect("remove unchanged emptied enclosure");
-        } else {
-            let _replacement = root.keep();
+            fs::remove_dir(path).expect("remove unchanged emptied enclosure");
         }
     }
 }
@@ -500,4 +499,49 @@ fn claude_fixture_cleanup_replaced_enclosure() {
     fs::remove_dir(&displaced).expect("empty displaced E");
     fs::remove_file(path.join("sentinel")).expect("own sentinel");
     fs::remove_dir(path).expect("own replacement E");
+}
+
+/// # Panics
+/// Panics if a failed mapped cleanup invokes pathname-recursive removal during unwind.
+/// ´test:unit:claude-fixture-cleanup-failure-keeps-replacement´
+#[test]
+fn claude_fixture_cleanup_failure_keeps_replacement() {
+    let parent = tempfile::tempdir().expect("test-owned parent");
+    let root = tempfile::tempdir_in(parent.path()).expect("enclosure");
+    let path = root.path().to_path_buf();
+    let metadata = fs::metadata(&path).expect("original identity");
+    let displaced = parent.path().join("retained-enclosure");
+    fs::rename(&path, &displaced).expect("move enclosure");
+    fs::create_dir(&path).expect("replacement");
+    let sentinel = path.join("sentinel");
+    fs::write(&sentinel, b"outside held enclosure").expect("sentinel");
+    let inode = fs::metadata(&sentinel).expect("sentinel identity").ino();
+    let invalid = parent.path().join("not-a-directory");
+    fs::write(&invalid, b"synthetic invalid descriptor").expect("force mapped cleanup refusal");
+    let host = Host {
+        root: Some(root),
+        held: fs::File::open(invalid).expect("non-directory descriptor"),
+        identity: (metadata.dev(), metadata.ino()),
+        child: None,
+    };
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(host)))
+        .expect_err("mapped cleanup failure");
+    let message = error
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| error.downcast_ref::<&str>().copied())
+        .expect("panic text");
+    assert!(
+        message.starts_with("whole enclosing mapped cleanup"),
+        "{message}"
+    );
+    assert_eq!(
+        fs::read(&sentinel).expect("sentinel retained"),
+        b"outside held enclosure"
+    );
+    assert_eq!(fs::metadata(&sentinel).expect("same inode").ino(), inode);
+    assert!(
+        displaced.is_dir(),
+        "cleanup failure retains the original enclosure"
+    );
 }
