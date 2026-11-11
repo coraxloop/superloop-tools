@@ -961,7 +961,8 @@ dependency_ledger += ['''
 {"kind":"external-program","identity":"external:/usr/bin/timeout","selector":"/usr/bin/timeout","contract":"Bound child wall time and propagate the specified timeout status","callers":["loop-home","superloop-lane"]}
 {"kind":"external-program","identity":"external:/bin/kill","selector":"/bin/kill","contract":"Send the named signal to the selected process or process group","callers":["permission-triage"]}
 {"kind":"external-program","identity":"external:kill","selector":"kill","contract":"Send the named signal to the selected process or process group","callers":["permission-triage","superloop-lane"]}
-{"kind":"external-program","identity":"external:/bin/sleep","selector":"/bin/sleep","contract":"Block for the specified duration until completion or signal","callers":["permission-triage","superloop-lane"]}
+{"kind":"external-program","identity":"external:/bin/sleep","selector":"/bin/sleep","contract":"Block for the specified duration until completion or signal","callers":["permission-triage","superloop-claude-hook","superloop-lane"]}
+{"kind":"external-program","identity":"external:/usr/bin/grep","selector":"/usr/bin/grep","contract":"Run the real readiness-file probe beneath the controlled watcher scheduling fixture","callers":["superloop-claude-hook"]}
 {"kind":"external-program","identity":"external:unzip","selector":"unzip","contract":"Probe unzip availability and extract the explicitly named ZIP archive","callers":["superloop-pack"]}
 {"kind":"external-program","identity":"external:df","selector":"df","contract":"Report available filesystem capacity in the requested numeric form","callers":["superloop-run-report"]}
 {"kind":"external-program","identity":"external:tar","selector":"tar","contract":"Create or read the explicitly named archive","callers":["superloop-claude-desktop"]}
