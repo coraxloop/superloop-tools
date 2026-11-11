@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The closed dead-pid fixture record now preserves the dated measurement of recurring collision windows at the node’s pid churn (``prob:gates:fixtures-name-a-dead-process-by-a-number-no-process-can-hold``).
+
 - Exercise one test-only Claude helper round through held namespace custody, with mapped worker publication and enclosing-storage cleanup controls; production remains gated (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-admitted-round``).
 
 - The anchored reply session refuses ambient registry overrides as entry declarations rather than backing-store I/O, converging on mail exit 2 before the command migration (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
