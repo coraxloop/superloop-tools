@@ -1733,6 +1733,9 @@ pattern = "packages/superloop-lane/src/creation_entry.rs"
 pattern = "packages/superloop-lane/src/credential.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/credential/tests/transaction.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/door.rs"
 
 [[include.rows]]

@@ -1920,6 +1920,7 @@ fn publish_live_snapshot(
 
 #[cfg(test)]
 mod tests {
+    mod transaction;
     use crate::runtime_admission::RuntimeAdmission::Gate;
 
     /// # Panics
@@ -2621,22 +2622,37 @@ mod tests {
     }
 
     fn claude_cleanup_fixture_at(directory: &fs::File) -> std::io::Result<()> {
+        claude_cleanup_contents_at(directory, false)
+    }
+
+    fn claude_cleanup_contents_at(directory: &fs::File, all: bool) -> std::io::Result<()> {
         use std::os::fd::AsRawFd as _;
         use std::os::unix::process::CommandExt as _;
         // Enter the held directory before execution; no namespace-written path is followed.
         let child = Command::new("/usr/bin/podman")
             .args(["unshare", "/usr/bin/python3", "-I", "-c"])
-            .arg(concat!(
-                "import os,shutil\n",
-                "root=os.open('.',os.O_RDONLY|os.O_DIRECTORY)\n",
-                "try:\n",
-                " r=os.open('runs',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=root)\n",
-                "except FileNotFoundError: pass\n",
-                "else:\n",
-                " try: shutil.rmtree('worker',dir_fd=r)\n",
-                " except FileNotFoundError: pass\n",
-                " finally: os.close(r)\n",
-            ))
+            .arg(if all {
+                concat!(
+                    "import os,shutil,stat\n",
+                    "root=os.open('.',os.O_RDONLY|os.O_DIRECTORY)\n",
+                    "for name in os.listdir(root):\n",
+                    " if stat.S_ISDIR(os.stat(name,dir_fd=root,follow_symlinks=False).st_mode):\n",
+                    "  shutil.rmtree(name,dir_fd=root)\n",
+                    " else: os.unlink(name,dir_fd=root)\n",
+                )
+            } else {
+                concat!(
+                    "import os,shutil\n",
+                    "root=os.open('.',os.O_RDONLY|os.O_DIRECTORY)\n",
+                    "try:\n",
+                    " r=os.open('runs',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=root)\n",
+                    "except FileNotFoundError: pass\n",
+                    "else:\n",
+                    " try: shutil.rmtree('worker',dir_fd=r)\n",
+                    " except FileNotFoundError: pass\n",
+                    " finally: os.close(r)\n",
+                )
+            })
             .env_remove("_CONTAINERS_USERNS_CONFIGURED")
             .env_remove("_CONTAINERS_ROOTLESS_UID")
             .current_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))
@@ -3082,7 +3098,12 @@ mod tests {
     }
 
     fn claude_standin_host() -> (tempfile::TempDir, crate::container_entry::Bundle) {
-        let root = claude_fixture_root();
+        claude_standin_host_with_root(claude_fixture_root())
+    }
+
+    fn claude_standin_host_with_root(
+        root: tempfile::TempDir,
+    ) -> (tempfile::TempDir, crate::container_entry::Bundle) {
         let owner = root.path().join("owner");
         let runs = root.path().join("runs");
         for path in [&owner, &runs] {

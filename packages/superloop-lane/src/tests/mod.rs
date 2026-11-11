@@ -276,7 +276,7 @@ fn box_gate_refuses_unknown_option() {
     );
 }
 
-fn fixture_settings(entry: &Path) -> Settings {
+pub fn fixture_settings(entry: &Path) -> Settings {
     Settings {
         sandbox_mode: "danger-full-access".into(),
         runs_root: None,
