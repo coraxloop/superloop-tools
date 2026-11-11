@@ -604,18 +604,7 @@ impl Directory {
             acl::transport(&folder)?;
         }
         let outbox = storage_file(&path.join("outbox"), custody, false)?;
-        let info = outbox.metadata()?;
-        if info.uid() != uid || info.gid() != uid || info.mode() & 0o007 != 0 {
-            return Err(MailError::Invalid("unsafe-storage: actor outbox custody"));
-        }
-        if active {
-            acl::outbox(&outbox, self.service)?;
-        } else {
-            if info.mode() & 0o7777 != 0o700 {
-                return Err(MailError::Invalid("unsafe-storage: retired outbox mode"));
-            }
-            acl::transport(&outbox)?;
-        }
+        verify_outbox(&outbox, uid, self.service, active)?;
         for directory in [&path, &path.join("inbox"), &path.join("sent")] {
             acl::transport(&storage_file(directory, custody, false)?)?;
         }
@@ -694,3 +683,20 @@ fn observe_admission(result: &Result<()>, loop_name: &str, address: &str, kind: 
 #[cfg(test)]
 #[path = "configuration_tests.rs"]
 mod tests;
+
+/// Recheck the held outbox at admission rather than trusting scan-time metadata.
+pub(super) fn verify_outbox(outbox: &File, uid: u32, service: u32, active: bool) -> Result<()> {
+    let info = outbox.metadata()?;
+    if info.uid() != uid || info.gid() != uid || info.mode() & 0o007 != 0 {
+        return Err(MailError::Invalid("unsafe-storage: actor outbox custody"));
+    }
+    if active {
+        acl::outbox(outbox, service)?;
+    } else {
+        if info.mode() & 0o7777 != 0o700 {
+            return Err(MailError::Invalid("unsafe-storage: retired outbox mode"));
+        }
+        acl::transport(outbox)?;
+    }
+    Ok(())
+}

@@ -530,3 +530,217 @@ fn unavailable_pin_transition(deregistered: bool) {
             .exists()
     );
 }
+
+/// # Panics
+/// Panics if a real anchored decision failure loses its named refusal in the sidecar.
+/// ´claim:loophome:mail-service-records-anchor-refusal-code´
+/// ´test:unit:mail-service-records-anchor-refusal-code´
+#[test]
+fn mail_service_records_anchor_refusal_code() {
+    let fixture = Fixture::new();
+    let (mut service, config) = anchored_service(&fixture);
+    let address = Address::parse("alpha").expect("address");
+    let inventory = Inventory {
+        loops: BTreeSet::from(["alpha".into()]),
+        actors: BTreeMap::from([(address.clone(), copy_actor(&fixture))]),
+        failures: Vec::new(),
+        retired: BTreeSet::new(),
+    };
+    seed_anchor_decision(&fixture);
+    service
+        .directory
+        .decision(&address, &Address::parse("alpha+worker").expect("worker"))
+        .expect("decision is valid before custody changes");
+    let name = OsStr::new("alpha+worker.review.letter");
+    fs::write(fixture.outbox(name), b"body").expect("source");
+    fs::set_permissions(fixture.outbox(name), fs::Permissions::from_mode(0o600))
+        .expect("source mode");
+    // The inventory is already admitted. Its independent decision read is later.
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o750))
+        .expect("change before decision");
+    let error = service
+        .deliver(&inventory, &address, name)
+        .expect_err("live decision refusal");
+    assert!(
+        matches!(error, MailError::Entry(ref reason) if reason.starts_with("anchor-mode:")),
+        "{error}"
+    );
+    // A persistent fault also refuses the inventory reread used by projection.
+    // Model restoration between the real delivery failure and its projection.
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).expect("restore custody");
+    // The registry revision observed by projection may have removed the sender.
+    // The already admitted actor's held outbox still receives its refusal.
+    fs::write(
+        config.join("registry.toml"),
+        "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[]\n",
+    )
+    .expect("new registry revision");
+    let allocations = config.join("allocations.toml");
+    fs::write(
+        &allocations,
+        format!("mail_uid={}\n", nix::unistd::geteuid().as_raw()),
+    )
+    .expect("service reservation");
+    fs::set_permissions(allocations, fs::Permissions::from_mode(0o600)).expect("ledger mode");
+    let observation = observe(&fixture.actor, name).ok();
+    let error = service
+        .refuse_candidate(&inventory, &address, name, observation, error)
+        .expect_err("service projects then preserves the decision refusal");
+    let sidecar: toml::Value = toml::from_str(
+        &fs::read_to_string(fixture.outbox("alpha+worker.review.letter.reason.toml"))
+            .expect("published sidecar"),
+    )
+    .expect("sidecar codec");
+    assert_eq!(sidecar["code"].as_str(), Some("anchor-mode"));
+    assert_eq!(sidecar["reason"].as_str(), Some(error.to_string().as_str()));
+    assert!(
+        refusal::recognized(
+            &service.journal,
+            &fixture.actor.outbox,
+            "alpha",
+            OsStr::new("alpha+worker.review.letter.reason.toml")
+        )
+        .expect("durable protected binding")
+    );
+}
+fn copy_actor(fixture: &Fixture) -> Actor {
+    Actor {
+        endpoint: publication::Endpoint::open(
+            &fixture.root,
+            Address::parse("alpha").expect("address"),
+            nix::unistd::getegid().as_raw(),
+            publication::Durability {
+                crash_consistent_rename: true,
+                durable_sync: true,
+            },
+        )
+        .expect("endpoint"),
+        outbox: fixture.actor.outbox.try_clone().expect("outbox"),
+        inbox: fixture.actor.inbox.try_clone().expect("inbox"),
+        staging: fixture.actor.staging.try_clone().expect("staging"),
+        uid: fixture.actor.uid,
+        group: fixture.actor.group,
+        active: true,
+    }
+}
+/// ´claim:loophome:mail-entry-refusal-code-uses-a-closed-allowlist´
+/// ´test:unit:mail-entry-refusal-code-uses-a-closed-allowlist´
+#[test]
+fn mail_entry_refusal_code_uses_a_closed_allowlist() {
+    for code in [
+        "anchor-declaration",
+        "anchor-missing",
+        "anchor-transport",
+        "anchor-owner",
+        "anchor-mode",
+        "anchor-kind",
+        "anchor-identity",
+        "anchor-escape",
+        "anchor-exec",
+        "anchor-io",
+        "anchor-uid-map",
+    ] {
+        assert_eq!(
+            refusal::code(&MailError::Entry(format!("{code}: operation=mail-binding"))),
+            code
+        );
+    }
+    for text in [
+        "",
+        "anchor-mode-extra: wrong",
+        "io-failure: wrong",
+        "untrusted\nanchor-mode:",
+    ] {
+        assert_eq!(
+            refusal::code(&MailError::Entry(text.into())),
+            "entry-refusal"
+        );
+    }
+}
+
+fn seed_anchor_decision(fixture: &Fixture) {
+    let uid = nix::unistd::geteuid().as_raw();
+    let registry = fixture.root.join(".config/loops/registry.toml");
+    fs::write(
+        &registry,
+        format!(
+            "namespace='org.superloop-tools.loophome.registry'\n\
+        version=[1,0,0]\nloops=[{{name='alpha',uid={uid},launch='dev/alpha'}}]\n"
+        ),
+    )
+    .expect("registry");
+    fs::set_permissions(registry, fs::Permissions::from_mode(0o600)).expect("registry mode");
+    let private = fixture.root.join(".var/loops/alpha/private");
+    fs::create_dir_all(private.join(".config/mail")).expect("configuration parents");
+    for directory in [
+        &private,
+        &private.join(".config"),
+        &private.join(".config/mail"),
+    ] {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).expect("mode");
+        super::super::acl::install(&File::open(directory).expect("directory"), uid, true)
+            .expect("configuration search grant");
+    }
+    let path = private.join(".config/mail/loop.toml");
+    fs::write(
+        &path,
+        "workers=[{name='worker',state='active'}]\n[mail]\nversion=1\nallow=[]\n",
+    )
+    .expect("worker configuration");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode");
+    super::super::acl::install(&File::open(path).expect("file"), uid, false).expect("read grant");
+}
+
+fn anchored_service(fixture: &Fixture) -> (Service, std::path::PathBuf) {
+    use crate::anchor::{
+        HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement, Transport,
+    };
+    let config = fixture.root.join(".config/loops");
+    fs::create_dir_all(&config).expect("configuration");
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).expect("mode");
+    let policy = Policy {
+        kind: Kind::Directory,
+        owner: Owner::Host,
+        mode: ModePolicy::Exact(0o700),
+    };
+    let pin = HostVerifier::current()
+        .expect("host")
+        .pin(&config, "configuration", 0, policy)
+        .expect("pin");
+    let manifest = Manifest {
+        version: 1,
+        operation: "mail-serve".into(),
+        loop_name: String::new(),
+        transport: Transport::Rights,
+        records: vec![pin.record()],
+    };
+    let mut anchors = Receiver::current()
+        .expect("receiver")
+        .validate(
+            &manifest,
+            vec![pin.into_fd()],
+            "mail-serve",
+            "",
+            Transport::Rights,
+            &[Requirement {
+                purpose: "configuration".into(),
+                alias_group: None,
+                policy,
+            }],
+        )
+        .expect("receipt");
+    let service = Service::new(
+        Directory {
+            configuration: Some(std::sync::Arc::new(anchors.pop().expect("configuration"))),
+            home: fixture.root.clone(),
+            service: nix::unistd::geteuid().as_raw(),
+            owner: nix::unistd::geteuid().as_raw(),
+            durability: publication::Durability {
+                crash_consistent_rename: true,
+                durable_sync: true,
+            },
+        },
+        fixture.journal(),
+    );
+    (service, config)
+}

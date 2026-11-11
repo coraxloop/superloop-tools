@@ -957,7 +957,7 @@ pub fn verify_active_beneath<'a>(
 ) -> Result<VerifiedLifetime<'a>> {
     const OPERATION: &str = "mail-binding";
     if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
-        return Err(failure(format!(
+        return Err(MailError::Entry(format!(
             "anchor-declaration: operation={OPERATION} purpose=registry-override"
         )));
     }

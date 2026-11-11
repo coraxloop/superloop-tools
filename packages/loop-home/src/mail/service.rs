@@ -395,46 +395,57 @@ impl Service {
         match self.deliver(&inventory, sender_address, name) {
             Ok(()) => Ok(()),
             Err(error) => {
-                let accepted = self.journal.records()?.into_iter().find(|record| {
-                    record.sender == sender_address.to_string()
-                        && Some(record.outgoing.as_str()) == name.to_str()
-                        && record.completed.is_none()
-                });
-                if let Some(record) = accepted {
-                    self.journal.pending(&record.delivery, &error.to_string())?;
-                    self.project(
-                        sender,
-                        sender_address,
-                        name,
-                        Some((record.bytes, record.digest)),
-                        ("pending-delivery", &error.to_string()),
-                        Some(record.delivery),
-                    )?;
-                } else {
-                    if let Some(text) = name.to_str()
-                        && let Ok(outgoing) = Outgoing::parse(text)
-                        && inventory.actors.contains_key(&outgoing.recipient)
-                        && nix::sys::stat::fstatat(
-                            &sender.staging,
-                            text,
-                            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-                        )
-                        .is_ok()
-                    {
-                        self.reconcile(&inventory, sender_address, &outgoing.recipient, text)?;
-                    }
-                    self.project(
-                        sender,
-                        sender_address,
-                        name,
-                        observation,
-                        (refusal::code(&error), &error.to_string()),
-                        None,
-                    )?;
-                }
-                Err(error)
+                self.refuse_candidate(&inventory, sender_address, name, observation, error)
             }
         }
+    }
+    fn refuse_candidate(
+        &mut self,
+        inventory: &Inventory,
+        sender_address: &Address,
+        name: &OsStr,
+        observation: Option<(u64, String)>,
+        error: MailError,
+    ) -> Result<()> {
+        let sender = actor(inventory, sender_address)?;
+        let accepted = self.journal.records()?.into_iter().find(|record| {
+            record.sender == sender_address.to_string()
+                && Some(record.outgoing.as_str()) == name.to_str()
+                && record.completed.is_none()
+        });
+        if let Some(record) = accepted {
+            self.journal.pending(&record.delivery, &error.to_string())?;
+            self.project(
+                sender,
+                sender_address,
+                name,
+                Some((record.bytes, record.digest)),
+                ("pending-delivery", &error.to_string()),
+                Some(record.delivery),
+            )?;
+        } else {
+            if let Some(text) = name.to_str()
+                && let Ok(outgoing) = Outgoing::parse(text)
+                && inventory.actors.contains_key(&outgoing.recipient)
+                && nix::sys::stat::fstatat(
+                    &sender.staging,
+                    text,
+                    nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+                )
+                .is_ok()
+            {
+                self.reconcile(inventory, sender_address, &outgoing.recipient, text)?;
+            }
+            self.project(
+                sender,
+                sender_address,
+                name,
+                observation,
+                (refusal::code(&error), &error.to_string()),
+                None,
+            )?;
+        }
+        Err(error)
     }
     fn deliver(
         &mut self,

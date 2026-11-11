@@ -20,6 +20,7 @@ pub struct BindingInventory {
     inventory: super::directory::Inventory,
     snapshot: super::directory::Snapshot,
     loop_name: String,
+    service: u32,
 }
 impl BindingInventory {
     /// Open the selected loop using a validated configuration snapshot and held directories.
@@ -72,6 +73,7 @@ impl BindingInventory {
             inventory,
             snapshot,
             loop_name: loop_name.into(),
+            service,
         })
     }
 
@@ -98,23 +100,159 @@ impl BindingInventory {
                 .ok_or(MailError::Invalid(
                     "invalid-directory: binding endpoint unavailable",
                 ))?;
+            super::directory::verify_outbox(&actor.outbox, actor.uid, self.service, actor.active)?;
             actor.endpoint.fresh()?;
         }
         Ok(())
     }
 }
 
-/// Receiver-validated capabilities for an anchored reply session.
+/// Owned mail capabilities whose coherence is established only by receipt.
 ///
-/// The entry must validate these as one mail-binding bundle before construction.
-/// No path in this value substitutes for a received descriptor.
-pub struct ReplyCustody<'a> {
-    pub configuration: &'a crate::anchor::Configuration,
-    pub configuration_directory: &'a crate::anchor::Anchor,
-    pub loop_storage: std::sync::Arc<crate::anchor::Anchor>,
-    pub private_storage: std::sync::Arc<crate::anchor::Anchor>,
-    pub identity_executable: &'a crate::anchor::Anchor,
-    pub journal: std::sync::Arc<crate::anchor::Anchor>,
+/// Private fields prevent callers assembling independent snapshots and anchors.
+/// The production command has not switched to this five-role mail subset yet.
+pub struct ReplyCustody {
+    home: std::path::PathBuf,
+    loop_name: String,
+    configuration: crate::anchor::Configuration,
+    configuration_directory: crate::anchor::Anchor,
+    loop_storage: std::sync::Arc<crate::anchor::Anchor>,
+    private_storage: std::sync::Arc<crate::anchor::Anchor>,
+    identity_executable: crate::anchor::Anchor,
+    journal: std::sync::Arc<crate::anchor::Anchor>,
+}
+
+const REPLY_OPERATION: &str = "mail-binding";
+const REPLY_PURPOSES: [&str; 5] = [
+    "configuration",
+    "loop-storage",
+    "private-storage",
+    "identity-executable",
+    "journal",
+];
+fn reply_refusal(purpose: &str) -> MailError {
+    MailError::Entry(format!(
+        "anchor-declaration: operation={REPLY_OPERATION} purpose={purpose}"
+    ))
+}
+fn reply_override() -> Result<()> {
+    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+        return Err(reply_refusal("registry-override"));
+    }
+    Ok(())
+}
+fn reply_requirements(loop_uid: u32, service: u32) -> Vec<crate::anchor::Requirement> {
+    use crate::anchor::{Kind, ModePolicy, Owner, Policy, Requirement};
+    [
+        (Owner::Host, Kind::Directory, ModePolicy::Exact(0o700)),
+        (Owner::Host, Kind::Directory, ModePolicy::Exact(0o711)),
+        (
+            Owner::Mapped(loop_uid),
+            Kind::Directory,
+            ModePolicy::Exact(0o700),
+        ),
+        (Owner::RootFile, Kind::File, ModePolicy::Executable),
+        (
+            Owner::Mapped(service),
+            Kind::Directory,
+            ModePolicy::Exact(0o700),
+        ),
+    ]
+    .into_iter()
+    .zip(REPLY_PURPOSES)
+    .map(|((owner, kind, mode), purpose)| Requirement {
+        purpose: purpose.into(),
+        alias_group: None,
+        policy: Policy { kind, owner, mode },
+    })
+    .collect()
+}
+impl ReplyCustody {
+    /// Receive the exact mail subset, deriving mapped policies from its held grant.
+    /// This is the sole constructor; no lifetime repair or identity drop occurs here.
+    /// # Errors
+    /// Refuses namespace, declaration, grant, settings or capability-policy mismatches.
+    pub fn receive(
+        receiver: &crate::anchor::Receiver,
+        manifest: &crate::anchor::Manifest,
+        descriptors: Vec<std::os::fd::OwnedFd>,
+        home: &Path,
+        loop_name: &str,
+    ) -> Result<Self> {
+        use crate::anchor::{Entry, Transport};
+        reply_override()?;
+        if nix::unistd::Uid::effective().as_raw() != 0 {
+            return Err(reply_refusal("namespace"));
+        }
+        if manifest.records.len() != REPLY_PURPOSES.len() {
+            return Err(reply_refusal("count"));
+        }
+        if !manifest
+            .records
+            .iter()
+            .zip(REPLY_PURPOSES)
+            .all(|(r, name)| r.purpose == name)
+        {
+            return Err(reply_refusal("purposes"));
+        }
+        let configuration = receiver.configuration(
+            manifest,
+            &descriptors,
+            Entry {
+                operation: REPLY_OPERATION,
+                loop_name,
+                transport: Transport::Rights,
+            },
+            home,
+            false,
+        )?;
+        let row = configuration
+            .registry
+            .row(loop_name, home)
+            .map_err(|_| reply_refusal("loop"))?;
+        let service = configuration
+            .allocations
+            .mail_uid()
+            .ok_or_else(|| reply_refusal("service"))?;
+        let required = reply_requirements(row.uid, service);
+        let mut anchors = receiver.validate(
+            manifest,
+            descriptors,
+            REPLY_OPERATION,
+            loop_name,
+            Transport::Rights,
+            &required,
+        )?;
+        let mut take = || anchors.pop().ok_or_else(|| reply_refusal("count"));
+        let journal = std::sync::Arc::new(take()?);
+        let identity_executable = take()?;
+        let private_storage = std::sync::Arc::new(take()?);
+        let loop_storage = std::sync::Arc::new(take()?);
+        let configuration_directory = take()?;
+        let custody = Self {
+            home: home.into(),
+            loop_name: loop_name.into(),
+            configuration,
+            configuration_directory,
+            loop_storage,
+            private_storage,
+            identity_executable,
+            journal,
+        };
+        custody.settings()?;
+        Ok(custody)
+    }
+    fn settings(&self) -> Result<command::Settings> {
+        let file = super::entry_anchors::configuration_file(
+            &self.configuration_directory,
+            Path::new("mail-service.toml"),
+        )?;
+        let settings = command::parse_settings(&io::bounded(&file, 4096)?)?;
+        if self.configuration.allocations.mail_uid() != Some(settings.uid) {
+            return Err(reply_refusal("service"));
+        }
+        Ok(settings)
+    }
 }
 
 /// A service-identity reply session retaining the protected worker lifetime lock.
@@ -128,40 +266,27 @@ pub struct ReplySession {
     service: u32,
     _lifetime: nix::fcntl::Flock<std::fs::File>,
 }
-impl ReplyCustody<'_> {
+impl ReplyCustody {
     /// Acquire the lease, permanently drop to the reserved service identity,
     /// and open the reply inventory beneath the same received storage.
     /// Call only in a short-lived namespace-root entry process.
     /// # Errors
     /// Refuses changed custody, settings, lifetime, identity drop or inventory.
-    pub fn enter(
-        self,
-        home: &Path,
-        loop_name: &str,
-        identity: &Identity,
-        verify_only: bool,
-    ) -> Result<ReplySession> {
-        // An ambient override is an invalid entry declaration, not a retryable I/O failure.
-        if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
-            return Err(MailError::Entry(
-                "anchor-declaration: operation=mail-binding purpose=registry-override".into(),
-            ));
-        }
+    pub fn enter(self, identity: &Identity, verify_only: bool) -> Result<ReplySession> {
+        reply_override()?;
+        let home = self.home.as_path();
+        let loop_name = self.loop_name.as_str();
+        let settings = self.settings()?;
         let lifetime = worker_provision::hold_active_beneath(
             home,
             loop_name,
             identity,
             verify_only,
-            self.configuration,
+            &self.configuration,
             &self.loop_storage,
             &self.private_storage,
-            self.identity_executable,
+            &self.identity_executable,
         )?;
-        let file = super::entry_anchors::configuration_file(
-            self.configuration_directory,
-            Path::new("mail-service.toml"),
-        )?;
-        let settings = command::parse_settings(&io::bounded(&file, 4096)?)?;
         self.journal.revalidate()?;
         command::enter_with(
             home,
@@ -172,7 +297,7 @@ impl ReplyCustody<'_> {
         let inventory = BindingInventory::open_beneath(
             home,
             loop_name,
-            self.configuration,
+            &self.configuration,
             self.loop_storage,
             self.private_storage,
             Durability {

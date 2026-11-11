@@ -1121,11 +1121,13 @@ pub fn bind_reservation_beneath<T>(
     instant: &Instant,
     verify: impl FnOnce(&Record) -> Result<T>,
 ) -> Result<T> {
-    bind_reservation(
+    reservation_binding(
         &reservation_root_beneath(anchor)?,
         family,
         reference,
         instant,
+        false,
+        Some(anchor),
         verify,
     )
 }
@@ -1142,11 +1144,13 @@ pub fn verify_reservation_beneath<T>(
     instant: &Instant,
     verify: impl FnOnce(&Record) -> Result<T>,
 ) -> Result<T> {
-    verify_reservation(
+    reservation_binding(
         &reservation_root_beneath(anchor)?,
         family,
         reference,
         instant,
+        true,
+        Some(anchor),
         verify,
     )
 }
@@ -1170,7 +1174,7 @@ pub fn bind_reservation<T>(
     instant: &Instant,
     verify: impl FnOnce(&Record) -> Result<T>,
 ) -> Result<T> {
-    reservation_binding(root, family, reference, instant, false, verify)
+    reservation_binding(root, family, reference, instant, false, None, verify)
 }
 
 /// Verify an existing delivery pin without creating or replacing any evidence.
@@ -1184,7 +1188,7 @@ pub fn verify_reservation<T>(
     instant: &Instant,
     verify: impl FnOnce(&Record) -> Result<T>,
 ) -> Result<T> {
-    reservation_binding(root, family, reference, instant, true, verify)
+    reservation_binding(root, family, reference, instant, true, None, verify)
 }
 
 fn reservation_binding<T>(
@@ -1193,10 +1197,19 @@ fn reservation_binding<T>(
     reference: &str,
     instant: &Instant,
     verify_only: bool,
+    custody: Option<&crate::anchor::Anchor>,
     verify: impl FnOnce(&Record) -> Result<T>,
 ) -> Result<T> {
     store::private(root, true)?;
     let _admission = reservation_admission(root)?;
+    // Revalidation postdates the wait and precedes every delivery/pin read. The
+    // anchor enforces the received exact policy; store::private above additionally
+    // requires the current service identity and no group access (the anchor
+    // permits preserved search/read ACLs). Repeat that stricter store check too.
+    if let Some(anchor) = custody {
+        anchor.revalidate()?;
+        store::private(root, true)?;
+    }
     let checkpoint: Checkpoint = store::read(root, "checkpoint.toml", SUMMARY_MAX_BYTES)?;
     if family.is_empty()
         || reference.is_empty()

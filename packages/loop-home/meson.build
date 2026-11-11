@@ -155,4 +155,6 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Install the principal mailbox fixture's exact named service ACL inside the test namespace"}
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#2","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Bounded snapshot of all fixture lifetime repair surfaces before and after receiving refusals"}
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#3","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Pipe-controlled namespace fault injector and admission lock holder, killed and reaped after the service identity drop"}
 ''']

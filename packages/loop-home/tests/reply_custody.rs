@@ -335,7 +335,7 @@ fn parent(case: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-fn receive(home: &Path) -> (anchor::Configuration, Vec<Anchor>) {
+fn receive() -> (Manifest, Vec<std::os::fd::OwnedFd>) {
     assert_eq!(fs::metadata("/").expect("namespace root").uid(), 65534);
     let manifest = Manifest::parse(&std::env::var("LOOP_HOME_REPLY_MANIFEST").expect("manifest"))
         .expect("parse");
@@ -349,10 +349,17 @@ fn receive(home: &Path) -> (anchor::Configuration, Vec<Anchor>) {
         anchor::transport::receive(&socket, 5, std::time::Duration::from_secs(30)).expect("frame");
     drop(socket);
     anchor::transport::replace_stdin("mail-binding").expect("null stdin");
+    (manifest, fds)
+}
+fn fixture_anchors(
+    home: &Path,
+    manifest: &Manifest,
+    fds: Vec<std::os::fd::OwnedFd>,
+) -> (anchor::Configuration, Vec<Anchor>) {
     let receiver = Receiver::current().expect("receiver");
     let configuration = receiver
         .configuration(
-            &manifest,
+            manifest,
             &fds,
             anchor::Entry {
                 operation: "mail-binding",
@@ -365,7 +372,7 @@ fn receive(home: &Path) -> (anchor::Configuration, Vec<Anchor>) {
         .expect("configuration");
     let anchors = receiver
         .validate(
-            &manifest,
+            manifest,
             fds,
             "mail-binding",
             "alpha",
@@ -376,29 +383,44 @@ fn receive(home: &Path) -> (anchor::Configuration, Vec<Anchor>) {
     (configuration, anchors)
 }
 fn child(home: &Path, case: &str) {
-    let (configuration, mut anchors) = receive(home);
+    let (manifest, fds) = receive();
+    let receiver = Receiver::current().expect("receiver");
+    if case == "declarations" {
+        declaration_refusals(home, &manifest, &fds, &receiver);
+        return;
+    }
+    let custody = ReplyCustody::receive(&receiver, &manifest, duplicate(&fds), home, "alpha");
+    let (configuration, mut anchors) = fixture_anchors(home, &manifest, fds);
     let journal = Arc::new(anchors.pop().expect("journal"));
     let executor = anchors.pop().expect("executor");
     let private = Arc::new(anchors.pop().expect("private"));
     let storage = Arc::new(anchors.pop().expect("storage"));
-    let config = anchors.pop().expect("config");
+    let _config = anchors.pop().expect("config");
     let identity = Identity {
         uid: 64010,
         name: "worker".into(),
         reservation: "reply-fixture".into(),
     };
     if case.starts_with("override-") {
+        let error = custody.err().expect("override at receiving constructor");
+        assert_entry_override(&error);
         for verify_only in [false, true] {
-            let custody = ReplyCustody {
-                configuration: &configuration,
-                configuration_directory: &config,
-                loop_storage: Arc::clone(&storage),
-                private_storage: Arc::clone(&private),
-                identity_executable: &executor,
-                journal: Arc::clone(&journal),
-            };
-            override_refusal(custody, home, &identity, verify_only);
+            let error = worker_provision::verify_active_beneath(
+                home,
+                "alpha",
+                &identity,
+                verify_only,
+                &configuration,
+                &storage,
+                &private,
+                &executor,
+            )
+            .err()
+            .expect("direct lifetime override");
+            assert_entry_override(&error);
         }
+        assert_eq!(nix::unistd::Uid::effective().as_raw(), 0);
+        assert!(!home.join(".var/loops/alpha/.mail-births").exists());
         return;
     }
     for phase in ["reserve", "finish"] {
@@ -424,62 +446,49 @@ fn child(home: &Path, case: &str) {
     );
     let probe = File::open(home.join(".var/loops/alpha/.mail-births"))
         .expect("independent lock description");
-    for (from, to) in [
-        (".config/loops", "held-configuration"),
-        (".var/loops/alpha", "held-storage"),
-        (".var/loops/.mail-service", "held-journal"),
-    ] {
-        fs::rename(home.join(from), home.join(to)).expect("retain original");
-        fs::write(home.join(from), b"replacement").expect("substitute pathname");
-    }
+    replace_received_paths(home);
     let row = configuration.registry.row("alpha", home).expect("row");
     let shared_storage = Arc::clone(&storage);
     let shared_journal = Arc::clone(&journal);
-    let custody = ReplyCustody {
-        configuration: &configuration,
-        configuration_directory: &config,
-        loop_storage: storage,
-        private_storage: private,
-        identity_executable: &executor,
-        journal,
-    };
+    let mutator = Mutator::new(home);
     let session = custody
-        .enter(home, "alpha", &identity, case != "repair")
+        .expect("receiving constructor")
+        .enter(&identity, case != "repair")
         .expect("production session and identity drop");
     assert_eq!(nix::unistd::Uid::effective().as_raw(), 64001);
     let (probe, error) =
         nix::fcntl::Flock::lock(probe, nix::fcntl::FlockArg::LockExclusiveNonblock)
             .expect_err("lease survives drop");
     assert_eq!(error, nix::errno::Errno::EWOULDBLOCK);
-    measure(&session, &shared_storage, &shared_journal, &row, case);
-    drop(session);
+    if case.starts_with("outbox-") || case.starts_with("admission-") {
+        admission_case(
+            session,
+            &shared_storage,
+            &shared_journal,
+            &row,
+            case,
+            mutator,
+        );
+    } else {
+        measure(&session, &shared_storage, &shared_journal, &row, case);
+        drop(session);
+        drop(mutator);
+    }
     drop(
         nix::fcntl::Flock::lock(probe, nix::fcntl::FlockArg::LockExclusiveNonblock)
             .expect("session drop releases lease"),
     );
 }
-fn override_refusal(
-    custody: ReplyCustody<'_>,
-    home: &Path,
-    identity: &Identity,
-    verify_only: bool,
-) {
-    let before = nix::unistd::Uid::effective();
-    let Err(error) = custody.enter(home, "alpha", identity, verify_only) else {
-        panic!("registry override admitted");
-    };
-    assert!(
-        matches!(error, loop_home::mail::journal::MailError::Entry(_)),
-        "{error}"
-    );
+fn duplicate(fds: &[std::os::fd::OwnedFd]) -> Vec<std::os::fd::OwnedFd> {
+    fds.iter()
+        .map(|fd| fd.try_clone().expect("fixture duplicate"))
+        .collect()
+}
+fn assert_entry_override(error: &journal::MailError) {
+    assert!(matches!(error, journal::MailError::Entry(_)), "{error}");
     assert_eq!(
         error.to_string(),
         "anchor-declaration: operation=mail-binding purpose=registry-override"
-    );
-    assert_eq!(nix::unistd::Uid::effective(), before, "no identity change");
-    assert!(
-        !home.join(".var/loops/alpha/.mail-births").exists(),
-        "no lifetime writes"
     );
 }
 
@@ -529,7 +538,7 @@ fn post_lock_check(
             if std::time::Instant::now() >= deadline {
                 break false;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::yield_now();
         };
         fs::set_permissions(&path, fs::Permissions::from_mode(0o731))
             .expect("change during receipt-lock wait");
@@ -718,7 +727,15 @@ fn reply_session_retains_custody() {
                     "journal-mode",
                     "payload",
                     "override-empty",
-                    "override-canonical"
+                    "override-canonical",
+                    "declarations",
+                    "outbox-uid",
+                    "outbox-mode",
+                    "outbox-acl",
+                    "outbox-wait",
+                    "admission-bind",
+                    "admission-verify",
+                    "admission-acl"
                 ]
                 .contains(&phase.as_str()),
                 "unsupported fixture phase {phase}"
@@ -734,8 +751,18 @@ fn reply_session_retains_custody() {
         "payload",
         "override-empty",
         "override-canonical",
+        "declarations",
+        "outbox-uid",
+        "outbox-mode",
+        "outbox-acl",
+        "outbox-wait",
+        "admission-bind",
+        "admission-verify",
+        "admission-acl",
     ] {
         parent(case);
+        writeln!(std::io::stdout().lock(), "reply custody case {case} passed")
+            .expect("case result");
     }
 }
 
@@ -914,4 +941,442 @@ fn main() -> std::process::ExitCode {
         .write_all(b"reply custody passed\n")
         .expect("fixture result");
     std::process::ExitCode::SUCCESS
+}
+
+fn repair_state(home: &Path) -> Vec<u8> {
+    let output = std::process::Command::new("/usr/bin/python3")
+        .args([
+            "-I",
+            "-c",
+            r"import os,sys,json,stat,errno
+root=sys.argv[1]; rows=[]
+for parent,dirs,files in os.walk(root):
+ for path in [parent]+[os.path.join(parent,n) for n in sorted(files)]:
+  s=os.lstat(path)
+  try: acl=os.getxattr(path,'system.posix_acl_access').hex()
+  except OSError as e:
+   if e.errno!=errno.ENODATA: raise
+   acl=None
+  data=open(path,'rb').read().hex() if stat.S_ISREG(s.st_mode) else None
+  rows.append([path,s.st_ino,s.st_uid,s.st_gid,s.st_mode,s.st_nlink,
+               s.st_mtime_ns,s.st_ctime_ns,acl,data])
+print(json.dumps(sorted(rows)))",
+        ])
+        .arg(home.join(".var/loops"))
+        .fixture_output("pre-repair snapshot", Duration::from_secs(20))
+        .expect("snapshot");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+fn declaration_refusals(
+    home: &Path,
+    manifest: &Manifest,
+    fds: &[std::os::fd::OwnedFd],
+    receiver: &Receiver,
+) {
+    let identity = Identity {
+        uid: 64010,
+        name: "worker".into(),
+        reservation: "reply-fixture".into(),
+    };
+    for (case, kind, purpose) in [
+        ("count", "anchor-declaration", "count"),
+        ("purpose", "anchor-declaration", "purposes"),
+        ("operation", "anchor-declaration", "configuration"),
+        ("loop", "anchor-declaration", "configuration"),
+        ("slot", "anchor-declaration", "manifest"),
+        ("owner", "anchor-owner", "private-storage"),
+        ("kind", "anchor-declaration", "identity-executable"),
+        ("alias", "anchor-owner", "journal"),
+        ("short", "anchor-missing", "configuration"),
+        ("excess", "anchor-transport", "configuration"),
+    ] {
+        let mut changed = manifest.clone();
+        let mut descriptors = duplicate(fds);
+        match case {
+            "count" => {
+                changed.records.pop();
+            }
+            "purpose" => changed.records[2].purpose = "unrelated".into(),
+            "operation" => changed.operation = "other-operation".into(),
+            "loop" => changed.loop_name = "beta".into(),
+            "slot" => changed.records[2].slot = 1,
+            "owner" => changed.records[2].owner_uid += 1,
+            "kind" => changed.records[3].kind = Kind::Directory,
+            "alias" => {
+                changed.records[4] = changed.records[0].clone();
+                changed.records[4].purpose = "journal".into();
+                changed.records[4].slot = 4;
+                descriptors[4] = fds[0].try_clone().expect("alias");
+            }
+            "short" => {
+                descriptors.pop();
+            }
+            "excess" => descriptors.push(fds[0].try_clone().expect("excess")),
+            _ => unreachable!(),
+        }
+        received_refusal(
+            home,
+            &changed,
+            descriptors,
+            receiver,
+            &identity,
+            (kind, purpose),
+        );
+    }
+    live_bundle_refusals(home, manifest, fds, receiver, &identity);
+    assert!(!home.join(".var/loops/alpha/.mail-births").exists());
+}
+
+fn received_refusal(
+    home: &Path,
+    manifest: &Manifest,
+    descriptors: Vec<std::os::fd::OwnedFd>,
+    receiver: &Receiver,
+    identity: &Identity,
+    expected: (&str, &str),
+) {
+    let before = repair_state(home);
+    let result = ReplyCustody::receive(receiver, manifest, descriptors, home, "alpha")
+        .and_then(|custody| custody.enter(identity, false));
+    let error = result.err().expect("invalid received bundle");
+    let text = error.to_string();
+    assert!(
+        text.starts_with(expected.0) && text.contains(&format!("purpose={}", expected.1)),
+        "{expected:?}: {error}"
+    );
+    assert_eq!(
+        nix::unistd::Uid::effective().as_raw(),
+        0,
+        "no identity drop"
+    );
+    assert_eq!(
+        repair_state(home),
+        before,
+        "{expected:?}: no repair or service write"
+    );
+}
+fn live_bundle_refusals(
+    home: &Path,
+    manifest: &Manifest,
+    fds: &[std::os::fd::OwnedFd],
+    receiver: &Receiver,
+    identity: &Identity,
+) {
+    use nix::sys::stat::{Mode, fchmod};
+    use nix::unistd::{Gid, Uid, fchown};
+    let private = File::open(home.join(".var/loops/alpha/private")).expect("mutation fd");
+    fchmod(&private, Mode::from_bits_truncate(0o750)).expect("widen private root");
+    received_refusal(
+        home,
+        manifest,
+        duplicate(fds),
+        receiver,
+        identity,
+        ("anchor-mode", "private-storage"),
+    );
+    fchmod(&private, Mode::from_bits_truncate(0o700)).expect("restore private mode");
+    fchown(
+        &private,
+        Some(Uid::from_raw(64011)),
+        Some(Gid::from_raw(64011)),
+    )
+    .expect("change live private owner");
+    received_refusal(
+        home,
+        manifest,
+        duplicate(fds),
+        receiver,
+        identity,
+        ("anchor-owner", "private-storage"),
+    );
+    fchown(
+        &private,
+        Some(Uid::from_raw(64000)),
+        Some(Gid::from_raw(64000)),
+    )
+    .expect("restore private owner");
+    let settings = home.join(".config/loops/mail-service.toml");
+    let original = fs::read_to_string(&settings).expect("settings");
+    let changed = original.replace("64001", "64002");
+    assert_ne!(original, changed);
+    fs::write(&settings, changed).expect("wrong reserved service");
+    received_refusal(
+        home,
+        manifest,
+        duplicate(fds),
+        receiver,
+        identity,
+        ("anchor-declaration", "service"),
+    );
+    fs::write(settings, original).expect("restore service settings");
+}
+
+struct Mutator {
+    process: std::process::Child,
+    input: std::process::ChildStdin,
+    replies: std::sync::mpsc::Receiver<String>,
+}
+impl Mutator {
+    fn new(home: &Path) -> Self {
+        use std::os::unix::process::CommandExt as _;
+        let mut process = std::process::Command::new("/usr/bin/python3")
+            .args([
+                "-I",
+                "-c",
+                r"import os,sys,fcntl,struct,errno
+root=sys.argv[1]; journal=root+'/held-journal'
+outbox=root+'/held-storage/workers/worker/mail/outbox'
+f=os.open(journal,os.O_RDONLY|os.O_DIRECTORY)
+s=os.stat(outbox); original=os.getxattr(outbox,'system.posix_acl_access')
+# The service can kill this child by its real UID after its own permanent drop.
+os.setresuid(64001,0,64001)
+assert os.getresuid()==(64001,0,64001)
+print('ready',flush=True)
+for command in sys.stdin:
+ command=command.strip()
+ if command=='lock': fcntl.flock(f,fcntl.LOCK_EX)
+ elif command=='release': fcntl.flock(f,fcntl.LOCK_UN)
+ elif command=='journal-mode': os.chmod(journal,0)
+ elif command=='journal-acl':
+  entries=[(1,7,0xffffffff),(2,4,64002),(4,0,0xffffffff),(16,4,0xffffffff),(32,0,0xffffffff)]
+  acl=struct.pack('<I',2)+b''.join(struct.pack('<HHI',*entry) for entry in entries)
+  os.setxattr(journal,'system.posix_acl_access',acl)
+ elif command=='outbox-uid': os.chown(outbox,64011,s.st_gid)
+ elif command=='outbox-mode': os.chmod(outbox,0o777)
+ elif command=='outbox-acl':
+  changed=original[:20]+struct.pack('<HHI',2,1,64002)+original[20:]
+  os.setxattr(outbox,'system.posix_acl_access',changed)
+ elif command=='restore':
+  try: os.removexattr(journal,'system.posix_acl_access')
+  except OSError as e:
+   if e.errno!=errno.ENODATA: raise
+  os.chmod(journal,0o700); os.chown(outbox,s.st_uid,s.st_gid)
+  os.chmod(outbox,s.st_mode & 0o7777); os.setxattr(outbox,'system.posix_acl_access',original)
+ else: raise RuntimeError(command)
+ print(command,flush=True)",
+            ])
+            .arg(home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .process_group(0)
+            .spawn()
+            .expect("root custody mutator");
+        let input = process.stdin.take().expect("control pipe");
+        let output = process.stdout.take().expect("ack pipe");
+        let (send, replies) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{BufRead as _, Read as _};
+            for line in std::io::BufReader::new(output).take(16_384).lines() {
+                if send.send(line.expect("mutator acknowledgement")).is_err() {
+                    break;
+                }
+            }
+        });
+        let guard = Self {
+            process,
+            input,
+            replies,
+        };
+        assert_eq!(
+            guard
+                .replies
+                .recv_timeout(Duration::from_secs(10))
+                .expect("ready"),
+            "ready"
+        );
+        guard
+    }
+    fn command(&mut self, word: &str) {
+        writeln!(self.input, "{word}").expect("release/control pipe");
+        self.input.flush().expect("flush command");
+        assert_eq!(
+            self.replies
+                .recv_timeout(Duration::from_secs(10))
+                .expect("bounded mutator acknowledgement"),
+            word
+        );
+    }
+}
+impl Drop for Mutator {
+    fn drop(&mut self) {
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(self.process.id()).expect("PID"));
+        if let Err(error) = nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGKILL) {
+            assert_eq!(
+                error,
+                nix::errno::Errno::ESRCH,
+                "kill lock-holder child {pid}"
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while self.process.try_wait().expect("reap lock holder").is_none() {
+            if std::time::Instant::now() >= deadline {
+                let _reported = writeln!(
+                    std::io::stderr().lock(),
+                    "lock-holder reap timed out; pid {pid} remains unmeasured"
+                );
+                assert!(
+                    std::thread::panicking(),
+                    "lock-holder reap timed out: {pid}"
+                );
+                break;
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+fn blocked_on(file: &File) {
+    let info = file.metadata().expect("admission identity");
+    let key = format!(
+        "{:02x}:{:02x}:{}",
+        nix::sys::stat::major(info.dev()),
+        nix::sys::stat::minor(info.dev()),
+        info.ino()
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if fs::read_to_string("/proc/locks")
+            .expect("lock census")
+            .lines()
+            .any(|line| line.contains("->") && line.split_whitespace().any(|word| word == key))
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "waiter did not block on admission"
+        );
+        std::thread::yield_now();
+    }
+}
+fn journal_state(file: &File) -> (Vec<u8>, Vec<std::ffi::OsString>, (i64, i64)) {
+    let path = PathBuf::from(format!(
+        "/proc/self/fd/{}",
+        std::os::fd::AsRawFd::as_raw_fd(file)
+    ));
+    let mut entries = fs::read_dir(&path)
+        .expect("held entries")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect::<Vec<_>>();
+    entries.sort();
+    let info = file.metadata().expect("root metadata");
+    (
+        fs::read(path.join("reservation-pins.toml")).expect("pin bytes"),
+        entries,
+        (info.mtime(), info.mtime_nsec()),
+    )
+}
+fn admission_case(
+    session: ReplySession,
+    storage: &Arc<Anchor>,
+    journal: &Arc<Anchor>,
+    row: &loop_home::LoopRecord,
+    case: &str,
+    mut mutator: Mutator,
+) {
+    let (_writer, instant) = delivery(storage, journal, row);
+    session.reply("review", &instant).expect("initial pin");
+    let root = File::from(journal.relay().expect("journal").1);
+    let before = journal_state(&root);
+    let session = if case.starts_with("admission-") || case == "outbox-wait" {
+        waiting_case(session, journal, &instant, &root, case, &mut mutator)
+    } else {
+        mutator.command(case);
+        for verify in [false, true] {
+            let result = if verify {
+                session.verify_reply("review", &instant)
+            } else {
+                session.reply("review", &instant)
+            };
+            let error = result.expect_err("live outbox custody");
+            let expected = if case == "outbox-acl" {
+                "outbox service ACL"
+            } else {
+                "actor outbox custody"
+            };
+            assert!(error.to_string().contains(expected), "{case}: {error}");
+        }
+        session
+    };
+    mutator.command("restore");
+    assert_eq!(journal_state(&root), before, "no pin or directory mutation");
+    session
+        .verify_reply("review", &instant)
+        .expect("restored custody verifies");
+    drop(session);
+}
+fn waiting_case(
+    session: ReplySession,
+    journal: &Arc<Anchor>,
+    instant: &Instant,
+    root: &File,
+    case: &str,
+    mutator: &mut Mutator,
+) -> ReplySession {
+    let verify_only = case == "admission-verify";
+    let outbox = case == "outbox-wait";
+    let anchor = Arc::clone(journal);
+    let instant = instant.clone();
+    let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback = Arc::clone(&called);
+    mutator.command("lock");
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = if outbox {
+            session.verify_reply("review", &instant).map(|_| ())
+        } else {
+            let inspect = |_: &journal::Record| {
+                callback.store(true, Ordering::SeqCst);
+                Ok(())
+            };
+            if verify_only {
+                journal::verify_reservation_beneath(&anchor, "fixture", "ref", &instant, inspect)
+            } else {
+                journal::bind_reservation_beneath(&anchor, "fixture", "ref", &instant, inspect)
+            }
+        };
+        send.send((session, result)).expect("waiter receiver");
+    });
+    blocked_on(root);
+    mutator.command(if outbox {
+        "outbox-mode"
+    } else if case == "admission-acl" {
+        "journal-acl"
+    } else {
+        "journal-mode"
+    });
+    mutator.command("release");
+    let (session, result) = receive
+        .recv_timeout(Duration::from_secs(15))
+        .expect("bounded admission waiter; process remains killable by fixture parent");
+    let error = result.expect_err("custody changed while admission blocked");
+    let expected = if outbox {
+        "unsafe-storage: actor outbox custody"
+    } else if case == "admission-acl" {
+        "unsafe-storage: service-private object required"
+    } else {
+        "anchor-mode:"
+    };
+    assert!(error.to_string().starts_with(expected), "{case}: {error}");
+    assert!(
+        !called.load(Ordering::SeqCst),
+        "journal callback must not run"
+    );
+    session
+}
+
+fn replace_received_paths(home: &Path) {
+    for (from, to) in [
+        (".config/loops", "held-configuration"),
+        (".var/loops/alpha", "held-storage"),
+        (".var/loops/.mail-service", "held-journal"),
+    ] {
+        fs::rename(home.join(from), home.join(to)).expect("retain original");
+        fs::write(home.join(from), b"replacement").expect("substitute pathname");
+    }
 }
