@@ -608,23 +608,31 @@ fn fixture_admission_spawner_checks_actual_thread_inputs() {
             "evidence directory",
         ),
     ] {
-        let result = crate::container_helper::spawn_credential_authority_admitted(
-            owner,
-            name.into(),
-            runs,
-            driver,
-            backend,
-            Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            &f.admission(),
-        );
-        let error = match result {
-            Ok(thread) => thread
-                .join()
-                .expect("clean join")
-                .expect_err("before cancelled loop"),
-            Err(error) => error,
-        };
-        refused(error, reason);
+        // A preset flag pins the refusal before any pass; an unset flag pins the exit guard.
+        for preset in [true, false] {
+            let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(preset));
+            let result = crate::container_helper::spawn_credential_authority_admitted(
+                owner.clone(),
+                name.into(),
+                runs.clone(),
+                driver.clone(),
+                backend,
+                Arc::clone(&cancelled),
+                &f.admission(),
+            );
+            let error = match result {
+                Ok(thread) => thread
+                    .join()
+                    .expect("clean join")
+                    .expect_err("before first pass"),
+                Err(error) => error,
+            };
+            refused(error, reason);
+            assert!(
+                cancelled.load(std::sync::atomic::Ordering::Acquire),
+                "pre-loop scope refusal cancels service"
+            );
+        }
     }
     assert_eq!(fs::read_dir(f.runs.join("R")).expect("R").count(), 0);
     assert_eq!(fs::read_dir(f.runs.join("S")).expect("S").count(), 0);

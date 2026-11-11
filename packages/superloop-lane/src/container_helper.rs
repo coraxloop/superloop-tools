@@ -2044,6 +2044,14 @@ pub(crate) fn spawn_credential_authority_admitted(
     )
 }
 
+// Service liveness must not outlast its authority, including an activation refusal.
+struct CredentialAuthorityCancellation(Arc<AtomicBool>);
+impl Drop for CredentialAuthorityCancellation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 /// Run the service authority with an explicit internal refresh endpoint.
 /// Codex uses the fixed vendor endpoint; its tests inject loopback before thread capture.
 /// Claude uses its owner program and does not use this endpoint.
@@ -2060,6 +2068,7 @@ fn spawn_credential_authority_at(
     std::thread::Builder::new()
         .name("credential-authority".into())
         .spawn(move || -> Result<(), LaneError> {
+            let _cancel_on_exit = CredentialAuthorityCancellation(Arc::clone(&refresh_cancelled));
             let custody = refresh_custody.activate()?;
             custody.admission.evidence_binding(
                 &refresh_home,
@@ -3246,6 +3255,47 @@ mod tests {
         assert!(!home.join(".config").exists());
         assert!(crate::home::snapshot_private_home().is_err());
         assert!(crate::container_entry::check(Path::new("/usr/bin/claude")).is_none());
+    }
+
+    /// ´test:unit:helper-authority-activation-failure-cancels-service´
+    #[test]
+    fn helper_authority_activation_failure_cancels_service() {
+        let fixture = crate::tests::helper_admission::Fixture::new();
+        let admission = fixture.admission();
+        let custody =
+            super::CredentialThreadCustody::capture_admitted(BoxBackend::Claude, &admission)
+                .expect("captured periodic custody");
+        let home = fixture.owner.clone();
+        let runs = fixture.runs.clone();
+        let driver = runs.join("R");
+        drop(fixture);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread = super::spawn_credential_authority_at(
+            home,
+            "alpha".into(),
+            runs,
+            driver,
+            BoxBackend::Claude,
+            Arc::clone(&cancelled),
+            ("http://127.0.0.1:1/unused".into(), custody),
+        )
+        .expect("spawn after root removal");
+        let error = thread
+            .join()
+            .expect("authority join")
+            .expect_err("activation refusal");
+        assert_eq!((error.status, error.kind), (2, "fixture-scope"));
+        assert_eq!(
+            error.detail,
+            format!(
+                "{}: refuses root pathname",
+                crate::runtime_admission::fixture::SENTINEL
+            )
+        );
+        assert!(
+            cancelled.load(Ordering::Acquire),
+            "activation failure cancels service"
+        );
     }
 
     /// ´test:unit:helper-fixture-publication-refuses-scope-before-effects´
