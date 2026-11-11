@@ -2040,6 +2040,7 @@ pub(crate) fn spawn_credential_authority_admitted(
         (
             crate::credential::service_endpoint(),
             CredentialThreadCustody::capture_admitted(backend, admission)?,
+            wait_credential_authority_period,
         ),
     )
 }
@@ -2052,19 +2053,33 @@ impl Drop for CredentialAuthorityCancellation {
     }
 }
 
+const CREDENTIAL_REFRESH_INTERVAL_SECONDS: u64 = 30;
+
+fn wait_credential_authority_period(cancelled: &AtomicBool) {
+    for _ in 0..CREDENTIAL_REFRESH_INTERVAL_SECONDS {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
 /// Run the service authority with an explicit internal refresh endpoint.
 /// Codex uses the fixed vendor endpoint; its tests inject loopback before thread capture.
 /// Claude uses its owner program and does not use this endpoint.
-fn spawn_credential_authority_at(
+fn spawn_credential_authority_at<W>(
     refresh_home: PathBuf,
     refresh_loop: String,
     refresh_root: PathBuf,
     refresh_driver_dir: PathBuf,
     backend: BoxBackend,
     refresh_cancelled: Arc<AtomicBool>,
-    authority: (String, CredentialThreadCustody),
-) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError> {
-    let (endpoint, refresh_custody) = authority;
+    authority: (String, CredentialThreadCustody, W),
+) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError>
+where
+    W: FnMut(&AtomicBool) + Send + 'static,
+{
+    let (endpoint, refresh_custody, mut wait_between_passes) = authority;
     std::thread::Builder::new()
         .name("credential-authority".into())
         .spawn(move || -> Result<(), LaneError> {
@@ -2110,12 +2125,7 @@ fn spawn_credential_authority_at(
                     return Err(error);
                 }
                 checked = result.is_ok();
-                for _ in 0..30 {
-                    if refresh_cancelled.load(Ordering::Acquire) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
+                wait_between_passes(&refresh_cancelled);
             }
             Ok(())
         })
@@ -3277,7 +3287,11 @@ mod tests {
             driver,
             BoxBackend::Claude,
             Arc::clone(&cancelled),
-            ("http://127.0.0.1:1/unused".into(), custody),
+            (
+                "http://127.0.0.1:1/unused".into(),
+                custody,
+                super::wait_credential_authority_period,
+            ),
         )
         .expect("spawn after root removal");
         let error = thread
@@ -3296,6 +3310,82 @@ mod tests {
             cancelled.load(Ordering::Acquire),
             "activation failure cancels service"
         );
+    }
+
+    /// ´test:unit:helper-authority-waits-for-pass-release´
+    #[test]
+    fn helper_authority_waits_for_pass_release() {
+        use std::os::unix::fs::MetadataExt as _;
+        let fixture = TempDir::new().expect("private fixture");
+        let home = fixture.path();
+        fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("home mode");
+        let runs = home.join("runs");
+        let driver = runs.join("R");
+        fs::create_dir_all(&driver).expect("driver");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected path");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("protected mode");
+        let held = fs::File::open(home).expect("held home");
+        let private =
+            crate::home::activate_handed_home(home, &held, nix::unistd::Uid::effective().as_raw())
+                .expect("private home");
+        let custody = super::CredentialThreadCustody::capture_admitted(BoxBackend::Claude, &Gate)
+            .expect("Gate custody");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (pass, observed) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let authority = super::spawn_credential_authority_at(
+            home.to_path_buf(),
+            "alpha".into(),
+            runs,
+            driver,
+            BoxBackend::Claude,
+            Arc::clone(&cancelled),
+            (
+                "http://127.0.0.1:1/unused".into(),
+                custody,
+                move |_: &AtomicBool| {
+                    pass.send(()).expect("report completed pass");
+                    resume
+                        .recv_timeout(Duration::from_secs(15))
+                        .expect("release completed pass");
+                },
+            ),
+        )
+        .expect("event-driven authority");
+        drop(private);
+        observed
+            .recv_timeout(Duration::from_secs(15))
+            .expect("first pass done");
+        let evidence = protected.join("credential-refresh.json");
+        let first = fs::read(&evidence).expect("first evidence");
+        let inode = fs::metadata(&evidence).expect("first inode").ino();
+        assert!(observed.try_recv().is_err(), "second pass awaits release");
+        assert!(!cancelled.load(Ordering::Acquire));
+        release.send(()).expect("release first pass");
+        observed
+            .recv_timeout(Duration::from_secs(15))
+            .expect("second pass done");
+        assert_ne!(fs::metadata(&evidence).expect("second inode").ino(), inode);
+        assert_eq!(fs::read(&evidence).expect("second evidence"), first);
+        cancelled.store(true, Ordering::Release);
+        release.send(()).expect("release final pass");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !authority.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            authority.is_finished(),
+            "cancelled authority joins after release"
+        );
+        authority
+            .join()
+            .expect("thread join")
+            .expect("clean cancellation");
+        assert!(matches!(
+            observed.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
     }
 
     /// ´test:unit:helper-fixture-publication-refuses-scope-before-effects´

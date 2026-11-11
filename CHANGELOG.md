@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Make the private credential-authority wait injectable for event-driven pass boundaries, retaining the production thirty-second cancellable interval (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:helper-authority-waits-for-pass-release``).
+
 - Inventory fixture cleanup reports metadata-query errors when checking that the parent-owned root and marker remain, retaining the directory and regular-file checks (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - The closed dead-pid fixture record now preserves the dated measurement of recurring collision windows at the node’s pid churn (``prob:gates:fixtures-name-a-dead-process-by-a-number-no-process-can-hold``).
