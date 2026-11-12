@@ -107,11 +107,145 @@ impl BindingInventory {
     }
 }
 
+/// The complete private binding selection; no independent mode flag is needed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BindingSelection {
+    Reply,
+    InboundBind,
+    InboundVerify,
+}
+impl BindingSelection {
+    /// Decode only the three supported private word/flag pairs.
+    #[must_use]
+    pub fn from_private(word: &str, flag: Option<&str>) -> Option<Self> {
+        [Self::Reply, Self::InboundBind, Self::InboundVerify]
+            .into_iter()
+            .find(|selection| selection.private_word() == word && selection.private_flag() == flag)
+    }
+    #[must_use]
+    pub const fn operation(self) -> &'static str {
+        match self {
+            Self::Reply => "mail-binding",
+            Self::InboundBind => "mail-bind",
+            Self::InboundVerify => "mail-verify",
+        }
+    }
+    #[must_use]
+    pub const fn private_word(self) -> &'static str {
+        if matches!(self, Self::Reply) {
+            "_bind-reply"
+        } else {
+            "_bind-mail"
+        }
+    }
+    #[must_use]
+    pub const fn private_flag(self) -> Option<&'static str> {
+        if self.verify_only() {
+            Some("--verify-only")
+        } else {
+            None
+        }
+    }
+    /// Also selects the lane's read-only evidence mode.
+    #[must_use]
+    pub const fn verify_only(self) -> bool {
+        matches!(self, Self::InboundVerify)
+    }
+    #[must_use]
+    pub const fn is_reply(self) -> bool {
+        matches!(self, Self::Reply)
+    }
+    pub(super) fn refusal(self, purpose: &str) -> MailError {
+        MailError::Entry(format!(
+            "anchor-declaration: operation={} purpose={purpose}",
+            self.operation()
+        ))
+    }
+    pub(super) fn io(self, purpose: &str, check: &str, error: impl std::fmt::Display) -> MailError {
+        MailError::Entry(format!(
+            "anchor-io: operation={} purpose={purpose} check={check}: {error}",
+            self.operation()
+        ))
+    }
+    pub(super) fn check_override(self) -> Result<()> {
+        if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+            return Err(self.refusal("registry-override"));
+        }
+        Ok(())
+    }
+}
+
+/// Selected custody for the next binding entry. Fields cannot be assembled by callers.
+pub struct BindingCustody {
+    custody: ReplyCustody,
+    selection: BindingSelection,
+}
+impl BindingCustody {
+    /// Receive the exact selected operation before repair or identity transition.
+    ///
+    /// # Errors
+    /// Refuses a mismatched operation, frame, configuration or capability policy.
+    pub fn receive(
+        receiver: &crate::anchor::Receiver,
+        manifest: &crate::anchor::Manifest,
+        descriptors: Vec<std::os::fd::OwnedFd>,
+        loop_name: &str,
+        selection: BindingSelection,
+    ) -> Result<Self> {
+        Ok(Self {
+            custody: ReplyCustody::receive_selected(
+                receiver,
+                manifest,
+                descriptors,
+                loop_name,
+                selection,
+            )?,
+            selection,
+        })
+    }
+    /// Enter the service identity with lifetime mode fixed by receipt.
+    ///
+    /// # Errors
+    /// Refuses changed custody or an unavailable lifetime; verify never repairs it.
+    pub fn enter(self, identity: &Identity) -> Result<BindingSession> {
+        Ok(BindingSession {
+            session: self.custody.enter(identity, self.selection.verify_only())?,
+            selection: self.selection,
+        })
+    }
+}
+
+/// Retains the receipt lease throughout selected delivery and evidence handling.
+#[must_use = "retain the session through evidence handling"]
+pub struct BindingSession {
+    session: ReplySession,
+    selection: BindingSelection,
+}
+impl BindingSession {
+    #[must_use]
+    pub const fn selection(&self) -> BindingSelection {
+        self.selection
+    }
+    /// Bind or verify the selected direction without a caller-supplied mode flag.
+    ///
+    /// # Errors
+    /// Refuses changed endpoints, journal custody, payload or a missing verification pin.
+    pub fn resolve(&self, step: &str, delivery: &Instant) -> Result<(Record, Vec<u8>)> {
+        self.session.resolve_direction(
+            step,
+            delivery,
+            self.selection.verify_only(),
+            self.selection.is_reply(),
+        )
+    }
+}
+
 /// Owned mail capabilities whose coherence is established only by receipt.
 ///
 /// Private fields prevent callers assembling independent snapshots and anchors.
 /// The production command switches only with its complete lane entry.
 pub struct ReplyCustody {
+    selection: BindingSelection,
     home: std::path::PathBuf,
     owner_home: crate::anchor::Anchor,
     runs_root: crate::anchor::Anchor,
@@ -125,7 +259,6 @@ pub struct ReplyCustody {
     journal: std::sync::Arc<crate::anchor::Anchor>,
 }
 
-const REPLY_OPERATION: &str = "mail-binding";
 pub const REPLY_PURPOSES: [&str; 8] = [
     "owner-home",
     "runs-root",
@@ -136,22 +269,6 @@ pub const REPLY_PURPOSES: [&str; 8] = [
     "identity-executable",
     "journal",
 ];
-pub(super) fn reply_refusal(purpose: &str) -> MailError {
-    MailError::Entry(format!(
-        "anchor-declaration: operation={REPLY_OPERATION} purpose={purpose}"
-    ))
-}
-pub(super) fn reply_io(purpose: &str, check: &str, error: impl std::fmt::Display) -> MailError {
-    MailError::Entry(format!(
-        "anchor-io: operation={REPLY_OPERATION} purpose={purpose} check={check}: {error}"
-    ))
-}
-pub(super) fn reply_override() -> Result<()> {
-    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
-        return Err(reply_refusal("registry-override"));
-    }
-    Ok(())
-}
 pub(super) fn reply_requirements(loop_uid: u32, service: u32) -> Vec<crate::anchor::Requirement> {
     use crate::anchor::{Kind, ModePolicy, Owner, Policy, Requirement};
     [
@@ -186,12 +303,14 @@ fn reply_core(
     manifest: &crate::anchor::Manifest,
     descriptors: &[std::os::fd::OwnedFd],
     scope: &str,
+    selection: BindingSelection,
 ) -> Result<(std::path::PathBuf, Vec<crate::anchor::Requirement>)> {
     use crate::anchor::{ModePolicy, Owner};
+    let operation = selection.operation();
     if descriptors.len() != REPLY_PURPOSES.len() {
         // Keep the bootstrap's exact frame diagnostics for direct library callers.
         return Err(MailError::Entry(format!(
-            "{}: operation={REPLY_OPERATION} purpose=configuration",
+            "{}: operation={operation} purpose=configuration",
             if descriptors.len() < REPLY_PURPOSES.len() {
                 "anchor-missing"
             } else {
@@ -200,16 +319,16 @@ fn reply_core(
         )));
     }
     crate::anchor::Manifest::parse(
-        &serde_json::to_string(manifest).map_err(|_| reply_refusal("manifest"))?,
+        &serde_json::to_string(manifest).map_err(|_| selection.refusal("manifest"))?,
     )?;
     let mut required = reply_requirements(0, 0);
     for slot in 0..2 {
         let stat = nix::sys::stat::fstat(&descriptors[slot])
-            .map_err(|error| reply_io(REPLY_PURPOSES[slot], "fstat", error))?;
+            .map_err(|error| selection.io(REPLY_PURPOSES[slot], "fstat", error))?;
         let mode = stat.st_mode & 0o7777;
         if mode & 0o7022 != 0 || mode & 0o700 != 0o700 {
             return Err(MailError::Entry(format!(
-                "anchor-mode: operation={REPLY_OPERATION} purpose={} check=directory-mode",
+                "anchor-mode: operation={operation} purpose={} check=directory-mode",
                 REPLY_PURPOSES[slot]
             )));
         }
@@ -228,18 +347,18 @@ fn reply_core(
         .enumerate()
         .map(|(slot, fd)| {
             fd.try_clone()
-                .map_err(|error| reply_io(REPLY_PURPOSES[slot], "duplicate", error))
+                .map_err(|error| selection.io(REPLY_PURPOSES[slot], "duplicate", error))
         })
         .collect::<Result<Vec<_>>>()?;
     if manifest.records[0].device == manifest.records[1].device
         && manifest.records[0].inode == manifest.records[1].inode
     {
-        return Err(reply_refusal("runs-root"));
+        return Err(selection.refusal("runs-root"));
     }
     let anchors = receiver.validate(
         &declaration,
         fds,
-        REPLY_OPERATION,
+        operation,
         scope,
         crate::anchor::Transport::Rights,
         &required,
@@ -249,7 +368,7 @@ fn reply_core(
 
 impl ReplyCustody {
     /// Receive the exact reply bundle, deriving mapped policies from its held grant.
-    /// This is the sole constructor; no lifetime repair or identity drop occurs here.
+    /// The shared receiving core performs no lifetime repair or identity drop.
     /// # Errors
     /// Refuses namespace, declaration, grant, settings or capability-policy mismatches.
     pub fn receive(
@@ -258,13 +377,29 @@ impl ReplyCustody {
         descriptors: Vec<std::os::fd::OwnedFd>,
         loop_name: &str,
     ) -> Result<Self> {
+        Self::receive_selected(
+            receiver,
+            manifest,
+            descriptors,
+            loop_name,
+            BindingSelection::Reply,
+        )
+    }
+    fn receive_selected(
+        receiver: &crate::anchor::Receiver,
+        manifest: &crate::anchor::Manifest,
+        descriptors: Vec<std::os::fd::OwnedFd>,
+        loop_name: &str,
+        selection: BindingSelection,
+    ) -> Result<Self> {
         use crate::anchor::{Entry, Transport};
-        reply_override()?;
+        selection.check_override()?;
+        let operation = selection.operation();
         if nix::unistd::Uid::effective().as_raw() != 0 {
-            return Err(reply_refusal("namespace"));
+            return Err(selection.refusal("namespace"));
         }
         if manifest.records.len() != REPLY_PURPOSES.len() {
-            return Err(reply_refusal("count"));
+            return Err(selection.refusal("count"));
         }
         if !manifest
             .records
@@ -272,14 +407,14 @@ impl ReplyCustody {
             .zip(REPLY_PURPOSES)
             .all(|(r, name)| r.purpose == name)
         {
-            return Err(reply_refusal("purposes"));
+            return Err(selection.refusal("purposes"));
         }
-        let (home, core) = reply_core(receiver, manifest, &descriptors, loop_name)?;
+        let (home, core) = reply_core(receiver, manifest, &descriptors, loop_name, selection)?;
         let configuration = receiver.configuration(
             manifest,
             &descriptors,
             Entry {
-                operation: REPLY_OPERATION,
+                operation,
                 loop_name,
                 transport: Transport::Rights,
             },
@@ -289,22 +424,22 @@ impl ReplyCustody {
         let row = configuration
             .registry
             .row(loop_name, &home)
-            .map_err(|_| reply_refusal("loop"))?;
+            .map_err(|_| selection.refusal("loop"))?;
         let service = configuration
             .allocations
             .mail_uid()
-            .ok_or_else(|| reply_refusal("service"))?;
+            .ok_or_else(|| selection.refusal("service"))?;
         let mut required = reply_requirements(row.uid, service);
         required[..3].clone_from_slice(&core);
         let mut anchors = receiver.validate(
             manifest,
             descriptors,
-            REPLY_OPERATION,
+            operation,
             loop_name,
             Transport::Rights,
             &required,
         )?;
-        let mut take = || anchors.pop().ok_or_else(|| reply_refusal("count"));
+        let mut take = || anchors.pop().ok_or_else(|| selection.refusal("count"));
         let journal = std::sync::Arc::new(take()?);
         let identity_executable = take()?;
         let private_storage = std::sync::Arc::new(take()?);
@@ -314,6 +449,7 @@ impl ReplyCustody {
         let runs_root = take()?;
         let owner_home = take()?;
         let custody = Self {
+            selection,
             home,
             owner_home,
             runs_root,
@@ -365,7 +501,7 @@ impl ReplyCustody {
         )?;
         let settings = command::parse_settings(&io::bounded(&file, 4096)?)?;
         if self.configuration.allocations.mail_uid() != Some(settings.uid) {
-            return Err(reply_refusal("service"));
+            return Err(self.selection.refusal("service"));
         }
         Ok(settings)
     }
@@ -389,7 +525,7 @@ impl ReplyCustody {
     /// # Errors
     /// Refuses changed custody, settings, lifetime, identity drop or inventory.
     pub fn enter(self, identity: &Identity, verify_only: bool) -> Result<ReplySession> {
-        reply_override()?;
+        self.selection.check_override()?;
         let home = self.home.as_path();
         let loop_name = self.loop_name.as_str();
         let settings = self.settings()?;
@@ -450,11 +586,24 @@ impl ReplySession {
         delivery: &Instant,
         verify_only: bool,
     ) -> Result<(Record, Vec<u8>)> {
+        self.resolve_direction(step, delivery, verify_only, true)
+    }
+    fn resolve_direction(
+        &self,
+        step: &str,
+        delivery: &Instant,
+        verify_only: bool,
+        reply: bool,
+    ) -> Result<(Record, Vec<u8>)> {
         binding_step(step)?;
         self.inventory.verify_worker(&self.identity)?;
         let loop_name = &self.inventory.loop_name;
-        let recipient =
-            Address::parse(loop_name).map_err(|_| MailError::Invalid("invalid-name: loop"))?;
+        let recipient = Address::parse(&if reply {
+            loop_name.clone()
+        } else {
+            format!("{loop_name}+{}", self.identity.name)
+        })
+        .map_err(|_| MailError::Invalid("invalid-name: loop"))?;
         let actor = self
             .inventory
             .inventory
@@ -463,13 +612,17 @@ impl ReplySession {
             .ok_or(MailError::Invalid(
                 "invalid-directory: recipient endpoint unavailable",
             ))?;
-        let sender = format!("{loop_name}+{}", self.identity.name);
+        let sender = if reply {
+            format!("{loop_name}+{}", self.identity.name)
+        } else {
+            loop_name.clone()
+        };
         let verify = |record: &Record| {
             self.inventory.verify_worker(&self.identity)?;
             verified_payload(actor, self.service, &sender, &recipient, record)
         };
         let family = self.identity.pin_family(loop_name);
-        let reference = format!("reply:{step}");
+        let reference = format!("{}:{step}", if reply { "reply" } else { "steering" });
         if verify_only {
             journal::verify_reservation_beneath(
                 &self.journal,
@@ -670,4 +823,56 @@ pub(super) fn verified_payload(
         ));
     }
     Ok((record.clone(), bytes))
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::BindingSelection;
+    /// ´claim:loophome:binding-selection-binds-operation-direction-and-mode´
+    /// ´test:unit:binding-selection-binds-operation-direction-and-mode´
+    #[test]
+    fn binding_selection_binds_operation_direction_and_mode() {
+        for (selection, word, flag, operation, verify, reply) in [
+            (
+                BindingSelection::Reply,
+                "_bind-reply",
+                None,
+                "mail-binding",
+                false,
+                true,
+            ),
+            (
+                BindingSelection::InboundBind,
+                "_bind-mail",
+                None,
+                "mail-bind",
+                false,
+                false,
+            ),
+            (
+                BindingSelection::InboundVerify,
+                "_bind-mail",
+                Some("--verify-only"),
+                "mail-verify",
+                true,
+                false,
+            ),
+        ] {
+            assert_eq!(BindingSelection::from_private(word, flag), Some(selection));
+            assert_eq!(selection.private_word(), word);
+            assert_eq!(selection.private_flag(), flag);
+            assert_eq!(selection.operation(), operation);
+            assert_eq!(selection.verify_only(), verify);
+            assert_eq!(selection.is_reply(), reply);
+        }
+        assert_eq!(
+            BindingSelection::from_private("_bind-reply", Some("--verify-only")),
+            None
+        );
+        assert_eq!(
+            BindingSelection::from_private("_bind-mail", Some("--bind")),
+            None
+        );
+        assert_eq!(BindingSelection::from_private("_other", None), None);
+    }
 }

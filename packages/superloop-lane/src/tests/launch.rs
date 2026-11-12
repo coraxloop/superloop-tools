@@ -3342,6 +3342,7 @@ fn resume_pre_spawn_failure(
     path: &std::path::Path,
     seed: &serde_json::Value,
 ) -> serde_json::Value {
+    let _mail_standin = crate::build::mail_standin::register(&request.podman_bin);
     let worker_home = std::path::Path::new(seed["plan"]["home"].as_str().expect("worker home"));
     let inbox = worker_home.join(".local/inbox");
     fs::create_dir_all(&inbox).expect("retained home inbox");

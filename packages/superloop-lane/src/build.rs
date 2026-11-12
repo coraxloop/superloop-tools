@@ -1006,6 +1006,15 @@ pub(crate) fn run_checked_with_private_launch(
     runs: &OwnedFd,
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<String, LaneError> {
+    #[cfg(test)]
+    if argv.get(2).is_some_and(|word| word == "_bind-mail")
+        && !mail_standin::allows(program, "_bind-mail")
+    {
+        return Err(LaneError::input(
+            "fixture-mail-standin",
+            "in-crate mail stand-in requires explicit scoped registration",
+        ));
+    }
     if argv.get(2).is_some_and(|word| word == "_bind-reply") {
         let request =
             crate::launch::reply_entry::command(program, &argv, (cwd, home), (runs_root, runs))?;
@@ -2239,6 +2248,58 @@ fn run_inner(
         )
     })?;
     Ok(result)
+}
+
+// Only explicitly registered in-crate recovery fixtures may keep a stand-in mail half.
+// The production binary and integration-test library do not compile this module.
+#[cfg(test)]
+pub(crate) mod mail_standin {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+    thread_local! { static PROGRAM: RefCell<Option<PathBuf>> = const { RefCell::new(None) }; }
+    pub struct Guard {
+        previous: Option<PathBuf>,
+        _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            PROGRAM.with(|slot| *slot.borrow_mut() = self.previous.take());
+        }
+    }
+    pub fn register(program: &Path) -> Guard {
+        Guard {
+            previous: PROGRAM.with(|slot| slot.replace(Some(program.to_owned()))),
+            _thread: std::marker::PhantomData,
+        }
+    }
+    pub fn allows(program: &Path, word: &str) -> bool {
+        word == "_bind-mail" && PROGRAM.with(|slot| slot.borrow().as_deref() == Some(program))
+    }
+    /// ´test:unit:registration-is-scoped-to-thread-program-and-word´
+    #[test]
+    fn registration_is_scoped_to_thread_program_and_word() {
+        let first = Path::new("/fixture/first");
+        let second = Path::new("/fixture/second");
+        assert!(!allows(first, "_bind-mail"));
+        {
+            let _first = register(first);
+            assert!(allows(first, "_bind-mail"));
+            assert!(!allows(first, "_bind-reply"));
+            assert!(!allows(second, "_bind-mail"));
+            assert!(
+                !std::thread::spawn(move || allows(first, "_bind-mail"))
+                    .join()
+                    .expect("thread")
+            );
+            {
+                let _second = register(second);
+                assert!(allows(second, "_bind-mail"));
+                assert!(!allows(first, "_bind-mail"));
+            }
+            assert!(allows(first, "_bind-mail"));
+        }
+        assert!(!allows(first, "_bind-mail"));
+    }
 }
 
 #[cfg(test)]

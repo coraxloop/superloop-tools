@@ -2790,6 +2790,7 @@ else:
         let parent = std::env::current_exe().expect("protected executable");
         let (fixture, plan, mut request) =
             dead_resume_fixture_in("started", parent.parent().expect("protected parent"));
+        let _mail_standin = crate::build::mail_standin::register(&request.podman_bin);
         let h = fixture.path();
         let owner = Uid::effective().as_raw();
         let root = File::open(h).expect("fixture root");
@@ -3169,6 +3170,7 @@ else:
 
     fn resume_threadless_dispatch_through_entry() {
         let (fixture, plan, mut request) = dead_resume_fixture("started");
+        let _mail_standin = crate::build::mail_standin::register(&request.podman_bin);
         let h = fixture.path();
         let owner = Uid::effective().as_raw();
         let root = File::open(h).expect("root");
@@ -3965,6 +3967,7 @@ else:
     }
 
     fn launch_after_public_settle(h: &Path, plan: &crate::plan::Plan, settled: &Value) {
+        let _mail_standin = crate::build::mail_standin::register(&h.join("runtime"));
         // Replace the container runtime, and with it the private _inspect-round and
         // _settle-evidence halves: launch still publishes the next round, starts and
         // waits for its driver, and stops its descriptor-bound helper.

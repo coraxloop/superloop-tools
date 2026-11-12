@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Inbound mail binding and verification can retain received custody through a selected library session, with distinct operations, unchanged pin records and read-only verification. This is preparation only: reply behavior and the public mail-binding and resume routes are unchanged; no operator action or record migration is needed (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 ## [0.4.2] - 2026-11-12
 
 ### Added
