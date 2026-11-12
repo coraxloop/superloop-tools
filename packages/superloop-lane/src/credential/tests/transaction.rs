@@ -190,6 +190,10 @@ fn wait_event(host: &mut Host, name: &str) {
 fn fail_with_output(host: &mut Host, event: &str) -> ! {
     let mut child = host.child.take().expect("diagnostic child");
     let stopped = child.stop();
+    if !stopped && let Some(root) = host.root.take() {
+        // Consuming the child for diagnostics must not authorize cleanup after an unproved stop.
+        let _retained = root.keep();
+    }
     let output = child.wait_with_output().expect("failed child output");
     panic!(
         "{event}; namespace stopped={stopped}\nstdout:\n{}\nstderr:\n{}",
@@ -1332,15 +1336,7 @@ fn claude_fixture_move_rechecks_custody_before_drop() {
 fn claude_fixture_watchdog_retains_child_output() {
     if enter(
         "claude_fixture_watchdog_retains_child_output",
-        |enclosing| {
-            let (root, _anchors) = moved_root(enclosing);
-            writeln!(std::io::stdout(), "fixture-watchdog-stdout").expect("stdout");
-            writeln!(std::io::stderr(), "fixture-watchdog-stderr").expect("stderr");
-            fs::write(enclosing.join("ready"), b"ready").expect("ready");
-            std::thread::sleep(Duration::from_secs(120));
-            drop(root);
-            panic!("watchdog fixture exceeded bound");
-        },
+        watchdog_body,
     ) {
         return;
     }
@@ -1361,4 +1357,60 @@ fn claude_fixture_watchdog_retains_child_output() {
     }
     host.cleanup();
     assert!(!enclosing.exists(), "watchdog cleanup removes real root");
+}
+
+fn watchdog_body(enclosing: &Path) {
+    let (root, _anchors) = moved_root(enclosing);
+    writeln!(std::io::stdout(), "fixture-watchdog-stdout").expect("stdout");
+    writeln!(std::io::stderr(), "fixture-watchdog-stderr").expect("stderr");
+    fs::write(enclosing.join("ready"), b"ready").expect("ready");
+    std::thread::sleep(Duration::from_secs(120));
+    drop(root);
+    panic!("watchdog fixture exceeded bound");
+}
+
+/// # Panics
+/// Panics if collecting failure output authorizes removal after an unconfirmed stop.
+/// ´test:unit:claude-fixture-unconfirmed-stop-retains-enclosure´
+#[test]
+fn claude_fixture_unconfirmed_stop_retains_enclosure() {
+    if enter(
+        "claude_fixture_unconfirmed_stop_retains_enclosure",
+        watchdog_body,
+    ) {
+        return;
+    }
+    let mut host = launch("claude_fixture_unconfirmed_stop_retains_enclosure");
+    let enclosing = host.root.as_ref().expect("E").path().to_path_buf();
+    wait_event(&mut host, "ready");
+    // First stop the real namespace, so this refusal-path control leaves no live child.
+    assert!(
+        host.child.as_mut().expect("child").stop(),
+        "real namespace stopped"
+    );
+    host.child.as_mut().expect("child").stopped = Some(false);
+    let sentinel = enclosing.join("unconfirmed-stop-sentinel");
+    fs::write(&sentinel, b"retained until stop is proved").expect("sentinel");
+    let inode = fs::metadata(&sentinel).expect("sentinel identity").ino();
+    let held = host.held.try_clone().expect("retain cleanup identity");
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        fail_with_output(&mut host, "injected unconfirmed stop");
+    }))
+    .expect_err("stop refusal diagnostic");
+    let message = error.downcast_ref::<String>().expect("panic text");
+    assert!(message.contains("namespace stopped=false"), "{message}");
+    assert_eq!(
+        fs::read(&sentinel).expect("unconfirmed stop retains enclosure"),
+        b"retained until stop is proved"
+    );
+    assert_eq!(
+        fs::metadata(&sentinel).expect("retained inode").ino(),
+        inode
+    );
+    // Only this control knows the real namespace was stopped before the injected refusal.
+    claude_cleanup_contents_at(&held, true).expect("cleanup confirmed-dead fixture");
+    let expected = held.metadata().expect("held E");
+    let named = fs::symlink_metadata(&enclosing).expect("same E");
+    assert_eq!((named.dev(), named.ino()), (expected.dev(), expected.ino()));
+    fs::remove_dir(enclosing).expect("empty own enclosure");
 }
