@@ -462,25 +462,13 @@ fn child(home: &Path, case: &str) {
         reservation: "reply-fixture".into(),
     };
     if case.starts_with("override-") {
-        let error = custody.err().expect("override at receiving constructor");
-        assert_entry_override(&error);
-        for verify_only in [false, true] {
-            let error = worker_provision::verify_active_beneath(
-                home,
-                "alpha",
-                &identity,
-                verify_only,
-                &configuration,
-                &storage,
-                &private,
-                &executor,
-            )
-            .err()
-            .expect("direct lifetime override");
-            assert_entry_override(&error);
-        }
-        assert_eq!(nix::unistd::Uid::effective().as_raw(), 0);
-        assert!(!home.join(".var/loops/alpha/.mail-births").exists());
+        lifetime_override(
+            home,
+            &identity,
+            &configuration,
+            (&storage, &private, &executor),
+            &custody.err().expect("override at receiving constructor"),
+        );
         return;
     }
     complete_birth(
@@ -542,6 +530,32 @@ fn child(home: &Path, case: &str) {
         nix::fcntl::Flock::lock(probe, nix::fcntl::FlockArg::LockExclusiveNonblock)
             .expect("session drop releases lease"),
     );
+}
+fn lifetime_override(
+    home: &Path,
+    identity: &Identity,
+    configuration: &anchor::Configuration,
+    anchors: (&Anchor, &Anchor, &Anchor),
+    error: &journal::MailError,
+) {
+    assert_entry_override(error);
+    for verify_only in [false, true] {
+        let error = worker_provision::verify_active_beneath(
+            home,
+            "alpha",
+            identity,
+            verify_only,
+            configuration,
+            anchors.0,
+            anchors.1,
+            anchors.2,
+        )
+        .err()
+        .expect("direct lifetime override");
+        assert_entry_override(&error);
+    }
+    assert_eq!(nix::unistd::Uid::effective().as_raw(), 0);
+    assert!(!home.join(".var/loops/alpha/.mail-births").exists());
 }
 fn duplicate(fds: &[std::os::fd::OwnedFd]) -> Vec<std::os::fd::OwnedFd> {
     fds.iter()

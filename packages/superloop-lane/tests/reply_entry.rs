@@ -187,6 +187,10 @@ fn reply_entry_retains_custody(kind: &str) {
         binary()
     };
     plan(home, &entry);
+    if kind == "public-route" {
+        public_route(home, &entry);
+        return;
+    }
     let mut spec = request(home, &entry);
     alter_frame(&mut spec, home, &entry, kind);
     let path = match kind {
@@ -237,6 +241,40 @@ fn reply_entry_retains_custody(kind: &str) {
         ),
     );
     assert!(result.status.success(), "{kind}: {result:?}");
+}
+fn public_route(home: &Path, entry: &Path) {
+    let request = superloop_lane::launch::steering::Request::parse(&[
+        "alpha".into(),
+        "R".into(),
+        "--step".into(),
+        "review".into(),
+        "--delivery".into(),
+        "2026-01-01T00:00:00.001Z".into(),
+    ])
+    .expect("public selection");
+    let host = (home, nix::unistd::Uid::effective().as_raw(), Some(entry));
+    let first = superloop_lane::launch::steering::run_from(home, &request, true, host)
+        .expect("complete public reply route");
+    assert_eq!(first["command"], "bind-reply");
+    assert_eq!(first["resume_authorized"], false);
+    assert_eq!(first["mail"]["sender"], "alpha+worker");
+    assert_eq!(first["mail"]["recipient"], "alpha");
+    let path = home.join("runs/.reservation-R.json");
+    let bytes = fs::read(&path).expect("published reservation");
+    let record: serde_json::Value = serde_json::from_slice(&bytes).expect("record");
+    assert_eq!(record["mail_replies"], serde_json::json!([first["mail"]]));
+    let second = superloop_lane::launch::steering::run_from(home, &request, true, host)
+        .expect("public rebind");
+    assert_eq!(second, first);
+    assert_eq!(fs::read(path).expect("unchanged reservation"), bytes);
+    let output = namespace(
+        home,
+        concat!(
+            "import pathlib,sys;root=pathlib.Path(sys.argv[1]);",
+            "assert (root/'runs/R/reply-review.txt').read_bytes()==b'reply bytes\\x00\\xff\\n'"
+        ),
+    );
+    assert!(output.status.success(), "{output:?}");
 }
 fn public_reply(home: &Path, entry: &Path, kind: &str) -> std::process::Output {
     Command::new(entry)
@@ -507,6 +545,7 @@ fn main() -> std::process::ExitCode {
     }
     let cases = [
         "basic",
+        "public-route",
         "configuration",
         "storage",
         "journal",

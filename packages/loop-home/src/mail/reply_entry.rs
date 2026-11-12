@@ -19,39 +19,7 @@ pub fn pins(
 ) -> Result<Vec<HostPin>> {
     reply_override()?;
     let host = HostVerifier::current()?.for_operation("mail-binding");
-    let configuration = host.pin(
-        &home.0.join(".config/loops"),
-        "configuration",
-        3,
-        Policy {
-            kind: Kind::Directory,
-            owner: Owner::Host,
-            mode: ModePolicy::Exact(0o700),
-        },
-    )?;
-    let mut bootstrap = configuration.record();
-    bootstrap.slot = 0;
-    let manifest = Manifest {
-        version: 1,
-        operation: "mail-binding".into(),
-        loop_name: scope.into(),
-        transport: anchor::Transport::Rights,
-        records: vec![bootstrap],
-    };
-    let config = anchor::Receiver::current()?.configuration(
-        &manifest,
-        &[configuration
-            .as_fd()
-            .try_clone_to_owned()
-            .map_err(|error| reply_io("configuration", "duplicate", error))?],
-        anchor::Entry {
-            operation: "mail-binding",
-            loop_name: scope,
-            transport: anchor::Transport::Rights,
-        },
-        home.0,
-        false,
-    )?;
+    let (configuration, config) = pin_configuration(&host, home.0, scope)?;
     let row = config
         .registry
         .row(scope, home.0)
@@ -116,6 +84,47 @@ pub fn pins(
     }
     matching_roots(&pins, home.1, runs.1)?;
     Ok(pins)
+}
+
+fn pin_configuration(
+    host: &HostVerifier,
+    home: &Path,
+    scope: &str,
+) -> Result<(HostPin, anchor::Configuration)> {
+    let configuration = host.pin(
+        &home.join(".config/loops"),
+        "configuration",
+        3,
+        Policy {
+            kind: Kind::Directory,
+            owner: Owner::Host,
+            mode: ModePolicy::Exact(0o700),
+        },
+    )?;
+    let mut bootstrap = configuration.record();
+    bootstrap.slot = 0;
+    let manifest = Manifest {
+        version: 1,
+        operation: "mail-binding".into(),
+        loop_name: scope.into(),
+        transport: anchor::Transport::Rights,
+        records: vec![bootstrap],
+    };
+    let config = anchor::Receiver::current()?.configuration(
+        &manifest,
+        &[configuration
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(|error| reply_io("configuration", "duplicate", error))?],
+        anchor::Entry {
+            operation: "mail-binding",
+            loop_name: scope,
+            transport: anchor::Transport::Rights,
+        },
+        home,
+        false,
+    )?;
+    Ok((configuration, config))
 }
 
 fn matching_roots(pins: &[HostPin], home: &OwnedFd, runs: &OwnedFd) -> Result<()> {

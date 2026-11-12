@@ -62,6 +62,19 @@ pub(super) fn evidence(plan: &Plan, step: &str) -> PathBuf {
 /// # Errors
 /// Refuses an unavailable delivery, changed worker or conflicting step binding.
 pub fn run(owner_home: &Path, request: &Request, reply: bool) -> Result<Value, LaneError> {
+    run_from(owner_home, request, reply, (Path::new("/"), 0, None))
+}
+
+/// Run the public binding body beneath an explicitly supplied host root.
+/// The normal command selects `/`, uid zero and its current executable.
+/// # Errors
+/// Returns the same admission, child and publication refusals as `run`.
+pub fn run_from(
+    owner_home: &Path,
+    request: &Request,
+    reply: bool,
+    host: (&Path, u32, Option<&Path>),
+) -> Result<Value, LaneError> {
     if reply && std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
         return Err(failure(
             "anchor-declaration: operation=mail-binding purpose=registry-override",
@@ -93,7 +106,10 @@ pub fn run(owner_home: &Path, request: &Request, reply: bool) -> Result<Value, L
     if prior.is_some_and(|prior| prior["delivery"] != request.delivery) {
         return Err(failure("step already binds another delivery"));
     }
-    let exe = std::env::current_exe().map_err(failure)?;
+    let exe = host
+        .2
+        .map_or_else(std::env::current_exe, |path| Ok(path.to_owned()))
+        .map_err(failure)?;
     let binding = verify_kind(
         owner_home,
         &plan,
@@ -102,7 +118,7 @@ pub fn run(owner_home: &Path, request: &Request, reply: bool) -> Result<Value, L
         &request.delivery,
         reply,
         false,
-        (Path::new("/"), 0, exe.as_path()),
+        (host.0, host.1, exe.as_path()),
     )?;
     let mail = record[if reply { "mail_replies" } else { "mail" }]
         .as_array_mut()

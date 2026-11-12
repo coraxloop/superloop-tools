@@ -72,6 +72,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Pin fixture-admission absence in every workspace release artifact with a current unit-test positive control and an empty-set refusal (``test:integration:test-release-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
 
+- Reply binding now has an actual-package acceptance through the public binding body, including vector construction, rights handoff, result comparison, reservation publication and an identical retry. A fixture host-root seam leaves the normal launcher’s root walk and executable selection unchanged; no deployment action or command syntax change is required (``claim:superlooplane:reply-entry-retains-custody``; ``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
 - Retain the fixture enclosure when a watchdog collects output after an unconfirmed namespace stop, so consuming the child handle cannot authorize removal during unwind (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-unconfirmed-stop-retains-enclosure``).
 
 - Pin the Claude fixture transaction's bound-evidence read-back, dead-helper exclusion and authority panic cancellation, and retain uncertain source custody and child output on fixture failures; production behavior is unchanged (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``prob:box:helper-service-cancels-when-its-authority-thread-exits``; ``test:unit:claude-fixture-periodic-dead-helper``; ``test:unit:helper-authority-panic-cancels-service``; ``test:unit:claude-fixture-move-rechecks-custody-before-drop``; ``test:unit:claude-fixture-watchdog-retains-child-output``).
