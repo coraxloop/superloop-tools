@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-12
+
 ### Added
 
 - Reply sessions can retain a worker lifetime lease across the service identity drop and bind or verify delivery pins through received configuration, storage, endpoint and journal custody, as a library prerequisite for the reply entry (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
@@ -62,7 +64,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Namespace entry has a shared capability foundation for verified maps, bounded descriptor handoff, operation-bound custody checks and ledger/registry reads beneath one configuration anchor; production caller migration remains deferred (``req:workercontracts:namespace-anchor-authority``).
 
-- Publication manifests declare the unpublished-label register destination through `public.unpublished`; cuts generate it there and bind the owner snapshot to it, refusing excluded-definition citations without a declaration and unsafe or conflicting destinations (``prob:pack:manifest-declares-the-unpublished-register``).
+- Publication manifests declare the unpublished-label register destination through `public.unpublished`; cuts generate it there and bind the owner snapshot to it, refusing excluded-definition citations without a declaration and unsafe or conflicting destinations; readers built before this release (the linter, the build-sync census and the pack) refuse the field as unknown, so a tree that declares it is read by this release's linter, build-sync and pack, installed together (``prob:pack:manifest-declares-the-unpublished-register``).
 
 - The contributing guide gives slice workers the branch workflow, source declarations, node verification bar and working-step report contract (``guide:contributing:superloop-tools``).
 
@@ -653,7 +655,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/coraxloop/superloop-tools/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/coraxloop/superloop-tools/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/coraxloop/superloop-tools/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/coraxloop/superloop-tools/compare/v0.3.1...v0.3.2
