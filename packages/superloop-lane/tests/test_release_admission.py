@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -34,6 +35,19 @@ OVERRIDES = ("RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
              "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
 
 
+def configuration_flag_tokens(value, source):
+    # Cargo's advanced-env mode accepts TOML arrays for configured env lists.
+    # Check them conservatively even if that mode was not enabled by this build.
+    if source != "config" and value.lstrip(RUST_WHITESPACE).startswith("["):
+        try:
+            array = tomllib.loads("flags = " + value)["flags"]
+            if isinstance(array, list) and all(isinstance(item, str) for item in array):
+                return array
+        except tomllib.TOMLDecodeError:
+            pass
+    return re.split("[" + RUST_WHITESPACE + "]+", value)
+
+
 def carries_test_configuration(value, source="config"):
     if isinstance(value, list):
         tokens = value
@@ -44,7 +58,7 @@ def carries_test_configuration(value, source="config"):
             tokens = [token.strip(RUST_WHITESPACE) for token in value.split(" ")]
             tokens = [token for token in tokens if token]
         else:
-            tokens = re.split("[" + RUST_WHITESPACE + "]+", value)
+            tokens = configuration_flag_tokens(value, source)
     else:
         return False
     return any(token == "--test" or token == "--cfg=test"
@@ -60,7 +74,8 @@ def environment_has_test(values):
         if name in OVERRIDES:
             require(value is None, "compiler override in release record: " + name)
         elif name == "CARGO_TARGET_*_RUSTFLAGS":
-            if any(carries_test_configuration(flags) for flags in value.values()):
+            if any(carries_test_configuration(flags, target)
+                   for target, flags in value.items()):
                 return True
         elif name in {"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS"} \
                 or (name.startswith("CARGO_TARGET_") and name.endswith("_RUSTFLAGS")):
@@ -140,6 +155,13 @@ def test_release_flag_sources():
             "Rust trim retains unit separator")
     require(not carries_test_configuration(["--cfg test"]), "array token is indivisible")
     require(carries_test_configuration(["--cfg", "test"]), "array token boundaries")
+    for source in ["CARGO_BUILD_RUSTFLAGS", "CARGO_TARGET_FIXTURE_RUSTFLAGS"]:
+        require(carries_test_configuration('["--cfg", "test"]', source),
+                "configured environment array boundaries")
+    require(not carries_test_configuration('["--cfg", "test"]', "RUSTFLAGS"),
+            "plain flags do not decode configured environment arrays")
+    require(not carries_test_configuration('["--cfg", "test"]'),
+            "configuration strings remain whitespace lists")
     require(not carries_test_configuration("-Cmetadata=unmatched'", "RUSTFLAGS"),
             "flags are not shell parsed")
     for name in OVERRIDES:
