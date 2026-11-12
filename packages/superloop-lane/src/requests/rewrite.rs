@@ -4,7 +4,18 @@ use super::*;
 use sha2::{Digest as _, Sha256};
 
 const JOURNAL: &str = "door-rewrite.json";
-const PLAN_LIMIT: usize = 64 * 1_048_576;
+const PLAN_LIMIT: usize = 256 * 1_048_576;
+
+fn check_plan_size(bytes: usize) -> Result<(), LaneError> {
+    let bound = PLAN_LIMIT / 2;
+    if bytes > bound {
+        return Err(problem(
+            "requests-rewrite-refusal",
+            format!("plan exceeds bound: bytes={bytes} bound={bound}"),
+        ));
+    }
+    Ok(())
+}
 
 fn digest(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
@@ -364,9 +375,7 @@ impl Store {
         }
         let bytes = serde_json::to_vec(&plan)
             .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
-        if bytes.len() > PLAN_LIMIT / 2 {
-            return Err(problem("requests-rewrite-refusal", "plan exceeds bound"));
-        }
+        check_plan_size(bytes.len())?;
         let plan_digest = digest(&bytes);
         if expected.is_none() {
             return Ok(
@@ -516,6 +525,75 @@ mod tests {
         row["schema"] = json!(3);
         std::fs::write(&path, serde_json::to_vec(&value).expect("bytes")).expect("old record");
         path
+    }
+
+    /// ´test:unit:rewrite-plan-bound-reports-measured-bytes´
+    #[test]
+    fn rewrite_plan_bound_reports_measured_bytes() {
+        let bound = 128 * 1_048_576;
+        check_plan_size(bound).expect("inclusive plan bound");
+        let error = check_plan_size(bound + 1).expect_err("oversized plan");
+        assert_eq!(error.kind, "requests-rewrite-refusal");
+        assert_eq!(
+            error.detail,
+            "plan exceeds bound: bytes=134217729 bound=134217728"
+        );
+    }
+
+    fn large_historical_custody(fixture: &Fixture) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = old_file(fixture);
+        let mut file: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("file")).expect("JSON");
+        let mut row = waiting("R", "1a", 3000, Mode::Audit).into_value();
+        row["matched_rule"] = json!({"class":"git","operation":"git-upload",
+            "shape_key":"git:upload","request_ids":vec![format!("R:{}", "a".repeat(158)); 13_000]});
+        row["schema"] = json!(5);
+        file["requests"] = Value::Array(
+            (0..3)
+                .map(|index| {
+                    let mut record = row.clone();
+                    record["id"] = json!(format!("R:{index:x}"));
+                    record
+                })
+                .collect(),
+        );
+        let bytes = serde_json::to_vec(&file).expect("historical bytes");
+        assert!(bytes.len() < MAX_RUN_BYTES);
+        std::fs::write(&path, &bytes).expect("large custody");
+        for suffix in ["a", "b"] {
+            let retired = fixture.home.join(format!("runs/.retired-R-{suffix}"));
+            std::fs::create_dir(&retired).expect("retired directory");
+            std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o700))
+                .expect("private custody");
+            std::fs::copy(&path, retired.join(RUN_FILE)).expect("retired custody");
+        }
+    }
+
+    /// ´test:unit:rewrite-converts-plan-above-old-bound´
+    #[test]
+    fn rewrite_converts_plan_above_old_bound() {
+        let fixture = Fixture::new();
+        large_historical_custody(&fixture);
+        let store = fixture.store();
+        let preview = store.rewrite(None).expect("preview above old bound");
+        let bytes = serde_json::to_vec(&preview["plan"]).expect("plan bytes");
+        assert!(bytes.len() > 32 * 1_048_576);
+        assert_eq!(preview["changed"], 9);
+        let approved = preview["preview_sha256"]
+            .as_str()
+            .expect("digest")
+            .to_owned();
+        assert_eq!(approved, digest(&bytes));
+        drop(bytes);
+        drop(preview);
+        let applied = store
+            .rewrite(Some(&approved))
+            .expect("apply above old bound");
+        assert_eq!(applied["complete"], true);
+        assert_eq!(applied["changed"], 9);
+        drop(applied);
+        assert_eq!(store.rewrite(None).expect("repeat preview")["changed"], 0);
     }
 
     /// ´test:unit:rewrite-binds-plan-and-preserves-historical-evidence´

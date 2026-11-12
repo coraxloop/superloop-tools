@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Inbound mail binding and verification can retain received custody through a selected library session, with distinct operations, unchanged pin records and read-only verification. This is preparation only: reply behavior and the public mail-binding and resume routes are unchanged; no operator action or record migration is needed (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
+### Fixed
+
+- Request-schema conversion (`superloop-lane requests rewrite`) now admits plans up to 128 MiB, up from 32 MiB, so loops with larger retired request stores can preview and apply their conversion; a loop whose preview was refused with `plan exceeds bound` reruns the dry run, and oversized-plan refusals now report the measured bytes and bound. Record shapes and the door and helper readers are unchanged (``test:unit:rewrite-converts-plan-above-old-bound``; ``test:unit:rewrite-plan-bound-reports-measured-bytes``).
+
 ## [0.4.2] - 2026-11-12
 
 ### Added
