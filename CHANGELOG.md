@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The release suite now exercises the workspace producer’s refusal of a Cargo configuration changed during compilation, which keeps the earlier published binaries and record, and its rebuild when a Cargo-home configuration is created (``test:integration:test-release-producer-dependencies``). The producer also depends on the checkout's ancestor directories and the Cargo home, so adding or removing an entry directly in one of them can rerun Cargo at a later build even when no source changed.
+
 - The release build’s compiler-input recorder now treats a string include as one path and records missing included configurations without adding a refusal of its own; Cargo still decides whether the build requires them (``test:integration:test-release-configuration-includes``).
 
 - The release suite (`meson test --suite release`) now refuses a build whose record names a compiler or wrapper override, even an empty one: `RUSTC`, `RUSTC_WRAPPER` or `RUSTC_WORKSPACE_WRAPPER`, their `CARGO_BUILD_` forms, or `rustc`, `rustc-wrapper` or `rustc-workspace-wrapper` under `[build]` in a Cargo configuration the build read, a compiler cache wrapper included. Unset the variable or remove the key, then remove the build directory's `workspace-build.json` before building. Compiler flags are now read with each Cargo source's own token boundaries, so a unit separator inside plain `RUSTFLAGS` no longer hides `--cfg test`, and no path is parsed as shell syntax (``test:integration:test-release-flag-sources``).

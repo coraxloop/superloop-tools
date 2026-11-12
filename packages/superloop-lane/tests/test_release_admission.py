@@ -4,11 +4,15 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 
@@ -183,6 +187,80 @@ def test_release_configuration_includes(builder, root, cargo):
         path.write_bytes(original)
 
 
+def producer_fixture(root):
+    workspace, output, cargo_home = root / "source", root / "build", root / "cargo-home"
+    (workspace / "fixture/src").mkdir(parents=True)
+    output.mkdir()
+    cargo_home.mkdir()
+    (workspace / "Cargo.toml").write_text('[workspace]\nmembers = ["fixture"]\n')
+    (workspace / "fixture/Cargo.toml").write_text('[package]\nname = "fixture"\n')
+    (workspace / "fixture/src/main.rs").write_text("fn main() {}\n")
+    cargo = workspace / "fixture-cargo"
+    cargo.write_text("#!" + sys.executable + "\n" + r"""
+import json, os
+from pathlib import Path
+root = Path.cwd()
+changing = (root / "change-config").exists()
+if changing:
+    (Path(os.environ["CARGO_HOME"]) / "config.toml").write_text(
+        '[build]\nrustflags = ["--cfg", "changed_during_build"]\n')
+artifact = root / "fixture-artifact"
+artifact.write_bytes(b"\x7fELFchanged" if changing else b"\x7fELForiginal")
+print(json.dumps({"reason": "compiler-artifact", "package_id": "fixture",
+                  "target": {"name": "fixture", "kind": ["bin"]},
+                  "features": [], "executable": str(artifact)}))
+""")
+    cargo.chmod(0o700)
+    return workspace, output, cargo_home, cargo
+
+
+def test_release_producer_dependencies(builder, source):
+    """Exercise configuration races and newly created inputs through the producer.
+
+    ´test:integration:test-release-producer-dependencies´
+    """
+    with tempfile.TemporaryDirectory(prefix="release-producer-") as directory:
+        root = Path(directory)
+        workspace, output, cargo_home, cargo = producer_fixture(root)
+        record = output / "workspace-build.json"
+        environment = {name: value for name, value in os.environ.items()
+                       if not builder.flag_name(name)}
+        environment.update(HOME=str(root / "account"), CARGO_HOME=str(cargo_home))
+        command = shlex.join([sys.executable, str(source / "packages/build-sync/workspace.py"),
+                              "build", str(workspace), str(record), str(cargo), "a" * 40])
+        # Quote the shell command, then escape Ninja's own dollar expansion.
+        target = str(record).replace("$", "$$").replace(" ", "$ ").replace(":", "$:")
+        (output / "build.ninja").write_text(
+            "rule record\n  restat = 1\n  command = " + command.replace("$", "$$")
+            + "\n  depfile = workspace-build.d\nbuild " + target + ": record\n")
+        ninja = shutil.which("ninja")
+        require(ninja is not None, "producer dependency control requires Ninja")
+        ninja_command = [ninja, "-C", str(output)]
+        for added in [False, True]:
+            if added:
+                (cargo_home / "config.toml").write_text(
+                    '[build]\nrustflags = ["--cfg", "new_config"]\n')
+                modified = max(cargo_home.stat().st_mtime_ns, record.stat().st_mtime_ns + 1)
+                os.utime(cargo_home, ns=(modified, modified))
+            result = subprocess.run(ninja_command, env=environment,
+                                    capture_output=True, text=True, check=False)
+            require(result.returncode == 0, result.stdout + result.stderr)
+            saved = json.loads(record.read_text())
+            selected = [item for item in saved["compiler_inputs"]["configurations"]
+                        if item["path"] == str(cargo_home / "config.toml")]
+            require(len(selected) == 1 and selected[0]["present"] == added,
+                    "new Cargo config must invalidate the producer dependency file")
+        original = record.read_bytes()
+        artifact = output / "cargo-fixture"
+        original_artifact = artifact.read_bytes()
+        (workspace / "change-config").touch()
+        with patch.dict(os.environ, environment, clear=True):
+            refused(lambda: builder.build(workspace, record, str(cargo), "a" * 40),
+                    "Cargo configuration changed during release build")
+        require(record.read_bytes() == original and artifact.read_bytes() == original_artifact,
+                "during-build config refusal must retain published bytes and record")
+
+
 def test_release_build_record(source):
     """Build-time inputs and byte binding refuse test flags and stale evidence.
 
@@ -192,6 +270,7 @@ def test_release_build_record(source):
         "workspace_record", source / "packages/build-sync/workspace.py")
     builder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(builder)
+    test_release_producer_dependencies(builder, source)
     with tempfile.TemporaryDirectory(prefix="release-record-") as directory:
         root = Path(directory)
         cargo = root / ".cargo"
