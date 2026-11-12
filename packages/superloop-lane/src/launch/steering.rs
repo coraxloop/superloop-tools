@@ -286,7 +286,6 @@ pub(super) fn private_selected(
     let owner_home = owner_home.as_path();
     let mode = custody.selection();
     let reply = mode.is_reply();
-    let verify_only = mode.verify_only();
     let Request {
         loop_name,
         run,
@@ -305,7 +304,7 @@ pub(super) fn private_selected(
     let worker = identity(&record)?;
     let loop_uid = super::recorded_loop_uid(&record)?;
     let directory = binding_directory(root, &driver_dir, loop_uid)?;
-    let mut file = evidence_file(&directory, step, reply, verify_only, loop_uid)?;
+    let mut file = evidence_file(&directory, step, mode, loop_uid)?;
     let instant = loop_home::mail::instant::Instant::parse(delivery).map_err(failure)?;
     let session = custody.enter(&worker).map_err(failure)?;
     let (delivery, bytes) = session.resolve(step, &instant).map_err(failure)?;
@@ -353,7 +352,7 @@ fn publish_evidence(
     Ok(())
 }
 
-// Reply admission needs the authorized destination, not rebuilt container argv.
+// Binding admission needs the authorized destination, not rebuilt container argv.
 // Both settings and registry reads use the receiver-activated configuration snapshot.
 fn reply_driver(home: &Path, loop_name: &str, run: &str) -> Result<PathBuf, LaneError> {
     crate::read_worker_settings(home, loop_name)?.validate_grant(home, loop_name)?;
@@ -388,10 +387,11 @@ fn binding_record(root: &Path, loop_name: &str, run: &str) -> Result<Value, Lane
 fn evidence_file(
     directory: &std::os::fd::OwnedFd,
     step: &str,
-    reply: bool,
-    verify_only: bool,
+    selection: BindingSelection,
     loop_uid: u32,
 ) -> Result<File, LaneError> {
+    let reply = selection.is_reply();
+    let verify_only = selection.verify_only();
     let file = File::from(
         nix::fcntl::openat2(
             directory,
@@ -498,8 +498,8 @@ mod tests {
             original
         );
         let directory = binding_directory(&root, &root.join("R"), uid).expect("held dir");
-        let mut file =
-            evidence_file(&directory, "review", true, false, uid).expect("held evidence");
+        let mut file = evidence_file(&directory, "review", BindingSelection::Reply, uid)
+            .expect("held evidence");
         file.write_all(b"held reply").expect("write");
         assert_eq!(
             std::fs::read(retained.join("R/reply-review.txt")).expect("retained"),

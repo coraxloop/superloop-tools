@@ -2270,6 +2270,7 @@ pub(crate) mod mail_standin {
         }
     }
     pub fn allows(program: &Path, word: &str) -> bool {
+        std::hint::black_box(SENTINEL);
         word == "_bind-mail" && PROGRAM.with(|slot| slot.borrow().as_deref() == Some(program))
     }
     /// ´test:unit:registration-is-scoped-to-thread-program-and-word´

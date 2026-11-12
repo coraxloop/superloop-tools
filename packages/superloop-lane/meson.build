@@ -575,7 +575,7 @@ test('lane-release-fixture-admission-absent', python,
   depends: workspace_build, suite: 'release', timeout: 900, is_parallel: false)
 
 dependency_ledger += ['''
-{"kind":"payload","path":"packages/superloop-lane/tests/test_release_admission.py","form":"python","sha256":"71fc42a4180c058b54be15c5dea029423635265e108dd01c17d9e39add4cfe26","owner":"superloop-lane","interpreter":"Python 3 standard library","execution_host":"test build host","version_authority":"packages/superloop-lane/Cargo.toml","contract":"Scan every workspace release artifact for fixture admission with a freshly built unit-test binary as positive control; never execute fixture authority","calls":[{"callee":"external:configured-cargo","selector":"command","anchor":"subprocess.run(command","lookup":"test-executable","contract":"Build the lane unit-test binary without running tests and select its executable from Cargo compiler-artifact output"}]}
+{"kind":"payload","path":"packages/superloop-lane/tests/test_release_admission.py","form":"python","sha256":"774bc13beee86004d5ee7639cd57d41f67be7c3e96c684939af73a20deafad5a","owner":"superloop-lane","interpreter":"Python 3 standard library","execution_host":"test build host","version_authority":"packages/superloop-lane/Cargo.toml","contract":"Scan every workspace release artifact for fixture admission with a freshly built unit-test binary as positive control; never execute fixture authority","calls":[{"callee":"external:configured-cargo","selector":"command","anchor":"subprocess.run(command","lookup":"test-executable","contract":"Build the lane unit-test binary without running tests and select its executable from Cargo compiler-artifact output"}]}
 ''']
 
 dependency_ledger += ['''

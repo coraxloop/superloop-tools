@@ -178,7 +178,6 @@ impl BindingSelection {
 /// Selected custody for the next binding entry. Fields cannot be assembled by callers.
 pub struct BindingCustody {
     custody: ReplyCustody,
-    selection: BindingSelection,
 }
 impl BindingCustody {
     /// Receive the exact selected operation before repair or identity transition.
@@ -200,7 +199,6 @@ impl BindingCustody {
                 loop_name,
                 selection,
             )?,
-            selection,
         })
     }
     /// Borrow the received home, roots and configuration without exposing construction.
@@ -210,7 +208,7 @@ impl BindingCustody {
     }
     #[must_use]
     pub const fn selection(&self) -> BindingSelection {
-        self.selection
+        self.custody.selection
     }
     #[must_use]
     pub const fn entry_anchors(
@@ -236,9 +234,10 @@ impl BindingCustody {
     /// # Errors
     /// Refuses changed custody or an unavailable lifetime; verify never repairs it.
     pub fn enter(self, identity: &Identity) -> Result<BindingSession> {
+        let selection = self.custody.selection;
         Ok(BindingSession {
-            session: self.custody.enter(identity, self.selection.verify_only())?,
-            selection: self.selection,
+            session: self.custody.enter(identity, selection.verify_only())?,
+            selection,
         })
     }
 }

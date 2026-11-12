@@ -185,6 +185,10 @@ impl Drop for Replacement {
 /// (´claim:superlooplane:reply-entry-retains-custody´)
 // Executed by the custom main, outside the libtest census.
 fn reply_entry_retains_custody(kind: &str) {
+    if kind.ends_with("override-unseeded") {
+        unseeded_override(kind);
+        return;
+    }
     if kind.starts_with("inbound-override") {
         inbound_override(kind);
         return;
@@ -291,6 +295,30 @@ fn public_route(home: &Path, entry: &Path) {
     );
     assert!(output.status.success(), "{output:?}");
 }
+fn unseeded_override(kind: &str) {
+    let fixture = fixture::Fixture::new();
+    let home = &fixture.0;
+    seed(home, !kind.starts_with("inbound-"));
+    let config = home.join(".config/loops/alpha");
+    fs::create_dir(&config).expect("reconciliation settings directory");
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).expect("mode");
+    let root = home.join("runs");
+    let settings = config.join("workers.toml");
+    fs::write(&settings, format!("runs_root='{}'\n", root.display())).expect("reconciliation only");
+    fs::set_permissions(settings, fs::Permissions::from_mode(0o600)).expect("mode");
+    let registry = home.join(".config/loops/registry.toml");
+    let source = fs::read_to_string(&registry).expect("registry").replace(
+        "launch='dev/alpha'",
+        &format!("launch='dev/alpha',runs_root='{}'", root.display()),
+    );
+    fs::write(registry, source).expect("runs grant");
+    let result = public_reply(home, &binary(), kind);
+    assert_eq!(result.status.code(), Some(2), "{result:?}");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("purpose=registry-override"),
+        "override must precede the missing plan: {result:?}"
+    );
+}
 fn inbound_override(kind: &str) {
     let fixture = fixture::Fixture::new();
     let home = &fixture.0;
@@ -351,7 +379,7 @@ fn inbound_route(kind: &str) {
         );
         for verify in [false, true] {
             legacy_binding(home, verify, true, "review");
-            mixed_new_old(home, &entry, verify);
+            mixed_new_old(home, verify);
         }
         let rollback = superloop_lane::launch::steering::Request::parse(&[
             "alpha".into(),
@@ -381,20 +409,8 @@ fn inbound_route(kind: &str) {
     if kind == "inbound-public" {
         return;
     }
-    if kind == "inbound-forged-binding" {
-        let forged = forged_entry(home, &first["mail"], "worker_uid");
-        let result = superloop_lane::launch::steering::run_from(
-            home,
-            &request,
-            false,
-            (home, nix::unistd::Uid::effective().as_raw(), Some(&forged)),
-        );
-        assert!(
-            result
-                .expect_err("binding comparison")
-                .line()
-                .contains("private binding differs from reservation")
-        );
+    if matches!(kind, "inbound-forged-binding" | "inbound-prior-binding") {
+        forged_binding(home, &request, &first["mail"], kind);
         assert_eq!(fs::read(reservation).expect("unchanged"), before);
         return;
     }
@@ -403,6 +419,32 @@ fn inbound_route(kind: &str) {
         return;
     }
     inbound_selected(home, &entry, kind, &first, &before);
+}
+fn forged_binding(
+    home: &Path,
+    request: &superloop_lane::launch::steering::Request,
+    binding: &serde_json::Value,
+    kind: &str,
+) {
+    let prior = kind == "inbound-prior-binding";
+    let forged = forged_entry(home, binding, if prior { "bytes" } else { "worker_uid" });
+    let result = superloop_lane::launch::steering::run_from(
+        home,
+        request,
+        false,
+        (home, nix::unistd::Uid::effective().as_raw(), Some(&forged)),
+    );
+    let expected = if prior {
+        "step already binds another delivery"
+    } else {
+        "private binding differs from reservation"
+    };
+    assert!(
+        result
+            .expect_err("binding comparison")
+            .line()
+            .contains(expected)
+    );
 }
 fn inbound_selected(
     home: &Path,
@@ -613,7 +655,7 @@ fn legacy_binding(home: &Path, verify: bool, new_entry: bool, step: &str) -> ser
         serde_json::from_slice(&result.stdout).expect("base record")
     }
 }
-fn mixed_new_old(home: &Path, _: &Path, verify: bool) {
+fn mixed_new_old(home: &Path, verify: bool) {
     let image = PathBuf::from(std::env::var_os("LANE_MAIL_OLD_BINARY").expect("0.4.2 image"));
     let mode = if verify {
         loop_home::mail::steering::BindingSelection::InboundVerify
@@ -1153,6 +1195,9 @@ fn main() -> std::process::ExitCode {
         "inbound-resume-forged",
         "inbound-override-empty",
         "inbound-override-canonical",
+        "public-override-unseeded",
+        "inbound-override-unseeded",
+        "inbound-prior-binding",
     ];
     let selected = std::env::var("LANE_REPLY_CASE").ok();
     if let Some(kind) = selected.as_deref() {

@@ -9,18 +9,20 @@ SENTINELS = (b"SUPERLOOP_CLAUDE_FIXTURE_ADMISSION_V1_ONLY_UNIT_TESTS",
              b"SUPERLOOP_MAIL_STANDIN_V1_ONLY_UNIT_TESTS")
 
 
-def contains(path, sentinel):
+def contains(path):
     """Keep overlap so a sentinel crossing a read boundary is still found."""
     with path.open("rb") as stream:
         assert stream.read(4) == b"\x7fELF", f"not an ELF binary: {path}"
         stream.seek(0)
         tail = b""
+        found = set()
         while block := stream.read(1024 * 1024):
             data = tail + block
-            if sentinel in data:
-                return True
-            tail = data[-(len(sentinel) - 1):]
-    return False
+            found.update(sentinel for sentinel in SENTINELS if sentinel in data)
+            if len(found) == len(SENTINELS):
+                break
+            tail = data[-(max(map(len, SENTINELS)) - 1):]
+    return found
 
 
 def test_release_admission(positive, artifacts):
@@ -30,11 +32,12 @@ def test_release_admission(positive, artifacts):
     """
     assert artifacts, "release artifact set is empty"
     assert len(set(artifacts)) == len(artifacts), "duplicate release artifact"
-    for sentinel in SENTINELS:
-        assert contains(positive, sentinel), f"unit positive control lacks {sentinel!r}"
-        for artifact in artifacts:
-            assert not contains(artifact, sentinel), (
-                f"fixture admission in {artifact}: {sentinel!r}")
+    positive_found = contains(positive)
+    assert positive_found == set(SENTINELS), (
+        f"unit positive control lacks sentinels: {positive_found}")
+    for artifact in artifacts:
+        found = contains(artifact)
+        assert not found, f"fixture admission in {artifact}: {found}"
     print(json.dumps({"positive_control": str(positive),
                       "release_artifacts": list(map(str, artifacts)),
                       "fixture_admission": "absent"}), flush=True)
