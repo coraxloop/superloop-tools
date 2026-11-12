@@ -152,6 +152,37 @@ def test_release_flag_sources():
             "absent overrides remain accepted")
 
 
+def test_release_configuration_includes(builder, root, cargo):
+    """Record string and list includes, leaving missing-file policy to Cargo.
+
+    ´test:integration:test-release-configuration-includes´
+    """
+    path = cargo / "config.toml"
+    original = path.read_bytes()
+    environment = {"HOME": str(root / "account"), "CARGO_HOME": str(cargo)}
+    try:
+        for directive in ['"flags.toml"', '["flags.toml"]',
+                          '[{path="flags.toml", optional=true}]']:
+            path.write_text("include = " + directive + "\n")
+            inputs, _ = builder.compiler_inputs(root, environment)
+            matched = [row for row in inputs["configurations"]
+                       if row["path"] == str(cargo / "flags.toml")]
+            require(len(matched) == 1 and matched[0]["present"]
+                    and configuration_has_test(matched[0]["settings"]),
+                    "include is one complete path")
+        for directive in ['"missing.toml"', '["missing.toml"]',
+                          '[{path="missing.toml", optional=true}]']:
+            path.write_text("include = " + directive + "\n")
+            inputs, observed = builder.compiler_inputs(root, environment)
+            missing = cargo / "missing.toml"
+            matched = [row for row in inputs["configurations"] if row["path"] == str(missing)]
+            require(len(matched) == 1 and not matched[0]["present"]
+                    and matched[0]["selected"] and observed[missing] is None,
+                    "missing include is inventoried without a recorder refusal")
+    finally:
+        path.write_bytes(original)
+
+
 def test_release_build_record(source):
     """Build-time inputs and byte binding refuse test flags and stale evidence.
 
@@ -175,6 +206,7 @@ def test_release_build_record(source):
         require(any(config["path"].endswith("flags.toml")
                     and configuration_has_test(config["settings"])
                     for config in inputs["configurations"]), "included flags not recorded")
+        test_release_configuration_includes(builder, root, cargo)
         (cargo / "config").write_text('[build]\nrustflags = []\n')
         inputs, _ = builder.compiler_inputs(
             root, {"HOME": str(root / "account"), "CARGO_HOME": str(cargo)})

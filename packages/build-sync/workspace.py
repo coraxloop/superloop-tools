@@ -91,12 +91,14 @@ def compiler_inputs(root, environment):
                        if "rustflags" in value},
             "env": {key: value for key, value in config.get("env", {}).items()
                     if flag_name(key)}}
-        for item in config.get("include", []):
+        includes = config.get("include", [])
+        if isinstance(includes, str):
+            includes = [includes]
+        for item in includes:
             name = item if isinstance(item, str) else item["path"]
             included = path.parent / name
-            if not included.is_file() and not (isinstance(item, dict)
-                                              and item.get("optional", False)):
-                raise SystemExit("required Cargo configuration include missing")
+            # Record absence; Cargo decides whether its enabled include semantics
+            # require this file. The recorder must not add an independent refusal.
             visit(included, True)
         active.remove(path)
 
