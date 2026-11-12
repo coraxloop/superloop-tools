@@ -58,7 +58,7 @@ fn bind_private_launch_args<'a>(
 ) -> Result<(&'a [String], Option<home::PrivateHomeGuard>), LaneError> {
     let private_launch = matches!(
         args.first().map(String::as_str),
-        Some("_choose-uid" | "_settle-evidence" | "_make-home" | "_bind-mail" | "_bind-reply")
+        Some("_choose-uid" | "_settle-evidence" | "_make-home" | "_bind-mail")
     );
     if !private_launch {
         return Ok((args, None));
@@ -703,10 +703,13 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
-    if args
-        .first()
-        .is_some_and(|value| matches!(value.as_str(), "_bind-mail" | "_bind-reply"))
-    {
+    if args.first().is_some_and(|word| word == "_bind-reply") {
+        let report = launch::reply_entry::serve(args)?;
+        writeln!(io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
+        return Ok(0);
+    }
+    if args.first().is_some_and(|value| value == "_bind-mail") {
         let [
             _,
             loop_name,
@@ -741,13 +744,12 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
                 ));
             }
         };
-        let report = launch::steering::private_bind(
+        let report = launch::steering::private_mail(
             Path::new(owner_home),
             loop_name,
             run,
             step,
             delivery,
-            args[0] == "_bind-reply",
             verify_only,
         )?;
         writeln!(io::stdout().lock(), "{report}")

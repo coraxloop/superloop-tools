@@ -440,6 +440,9 @@ pattern = "packages/loop-home/src/error.rs"
 pattern = "packages/loop-home/src/lib.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/mail/reply_entry.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/planner.rs"
 
 [[include.rows]]
@@ -1979,6 +1982,9 @@ pattern = "packages/superloop-lane/src/launch/repin_door.rs"
 pattern = "packages/superloop-lane/src/launch/repin_door_tests.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/launch/reply_entry.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/report.rs"
 
 [[include.rows]]
@@ -2622,6 +2628,9 @@ pattern = "packages/superloop-lane/tests/private_dispatch.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/private_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/reply_entry.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/requests_entry.rs"

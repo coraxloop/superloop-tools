@@ -614,10 +614,14 @@ pub(super) fn inspect_current_round(
         .driver_dir
         .parent()
         .ok_or_else(|| LaneError::input("round-home", "runs root is absent"))?;
-    let record = read_reservation(&reservation_path(root, run))?
-        .ok_or_else(|| LaneError::input("round-record", "reservation is absent"))?;
+    let record = inspection_record(root, run)?;
     check_identity(&plan, &record)?;
     inspect_loaded_round(&plan, &record, evidence)
+}
+
+fn inspection_record(root: &Path, run: &str) -> Result<Value, LaneError> {
+    read_reservation(&reservation_path(root, run))?
+        .ok_or_else(|| LaneError::input("round-record", "reservation is absent"))
 }
 
 fn inspect_loaded_round(
@@ -1863,6 +1867,33 @@ mod tests {
                 .expect_err("changed model refuses")
                 .kind,
             "round-selection"
+        );
+    }
+
+    /// # Panics
+    /// Panics if inspection reopens a replaced reservation pathname after receipt.
+    /// ´test:unit:inspection-reservation-retains-received-runs´
+    #[test]
+    fn inspection_reservation_retains_received_runs() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = fixture.path().join("runs");
+        std::fs::create_dir(&root).expect("runs");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        let record = serde_json::json!({"schema":1,"loop":"alpha","run":"R",
+            "worker_uid":3000,"phase":"settled"});
+        super::publish_reservation(&super::reservation_path(&root, "R"), &record).expect("record");
+        let held = std::fs::File::open(&root).expect("held runs");
+        let _guard =
+            crate::home::activate_handed_home(&root, &held, nix::unistd::Uid::effective().as_raw())
+                .expect("activate");
+        std::fs::rename(&root, fixture.path().join("retained")).expect("rename");
+        std::fs::create_dir(&root).expect("replacement");
+        std::fs::write(super::reservation_path(&root, "R"), b"not a reservation")
+            .expect("replacement record");
+        assert_eq!(
+            super::inspection_record(&root, "R").expect("held reservation"),
+            record
         );
     }
 

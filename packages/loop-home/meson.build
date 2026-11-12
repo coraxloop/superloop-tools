@@ -22,6 +22,7 @@ pkg_loop_home_rust = files(
   'src/mail/migration_tree.rs',
   'src/mail/migration_metadata.rs',
   'src/mail/steering.rs',
+  'src/mail/reply_entry.rs',
   'src/mail/provision.rs',
   'src/mail/birth.rs',
   'src/mail/worker_provision.rs',

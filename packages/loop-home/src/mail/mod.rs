@@ -27,6 +27,7 @@ pub mod birth;
 
 pub mod worker_provision;
 
+pub mod reply_entry;
 pub mod steering;
 
 pub mod migration;

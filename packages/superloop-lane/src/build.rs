@@ -1006,6 +1006,11 @@ pub(crate) fn run_checked_with_private_launch(
     runs: &OwnedFd,
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<String, LaneError> {
+    if argv.get(2).is_some_and(|word| word == "_bind-reply") {
+        let request =
+            crate::launch::reply_entry::command(program, &argv, (cwd, home), (runs_root, runs))?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
     if argv.get(2).is_some_and(|word| word == "_make-home") {
         let letter = letter.ok_or_else(|| {
             LaneError::input(
@@ -2260,6 +2265,38 @@ mod tests {
     fn executable(path: &std::path::Path, body: &str) {
         crate::fixture_exec::write_executable(path, format!("#!/bin/sh\n{body}\n").as_bytes())
             .expect("closed and synced fixture script");
+    }
+
+    /// # Panics
+    /// Panics if reply dispatch falls back to the retired two-descriptor launcher.
+    /// ´test:unit:reply-dispatch-requires-capability-vector´
+    #[test]
+    fn reply_dispatch_requires_capability_vector() {
+        let root = tempfile::tempdir().expect("root");
+        let fd = std::fs::File::open(root.path()).expect("directory").into();
+        let error = super::run_checked_with_private_launch(
+            std::path::Path::new("/usr/bin/false"),
+            vec![
+                "unshare".into(),
+                "/usr/bin/false".into(),
+                "_bind-reply".into(),
+            ],
+            &std::collections::BTreeMap::new(),
+            root.path(),
+            10,
+            "reply-dispatch",
+            &fd,
+            root.path(),
+            &fd,
+            None,
+        )
+        .expect_err("incomplete frame");
+        assert!(
+            error
+                .detail
+                .contains("anchor-declaration: operation=mail-binding purpose=vector"),
+            "{error:?}"
+        );
     }
 
     /// ´test:unit:door-listener-handoff-does-not-inherit-on-exec´

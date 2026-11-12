@@ -1795,10 +1795,17 @@ pub fn private_handover(
     let directory = last["driver_dir"]
         .as_str()
         .ok_or_else(|| LaneError::input("rotate-context", "last driver directory is absent"))?;
+    let context = handover_context(root, Path::new(directory), loop_uid)?;
+    handover["context"] = context;
+    bound_handover_output(&mut handover)?;
+    Ok(handover)
+}
+
+fn handover_context(root: &Path, directory: &Path, loop_uid: u32) -> Result<Value, LaneError> {
     let pinned = File::from(home::pin_loop_round(
         root,
-        Path::new(directory),
-        0,
+        directory,
+        nix::unistd::Uid::effective().as_raw(),
         loop_uid,
     )?);
     let context = super::follow::open_regular_at(&pinned, "context.jsonl", "rotate-context", true)?
@@ -1809,9 +1816,7 @@ pub fn private_handover(
                 .map(Some).map_err(|error| LaneError::input("rotate-context", error.to_string())))
         })?
         .unwrap_or_else(|| json!({"state":"unknown","used":null,"window":null,"fraction":null,"source":"event-stream","reason":"context-record-absent","turn":0,"at":null}));
-    handover["context"] = context;
-    bound_handover_output(&mut handover)?;
-    Ok(handover)
+    Ok(context)
 }
 
 fn marked_body(entry: &Value, kind: &str) -> Result<String, LaneError> {
@@ -2691,6 +2696,40 @@ mod tests {
     use std::cell::Cell;
     use std::fs;
     use std::os::fd::OwnedFd;
+
+    /// # Panics
+    /// Panics if a post-receipt context read follows a substituted runs pathname.
+    /// ´test:unit:rotation-context-retains-received-runs´
+    #[test]
+    fn rotation_context_retains_received_runs() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = fixture.path().join("runs");
+        std::fs::create_dir_all(root.join("R")).expect("runs");
+        let uid = nix::unistd::Uid::effective().as_raw();
+        for path in [&root, &root.join("R")] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let held = fs::File::open(&root).expect("root");
+        let _guard = crate::home::activate_handed_home(&root, &held, uid).expect("activate");
+        let retained = fixture.path().join("retained");
+        std::fs::rename(&root, &retained).expect("rename");
+        std::fs::create_dir_all(root.join("R")).expect("replacement");
+        std::fs::write(
+            retained.join("R/context.jsonl"),
+            b"{\"state\":\"measured\",\"used\":17}\n",
+        )
+        .expect("held");
+        std::fs::write(
+            root.join("R/context.jsonl"),
+            b"{\"state\":\"replacement\"}\n",
+        )
+        .expect("replacement");
+        assert_eq!(
+            super::handover_context(&root, &root.join("R"), uid).expect("context"),
+            json!({"state":"measured","used":17})
+        );
+    }
 
     /// ´test:unit:rotation-private-handover-refuses-replaced-reservation´
     #[test]

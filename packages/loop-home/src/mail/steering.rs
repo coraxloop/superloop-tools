@@ -110,12 +110,15 @@ impl BindingInventory {
 /// Owned mail capabilities whose coherence is established only by receipt.
 ///
 /// Private fields prevent callers assembling independent snapshots and anchors.
-/// The production command has not switched to this five-role mail subset yet.
+/// The production command switches only with its complete lane entry.
 pub struct ReplyCustody {
     home: std::path::PathBuf,
+    owner_home: crate::anchor::Anchor,
+    runs_root: crate::anchor::Anchor,
+    entry_executable: crate::anchor::Anchor,
     loop_name: String,
     configuration: crate::anchor::Configuration,
-    configuration_directory: crate::anchor::Anchor,
+    configuration_directory: std::sync::Arc<crate::anchor::Anchor>,
     loop_storage: std::sync::Arc<crate::anchor::Anchor>,
     private_storage: std::sync::Arc<crate::anchor::Anchor>,
     identity_executable: crate::anchor::Anchor,
@@ -123,27 +126,38 @@ pub struct ReplyCustody {
 }
 
 const REPLY_OPERATION: &str = "mail-binding";
-const REPLY_PURPOSES: [&str; 5] = [
+pub const REPLY_PURPOSES: [&str; 8] = [
+    "owner-home",
+    "runs-root",
+    "entry-executable",
     "configuration",
     "loop-storage",
     "private-storage",
     "identity-executable",
     "journal",
 ];
-fn reply_refusal(purpose: &str) -> MailError {
+pub(super) fn reply_refusal(purpose: &str) -> MailError {
     MailError::Entry(format!(
         "anchor-declaration: operation={REPLY_OPERATION} purpose={purpose}"
     ))
 }
-fn reply_override() -> Result<()> {
+pub(super) fn reply_io(purpose: &str, check: &str, error: impl std::fmt::Display) -> MailError {
+    MailError::Entry(format!(
+        "anchor-io: operation={REPLY_OPERATION} purpose={purpose} check={check}: {error}"
+    ))
+}
+pub(super) fn reply_override() -> Result<()> {
     if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
         return Err(reply_refusal("registry-override"));
     }
     Ok(())
 }
-fn reply_requirements(loop_uid: u32, service: u32) -> Vec<crate::anchor::Requirement> {
+pub(super) fn reply_requirements(loop_uid: u32, service: u32) -> Vec<crate::anchor::Requirement> {
     use crate::anchor::{Kind, ModePolicy, Owner, Policy, Requirement};
     [
+        (Owner::Host, Kind::Directory, ModePolicy::Exact(0o700)),
+        (Owner::Host, Kind::Directory, ModePolicy::Exact(0o700)),
+        (Owner::Host, Kind::File, ModePolicy::Executable),
         (Owner::Host, Kind::Directory, ModePolicy::Exact(0o700)),
         (Owner::Host, Kind::Directory, ModePolicy::Exact(0o711)),
         (
@@ -167,8 +181,74 @@ fn reply_requirements(loop_uid: u32, service: u32) -> Vec<crate::anchor::Require
     })
     .collect()
 }
+fn reply_core(
+    receiver: &crate::anchor::Receiver,
+    manifest: &crate::anchor::Manifest,
+    descriptors: &[std::os::fd::OwnedFd],
+    scope: &str,
+) -> Result<(std::path::PathBuf, Vec<crate::anchor::Requirement>)> {
+    use crate::anchor::{ModePolicy, Owner};
+    if descriptors.len() != REPLY_PURPOSES.len() {
+        // Keep the bootstrap's exact frame diagnostics for direct library callers.
+        return Err(MailError::Entry(format!(
+            "{}: operation={REPLY_OPERATION} purpose=configuration",
+            if descriptors.len() < REPLY_PURPOSES.len() {
+                "anchor-missing"
+            } else {
+                "anchor-transport"
+            }
+        )));
+    }
+    crate::anchor::Manifest::parse(
+        &serde_json::to_string(manifest).map_err(|_| reply_refusal("manifest"))?,
+    )?;
+    let mut required = reply_requirements(0, 0);
+    for slot in 0..2 {
+        let stat = nix::sys::stat::fstat(&descriptors[slot])
+            .map_err(|error| reply_io(REPLY_PURPOSES[slot], "fstat", error))?;
+        let mode = stat.st_mode & 0o7777;
+        if mode & 0o7022 != 0 || mode & 0o700 != 0o700 {
+            return Err(MailError::Entry(format!(
+                "anchor-mode: operation={REPLY_OPERATION} purpose={} check=directory-mode",
+                REPLY_PURPOSES[slot]
+            )));
+        }
+        required[slot].policy.mode = ModePolicy::Exact(mode);
+    }
+    required[2].policy.owner = if manifest.records[2].owner_uid == 0 {
+        Owner::RootFile
+    } else {
+        Owner::Host
+    };
+    required.truncate(3);
+    let mut declaration = manifest.clone();
+    declaration.records.truncate(3);
+    let fds = descriptors[..3]
+        .iter()
+        .enumerate()
+        .map(|(slot, fd)| {
+            fd.try_clone()
+                .map_err(|error| reply_io(REPLY_PURPOSES[slot], "duplicate", error))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if manifest.records[0].device == manifest.records[1].device
+        && manifest.records[0].inode == manifest.records[1].inode
+    {
+        return Err(reply_refusal("runs-root"));
+    }
+    let anchors = receiver.validate(
+        &declaration,
+        fds,
+        REPLY_OPERATION,
+        scope,
+        crate::anchor::Transport::Rights,
+        &required,
+    )?;
+    Ok((anchors[0].directory_path()?, required))
+}
+
 impl ReplyCustody {
-    /// Receive the exact mail subset, deriving mapped policies from its held grant.
+    /// Receive the exact reply bundle, deriving mapped policies from its held grant.
     /// This is the sole constructor; no lifetime repair or identity drop occurs here.
     /// # Errors
     /// Refuses namespace, declaration, grant, settings or capability-policy mismatches.
@@ -176,7 +256,6 @@ impl ReplyCustody {
         receiver: &crate::anchor::Receiver,
         manifest: &crate::anchor::Manifest,
         descriptors: Vec<std::os::fd::OwnedFd>,
-        home: &Path,
         loop_name: &str,
     ) -> Result<Self> {
         use crate::anchor::{Entry, Transport};
@@ -195,6 +274,7 @@ impl ReplyCustody {
         {
             return Err(reply_refusal("purposes"));
         }
+        let (home, core) = reply_core(receiver, manifest, &descriptors, loop_name)?;
         let configuration = receiver.configuration(
             manifest,
             &descriptors,
@@ -203,18 +283,19 @@ impl ReplyCustody {
                 loop_name,
                 transport: Transport::Rights,
             },
-            home,
+            &home,
             false,
         )?;
         let row = configuration
             .registry
-            .row(loop_name, home)
+            .row(loop_name, &home)
             .map_err(|_| reply_refusal("loop"))?;
         let service = configuration
             .allocations
             .mail_uid()
             .ok_or_else(|| reply_refusal("service"))?;
-        let required = reply_requirements(row.uid, service);
+        let mut required = reply_requirements(row.uid, service);
+        required[..3].clone_from_slice(&core);
         let mut anchors = receiver.validate(
             manifest,
             descriptors,
@@ -228,9 +309,15 @@ impl ReplyCustody {
         let identity_executable = take()?;
         let private_storage = std::sync::Arc::new(take()?);
         let loop_storage = std::sync::Arc::new(take()?);
-        let configuration_directory = take()?;
+        let configuration_directory = std::sync::Arc::new(take()?);
+        let entry_executable = take()?;
+        let runs_root = take()?;
+        let owner_home = take()?;
         let custody = Self {
-            home: home.into(),
+            home,
+            owner_home,
+            runs_root,
+            entry_executable,
             loop_name: loop_name.into(),
             configuration,
             configuration_directory,
@@ -241,6 +328,35 @@ impl ReplyCustody {
         };
         custody.settings()?;
         Ok(custody)
+    }
+    /// Home identity obtained from the received owner-home descriptor.
+    #[must_use]
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+    /// Borrow the validated lane roots and entry image without releasing ownership.
+    #[must_use]
+    pub const fn entry_anchors(
+        &self,
+    ) -> (
+        &crate::anchor::Anchor,
+        &crate::anchor::Anchor,
+        &crate::anchor::Anchor,
+    ) {
+        (&self.owner_home, &self.runs_root, &self.entry_executable)
+    }
+    /// Borrow the receiver-validated configuration and its directory for plan activation.
+    #[must_use]
+    pub fn configuration(
+        &self,
+    ) -> (
+        &crate::anchor::Configuration,
+        std::sync::Arc<crate::anchor::Anchor>,
+    ) {
+        (
+            &self.configuration,
+            std::sync::Arc::clone(&self.configuration_directory),
+        )
     }
     fn settings(&self) -> Result<command::Settings> {
         let file = super::entry_anchors::configuration_file(

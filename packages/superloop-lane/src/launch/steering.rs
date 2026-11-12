@@ -62,6 +62,11 @@ pub(super) fn evidence(plan: &Plan, step: &str) -> PathBuf {
 /// # Errors
 /// Refuses an unavailable delivery, changed worker or conflicting step binding.
 pub fn run(owner_home: &Path, request: &Request, reply: bool) -> Result<Value, LaneError> {
+    if reply && std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+        return Err(failure(
+            "anchor-declaration: operation=mail-binding purpose=registry-override",
+        ));
+    }
     let (plan, _) =
         crate::load_plan_for_record(owner_home, &request.loop_name, &request.run, (0, 0))?;
     let root = plan
@@ -252,7 +257,45 @@ fn binding_argv(
 ///
 /// # Errors
 /// Refuses changed custody, identity, delivery or evidence publication.
-pub fn private_bind(
+pub fn private_mail(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    step: &str,
+    delivery: &str,
+    verify_only: bool,
+) -> Result<Value, LaneError> {
+    private_binding(
+        owner_home,
+        loop_name,
+        run,
+        step,
+        delivery,
+        false,
+        verify_only,
+        None,
+    )
+}
+
+pub(super) fn private_reply(
+    custody: loop_home::mail::steering::ReplyCustody,
+    request: &Request,
+) -> Result<Value, LaneError> {
+    let home = custody.home().to_owned();
+    private_binding(
+        &home,
+        &request.loop_name,
+        &request.run,
+        &request.step,
+        &request.delivery,
+        true,
+        false,
+        Some(custody),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn private_binding(
     owner_home: &Path,
     loop_name: &str,
     run: &str,
@@ -260,27 +303,119 @@ pub fn private_bind(
     delivery: &str,
     reply: bool,
     verify_only: bool,
+    custody: Option<loop_home::mail::steering::ReplyCustody>,
 ) -> Result<Value, LaneError> {
     if !Uid::effective().is_root() {
         return Err(failure("namespace-root entry required"));
     }
     super::letters::valid_step(step)?;
-    let (plan, _) = crate::load_plan_for_record(owner_home, loop_name, run, (0, 0))?;
-    let root = plan
-        .driver_dir
+    let driver_dir = if custody.is_some() {
+        reply_driver(owner_home, loop_name, run)?
+    } else {
+        crate::load_plan_for_record(owner_home, loop_name, run, (0, 0))?
+            .0
+            .driver_dir
+    };
+    let root = driver_dir
         .parent()
         .ok_or_else(|| failure("runs root absent"))?;
+    let record = binding_record(root, loop_name, run)?;
+    let worker = identity(&record)?;
+    let loop_uid = super::recorded_loop_uid(&record)?;
+    let directory = binding_directory(root, &driver_dir, loop_uid)?;
+    let mut file = evidence_file(&directory, step, reply, verify_only, loop_uid)?;
+    let instant = loop_home::mail::instant::Instant::parse(delivery).map_err(failure)?;
+    let resolve = if verify_only {
+        loop_home::mail::steering::verify
+    } else if reply {
+        loop_home::mail::steering::reply
+    } else {
+        loop_home::mail::steering::bind
+    };
+    let session = custody
+        .map(|custody| custody.enter(&worker, false))
+        .transpose()
+        .map_err(failure)?;
+    let (delivery, bytes) = if let Some(session) = &session {
+        session.reply(step, &instant).map_err(failure)?
+    } else {
+        resolve(owner_home, loop_name, &worker, step, &instant).map_err(failure)?
+    };
+    if verify_only {
+        let mut evidence = Vec::new();
+        file.take(loop_home::mail::journal::MAX_LETTER_BYTES + 1)
+            .read_to_end(&mut evidence)
+            .map_err(failure)?;
+        if evidence != bytes {
+            return Err(failure("retained evidence differs from verified delivery"));
+        }
+    } else {
+        file.set_len(0).map_err(failure)?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(failure)?;
+        nix::unistd::fsync(&directory).map_err(failure)?;
+    }
+    let stopped = !reply && declarations(&bytes, &record)?;
+    // The journal authenticates the payload digest; the home digest only names its journal.
+    Ok(json!({
+        "worker_uid": worker.uid,
+        "sender": delivery.sender,
+        "recipient": delivery.recipient,
+        "delivery": delivery.delivery.to_string(),
+        "journal_identity": format!("{}:{}",
+            loop_home::mail::journal::digest(owner_home.as_os_str().as_encoded_bytes()),
+            delivery.delivery),
+        "inbox_name": delivery.inbox_name,
+        "step": step,
+        "evidence_digest": delivery.digest,
+        "bytes": delivery.bytes,
+        "stop": stopped,
+    }))
+}
+
+// Reply admission needs the authorized destination, not rebuilt container argv.
+// Both settings and registry reads use the receiver-activated configuration snapshot.
+fn reply_driver(home: &Path, loop_name: &str, run: &str) -> Result<PathBuf, LaneError> {
+    crate::read_worker_settings(home, loop_name)?.validate_grant(home, loop_name)?;
+    let registry = crate::read_plan_registry(home)?;
+    registry.row(loop_name, home).map_err(failure)?;
+    home::read_allocations(home)?
+        .require(loop_name)
+        .map_err(failure)?;
+    let root = registry
+        .runs_root(loop_name)
+        .ok_or_else(|| failure("runs root absent"))?;
+    Ok(root.join(run))
+}
+
+fn binding_directory(
+    root: &Path,
+    driver: &Path,
+    loop_uid: u32,
+) -> Result<std::os::fd::OwnedFd, LaneError> {
+    home::pin_loop_round(root, driver, Uid::effective().as_raw(), loop_uid)
+}
+
+fn binding_record(root: &Path, loop_name: &str, run: &str) -> Result<Value, LaneError> {
     let record = read_reservation(&reservation_path(root, run))?
         .ok_or_else(|| failure("reservation absent"))?;
     if record["loop"] != loop_name || record["run"] != run {
         return Err(failure("reservation identity differs"));
     }
-    let worker = identity(&record)?;
-    let loop_uid = super::recorded_loop_uid(&record)?;
-    let directory = home::pin_loop_round(root, &plan.driver_dir, 0, loop_uid)?;
-    let mut file = File::from(
+    Ok(record)
+}
+
+fn evidence_file(
+    directory: &std::os::fd::OwnedFd,
+    step: &str,
+    reply: bool,
+    verify_only: bool,
+    loop_uid: u32,
+) -> Result<File, LaneError> {
+    let file = File::from(
         nix::fcntl::openat2(
-            &directory,
+            directory,
             format!("{}-{step}.txt", if reply { "reply" } else { "mail" }).as_str(),
             nix::fcntl::OpenHow::new()
                 .flags(
@@ -305,7 +440,7 @@ pub fn private_bind(
     );
     let meta = file.metadata().map_err(failure)?;
     if !meta.is_file()
-        || meta.uid() != super::recorded_loop_uid(&record)? && meta.uid() != 0
+        || meta.uid() != loop_uid && meta.uid() != 0
         || meta.nlink() != 1
         || meta.mode() & 0o7777 != 0o600
     {
@@ -319,35 +454,7 @@ pub fn private_bind(
         )
         .map_err(failure)?;
     }
-    let instant = loop_home::mail::instant::Instant::parse(delivery).map_err(failure)?;
-    let resolve = if verify_only {
-        loop_home::mail::steering::verify
-    } else if reply {
-        loop_home::mail::steering::reply
-    } else {
-        loop_home::mail::steering::bind
-    };
-    let (delivery, bytes) =
-        resolve(owner_home, loop_name, &worker, step, &instant).map_err(failure)?;
-    if verify_only {
-        let mut evidence = Vec::new();
-        file.take(loop_home::mail::journal::MAX_LETTER_BYTES + 1)
-            .read_to_end(&mut evidence)
-            .map_err(failure)?;
-        if evidence != bytes {
-            return Err(failure("retained evidence differs from verified delivery"));
-        }
-    } else {
-        file.set_len(0).map_err(failure)?;
-        file.write_all(&bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(failure)?;
-        nix::unistd::fsync(&directory).map_err(failure)?;
-    }
-    let stopped = !reply && declarations(&bytes, &record)?;
-    Ok(
-        json!({"worker_uid":worker.uid,"sender":delivery.sender,"recipient":delivery.recipient,"delivery":delivery.delivery.to_string(),"journal_identity":format!("{}:{}",loop_home::mail::journal::digest(owner_home.as_os_str().as_encoded_bytes()),delivery.delivery),"inbox_name":delivery.inbox_name,"step":step,"evidence_digest":delivery.digest,"bytes":delivery.bytes,"stop":stopped}),
-    )
+    Ok(file)
 }
 
 // Mail remains opaque: only a UTF-8 brief participates in the optional
@@ -383,6 +490,44 @@ pub(super) fn stop_brief<'a>(record: &'a Value, step: &str) -> Option<&'a Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// # Panics
+    /// Panics if reservation or evidence reads follow a replacement after activation.
+    /// ´test:unit:reply-private-reads-retain-received-runs´
+    #[test]
+    fn reply_private_reads_retain_received_runs() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = fixture.path().join("runs");
+        std::fs::create_dir_all(root.join("R")).expect("runs");
+        let uid = Uid::effective().as_raw();
+        for path in [&root, &root.join("R")] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let original = json!({"schema":1,"phase":"started","worker_uid":uid,
+            "loop":"alpha","run":"R","source":"held"});
+        publish_reservation(&reservation_path(&root, "R"), &original).expect("reservation");
+        let held = File::open(&root).expect("root");
+        let _guard = home::activate_handed_home(&root, &held, uid).expect("activate");
+        let retained = fixture.path().join("retained");
+        std::fs::rename(&root, &retained).expect("rename");
+        std::fs::create_dir_all(root.join("R")).expect("replacement");
+        std::fs::write(root.join(".reservation-R.json"), b"replacement")
+            .expect("replacement record");
+        assert_eq!(
+            binding_record(&root, "alpha", "R").expect("held record"),
+            original
+        );
+        let directory = binding_directory(&root, &root.join("R"), uid).expect("held dir");
+        let mut file =
+            evidence_file(&directory, "review", true, false, uid).expect("held evidence");
+        file.write_all(b"held reply").expect("write");
+        assert_eq!(
+            std::fs::read(retained.join("R/reply-review.txt")).expect("retained"),
+            b"held reply"
+        );
+        assert!(!root.join("R/reply-review.txt").exists());
+    }
 
     /// ´test:unit:mail-launcher-preview-appends-verify-only´
     #[test]

@@ -49,6 +49,7 @@ pub(crate) mod probe;
 pub mod reader_entry;
 pub mod reaping;
 pub mod repin_door;
+pub mod reply_entry;
 pub mod report;
 mod reservation_census;
 pub mod retire;

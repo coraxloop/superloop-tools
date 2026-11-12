@@ -1,5 +1,5 @@
 #[path = "support/bounded.rs"]
-mod bounded;
+pub(crate) mod bounded;
 use bounded::CommandOutput as _;
 use loop_home::anchor::{
     self, Anchor, HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement,
@@ -30,9 +30,9 @@ const PHASE: &str = "LOOP_HOME_REPLY_PHASE";
 const HOME: &str = "LOOP_HOME_REPLY_HOME";
 const BODY: &[u8] = b"reply bytes\0\xff\n";
 
-struct Fixture(PathBuf);
+pub(crate) struct Fixture(pub(crate) PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "mail-reply-{}-{}",
@@ -67,7 +67,7 @@ impl Drop for Fixture {
         bounded::cleanup(&self.0, cleanup);
     }
 }
-fn child_command(home: &Path, phase: &str) -> std::process::Command {
+pub(crate) fn child_command(home: &Path, phase: &str) -> std::process::Command {
     let mut command = std::process::Command::new("/usr/bin/podman");
     command
         .args(["unshare"])
@@ -113,6 +113,7 @@ fn owned(path: &Path, uid: u32, mode: u32) {
 fn seed(home: &Path) {
     assert_eq!(nix::unistd::Uid::effective().as_raw(), 0);
     for (name, uid, mode) in [
+        ("runs", 0, 0o700),
         (".var", 0, 0o711),
         (".var/loops", 0, 0o711),
         (".var/loops/alpha", 0, 0o711),
@@ -167,7 +168,7 @@ os.setxattr(sys.argv[1],'system.posix_acl_access',encoded)
         String::from_utf8_lossy(&output.stderr)
     );
 }
-fn configuration(home: &Path) {
+pub(crate) fn configuration(home: &Path) {
     for name in [".config", ".config/loops"] {
         let path = home.join(name);
         fs::create_dir(&path).expect("configuration directory");
@@ -198,6 +199,24 @@ fn configuration(home: &Path) {
 }
 fn requirements() -> Vec<Requirement> {
     [
+        (
+            "owner-home",
+            Owner::Host,
+            Kind::Directory,
+            ModePolicy::Exact(0o700),
+        ),
+        (
+            "runs-root",
+            Owner::Host,
+            Kind::Directory,
+            ModePolicy::Exact(0o700),
+        ),
+        (
+            "entry-executable",
+            Owner::Host,
+            Kind::File,
+            ModePolicy::Executable,
+        ),
         (
             "configuration",
             Owner::Host,
@@ -268,6 +287,9 @@ fn parent(case: &str) {
     );
     let verifier = HostVerifier::current().expect("initial namespace verifier");
     let paths = [
+        home.clone(),
+        home.join("runs"),
+        std::env::current_exe().expect("entry image"),
         home.join(".config/loops"),
         home.join(".var/loops/alpha"),
         home.join(".var/loops/alpha/private"),
@@ -346,7 +368,7 @@ fn receive() -> (Manifest, Vec<std::os::fd::OwnedFd>) {
             .expect("stdin"),
     );
     let fds =
-        anchor::transport::receive(&socket, 5, std::time::Duration::from_secs(30)).expect("frame");
+        anchor::transport::receive(&socket, 8, std::time::Duration::from_secs(30)).expect("frame");
     drop(socket);
     anchor::transport::replace_stdin("mail-binding").expect("null stdin");
     (manifest, fds)
@@ -382,6 +404,44 @@ fn fixture_anchors(
         .expect("capabilities");
     (configuration, anchors)
 }
+fn package_seed(
+    home: &Path,
+    custody: ReplyCustody,
+    identity: &Identity,
+    configuration: &anchor::Configuration,
+    storage: &Arc<Anchor>,
+    journal: &Arc<Anchor>,
+) {
+    let row = configuration.registry.row("alpha", home).expect("row");
+    let driver = home.join("runs/R");
+    fs::create_dir(&driver).expect("driver directory");
+    owned(&driver, 64000, 0o700);
+    let _session = custody.enter(identity, false).expect("service");
+    let (_writer, instant) = delivery(storage, journal, &row);
+    writeln!(std::io::stdout().lock(), "PACKAGE-DELIVERY {instant}").expect("seed result");
+}
+
+fn complete_birth(
+    home: &Path,
+    identity: &Identity,
+    configuration: &anchor::Configuration,
+    anchors: (&Anchor, &Anchor, &Anchor),
+) {
+    for phase in ["reserve", "finish"] {
+        worker_provision::creation_beneath(
+            home,
+            "alpha",
+            identity,
+            phase,
+            configuration,
+            anchors.0,
+            anchors.1,
+            anchors.2,
+        )
+        .expect("production birth");
+    }
+}
+
 fn child(home: &Path, case: &str) {
     let (manifest, fds) = receive();
     let receiver = Receiver::current().expect("receiver");
@@ -389,7 +449,7 @@ fn child(home: &Path, case: &str) {
         declaration_refusals(home, &manifest, &fds, &receiver);
         return;
     }
-    let custody = ReplyCustody::receive(&receiver, &manifest, duplicate(&fds), home, "alpha");
+    let custody = ReplyCustody::receive(&receiver, &manifest, duplicate(&fds), "alpha");
     let (configuration, mut anchors) = fixture_anchors(home, &manifest, fds);
     let journal = Arc::new(anchors.pop().expect("journal"));
     let executor = anchors.pop().expect("executor");
@@ -423,18 +483,22 @@ fn child(home: &Path, case: &str) {
         assert!(!home.join(".var/loops/alpha/.mail-births").exists());
         return;
     }
-    for phase in ["reserve", "finish"] {
-        worker_provision::creation_beneath(
+    complete_birth(
+        home,
+        &identity,
+        &configuration,
+        (&storage, &private, &executor),
+    );
+    if case == "package-seed" {
+        package_seed(
             home,
-            "alpha",
+            custody.expect("custody"),
             &identity,
-            phase,
             &configuration,
             &storage,
-            &private,
-            &executor,
-        )
-        .expect("production birth");
+            &journal,
+        );
+        return;
     }
     post_lock_check(
         home,
@@ -735,7 +799,8 @@ fn reply_session_retains_custody() {
                     "outbox-wait",
                     "admission-bind",
                     "admission-verify",
-                    "admission-acl"
+                    "admission-acl",
+                    "package-seed"
                 ]
                 .contains(&phase.as_str()),
                 "unsupported fixture phase {phase}"
@@ -771,15 +836,15 @@ const TEST_NAME: &str = "reply_session_retains_custody";
 const VALUED_OPTIONS: [&str; 4] = ["--skip", "--format", "--color", "--test-threads"];
 
 #[derive(Default)]
-struct TestArguments {
+pub(crate) struct TestArguments {
     filters: Vec<String>,
     skips: Vec<String>,
     exact: bool,
-    list: bool,
+    pub(crate) list: bool,
     ignored: bool,
 }
 impl TestArguments {
-    fn parse(args: &[std::ffi::OsString]) -> Result<Self, String> {
+    pub(crate) fn parse(args: &[std::ffi::OsString]) -> Result<Self, String> {
         let mut result = Self::default();
         let mut words = args.iter();
         while let Some(word) = words.next() {
@@ -828,11 +893,14 @@ impl TestArguments {
         Ok(result)
     }
     fn selected(&self) -> bool {
+        self.selected_for(TEST_NAME)
+    }
+    pub(crate) fn selected_for(&self, name: &str) -> bool {
         let matches = |filter: &String| {
             if self.exact {
-                TEST_NAME == filter
+                name == filter
             } else {
-                TEST_NAME.contains(filter)
+                name.contains(filter)
             }
         };
         !self.ignored
@@ -901,7 +969,7 @@ fn argument_probe(args: &[&str]) -> std::process::Output {
         .expect("bounded argument probe")
 }
 
-fn main() -> std::process::ExitCode {
+pub(crate) fn main() -> std::process::ExitCode {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|word| {
         word.to_str()
@@ -986,12 +1054,13 @@ fn declaration_refusals(
     for (case, kind, purpose) in [
         ("count", "anchor-declaration", "count"),
         ("purpose", "anchor-declaration", "purposes"),
-        ("operation", "anchor-declaration", "configuration"),
-        ("loop", "anchor-declaration", "configuration"),
+        ("operation", "anchor-declaration", "bundle"),
+        ("loop", "anchor-declaration", "bundle"),
         ("slot", "anchor-declaration", "manifest"),
         ("owner", "anchor-owner", "private-storage"),
         ("kind", "anchor-declaration", "identity-executable"),
         ("alias", "anchor-owner", "journal"),
+        ("roots-alias", "anchor-declaration", "runs-root"),
         ("short", "anchor-missing", "configuration"),
         ("excess", "anchor-transport", "configuration"),
     ] {
@@ -1001,22 +1070,28 @@ fn declaration_refusals(
             "count" => {
                 changed.records.pop();
             }
-            "purpose" => changed.records[2].purpose = "unrelated".into(),
+            "purpose" => changed.records[5].purpose = "unrelated".into(),
             "operation" => changed.operation = "other-operation".into(),
             "loop" => changed.loop_name = "beta".into(),
-            "slot" => changed.records[2].slot = 1,
-            "owner" => changed.records[2].owner_uid += 1,
-            "kind" => changed.records[3].kind = Kind::Directory,
+            "slot" => changed.records[5].slot = 1,
+            "owner" => changed.records[5].owner_uid += 1,
+            "kind" => changed.records[6].kind = Kind::Directory,
+            "roots-alias" => {
+                changed.records[1] = changed.records[0].clone();
+                changed.records[1].purpose = "runs-root".into();
+                changed.records[1].slot = 1;
+                descriptors[1] = fds[0].try_clone().expect("root alias");
+            }
             "alias" => {
-                changed.records[4] = changed.records[0].clone();
-                changed.records[4].purpose = "journal".into();
-                changed.records[4].slot = 4;
-                descriptors[4] = fds[0].try_clone().expect("alias");
+                changed.records[7] = changed.records[3].clone();
+                changed.records[7].purpose = "journal".into();
+                changed.records[7].slot = 7;
+                descriptors[7] = fds[3].try_clone().expect("alias");
             }
             "short" => {
                 descriptors.pop();
             }
-            "excess" => descriptors.push(fds[0].try_clone().expect("excess")),
+            "excess" => descriptors.push(fds[3].try_clone().expect("excess")),
             _ => unreachable!(),
         }
         received_refusal(
@@ -1041,7 +1116,7 @@ fn received_refusal(
     expected: (&str, &str),
 ) {
     let before = repair_state(home);
-    let result = ReplyCustody::receive(receiver, manifest, descriptors, home, "alpha")
+    let result = ReplyCustody::receive(receiver, manifest, descriptors, "alpha")
         .and_then(|custody| custody.enter(identity, false));
     let error = result.err().expect("invalid received bundle");
     let text = error.to_string();

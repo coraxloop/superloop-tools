@@ -810,6 +810,60 @@ impl AsFd for Anchor {
     }
 }
 impl Anchor {
+    /// Read this directory's current kernel path from verified procfs.
+    /// The result is an identity word; callers must bind any subsequent pathname use.
+    /// # Errors
+    /// Refuses non-directory custody, changed custody or unavailable kernel metadata.
+    pub fn directory_path(&self) -> Result<std::path::PathBuf> {
+        self.revalidate()?;
+        if self.policy.kind != Kind::Directory {
+            return Err(Error::new(
+                "anchor-kind",
+                &self.operation,
+                &self.record.purpose,
+            ));
+        }
+        let root = nix::fcntl::open(
+            "/proc/self/fd",
+            nix::fcntl::OFlag::O_PATH
+                | nix::fcntl::OFlag::O_DIRECTORY
+                | nix::fcntl::OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::empty(),
+        )
+        .map_err(|e| {
+            Error::new("anchor-io", &self.operation, &self.record.purpose)
+                .because("descriptor-path-open", e)
+        })?;
+        if nix::sys::statfs::fstatfs(&root)
+            .map_err(|e| {
+                Error::new("anchor-io", &self.operation, &self.record.purpose)
+                    .because("descriptor-path-statfs", e)
+            })?
+            .filesystem_type()
+            != nix::sys::statfs::PROC_SUPER_MAGIC
+        {
+            return Err(Error::new(
+                "anchor-identity",
+                &self.operation,
+                &self.record.purpose,
+            ));
+        }
+        let name = self.fd.as_raw_fd().to_string();
+        let path = nix::fcntl::readlinkat(&root, name.as_str()).map_err(|e| {
+            Error::new("anchor-io", &self.operation, &self.record.purpose)
+                .because("descriptor-path-readlink", e)
+        })?;
+        let path = std::path::PathBuf::from(path);
+        if !path.is_absolute() || path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") {
+            return Err(Error::new(
+                "anchor-identity",
+                &self.operation,
+                &self.record.purpose,
+            ));
+        }
+        Ok(path)
+    }
+
     /// Recheck this held capability without reopening its pathname.
     ///
     /// # Errors
