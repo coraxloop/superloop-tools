@@ -5,7 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-import shlex
+import re
 import subprocess
 import sys
 import tempfile
@@ -22,19 +22,57 @@ def require(condition, message):
         raise SystemExit(message)
 
 
-def carries_test_configuration(value):
-    if isinstance(value, dict):
-        return any(carries_test_configuration(item) for item in value.values())
+# Rust's White_Space property excludes Python's extra U+001C..U+001F separators.
+RUST_WHITESPACE = "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004" \
+                  "\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+OVERRIDES = ("RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+             "CARGO_BUILD_RUSTC", "CARGO_BUILD_RUSTC_WRAPPER",
+             "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
+
+
+def carries_test_configuration(value, source="config"):
     if isinstance(value, list):
         tokens = value
     elif isinstance(value, str):
-        tokens = value.split("\x1f") if "\x1f" in value else shlex.split(value)
+        if source == "CARGO_ENCODED_RUSTFLAGS":
+            tokens = value.split("\x1f")
+        elif source == "RUSTFLAGS":
+            tokens = [token.strip(RUST_WHITESPACE) for token in value.split(" ")]
+            tokens = [token for token in tokens if token]
+        else:
+            tokens = re.split("[" + RUST_WHITESPACE + "]+", value)
     else:
         return False
     return any(token == "--test" or token == "--cfg=test"
                or (token == "--cfg" and index + 1 < len(tokens)
                    and tokens[index + 1] == "test")
                for index, token in enumerate(tokens))
+
+
+def environment_has_test(values):
+    for name, value in values.items():
+        if isinstance(value, dict) and "value" in value:
+            value = value["value"]
+        if name in OVERRIDES:
+            require(value is None, "compiler override in release record: " + name)
+        elif name == "CARGO_TARGET_*_RUSTFLAGS":
+            if any(carries_test_configuration(flags) for flags in value.values()):
+                return True
+        elif name in {"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS"} \
+                or (name.startswith("CARGO_TARGET_") and name.endswith("_RUSTFLAGS")):
+            if carries_test_configuration(value, name):
+                return True
+    return False
+
+
+def configuration_has_test(settings):
+    build = settings.get("build", {})
+    for name in ["rustc", "rustc-wrapper", "rustc-workspace-wrapper"]:
+        require(build.get(name) is None, "compiler override in release config: " + name)
+    return (carries_test_configuration(build.get("rustflags"))
+            or any(carries_test_configuration(target.get("rustflags"))
+                   for target in settings.get("target", {}).values())
+            or environment_has_test(settings.get("env", {})))
 
 
 def build_record(build, artifacts):
@@ -55,11 +93,11 @@ def build_record(build, artifacts):
     configurations = inputs.get("configurations")
     require(isinstance(configurations, list) and configurations,
             "missing Cargo configuration inventory")
-    require(not carries_test_configuration(environment), "test configuration in build environment")
+    require(not environment_has_test(environment), "test configuration in build environment")
     for config in configurations:
         require(set(config) == {"path", "present", "selected", "settings"},
                 "incomplete Cargo configuration record")
-        require(not carries_test_configuration(config["settings"]),
+        require(not configuration_has_test(config["settings"]),
                 "test configuration in Cargo config: " + config["path"])
     saved = record.get("artifacts", {})
     require(set(saved) == {path.name for path in artifacts}, "stale build artifact inventory")
@@ -77,6 +115,41 @@ def refused(action, expected):
         require(expected in str(error), f"wrong record refusal: {error}")
     else:
         raise SystemExit("record control unexpectedly passed: " + expected)
+
+
+def test_release_flag_sources():
+    """Use Cargo's source-specific boundaries and refuse executable overrides.
+
+    ´test:integration:test-release-flag-sources´
+    """
+    require(carries_test_configuration("--cfg test -Cmetadata=a\x1fb", "RUSTFLAGS"),
+            "plain flags retain test before an embedded unit separator")
+    require(carries_test_configuration("--cfg\x1ftest", "CARGO_ENCODED_RUSTFLAGS"),
+            "encoded flag separator")
+    require(not carries_test_configuration("--cfg test", "CARGO_ENCODED_RUSTFLAGS"),
+            "encoded flags preserve embedded spaces")
+    require(not carries_test_configuration("--cfg\ttest", "RUSTFLAGS"),
+            "plain RUSTFLAGS splits spaces, not internal tabs")
+    require(carries_test_configuration("--cfg\ttest", "CARGO_BUILD_RUSTFLAGS"),
+            "config environment splits Rust whitespace")
+    require(not carries_test_configuration("--cfg\x1f test", "RUSTFLAGS"),
+            "Rust trim retains unit separator")
+    require(not carries_test_configuration(["--cfg test"]), "array token is indivisible")
+    require(carries_test_configuration(["--cfg", "test"]), "array token boundaries")
+    require(not carries_test_configuration("-Cmetadata=unmatched'", "RUSTFLAGS"),
+            "flags are not shell parsed")
+    for name in OVERRIDES:
+        for value in ["", "/fixture/unmatched'", {"value": "/fixture/compiler"}]:
+            refused(lambda: environment_has_test({name: value}), "compiler override")
+    for name in ["rustc", "rustc-wrapper", "rustc-workspace-wrapper"]:
+        refused(lambda: configuration_has_test({"build": {name: "/fixture/unmatched'"}}),
+                "compiler override")
+    for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS"]:
+        flags = "--cfg\x1ftest" if name == "CARGO_ENCODED_RUSTFLAGS" else "--cfg test"
+        require(configuration_has_test({"env": {name: {"value": flags, "force": True}}}),
+                "config env flag source")
+    require(not environment_has_test({name: None for name in OVERRIDES}),
+            "absent overrides remain accepted")
 
 
 def test_release_build_record(source):
@@ -100,7 +173,7 @@ def test_release_build_record(source):
         require("synthetic-not-recorded" not in json.dumps(inputs),
                 "unrelated configuration value recorded")
         require(any(config["path"].endswith("flags.toml")
-                    and carries_test_configuration(config["settings"])
+                    and configuration_has_test(config["settings"])
                     for config in inputs["configurations"]), "included flags not recorded")
         (cargo / "config").write_text('[build]\nrustflags = []\n')
         inputs, _ = builder.compiler_inputs(
@@ -122,7 +195,10 @@ def test_release_build_record(source):
         artifact.write_bytes(b"\x7fELFfixture")
         original = json.dumps(record)
         for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS"]:
-            for flags in ["--cfg test", "--cfg=test", "--test", "--cfg\x1ftest"]:
+            forms = ["--cfg=test", "--test"]
+            forms.append("--cfg\x1ftest" if name == "CARGO_ENCODED_RUSTFLAGS"
+                         else "--cfg test -Cmetadata=a\x1fb")
+            for flags in forms:
                 record = json.loads(original)
                 record["compiler_inputs"]["environment"][name] = flags
                 path.write_text(json.dumps(record))
@@ -188,6 +264,7 @@ def main():
     parser.add_argument("artifacts", nargs="*")
     args = parser.parse_args()
     require(args.artifacts, "release artifact set is empty")
+    test_release_flag_sources()
     test_release_build_record(args.root)
     build_record(args.build, [args.build / name for name in args.artifacts])
     command = [args.cargo, "test", "--locked", "--profile", "gate", "-p",
