@@ -7,7 +7,7 @@ use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-const CAP: u64 = 64 * 1024 * 1024;
+use request_core::OWNER_INPUT_CAP as CAP;
 fn failure(detail: impl Into<String>) -> GatewayError {
     GatewayError::RequestChannel(detail.into())
 }

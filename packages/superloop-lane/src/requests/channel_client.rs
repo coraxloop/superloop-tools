@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::error::LaneError;
 
-pub(super) const CAP: u64 = 64 * 1024 * 1024;
+use request_core::OWNER_INPUT_CAP as CAP;
 
 fn failure(detail: impl Into<String>) -> LaneError {
     LaneError::input("requests-helper-refusal", detail)

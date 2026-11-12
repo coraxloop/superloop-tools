@@ -328,7 +328,7 @@ impl Store {
     /// # Errors
     /// Refuses changed evidence, unsafe custody, an oversized plan or oversized helper input.
     pub fn rewrite(&self, expected: Option<&str>) -> Result<Value, LaneError> {
-        self.rewrite_with_channel_cap(expected, super::super::channel_client::CAP)
+        self.rewrite_with_channel_cap(expected, request_core::OWNER_INPUT_CAP)
     }
 
     #[allow(clippy::too_many_lines)]

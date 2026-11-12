@@ -6,7 +6,7 @@ use permission_triage::{CallerRole, Journal};
 use request_core::Error;
 use serde_json::{Value, json};
 
-const CAP: u64 = 64 * 1024 * 1024;
+use request_core::OWNER_INPUT_CAP as CAP;
 
 fn failure(error: impl std::fmt::Display) -> Error {
     Error::new("requests-helper", error.to_string())
