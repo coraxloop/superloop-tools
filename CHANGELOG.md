@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Close the helper-authority cancellation record after its activation, scope and panic regressions, retaining the release compatibility statement beside the protocol (``prob:box:helper-service-cancels-when-its-authority-thread-exits``).
+
 - Pin fixture-admission absence in every workspace release artifact with a current unit-test positive control and an empty-set refusal (``test:integration:test-release-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
 
 - Retain the fixture enclosure when a watchdog collects output after an unconfirmed namespace stop, so consuming the child handle cannot authorize removal during unwind (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-unconfirmed-stop-retains-enclosure``).
