@@ -203,6 +203,34 @@ impl BindingCustody {
             selection,
         })
     }
+    /// Borrow the received home, roots and configuration without exposing construction.
+    #[must_use]
+    pub fn home(&self) -> &Path {
+        self.custody.home()
+    }
+    #[must_use]
+    pub const fn selection(&self) -> BindingSelection {
+        self.selection
+    }
+    #[must_use]
+    pub const fn entry_anchors(
+        &self,
+    ) -> (
+        &crate::anchor::Anchor,
+        &crate::anchor::Anchor,
+        &crate::anchor::Anchor,
+    ) {
+        self.custody.entry_anchors()
+    }
+    #[must_use]
+    pub fn configuration(
+        &self,
+    ) -> (
+        &crate::anchor::Configuration,
+        std::sync::Arc<crate::anchor::Anchor>,
+    ) {
+        self.custody.configuration()
+    }
     /// Enter the service identity with lifetime mode fixed by receipt.
     ///
     /// # Errors

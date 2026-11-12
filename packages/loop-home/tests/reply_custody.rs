@@ -81,8 +81,11 @@ pub(crate) fn child_command(home: &Path, phase: &str) -> std::process::Command {
     );
     assert!(entry.is_absolute(), "absolute pathname reference image");
     let mut command = std::process::Command::new("/usr/bin/podman");
+    command.arg("unshare");
+    if phase.starts_with("inbound-path-") || phase == "inbound-legacy-entry" {
+        command.args(["/usr/bin/unshare", "--mount", "--propagation", "private"]);
+    }
     command
-        .args(["unshare"])
         .arg(entry)
         .env(PHASE, phase)
         .env(HOME, home)
@@ -90,18 +93,13 @@ pub(crate) fn child_command(home: &Path, phase: &str) -> std::process::Command {
         .env_remove("_CONTAINERS_ROOTLESS_UID");
     command
 }
-fn child_home() -> PathBuf {
+pub(crate) fn child_home() -> PathBuf {
     let home = PathBuf::from(std::env::var_os(HOME).expect("fixture home"));
     assert!(home.is_absolute());
     let name = home.file_name().expect("name").to_str().expect("UTF8");
     let temporary = std::env::temp_dir();
-    let root = if name.starts_with("mail-inbound-") {
-        Path::new("/tmp")
-    } else {
-        assert!(name.starts_with("mail-reply-"));
-        temporary.as_path()
-    };
-    assert_eq!(home.parent(), Some(root));
+    assert!(name.starts_with("mail-reply-") || name.starts_with("mail-inbound-"));
+    assert_eq!(home.parent(), Some(temporary.as_path()));
     assert!(
         !fs::symlink_metadata(&home)
             .expect("home")
@@ -424,13 +422,14 @@ fn package_seed(
     configuration: &anchor::Configuration,
     storage: &Arc<Anchor>,
     journal: &Arc<Anchor>,
+    reply: bool,
 ) {
     let row = configuration.registry.row("alpha", home).expect("row");
     let driver = home.join("runs/R");
     fs::create_dir(&driver).expect("driver directory");
     owned(&driver, 64000, 0o700);
     let _session = custody.enter(identity, false).expect("service");
-    let (_writer, instant) = delivery(storage, journal, &row);
+    let (_writer, instant) = delivery_for(storage, journal, &row, reply);
     writeln!(std::io::stdout().lock(), "PACKAGE-DELIVERY {instant}").expect("seed result");
 }
 
@@ -490,7 +489,7 @@ fn child(home: &Path, case: &str) {
         &configuration,
         (&storage, &private, &executor),
     );
-    if case == "package-seed" {
+    if matches!(case, "package-seed" | "package-inbound-seed") {
         package_seed(
             home,
             custody.expect("custody"),
@@ -498,6 +497,7 @@ fn child(home: &Path, case: &str) {
             &configuration,
             &storage,
             &journal,
+            case == "package-seed",
         );
         return;
     }
@@ -850,7 +850,8 @@ fn reply_session_retains_custody() {
                     "admission-bind",
                     "admission-verify",
                     "admission-acl",
-                    "package-seed"
+                    "package-seed",
+                    "package-inbound-seed"
                 ]
                 .contains(&phase.as_str()),
                 "unsupported fixture phase {phase}"
@@ -1580,7 +1581,7 @@ fn inbound_run(home: &Path, phase: &str) -> Vec<u8> {
 fn inbound_parent() {
     // The legacy pathname reference must traverse every ancestor as the service identity.
     // Own this exact create_dir result; the existing bounded parent cleanup removes it.
-    let fixture = Fixture::at(Path::new("/tmp"), "mail-inbound");
+    let fixture = Fixture::at(&std::env::temp_dir(), "mail-inbound");
     let home = &fixture.0;
     configuration(home);
     let seed = inbound_command(home, "seed");
@@ -1608,6 +1609,47 @@ fn inbound_parent() {
     inbound_run(home, "inbound-reply-mismatch");
     assert_eq!(inbound_run(home, "inbound-replaced"), path_binding);
 }
+// Only the legacy reference enters this private mount namespace. Keep the stored
+// absolute home name, but replace its unsearchable ancestors with empty directories.
+// All fixture data remains on the parent's disk-backed filesystem through the bind.
+pub(crate) fn searchable_reference(home: &Path) {
+    use nix::mount::{MsFlags, mount};
+    use std::os::fd::AsRawFd as _;
+    let held = File::open(home).expect("hold parent-created home before overlay");
+    let mut ancestors: Vec<_> = home.ancestors().skip(1).collect();
+    ancestors.reverse();
+    let blocked = ancestors.into_iter().find(|path| {
+        fs::metadata(path)
+            .expect("reference ancestor status")
+            .mode()
+            & 0o001
+            == 0
+    });
+    let Some(blocked) = blocked else { return };
+    assert_ne!(blocked, Path::new("/"), "reference root must be searchable");
+    mount(
+        Some("tmpfs"),
+        blocked,
+        Some("tmpfs"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        Some("mode=0755,size=1m"),
+    )
+    .expect("private searchable ancestor overlay");
+    fs::create_dir_all(home).expect("private namespace mountpoint");
+    for ancestor in home.ancestors().take_while(|path| *path != blocked) {
+        fs::set_permissions(ancestor, fs::Permissions::from_mode(0o755))
+            .expect("searchable namespace-only ancestor");
+    }
+    let source = format!("/proc/self/fd/{}", held.as_raw_fd());
+    mount(
+        Some(source.as_str()),
+        home,
+        None::<&str>,
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .expect("bind original fixture beneath searchable namespace ancestors");
+}
 fn inbound_child(home: &Path, phase: &str) {
     let identity = Identity {
         uid: 64010,
@@ -1622,6 +1664,7 @@ fn inbound_child(home: &Path, phase: &str) {
         return;
     }
     if phase.starts_with("inbound-path-") {
+        searchable_reference(home);
         let result = if phase == "inbound-path-bind" {
             loop_home::mail::steering::bind(home, "alpha", &identity, "path", &instant)
         } else {

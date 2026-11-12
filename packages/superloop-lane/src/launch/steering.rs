@@ -1,6 +1,7 @@
 //! Bind a service delivery to a protected worker reservation before resume.
 use super::{lock_mailbox, publish_reservation, read_reservation, reservation_path};
 use crate::{build, error::LaneError, home, plan::Plan};
+use loop_home::mail::steering::{BindingCustody, BindingSelection, BindingSession};
 use nix::unistd::Uid;
 use serde_json::{Value, json};
 use std::fs::File;
@@ -65,8 +66,10 @@ pub fn run(owner_home: &Path, request: &Request, reply: bool) -> Result<Value, L
     run_from(owner_home, request, reply, (Path::new("/"), 0, None))
 }
 
+#[doc(hidden)]
 /// Run the public binding body beneath an explicitly supplied host root.
 /// The normal command selects `/`, uid zero and its current executable.
+///
 /// # Errors
 /// Returns the same admission, child and publication refusals as `run`.
 pub fn run_from(
@@ -75,10 +78,12 @@ pub fn run_from(
     reply: bool,
     host: (&Path, u32, Option<&Path>),
 ) -> Result<Value, LaneError> {
-    if reply && std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
-        return Err(failure(
-            "anchor-declaration: operation=mail-binding purpose=registry-override",
-        ));
+    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+        let mode = selected_mode(reply, false);
+        return Err(failure(format!(
+            "anchor-declaration: operation={} purpose=registry-override",
+            mode.operation(),
+        )));
     }
     let (plan, _) =
         crate::load_plan_for_record(owner_home, &request.loop_name, &request.run, (0, 0))?;
@@ -237,15 +242,11 @@ fn binding_argv(
     delivery: &str,
     direction: (bool, bool),
 ) -> Result<Vec<String>, LaneError> {
-    let (reply, verify_only) = direction;
+    let mode = selected_mode(direction.0, direction.1);
     let mut argv = vec![
         "unshare".into(),
         exe,
-        if reply {
-            "_bind-reply".into()
-        } else {
-            "_bind-mail".into()
-        },
+        mode.private_word().into(),
         record["loop"]
             .as_str()
             .ok_or_else(|| failure("loop absent"))?
@@ -261,77 +262,42 @@ fn binding_argv(
         "--delivery".into(),
         delivery.into(),
     ];
-    if verify_only {
-        argv.push("--verify-only".into());
+    if let Some(flag) = mode.private_flag() {
+        argv.push(flag.into());
     }
     Ok(argv)
 }
 
-/// Namespace-root production entry; verify the birth before dropping to service UID.
-///
-/// The preopened evidence descriptor grants no access to other host files.
-///
-/// # Errors
-/// Refuses changed custody, identity, delivery or evidence publication.
-pub fn private_mail(
-    owner_home: &Path,
-    loop_name: &str,
-    run: &str,
-    step: &str,
-    delivery: &str,
-    verify_only: bool,
+const fn selected_mode(reply: bool, verify_only: bool) -> BindingSelection {
+    if reply {
+        BindingSelection::Reply
+    } else if verify_only {
+        BindingSelection::InboundVerify
+    } else {
+        BindingSelection::InboundBind
+    }
+}
+
+pub(super) fn private_selected(
+    custody: BindingCustody,
+    request: &Request,
 ) -> Result<Value, LaneError> {
-    private_binding(
-        owner_home,
+    let owner_home = custody.home().to_owned();
+    let owner_home = owner_home.as_path();
+    let mode = custody.selection();
+    let reply = mode.is_reply();
+    let verify_only = mode.verify_only();
+    let Request {
         loop_name,
         run,
         step,
         delivery,
-        false,
-        verify_only,
-        None,
-    )
-}
-
-pub(super) fn private_reply(
-    custody: loop_home::mail::steering::ReplyCustody,
-    request: &Request,
-) -> Result<Value, LaneError> {
-    let home = custody.home().to_owned();
-    private_binding(
-        &home,
-        &request.loop_name,
-        &request.run,
-        &request.step,
-        &request.delivery,
-        true,
-        false,
-        Some(custody),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn private_binding(
-    owner_home: &Path,
-    loop_name: &str,
-    run: &str,
-    step: &str,
-    delivery: &str,
-    reply: bool,
-    verify_only: bool,
-    custody: Option<loop_home::mail::steering::ReplyCustody>,
-) -> Result<Value, LaneError> {
+    } = request;
     if !Uid::effective().is_root() {
         return Err(failure("namespace-root entry required"));
     }
     super::letters::valid_step(step)?;
-    let driver_dir = if custody.is_some() {
-        reply_driver(owner_home, loop_name, run)?
-    } else {
-        crate::load_plan_for_record(owner_home, loop_name, run, (0, 0))?
-            .0
-            .driver_dir
-    };
+    let driver_dir = reply_driver(owner_home, loop_name, run)?;
     let root = driver_dir
         .parent()
         .ok_or_else(|| failure("runs root absent"))?;
@@ -341,37 +307,9 @@ fn private_binding(
     let directory = binding_directory(root, &driver_dir, loop_uid)?;
     let mut file = evidence_file(&directory, step, reply, verify_only, loop_uid)?;
     let instant = loop_home::mail::instant::Instant::parse(delivery).map_err(failure)?;
-    let resolve = if verify_only {
-        loop_home::mail::steering::verify
-    } else if reply {
-        loop_home::mail::steering::reply
-    } else {
-        loop_home::mail::steering::bind
-    };
-    let session = custody
-        .map(|custody| custody.enter(&worker, false))
-        .transpose()
-        .map_err(failure)?;
-    let (delivery, bytes) = if let Some(session) = &session {
-        session.reply(step, &instant).map_err(failure)?
-    } else {
-        resolve(owner_home, loop_name, &worker, step, &instant).map_err(failure)?
-    };
-    if verify_only {
-        let mut evidence = Vec::new();
-        file.take(loop_home::mail::journal::MAX_LETTER_BYTES + 1)
-            .read_to_end(&mut evidence)
-            .map_err(failure)?;
-        if evidence != bytes {
-            return Err(failure("retained evidence differs from verified delivery"));
-        }
-    } else {
-        file.set_len(0).map_err(failure)?;
-        file.write_all(&bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(failure)?;
-        nix::unistd::fsync(&directory).map_err(failure)?;
-    }
+    let session = custody.enter(&worker).map_err(failure)?;
+    let (delivery, bytes) = session.resolve(step, &instant).map_err(failure)?;
+    publish_evidence(&session, &mut file, &directory, &bytes)?;
     let stopped = !reply && declarations(&bytes, &record)?;
     // The journal authenticates the payload digest; the home digest only names its journal.
     Ok(json!({
@@ -388,6 +326,31 @@ fn private_binding(
         "bytes": delivery.bytes,
         "stop": stopped,
     }))
+}
+
+// Borrowing the session makes releasing the receipt lease before publication impossible.
+fn publish_evidence(
+    session: &BindingSession,
+    file: &mut File,
+    directory: &std::os::fd::OwnedFd,
+    bytes: &[u8],
+) -> Result<(), LaneError> {
+    if session.selection().verify_only() {
+        let mut evidence = Vec::new();
+        file.take(loop_home::mail::journal::MAX_LETTER_BYTES + 1)
+            .read_to_end(&mut evidence)
+            .map_err(failure)?;
+        if evidence != bytes {
+            return Err(failure("retained evidence differs from verified delivery"));
+        }
+    } else {
+        file.set_len(0).map_err(failure)?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(failure)?;
+        nix::unistd::fsync(directory).map_err(failure)?;
+    }
+    Ok(())
 }
 
 // Reply admission needs the authorized destination, not rebuilt container argv.

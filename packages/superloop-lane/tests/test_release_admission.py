@@ -5,10 +5,11 @@ import json
 from pathlib import Path
 import subprocess
 
-SENTINEL = b"SUPERLOOP_CLAUDE_FIXTURE_ADMISSION_V1_ONLY_UNIT_TESTS"
+SENTINELS = (b"SUPERLOOP_CLAUDE_FIXTURE_ADMISSION_V1_ONLY_UNIT_TESTS",
+             b"SUPERLOOP_MAIL_STANDIN_V1_ONLY_UNIT_TESTS")
 
 
-def contains(path):
+def contains(path, sentinel):
     """Keep overlap so a sentinel crossing a read boundary is still found."""
     with path.open("rb") as stream:
         assert stream.read(4) == b"\x7fELF", f"not an ELF binary: {path}"
@@ -16,9 +17,9 @@ def contains(path):
         tail = b""
         while block := stream.read(1024 * 1024):
             data = tail + block
-            if SENTINEL in data:
+            if sentinel in data:
                 return True
-            tail = data[-(len(SENTINEL) - 1):]
+            tail = data[-(len(sentinel) - 1):]
     return False
 
 
@@ -29,9 +30,11 @@ def test_release_admission(positive, artifacts):
     """
     assert artifacts, "release artifact set is empty"
     assert len(set(artifacts)) == len(artifacts), "duplicate release artifact"
-    assert contains(positive), "unit-test positive control lacks fixture sentinel"
-    for artifact in artifacts:
-        assert not contains(artifact), f"fixture admission in release artifact: {artifact}"
+    for sentinel in SENTINELS:
+        assert contains(positive, sentinel), f"unit positive control lacks {sentinel!r}"
+        for artifact in artifacts:
+            assert not contains(artifact, sentinel), (
+                f"fixture admission in {artifact}: {sentinel!r}")
     print(json.dumps({"positive_control": str(positive),
                       "release_artifacts": list(map(str, artifacts)),
                       "fixture_admission": "absent"}), flush=True)

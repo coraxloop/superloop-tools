@@ -1006,16 +1006,12 @@ pub(crate) fn run_checked_with_private_launch(
     runs: &OwnedFd,
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<String, LaneError> {
+    let binding = argv.get(2).is_some_and(|word| {
+        loop_home::mail::steering::BindingSelection::from_private(word, None).is_some()
+    });
     #[cfg(test)]
-    if argv.get(2).is_some_and(|word| word == "_bind-mail")
-        && !mail_standin::allows(program, "_bind-mail")
-    {
-        return Err(LaneError::input(
-            "fixture-mail-standin",
-            "in-crate mail stand-in requires explicit scoped registration",
-        ));
-    }
-    if argv.get(2).is_some_and(|word| word == "_bind-reply") {
+    let binding = binding && !mail_standin::allows(program, argv.get(2).map_or("", String::as_str));
+    if binding {
         let request =
             crate::launch::reply_entry::command(program, &argv, (cwd, home), (runs_root, runs))?;
         return run_checked_command(&request, environment, cwd, timeout_seconds, name);
@@ -2254,6 +2250,7 @@ fn run_inner(
 // The production binary and integration-test library do not compile this module.
 #[cfg(test)]
 pub(crate) mod mail_standin {
+    const SENTINEL: &str = "SUPERLOOP_MAIL_STANDIN_V1_ONLY_UNIT_TESTS";
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
     thread_local! { static PROGRAM: RefCell<Option<PathBuf>> = const { RefCell::new(None) }; }
@@ -2278,6 +2275,7 @@ pub(crate) mod mail_standin {
     /// ´test:unit:registration-is-scoped-to-thread-program-and-word´
     #[test]
     fn registration_is_scoped_to_thread_program_and_word() {
+        assert!(std::hint::black_box(SENTINEL).starts_with("SUPERLOOP_MAIL"));
         let first = Path::new("/fixture/first");
         let second = Path::new("/fixture/second");
         assert!(!allows(first, "_bind-mail"));

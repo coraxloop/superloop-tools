@@ -8,7 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Inbound mail binding and verification can retain received custody through a selected library session, with distinct operations, unchanged pin records and read-only verification. This is preparation only: reply behavior and the public mail-binding and resume routes are unchanged; no operator action or record migration is needed (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+- Inbound mail binding and verification can retain received custody through a selected library session, with distinct operations, unchanged pin records and read-only verification. The selected library session retains the existing pin record format (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+### Changed
+
+- `bind-mail` and both `launch … --round` modes now retain received configuration, storage, identity-program, journal and run custody through binding or read-only verification. Install with neither command in flight, then rerun an identical binding and a settled run’s dry resume. The reply entry’s owner, mode, ACL and link requirements now apply to these commands too; provisioner-written homes and recorded bindings need no migration. Unset `ENTER_LOOP_REGISTRY`, even an empty or canonical value: `bind-mail` newly refuses it before plan reads, while resume refuses after its existing plan and reservation reads. A process crossing the install refuses `anchor-missing` with its selected operation or `verified-prefix` before publication or preparation; rerun it afterwards. Running containers are unchanged until their next resume (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:inbound-binding-retains-custody``).
 
 ### Fixed
 

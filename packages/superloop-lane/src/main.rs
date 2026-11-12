@@ -58,7 +58,7 @@ fn bind_private_launch_args<'a>(
 ) -> Result<(&'a [String], Option<home::PrivateHomeGuard>), LaneError> {
     let private_launch = matches!(
         args.first().map(String::as_str),
-        Some("_choose-uid" | "_settle-evidence" | "_make-home" | "_bind-mail")
+        Some("_choose-uid" | "_settle-evidence" | "_make-home")
     );
     if !private_launch {
         return Ok((args, None));
@@ -703,55 +703,10 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
-    if args.first().is_some_and(|word| word == "_bind-reply") {
+    if args.first().is_some_and(|word| {
+        loop_home::mail::steering::BindingSelection::from_private(word, None).is_some()
+    }) {
         let report = launch::reply_entry::serve(args)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_bind-mail") {
-        let [
-            _,
-            loop_name,
-            run,
-            home_flag,
-            owner_home,
-            step_flag,
-            step,
-            delivery_flag,
-            delivery,
-            rest @ ..,
-        ] = args
-        else {
-            return Err(LaneError::input(
-                "mail-private",
-                "private delivery binding form is incomplete",
-            ));
-        };
-        if home_flag != "--owner-home" || step_flag != "--step" || delivery_flag != "--delivery" {
-            return Err(LaneError::input(
-                "mail-private",
-                "private delivery binding options differ",
-            ));
-        }
-        let verify_only = match rest {
-            [] => false,
-            [flag] if flag == "--verify-only" && args[0] == "_bind-mail" => true,
-            _ => {
-                return Err(LaneError::input(
-                    "mail-private",
-                    "private delivery binding options differ",
-                ));
-            }
-        };
-        let report = launch::steering::private_mail(
-            Path::new(owner_home),
-            loop_name,
-            run,
-            step,
-            delivery,
-            verify_only,
-        )?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);

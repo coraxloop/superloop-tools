@@ -1022,7 +1022,8 @@ pub(super) fn continuation_round(
 ///
 /// Refuses a missing letter, unsettled run, changed identity or failed driver.
 #[allow(clippy::too_many_lines)]
-pub(super) fn resume_with_host_root(
+#[doc(hidden)]
+pub fn resume_with_host_root(
     owner_home: &Path,
     request: &LaunchRequest,
     host_root: &Path,
