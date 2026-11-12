@@ -11,6 +11,39 @@ pub struct MarkImportedRequest {
     pub object: String,
 }
 
+pub(crate) fn parse_private_argv(
+    args: &[String],
+) -> Result<(MarkImportedRequest, &Path), LaneError> {
+    let [
+        _,
+        loop_name,
+        run,
+        object_flag,
+        object,
+        home_flag,
+        owner_home,
+    ] = args
+    else {
+        return Err(LaneError::input(
+            "import-private",
+            "private import form is incomplete",
+        ));
+    };
+    if object_flag != "--object" || home_flag != "--owner-home" {
+        return Err(LaneError::input(
+            "import-private",
+            "private import form is invalid",
+        ));
+    }
+    let request = MarkImportedRequest::parse(&[
+        loop_name.clone(),
+        run.clone(),
+        object_flag.clone(),
+        object.clone(),
+    ])?;
+    Ok((request, Path::new(owner_home)))
+}
+
 /// Build the private import words used by the public command.
 ///
 /// # Errors

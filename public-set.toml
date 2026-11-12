@@ -57,6 +57,9 @@ pattern = "LICENSE-DOCS"
 pattern = "README.md"
 
 [[include.rows]]
+pattern = "CONTRIBUTING.md"
+
+[[include.rows]]
 pattern = "ci/test_docstring_carrier.py"
 
 [[include.rows]]
@@ -64,6 +67,11 @@ pattern = "docs/backlog.md"
 
 [[include.rows]]
 pattern = "docs/meson.build"
+
+# The pack adds this member after archiving the source tree.
+[[include.rows]]
+pattern = "docs/public-pack-provenance.toml"
+reserved = true
 
 [[include.rows]]
 pattern = "docs/public/unpublished-labels.toml"
@@ -387,6 +395,9 @@ pattern = "packages/lane-lifecycle/README.md"
 pattern = "packages/lane-lifecycle/meson.build"
 
 [[include.rows]]
+pattern = "packages/lane-lifecycle/src/dead_pid.rs"
+
+[[include.rows]]
 pattern = "packages/lane-lifecycle/src/execution_settings.rs"
 
 [[include.rows]]
@@ -408,6 +419,9 @@ pattern = "packages/loop-home/meson.build"
 pattern = "packages/loop-home/src/allocations.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/ancestor.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/app.rs"
 
 [[include.rows]]
@@ -424,6 +438,9 @@ pattern = "packages/loop-home/src/error.rs"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/reply_entry.rs"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/planner.rs"
@@ -451,6 +468,12 @@ pattern = "packages/loop-home/src/verify.rs"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/workers_settings.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/tests/reply_custody.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/tests/support/bounded.rs"
 
 [[include.rows]]
 pattern = "packages/permission-triage/Cargo.toml"
@@ -1701,10 +1724,19 @@ pattern = "packages/superloop-lane/src/build_payload.rs"
 pattern = "packages/superloop-lane/src/claude_image_probe.py"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/container_entry.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/container_helper.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/creation_entry.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/credential.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/credential/tests/transaction.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/door.rs"
@@ -1896,6 +1928,9 @@ pattern = "packages/superloop-lane/src/launch/exercise_door_modes.rs"
 pattern = "packages/superloop-lane/src/launch/exercise_door_probe.py"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/launch/exercise_entry.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/exercise_layout.rs"
 
 [[include.rows]]
@@ -1938,16 +1973,25 @@ pattern = "packages/superloop-lane/src/launch/probe.rs"
 pattern = "packages/superloop-lane/src/launch/reaping.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/launch/reader_entry.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/repin_door.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/launch/repin_door_tests.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/launch/reply_entry.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/report.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/launch/report/tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/reservation_census.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/launch/retire.rs"
@@ -2043,6 +2087,15 @@ pattern = "packages/superloop-lane/src/requests/test_helper.rs"
 pattern = "packages/superloop-lane/src/routes.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/runtime_admission.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/runtime_admission/fixture.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/runtime_entry.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/settings.rs"
 
 [[include.rows]]
@@ -2073,6 +2126,12 @@ pattern = "packages/superloop-lane/src/signin_home/reconcile.rs"
 pattern = "packages/superloop-lane/src/signin_home/repair.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/tests/helper_admission.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/tests/helper_service.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/tests/install.rs"
 
 [[include.rows]]
@@ -2083,6 +2142,12 @@ pattern = "packages/superloop-lane/src/tests/mod.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/tests/prepare.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/tests/reader_custody.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/tests/runtime_preparation.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/vendor_net.rs"
@@ -2101,6 +2166,9 @@ pattern = "packages/superloop-lane/tests/census_entry.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/command_persistence.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/container_anchors.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/door_rubric_entry.rs"
@@ -2553,10 +2621,16 @@ pattern = "packages/superloop-lane/tests/fixtures/reconcile-host.c"
 pattern = "packages/superloop-lane/tests/install_door_entry.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/tests/native_creation_custody.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/tests/private_dispatch.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/private_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/reply_entry.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/requests_entry.rs"
@@ -2584,6 +2658,9 @@ pattern = "packages/superloop-lane/tests/support/temporary_root.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/support/vendor_fixture.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/test_release_admission.py"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/vendor_build_entry.rs"
@@ -3195,6 +3272,7 @@ pattern = "tests/steward-run.sh"
 pattern = "tests/version-smoke.py"
 
 [public]
+unpublished = "docs/public/unpublished-labels.toml"
 licence_code = "LICENSE-CODE"
 licence_docs = "LICENSE-DOCS"
 name = "superloop-tools"
@@ -3279,6 +3357,9 @@ pattern = "packages/loop-home/src/mail/birth_tests.rs"
 pattern = "packages/loop-home/src/mail/worker_provision.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/mail/worker_anchors.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-claude-hook/docs/mail-watcher.md"
 
 [[include.rows]]
@@ -3325,3 +3406,51 @@ pattern = "packages/loop-home/src/mail/migration_cutover.rs"
 
 [[include.rows]]
 pattern = "packages/superloop/tests/mail_migration.py"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/anchor.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/anchor/transport.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/anchor/tests.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/ancestor_owners.py"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/entry_anchors.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/mail_anchors.rs"
+
+[[include.rows]]
+pattern = "packages/run-worker/tests/mail_anchors.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/src/cli.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/src/copy.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/src/store.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/src/manifest.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-capture-admit/tests/subprocess_contract.rs"

@@ -790,8 +790,7 @@ struct Declared {
 }
 
 /// The list file's text standing above its first owner table, headed or inline:
-/// its envelope, and any
-/// comment written with it.
+/// its envelope, and any comment written with it.
 ///
 /// The ratchet writer maintains the row array under an already-declared key and
 /// stays out of the two reserved keys entirely, so what stands above the first
@@ -2296,7 +2295,7 @@ fn failures_of(bytes: &[u8]) -> usize {
 ///
 /// # Errors
 ///
-/// Returns the filesystem's error when the list file cannot be replaced.
+/// Returns read or replacement errors, or refuses malformed rendered TOML.
 ///
 pub fn lower_lists(plan: &ExecutionPlan) -> std::io::Result<bool> {
     lower_lists_with_plan(plan.control_write())
@@ -2306,13 +2305,13 @@ pub fn lower_lists(plan: &ExecutionPlan) -> std::io::Result<bool> {
 ///
 /// # Errors
 ///
-/// Returns the filesystem's error when the list file cannot be replaced.
+/// Returns read or replacement errors, or refuses malformed rendered TOML.
 pub fn lower_lists_with_plan(plan: ControlWritePlan<'_>) -> std::io::Result<bool> {
     let snapshot = plan.snapshot();
 
     let root = plan.root();
     let path = root.join(DIRECTORY).join(LISTS_FILE);
-    let held = std::fs::read_to_string(&path).unwrap_or_default();
+    let held = std::fs::read_to_string(&path)?;
     let rendered = rewrite_lists(
         snapshot,
         held.as_bytes(),
@@ -2325,6 +2324,12 @@ pub fn lower_lists_with_plan(plan: ControlWritePlan<'_>) -> std::io::Result<bool
         return Ok(false);
     }
 
+    toml::from_str::<toml::Table>(&rendered).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("refusing invalid rendered lists: {error}"),
+        )
+    })?;
     replace_atomically(&path, rendered.as_bytes())?;
 
     Ok(true)
@@ -2449,24 +2454,19 @@ fn list_table_starts(
             let preserved = deferred
                 .iter()
                 .any(|row| row.owner == owner && row.policy == policy);
+            let has_active_pair = pairs
+                .iter()
+                .any(|pair| pair.owner == owner && pair.policy == policy);
             let singleton = Pair::singleton(owner.clone(), policy.clone());
             let span = fields.span();
             let header = body[span.clone()].starts_with('[');
+            let inline_policy = body[span.clone()].starts_with('{');
             if header {
-                let replace_header = !preserved
-                    && (pairs.contains(&singleton)
-                        || !pairs
-                            .iter()
-                            .any(|pair| pair.owner == owner && pair.policy == policy));
+                let replace_header = !preserved && (pairs.contains(&singleton) || !has_active_pair);
                 starts.push((prefix + span.start, replace_header.then_some(singleton)));
             } else if body[span.clone()].starts_with('{') && pairs.contains(&singleton) {
                 inline.push((prefix + span.start..prefix + span.end, singleton));
-            } else if body[span.clone()].starts_with('{')
-                && !preserved
-                && !pairs
-                    .iter()
-                    .any(|pair| pair.owner == owner && pair.policy == policy)
-            {
+            } else if body[span.clone()].starts_with('{') && !preserved && !has_active_pair {
                 let span = removed_inline_entry(body, key_start..span.end, inline_owner);
                 removed.push(prefix + span.start..prefix + span.end);
                 continue;
@@ -2503,11 +2503,16 @@ fn list_table_starts(
                 } else if value.get_ref().is_table()
                     && body[span.clone()].starts_with('{')
                     && !preserved
-                    && pairs
-                        .iter()
-                        .any(|pair| pair.owner == owner && pair.policy == policy)
+                    && (!header || has_active_pair)
                 {
-                    let span = removed_inline_entry(body, key_start..span.end, !header);
+                    let span = removed_inline_entry(
+                        body,
+                        key_start..span.end,
+                        inline_policy || inline_owner,
+                    );
+                    removed.push(prefix + span.start..prefix + span.end);
+                } else if !header && !inline_policy && !preserved && !has_active_pair {
+                    let span = removed_inline_entry(body, key_start..span.end, inline_owner);
                     removed.push(prefix + span.start..prefix + span.end);
                 }
             }
@@ -2517,13 +2522,13 @@ fn list_table_starts(
     Ok((starts, inline, removed))
 }
 
-/// Include one separator when removing an entry inside an inline owner table.
+/// Include a separator inside an inline container, or the full dotted-key prefix.
 fn removed_inline_entry(
     body: &str,
     mut span: std::ops::Range<usize>,
-    inline_owner: bool,
+    inside_inline_container: bool,
 ) -> std::ops::Range<usize> {
-    if inline_owner {
+    if inside_inline_container {
         let after = &body[span.end..];
         let trimmed = after.trim_start();
         if trimmed.starts_with(',') {

@@ -312,16 +312,24 @@ fn home_layout_private_entry_binds_owner_home_and_record() {
     let output = enter(&body, &home, &runs, None);
     let refusal = String::from_utf8(output.stderr).expect("refusal text");
     assert!(!output.status.success(), "private fixture has no run");
-    assert!(refusal.contains(&home.display().to_string()), "{refusal}");
+    assert!(
+        refusal.contains("anchor-declaration: operation=exercise-"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("purpose=vector"), "{refusal}");
     assert!(!refusal.contains(&identity), "{refusal}");
 
     let mut malformed = body;
     malformed[3] = "--wrong-record".into();
+    let malformed_error =
+        superloop_lane::launch::exercise::parse_home_layout_private_argv(&malformed)
+            .expect_err("malformed reader body");
+    assert_eq!(malformed_error.kind, "exercise-home-layout-form");
     let output = enter(&malformed, &home, &runs, None);
     assert_eq!(output.status.code(), Some(2));
     let refusal = String::from_utf8(output.stderr).expect("malformed refusal");
     assert!(
-        refusal.contains("exercise-home-layout-form: private form is malformed"),
+        refusal.contains("anchor-declaration: operation=exercise-home-layout purpose=vector"),
         "{refusal}"
     );
 }
@@ -349,15 +357,22 @@ fn harvest_case_private_entry_binds_owner_home_and_record() {
     let output = enter(&body, &home, &runs, None);
     let refusal = String::from_utf8(output.stderr).expect("refusal text");
     assert!(!output.status.success(), "fixture has no private run");
-    assert!(refusal.contains(&home.display().to_string()), "{refusal}");
+    assert!(
+        refusal.contains("anchor-declaration: operation=exercise-"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("purpose=vector"), "{refusal}");
     assert!(!refusal.contains(&identity), "{refusal}");
     let mut malformed = body;
     malformed[3] = "--wrong-record".into();
+    let malformed_error = superloop_lane::launch::exercise::parse_harvest_private_argv(&malformed)
+        .expect_err("malformed reader body");
+    assert_eq!(malformed_error.kind, "exercise-harvest-form");
     let output = enter(&malformed, &home, &runs, None);
     assert_eq!(output.status.code(), Some(2));
     let refusal = String::from_utf8(output.stderr).expect("malformed refusal");
     assert!(
-        refusal.contains("exercise-harvest-form: private form is malformed"),
+        refusal.contains("anchor-declaration: operation=exercise-harvest purpose=vector"),
         "{refusal}"
     );
 }
@@ -375,7 +390,18 @@ fn other_bite_private_entries_bind_their_owner_home() {
     fs::create_dir(&outside).expect("outside");
     let home_word = home.display().to_string();
     let object = "a".repeat(40);
-    let forms: [(&str, Vec<String>, bool); 6] = [
+    let forms: [(&str, Vec<String>, bool); 7] = [
+        (
+            "round",
+            vec![
+                "_inspect-round".into(),
+                "alpha".into(),
+                "R".into(),
+                "--owner-home".into(),
+                home_word,
+            ],
+            false,
+        ),
         (
             "checkpoint",
             superloop_lane::launch::checkpoint::private_checkpoint_argv(
@@ -456,29 +482,44 @@ fn other_bite_private_entries_bind_their_owner_home() {
     for (name, body, external) in forms {
         let output = enter(&body, &home, &runs, external.then_some(outside.as_path()));
         let refusal = String::from_utf8(output.stderr).expect("refusal text");
-        assert!(refusal.contains(&home_word), "{name}: {refusal}");
-        assert!(!refusal.contains("verified-prefix:"), "{name}: {refusal}");
-        assert!(!refusal.contains("private form is"), "{name}: {refusal}");
-        assert!(!output.status.success(), "{name}: fixture has no run");
-        let (flag_index, refusal_kind) = match name {
-            "checkpoint" => (3, "checkpoint-private"),
-            "checkout" => (3, "checkout-private"),
-            "harvest" => (3, "harvest-private"),
-            "import" => (3, "import-private"),
-            "follow" => (3, "follow-private"),
-            "rotation" => (5, "rotate-private"),
-            _ => panic!("unexpected private form"),
+        assert_eq!(output.status.code(), Some(2));
+        let (operation, kind) = match name {
+            "import" => ("mark-imported", "import-private"),
+            "round" => ("inspect-round", "round-private"),
+            "rotation" => ("rotation-handover", "rotate-private"),
+            _ => (name, ""),
         };
-        let mut drifted = body;
-        drifted[flag_index] = "--wrong-option".into();
-        let output = enter(
-            &drifted,
-            &home,
-            &runs,
-            external.then_some(outside.as_path()),
+        let kind = if kind.is_empty() {
+            format!("{name}-private")
+        } else {
+            kind.into()
+        };
+        assert!(
+            refusal.contains(&format!(
+                "{kind}: anchor-missing: operation={operation} purpose=manifest"
+            )),
+            "{refusal}"
         );
-        let refusal = String::from_utf8(output.stderr).expect("drifted form refusal");
-        assert!(refusal.contains(refusal_kind), "{name}: {refusal}");
-        assert!(!refusal.contains("verified-prefix:"), "{name}: {refusal}");
+        if name == "rotation" {
+            let mut drifted = body;
+            drifted[5] = "--wrong-option".into();
+            drifted.extend([
+                "--verified-runs-root".into(),
+                runs.display().to_string(),
+                "--anchor-manifest".into(),
+                "{}".into(),
+            ]);
+            let output = Command::new(env!("CARGO_BIN_EXE_superloop-lane"))
+                .args(&drifted)
+                .output()
+                .expect("malformed vector");
+            let refusal = String::from_utf8(output.stderr).expect("drifted refusal");
+            assert!(
+                refusal.contains(
+                    "rotate-private: anchor-declaration: operation=rotation-handover purpose=vector"
+                ),
+                "{refusal}"
+            );
+        }
     }
 }

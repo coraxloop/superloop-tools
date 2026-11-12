@@ -17,4 +17,5 @@ release-group = "superloop-gate-submit"
 workspace = true
 
 [dependencies]
+tracing = { workspace = true }
 superloop-cli-common.workspace = true

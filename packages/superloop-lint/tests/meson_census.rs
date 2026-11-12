@@ -7,17 +7,17 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`the_graph_census_accepts_an_equal_declaration`] | cli | Equal declared and tracked sets pass the audit. # Panics Panics only if fixture creation fails or an equal graph is refused. |
-//! | [`the_graph_census_refuses_an_omitted_tracked_path`] | cli | A tracked path omitted from Meson's lists is a missing graph path. # Panics Panics only if fixture creation fails or the omitted path is accepted. |
-//! | [`the_graph_census_refuses_stale_list_paths`] | cli | Stale declarations and exclusions are each rejected. # Panics Panics only if fixture creation fails or a stale list path is accepted. |
-//! | [`the_graph_census_refuses_duplicate_and_patterned_declarations`] | cli | Duplicate declarations and pattern overlaps refuse the same list. # Panics Panics only if fixture creation fails or either ambiguity is accepted. |
-//! | [`the_graph_census_refuses_an_untracked_checkout_path`] | cli | The tracked-exclusive reader exposes a checkout path omitted by Git. # Panics Panics only if fixture creation fails or an untracked path is accepted. |
-//! | [`the_graph_census_refuses_a_tracked_symlink`] | cli | A tracked symlink carries a forbidden index mode. # Panics Panics only if fixture creation fails or a tracked symlink is accepted. |
-//! | [`the_graph_census_accepts_required_contract_rows`] | cli | A required contract accepts tracked plain files, a matching pattern and a populated directory while ignoring optional rows. # Panics Panics only if fixture creation or the accepted census and build report fail. |
-//! | [`the_graph_census_refuses_missing_required_contract_paths`] | cli | Missing required plain files and directories receive the contract path in a refusal. # Panics Panics only if fixture creation fails or a missing path is accepted. |
-//! | [`the_graph_census_refuses_unmatched_required_contract_patterns`] | cli | A required pattern without a tracked regular match is refused at its contract path. # Panics Panics only if fixture creation fails or an unmatched pattern is accepted. |
-//! | [`the_graph_census_refuses_invalid_required_contract_patterns`] | cli | Stars outside the last component and multiple stars in one pattern are refused. # Panics Panics only if fixture creation fails or an invalid pattern is accepted. |
-//! | [`the_graph_census_refuses_invalid_required_contracts`] | cli | Malformed TOML, missing row fields and unknown contract keys are refused. # Panics Panics only if fixture creation fails or an invalid contract is accepted. |
+//! | [`the_graph_census_accepts_an_equal_declaration`] | cli | Equal declared and tracked sets pass the audit. |
+//! | [`the_graph_census_refuses_an_omitted_tracked_path`] | cli | A tracked path omitted from Meson's lists is a missing graph path. |
+//! | [`the_graph_census_refuses_stale_list_paths`] | cli | Stale declarations and exclusions are each rejected. |
+//! | [`the_graph_census_refuses_duplicate_and_patterned_declarations`] | cli | Duplicate declarations and pattern overlaps refuse the same list. |
+//! | [`the_graph_census_refuses_an_untracked_checkout_path`] | cli | The tracked-exclusive reader exposes a checkout path omitted by Git. |
+//! | [`the_graph_census_refuses_a_tracked_symlink`] | cli | A tracked symlink carries a forbidden index mode. |
+//! | [`the_graph_census_accepts_required_contract_rows`] | cli | A required contract accepts tracked plain files, a matching pattern and a populated directory while ignoring optional rows. |
+//! | [`the_graph_census_refuses_missing_required_contract_paths`] | cli | Missing required plain files and directories receive the contract path in a refusal. |
+//! | [`the_graph_census_refuses_unmatched_required_contract_patterns`] | cli | A required pattern without a tracked regular match is refused at its contract path. |
+//! | [`the_graph_census_refuses_invalid_required_contract_patterns`] | cli | Stars outside the last component and multiple stars in one pattern are refused. |
+//! | [`the_graph_census_refuses_invalid_required_contracts`] | cli | Malformed TOML, missing row fields and unknown contract keys are refused. |
 
 use std::fs;
 use std::path::{Path, PathBuf};

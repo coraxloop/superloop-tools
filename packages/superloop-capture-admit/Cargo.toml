@@ -1,0 +1,26 @@
+[package]
+name = "superloop-capture-admit"
+description = "Admission and pruning of confined capture generations"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 2
+release-group = "superloop-capture-admit"
+
+[lints]
+workspace = true
+
+[dependencies]
+superloop-cli-common.workspace = true
+lane-lifecycle.workspace = true
+sha2.workspace = true
+nix.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

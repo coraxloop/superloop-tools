@@ -69,6 +69,14 @@ fn kinds() -> [Kind<'static>; 4] {
 
 fn decode(value: Value) -> Result<Collection, LaneError> {
     let collection: Collection = serde_json::from_value(value).map_err(core)?;
+    for row in &collection.requests {
+        if matches!(
+            row.kind.as_str(),
+            "door-before-effect" | "door-after-effect"
+        ) {
+            RequestRecord::decode(row.body["record"].clone())?;
+        }
+    }
     collection.validate(&kinds()).map_err(core)?;
     Ok(collection)
 }
@@ -218,6 +226,91 @@ impl Store {
         } else {
             common_id(&self.loop_name, id)
         }
+    }
+
+    pub(super) fn rewrite_channel_plan(&self) -> Result<Value, LaneError> {
+        let Some(client) = self.bound_client()? else {
+            return Ok(Value::Null);
+        };
+        let before = client.call("--owner-read", "", &self.loop_name, None)?;
+        let mut after: Collection = serde_json::from_value(before.clone()).map_err(core)?;
+        let mut changed = 0;
+        for row in &mut after.requests {
+            if matches!(
+                row.kind.as_str(),
+                "door-before-effect" | "door-after-effect"
+            ) {
+                let converted = super::rewrite::convert_record(&row.body["record"])?;
+                if converted.value()["loop"] != self.loop_name {
+                    return Err(core("rewrite channel loop differs"));
+                }
+                if converted.value() != &row.body["record"] {
+                    changed += 1;
+                }
+                row.body["record"] = converted.into_value();
+            }
+        }
+        after.validate(&kinds()).map_err(core)?;
+        if changed > 0 {
+            after.revision = after
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| core("revision exhausted"))?;
+        }
+        Ok(
+            json!({"binding":client.value(&self.loop_name),"before":before,"after":after,"changed":changed}),
+        )
+    }
+
+    pub(super) fn rewrite_channel_check(&self, plan: &Value) -> Result<(), LaneError> {
+        let current = self.bound_client()?;
+        if plan.is_null() {
+            return if current.is_none() {
+                Ok(())
+            } else {
+                Err(core("rewrite channel appeared"))
+            };
+        }
+        let client = current.ok_or_else(|| core("rewrite channel disappeared"))?;
+        if client.value(&self.loop_name) != plan["binding"] {
+            return Err(core("rewrite channel binding changed"));
+        }
+        let current = client.call("--owner-read", "", &self.loop_name, None)?;
+        if current != plan["before"] && current != plan["after"] {
+            return Err(core("rewrite channel preimage changed"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn rewrite_channel_apply(&self, plan: &Value) -> Result<(), LaneError> {
+        self.rewrite_channel_check(plan)?;
+        if plan.is_null() || plan["changed"] == 0 {
+            return Ok(());
+        }
+        let client = Client::decode(&plan["binding"], &self.loop_name)?;
+        if client.call("--owner-read", "", &self.loop_name, None)? == plan["after"] {
+            return Ok(());
+        }
+        let _validated = decode(plan["after"].clone())?;
+        let mut input = envelope(
+            &[],
+            None,
+            None,
+            false,
+            request_core::now_ns().map_err(core)?,
+        );
+        input["expected"] = plan["before"].clone();
+        input["publication"] = plan["after"].clone();
+        let result = client.call(
+            "--owner-commit",
+            "rewrite-door",
+            &self.loop_name,
+            Some(&input),
+        )?;
+        if result["collection"] != plan["after"] {
+            return Err(core("rewrite channel publication differs"));
+        }
+        Ok(())
     }
 
     /// Translate a compatibility triage batch without bypassing the private helper.
@@ -713,6 +806,14 @@ mod tests {
                     .expect("record")
                     .remove("agent_runner_stderr_tail");
             }
+            assert_eq!(
+                RequestRecord::decode(record.clone())
+                    .expect_err("historical record")
+                    .kind,
+                "requests-rewrite-required"
+            );
+            record["schema"] = json!(6);
+            record["agent_observations"] = Value::Null;
             let bytes = serde_json::to_vec(&json!({"schema":1,"run":"R","revision":1,
                 "requests":[record]}))
             .expect("base run");

@@ -27,10 +27,32 @@ pub(super) fn run(
     input: &mut impl io::Read,
     output: &mut impl io::Write,
 ) -> Result<(), LaneError> {
+    let started = std::time::Instant::now();
+    run_inner(owner_home, args, input, output, started).map_err(|mut error| {
+        if args.first().is_some_and(|action| action == "list")
+            && crate::requests::store::is_lock_contention(&error)
+        {
+            use std::fmt::Write as _;
+            let _written = write!(
+                error.detail,
+                "; listing_elapsed_seconds={:.3}",
+                started.elapsed().as_secs_f64()
+            );
+        }
+        error
+    })
+}
+
+fn run_inner(
+    owner_home: &Path,
+    args: &[String],
+    input: &mut impl io::Read,
+    output: &mut impl io::Write,
+    started: std::time::Instant,
+) -> Result<(), LaneError> {
     let [action, loop_name, rest @ ..] = args else {
         return Err(super::usage());
     };
-    let started = std::time::Instant::now();
     let store = Store::open(owner_home, loop_name, false)?;
     let store = if action == "list" {
         store.with_reader_deadline(started + crate::requests::store::reader_lock_wait())
@@ -85,7 +107,7 @@ pub(super) fn run(
                 .into_iter()
                 .filter(|row| row.value()["state"] == *state)
                 .collect::<Vec<_>>();
-            super::list_response(loop_name, &records, shape_stale)?
+            super::list_response(&store, loop_name, &records, shape_stale)?
         }
         _ => return Err(super::usage()),
     };
@@ -98,7 +120,9 @@ fn read(store: &Store, action: &str, loop_name: &str, pending: bool) -> Result<V
     result["loop"] = json!(loop_name);
     result["shape_record"] = json!(if stale { "stale" } else { "current" });
     result["schema"] = json!(2);
-    result["decisions"] = super::list_response(loop_name, &records, stale)?["decisions"].clone();
+    let native = super::list_response(store, loop_name, &records, stale)?;
+    result["decisions"] = native["decisions"].clone();
+    result["door_judgements"] = native["door_judgements"].clone();
     result["preflight_refusals"] = json!(
         records
             .iter()

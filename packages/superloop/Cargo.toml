@@ -14,6 +14,7 @@ tier = 2
 release-group = "superloop"
 
 [dependencies]
+tracing = { workspace = true }
 execute-command.workspace = true
 request-core.workspace = true
 nix.workspace = true

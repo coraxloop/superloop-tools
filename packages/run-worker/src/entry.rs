@@ -256,6 +256,7 @@ pub fn worker_entry_plan(
             label: String::from("drop"),
             argv,
             io,
+            descriptors: loop_home::CommandDescriptors::default(),
         },
     }
 }

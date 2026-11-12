@@ -49,7 +49,10 @@ fn door_concurrent_request_refuses_before_record() {
         let reply = concurrent_process_request(&fixture, 3000, false);
         assert_eq!(reply["status"], 125);
         assert_eq!(reply["reason"], "door-request-concurrent");
-        assert_eq!(reply["admission_window"], "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds");
+        assert_eq!(
+            reply["admission_window"],
+            "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds"
+        );
         let waited = reply["waited_seconds"].as_f64().expect("measured wait");
         assert!((0.9..1.5).contains(&waited), "waited={waited}");
         assert_eq!(reply["retry_after_seconds"], 30);
@@ -421,10 +424,19 @@ fn door_concurrent_allow_agent_publication_window() {
     );
     let overlap = concurrent_process_request(&fixture, 3000, false);
     assert_eq!(overlap["reason"], "door-request-concurrent");
-    assert_eq!(overlap["admission_window"], "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds");
+    assert_eq!(
+        overlap["admission_window"],
+        "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds"
+    );
     assert_eq!(overlap["status"], 125);
     assert_eq!(overlap["retry_after_seconds"], 30);
-    assert!((0.9..1.5).contains(&overlap["waited_seconds"].as_f64().expect("publication wait")));
+    assert!(
+        (0.9..1.5).contains(
+            &overlap["waited_seconds"]
+                .as_f64()
+                .expect("publication wait")
+        )
+    );
     assert_eq!(store.list_run("R").expect("one record").len(), 1);
     release_tx.send(()).expect("release publication");
     handler
@@ -516,6 +528,45 @@ fn door_exercise_retries_concurrent_admission() {
     );
 }
 
+fn admission_final(client: &mut UnixStream) -> serde_json::Value {
+    let mut observed_credit = 0;
+    loop {
+        let frame = frame_read(client).expect("admission progress or final");
+        if frame["type"] != "request-lock-wait" {
+            assert_eq!(frame["type"], "final");
+            return frame;
+        }
+        let credit = frame["wait_ms"].as_u64().expect("credit milliseconds");
+        assert!(credit >= observed_credit && credit <= 120_000);
+        observed_credit = credit;
+    }
+}
+
+fn admission_release_hook(
+    last_interval: bool,
+    contended: std::sync::mpsc::Sender<()>,
+    released: std::sync::mpsc::Receiver<()>,
+    store: Store,
+    holder: std::sync::mpsc::Sender<thread::JoinHandle<()>>,
+) {
+    let hook = if last_interval {
+        &super::ADMISSION_LAST_POLL
+    } else {
+        &super::ADMISSION_CONTENDED
+    };
+    hook.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            contended.send(()).expect("overlap contended");
+            released
+                .recv_timeout(Duration::from_secs(5))
+                .expect("first guard released");
+            holder
+                .send(referral_contender(&store, true).expect("competing writer"))
+                .expect("holder thread retained");
+        }));
+    });
+}
+
 /// # Panics
 /// Panics only if admission does not resume after the first request completes.
 /// ´test:unit:door-concurrent-request-admits-after-release´
@@ -534,22 +585,22 @@ fn door_concurrent_request_admits_after_release() {
         let home = fixture.home.clone();
         let second_store = fixture.store();
         let (mut second_client, mut second_server) = UnixStream::pair().expect("overlap pair");
-        second_client.shutdown(Shutdown::Write).expect("overlap EOF");
+        second_client
+            .shutdown(Shutdown::Write)
+            .expect("overlap EOF");
         let (contended_tx, contended_rx) = std::sync::mpsc::channel();
         let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let (holder_tx, holder_rx) = std::sync::mpsc::channel();
+        let holder_store = fixture.store();
         let second = thread::spawn(move || {
-            let hook = if last_interval {
-                &super::ADMISSION_LAST_POLL
-            } else {
-                &super::ADMISSION_CONTENDED
-            };
-            hook.with(|slot| {
-                *slot.borrow_mut() = Some(Box::new(move || {
-                    contended_tx.send(()).expect("overlap contended");
-                    released_rx.recv_timeout(Duration::from_secs(5)).expect("first guard released");
-                }));
-            });
-            serve_request(
+            admission_release_hook(
+                last_interval,
+                contended_tx,
+                released_rx,
+                holder_store,
+                holder_tx,
+            );
+            let result = serve_request(
                 &mut second_server,
                 &concurrent_registration(3000),
                 3000,
@@ -560,27 +611,48 @@ fn door_concurrent_request_admits_after_release() {
                 Some(&rubric(Some("allow"))),
                 Some(&second_store),
                 Instant::now(),
-            )
+            );
+            holder_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("holder thread")
+                .join()
+                .expect("holder released after progress");
+            result
         });
-        contended_rx.recv_timeout(Duration::from_secs(5)).expect("overlap waiting");
+        contended_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("overlap waiting");
         assert_eq!(store.list_run("R").expect("before release").len(), 1);
         label(&store, &first_id, "allow");
-        let first_reply = frame_read(&mut client).expect("first reply");
+        let first_reply = admission_final(&mut client);
         assert_eq!(first_reply["reason"], "door-complete");
         first.join().expect("first handler").expect("first served");
         released_tx.send(()).expect("resume admission poll");
         let deadline = Instant::now() + Duration::from_secs(3);
         let second_id = loop {
-            if let Some(record) = store.list_run("R").expect("admitted records")
-                .into_iter().find(|record| record.id() != first_id) {
+            if let Some(record) = store
+                .list_run("R")
+                .expect("admitted records")
+                .into_iter()
+                .find(|record| record.id() != first_id)
+            {
                 break record.id().to_owned();
             }
             assert!(Instant::now() < deadline, "overlap never admitted");
             thread::sleep(Duration::from_millis(5));
         };
         label(&store, &second_id, "allow");
-        let reply = frame_read(&mut second_client).expect("overlap reply");
-        second.join().expect("second handler").expect("second served");
+        let reply = admission_final(&mut second_client);
+        assert!(
+            reply["request_lock_wait_credit_ms"]
+                .as_u64()
+                .expect("credit")
+                >= 50
+        );
+        second
+            .join()
+            .expect("second handler")
+            .expect("second served");
         assert_eq!(reply["reason"], "door-complete");
         assert_eq!(reply["status"], 0);
         assert!(reply.get("waited_seconds").is_none());
@@ -591,5 +663,235 @@ fn door_concurrent_request_admits_after_release() {
         for record in records {
             assert_eq!(record.value()["effect"]["state"], "completed");
         }
+    }
+}
+
+/// # Panics
+/// Panics if a second process bypasses a same-class or exclusive admission guard.
+/// ´test:unit:door-compute-receive-admission-cross-process´
+#[test]
+fn door_compute_receive_admission_cross_process() {
+    const CHILD: &str = "SUPERLOOP_ADMISSION_MATRIX";
+    let operation = |name: &str| match name {
+        "compute" => Some(Operation::Compute),
+        "receive" => Some(Operation::GitReceive),
+        _ => None,
+    };
+    if let Ok(case) = std::env::var(CHILD) {
+        let home = PathBuf::from(std::env::var_os("SUPERLOOP_ADMISSION_HOME").expect("home"));
+        let _namespace = concurrent_namespace(&home);
+        let parts: Vec<_> = case.split(':').collect();
+        let guard = super::RequestGuard::acquire_operation(
+            &home,
+            &concurrent_registration(3000),
+            operation(parts[0]),
+        )
+        .expect("child guard");
+        assert_eq!(guard.is_some(), parts[1] == "true");
+        return;
+    }
+    let fixture = Fixture::new();
+    let registration = concurrent_registration(3000);
+    for first in ["compute", "receive", "exclusive"] {
+        let held =
+            super::RequestGuard::acquire_operation(&fixture.home, &registration, operation(first))
+                .expect("parent guard")
+                .expect("free slot");
+        for second in ["compute", "receive", "exclusive"] {
+            let expected = first != second && first != "exclusive" && second != "exclusive";
+            let result = concurrent_fixture_command_for(
+                "door::tests::door_compute_receive_admission_cross_process",
+            )
+            .env(CHILD, format!("{second}:{expected}"))
+            .env("SUPERLOOP_ADMISSION_HOME", &fixture.home)
+            .output()
+            .expect("child process");
+            assert!(result.status.success(), "{first}/{second}: {result:?}");
+        }
+        drop(held);
+        assert!(
+            super::RequestGuard::acquire(&fixture.home, &registration)
+                .expect("released guard")
+                .is_some()
+        );
+    }
+}
+
+/// # Panics
+/// Panics if a receive cannot complete beside compute or either record loses its effect identity.
+/// ´test:unit:door-receive-completes-beside-running-compute´
+#[test]
+fn door_receive_completes_beside_running_compute() {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let (socket, compute_calls, compute_server) =
+        super::compute_tests::compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+    let mut compute = UnixStream::connect(socket).expect("compute connection");
+    frame_write(
+        &mut compute,
+        &json!({"schema":2,
+        "argv":[b"fixture".to_vec(), b"/opt/fixture/bin/report cargo run --locked".to_vec()],
+        "deadline_ms":60000}),
+    )
+    .expect("compute request");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while compute_calls.load(Ordering::Relaxed) == 0 {
+        assert!(Instant::now() < deadline, "compute effect starts");
+        thread::sleep(Duration::from_millis(5));
+    }
+    let (runner, receive_calls, _) = counting_runner(&fixture);
+    let (socket, receive_server) = fixture_service(&fixture, runner, rubric(None), 60000, None);
+    let command = format!(
+        "{} {} refs/heads/lane/R\0report-status\n",
+        "0".repeat(40),
+        "a".repeat(40)
+    );
+    let packet = format!("{:04x}{command}0000", command.len() + 4);
+    let reply = super::stub_call_stream(
+        &socket,
+        &[
+            "fixture".into(),
+            "git-receive-pack '~/mirrors/R.git'".into(),
+        ],
+        io::Cursor::new(packet.into_bytes()),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .expect("receive transport");
+    assert_eq!(reply["reason"], "door-complete", "{reply}");
+    assert_eq!(reply["ref_check"], "admitted");
+    receive_server
+        .join()
+        .expect("receive thread")
+        .expect("receive result");
+    assert_eq!(receive_calls.load(Ordering::Relaxed), 1);
+    assert!(
+        !compute_server.is_finished(),
+        "compute remains held on its input"
+    );
+    compute
+        .shutdown(Shutdown::Write)
+        .expect("finish compute input");
+    loop {
+        let reply = frame_read_until(&mut compute, deadline).expect("compute reply");
+        if reply["type"] == "final" {
+            assert_eq!(reply["reason"], "door-complete", "{reply}");
+            break;
+        }
+    }
+    compute_server
+        .join()
+        .expect("compute thread")
+        .expect("compute result");
+    let rows = fixture.store().list_run("R").expect("both records");
+    assert_eq!(rows.len(), 2);
+    assert_ne!(rows[0].id(), rows[1].id());
+    let operations: std::collections::BTreeSet<_> = rows
+        .iter()
+        .map(|row| row.value()["operation"].as_str().expect("record operation"))
+        .collect();
+    assert_eq!(
+        operations,
+        std::collections::BTreeSet::from(["compute", "git-receive"])
+    );
+    let receive = rows
+        .iter()
+        .find(|row| row.value()["operation"] == "git-receive")
+        .expect("receive record");
+    assert_eq!(receive.value()["effect"]["ref_check"], "admitted");
+    assert!(
+        rows.iter()
+            .all(|row| row.value()["effect"]["state"] == "completed")
+    );
+    assert_eq!(compute_calls.load(Ordering::Relaxed), 1);
+}
+
+/// ´test:unit:door-two-requesters-credit-contention-before-unlocked-triage´
+#[test]
+fn door_two_requesters_credit_contention_before_unlocked_triage() {
+    struct PausedAgent {
+        run: &'static str,
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl super::agent::AgentRunner for PausedAgent {
+        fn judge(&self, _: &[u8], remaining: Duration) -> super::agent::RunnerOutcome {
+            assert!(!remaining.is_zero(), "contention consumed the agent budget");
+            self.entered.send(()).expect("agent entered");
+            self.release.lock().expect("release lock")
+                .recv_timeout(Duration::from_secs(10)).expect("release agent");
+            let mut result = super::agent::RunnerOutcome::referral("failure", "fixture", Instant::now());
+            result.status = "verdict".into();
+            result.verdict = "allow".into();
+            result.scope = "loop".into();
+            result.reason = format!("fixture independent judgement {}", self.run);
+            result
+        }
+    }
+    let fixture = Fixture::new();
+    fixture.set_floor("enforce");
+    let store = fixture.store();
+    store.ensure_first_mode("ssh").expect("initial mode");
+    let route = route_for(&fixture.home);
+    let (contended_tx, contended_rx) = std::sync::mpsc::channel();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let holder = store.fixture_exclusive_lock().expect("bounded contender");
+    let mut services = Vec::new();
+    let mut clients = Vec::new();
+    let mut releases = Vec::new();
+    for (index, run) in ["R", "S"].into_iter().enumerate() {
+        let socket = crate::fixture_exec::fixture_socket_path(fixture.home.join(format!("credit-{run}.sock")));
+        let listener = UnixListener::bind(&socket).expect("listener");
+        let home = fixture.home.clone();
+        let service_store = fixture.store();
+        let route = route.clone();
+        let (runner, _, _) = counting_runner(&fixture);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        releases.push(release_tx);
+        let agent = PausedAgent { run, entered: entered_tx.clone(), release: Mutex::new(release_rx) };
+        let contended = contended_tx.clone();
+        services.push(thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let request = frame_read(&mut stream).expect("request");
+            let registration = Registration::from_row(&json!({"name":"alpha","uid":2001}), "alpha", run, 3000 + u32::try_from(index).expect("two callers"), Scope::Work).expect("registration");
+            super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = Some(contended));
+            super::serve_request_with_agent(&mut stream, &registration, registration.worker_uid,
+                &request, Some(&route), Some(&runner), Some(&home), Some(&rubric(None)),
+                Some(&service_store), Some(&agent), None, Instant::now()).expect("served")
+        }));
+        clients.push(thread::spawn(move || {
+            super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(Some(3000)));
+            super::transport::stub_call_stream(&socket, &[OsString::from("door-attribution-probe")], io::empty(), Vec::new(), Vec::new()).expect("stub completes")
+        }));
+    }
+    for _ in 0..2 { contended_rx.recv_timeout(Duration::from_secs(10)).expect("both requests contend"); }
+    // Exceed the requested active budget while both callers are measured waiting.
+    thread::sleep(Duration::from_secs(6));
+    drop(holder);
+    for _ in 0..2 { entered_rx.recv_timeout(Duration::from_secs(10)).expect("both agents entered"); }
+    let mut pending_ids = std::collections::BTreeMap::new();
+    for run in ["R", "S"] {
+        let rows = store.list_run(run).expect("pending custody is readable during triage");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].id().starts_with(&format!("{run}:")));
+        pending_ids.insert(run, rows[0].id().to_owned());
+        assert_eq!(rows[0].value()["effect"]["state"], "pending");
+    }
+    drop(store.fixture_exclusive_lock().expect("triage holds no writer lock"));
+    for release in releases { release.send(()).expect("release judgement"); }
+    for client in clients {
+        let reply = client.join().expect("client");
+        assert_eq!(reply["reason"], "door-complete", "{reply}");
+        assert_eq!(reply["status"], 0);
+        assert!(reply["request_lock_wait_ms"].as_u64().expect("measured wait") >= 3000);
+    }
+    for service in services { service.join().expect("service"); }
+    for run in ["R", "S"] {
+        let rows = store.list_run(run).expect("completed custody");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value()["effect"]["state"], "completed");
+        assert_eq!(rows[0].value()["would_do"]["decision"], "allow");
+        assert_eq!(rows[0].id(), pending_ids[run]);
+        assert_eq!(rows[0].value()["would_do"]["reason"], format!("fixture independent judgement {run}"));
     }
 }

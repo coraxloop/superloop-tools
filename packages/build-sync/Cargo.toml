@@ -18,6 +18,7 @@ name = "build-sync"
 path = "src/main.rs"
 
 [dependencies]
+tracing = { workspace = true }
 clap = { workspace = true }
 superloop-cli-common = { workspace = true }
 proc-macro2 = { workspace = true }

@@ -25,6 +25,8 @@ use crate::launch::{
     publish_reservation, read_reservation, reservation_path,
 };
 use crate::plan::protected_identifier_path;
+use crate::runtime_admission::RuntimeAdmission;
+use crate::settings::BoxBackend;
 use crate::{caller_home, load_plan, valid_run_name};
 
 const PROMPT_LIMIT: usize = 1_048_576;
@@ -34,8 +36,8 @@ const CAPACITY_EVIDENCE_LIMIT: usize = 1_048_576;
 const STREAM_DRAIN_GRACE: Duration = Duration::from_secs(30);
 const STREAM_STOP_GRACE: Duration = Duration::from_secs(5);
 
-#[derive(Default)]
 struct CapacityCapture {
+    backend: BoxBackend,
     tail: Vec<u8>,
     thread: Option<String>,
     skipping_line: bool,
@@ -43,6 +45,16 @@ struct CapacityCapture {
 }
 
 impl CapacityCapture {
+    const fn new(backend: BoxBackend) -> Self {
+        Self {
+            backend,
+            tail: Vec::new(),
+            thread: None,
+            skipping_line: false,
+            scanned: 0,
+        }
+    }
+
     fn push(&mut self, mut bytes: &[u8]) {
         if self.skipping_line {
             let Some(end) = bytes.iter().position(|byte| *byte == b'\n') else {
@@ -60,10 +72,7 @@ impl CapacityCapture {
                         return None;
                     }
                     self.scanned += line.len();
-                    let event: Value = serde_json::from_slice(line).ok()?;
-                    let thread = event["thread_id"].as_str()?;
-                    (event["type"] == "thread.started" && valid_thread(thread))
-                        .then(|| thread.to_owned())
+                    session_event(self.backend, line).ok().flatten()
                 });
         }
         if self.tail.len() > CAPACITY_EVIDENCE_LIMIT {
@@ -80,12 +89,36 @@ impl CapacityCapture {
     }
 }
 
-pub(crate) fn resume_box_vector(vector: &[String], thread: &str) -> Result<Vec<String>, LaneError> {
+pub(crate) fn resume_box_vector(
+    backend: BoxBackend,
+    vector: &[String],
+    thread: &str,
+) -> Result<Vec<String>, LaneError> {
     if !valid_thread(thread) {
         return Err(LaneError::input(
             "round-thread",
             "request thread is malformed",
         ));
+    }
+    if backend == BoxBackend::Claude {
+        let program = vector
+            .iter()
+            .position(|word| word == "/home/worker/.local/bin/claude")
+            .ok_or_else(|| LaneError::input("round-thread", "saved Claude program is absent"))?;
+        let arguments = &vector[program + 1..];
+        if arguments.first().is_none_or(|word| word != "-p")
+            || arguments
+                .iter()
+                .any(|word| matches!(word.as_str(), "--resume" | "-r"))
+        {
+            return Err(LaneError::input(
+                "round-thread",
+                "saved Claude print or resume boundary differs",
+            ));
+        }
+        let mut resumed = vector.to_vec();
+        resumed.extend(["--resume".to_owned(), thread.to_owned()]);
+        return Ok(resumed);
     }
     let exec = vector
         .iter()
@@ -105,6 +138,24 @@ pub(crate) fn resume_box_vector(vector: &[String], thread: &str) -> Result<Vec<S
     let position = resumed.len() - 1;
     resumed.splice(position..position, ["resume".to_owned(), thread.to_owned()]);
     Ok(resumed)
+}
+
+pub(crate) fn session_event(backend: BoxBackend, line: &[u8]) -> Result<Option<String>, LaneError> {
+    let Ok(event) = serde_json::from_slice::<Value>(line) else {
+        return Ok(None);
+    };
+    let key = match backend {
+        BoxBackend::Codex if event["type"] == "thread.started" => "thread_id",
+        BoxBackend::Claude if event["type"] == "system" && event["subtype"] == "init" => {
+            "session_id"
+        }
+        _ => return Ok(None),
+    };
+    let session = event[key]
+        .as_str()
+        .filter(|id| valid_thread(id))
+        .ok_or_else(|| LaneError::input("round-thread", "step thread event has a malformed id"))?;
+    Ok(Some(session.to_owned()))
 }
 
 fn valid_thread(thread: &str) -> bool {
@@ -222,6 +273,7 @@ pub(crate) fn command_for_request(
     record: &Value,
     requested: Option<&str>,
 ) -> Result<Vec<String>, LaneError> {
+    let backend = BoxBackend::from_plan(&record["plan"])?;
     let step = record["active_round"].as_str();
     if requested.is_none() && crate::launch::rounds::fresh_thread_round(record) {
         return Ok(vector.to_vec());
@@ -247,7 +299,7 @@ pub(crate) fn command_for_request(
             ),
         ));
     }
-    resume_box_vector(vector, saved)
+    resume_box_vector(backend, vector, saved)
 }
 
 fn decode_round_request(bytes: Vec<u8>) -> Result<(Option<String>, Vec<u8>), LaneError> {
@@ -438,7 +490,12 @@ fn record_attempt_wall(
     publish_reservation(reservation, &current)
 }
 
-fn capacity_event(bytes: &[u8]) -> bool {
+fn capacity_event(backend: BoxBackend, bytes: &[u8]) -> bool {
+    // No captured Claude transient-capacity event is established. Its recorded
+    // quota rejection is not retryable capacity, nor is another vendor's event.
+    if backend == BoxBackend::Claude {
+        return false;
+    }
     bytes.split(|byte| *byte == b'\n').any(|line| {
         let Ok(event) = serde_json::from_slice::<Value>(line) else {
             return false;
@@ -728,14 +785,21 @@ pub(crate) fn fixture_pinned_request(
     run: &str,
     podman: &Path,
 ) -> Result<Value, LaneError> {
-    pinned_request(owner_home, "alpha", run, podman).map(|request| request.record)
+    pinned_request_admitted(owner_home, "alpha", run, podman, &RuntimeAdmission::Gate)
+        .map(|request| request.record)
 }
 
-fn pinned_request(
+#[cfg(test)]
+pub(crate) fn fixture_reserved_program_attempt(home: &Path, run: &Path) {
+    tests::reserved_program_attempt(home, run);
+}
+
+fn pinned_request_admitted(
     owner_home: &Path,
     loop_name: &str,
     run: &str,
     podman: &Path,
+    admission: &RuntimeAdmission,
 ) -> Result<PinnedRequest, LaneError> {
     crate::pinned::owner_executable(podman, Uid::effective().as_raw())?;
     let (initial, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
@@ -768,12 +832,13 @@ fn pinned_request(
             "launcher's recorded process is absent",
         ));
     }
-    let (plan, settings) =
-        crate::launch::pinned_plan_from_record(owner_home, loop_name, run, podman, &record)
-            .map_err(|error| LaneError::input("helper-pin", error.line()))?;
+    let (plan, settings) = crate::launch::pinned_plan_from_record_admitted(
+        owner_home, loop_name, run, podman, &record, admission,
+    )
+    .map_err(|error| LaneError::input("helper-pin", error.line()))?;
     let loop_uid = crate::plan::loop_uid(&plan.document)?;
     let observing = record["plan"]["vendor_mode"].is_string();
-    crate::plan::verify_box_attestation(&plan.document)?;
+    crate::plan::verify_box_attestation_admitted(&plan.document, admission)?;
     let argv = plan.document["runtime_argv"]
         .as_array()
         .ok_or_else(|| LaneError::input("helper-pin", "plan has no runtime vector"))?
@@ -1012,6 +1077,7 @@ fn run_attempt_with(
     retry_thread: Option<&str>,
 ) -> Result<AttemptOutcome, LaneError> {
     let wall_bound = attempt_wall_bound(record)?;
+    let backend = BoxBackend::from_plan(&record["plan"])?;
     let mut length = [0_u8; 4];
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -1040,7 +1106,7 @@ fn run_attempt_with(
     // after capacity evidence admitted another attempt. The client still
     // has to pass the original round-request validation above.
     let resolved = if let Some(thread) = retry_thread {
-        resume_box_vector(vector, thread)?
+        resume_box_vector(backend, vector, thread)?
     } else {
         resolved
     };
@@ -1079,14 +1145,16 @@ fn run_attempt_with(
     custody_directory
         .sync_all()
         .map_err(|error| LaneError::operation("container-evidence", error.to_string()))?;
+    crate::container_entry::configure(&mut command, Path::new(program), arguments, environment)?;
     let mut child = start_after_reservation(reservation, record, || {
-        crate::fixture_exec::spawn(&mut command)
-            .map_err(|error| LaneError::operation("container-start", error.to_string()))
+        crate::fixture_exec::spawn(&mut command).map_err(|error| {
+            crate::container_entry::spawn_error(Path::new(program), "container-start", &error)
+        })
     })?;
     let writer = Arc::new(Mutex::new(sender));
     let transferred = Arc::new(AtomicUsize::new(0));
     let overflow = Arc::new(AtomicBool::new(false));
-    let capacity = Arc::new(Mutex::new(CapacityCapture::default()));
+    let capacity = Arc::new(Mutex::new(CapacityCapture::new(backend)));
     let mut out_worker = None;
     let mut err_worker = None;
     let mut input_worker = None;
@@ -1269,7 +1337,7 @@ fn run_attempt_with(
             && code != 0
             && capacity
                 .lock()
-                .is_ok_and(|capture| capacity_event(&capture.tail));
+                .is_ok_and(|capture| capacity_event(capture.backend, &capture.tail));
         Ok(AttemptProgress {
             code,
             capacity: capacity_evidence,
@@ -1625,7 +1693,9 @@ fn remove_container(
     }
 }
 
-fn run_identity(run_dir: &Path) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
+pub(crate) fn run_identity(
+    run_dir: &Path,
+) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
     run_identity_at(&caller_home()?, run_dir, Uid::effective().as_raw())
 }
 
@@ -1633,6 +1703,20 @@ fn run_identity_at(
     owner_home: &Path,
     run_dir: &Path,
     namespace_owner: u32,
+) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
+    run_identity_at_admitted(
+        owner_home,
+        run_dir,
+        namespace_owner,
+        &RuntimeAdmission::Gate,
+    )
+}
+
+fn run_identity_at_admitted(
+    owner_home: &Path,
+    run_dir: &Path,
+    namespace_owner: u32,
+    admission: &RuntimeAdmission,
 ) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
     let invalid = || {
         LaneError::input(
@@ -1678,9 +1762,10 @@ fn run_identity_at(
             "reserved runtime program is not absolute",
         ));
     }
-    let (plan, _settings) =
-        crate::launch::pinned_plan_from_record(owner_home, &loop_name, &run, &program, &record)
-            .map_err(|error| LaneError::input("helper-pin", error.line()))?;
+    let (plan, _settings) = crate::launch::pinned_plan_from_record_admitted(
+        owner_home, &loop_name, &run, &program, &record, admission,
+    )
+    .map_err(|error| LaneError::input("helper-pin", error.line()))?;
     if plan.driver_dir != run_dir {
         return Err(invalid());
     }
@@ -1841,11 +1926,16 @@ fn authorize_peer(stream: &UnixStream, loop_uid: u32, reservation: &Path) -> Res
 }
 
 /// Publish the round's credential before exposing the helper's ready socket.
-pub(crate) fn publish_round_credential(
+pub(crate) fn publish_round_credential_admitted(
     owner_home: &Path,
     loop_name: &str,
     record: &mut Value,
+    admission: &RuntimeAdmission,
 ) -> Result<(), LaneError> {
+    let backend = BoxBackend::from_plan(&record["plan"])?;
+    admission.check(backend)?;
+    #[cfg(test)]
+    admission.scope_record(record)?;
     let home = record["plan"]["home"]
         .as_str()
         .ok_or_else(|| LaneError::input("credential-publish", "run home is absent"))?;
@@ -1863,9 +1953,246 @@ pub(crate) fn publish_round_credential(
         .and_then(|rounds| rounds.last_mut())
         .filter(|round| round["step"] == step)
         .ok_or_else(|| LaneError::input("credential-publish", "active round differs"))?;
-    round["credential_publication"] =
-        crate::credential::publish_round(owner_home, loop_name, &home, uid)?;
+    round["credential_publication"] = crate::credential::publish_round_admitted(
+        owner_home, loop_name, &home, uid, backend, admission,
+    )?;
     Ok(())
+}
+
+// Only custody capture constructs this token; activation moves its admission into the guard.
+enum RuntimeAdmissionThread {
+    Gate,
+    #[cfg(test)]
+    Fixture(crate::runtime_admission::fixture::FixtureThreadPart),
+}
+#[cfg(test)]
+pub(crate) struct CapturePermit(());
+#[cfg(test)]
+pub(crate) struct ActivationPermit(());
+
+/// The authority thread holds home and configuration custody and only two credential executables.
+pub(crate) struct CredentialThreadCustody {
+    admission: RuntimeAdmissionThread,
+    home: crate::home::PrivateHomeSnapshot,
+    configuration: Option<crate::runtime_entry::PlanConfiguration>,
+    programs: Option<BTreeMap<PathBuf, Arc<loop_home::anchor::Anchor>>>,
+}
+pub(crate) struct CredentialThreadGuard {
+    admission: RuntimeAdmission,
+    _configuration: crate::runtime_entry::ConfigurationGuard,
+    _programs: Option<crate::container_entry::ExecutableGuard>,
+    _home: crate::home::PrivateHomeGuard,
+}
+impl CredentialThreadCustody {
+    pub(crate) fn capture_admitted(
+        backend: BoxBackend,
+        admission: &RuntimeAdmission,
+    ) -> Result<Self, LaneError> {
+        Ok(Self {
+            home: crate::home::snapshot_private_home()?,
+            configuration: crate::runtime_entry::snapshot_configuration(),
+            programs: crate::container_entry::credential_programs(backend)?,
+            admission: match admission {
+                RuntimeAdmission::Gate => RuntimeAdmissionThread::Gate,
+                #[cfg(test)]
+                RuntimeAdmission::Fixture(proof) => RuntimeAdmissionThread::Fixture({
+                    admission.check(backend)?;
+                    proof.take_thread(&CapturePermit(()))?
+                }),
+            },
+        })
+    }
+    pub(crate) fn activate(self) -> Result<CredentialThreadGuard, LaneError> {
+        Ok(CredentialThreadGuard {
+            _home: crate::home::activate_private_snapshot(self.home)?,
+            _configuration: crate::runtime_entry::activate_configuration_snapshot(
+                self.configuration,
+            ),
+            _programs: self.programs.map(|programs| {
+                crate::container_entry::activate_program_map("container-helper", programs)
+            }),
+            admission: match self.admission {
+                RuntimeAdmissionThread::Gate => RuntimeAdmission::Gate,
+                #[cfg(test)]
+                RuntimeAdmissionThread::Fixture(part) => part.activate(&ActivationPermit(()))?,
+            },
+        })
+    }
+}
+
+/// Spawn credential authority with its held home, configuration and selected programs.
+pub(crate) fn spawn_credential_authority_admitted(
+    refresh_home: PathBuf,
+    refresh_loop: String,
+    refresh_root: PathBuf,
+    refresh_driver_dir: PathBuf,
+    backend: BoxBackend,
+    refresh_cancelled: Arc<AtomicBool>,
+    admission: &RuntimeAdmission,
+) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError> {
+    spawn_credential_authority_at(
+        refresh_home,
+        refresh_loop,
+        refresh_root,
+        refresh_driver_dir,
+        backend,
+        refresh_cancelled,
+        (
+            crate::credential::service_endpoint(),
+            CredentialThreadCustody::capture_admitted(backend, admission)?,
+            wait_credential_authority_period,
+        ),
+    )
+}
+
+/// Use the private pass wait in an in-crate namespace transaction.
+#[cfg(test)]
+pub(crate) fn fixture_authority_with_wait<W>(
+    paths: (&Path, &Path, &Path),
+    cancelled: Arc<AtomicBool>,
+    admission: &RuntimeAdmission,
+    wait: W,
+) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError>
+where
+    W: FnMut(&AtomicBool) + Send + 'static,
+{
+    spawn_credential_authority_at(
+        paths.0.to_path_buf(),
+        "alpha".into(),
+        paths.1.to_path_buf(),
+        paths.2.to_path_buf(),
+        BoxBackend::Claude,
+        cancelled,
+        (
+            crate::credential::service_endpoint(),
+            CredentialThreadCustody::capture_admitted(BoxBackend::Claude, admission)?,
+            wait,
+        ),
+    )
+}
+
+// Service liveness must not outlast its authority, including an activation refusal.
+struct CredentialAuthorityCancellation(Arc<AtomicBool>);
+impl Drop for CredentialAuthorityCancellation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+const CREDENTIAL_REFRESH_INTERVAL_SECONDS: u64 = 30;
+
+fn wait_credential_authority_period(cancelled: &AtomicBool) {
+    for _ in 0..CREDENTIAL_REFRESH_INTERVAL_SECONDS {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Run the service authority with an explicit internal refresh endpoint.
+/// Codex uses the fixed vendor endpoint; its tests inject loopback before thread capture.
+/// Claude uses its owner program and does not use this endpoint.
+fn spawn_credential_authority_at<W>(
+    refresh_home: PathBuf,
+    refresh_loop: String,
+    refresh_root: PathBuf,
+    refresh_driver_dir: PathBuf,
+    backend: BoxBackend,
+    refresh_cancelled: Arc<AtomicBool>,
+    authority: (String, CredentialThreadCustody, W),
+) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError>
+where
+    W: FnMut(&AtomicBool) + Send + 'static,
+{
+    let (endpoint, refresh_custody, mut wait_between_passes) = authority;
+    std::thread::Builder::new()
+        .name("credential-authority".into())
+        .spawn(move || -> Result<(), LaneError> {
+            let _cancel_on_exit = CredentialAuthorityCancellation(Arc::clone(&refresh_cancelled));
+            let custody = refresh_custody.activate()?;
+            custody.admission.evidence_binding(
+                &refresh_home,
+                &refresh_loop,
+                &refresh_root,
+                &refresh_driver_dir,
+                backend,
+            )?;
+            let mut published = BTreeMap::new();
+            let mut checked = false;
+            while !refresh_cancelled.load(Ordering::Acquire) {
+                let result = crate::credential::refresh_live_admitted(
+                    &refresh_home,
+                    &refresh_loop,
+                    &refresh_root,
+                    &mut published,
+                    backend,
+                    &endpoint,
+                    &custody.admission,
+                );
+                let binding = custody.admission.evidence_binding(
+                    &refresh_home,
+                    &refresh_loop,
+                    &refresh_root,
+                    &refresh_driver_dir,
+                    backend,
+                )?;
+                let evidence = crate::credential::evidence_for_check_bound(
+                    &result, !checked, backend, binding,
+                );
+                if let Some(evidence) = evidence
+                    && let Err(error) = crate::credential::publish_evidence_bound(
+                        &refresh_driver_dir,
+                        &evidence,
+                        binding,
+                    )
+                {
+                    refresh_cancelled.store(true, Ordering::Release);
+                    return Err(error);
+                }
+                checked = result.is_ok();
+                wait_between_passes(&refresh_cancelled);
+            }
+            Ok(())
+        })
+        .map_err(|error| LaneError::operation("credential-thread", error.to_string()))
+}
+
+// Keep the selected credential capability check in the same transaction as the
+// helper PID, round receipt and reservation publication.
+fn publish_helper_identity_admitted(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    root: &Path,
+    admission: &RuntimeAdmission,
+) -> Result<BoxBackend, LaneError> {
+    let reservation = reservation_path(root, run);
+    let _lock = crate::launch::lock_runs_root(root, true, Uid::effective().as_raw())?;
+    let _mailbox = crate::launch::lock_mailbox(root, run, Uid::effective().as_raw())?;
+    let mut record = crate::launch::read_reservation(&reservation)?
+        .ok_or_else(|| LaneError::input("helper-pin", "reservation is absent"))?;
+    if record["phase"] != "preparing" || record["loop"] != loop_name || record["run"] != run {
+        return Err(LaneError::input(
+            "helper-pin",
+            "reservation names another run",
+        ));
+    }
+    let backend = BoxBackend::from_plan(&record["plan"])?;
+    admission.check(backend)?;
+    #[cfg(test)]
+    admission.scope_names(owner_home, loop_name, run)?;
+    #[cfg(test)]
+    admission.scope_record(&record)?;
+    #[cfg(test)]
+    admission.scope_roots(owner_home, loop_name, root)?;
+    let _credentials = crate::container_entry::credential_programs(backend)?;
+    let pid = std::process::id();
+    record["helper_pid"] = json!(pid);
+    record["helper_start"] = json!(process_start(pid)?);
+    publish_round_credential_admitted(owner_home, loop_name, &mut record, admission)?;
+    crate::launch::publish_reservation(&reservation, &record)?;
+    Ok(backend)
 }
 
 /// Serve one run's fixed container request as the namespace owner.
@@ -1873,16 +2200,25 @@ pub(crate) fn publish_round_credential(
 /// # Errors
 ///
 /// Refuses a changed saved request, a foreign peer, or a failed bounded child.
-#[allow(clippy::too_many_lines)]
 pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
+    serve_admitted(run_dir, &RuntimeAdmission::Gate)
+}
+
+#[allow(clippy::too_many_lines)]
+fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), LaneError> {
     if !Uid::effective().is_root() {
         return Err(LaneError::input(
             "helper-identity",
             "rootless namespace owner is required",
         ));
     }
-    let (owner_home, loop_name, run, podman) = run_identity(run_dir)?;
-    let initial = pinned_request(&owner_home, &loop_name, &run, &podman)?;
+    let (owner_home, loop_name, run, podman) = run_identity_at_admitted(
+        &caller_home()?,
+        run_dir,
+        Uid::effective().as_raw(),
+        admission,
+    )?;
+    let initial = pinned_request_admitted(&owner_home, &loop_name, &run, &podman, admission)?;
     attempt_vector(&initial.argv, &initial.driver_dir, 1)?;
     let loop_uid = initial.loop_uid;
     let driver_dir = initial.driver_dir;
@@ -1912,23 +2248,7 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
         .parent()
         .ok_or_else(|| LaneError::input("helper-pin", "runs root absent"))?;
     let reservation = reservation_path(root, &run);
-    {
-        let _lock = crate::launch::lock_runs_root(root, true, 0)?;
-        let _mailbox = crate::launch::lock_mailbox(root, &run, 0)?;
-        let mut record = crate::launch::read_reservation(&reservation)?
-            .ok_or_else(|| LaneError::input("helper-pin", "reservation is absent"))?;
-        if record["phase"] != "preparing" || record["loop"] != loop_name || record["run"] != run {
-            return Err(LaneError::input(
-                "helper-pin",
-                "reservation names another run",
-            ));
-        }
-        let pid = std::process::id();
-        record["helper_pid"] = json!(pid);
-        record["helper_start"] = json!(process_start(pid)?);
-        publish_round_credential(&owner_home, &loop_name, &mut record)?;
-        crate::launch::publish_reservation(&reservation, &record)?;
-    }
+    let backend = publish_helper_identity_admitted(&owner_home, &loop_name, &run, root, admission)?;
     let listener = UnixListener::bind(socket_slot.address())
         .map_err(|error| LaneError::operation("helper-socket", error.to_string()))?;
     socket_slot
@@ -1946,43 +2266,15 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
     let control_cancelled = Arc::clone(&cancelled);
     let controller =
         std::thread::spawn(move || control_loop(&control_listener, &control_cancelled, 0));
-    let refresh_cancelled = Arc::clone(&cancelled);
-    let refresh_home = owner_home.clone();
-    let refresh_loop = loop_name.clone();
-    let refresh_root = root.to_path_buf();
-    let refresh_driver_dir = driver_dir.clone();
-    let refresh_anchors = crate::home::snapshot_private_home()?;
-    let refresher = std::thread::Builder::new()
-        .name("credential-authority".into())
-        .spawn(move || -> Result<(), LaneError> {
-            let _verified = crate::home::activate_private_snapshot(refresh_anchors)?;
-            let mut published = BTreeMap::new();
-            let mut checked = false;
-            while !refresh_cancelled.load(Ordering::Acquire) {
-                let result = crate::credential::refresh_live(
-                    &refresh_home,
-                    &refresh_loop,
-                    &refresh_root,
-                    &mut published,
-                );
-                if let Some(evidence) = crate::credential::evidence_for_check(&result, !checked)
-                    && let Err(error) =
-                        crate::credential::publish_evidence(&refresh_driver_dir, &evidence)
-                {
-                    refresh_cancelled.store(true, Ordering::Release);
-                    return Err(error);
-                }
-                checked = result.is_ok();
-                for _ in 0..30 {
-                    if refresh_cancelled.load(Ordering::Acquire) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            }
-            Ok(())
-        })
-        .map_err(|error| LaneError::operation("credential-thread", error.to_string()))?;
+    let refresher = spawn_credential_authority_admitted(
+        owner_home.clone(),
+        loop_name.clone(),
+        root.to_path_buf(),
+        driver_dir.clone(),
+        backend,
+        Arc::clone(&cancelled),
+        admission,
+    )?;
     let result = (|| {
         let mut previous_capacity = false;
         let mut retry_thread = None;
@@ -2009,7 +2301,8 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
                     "the loop-group socket changed during the run",
                 ));
             }
-            let request = pinned_request(&owner_home, &loop_name, &run, &podman)?;
+            let request =
+                pinned_request_admitted(&owner_home, &loop_name, &run, &podman, admission)?;
             if request.loop_uid != loop_uid || request.driver_dir != driver_dir {
                 return Err(LaneError::input(
                     "helper-pin",
@@ -2166,7 +2459,15 @@ pub fn client(run_dir: &Path) -> Result<i32, LaneError> {
 }
 
 #[cfg(test)]
+impl CredentialThreadGuard {
+    pub(crate) fn fixture_admission(&self) -> &RuntimeAdmission {
+        &self.admission
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::RuntimeAdmission::Gate;
     const TEST_CONTAINER_ID: &str =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const TEST_OTHER_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -2174,10 +2475,109 @@ mod tests {
         AttemptOutcome, ClientSocketIdentity, LauncherIdentity, STREAM_DRAIN_GRACE, STREAM_LIMIT,
         STREAM_STOP_GRACE, attempt_vector, attested_client_socket, capacity_event,
         command_for_request, control_loop, decode_round_request, in_driver_session, launcher_alive,
-        open_client_runs_root_with, pinned_request, process_start, read_words, remove_container,
-        retry_after, run_attempt, run_attempt_with, run_identity_at, start_after_reservation,
-        stop_container, verify_vector,
+        open_client_runs_root_with, pinned_request_admitted, process_start, read_words,
+        remove_container, retry_after, run_attempt, run_attempt_with, run_identity_at,
+        start_after_reservation, stop_container, verify_vector,
     };
+
+    /// ´test:unit:boxed-claude-helper-resumes-saved-session-without-quota-retry´
+    #[test]
+    fn boxed_claude_helper_resumes_saved_session_without_quota_retry() {
+        let init = r#"{"type":"system","subtype":"init","cwd":"/x","session_id":"22222222-2222-4222-8222-222222222222","tools":[],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"auto"}"#;
+        let quota = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1789820400,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":1789820400},"seven_day":{"utilization":0.28,"resetsAt":1790301600}}},"uuid":"33333333-3333-4333-8333-333333333333","session_id":"22222222-2222-4222-8222-222222222222"}"#;
+        let mut fixture = StartedAttemptFixture::new(&format!(
+            "cat > /dev/null; printf '%s\\n' \"$@\" > \"$TEST_ARGV\"; printf '%s\\n' '{init}' '{quota}'; exit 1"
+        ));
+        let arguments = fixture.root.path().join("arguments");
+        fixture
+            .environment
+            .insert("TEST_ARGV".into(), arguments.display().to_string());
+        fixture.vector.extend([
+            "/home/worker/.local/bin/claude".into(),
+            "-p".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--verbose".into(),
+        ]);
+        let session = "22222222-2222-4222-8222-222222222222";
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":{"backend":"claude"},"active_round":"work-1","thread_id":session,"rounds":[{"step":"work-1","budget_seconds":3600}]});
+        let reservation = fixture.root.path().join(".reservation-R.json");
+        publish_reservation(&reservation, &record).expect("Claude reservation");
+        let (mut server, mut client) = UnixStream::pair().expect("channel");
+        let request = format!("\0{session}\0fixture prompt").into_bytes();
+        let reader = std::thread::spawn(move || {
+            client
+                .write_all(&u32::try_from(request.len()).expect("length").to_le_bytes())
+                .expect("header");
+            client.write_all(&request).expect("prompt");
+            read_bounded_attempt_status(&mut client, super::STREAM_LIMIT)
+        });
+        let pid = std::process::id();
+        let outcome = run_attempt(
+            &mut server,
+            &fixture.vector,
+            &fixture.environment,
+            fixture.root.path(),
+            &reservation,
+            &record,
+            &fixture.driver,
+            1,
+            &AtomicBool::new(false),
+            LauncherIdentity {
+                pid,
+                start: process_start(pid).expect("launcher"),
+            },
+            None,
+        )
+        .expect("Claude attempt");
+        assert_eq!(reader.join().expect("drained"), 1);
+        assert_eq!(outcome.thread.as_deref(), Some(session));
+        assert_eq!(outcome.code, 1);
+        assert!(!outcome.capacity);
+        assert!(!retry_after(&outcome));
+        assert!(
+            fs::read_to_string(arguments)
+                .expect("executed vector")
+                .ends_with(&format!("--resume\n{session}\n"))
+        );
+        assert_eq!(fixture.evidence()["thread_id_source"], "captured");
+    }
+
+    /// ´test:unit:boxed-selected-session-capture-and-capacity-boundary´
+    #[test]
+    fn boxed_selected_session_capture_and_capacity_boundary() {
+        // Reuse the recorded Claude init and rejected-quota events in the driver tests.
+        let init = br#"{"type":"system","subtype":"init","cwd":"/x","session_id":"22222222-2222-4222-8222-222222222222","tools":[],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"auto"}"#;
+        let quota = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1789820400,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":1789820400},"seven_day":{"utilization":0.28,"resetsAt":1790301600}}},"uuid":"33333333-3333-4333-8333-333333333333","session_id":"22222222-2222-4222-8222-222222222222"}"#;
+        let codex = b"{\"type\":\"thread.started\",\"thread_id\":\"codex-thread\"}\n";
+        let capacity = b"{\"type\":\"error\",\"message\":\"The model is at capacity\"}\n";
+        let mut claude = super::CapacityCapture::new(BoxBackend::Claude);
+        claude.push(codex);
+        assert!(claude.thread.is_none());
+        for chunk in init.chunks(7) {
+            claude.push(chunk);
+        }
+        assert!(
+            claude.thread.is_none(),
+            "an incomplete line is not evidence"
+        );
+        claude.push(b"\n");
+        assert_eq!(
+            claude.thread.as_deref(),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        claude.push(quota.as_bytes());
+        claude.push(b"\n");
+        claude.push(capacity);
+        assert!(!super::capacity_event(BoxBackend::Claude, &claude.tail));
+        let mut codex_capture = super::CapacityCapture::new(BoxBackend::Codex);
+        codex_capture.push(init);
+        codex_capture.push(b"\n");
+        assert!(codex_capture.thread.is_none());
+        codex_capture.push(codex);
+        assert_eq!(codex_capture.thread.as_deref(), Some("codex-thread"));
+        assert!(super::capacity_event(BoxBackend::Codex, capacity));
+    }
 
     /// ´test:unit:round-client-refuses-request-owned-by-another-uid´
     #[test]
@@ -2194,6 +2594,7 @@ mod tests {
         read_reservation,
     };
     use crate::plan::protected_identifier_path;
+    use crate::settings::BoxBackend;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::fs;
@@ -2214,7 +2615,7 @@ mod tests {
     fn seed_attempt_reservation(root: &Path) {
         publish_reservation(
             &root.join(".reservation-R.json"),
-            &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
         )
         .expect("protected attempt reservation");
     }
@@ -2350,7 +2751,7 @@ mod tests {
     fn helper_wall_stop_retains_cause_in_outcome_and_round() {
         let fixture = StartedAttemptFixture::new("cat >/dev/null; exec sleep 30");
         let reservation = fixture.root.path().join(".reservation-R.json");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":7200}],"plan":{"attempt_wall_seconds":1}});
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":7200}],"plan":{"backend":"codex","attempt_wall_seconds":1}});
         publish_reservation(&reservation, &record).expect("planned wall");
         let (mut server, mut client) = UnixStream::pair().expect("channel");
         client
@@ -2490,7 +2891,7 @@ mod tests {
     }
 
     fn custom_runs_fixture() -> (TempDir, PathBuf, PathBuf) {
-        let fixture = TempDir::new_in("/tmp").expect("fixture");
+        let fixture = TempDir::new().expect("fixture");
         let home = fixture.path();
         fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("owner home");
         let custody = home.join(".config/loops/alpha");
@@ -2562,6 +2963,645 @@ mod tests {
         )
         .expect("reservation mode");
         (fixture, run_dir, letter)
+    }
+
+    const CLAUDE_GATE_DETAIL: &str = concat!(
+        "claude boxed launch awaits its credential adapter, ",
+        "trial acceptance and runtime paths"
+    );
+
+    fn assert_claude_gate(site: &str, error: &crate::error::LaneError, wrapped: bool) {
+        assert_eq!(error.status, 2, "{site}");
+        assert_eq!(
+            error.kind,
+            if wrapped {
+                "helper-pin"
+            } else {
+                "backend-unavailable"
+            },
+            "{site}"
+        );
+        let detail = if wrapped {
+            format!("backend-unavailable: {CLAUDE_GATE_DETAIL}")
+        } else {
+            CLAUDE_GATE_DETAIL.to_owned()
+        };
+        assert_eq!(error.detail, detail, "{site}");
+    }
+
+    /// ´test:unit:helper-service-claude-gate-baseline´
+    #[test]
+    fn helper_service_claude_gate_baseline() {
+        let fixture = TempDir::new().expect("private fixture");
+        let home = fixture.path().join("absent-owner");
+        let runs = fixture.path().join("absent-runs");
+        let worker = runs.join("absent-worker");
+        let backend = BoxBackend::Claude;
+        let mut published = BTreeMap::from([(worker.clone(), b"synthetic prior".to_vec())]);
+        let prior = published.clone();
+        let mut record = json!({"plan":{"backend":"claude"}});
+        let original = record.clone();
+        let cases = [
+            (
+                "preflight",
+                crate::credential::preflight(&home, "alpha", backend),
+            ),
+            (
+                "prepare_run",
+                crate::credential::prepare_run(&home, "alpha", &worker, 3000, backend),
+            ),
+            (
+                "publish_round",
+                crate::credential::publish_round_admitted(
+                    &home, "alpha", &worker, 3000, backend, &Gate,
+                )
+                .map(|_| ()),
+            ),
+            (
+                "refresh_live",
+                crate::credential::refresh_live_admitted(
+                    &home,
+                    "alpha",
+                    &runs,
+                    &mut published,
+                    backend,
+                    "not-an-endpoint",
+                    &Gate,
+                )
+                .map(|_| ()),
+            ),
+            (
+                "publish_round_credential",
+                super::publish_round_credential_admitted(&home, "alpha", &mut record, &Gate),
+            ),
+            (
+                "verify_box_attestation",
+                crate::plan::verify_box_attestation_admitted(&record["plan"], &Gate),
+            ),
+            (
+                "pinned_plan_from_record",
+                crate::launch::pinned_plan_from_record_admitted(
+                    &home,
+                    "alpha",
+                    "R",
+                    Path::new("/absent-podman"),
+                    &record,
+                    &Gate,
+                )
+                .map(|_| ()),
+            ),
+        ];
+        for (site, result) in cases {
+            assert_claude_gate(site, &result.expect_err("closed runtime gate"), false);
+        }
+        assert_eq!(published, prior);
+        assert_eq!(record, original);
+        assert!(!home.exists());
+        assert!(!runs.exists());
+        assert_eq!(
+            fs::read_dir(fixture.path())
+                .expect("untouched fixture")
+                .count(),
+            0
+        );
+    }
+
+    /// ´test:unit:helper-service-publication-gate-keeps-identity-precedence´
+    #[test]
+    fn helper_service_publication_gate_keeps_identity_precedence() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let fixture = TempDir::new().expect("private fixture");
+        let root = fixture.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).expect("root mode");
+        fs::create_dir(root.join("R")).expect("run");
+        fs::set_permissions(root.join("R"), fs::Permissions::from_mode(0o700)).expect("run mode");
+        let reservation = crate::launch::reservation_path(root, "R");
+        let programs =
+            crate::container_entry::activate_program_map("container-helper", BTreeMap::new());
+        for (field, value) in [
+            ("phase", "started"),
+            ("loop", "other"),
+            ("run", "S"),
+            ("phase", "preparing"),
+        ] {
+            let mut record = json!({"schema":1,"phase":"preparing","loop":"alpha",
+                "run":"R","worker_uid":3000,"plan":{"backend":"claude"}});
+            record[field] = json!(value);
+            assert!(record.get("helper_pid").is_none());
+            crate::launch::publish_reservation(&reservation, &record).expect("reservation");
+            let bytes = fs::read(&reservation).expect("prior bytes");
+            let inode = fs::metadata(&reservation).expect("prior inode").ino();
+            let error = super::publish_helper_identity_admitted(root, "alpha", "R", root, &Gate)
+                .expect_err("no helper publication");
+            if value == "preparing" {
+                assert_claude_gate("publish_helper_identity", &error, false);
+            } else {
+                assert_eq!(error.status, 2);
+                assert_eq!(error.kind, "helper-pin");
+                assert_eq!(error.detail, "reservation names another run");
+            }
+            let mut entries: Vec<_> = fs::read_dir(root)
+                .expect("runs entries")
+                .map(|entry| entry.expect("entry").file_name())
+                .collect();
+            entries.sort();
+            assert_eq!(entries, [".letter-R.lock", ".reservation-R.json", "R"]);
+            assert_eq!(fs::read(&reservation).expect("unchanged bytes"), bytes);
+            assert_eq!(
+                fs::metadata(&reservation).expect("unchanged inode").ino(),
+                inode
+            );
+        }
+        drop(programs);
+        assert!(crate::container_entry::check(Path::new("/usr/bin/claude")).is_none());
+    }
+
+    /// ´test:unit:helper-service-plan-readers-keep-wrapped-gate´
+    #[test]
+    fn helper_service_plan_readers_keep_wrapped_gate() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let (fixture, run, _) = custom_runs_fixture();
+        let root = run.parent().expect("runs root");
+        let reservation = crate::launch::reservation_path(root, "R");
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&reservation).expect("record bytes")).expect("record");
+        record["plan"]["backend"] = json!("claude");
+        crate::launch::publish_reservation(&reservation, &record).expect("Claude record");
+        let error = super::pinned_request_admitted(
+            fixture.path(),
+            "alpha",
+            "R",
+            Path::new("/usr/bin/podman"),
+            &Gate,
+        )
+        .err()
+        .expect("launcher check precedes gate");
+        assert_eq!(error.status, 2);
+        assert_eq!(error.kind, "helper-pin");
+        assert_eq!(error.detail, "reservation has no launcher PID");
+        record["launcher_pid"] = json!(std::process::id());
+        let start = super::process_start(std::process::id()).expect("current start");
+        for (tick, detail) in [
+            (Value::Null, "reservation has no launcher start tick"),
+            (json!(start + 1), "launcher's recorded process is absent"),
+        ] {
+            record["launcher_start"] = tick;
+            crate::launch::publish_reservation(&reservation, &record).expect("launcher fixture");
+            let error = super::pinned_request_admitted(
+                fixture.path(),
+                "alpha",
+                "R",
+                Path::new("/usr/bin/podman"),
+                &Gate,
+            )
+            .err()
+            .expect("identity precedes runtime gate");
+            assert_eq!(error.status, 2);
+            assert_eq!(error.kind, "helper-pin");
+            assert_eq!(error.detail, detail);
+        }
+        record["launcher_start"] = json!(start);
+        crate::launch::publish_reservation(&reservation, &record).expect("launcher identity");
+        let bytes = fs::read(&reservation).expect("prior bytes");
+        let inode = fs::metadata(&reservation).expect("prior inode").ino();
+        for (site, result) in [
+            (
+                "run_identity_at",
+                super::run_identity_at_admitted(
+                    fixture.path(),
+                    &run,
+                    nix::unistd::Uid::effective().as_raw(),
+                    &Gate,
+                )
+                .map(|_| ()),
+            ),
+            (
+                "pinned_request",
+                super::pinned_request_admitted(
+                    fixture.path(),
+                    "alpha",
+                    "R",
+                    Path::new("/usr/bin/podman"),
+                    &Gate,
+                )
+                .map(|_| ()),
+            ),
+        ] {
+            assert_claude_gate(site, &result.expect_err("wrapped gate"), true);
+        }
+        assert_eq!(fs::read(&reservation).expect("unchanged bytes"), bytes);
+        assert_eq!(
+            fs::metadata(&reservation).expect("unchanged inode").ino(),
+            inode
+        );
+    }
+
+    /// ´test:unit:helper-service-launch-loader-keeps-selected-gate´
+    #[test]
+    fn helper_service_launch_loader_keeps_selected_gate() {
+        let (fixture, _run, _) = custom_runs_fixture();
+        let settings = fixture.path().join(".config/loops/alpha/workers.toml");
+        let text = fs::read_to_string(&settings).expect("settings");
+        assert!(text.contains("codex = ["));
+        fs::write(&settings, text.replace("codex = [", "claude = [")).expect("Claude settings");
+        for backend in [None, Some(BoxBackend::Claude)] {
+            let result = crate::load_launch_plan_admitted(
+                fixture.path(),
+                "alpha",
+                "R",
+                (0, 0),
+                backend,
+                &Gate,
+            );
+            assert_claude_gate(
+                "load_launch_plan",
+                &result.expect_err("selected gate"),
+                false,
+            );
+        }
+    }
+
+    /// ´test:unit:helper-service-periodic-claude-gate-publishes-refusal´
+    #[test]
+    fn helper_service_periodic_claude_gate_publishes_refusal() {
+        let fixture = TempDir::new().expect("private fixture");
+        let home = fixture.path();
+        fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("home mode");
+        let runs = home.join("runs");
+        let driver = runs.join("R");
+        fs::create_dir_all(&driver).expect("driver");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected path");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("protected mode");
+        let held = fs::File::open(home).expect("held fixture home");
+        let private =
+            crate::home::activate_handed_home(home, &held, nix::unistd::Uid::effective().as_raw())
+                .expect("private home");
+        // The spawner's existing test endpoint is required even when the Claude gate refuses.
+        let _endpoint =
+            crate::credential::fixture_service_endpoint("http://127.0.0.1:1/unused".into());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let authority = super::spawn_credential_authority_admitted(
+            home.to_path_buf(),
+            "alpha".into(),
+            runs.clone(),
+            driver,
+            BoxBackend::Claude,
+            Arc::clone(&cancelled),
+            &Gate,
+        )
+        .expect("production periodic spawner");
+        drop(private);
+        let evidence = protected.join("credential-refresh.json");
+        let began = std::time::Instant::now();
+        while !evidence.exists()
+            && !authority.is_finished()
+            && began.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cancelled.store(true, Ordering::Release);
+        while !authority.is_finished() && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            authority.is_finished(),
+            "cancellation joins the periodic authority"
+        );
+        authority
+            .join()
+            .expect("authority thread")
+            .expect("clean authority result");
+        let actual: Value = serde_json::from_slice(&fs::read(evidence).expect("refused evidence"))
+            .expect("evidence JSON");
+        assert_eq!(
+            actual,
+            json!({
+                "schema":2, "backend":"claude", "state":"refused",
+                "provider":{"kind":"owner-program", "program":"/usr/bin/claude",
+                    "required_sha256":crate::credential::CLAUDE_SCHEMA_PROGRAM_SHA256},
+                "run_refusals":[], "run_refusals_omitted":0,
+                "expires_unix":null, "refresh_due_unix":null,
+                "kind":"backend-unavailable", "detail":CLAUDE_GATE_DETAIL,
+            })
+        );
+        assert!(!runs.join("worker/.claude/.credentials.json").exists());
+        assert!(!home.join(".config").exists());
+        assert!(crate::home::snapshot_private_home().is_err());
+        assert!(crate::container_entry::check(Path::new("/usr/bin/claude")).is_none());
+    }
+
+    /// ´test:unit:helper-authority-activation-failure-cancels-service´
+    #[test]
+    fn helper_authority_activation_failure_cancels_service() {
+        let fixture = crate::tests::helper_admission::Fixture::new();
+        let admission = fixture.admission();
+        let custody =
+            super::CredentialThreadCustody::capture_admitted(BoxBackend::Claude, &admission)
+                .expect("captured periodic custody");
+        let home = fixture.owner.clone();
+        let runs = fixture.runs.clone();
+        let driver = runs.join("R");
+        drop(fixture);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread = super::spawn_credential_authority_at(
+            home,
+            "alpha".into(),
+            runs,
+            driver,
+            BoxBackend::Claude,
+            Arc::clone(&cancelled),
+            (
+                "http://127.0.0.1:1/unused".into(),
+                custody,
+                super::wait_credential_authority_period,
+            ),
+        )
+        .expect("spawn after root removal");
+        let error = thread
+            .join()
+            .expect("authority join")
+            .expect_err("activation refusal");
+        assert_eq!((error.status, error.kind), (2, "fixture-scope"));
+        assert_eq!(
+            error.detail,
+            format!(
+                "{}: refuses root pathname",
+                crate::runtime_admission::fixture::SENTINEL
+            )
+        );
+        assert!(
+            cancelled.load(Ordering::Acquire),
+            "activation failure cancels service"
+        );
+    }
+
+    /// ´test:unit:helper-authority-panic-cancels-service´
+    #[test]
+    fn helper_authority_panic_cancels_service() {
+        let fixture = TempDir::new().expect("fixture");
+        let home = fixture.path();
+        fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("mode");
+        let runs = home.join("runs");
+        let driver = runs.join("R");
+        fs::create_dir_all(&driver).expect("driver");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("mode");
+        let held = fs::File::open(home).expect("held home");
+        let _private =
+            crate::home::activate_handed_home(home, &held, nix::unistd::Uid::effective().as_raw())
+                .expect("private home");
+        let custody = super::CredentialThreadCustody::capture_admitted(BoxBackend::Claude, &Gate)
+            .expect("Gate custody");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread = super::spawn_credential_authority_at(
+            home.to_path_buf(),
+            "alpha".into(),
+            runs,
+            driver,
+            BoxBackend::Claude,
+            Arc::clone(&cancelled),
+            (
+                "http://127.0.0.1:1/unused".into(),
+                custody,
+                |_: &AtomicBool| panic!("injected authority wait panic"),
+            ),
+        )
+        .expect("actual spawner");
+        let panic = thread.join().expect_err("authority wait panics");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"injected authority wait panic")
+        );
+        assert!(
+            cancelled.load(Ordering::Acquire),
+            "authority panic cancels service"
+        );
+        assert!(
+            protected.join("credential-refresh.json").is_file(),
+            "wait follows real pass"
+        );
+    }
+
+    /// ´test:unit:helper-authority-waits-for-pass-release´
+    #[test]
+    fn helper_authority_waits_for_pass_release() {
+        use std::os::unix::fs::MetadataExt as _;
+        let fixture = TempDir::new().expect("private fixture");
+        let home = fixture.path();
+        fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("home mode");
+        let runs = home.join("runs");
+        let driver = runs.join("R");
+        fs::create_dir_all(&driver).expect("driver");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected path");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("protected mode");
+        let held = fs::File::open(home).expect("held home");
+        let private =
+            crate::home::activate_handed_home(home, &held, nix::unistd::Uid::effective().as_raw())
+                .expect("private home");
+        let custody = super::CredentialThreadCustody::capture_admitted(BoxBackend::Claude, &Gate)
+            .expect("Gate custody");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (pass, observed) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let authority = super::spawn_credential_authority_at(
+            home.to_path_buf(),
+            "alpha".into(),
+            runs,
+            driver,
+            BoxBackend::Claude,
+            Arc::clone(&cancelled),
+            (
+                "http://127.0.0.1:1/unused".into(),
+                custody,
+                move |_: &AtomicBool| {
+                    pass.send(()).expect("report completed pass");
+                    resume
+                        .recv_timeout(Duration::from_secs(15))
+                        .expect("release completed pass");
+                },
+            ),
+        )
+        .expect("event-driven authority");
+        drop(private);
+        observed
+            .recv_timeout(Duration::from_secs(15))
+            .expect("first pass done");
+        let evidence = protected.join("credential-refresh.json");
+        let first = fs::read(&evidence).expect("first evidence");
+        let inode = fs::metadata(&evidence).expect("first inode").ino();
+        assert!(observed.try_recv().is_err(), "second pass awaits release");
+        assert!(
+            !cancelled.load(Ordering::Acquire),
+            "authority cancelled before first release"
+        );
+        release.send(()).expect("release first pass");
+        observed
+            .recv_timeout(Duration::from_secs(15))
+            .expect("second pass done");
+        assert_ne!(fs::metadata(&evidence).expect("second inode").ino(), inode);
+        assert_eq!(fs::read(&evidence).expect("second evidence"), first);
+        cancelled.store(true, Ordering::Release);
+        release.send(()).expect("release final pass");
+        assert!(
+            matches!(
+                observed.recv_timeout(Duration::from_secs(15)),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+            ),
+            "cancelled authority drops the pass channel after release"
+        );
+        authority
+            .join()
+            .expect("thread join")
+            .expect("clean cancellation");
+        assert!(matches!(
+            observed.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    /// ´test:unit:helper-fixture-publication-refuses-scope-before-effects´
+    #[test]
+    fn helper_fixture_publication_refuses_scope_before_effects() {
+        use std::os::unix::fs::MetadataExt as _;
+        let fixture = crate::tests::helper_admission::Fixture::new();
+        let admission = fixture.admission();
+        let reservation = crate::launch::reservation_path(&fixture.runs, "R");
+        let mut plan = fixture.plan();
+        plan["worker_uid"] = json!(3001);
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha",
+            "run":"R","worker_uid":3000,"plan":plan});
+        crate::launch::publish_reservation(&reservation, &record).expect("fixture reservation");
+        let before = fs::read(&reservation).expect("bytes");
+        let inode = fs::metadata(&reservation).expect("metadata").ino();
+        let error = super::publish_helper_identity_admitted(
+            &fixture.owner,
+            "alpha",
+            "R",
+            &fixture.runs,
+            &admission,
+        )
+        .expect_err("scope before helper identity");
+        assert_eq!(error.status, 2);
+        assert_eq!(error.kind, "fixture-scope");
+        assert_eq!(
+            error.detail,
+            format!(
+                "{}: refuses worker uid",
+                crate::runtime_admission::fixture::SENTINEL
+            )
+        );
+        assert_eq!(fs::read(&reservation).expect("retained bytes"), before);
+        assert_eq!(
+            fs::metadata(&reservation).expect("retained inode").ino(),
+            inode
+        );
+        let mut entries: Vec<_> = fs::read_dir(&fixture.runs)
+            .expect("whole runs root")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, [".letter-R.lock", ".reservation-R.json"]);
+    }
+
+    fn foreign_credential_custody() -> crate::container_entry::ExecutableGuard {
+        use loop_home::anchor::{
+            HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement,
+            Transport,
+        };
+        let verifier = HostVerifier::current()
+            .expect("host map")
+            .for_operation("container-helper");
+        let mut programs = BTreeMap::new();
+        for (key, role, path) in [
+            ("/usr/bin/claude", "credential-claude", "/usr/bin/true"),
+            ("/usr/bin/date", "credential-clock", "/usr/bin/date"),
+        ] {
+            let policy = Policy {
+                kind: Kind::File,
+                owner: Owner::RootFile,
+                mode: ModePolicy::Executable,
+            };
+            let pin = verifier
+                .pin(Path::new(path), role, 0, policy)
+                .expect("held foreign client and clock");
+            let manifest = Manifest {
+                version: 1,
+                transport: Transport::Rights,
+                operation: "container-helper".into(),
+                loop_name: "alpha".into(),
+                records: vec![pin.record()],
+            };
+            let mut received = Receiver::current()
+                .expect("receiver")
+                .validate(
+                    &manifest,
+                    vec![pin.into_fd()],
+                    "container-helper",
+                    "alpha",
+                    Transport::Rights,
+                    &[Requirement {
+                        purpose: role.into(),
+                        policy,
+                        alias_group: None,
+                    }],
+                )
+                .expect("validated held capability");
+            programs.insert(
+                PathBuf::from(key),
+                Arc::new(received.pop().expect("received capability")),
+            );
+        }
+        crate::container_entry::activate_program_map("container-helper", programs)
+    }
+
+    /// # Panics
+    /// Panics if foreign credential custody reaches helper or round publication.
+    /// ´test:unit:helper-credential-mismatch-precedes-reservation-publication´
+    #[test]
+    fn helper_credential_mismatch_precedes_reservation_publication() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let fixture = tempfile::tempdir().expect("private TMPDIR fixture");
+        let root = fixture.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).expect("root mode");
+        let run = root.join("R");
+        fs::create_dir(&run).expect("run");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).expect("run mode");
+        let worker = root.join("absent-worker");
+        let reservation = crate::launch::reservation_path(root, "R");
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R",
+            "worker_uid":3001,"plan":{"backend":"codex","home":worker},
+            "active_round":"one","rounds":[{"step":"one","credential_publication":null}]});
+        crate::launch::publish_reservation(&reservation, &record).expect("reservation");
+        let bytes = fs::read(&reservation).expect("prior bytes");
+        let inode = fs::metadata(&reservation).expect("prior inode").ino();
+        let _guard = foreign_credential_custody();
+        let error = super::publish_helper_identity_admitted(root, "alpha", "R", root, &Gate)
+            .expect_err("foreign client at the production publication transaction");
+        assert_eq!(error.kind, "container-anchor");
+        assert_eq!(
+            error.detail,
+            concat!(
+                "anchor-missing: operation=container-helper ",
+                "purpose=credential-executable backend=codex program=/usr/bin/curl"
+            )
+        );
+        assert_eq!(fs::read(&reservation).expect("unchanged bytes"), bytes);
+        assert_eq!(
+            fs::metadata(&reservation).expect("unchanged inode").ino(),
+            inode
+        );
+        let saved = crate::launch::read_reservation(&reservation)
+            .expect("read")
+            .expect("record");
+        assert!(saved.get("helper_pid").is_none());
+        assert!(saved["rounds"][0]["credential_publication"].is_null());
+        assert!(!worker.exists());
     }
 
     /// ´test:unit:helper-accepts-a-registered-custom-runs-root´
@@ -2686,7 +3726,7 @@ mod tests {
             .expect("ready helper sees the program");
         fs::remove_file(&program).expect("replace between readiness and request");
         std::os::unix::fs::symlink("/usr/bin/true", &program).expect("replacement link");
-        let refusal = pinned_request(fixture.path(), "alpha", "R", &program)
+        let refusal = pinned_request_admitted(fixture.path(), "alpha", "R", &program, &Gate)
             .err()
             .expect("request checks the executable before reading the run");
         assert_eq!(refusal.kind, "owner-program");
@@ -2696,12 +3736,15 @@ mod tests {
     #[test]
     fn helper_requires_capacity_evidence_and_the_launched_session_for_retry() {
         assert!(capacity_event(
+            BoxBackend::Codex,
             b"{\"type\":\"error\",\"message\":\"The model is at capacity\"}\n"
         ));
         assert!(!capacity_event(
+            BoxBackend::Codex,
             b"{\"type\":\"item.completed\",\"message\":\"model at capacity\"}\n"
         ));
         assert!(!capacity_event(
+            BoxBackend::Codex,
             b"{\"type\":\"error\",\"message\":\"model access denied\"}\n"
         ));
         assert!(retry_after(&AttemptOutcome {
@@ -2775,7 +3818,7 @@ mod tests {
                 .expect("namespace environment"),
             root,
             &root.join(".reservation-R.json"),
-            &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
             &driver,
             1,
             &AtomicBool::new(false),
@@ -2872,7 +3915,7 @@ mod tests {
                 .expect("namespace environment"),
             root,
             &root.join(".reservation-R.json"),
-            &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
             &driver,
             1,
             &AtomicBool::new(false),
@@ -2893,6 +3936,153 @@ mod tests {
         assert_eq!(saved["removal"]["state"], "removed");
         let arguments = fs::read_to_string(calls).expect("removal after evidence");
         assert_eq!(arguments, format!("rm\n--ignore\n{TEST_CONTAINER_ID}\n"));
+    }
+
+    /// # Panics
+    /// Panics if an attempt executes the replaced pathname instead of its held capability.
+    /// ´claim:superlooplane:helper-attempt-executes-the-held-inode´
+    /// ´test:unit:helper-attempt-executes-the-held-inode´
+    #[test]
+    fn helper_attempt_executes_the_held_inode() {
+        use loop_home::anchor::{
+            HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement,
+            Transport,
+        };
+        for (original, replacement, status) in [
+            ("/usr/bin/false", "/usr/bin/true", 1),
+            ("/usr/bin/true", "/usr/bin/false", 0),
+        ] {
+            let fixture = StartedAttemptFixture::new("exit 9");
+            let program = Path::new(&fixture.vector[0]);
+            fs::copy(original, program).expect("native selected program");
+            fs::set_permissions(program, fs::Permissions::from_mode(0o700)).expect("program mode");
+            let policy = Policy {
+                kind: Kind::File,
+                owner: Owner::Host,
+                mode: ModePolicy::Executable,
+            };
+            let pin = HostVerifier::current()
+                .expect("host map")
+                .for_operation("container-helper")
+                .pin(program, "podman-executable", 0, policy)
+                .expect("program pin");
+            let manifest = Manifest {
+                version: 1,
+                transport: Transport::Rights,
+                operation: "container-helper".into(),
+                loop_name: "alpha".into(),
+                records: vec![pin.record()],
+            };
+            let mut anchors = Receiver::current()
+                .expect("receiver")
+                .validate(
+                    &manifest,
+                    vec![pin.into_fd()],
+                    "container-helper",
+                    "alpha",
+                    Transport::Rights,
+                    &[Requirement {
+                        purpose: "podman-executable".into(),
+                        policy,
+                        alias_group: None,
+                    }],
+                )
+                .expect("held executable");
+            let swap = fixture.root.path().join("replacement");
+            fs::copy(replacement, &swap).expect("replacement program");
+            fs::set_permissions(&swap, fs::Permissions::from_mode(0o700))
+                .expect("replacement mode");
+            fs::rename(swap, program).expect("replace pathname");
+            let _programs = crate::container_entry::activate_program_map(
+                "container-helper",
+                BTreeMap::from([(
+                    program.to_path_buf(),
+                    Arc::new(anchors.pop().expect("one executable")),
+                )]),
+            );
+            let (mut server, mut client) = UnixStream::pair().expect("channel");
+            client
+                .write_all(&0_u32.to_le_bytes())
+                .expect("empty prompt");
+            let outcome = fixture
+                .run(&mut server, STREAM_LIMIT, Child::try_wait)
+                .expect("attempt records selected native exit");
+            assert_eq!(outcome.code, status);
+            assert_eq!(read_attempt_status(&mut client), status);
+            let evidence = fixture.evidence();
+            assert_eq!(evidence["status"], status);
+            assert!(evidence["post_start_error"].is_null());
+        }
+    }
+
+    /// # Panics
+    /// Panics if the service binding loses the protected program key before an attempt.
+    pub(super) fn reserved_program_attempt(home: &Path, run: &Path) {
+        for (original, replacement, status) in [
+            ("/usr/bin/false", "/usr/bin/true", 1),
+            ("/usr/bin/true", "/usr/bin/false", 0),
+        ] {
+            let mut fixture = StartedAttemptFixture::new("exit 9");
+            let held_path = Path::new(&fixture.vector[0]).to_path_buf();
+            fs::copy(original, &held_path).expect("native capability");
+            fs::set_permissions(&held_path, fs::Permissions::from_mode(0o700)).expect("mode");
+            let held_home = fs::File::open(home).expect("home descriptor").into();
+            let runs = run.parent().expect("runs root");
+            let held_runs = fs::File::open(runs).expect("runs descriptor").into();
+            let bundle = crate::container_entry::pin(
+                "alpha",
+                (home, &held_home),
+                (runs, &held_runs),
+                &std::env::current_exe().expect("entry image"),
+                &held_path,
+                BoxBackend::Codex,
+            )
+            .expect("production helper composer");
+            let (sender, input) = UnixStream::pair().expect("capability frame");
+            loop_home::anchor::transport::send(&sender, &bundle.descriptors)
+                .expect("complete helper frame");
+            let swap = fixture.root.path().join("replacement");
+            fs::copy(replacement, &swap).expect("replacement image");
+            fs::set_permissions(&swap, fs::Permissions::from_mode(0o700)).expect("mode");
+            fs::rename(swap, &held_path).expect("replace held pathname");
+            let (_, mut anchors) = crate::container_entry::receive_for(
+                &bundle.manifest,
+                &input,
+                "container-helper",
+                Some("alpha"),
+            )
+            .expect("production helper receiver");
+            let _configuration = crate::container_entry::configuration(
+                home,
+                "alpha",
+                "container-helper",
+                anchors.pop().expect("configuration"),
+            )
+            .expect("received configuration");
+            let (podman, support) =
+                crate::container_entry::take_support_programs(&mut anchors, BoxBackend::Codex)
+                    .expect("received support programs");
+            let _programs =
+                crate::container_entry::activate_program_map("container-helper", support);
+            let identity = run_identity_at(home, run, nix::unistd::Uid::effective().as_raw())
+                .expect("production reservation and plan reconstruction");
+            let selected = identity.3.clone();
+            assert_ne!(
+                selected, held_path,
+                "the reservation key is not the pinned pathname"
+            );
+            crate::container_entry::bind_reserved_program(home, "alpha", identity, podman)
+                .expect("production service program-key binding");
+            fixture.vector[0] = selected.display().to_string();
+            let (mut server, mut client) = UnixStream::pair().expect("attempt channel");
+            client.write_all(&0_u32.to_le_bytes()).expect("prompt");
+            let outcome = fixture
+                .run(&mut server, STREAM_LIMIT, Child::try_wait)
+                .expect("attempt through service-bound runtime");
+            assert_eq!(outcome.code, status);
+            assert_eq!(read_attempt_status(&mut client), status);
+            assert_eq!(fixture.evidence()["status"], status);
+        }
     }
 
     struct StartedAttemptFixture {
@@ -2930,7 +4120,7 @@ mod tests {
             )
             .expect("built driver process");
             wait_fixture_ready(&ready).expect("driver start");
-            let record = json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,
+            let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,
                 "driver_entry_pid":driver.id(),"driver_entry_start":process_start(driver.id()).expect("driver identity"),
                 "active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
             let reservation = fixture.root.path().join(".reservation-R.json");
@@ -3101,7 +4291,7 @@ mod tests {
                 &self.environment,
                 self.root.path(),
                 &self.root.path().join(".reservation-R.json"),
-                &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+                &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
                 &self.driver,
                 1,
                 &AtomicBool::new(false),
@@ -3188,7 +4378,7 @@ exit 0
                 "-".into(),
             ]);
             let prompt = format!("Read /home/worker/.local/inbox/{step}.md.");
-            let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"step":step,"budget_seconds":3600}]});
+            let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"step":step,"budget_seconds":3600}]});
             let mut retry_thread = None;
             for attempt in 1..=2 {
                 let (mut server, mut client) = UnixStream::pair().expect("channel");
@@ -3307,7 +4497,7 @@ exit 0
     /// ´test:unit:capacity-capture-discards-oversized-fragments-without-losing-later-events´
     #[test]
     fn capacity_capture_discards_oversized_fragments_without_losing_later_events() {
-        let mut capture = super::CapacityCapture::default();
+        let mut capture = super::CapacityCapture::new(BoxBackend::Codex);
         capture.push(b"{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\n");
         let padding = vec![b'x'; super::FRAME_LIMIT];
         for _ in 0..300 {
@@ -3315,9 +4505,9 @@ exit 0
             assert!(capture.tail.len() <= super::CAPACITY_EVIDENCE_LIMIT);
         }
         capture.push(b"{\"type\":\"error\",\"message\":\"model at capacity\"}\n");
-        assert!(!capacity_event(&capture.tail));
+        assert!(!capacity_event(capture.backend, &capture.tail));
         capture.push(b"{\"type\":\"error\",\"message\":\"model at capacity\"}\n");
-        assert!(capacity_event(&capture.tail));
+        assert!(capacity_event(capture.backend, &capture.tail));
         assert_eq!(capture.thread.as_deref(), Some("thread-1"));
     }
 
@@ -3367,7 +4557,7 @@ exit 0
                 )
                 .expect("length");
             client.write_all(&request).expect("round request");
-            let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"step":step,"budget_seconds":3600}]});
+            let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"step":step,"budget_seconds":3600}]});
             let pid = std::process::id();
             let result = run_attempt(
                 &mut server,
@@ -3404,8 +4594,8 @@ exit 0
                 let expected = if step == "dispatch" {
                     fixture.vector[1..].to_vec()
                 } else {
-                    super::resume_box_vector(&fixture.vector, "thread-1").expect("resume vector")
-                        [1..]
+                    super::resume_box_vector(BoxBackend::Codex, &fixture.vector, "thread-1")
+                        .expect("resume vector")[1..]
                         .to_vec()
                 };
                 assert_eq!(started, format!("{}\n", expected.join("\n")));
@@ -3985,7 +5175,7 @@ exit 0
         fs::create_dir(&custody).expect("custody directory");
         fs::set_permissions(&custody, fs::Permissions::from_mode(0o700)).expect("custody mode");
         let reservation = root.join(".reservation-R.json");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
+        let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
         publish_reservation(&reservation, &record).expect("attempt reservation");
         let vector = vec![
             program.display().to_string(),
@@ -4089,7 +5279,7 @@ exit 0
         fs::create_dir(&custody).expect("custody directory");
         fs::set_permissions(&custody, fs::Permissions::from_mode(0o700)).expect("custody mode");
         let reservation = root.join(".reservation-R.json");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
+        let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
         publish_reservation(&reservation, &record).expect("attempt reservation");
         let vector = vec![
             program.display().to_string(),
@@ -4149,7 +5339,7 @@ exit 0
         fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
             .expect("protected fixture");
         let path = fixture.path().join(".reservation-R.json");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
+        let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
         publish_reservation(&path, &record).expect("seed reservation");
         start_after_reservation(&path, &record, || {
             let saved = read_reservation(&path)

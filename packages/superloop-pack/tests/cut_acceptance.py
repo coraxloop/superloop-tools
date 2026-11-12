@@ -4,10 +4,11 @@ import json
 from pathlib import Path
 import subprocess
 import tarfile
-import tempfile
+import shutil
 import time
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--work-root', required=True, type=Path)
 parser.add_argument('--root', required=True, type=Path)
 parser.add_argument('--pack', required=True, type=Path)
 parser.add_argument('--linter', required=True, type=Path)
@@ -31,50 +32,74 @@ def run(argv, cwd):
     return result.stdout.strip()
 
 
-with tempfile.TemporaryDirectory(prefix='cut-acceptance-') as directory:
-    fixture = Path(directory)
-    source, public, archive = (fixture / name for name in ('source', 'public', 'archive'))
-    burn = fixture / 'burn.toml'
-    burn.write_text('[[values]]\nvalue = "fictional-private-estate-sentinel"\nmatch = "substring"\n')
+fixture = args.work_root.resolve()
+fixture.mkdir(parents=True, exist_ok=True)
+source, public, archive = (fixture / name for name in ('source', 'public', 'archive'))
+burn = fixture / 'burn.toml'
+burn.write_text('[[values]]\nvalue = "fictional-private-estate-sentinel"\nmatch = "substring"\n')
+if source.exists():
+    run(['git', 'fetch', '--quiet', args.root, 'HEAD'], source)
+    run(['git', 'reset', '--hard', 'FETCH_HEAD'], source)
+    run(['git', 'clean', '-fdx'], source)
+else:
     run(['git', 'clone', '--no-hardlinks', '--quiet', args.root, source], fixture)
-    run(['git', '-c', 'tag.gpgsign=false', 'tag', 'cut-acceptance'], source)
-    run([args.pack, 'cut', '--tag', 'cut-acceptance', '--manifest', 'public-set.toml',
-         '--out', public, '--author', 'Fixture Author <fixture@example.com>',
-         '--date', '2026-10-12T16:11:22Z', '--public-tag', 'v0.1.0',
-         '--burn-register', burn, '--linter', args.linter], source)
-    recut = fixture / 'recut'
-    run([args.pack, 'cut', '--tag', 'cut-acceptance', '--manifest', 'public-set.toml',
-         '--out', recut, '--author', 'Fixture Author <fixture@example.com>',
-         '--date', '2026-10-12T16:11:22Z', '--public-tag', 'v0.1.0',
-         '--burn-register', burn, '--linter', args.linter], source)
-    for ref in ('HEAD', 'HEAD^{tree}', 'refs/tags/v0.1.0'):
-        original = run(['git', 'rev-parse', ref], public)
-        assert original == run(['git', 'rev-parse', ref], recut)
-        print(json.dumps({'recut_equal': ref, 'object': original}), flush=True)
-    assert [int(value) for value in run(
-        ['git', 'log', '-1', '--format=%at %ct'], public).split()] == [1791821482] * 2
-    assert run(['git', 'tag', '-l', '--format=%(objecttype) %(taggername) %(contents:subject)', 'v0.1.0'], public) == (
-        'tag Fixture Author superloop-tools v0.1.0')
-    assert int(run(['git', 'tag', '-l', '--format=%(taggerdate:unix)',
-                    'v0.1.0'], public)) == 1791821482
-    assert not (public / 'Cargo.lock').exists(), 'public cut must omit Cargo.lock'
-    run(['meson', 'setup', 'build'], public)
-    assert not (public / 'docs/public/README.md').exists()
-    assert (public / 'README.md').read_bytes() == (source / 'README.md').read_bytes()
-    readme = (public / 'README.md').read_text()
-    for label in ('guide:publictools:superloop-tools', 'sec:publictools:build',
-                  'sec:publictools:public-releases', 'sec:publictools:acknowledgements',
-                  'sec:publictools:licensing'):
-        assert readme.count(label) == 1, 'one README mint per label: ' + label
-    run([args.linter, 'check', '--root', '.'], public)
-    run(['cargo', 'build', '--workspace', '--bins', '--tests', '--target-dir', public / 'target'], public)
-    run(['git', '-c', 'tag.gpgsign=false', 'tag', 'cut-acceptance'], public)
-    commit = run(['git', 'rev-parse', 'HEAD'], public)
-    tar = fixture / 'public.tar'
-    run(['git', 'archive', 'cut-acceptance', '--format=tar', '--output', tar], public)
-    archive.mkdir()
-    with tarfile.open(tar) as contents:
-        contents.extractall(archive, filter='data')
-    assert not (archive / 'Cargo.lock').exists(), 'public archive must omit Cargo.lock'
-    run(['meson', 'setup', 'build', '-Dtools_source_commit=' + commit], archive)
-    print(json.dumps({'acceptance': 'cut-tree', 'wall': time.monotonic() - started}), flush=True)
+run(['git', '-c', 'tag.gpgsign=false', 'tag', '-f', 'cut-acceptance'], source)
+staged = fixture / 'staged'
+for stale in (staged, fixture / 'recut'):
+    if stale.exists():
+        shutil.rmtree(stale)
+run([args.pack, 'cut', '--tag', 'cut-acceptance', '--manifest', 'public-set.toml',
+     '--out', staged, '--author', 'Fixture Author <fixture@example.com>',
+     '--date', '2026-10-12T16:11:22Z', '--public-tag', 'v0.1.0',
+     '--burn-register', burn, '--linter', args.linter], source)
+if public.exists():
+    run(['git', 'fetch', '--quiet', staged, 'HEAD',
+         '+refs/tags/v0.1.0:refs/tags/v0.1.0'], public)
+    run(['git', 'reset', '--hard', run(['git', 'rev-parse', 'HEAD'], staged)], public)
+    run(['git', 'clean', '-fdx', '-e', 'target/', '-e', 'build/'], public)
+    shutil.rmtree(staged)
+else:
+    staged.rename(public)
+recut = fixture / 'recut'
+run([args.pack, 'cut', '--tag', 'cut-acceptance', '--manifest', 'public-set.toml',
+     '--out', recut, '--author', 'Fixture Author <fixture@example.com>',
+     '--date', '2026-10-12T16:11:22Z', '--public-tag', 'v0.1.0',
+     '--burn-register', burn, '--linter', args.linter], source)
+for ref in ('HEAD', 'HEAD^{tree}', 'refs/tags/v0.1.0'):
+    original = run(['git', 'rev-parse', ref], public)
+    assert original == run(['git', 'rev-parse', ref], recut)
+    print(json.dumps({'recut_equal': ref, 'object': original}), flush=True)
+assert [int(value) for value in run(
+    ['git', 'log', '-1', '--format=%at %ct'], public).split()] == [1791821482] * 2
+assert run(['git', 'tag', '-l', '--format=%(objecttype) %(taggername) %(contents:subject)', 'v0.1.0'], public) == (
+    'tag Fixture Author superloop-tools v0.1.0')
+assert int(run(['git', 'tag', '-l', '--format=%(taggerdate:unix)',
+                'v0.1.0'], public)) == 1791821482
+assert not (public / 'Cargo.lock').exists(), 'public cut must omit Cargo.lock'
+run(['meson', 'setup', 'build'], public)
+assert not (public / 'docs/public/README.md').exists()
+assert (public / 'README.md').read_bytes() == (source / 'README.md').read_bytes()
+readme = (public / 'README.md').read_text()
+for label in ('guide:publictools:superloop-tools', 'sec:publictools:build',
+              'sec:publictools:public-releases', 'sec:publictools:acknowledgements',
+              'sec:publictools:licensing'):
+    assert readme.count(label) == 1, 'one README mint per label: ' + label
+run([args.linter, 'check', '--root', '.'], public)
+run(['cargo', 'build', '--workspace', '--bins', '--tests', '--target-dir', public / 'target'], public)
+run(['git', '-c', 'tag.gpgsign=false', 'tag', '-f', 'cut-acceptance'], public)
+commit = run(['git', 'rev-parse', 'HEAD'], public)
+tar = fixture / 'public.tar'
+run(['git', 'archive', 'cut-acceptance', '--format=tar', '--output', tar], public)
+archive.mkdir(exist_ok=True)
+for stale in archive.iterdir():
+    if stale.name != 'build':
+        if stale.is_dir() and not stale.is_symlink():
+            shutil.rmtree(stale)
+        else:
+            stale.unlink()
+with tarfile.open(tar) as contents:
+    contents.extractall(archive, filter='data')
+assert not (archive / 'Cargo.lock').exists(), 'public archive must omit Cargo.lock'
+reconfigure = ['--reconfigure'] if (archive / 'build/meson-private/coredata.dat').exists() else []
+run(['meson', 'setup', *reconfigure, 'build', '-Dtools_source_commit=' + commit], archive)
+print(json.dumps({'acceptance': 'cut-tree', 'wall': time.monotonic() - started}), flush=True)

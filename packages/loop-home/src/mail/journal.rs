@@ -38,6 +38,8 @@ const ZERO_DIGEST: &str = "00000000000000000000000000000000000000000000000000000
 /// Transport error without letter contents.
 #[derive(Debug)]
 pub enum MailError {
+    /// Named namespace-entry or capability failure, without payload bytes.
+    Entry(String),
     /// Unsafe, malformed or inconsistent transport state.
     Invalid(&'static str),
     /// Named backing filesystem failure.
@@ -52,6 +54,7 @@ pub type Result<T> = std::result::Result<T, MailError>;
 impl fmt::Display for MailError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Entry(reason) => f.write_str(reason),
             Self::Invalid(reason) => f.write_str(reason),
             Self::Io(error) => write!(f, "io-failure: {error}"),
             Self::Capacity => f.write_str("service-capacity"),
@@ -663,6 +666,11 @@ impl Journal {
         &self.root
     }
 
+    /// Last reserved instant, observed without changing the clock watermark.
+    pub(super) const fn greatest_reserved(&self) -> Option<&Instant> {
+        self.state.greatest_reserved.as_ref()
+    }
+
     /// Check actual UTC before preparing admission; the writer lock prevents races.
     ///
     /// # Errors
@@ -1004,6 +1012,7 @@ impl Journal {
         now: &Instant,
         project: impl FnOnce(&[Record]) -> Result<Pins>,
     ) -> Result<u64> {
+        let _span = tracing::debug_span!("mail.prune", now = %now).entered();
         let _admission = reservation_admission(&self.root)?;
         let live_reservations = self.reservation_pins()?;
         self.finish_compaction()?;
@@ -1013,6 +1022,7 @@ impl Journal {
             .as_ref()
             .is_some_and(|seen| now < seen)
         {
+            tracing::trace!(now = %now, greatest_observed = ?self.state.greatest_observed, "prune postponed: clock moved backward");
             return Ok(0);
         }
         let mut observed = self.state.clone();
@@ -1022,6 +1032,7 @@ impl Journal {
         let mut removed = 0;
         let records = self.records()?;
         let pins = project(&records)?;
+        let examined = records.len();
         for record in records {
             let Some(completed) = &record.completed else {
                 continue;
@@ -1067,6 +1078,24 @@ impl Journal {
             self.finish_compaction()?;
             removed += 1;
         }
+        if removed > 0 {
+            tracing::info!(
+                examined,
+                removed,
+                retained = examined as u64 - removed,
+                reservations = live_reservations.len(),
+                active_inboxes = pins.active_inboxes.len(),
+                "journal pruned"
+            );
+        } else {
+            tracing::trace!(
+                examined,
+                removed,
+                reservations = live_reservations.len(),
+                active_inboxes = pins.active_inboxes.len(),
+                "journal prune unchanged"
+            );
+        }
         Ok(removed)
     }
 }
@@ -1076,6 +1105,59 @@ impl Journal {
 fn reservation_admission(root: &File) -> Result<Flock<File>> {
     Flock::lock(store::open(root, ".", true)?, FlockArg::LockExclusive)
         .map_err(|(_, error)| MailError::from(error))
+}
+
+/// Admit a reservation binding through a receiver-validated journal capability.
+///
+/// The service identity opens only the held directory, never its absolute path.
+/// The existing compaction admission lock and delivery validation remain shared
+/// with pathname callers; this does not acquire the service's writer lock.
+/// # Errors
+/// Refuses changed anchor custody, unsafe journal storage or invalid delivery evidence.
+pub fn bind_reservation_beneath<T>(
+    anchor: &crate::anchor::Anchor,
+    family: &str,
+    reference: &str,
+    instant: &Instant,
+    verify: impl FnOnce(&Record) -> Result<T>,
+) -> Result<T> {
+    reservation_binding(
+        &reservation_root_beneath(anchor)?,
+        family,
+        reference,
+        instant,
+        false,
+        Some(anchor),
+        verify,
+    )
+}
+
+/// Verify an existing reservation pin through the received journal capability.
+///
+/// Verification creates or replaces no journal evidence.
+/// # Errors
+/// Refuses changed anchor custody, unsafe storage, an absent pin or invalid evidence.
+pub fn verify_reservation_beneath<T>(
+    anchor: &crate::anchor::Anchor,
+    family: &str,
+    reference: &str,
+    instant: &Instant,
+    verify: impl FnOnce(&Record) -> Result<T>,
+) -> Result<T> {
+    reservation_binding(
+        &reservation_root_beneath(anchor)?,
+        family,
+        reference,
+        instant,
+        true,
+        Some(anchor),
+        verify,
+    )
+}
+
+fn reservation_root_beneath(anchor: &crate::anchor::Anchor) -> Result<File> {
+    let (_, descriptor) = anchor.relay()?;
+    store::open(&File::from(descriptor), ".", true)
 }
 
 /// Verify a terminal delivery and durably pin it before exposing its binding.
@@ -1092,7 +1174,7 @@ pub fn bind_reservation<T>(
     instant: &Instant,
     verify: impl FnOnce(&Record) -> Result<T>,
 ) -> Result<T> {
-    reservation_binding(root, family, reference, instant, false, verify)
+    reservation_binding(root, family, reference, instant, false, None, verify)
 }
 
 /// Verify an existing delivery pin without creating or replacing any evidence.
@@ -1106,7 +1188,7 @@ pub fn verify_reservation<T>(
     instant: &Instant,
     verify: impl FnOnce(&Record) -> Result<T>,
 ) -> Result<T> {
-    reservation_binding(root, family, reference, instant, true, verify)
+    reservation_binding(root, family, reference, instant, true, None, verify)
 }
 
 fn reservation_binding<T>(
@@ -1115,10 +1197,19 @@ fn reservation_binding<T>(
     reference: &str,
     instant: &Instant,
     verify_only: bool,
+    custody: Option<&crate::anchor::Anchor>,
     verify: impl FnOnce(&Record) -> Result<T>,
 ) -> Result<T> {
     store::private(root, true)?;
     let _admission = reservation_admission(root)?;
+    // Revalidation postdates the wait and precedes every delivery/pin read. The
+    // anchor enforces the received exact policy; store::private above additionally
+    // requires the current service identity and no group access (the anchor
+    // permits preserved search/read ACLs). Repeat that stricter store check too.
+    if let Some(anchor) = custody {
+        anchor.revalidate()?;
+        store::private(root, true)?;
+    }
     let checkpoint: Checkpoint = store::read(root, "checkpoint.toml", SUMMARY_MAX_BYTES)?;
     if family.is_empty()
         || reference.is_empty()
@@ -1212,3 +1303,9 @@ thread_local! { static CRASH_AFTER_CHECKPOINT: std::cell::Cell<bool> = const { s
 #[cfg(test)]
 #[path = "journal_tests.rs"]
 mod tests;
+
+impl From<crate::anchor::Error> for MailError {
+    fn from(error: crate::anchor::Error) -> Self {
+        Self::Entry(error.to_string())
+    }
+}

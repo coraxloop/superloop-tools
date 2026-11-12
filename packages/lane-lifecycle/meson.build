@@ -1,4 +1,5 @@
 pkg_lane_lifecycle_rust = files(
+  'src/dead_pid.rs',
   'src/execution_settings.rs',
   'src/lib.rs',
   'src/observation.rs',

@@ -858,19 +858,18 @@ fn retire_mail_identity(owner_home: &Path, record: &Value) -> Result<Option<Valu
     let owner = Uid::effective().as_raw();
     crate::pinned::owner_executable(Path::new(runtime), owner)?;
     let executable = crate::pinned::owner_executable_word(&executable, owner)?;
-    build::run_checked(
-        Path::new(runtime),
-        vec![
-            "unshare".into(),
-            executable,
-            "_mail-worker-birth".into(),
-            crate::pinned::path_word(owner_home, "owner-home")?,
-            loop_name.into(),
-            "retire".into(),
-            identity.name.clone(),
-            identity.uid.to_string(),
-            identity.reservation.clone(),
-        ],
+    let request = loop_home::mail::worker_provision::anchored_command(
+        owner_home,
+        loop_name,
+        &identity,
+        "_mail-worker-birth",
+        "retire",
+        Path::new(&executable),
+        &[runtime.into(), "unshare".into()],
+    )
+    .map_err(|error| LaneError::operation("mail-birth", error.to_string()))?;
+    build::run_checked_command(
+        &request,
         &launch_environment(owner_home)?,
         owner_home,
         30,
@@ -1685,6 +1684,27 @@ mod tests {
         (fixture, root, request)
     }
 
+    fn mail_retirement_fixture(home: &Path) {
+        fs::write(
+            home.join(".config/loops/allocations.toml"),
+            "mail_uid=45000\n[alpha]\nuids={base=3000,count=2}\nmail_gids={base=45001,count=3}\n",
+        )
+        .expect("mail grants");
+        for (relative, mode) in [
+            (".var", 0o711),
+            (".var/loops", 0o711),
+            (".var/loops/alpha", 0o711),
+            (".var/loops/alpha/private", 0o700),
+            (".var/loops/.mail-service", 0o700),
+        ] {
+            let path = home.join(relative);
+            fs::create_dir_all(&path).expect("mail custody directory");
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("mail custody mode");
+        }
+    }
+
+    /// # Panics
+    /// Panics if the protected retirement fixture or its descriptor handoff fails.
     /// ´test:unit:ordinary-retirement-admits-measured-never-started-preparation´
     #[test]
     fn ordinary_retirement_admits_measured_never_started_preparation() {
@@ -1715,10 +1735,11 @@ mod tests {
             return;
         }
         let (fixture, root, mut request) = public_fixture();
+        mail_retirement_fixture(fixture.path());
         let runtime = fixture.path().join("container-fixture");
         crate::fixture_exec::write_executable(
             &runtime,
-            b"#!/bin/sh\n[ \"$1\" = ps ] && exit 0\n[ \"$1\" = unshare ] && [ \"$3\" = _mail-worker-birth ] && [ \"$5\" = alpha ] && [ \"$6\" = retire ] && [ \"$7\" = worker-3000 ] && [ \"$8\" = 3000 ] && [ \"$9\" = superloop-lane:3000 ] || exit 9\nexit 0\n",
+            b"#!/bin/sh\n[ \"$1\" = ps ] && exit 0\n[ \"$1\" = unshare ] && [ \"$3\" = _mail-worker-birth ] && [ \"$5\" = alpha ] && [ \"$6\" = retire ] && [ \"$7\" = worker-3000 ] && [ \"$8\" = 3000 ] && [ \"$9\" = superloop-lane:3000 ] && [ \"${10}\" = --anchor-manifest ] && [ -S /proc/self/fd/0 ] || exit 9\nexit 0\n",
         )
         .expect("absent container");
         let mut record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"imports":[],"harvest_agreement":null,"collection":null,"plan":{"home":fixture.path().join(".cache/tmp/lane-alpha-R"),"driver_dir":root.join("R"),"runtime_argv":[runtime]},"launcher_pid":u32::MAX,"launcher_start":1,"observer_state":"not-started","helper_spawn_state":"not-started","probe_starts":[]});
@@ -2056,7 +2077,7 @@ mod tests {
         let lease = root.join(".prepare-R.lock");
         fs::write(&lease, "").expect("lease");
         fs::set_permissions(&lease, fs::Permissions::from_mode(0o600)).expect("lease mode");
-        let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"imports":[],"harvest_agreement":null,"collection":null,"plan":{"home":fixture.path().join(".cache/tmp/lane-alpha-R"),"driver_dir":root.join("R"),"runtime_argv":["/usr/bin/true"]},"launcher_pid":321,"launcher_start":88,"observer_state":"failed","observer_end":{"state":"uncertain","socket":{"state":"uncertain"}},"settlement_uncertain":false,"pre_driver_failure":"proxy-start","driver_end":{"state":"not-started"},"helper_end":{"state":"not-started"},"helper_spawn_state":"not-started"});
+        let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"imports":[],"harvest_agreement":null,"collection":null,"plan":{"home":fixture.path().join(".cache/tmp/lane-alpha-R"),"driver_dir":root.join("R"),"runtime_argv":["/usr/bin/true"]},"launcher_pid":crate::dead_pid::DEAD_LOCK_PID,"launcher_start":88,"observer_state":"failed","observer_end":{"state":"uncertain","socket":{"state":"uncertain"}},"settlement_uncertain":false,"pre_driver_failure":"proxy-start","driver_end":{"state":"not-started"},"helper_end":{"state":"not-started"},"helper_spawn_state":"not-started"});
         let reservation = reservation_path(&root, "R");
         publish_reservation(&reservation, &record).expect("reservation");
         let error = run(fixture.path(), &request).expect_err("unidentified observer");

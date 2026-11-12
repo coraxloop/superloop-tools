@@ -1,3 +1,9 @@
+// Format captured from the production entry in kranich round j01, 2026-11-07.
+// The package version follows the workspace; interface 1 remains the recorded form.
+#[cfg(test)]
+pub const ENTRY_INTERFACE_PROBE: &str =
+    concat!("superloop-driver-entry ", env!("CARGO_PKG_VERSION"), " 1");
+
 use std::io;
 use std::process::{Child, Command};
 

@@ -18,6 +18,7 @@ name = "superloop-chat-export"
 path = "src/main.rs"
 
 [dependencies]
+tracing = { workspace = true }
 superloop-cli-common.workspace = true
 clap = { workspace = true }
 minijinja = { workspace = true }

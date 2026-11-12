@@ -915,3 +915,36 @@ allowances = []
 
 [SUPERLOOP."profile.tests-conform"]
 allowances = []
+
+[SUPERLOOPCAPTUREADMIT."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPCAPTUREADMIT."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPCAPTUREADMIT."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPCAPTUREADMIT."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPCAPTUREADMIT."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPCAPTUREADMIT."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPCAPTUREADMIT."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPCAPTUREADMIT."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPCAPTUREADMIT."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPCAPTUREADMIT."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPCAPTUREADMIT."profile.tests-conform"]
+allowances = []

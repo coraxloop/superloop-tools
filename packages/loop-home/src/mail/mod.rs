@@ -15,6 +15,7 @@ pub mod acl;
 pub mod command;
 pub mod configuration;
 mod directory;
+mod entry_anchors;
 mod io;
 mod refusal;
 mod service;
@@ -26,6 +27,7 @@ pub mod birth;
 
 pub mod worker_provision;
 
+pub mod reply_entry;
 pub mod steering;
 
 pub mod migration;
@@ -45,3 +47,5 @@ pub mod migration_inventory;
 pub mod migration_control;
 
 pub mod migration_cutover;
+
+mod worker_anchors;

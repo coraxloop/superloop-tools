@@ -7,8 +7,8 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`missing_import_names_the_searched_owner_and_prefix`] | check | Missing imported labels name the searched registry; local misses keep their wording. # Panics Panics only if the fixture prefix is invalid or resolution violates its contract. |
-//! | [`resolves_only_live_unpublished_addresses`] | check | Unpublished addresses resolve without inventing document mints, while unused entries fail. # Panics Panics only if the fixture register fails to parse or resolution violates its contract. |
+//! | [`missing_import_names_the_searched_owner_and_prefix`] | check | Missing imported labels name the searched registry; local misses keep their wording. |
+//! | [`resolves_only_live_unpublished_addresses`] | check | Unpublished addresses resolve without inventing document mints, while unused entries fail. |
 //! | [`resolves_a_mint_and_its_citation`] | check | The ordinary case is clean: a head mints, a sentence below cites it, the citation resolves, and the pair becomes an edge of the reference graph. A document may refer to what it has just established. |
 //! | [`resolves_across_files_in_either_traversal_order`] | check | The order the corpus is read in decides nothing: a citation in one file of a mint in another resolves whichever file is visited first, and both orders yield the same counts. Resolution is staged rather than sequential, so no document need be written before another. |
 //! | [`duplicate_mints_fail_with_both_locations`] | check | A statement is minted once: minting it in two documents fails with both locations named, and only one mint is counted. An author is shown the pair to reconcile rather than told that a name is unavailable. |

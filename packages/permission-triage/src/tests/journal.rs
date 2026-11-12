@@ -1510,3 +1510,101 @@ fn registered_journal_read_rejects_a_foreign_owner() {
     }
     assert_eq!(fs::read_dir(root).expect("unchanged root").count(), 0);
 }
+
+/// ´test:crate:owner-door-rewrite-preserves-permission-and-supervisory-state´
+#[test]
+fn owner_door_rewrite_preserves_permission_and_supervisory_state() {
+    let (directory, _, _) = fixture_with_escalation("door-rewrite");
+    let journal =
+        Journal::from_registered_root(&directory.state_root(), Scope::Loop).expect("journal");
+    let id = "d".repeat(64);
+    let door = request_core::Request::filed(
+        id.clone(),
+        "door-after-effect".into(),
+        json!({"source_id":"R:1a","record":{"id":"R:1a","schema":4}}),
+        "worker".into(),
+        "R".into(),
+        1,
+    );
+    let mut seed = json!({"schema":1,"records":[door],"document":{"schema":1,"items":[{"id":id,"mark_for_review":true}]},"id":null,"pending":false,"now_ns":100,"expected":null,"publication":null});
+    let preview = journal
+        .owner_transaction(
+            &crate::CallerRole::Unknown,
+            "triage",
+            &serde_json::to_vec(&seed).expect("seed"),
+            false,
+        )
+        .expect("seed preview");
+    seed["expected"] = preview["before"].clone();
+    let saved = journal
+        .owner_transaction(
+            &crate::CallerRole::Unknown,
+            "triage",
+            &serde_json::to_vec(&seed).expect("seed"),
+            true,
+        )
+        .expect("seed commit")["collection"]
+        .clone();
+    let before = journal.read().expect("bytes");
+    let mut input = json!({"schema":1,"records":[],"document":null,"id":null,"pending":false,"now_ns":100,"expected":null,"publication":null});
+    let preview = journal
+        .owner_transaction(
+            &crate::CallerRole::Unknown,
+            "rewrite-door",
+            &serde_json::to_vec(&input).expect("input"),
+            false,
+        )
+        .expect("preview");
+    assert_eq!(journal.read().expect("preview bytes"), before);
+    let mut target = preview["collection"].clone();
+    let row = target["requests"]
+        .as_array_mut()
+        .expect("rows")
+        .iter_mut()
+        .find(|row| row["id"] == id)
+        .expect("door");
+    row["body"]["record"]["schema"] = json!(5);
+    row["body"]["record"]["agent_observations"] = Value::Null;
+    input["expected"] = saved;
+    input["publication"] = target.clone();
+    for kind in ["door-after-effect", "permission-case"] {
+        let mut bad = input.clone();
+        let row = bad["publication"]["requests"]
+            .as_array_mut()
+            .expect("rows")
+            .iter_mut()
+            .find(|row| row["kind"] == kind)
+            .expect("kind");
+        row["worker"] = json!("changed");
+        assert!(
+            journal
+                .owner_transaction(
+                    &crate::CallerRole::Unknown,
+                    "rewrite-door",
+                    &serde_json::to_vec(&bad).expect("bad"),
+                    true
+                )
+                .is_err()
+        );
+        assert_eq!(journal.read().expect("refused bytes"), before);
+    }
+    let result = journal
+        .owner_transaction(
+            &crate::CallerRole::Unknown,
+            "rewrite-door",
+            &serde_json::to_vec(&input).expect("input"),
+            true,
+        )
+        .expect("commit");
+    assert_eq!(result["collection"], target);
+    let refusal = journal
+        .owner_transaction(
+            &crate::CallerRole::Unknown,
+            "rewrite-door",
+            &serde_json::to_vec(&input).expect("stale"),
+            true,
+        )
+        .expect_err("stale helper preimage");
+    assert_eq!(refusal.class, "requests-conflict");
+    assert_eq!(refusal.detail, "preview preimage changed");
+}

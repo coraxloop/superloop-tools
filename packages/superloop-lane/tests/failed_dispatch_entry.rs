@@ -5,6 +5,9 @@ mod entry;
 
 use entry::retry_busy_entry;
 
+#[path = "../../lane-lifecycle/src/dead_pid.rs"]
+mod dead_pid;
+
 #[path = "support/registry_entry.rs"]
 mod registry_fixture;
 
@@ -62,7 +65,14 @@ fn fixture() -> Fixture {
     fs::set_permissions(&scratchpad, fs::Permissions::from_mode(0o700)).expect("scratchpad mode");
     let letter = scratchpad.join("first-letter");
     let observation = json!({"schema":1,"command":"observed-hosts","loop":"alpha","run":"R","mode":"observing","enforcing":false,"source":runs.join(".observed-R.txt"),"attempted_connect_hosts":{"api.example.com":true,"failed.example.com":false},"connected_hosts":["api.example.com"]});
-    executable(&entry, "#!/bin/sh\nexit 0\n");
+    // Captured production interface query, kranich round j01, 2026-11-07.
+    executable(
+        &entry,
+        &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'driver-launch --interface-version' ]; then printf 'superloop-driver-entry {} 1\\n'; fi\nexit 0\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
     executable(
         &podman,
         &format!(
@@ -211,7 +221,7 @@ fn fixture() -> Fixture {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("retained mode");
     }
     let reservation = runs.join(".reservation-R.json");
-    let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":letter,"active_round":"dispatch","launcher_pid":4_000_000,"launcher_start":1,"driver_entry_pid":4_000_001,"driver_entry_start":1,"helper_pid":4_000_002,"helper_start":1,"helper_parent_pid":4_000_003,"helper_parent_start":1,"observer_state":"not-started","settlement_uncertain":false,"rounds":[{"step":"dispatch","phase":"failed","settlement_error":"settle-evidence: reply absent"}],"mail":[],"mail_replies":[],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture"}});
+    let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":letter,"active_round":"dispatch","launcher_pid":dead_pid::DEAD_LOCK_PID,"launcher_start":1,"driver_entry_pid":dead_pid::DEAD_LOCK_PID + 1,"driver_entry_start":1,"helper_pid":dead_pid::DEAD_LOCK_PID + 2,"helper_start":1,"helper_parent_pid":dead_pid::DEAD_LOCK_PID + 3,"helper_parent_start":1,"observer_state":"not-started","settlement_uncertain":false,"rounds":[{"step":"dispatch","phase":"failed","settlement_error":"settle-evidence: reply absent"}],"mail":[],"mail_replies":[],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture"}});
     fs::write(&reservation, serde_json::to_vec(&record).expect("JSON")).expect("reservation");
     fs::set_permissions(&reservation, fs::Permissions::from_mode(0o600)).expect("record mode");
     let mailbox = runs.join(".letter-R.lock");
@@ -327,10 +337,21 @@ impl ReportFixture {
         executable(
             &self.fixture.podman,
             &format!(
-                "#!/bin/sh\nif [ \"$1 $2\" = 'image inspect' ]; then printf '%s\\n' '{}'; exit 0; fi\nif [ \"$1\" = ps ]; then exit 0; fi\nif [ \"$1\" = unshare ]; then shift; exec env LD_PRELOAD='{}' REPORT_FIXTURE_PRIVATE=1 REPORT_FIXTURE_RUN='{}' {extra} \"$@\"; fi\nexit 9\n",
-                "a".repeat(64),
-                self.library.display(),
-                self.run.display()
+                concat!(
+                    "#!/bin/sh\n",
+                    "if [ \"$1 $2\" = 'image inspect' ]; then printf '%s\\n' '{image}'; exit 0; fi\n",
+                    "if [ \"$1\" = ps ]; then exit 0; fi\n",
+                    "if [ \"$1\" = unshare ]; then\n  shift\n",
+                    "  exec /usr/bin/env -u LD_PRELOAD -u REPORT_FIXTURE_PRIVATE \\\n",
+                    "    -u _CONTAINERS_USERNS_CONFIGURED -u _CONTAINERS_ROOTLESS_UID \\\n",
+                    "    /usr/bin/podman unshare /usr/bin/env LD_PRELOAD='{library}' \\\n",
+                    "    REPORT_FIXTURE_PRIVATE=1 REPORT_FIXTURE_RUN='{run}' {extra} \"$@\"\n",
+                    "fi\nexit 9\n"
+                ),
+                image = "a".repeat(64),
+                library = self.library.display(),
+                run = self.run.display(),
+                extra = extra,
             ),
         );
     }

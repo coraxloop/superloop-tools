@@ -13,6 +13,7 @@ tier = 2
 release-group = "runtime"
 
 [dependencies]
+tracing = { workspace = true }
 superloop-cli-common.workspace = true
 nix.workspace = true
 serde_json.workspace = true

@@ -218,7 +218,7 @@ impl Allocations {
             .map(Some)
     }
 
-    fn with_registry_uids(mut self, path: &Path) -> Result<Self, LoopError> {
+    fn with_registry_uids(self, path: &Path) -> Result<Self, LoopError> {
         let home = path
             .ancestors()
             .nth(3)
@@ -226,6 +226,14 @@ impl Allocations {
         let registry_path =
             crate::registry_path(std::env::var_os("ENTER_LOOP_REGISTRY").as_deref(), home);
         let registry = crate::load_registry(&registry_path)?;
+        self.with_registry(&registry, home)
+    }
+
+    pub(crate) fn with_registry(
+        mut self,
+        registry: &crate::registry::Registry,
+        home: &Path,
+    ) -> Result<Self, LoopError> {
         self.registry_uids = registry
             .rows(home)
             .into_iter()

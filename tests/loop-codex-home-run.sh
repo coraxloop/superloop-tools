@@ -154,16 +154,6 @@ cat > "$REGISTRY" <<EOF
 EOF
 
 start=$(date +%s%N)
-set +e
-(cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha > "$TEST_ROOT/no-nodes.out" 2> "$TEST_ROOT/no-nodes.err")
-status=$?
-set -e
-[[ $status -eq 2 ]] || fail "missing nodes exit was $status"
-expect_line "$TEST_ROOT/no-nodes.err" 'superloop-lane signin-home: cannot resolve nodes; supply --nodes' "missing nodes reason"
-[[ ! -e $FAKE_HOME/.config/loops/alpha/codex ]] || fail "missing nodes created home"
-pass "missing node pair refuses by name" "$start"
-
-start=$(date +%s%N)
 for invalid_nodes in 'node-a,node-a' 'Node-a,node-b' 'node a,node-b' '' ',node-a' 'node-a,' 'node-a,,node-b' 'node-a,node-b,node-a' $'node-a\nnode-b'; do
   set +e
   (cd "$OUTSIDE" && HOME=$FAKE_HOME "$SCRIPT" alpha --nodes "$invalid_nodes" > "$TEST_ROOT/invalid-nodes.out" 2> "$TEST_ROOT/invalid-nodes.err")
@@ -182,10 +172,10 @@ set +e
 status=$?
 set -e
 [[ $status -eq 1 ]] || fail "verification without nodes exit was $status"
-expect_line "$TEST_ROOT/verify-no-nodes.out" "{\"loop\":\"alpha\",\"home\":\"$FAKE_HOME/.config/loops/alpha/codex\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"nodes\",\"hosts\",\"user\",\"key\"],\"varied\":[],\"varied_lines\":[]}" "verification without nodes JSON"
+expect_line "$TEST_ROOT/verify-no-nodes.out" "{\"loop\":\"alpha\",\"home\":\"$FAKE_HOME/.config/loops/alpha/codex\",\"charter\":\"$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md\",\"ok\":false,\"missing\":[\"home\"],\"varied\":[],\"varied_lines\":[]}" "verification without nodes JSON"
 [[ ! -s $TEST_ROOT/verify-no-nodes.err ]] || fail "verification without nodes wrote stderr"
 [[ ! -e $FAKE_HOME/.config/loops/alpha/codex ]] || fail "verification without nodes created home"
-pass "verification without nodes reports missing nodes" "$start"
+pass "verification without nodes reports the absent home" "$start"
 
 start=$(date +%s%N)
 charter=$FAKE_HOME/.local/share/orchestration-instance/docs/tools/worker-charter.md

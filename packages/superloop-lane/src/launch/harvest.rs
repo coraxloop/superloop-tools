@@ -1,6 +1,7 @@
 //! Compare a preserved lane object with gate evidence before collecting its disposable home.
 
 use super::*;
+use crate::settings::BoxBackend;
 use nix::unistd::{UnlinkatFlags, unlinkat};
 
 const MAX_PRESERVED_ENTRIES: usize = 8192;
@@ -44,6 +45,55 @@ pub fn private_harvest_argv(
         argv.push("--dry-run".into());
     }
     Ok(argv)
+}
+
+pub(crate) fn parse_private_argv(
+    args: &[String],
+) -> Result<(HarvestRequest, &Path, bool), LaneError> {
+    let [
+        kind,
+        loop_name,
+        run,
+        object_flag,
+        object,
+        home_flag,
+        owner_home,
+        rest @ ..,
+    ] = args
+    else {
+        return Err(LaneError::input(
+            "harvest-private",
+            "private harvest form is incomplete",
+        ));
+    };
+    if (kind != "_harvest" && kind != "_harvest-recover")
+        || object_flag != "--gate-object"
+        || home_flag != "--owner-home"
+    {
+        return Err(LaneError::input(
+            "harvest-private",
+            "private harvest form is invalid",
+        ));
+    }
+    let mut words = vec![
+        loop_name.clone(),
+        run.clone(),
+        object_flag.clone(),
+        object.clone(),
+    ];
+    if rest == ["--dry-run"] {
+        words.push("--dry-run".into());
+    } else if !rest.is_empty() {
+        return Err(LaneError::input(
+            "harvest-private",
+            "private harvest form is invalid",
+        ));
+    }
+    Ok((
+        HarvestRequest::parse(&words)?,
+        Path::new(owner_home),
+        kind == "_harvest-recover",
+    ))
 }
 
 fn valid_object(object: &str) -> bool {
@@ -315,13 +365,29 @@ pub fn run(owner_home: &Path, request: &HarvestRequest) -> Result<Value, LaneErr
         .runs_root
         .as_deref()
         .ok_or_else(|| LaneError::input("harvest-grant", "runs_root is absent"))?;
+    let owner = Uid::effective().as_raw();
+    let home_fd = home::verify_host_prefix_from(Path::new("/"), owner_home, owner, 0)?;
+    let runs_fd = home::verify_host_launch_root(Path::new("/"), owner_home, root, owner, 0)?;
+    run_with_custody(owner_home, request, &plan, root, &home_fd, &runs_fd)
+}
+
+fn run_with_custody(
+    owner_home: &Path,
+    request: &HarvestRequest,
+    plan: &Plan,
+    root: &Path,
+    home_fd: &OwnedFd,
+    runs_fd: &OwnedFd,
+) -> Result<Value, LaneError> {
+    let owner = Uid::effective().as_raw();
+    let record = checkout::read_record(runs_fd, &request.run, owner)
+        .map_err(|error| LaneError::input("harvest-record", error.line()))?;
+    settled_reservation(&record, plan, &request.loop_name, &request.run)?;
+    BoxBackend::from_plan(&record["plan"])?.require_runtime()?;
     let program = plan.document["runtime_argv"][0]
         .as_str()
         .ok_or_else(|| LaneError::input("harvest-record", "container program is absent"))?;
-    let owner = Uid::effective().as_raw();
     crate::pinned::owner_executable(Path::new(program), owner)?;
-    let home_fd = home::verify_host_prefix_from(Path::new("/"), owner_home, owner, 0)?;
-    let runs_fd = home::verify_host_launch_root(Path::new("/"), owner_home, root, owner, 0)?;
     let exe = std::env::current_exe()
         .map_err(|error| LaneError::operation("harvest-program", error.to_string()))?;
     crate::pinned::owner_executable(&exe, owner)?;
@@ -341,9 +407,9 @@ pub fn run(owner_home: &Path, request: &HarvestRequest) -> Result<Value, LaneErr
         owner_home,
         300,
         "harvest-private",
-        &home_fd,
+        home_fd,
         root,
-        &runs_fd,
+        runs_fd,
         None,
     );
     let output = output.map_err(|error| {
@@ -355,9 +421,9 @@ pub fn run(owner_home: &Path, request: &HarvestRequest) -> Result<Value, LaneErr
                 owner_home,
                 300,
                 "harvest-recovery",
-                &home_fd,
+                home_fd,
                 root,
-                &runs_fd,
+                runs_fd,
                 None,
             );
             if let Err(recovery_error) = recovered {
@@ -432,7 +498,9 @@ fn stat_entry(
 
 /// These worker-owned roots are inventoried for removal but not read as harvest evidence.
 fn collected_only(relative: &Path) -> bool {
-    relative.starts_with(".codex") || relative.starts_with(".cache")
+    relative.starts_with(".codex")
+        || relative.starts_with(".claude")
+        || relative.starts_with(".cache")
 }
 
 fn valid_writable_collected_first(collection: &Value) -> bool {
@@ -479,6 +547,8 @@ fn owner_map(
     owner: u32,
     worker: u32,
 ) -> Result<BTreeMap<PathBuf, u32>, LaneError> {
+    let backend = crate::settings::BoxBackend::from_plan(&record["plan"])?;
+    let state = backend.state_leaf();
     let rows = record["plan"]["paths"]
         .as_array()
         .ok_or_else(|| LaneError::input("harvest-plan", "plan paths are absent"))?;
@@ -488,6 +558,15 @@ fn owner_map(
             .as_str()
             .ok_or_else(|| LaneError::input("harvest-plan", "plan path is absent"))?;
         if let Ok(relative) = Path::new(name).strip_prefix(home) {
+            if [".codex", ".claude"]
+                .into_iter()
+                .any(|root| root != state && relative.starts_with(root))
+            {
+                return Err(LaneError::input(
+                    "harvest-plan",
+                    "vendor state differs from the protected backend",
+                ));
+            }
             let uid = row["uid"]
                 .as_u64()
                 .and_then(|value| u32::try_from(value).ok())
@@ -507,7 +586,7 @@ fn owner_map(
             "home owner is absent from plan",
         ));
     }
-    for root in [".codex", ".cache"] {
+    for root in [state, ".cache"] {
         if owners.get(Path::new(root)) != Some(&worker) {
             return Err(LaneError::input(
                 "harvest-plan",
@@ -524,6 +603,7 @@ fn planned_uid(relative: &Path, owners: &BTreeMap<PathBuf, u32>) -> Result<u32, 
     }
     for root in [
         ".codex",
+        ".claude",
         ".cache",
         ".local/outbox",
         ".local/sources",
@@ -544,7 +624,15 @@ fn planned_uid(relative: &Path, owners: &BTreeMap<PathBuf, u32>) -> Result<u32, 
 fn fixed_child(relative: &Path) -> bool {
     let word = relative.to_string_lossy();
     if relative.components().count() == 1 {
-        return [".ssh", ".gitconfig", ".codex", ".cache", ".local"].contains(&word.as_ref());
+        return [
+            ".ssh",
+            ".gitconfig",
+            ".codex",
+            ".claude",
+            ".cache",
+            ".local",
+        ]
+        .contains(&word.as_ref());
     }
     if relative.components().count() == 2 && word.starts_with(".local/") {
         return [
@@ -1214,8 +1302,7 @@ pub fn private_recover(owner_home: &Path, request: &HarvestRequest) -> Result<Va
             "rootless namespace root is required",
         ));
     }
-    let (plan, settings) =
-        crate::load_plan_for_record(owner_home, &request.loop_name, &request.run, (0, 0))?;
+    let (plan, settings) = private_inputs(owner_home, request)?;
     let root = settings
         .runs_root
         .as_deref()
@@ -1226,6 +1313,7 @@ pub fn private_recover(owner_home: &Path, request: &HarvestRequest) -> Result<Va
     let mut record = checkout::read_record(&root_fd, &request.run, owner)
         .map_err(|error| LaneError::input("harvest-record", error.line()))?;
     settled_reservation(&record, &plan, &request.loop_name, &request.run)?;
+    BoxBackend::from_plan(&record["plan"])?.require_runtime()?;
     let (agreement, collection) = harvest_fields(&record)?;
     let Some(collection) = collection.filter(|collection| collection["state"] == "removing") else {
         return Ok(
@@ -1348,6 +1436,7 @@ pub fn private_run(owner_home: &Path, request: &HarvestRequest) -> Result<Value,
     let mut record = checkout::read_record(&root_fd, &request.run, owner)
         .map_err(|error| LaneError::input("harvest-record", error.line()))?;
     settled_reservation(&record, &plan, &request.loop_name, &request.run)?;
+    BoxBackend::from_plan(&record["plan"])?.require_runtime()?;
     let (prior_agreement, prior_collection) = harvest_fields(&record)?;
     let (_, checkpoints, _) = checkpoint::checkpoint_fields(&record)?;
     let checkpoint = checkpoints
@@ -1579,6 +1668,7 @@ pub(crate) mod tests {
                     .expect("entry mode");
             }
         }
+        record["plan"]["backend"] = json!("codex");
         record["plan"]["home"] = json!(plan.home);
         record["plan"]["paths"] = json!([
             {"path":plan.home,"uid":owner,"gid":owner},
@@ -1656,6 +1746,370 @@ pub(crate) mod tests {
         }
     }
 
+    /// # Panics
+    /// Panics if the public route hides the backend refusal behind a child or recovery failure.
+    /// ´test:unit:harvest-public-preserves-the-backend-refusal´
+    #[test]
+    fn harvest_public_preserves_the_backend_refusal() {
+        for backend in [Some("claude"), None, Some("codex")] {
+            for dry_run in [false, true] {
+                let (fixture, settings, worker) = gated_harvest_fixture();
+                let root = settings.runs_root.as_deref().expect("runs");
+                let (plan, record) = gated_harvest_record(root, &worker, backend);
+                let reservation = super::super::reservation_path(root, "R");
+                super::super::publish_reservation(&reservation, &record).expect("record");
+                let before = fs::read(&reservation).expect("record bytes");
+                let identity = fs::metadata(&reservation).expect("identity").ino();
+                let home_fd = fs::File::open(fixture.path()).expect("fixture home").into();
+                let runs_fd = fs::File::open(root).expect("fixture runs").into();
+                let error = run_with_custody(
+                    fixture.path(),
+                    &gated_harvest_request(dry_run),
+                    &plan,
+                    root,
+                    &home_fd,
+                    &runs_fd,
+                )
+                .expect_err("no private child is reachable");
+                let expected = match backend {
+                    Some("claude") => BoxBackend::Claude.require_runtime().unwrap_err(),
+                    None => BoxBackend::from_plan(&record["plan"]).unwrap_err(),
+                    _ => LaneError::input("harvest-record", "container program is absent"),
+                };
+                assert_eq!(error.line(), expected.line());
+                assert_eq!(fs::read(&reservation).expect("unchanged"), before);
+                assert_eq!(
+                    fs::metadata(&reservation).expect("identity").ino(),
+                    identity
+                );
+                assert_eq!(
+                    fs::read(worker.join("retained")).expect("worker"),
+                    b"synthetic worker state"
+                );
+            }
+        }
+    }
+
+    /// # Panics
+    /// Panics if the recovery entry loses its independent gate in the rootless namespace.
+    /// ´test:unit:harvest-recovery-keeps-its-own-runtime-gate´
+    #[test]
+    fn harvest_recovery_keeps_its_own_runtime_gate() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        const MARKER: &str = "HARVEST-RECOVERY-GATE-MEASURED";
+        if std::env::var_os("SUPERLOOP_HARVEST_RECOVERY_PROOF").is_some() {
+            assert_eq!(Uid::effective().as_raw(), 0);
+            let _hash = receive_recovery_hash();
+            gated_namespace_recovery();
+            writeln!(std::io::stdout().lock(), "{MARKER}").expect("marker");
+            return;
+        }
+        let (manifest, input) = recovery_hash_handoff();
+        let mut child = Command::new("/usr/bin/podman")
+            .args(["unshare"])
+            .arg(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "launch::harvest::tests::harvest_recovery_keeps_its_own_runtime_gate",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_remove("_CONTAINERS_USERNS_CONFIGURED")
+            .env_remove("_CONTAINERS_ROOTLESS_UID")
+            .env("SUPERLOOP_HARVEST_RECOVERY_PROOF", "1")
+            .env("SUPERLOOP_RECOVERY_HASH_MANIFEST", manifest)
+            .stdin(Stdio::from(std::os::fd::OwnedFd::from(input)))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("namespace child");
+        let began = std::time::Instant::now();
+        while child.try_wait().expect("child status").is_none() {
+            if began.elapsed() > std::time::Duration::from_secs(60) {
+                drop(child.kill());
+                drop(child.wait());
+                panic!("recovery proof exceeded 60 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().expect("namespace result");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains(MARKER) && stdout.contains("1 passed"),
+            "{stdout}"
+        );
+    }
+
+    /// # Panics
+    /// Panics if the host cannot pin and transfer the recovery fixture's hashing executable.
+    fn recovery_hash_handoff() -> (String, std::os::unix::net::UnixStream) {
+        use loop_home::anchor::{HostVerifier, Manifest, Owner, Transport, transport};
+        let policy = crate::container_entry::executable_policy(Owner::RootFile);
+        let pin = HostVerifier::current()
+            .expect("host map")
+            .for_operation("harvest-recover")
+            .pin(
+                Path::new("/usr/bin/sha256sum"),
+                "hash-executable",
+                0,
+                policy,
+            )
+            .expect("host hashing pin");
+        let manifest = Manifest {
+            version: 1,
+            transport: Transport::Rights,
+            operation: "harvest-recover".into(),
+            loop_name: "alpha".into(),
+            records: vec![pin.record()],
+        };
+        let (sender, input) = std::os::unix::net::UnixStream::pair().expect("rights channel");
+        transport::send(&sender, &[pin.into_fd()]).expect("hash transfer");
+        (serde_json::to_string(&manifest).expect("manifest"), input)
+    }
+
+    /// # Panics
+    /// Panics if the namespace cannot validate the host's hashing capability.
+    fn receive_recovery_hash() -> crate::container_entry::ExecutableGuard {
+        use loop_home::anchor::{Manifest, Owner, Receiver, Requirement, Transport, transport};
+        use std::os::fd::AsFd as _;
+        let source = std::env::var("SUPERLOOP_RECOVERY_HASH_MANIFEST").expect("hash manifest");
+        let manifest = Manifest::parse(&source).expect("manifest");
+        let socket = std::os::unix::net::UnixStream::from(
+            std::io::stdin()
+                .as_fd()
+                .try_clone_to_owned()
+                .expect("rights input"),
+        );
+        let descriptors = transport::receive(&socket, 1, std::time::Duration::from_secs(30))
+            .expect("one hash descriptor");
+        transport::replace_stdin("harvest-recover").expect("null stdin");
+        let policy = crate::container_entry::executable_policy(Owner::RootFile);
+        let anchor = Receiver::current()
+            .expect("namespace map")
+            .validate(
+                &manifest,
+                descriptors,
+                "harvest-recover",
+                "alpha",
+                Transport::Rights,
+                &[Requirement {
+                    purpose: "hash-executable".into(),
+                    policy,
+                    alias_group: None,
+                }],
+            )
+            .expect("validated hash")
+            .pop()
+            .expect("hash capability");
+        crate::container_entry::activate_program_map(
+            "harvest-recover",
+            BTreeMap::from([(
+                PathBuf::from("/usr/bin/sha256sum"),
+                std::sync::Arc::new(anchor),
+            )]),
+        )
+    }
+
+    /// # Panics
+    /// Panics if a protected recovery record changes before backend admission.
+    fn gated_namespace_recovery() {
+        for backend in [Some("claude"), None, Some("codex")] {
+            let (fixture, settings, worker) = gated_harvest_fixture();
+            let root = settings.runs_root.as_deref().expect("runs");
+            let _custody = home::activate_private_launch(
+                fixture.path(),
+                &fs::File::open(fixture.path()).expect("home"),
+                root,
+                &fs::File::open(root).expect("runs"),
+                None,
+                0,
+            )
+            .expect("received roots");
+            let (plan, record) = gated_harvest_record(root, &worker, backend);
+            let reservation = super::super::reservation_path(root, "R");
+            super::super::publish_reservation(&reservation, &record).expect("record");
+            let before = fs::read(&reservation).expect("record bytes");
+            let identity = fs::metadata(&reservation).expect("identity").ino();
+            PRIVATE_RUN_FIXTURE.with(|slot| {
+                assert!(slot.borrow().is_none());
+                *slot.borrow_mut() = Some((plan, settings.clone()));
+            });
+            let result = private_recover(fixture.path(), &gated_harvest_request(false));
+            if backend == Some("codex") {
+                assert_eq!(result.expect("Codex recovery")["pending"], false);
+            } else {
+                let expected = BoxBackend::from_plan(&record["plan"])
+                    .and_then(BoxBackend::require_runtime)
+                    .unwrap_err();
+                assert_eq!(
+                    result.expect_err("protected backend").line(),
+                    expected.line()
+                );
+            }
+            assert_eq!(fs::read(&reservation).expect("unchanged"), before);
+            assert_eq!(
+                fs::metadata(&reservation).expect("identity").ino(),
+                identity
+            );
+            assert_eq!(
+                fs::read(worker.join("retained")).expect("worker"),
+                b"synthetic worker state"
+            );
+        }
+    }
+
+    fn gated_harvest_request(dry_run: bool) -> HarvestRequest {
+        HarvestRequest {
+            loop_name: "alpha".into(),
+            run: "R".into(),
+            gate_object: "a".repeat(40),
+            dry_run,
+        }
+    }
+
+    fn gated_harvest_record(root: &Path, worker: &Path, backend: Option<&str>) -> (Plan, Value) {
+        let mut document = json!({"home":worker,"driver_dir":root.join("R")});
+        if let Some(backend) = backend {
+            document["backend"] = backend.into();
+        }
+        let record = json!({"schema":1,"loop":"alpha","run":"R","phase":"settled",
+            "plan":document,"worker_uid":3000,"harvest_agreement":null,"collection":null,
+            "rounds":[{"step":"dispatch","phase":"settled","ended_by":"by-report"}],
+            "active_round":"dispatch"});
+        (
+            Plan {
+                home: worker.into(),
+                driver_dir: root.join("R"),
+                letter: worker.join("brief.txt"),
+                document,
+            },
+            record,
+        )
+    }
+
+    fn gated_harvest_fixture() -> (tempfile::TempDir, Settings, PathBuf) {
+        let fixture = tempfile::tempdir().expect("fixture under TMPDIR");
+        let root = fixture.path().join("runs");
+        let worker_home = fixture.path().join("worker");
+        for path in [fixture.path(), root.as_path(), worker_home.as_path()] {
+            std::fs::create_dir_all(path).expect("fixture directory");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .expect("directory mode");
+        }
+        let sentinel = worker_home.join("retained");
+        std::fs::write(&sentinel, b"synthetic worker state").expect("worker state");
+        for name in [".prepare-R.lock", ".letter-R.lock"] {
+            let path = root.join(name);
+            std::fs::write(&path, b"").expect("existing dry-run lock");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("lock mode");
+        }
+        let settings = Settings {
+            runs_root: Some(root),
+            backend_argv: BTreeMap::default(),
+            driver_argv: Vec::new(),
+            entry_bin: None,
+            driver_bin: None,
+            image_digest: None,
+            template_dir: None,
+            resources: None,
+            socket_dir: None,
+            vendor_hosts: BTreeMap::default(),
+            sandbox_mode: String::new(),
+            context_threshold: None,
+            retention: "keep".into(),
+            source: String::new(),
+        };
+        (fixture, settings, worker_home)
+    }
+
+    /// ´test:unit:harvest-private-refuses-claude-before-collection´
+    #[test]
+    fn harvest_private_refuses_claude_before_collection() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (fixture, settings, worker_home) = gated_harvest_fixture();
+        let root = settings.runs_root.as_deref().expect("runs root");
+        let reservation = super::super::reservation_path(root, "R");
+        let sentinel = worker_home.join("retained");
+        let sentinel_inode = std::fs::metadata(&sentinel)
+            .expect("sentinel metadata")
+            .ino();
+        for (backend, expected) in [
+            ("claude", "backend-unavailable"),
+            ("codex", "harvest-checkpoint"),
+        ] {
+            for dry_run in [false, true] {
+                let document = json!({
+                    "backend":backend,"home":worker_home,"driver_dir":root.join("R")
+                });
+                let record = json!({
+                    "schema":1,"loop":"alpha","run":"R","phase":"settled",
+                    "plan":document,"worker_uid":3000,
+                    "harvest_agreement":null,"collection":null,
+                    "rounds":[{"step":"dispatch","phase":"settled","ended_by":"by-report"}],
+                    "active_round":"dispatch"
+                });
+                super::super::publish_reservation(&reservation, &record).expect("reservation");
+                let before = std::fs::read(&reservation).expect("reservation bytes");
+                let inode = std::fs::metadata(&reservation)
+                    .expect("reservation metadata")
+                    .ino();
+                let plan = Plan {
+                    home: worker_home.clone(),
+                    driver_dir: root.join("R"),
+                    letter: worker_home.join("brief.txt"),
+                    document,
+                };
+                PRIVATE_RUN_FIXTURE.with(|slot| {
+                    assert!(slot.borrow().is_none());
+                    *slot.borrow_mut() = Some((plan, settings.clone()));
+                });
+                let request = HarvestRequest {
+                    loop_name: "alpha".into(),
+                    run: "R".into(),
+                    gate_object: "a".repeat(40),
+                    dry_run,
+                };
+                let refusal =
+                    private_run(fixture.path(), &request).expect_err("closed gate or control");
+                assert_eq!(refusal.kind, expected, "{}", refusal.line());
+                if backend == "claude" {
+                    assert_eq!(
+                        refusal.detail,
+                        BoxBackend::Claude.require_runtime().unwrap_err().detail
+                    );
+                }
+                assert_eq!(
+                    std::fs::read(&reservation).expect("reservation remains"),
+                    before
+                );
+                assert_eq!(
+                    std::fs::metadata(&reservation)
+                        .expect("same reservation")
+                        .ino(),
+                    inode
+                );
+                assert_eq!(
+                    std::fs::read(&sentinel).expect("worker remains"),
+                    b"synthetic worker state"
+                );
+                assert_eq!(
+                    std::fs::metadata(&sentinel)
+                        .expect("same worker state")
+                        .ino(),
+                    sentinel_inode
+                );
+            }
+        }
+    }
+
     /// ´test:unit:harvest-private-dry-run-verifies-unborn-copy´
     #[test]
     fn harvest_private_dry_run_verifies_unborn_copy() {
@@ -1677,6 +2131,7 @@ pub(crate) mod tests {
         plan.home = home_parent.join("lane-alpha-R");
         plan.document = serde_json::from_str(include_str!("../../tests/fixtures/plan.json"))
             .expect("fixture plan document");
+        record["plan"]["backend"] = json!("codex");
         record["plan"]["home"] = json!(plan.home);
         record["plan"]["paths"] = json!([
             {"path":plan.home,"uid":owner,"gid":owner},
@@ -2284,7 +2739,7 @@ pub(crate) mod tests {
     #[test]
     fn harvest_owner_class_comes_from_plan_and_unplanned_input_refuses() {
         let home = Path::new("~/lane-alpha-R");
-        let record = json!({"plan":{"paths":[{"path":home,"uid":41001},{"path":home.join(".codex"),"uid":3000},{"path":home.join(".cache"),"uid":3000},{"path":home.join(".local"),"uid":41001},{"path":home.join(".local/inbox"),"uid":41001},{"path":home.join(".local/outbox"),"uid":3000}]}});
+        let record = json!({"plan":{"backend":"codex","paths":[{"path":home,"uid":41001},{"path":home.join(".codex"),"uid":3000},{"path":home.join(".cache"),"uid":3000},{"path":home.join(".local"),"uid":41001},{"path":home.join(".local/inbox"),"uid":41001},{"path":home.join(".local/outbox"),"uid":3000}]}});
         let owners = owner_map(&record, home, 41001, 3000).expect("plan owners");
         assert_eq!(
             planned_uid(Path::new(".local/inbox/letter.md"), &owners).expect("inbox owner"),
@@ -2420,6 +2875,160 @@ pub(crate) mod tests {
             .expect_err("writable evidence walk")
             .kind,
             "harvest-path"
+        );
+    }
+    /// # Panics
+    /// Panics if harvest selects state from anything other than the protected backend.
+    /// ´test:unit:harvest-state-owner-is-bound-to-the-backend´
+    #[test]
+    fn harvest_state_owner_is_bound_to_the_backend() {
+        let home = Path::new("/fixture/home");
+        for (backend, state, foreign) in [
+            ("codex", ".codex", ".claude"),
+            ("claude", ".claude", ".codex"),
+        ] {
+            let mut record = json!({"plan":{"backend":backend,"paths":[
+                {"path":home,"uid":41001},{"path":home.join(state),"uid":3000},
+                {"path":home.join(".cache"),"uid":3000}]}});
+            let owners = owner_map(&record, home, 41001, 3000).expect("selected owners");
+            assert_eq!(
+                planned_uid(&Path::new(state).join("sessions/one"), &owners).expect("state child"),
+                3000
+            );
+            assert_eq!(
+                planned_uid(Path::new(foreign), &owners)
+                    .expect_err("unplanned vendor")
+                    .kind,
+                "harvest-plan"
+            );
+            record["plan"]["paths"][1]["path"] = json!(home.join(foreign));
+            let error = owner_map(&record, home, 41001, 3000).expect_err("foreign state row");
+            assert_eq!(error.kind, "harvest-plan");
+            assert_eq!(
+                error.detail,
+                "vendor state differs from the protected backend"
+            );
+            record["plan"]["paths"][1]["path"] = json!(home.join(state));
+            record["plan"]["paths"][1]["uid"] = json!(41001);
+            assert_eq!(
+                owner_map(&record, home, 41001, 3000)
+                    .expect_err("state not worker owned")
+                    .kind,
+                "harvest-plan"
+            );
+            record["plan"]["backend"] = Value::Null;
+            assert_eq!(
+                owner_map(&record, home, 41001, 3000)
+                    .expect_err("missing binding")
+                    .kind,
+                "backend-selection"
+            );
+        }
+    }
+
+    fn claude_harvest_fixture() -> (tempfile::TempDir, PathBuf, Value) {
+        let fixture = tempfile::tempdir().expect("private TMPDIR fixture");
+        let home = fixture.path().join("lane-alpha-R");
+        let uid = Uid::effective().as_raw();
+        let mut rows = Vec::new();
+        for relative in [
+            "",
+            ".claude",
+            ".claude/projects",
+            ".cache",
+            ".local",
+            ".local/outbox",
+        ] {
+            let path = home.join(relative);
+            std::fs::create_dir_all(&path).expect("home leaf");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("private leaf");
+            rows.push(json!({"path":path,"uid":uid}));
+        }
+        let authority = home.join(".claude/.credentials.json");
+        std::fs::write(&authority, b"synthetic unreadable authority").expect("synthetic state");
+        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o200))
+            .expect("unreadable file");
+        let session = home.join(".claude/projects/session.jsonl");
+        std::fs::write(&session, b"synthetic session\n").expect("session stand-in");
+        std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o664))
+            .expect("writable disposable state");
+        let reply = home.join(".local/outbox/reply.md");
+        std::fs::write(&reply, b"preserved reply\n").expect("reply");
+        std::fs::set_permissions(&reply, std::fs::Permissions::from_mode(0o600))
+            .expect("reply mode");
+        let outside = fixture.path().join("outside");
+        std::fs::write(&outside, b"outside sentinel").expect("outside file");
+        std::os::unix::fs::symlink(&outside, home.join(".claude/projects/link"))
+            .expect("worker symlink");
+        let record = json!({"plan":{"backend":"claude","paths":rows}});
+        (fixture, home, record)
+    }
+
+    /// # Panics
+    /// Panics if Claude state is read as evidence or cannot be removed and resumed safely.
+    /// ´test:unit:claude-harvest-inventories-state-without-preserving-it´
+    #[test]
+    fn claude_harvest_inventories_state_without_preserving_it() {
+        let (fixture, home, record) = claude_harvest_fixture();
+        let uid = Uid::effective().as_raw();
+        let authority = home.join(".claude/.credentials.json");
+        let reply = home.join(".local/outbox/reply.md");
+        let owners = owner_map(&record, &home, uid, uid).expect("protected Claude owners");
+        let held: OwnedFd = std::fs::File::open(&home).expect("home descriptor").into();
+        let parent: OwnedFd = std::fs::File::open(fixture.path())
+            .expect("parent descriptor")
+            .into();
+        let mut inventory = Inventory::default();
+        plan_entries(&held, Path::new(""), &owners, uid, &mut inventory, 0)
+            .expect("inventory without state reads");
+        assert_eq!(
+            inventory.preserved, 2,
+            "only outbox and reply are preserved"
+        );
+        assert_eq!(
+            inventory.preserved_contributors,
+            BTreeMap::from([(".local/outbox".into(), 2)])
+        );
+        let (planned, first) = planned_removals(&held, &owners, uid).expect("removal plan");
+        assert!(
+            planned
+                .iter()
+                .any(|path| path == ".claude/.credentials.json")
+        );
+        assert_eq!(first.as_deref(), Some(".claude/projects/link"));
+        std::fs::create_dir(home.join(".codex")).expect("foreign vendor directory");
+        assert_eq!(
+            planned_removals(&held, &owners, uid)
+                .expect_err("unplanned vendor directory")
+                .kind,
+            "harvest-plan"
+        );
+        std::fs::remove_dir(home.join(".codex")).expect("remove foreign directory");
+        let mut receipt = collection();
+        receipt["planned"] = json!(planned);
+        receipt["writable_collected_first"] = json!(first);
+        harvest_fields(&json!({"harvest_agreement":agreement(),"collection":receipt}))
+            .expect("Claude collection evidence");
+        for path in planned.iter().filter(|path| path.starts_with(".claude/")) {
+            remove_entry(&held, &parent, "lane-alpha-R", path, uid, uid, &owners)
+                .expect("state removal");
+        }
+        assert!(!authority.exists());
+        let (remaining, _) =
+            planned_removals(&held, &owners, uid).expect("resumed collection plan");
+        assert!(remaining.iter().any(|path| path == ".claude"));
+        assert!(!remaining.iter().any(|path| path.starts_with(".claude/")));
+        remove_entry(&held, &parent, "lane-alpha-R", ".claude", uid, uid, &owners)
+            .expect("state root removal");
+        assert!(!home.join(".claude").exists());
+        assert_eq!(
+            std::fs::read(fixture.path().join("outside")).expect("outside retained"),
+            b"outside sentinel"
+        );
+        assert_eq!(
+            std::fs::read(&reply).expect("preserved reply untouched"),
+            b"preserved reply\n"
         );
     }
 }

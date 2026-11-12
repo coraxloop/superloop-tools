@@ -1,5 +1,6 @@
-//! Owner-side authority for one loop's Codex access credentials.
+//! Owner-side credential authority and backend-specific worker encodings.
 
+use crate::settings::BoxBackend;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
@@ -17,8 +18,62 @@ use serde_json::{Value, json};
 use crate::error::LaneError;
 
 const AUTH_HOST: &str = "auth.openai.com";
-const AUTH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+pub(crate) const AUTH_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+#[cfg(test)]
+thread_local! {
+    static SERVICE_ENDPOINT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Select the fixed service endpoint, with a required isolated override in test builds.
+/// # Panics
+/// Panics in test builds if the spawning thread has not installed a fixture endpoint.
+pub(crate) fn service_endpoint() -> String {
+    #[cfg(test)]
+    {
+        SERVICE_ENDPOINT.with(|value| {
+            value
+                .borrow()
+                .clone()
+                .expect("service fixture endpoint is required")
+        })
+    }
+    #[cfg(not(test))]
+    AUTH_ENDPOINT.to_owned()
+}
+
+#[cfg(test)]
+pub(crate) struct ServiceEndpointGuard(Option<String>);
+#[cfg(test)]
+impl Drop for ServiceEndpointGuard {
+    fn drop(&mut self) {
+        SERVICE_ENDPOINT.with(|value| *value.borrow_mut() = self.0.take());
+    }
+}
+
+/// Serve one synthetic refresh response on loopback for the namespace service fixture.
+///
+/// # Panics
+/// Panics if the fixture listener or its request/response cannot be established.
+#[cfg(test)]
+pub(crate) fn fixture_refresh_endpoint(
+    response: Value,
+) -> (String, std::thread::JoinHandle<Value>) {
+    tests::fixture_endpoint("200 OK", response)
+}
+
+/// Override the spawning thread's service endpoint in a test build.
+#[cfg(test)]
+pub(crate) fn fixture_service_endpoint(endpoint: String) -> ServiceEndpointGuard {
+    ServiceEndpointGuard(SERVICE_ENDPOINT.with(|value| value.replace(Some(endpoint))))
+}
+
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+/// Complete SHA-256 of the program behind the loop's reviewed credential structure record.
+/// An executable supplier cannot select the independent record; bind all program bytes
+/// before authority access (´proto:superlooplane:claude-owner-program-binding´).
+pub(crate) const CLAUDE_SCHEMA_PROGRAM_SHA256: &str =
+    "708c77b204db30086ff6f1ed34577bda03e1be74ced80557cbf7b54249ebf0bd";
 const REFRESH_AHEAD: Duration = Duration::from_secs(10 * 60);
 const MAX_AUTH_BYTES: u64 = 65_536;
 const MAX_EVIDENCE_BYTES: u64 = 65_536;
@@ -48,11 +103,42 @@ fn now_seconds() -> Result<u64, LaneError> {
         .map_err(|error| failure("credential-clock", error.to_string()))
 }
 
+fn now_milliseconds() -> Result<u64, LaneError> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| failure("credential-clock", error.to_string()))?;
+    u64::try_from(elapsed.as_millis())
+        .map_err(|error| failure("credential-clock", error.to_string()))
+}
+
+fn credential_spawn_error(
+    program: &Path,
+    kind: &'static str,
+    message: &str,
+    error: &std::io::Error,
+) -> LaneError {
+    let held = crate::container_entry::spawn_error(program, kind, error);
+    if held.kind == "anchor-exec" {
+        held
+    } else {
+        failure(kind, message)
+    }
+}
+
 fn utc_timestamp() -> Result<String, LaneError> {
-    let output = Command::new("/usr/bin/date")
-        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-        .output()
-        .map_err(|_| failure("credential-clock", "UTC date program could not start"))?;
+    let program = Path::new("/usr/bin/date");
+    let argv = ["-u".into(), "+%Y-%m-%dT%H:%M:%SZ".into()];
+    let mut command = Command::new("/usr/bin/date");
+    command.args(&argv);
+    crate::container_entry::configure(&mut command, program, &argv, &std::env::vars().collect())?;
+    let output = command.output().map_err(|error| {
+        credential_spawn_error(
+            program,
+            "credential-clock",
+            "UTC date program could not start",
+            &error,
+        )
+    })?;
     if !output.status.success() {
         return Err(failure("credential-clock", "UTC date program failed"));
     }
@@ -377,12 +463,22 @@ fn open_dir(
 }
 
 fn read_source(owner_home: &Path, loop_name: &str) -> Result<Source, LaneError> {
-    let path = sign_in_dir(owner_home, loop_name);
+    let (document, stamp) = read_owner_document(&sign_in_dir(owner_home, loop_name), "auth.json")?;
+    let mut source = Source::parse(document)?;
+    source.stamp = Some(stamp);
+    Ok(source)
+}
+
+fn read_owner_document(path: &Path, filename: &str) -> Result<(Value, FileStamp), LaneError> {
     let owner = owner_identity().0;
-    let dir = open_dir(&path, owner, owner, 0o700)?;
+    let dir = open_dir(path, owner, owner, 0o700)?;
+    read_owner_file(&dir, filename)
+}
+
+fn read_owner_file(dir: &OwnedFd, filename: &str) -> Result<(Value, FileStamp), LaneError> {
     let file = openat2(
-        &dir,
-        "auth.json",
+        dir,
+        filename,
         OpenHow::new()
             .flags(OFlag::O_RDONLY | OFlag::O_CLOEXEC)
             .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
@@ -415,9 +511,7 @@ fn read_source(owner_home: &Path, loop_name: &str) -> Result<Source, LaneError> 
     }
     let document = serde_json::from_slice(&bytes)
         .map_err(|_| failure("credential-sign-in", "sign-in JSON is invalid"))?;
-    let mut source = Source::parse(document)?;
-    source.stamp = Some(FileStamp::from_stat(&stat));
-    Ok(source)
+    Ok((document, FileStamp::from_stat(&stat)))
 }
 
 fn atomic_file(
@@ -499,7 +593,20 @@ fn write_run(home: &Path, worker_uid: u32, source: &Source) -> Result<(), LaneEr
 ///
 /// Refuses an unsafe directory or failed atomic replacement.
 pub(crate) fn publish_evidence(driver_dir: &Path, document: &Value) -> Result<(), LaneError> {
-    validate_evidence(document)?;
+    publish_evidence_bound(
+        driver_dir,
+        document,
+        &crate::runtime_admission::ReviewedProgramBinding::Schema,
+    )
+}
+
+/// Publish evidence using the same binding that shaped the helper observation.
+pub(crate) fn publish_evidence_bound(
+    driver_dir: &Path,
+    document: &Value,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> Result<(), LaneError> {
+    validate_evidence(document, binding)?;
     let directory = crate::plan::protected_identity_dir(driver_dir)?;
     let bytes = serde_json::to_vec(document)
         .map_err(|_| failure("credential-evidence", "refresh evidence cannot be encoded"))?;
@@ -523,9 +630,34 @@ pub(crate) fn publish_evidence(driver_dir: &Path, document: &Value) -> Result<()
     .map_err(|error| failure("credential-evidence", error.detail))
 }
 
-fn validate_evidence(document: &Value) -> Result<(), LaneError> {
-    if document["schema"] != 1
-        || document["host"] != REFRESH_HOST
+fn evidence_provider_valid(
+    document: &Value,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> bool {
+    match document["schema"].as_u64() {
+        Some(1) => {
+            document["host"] == REFRESH_HOST
+                && document.get("backend").is_none()
+                && document.get("provider").is_none()
+        }
+        Some(2) => {
+            document["backend"] == "claude"
+                && document.get("host").is_none()
+                && document["provider"]
+                    == json!({
+                        "kind":"owner-program", "program":"/usr/bin/claude",
+                        "required_sha256":binding.required_sha256(),
+                    })
+        }
+        _ => false,
+    }
+}
+
+fn validate_evidence(
+    document: &Value,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> Result<(), LaneError> {
+    if !evidence_provider_valid(document, binding)
         || !matches!(
             document["state"].as_str(),
             Some("current" | "published" | "partial" | "refused")
@@ -533,7 +665,7 @@ fn validate_evidence(document: &Value) -> Result<(), LaneError> {
     {
         return Err(failure(
             "credential-evidence",
-            "schema, host or state is invalid",
+            "schema, provider or state is invalid",
         ));
     }
     let expires = document
@@ -698,13 +830,13 @@ pub(crate) fn read_evidence_bytes(
 
 // Census observes temporal defects; publication still uses validate_evidence.
 fn validate_evidence_envelope(document: &Value) -> Result<(), LaneError> {
-    if document["schema"] != 1
-        || document["host"] != REFRESH_HOST
-        || !matches!(
-            document["state"].as_str(),
-            Some("current" | "published" | "partial" | "refused")
-        )
-        || !document["run_refusals"].is_array()
+    if !evidence_provider_valid(
+        document,
+        &crate::runtime_admission::ReviewedProgramBinding::Schema,
+    ) || !matches!(
+        document["state"].as_str(),
+        Some("current" | "published" | "partial" | "refused")
+    ) || !document["run_refusals"].is_array()
         || !document["run_refusals_omitted"].is_u64()
         || !matches!(
             (document.get("kind"), document.get("detail")),
@@ -810,28 +942,39 @@ fn refresh_request(source: &Source, endpoint: &str) -> Result<Source, LaneError>
         "grant_type": "refresh_token",
         "refresh_token": source.document["tokens"]["refresh_token"]
     });
-    let mut child = Command::new("/usr/bin/curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail-with-body",
-            "--max-time",
-            "20",
-            "--max-filesize",
-            "65536",
-            "--noproxy",
-            "*",
-            "--header",
-            "Content-Type: application/json",
-            "--data-binary",
-            "@-",
-            endpoint,
-        ])
+    let program = Path::new("/usr/bin/curl");
+    let argv = [
+        "--silent",
+        "--show-error",
+        "--fail-with-body",
+        "--max-time",
+        "20",
+        "--max-filesize",
+        "65536",
+        "--noproxy",
+        "*",
+        "--header",
+        "Content-Type: application/json",
+        "--data-binary",
+        "@-",
+        endpoint,
+    ]
+    .map(str::to_owned);
+    let mut command = Command::new("/usr/bin/curl");
+    command
+        .args(&argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| failure("credential-refresh", "token client could not start"))?;
+        .stderr(Stdio::null());
+    crate::container_entry::configure(&mut command, program, &argv, &std::env::vars().collect())?;
+    let mut child = command.spawn().map_err(|error| {
+        credential_spawn_error(
+            program,
+            "credential-refresh",
+            "token client could not start",
+            &error,
+        )
+    })?;
     child
         .stdin
         .take()
@@ -879,6 +1022,455 @@ fn publish_owner(
     )
 }
 
+/// Owner-only authority operations; worker file encodings do not enter this protocol.
+/// A provider may return refreshed authority or let its owner-side program replace
+/// the source itself. The latter is adopted by the read after refresh.
+trait OwnerProvider {
+    type Snapshot;
+    type Identity: Copy + Eq;
+
+    fn read(&self) -> Result<Self::Snapshot, LaneError>;
+    fn due(&self, source: &Self::Snapshot, now: u64) -> bool;
+    fn identity(&self, source: &Self::Snapshot) -> Result<Self::Identity, LaneError>;
+    /// Some stages authority for conditional publication; None means an owner
+    /// program owns publication and the helper must only reread its source.
+    fn refresh(&self, source: &Self::Snapshot) -> Result<Option<Self::Snapshot>, LaneError>;
+    fn publish(&self, next: &Self::Snapshot, expected: Self::Identity) -> Result<bool, LaneError>;
+}
+
+struct CodexOwnerProvider<'a> {
+    owner_home: &'a Path,
+    loop_name: &'a str,
+    endpoint: &'a str,
+}
+
+impl OwnerProvider for CodexOwnerProvider<'_> {
+    type Snapshot = Source;
+    type Identity = FileStamp;
+
+    fn read(&self) -> Result<Source, LaneError> {
+        read_source(self.owner_home, self.loop_name)
+    }
+
+    fn due(&self, source: &Source, now: u64) -> bool {
+        source.needs_refresh(now)
+    }
+
+    fn identity(&self, source: &Source) -> Result<FileStamp, LaneError> {
+        source
+            .stamp
+            .ok_or_else(|| failure("credential-sign-in", "source identity is absent"))
+    }
+
+    fn refresh(&self, source: &Source) -> Result<Option<Source>, LaneError> {
+        refresh_request(source, self.endpoint).map(Some)
+    }
+
+    fn publish(&self, next: &Source, expected: FileStamp) -> Result<bool, LaneError> {
+        publish_owner(self.owner_home, self.loop_name, next, expected)
+    }
+}
+
+// The structural record describes owner authority, never a worker refresh grant.
+struct ClaudeSource {
+    oauth: Value,
+    expires_ms: u64,
+    stamp: Option<FileStamp>,
+}
+
+impl ClaudeSource {
+    fn parse(document: &Value) -> Result<Self, LaneError> {
+        let oauth = &document["claudeAiOauth"];
+        let object = oauth.as_object().ok_or_else(|| {
+            failure(
+                "credential-sign-in",
+                "Claude claudeAiOauth object is absent",
+            )
+        })?;
+        let fields = [
+            "accessToken",
+            "refreshToken",
+            "expiresAt",
+            "refreshTokenExpiresAt",
+            "scopes",
+            "subscriptionType",
+            "subscriptionTypeSource",
+            "rateLimitTier",
+        ];
+        if object.len() != fields.len() || fields.iter().any(|key| !object.contains_key(*key)) {
+            return Err(failure(
+                "credential-sign-in",
+                "Claude owner credential fields differ from the recorded schema",
+            ));
+        }
+        for field in ["accessToken", "refreshToken"] {
+            if !oauth[field].as_str().is_some_and(|value| {
+                value.len() == 108 && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+            }) {
+                return Err(failure(
+                    "credential-sign-in",
+                    format!("Claude {field} has an invalid opaque token shape"),
+                ));
+            }
+        }
+        for field in ["expiresAt", "refreshTokenExpiresAt"] {
+            if !oauth[field]
+                .as_u64()
+                .is_some_and(|value| (1_000_000_000_000..10_000_000_000_000).contains(&value))
+            {
+                return Err(failure(
+                    "credential-sign-in",
+                    format!("Claude {field} is not a 13-digit millisecond epoch"),
+                ));
+            }
+        }
+        let printable = |value: &Value| {
+            value.as_str().is_some_and(|text| {
+                !text.is_empty()
+                    && text.len() <= 256
+                    && text.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+            })
+        };
+        if !oauth["scopes"].as_array().is_some_and(|values| {
+            !values.is_empty() && values.len() <= 64 && values.iter().all(printable)
+        }) {
+            return Err(failure(
+                "credential-sign-in",
+                "Claude scopes are not bounded printable strings",
+            ));
+        }
+        for field in [
+            "subscriptionType",
+            "subscriptionTypeSource",
+            "rateLimitTier",
+        ] {
+            if !printable(&oauth[field]) {
+                return Err(failure(
+                    "credential-sign-in",
+                    format!("Claude {field} is not a bounded printable string"),
+                ));
+            }
+        }
+        Ok(Self {
+            oauth: oauth.clone(),
+            expires_ms: oauth["expiresAt"].as_u64().unwrap_or_default(),
+            stamp: None,
+        })
+    }
+
+    fn worker_file(&self) -> Vec<u8> {
+        // Neither refresh authority nor plugin state crosses this allow-list
+        // (proto:superlooplane:claude-owner-credential-encoding).
+        let mut oauth = serde_json::Map::new();
+        for key in [
+            "accessToken",
+            "expiresAt",
+            "scopes",
+            "subscriptionType",
+            "subscriptionTypeSource",
+            "rateLimitTier",
+        ] {
+            oauth.insert(key.into(), self.oauth[key].clone());
+        }
+        let mut bytes = json!({"claudeAiOauth":oauth}).to_string().into_bytes();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    const fn needs_refresh(&self, now: u64) -> bool {
+        self.expires_ms
+            <= now
+                .saturating_add(REFRESH_AHEAD.as_secs())
+                .saturating_mul(1000)
+    }
+}
+
+/// Observe the validated Claude projection beneath a held sign-in directory while holding its
+/// publication lock. This does not refresh authority or expose a credential-derived digest.
+/// The caller enforces the runtime gate and supplies the directory's custody; `home` only
+/// names the reported source path and is never opened.
+///
+/// # Errors
+///
+/// Refuses unsafe owner custody, malformed source data, or a failed observation.
+pub(crate) fn with_claude_exercise_snapshot<T>(
+    directory: &OwnedFd,
+    home: &Path,
+    now: u64,
+    observe: impl FnOnce(Value, Value, bool) -> Result<T, LaneError>,
+) -> Result<T, LaneError> {
+    let _guard = lock_with(directory, FlockArg::LockExclusive)?;
+    let (document, stamp) = read_owner_file(directory, ".credentials.json")?;
+    let source = ClaudeSource::parse(&document)?;
+    let projection = serde_json::from_slice(&source.worker_file())
+        .map_err(|_| failure("credential-sign-in", "Claude projection cannot be encoded"))?;
+    let owner = owner_identity().0;
+    let identity = json!({"path":home.join(".credentials.json"),"device":stamp.device,
+        "inode":stamp.inode,"uid":owner,"mode":600,
+        "modified_wall_unix_seconds":stamp.modified,"modified_nanoseconds":stamp.modified_nsec});
+    observe(identity, projection, source.needs_refresh(now))
+}
+
+pub(crate) fn claude_sign_in_dir(owner_home: &Path, loop_name: &str) -> PathBuf {
+    owner_home
+        .join(".config/loops")
+        .join(loop_name)
+        .join("claude")
+}
+
+fn read_claude_source(home: &Path) -> Result<ClaudeSource, LaneError> {
+    let (document, stamp) = read_owner_document(home, ".credentials.json")?;
+    let mut source = ClaudeSource::parse(&document)?;
+    source.stamp = Some(stamp);
+    Ok(source)
+}
+
+struct ClaudeOwnerProvider<'a, F> {
+    home: &'a Path,
+    refresh_program: F,
+}
+
+impl<F: Fn() -> Result<(), LaneError>> OwnerProvider for ClaudeOwnerProvider<'_, F> {
+    type Snapshot = ClaudeSource;
+    type Identity = FileStamp;
+
+    fn read(&self) -> Result<ClaudeSource, LaneError> {
+        read_claude_source(self.home)
+    }
+    fn due(&self, source: &ClaudeSource, now: u64) -> bool {
+        source.needs_refresh(now)
+    }
+    fn identity(&self, source: &ClaudeSource) -> Result<FileStamp, LaneError> {
+        source
+            .stamp
+            .ok_or_else(|| failure("credential-sign-in", "Claude source identity is absent"))
+    }
+    fn refresh(&self, _source: &ClaudeSource) -> Result<Option<ClaudeSource>, LaneError> {
+        (self.refresh_program)()?;
+        Ok(None)
+    }
+    fn publish(&self, _next: &ClaudeSource, _expected: FileStamp) -> Result<bool, LaneError> {
+        Err(failure(
+            "credential-publish",
+            "Claude owner publication belongs to the vendor program",
+        ))
+    }
+}
+
+fn claude_refresh_program(home: &Path, expected_program: &str) -> Result<(), LaneError> {
+    use std::os::unix::process::CommandExt as _;
+    let program = Path::new("/usr/bin/claude");
+    // Never fall back to an ambient program from the namespace/helper thread.
+    crate::container_entry::check(program).ok_or_else(|| {
+        failure(
+            "credential-refresh",
+            "Claude refresh requires its held owner program",
+        )
+    })??;
+    crate::container_entry::verify_program_digest(program, expected_program)?;
+    let argv = vec!["--print".into(), "Reply with OK.".into()];
+    let environment = BTreeMap::from([
+        ("HOME".into(), home.to_string_lossy().into_owned()),
+        (
+            "CLAUDE_CONFIG_DIR".into(),
+            home.to_string_lossy().into_owned(),
+        ),
+        ("TMPDIR".into(), home.to_string_lossy().into_owned()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ]);
+    let mut command = Command::new("/usr/bin/claude");
+    command
+        .args(&argv)
+        .env_clear()
+        .envs(&environment)
+        .current_dir(home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    crate::container_entry::configure(&mut command, program, &argv, &environment)?;
+    let mut child = command.spawn().map_err(|error| {
+        credential_spawn_error(
+            program,
+            "credential-refresh",
+            "Claude owner refresh could not start",
+            &error,
+        )
+    })?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(failure(
+                        "credential-refresh",
+                        "Claude owner print-mode refresh failed",
+                    ))
+                };
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            state => {
+                if let Ok(pid) = i32::try_from(child.id()) {
+                    let _ignored = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(pid),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+                let _ignored = child.kill();
+                let _ignored = child.wait();
+                return Err(failure(
+                    "credential-refresh",
+                    if state.is_err() {
+                        "Claude owner refresh wait failed"
+                    } else {
+                        "Claude owner refresh timed out"
+                    },
+                ));
+            }
+        }
+    }
+}
+
+// Check the reviewed executable before opening any sign-in or publishing a worker
+// file, even when the current access token does not need a refresh.
+fn claude_program_pin(owner_home: &Path, loop_name: &str) -> Result<String, LaneError> {
+    let expected = crate::launch::reviewed_claude_program_digest(owner_home, loop_name)?;
+    crate::container_entry::verify_program_digest(Path::new("/usr/bin/claude"), &expected)?;
+    Ok(expected)
+}
+
+fn claude_program_pin_bound(
+    owner_home: &Path,
+    loop_name: &str,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> Result<String, LaneError> {
+    let expected =
+        crate::launch::reviewed_claude_program_digest_bound(owner_home, loop_name, binding)?;
+    crate::container_entry::verify_program_digest(Path::new("/usr/bin/claude"), &expected)?;
+    Ok(expected)
+}
+
+fn prepare_claude_run(
+    owner_home: &Path,
+    loop_name: &str,
+    run_home: &Path,
+    worker_uid: u32,
+    now: u64,
+) -> Result<(), LaneError> {
+    let expected_program = claude_program_pin(owner_home, loop_name)?;
+    let home = claude_sign_in_dir(owner_home, loop_name);
+    prepare_claude_run_at(
+        &home,
+        run_home,
+        worker_uid,
+        now,
+        || claude_refresh_program(&home, &expected_program),
+        now_milliseconds,
+    )
+}
+
+fn prepare_claude_run_at(
+    home: &Path,
+    run_home: &Path,
+    worker_uid: u32,
+    now: u64,
+    refresh_program: impl Fn() -> Result<(), LaneError>,
+    publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
+) -> Result<(), LaneError> {
+    with_claude_authority(home, now, refresh_program, publication_time_ms, |source| {
+        write_claude_run(run_home, worker_uid, source)
+    })
+}
+
+fn with_claude_authority<T>(
+    home: &Path,
+    now: u64,
+    refresh_program: impl Fn() -> Result<(), LaneError>,
+    publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
+    action: impl FnOnce(&ClaudeSource) -> Result<T, LaneError>,
+) -> Result<T, LaneError> {
+    let owner = owner_identity().0;
+    let directory = open_dir(home, owner, owner, 0o700)?;
+    let _guard = lock_with(&directory, FlockArg::LockExclusive)?;
+    let source = refresh_provider(
+        &ClaudeOwnerProvider {
+            home,
+            refresh_program,
+        },
+        now,
+        || {},
+    )?;
+    if source.expires_ms <= publication_time_ms()? {
+        return Err(failure(
+            "credential-refresh",
+            "Claude owner program left expired access authority",
+        ));
+    }
+    action(&source)
+}
+
+fn publish_claude_round_at(
+    home: &Path,
+    run_home: &Path,
+    worker_uid: u32,
+    now: u64,
+    refresh_program: impl Fn() -> Result<(), LaneError>,
+    publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
+) -> Result<Value, LaneError> {
+    with_claude_authority(home, now, refresh_program, publication_time_ms, |source| {
+        let stamp = source
+            .stamp
+            .ok_or_else(|| failure("credential-publish", "Claude source inode is absent"))?;
+        write_claude_run(run_home, worker_uid, source)?;
+        publication_receipt(stamp)
+    })
+}
+
+fn write_claude_run(home: &Path, worker_uid: u32, source: &ClaudeSource) -> Result<(), LaneError> {
+    atomic_file(
+        &home.join(".claude"),
+        ".credentials.json",
+        &source.worker_file(),
+        worker_uid,
+        worker_uid,
+        0o700,
+        None,
+    )
+    .map(|_published| ())
+}
+
+/// Callers hold the loop refresh lock through this operation and worker publication.
+/// This preserves the identity check followed by rename; it is not an atomic CAS.
+fn refresh_provider<P: OwnerProvider>(
+    provider: &P,
+    now: u64,
+    before_publish: impl FnOnce(),
+) -> Result<P::Snapshot, LaneError> {
+    let source = provider.read()?;
+    if !provider.due(&source, now) {
+        return Ok(source);
+    }
+    let expected = provider.identity(&source)?;
+    let next = provider.refresh(&source)?;
+    let current = provider.read()?;
+    if provider.identity(&current)? != expected {
+        return Ok(current);
+    }
+    let Some(next) = next else {
+        return Ok(current);
+    };
+    before_publish();
+    if provider.publish(&next, expected)? {
+        Ok(next)
+    } else {
+        provider.read()
+    }
+}
+
 fn refresh_if_due(
     owner_home: &Path,
     loop_name: &str,
@@ -895,24 +1487,15 @@ fn refresh_if_due_with(
     now: u64,
     before_publish: impl FnOnce(),
 ) -> Result<Source, LaneError> {
-    let source = read_source(owner_home, loop_name)?;
-    if !source.needs_refresh(now) {
-        return Ok(source);
-    }
-    let expected = source
-        .stamp
-        .ok_or_else(|| failure("credential-sign-in", "source identity is absent"))?;
-    let next = refresh_request(&source, endpoint)?;
-    let current = read_source(owner_home, loop_name)?;
-    if current.stamp != Some(expected) {
-        return Ok(current);
-    }
-    before_publish();
-    if publish_owner(owner_home, loop_name, &next, expected)? {
-        Ok(next)
-    } else {
-        read_source(owner_home, loop_name)
-    }
+    refresh_provider(
+        &CodexOwnerProvider {
+            owner_home,
+            loop_name,
+            endpoint,
+        },
+        now,
+        before_publish,
+    )
 }
 
 /// Hold the loop-wide refresh lock through the initial run-home credential publication.
@@ -925,7 +1508,12 @@ pub fn prepare_run(
     loop_name: &str,
     run_home: &Path,
     worker_uid: u32,
+    backend: BoxBackend,
 ) -> Result<(), LaneError> {
+    backend.require_runtime()?;
+    if backend == BoxBackend::Claude {
+        return prepare_claude_run(owner_home, loop_name, run_home, worker_uid, now_seconds()?);
+    }
     let _guard = lock(owner_home, loop_name)?;
     let source = refresh_if_due(owner_home, loop_name, AUTH_ENDPOINT, now_seconds()?)?;
     write_run(run_home, worker_uid, &source)
@@ -936,12 +1524,28 @@ pub fn prepare_run(
 /// # Errors
 ///
 /// Refuses unavailable authority, unsafe custody or failed publication and clock evidence.
-pub(crate) fn publish_round(
+pub(crate) fn publish_round_admitted(
     owner_home: &Path,
     loop_name: &str,
     run_home: &Path,
     worker_uid: u32,
+    backend: BoxBackend,
+    admission: &crate::runtime_admission::RuntimeAdmission,
 ) -> Result<Value, LaneError> {
+    admission.check(backend)?;
+    let binding = admission.round_binding(owner_home, loop_name, run_home, worker_uid)?;
+    if backend == BoxBackend::Claude {
+        let expected_program = claude_program_pin_bound(owner_home, loop_name, binding)?;
+        let home = claude_sign_in_dir(owner_home, loop_name);
+        return publish_claude_round_at(
+            &home,
+            run_home,
+            worker_uid,
+            now_seconds()?,
+            || claude_refresh_program(&home, &expected_program),
+            now_milliseconds,
+        );
+    }
     let _guard = lock(owner_home, loop_name)?;
     let _refreshed = refresh_if_due(owner_home, loop_name, AUTH_ENDPOINT, now_seconds()?)?;
     // Reopen after a refresh so the evidence identifies the published owner inode.
@@ -950,6 +1554,10 @@ pub(crate) fn publish_round(
         .stamp
         .ok_or_else(|| failure("credential-publish", "source inode is absent"))?;
     write_run(run_home, worker_uid, &source)?;
+    publication_receipt(stamp)
+}
+
+fn publication_receipt(stamp: FileStamp) -> Result<Value, LaneError> {
     let published = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| failure("credential-clock", error.to_string()))?;
@@ -963,7 +1571,19 @@ pub(crate) fn publish_round(
 /// # Errors
 ///
 /// Refuses absent, unreadable or malformed sign-in data.
-pub fn preflight(owner_home: &Path, loop_name: &str) -> Result<(), LaneError> {
+pub fn preflight(owner_home: &Path, loop_name: &str, backend: BoxBackend) -> Result<(), LaneError> {
+    backend.require_runtime()?;
+    if backend == BoxBackend::Claude {
+        let expected_program = claude_program_pin(owner_home, loop_name)?;
+        let home = claude_sign_in_dir(owner_home, loop_name);
+        return with_claude_authority(
+            &home,
+            now_seconds()?,
+            || claude_refresh_program(&home, &expected_program),
+            now_milliseconds,
+            |_| Ok(()),
+        );
+    }
     preflight_at(owner_home, loop_name, AUTH_ENDPOINT, now_seconds()?)
 }
 
@@ -989,12 +1609,29 @@ pub(crate) struct RefreshReport {
     pub authority_failure: Option<LaneError>,
 }
 
-/// Shape the result of one helper check for protected owner evidence.
+/// Shape evidence under the compiled schema binding for regressions.
+#[cfg(test)]
 pub(crate) fn evidence_for_check(
     result: &Result<RefreshReport, LaneError>,
     first_check: bool,
+    backend: BoxBackend,
 ) -> Option<Value> {
-    match result {
+    evidence_for_check_bound(
+        result,
+        first_check,
+        backend,
+        &crate::runtime_admission::ReviewedProgramBinding::Schema,
+    )
+}
+
+/// Shape the result of one helper check for protected owner evidence.
+pub(crate) fn evidence_for_check_bound(
+    result: &Result<RefreshReport, LaneError>,
+    first_check: bool,
+    backend: BoxBackend,
+    binding: &crate::runtime_admission::ReviewedProgramBinding,
+) -> Option<Value> {
+    let mut evidence = match result {
         Err(error) => Some(json!({
             "schema":1,"host":REFRESH_HOST,"state":"refused",
             "run_refusals":[],"run_refusals_omitted":0,
@@ -1029,7 +1666,17 @@ pub(crate) fn evidence_for_check(
             }))
         }
         Ok(_) => None,
+    }?;
+    if backend == BoxBackend::Claude {
+        evidence.as_object_mut()?.remove("host");
+        evidence["schema"] = json!(2);
+        evidence["backend"] = json!("claude");
+        evidence["provider"] = json!({
+            "kind":"owner-program", "program":"/usr/bin/claude",
+            "required_sha256":binding.required_sha256(),
+        });
     }
+    Some(evidence)
 }
 
 #[cfg(test)]
@@ -1049,17 +1696,38 @@ pub(crate) const fn fixture_report(expires_unix: u64) -> RefreshReport {
 /// # Errors
 ///
 /// Reports a failed authority request or publication without exposing token bytes.
-pub(crate) fn refresh_live(
+pub(crate) fn refresh_live_admitted(
     owner_home: &Path,
     loop_name: &str,
     runs_root: &Path,
     published: &mut BTreeMap<PathBuf, Vec<u8>>,
+    backend: BoxBackend,
+    endpoint: &str,
+    admission: &crate::runtime_admission::RuntimeAdmission,
 ) -> Result<RefreshReport, LaneError> {
+    admission.check(backend)?;
+    let binding = admission.periodic_binding(owner_home, loop_name, runs_root)?;
+    if backend == BoxBackend::Claude {
+        let expected_program = claude_program_pin_bound(owner_home, loop_name, binding)?;
+        let home = claude_sign_in_dir(owner_home, loop_name);
+        return refresh_claude_live_admitted_at(
+            &home,
+            loop_name,
+            runs_root,
+            now_seconds()?,
+            published,
+            (
+                || claude_refresh_program(&home, &expected_program),
+                now_milliseconds,
+                admission,
+            ),
+        );
+    }
     refresh_live_at(
         owner_home,
         loop_name,
         runs_root,
-        AUTH_ENDPOINT,
+        endpoint,
         now_seconds()?,
         published,
         write_run,
@@ -1094,7 +1762,82 @@ fn refresh_live_at(
     } else {
         source
     };
-    let snapshot = next.worker_file();
+    publish_live_snapshot(
+        runs_root,
+        loop_name,
+        BoxBackend::Codex,
+        published,
+        &next.worker_file(),
+        next.expires_at,
+        |home, uid| publish(home, uid, &next),
+    )
+}
+
+#[cfg(test)]
+fn refresh_claude_live_at(
+    home: &Path,
+    loop_name: &str,
+    runs_root: &Path,
+    now: u64,
+    published: &mut BTreeMap<PathBuf, Vec<u8>>,
+    refresh_program: impl Fn() -> Result<(), LaneError>,
+    publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
+) -> Result<RefreshReport, LaneError> {
+    refresh_claude_live_admitted_at(
+        home,
+        loop_name,
+        runs_root,
+        now,
+        published,
+        (
+            refresh_program,
+            publication_time_ms,
+            &crate::runtime_admission::RuntimeAdmission::Gate,
+        ),
+    )
+}
+
+fn refresh_claude_live_admitted_at(
+    home: &Path,
+    loop_name: &str,
+    runs_root: &Path,
+    now: u64,
+    published: &mut BTreeMap<PathBuf, Vec<u8>>,
+    provider: (
+        impl Fn() -> Result<(), LaneError>,
+        impl FnOnce() -> Result<u64, LaneError>,
+        &crate::runtime_admission::RuntimeAdmission,
+    ),
+) -> Result<RefreshReport, LaneError> {
+    let (refresh_program, publication_time_ms, admission) = provider;
+    #[cfg(not(test))]
+    let _ = admission;
+    with_claude_authority(home, now, refresh_program, publication_time_ms, |source| {
+        publish_live_snapshot(
+            runs_root,
+            loop_name,
+            BoxBackend::Claude,
+            published,
+            &source.worker_file(),
+            source.expires_ms / 1000,
+            |home, uid| {
+                #[cfg(test)]
+                admission.scope_recipient(home)?;
+                write_claude_run(home, uid, source)
+            },
+        )
+    })
+}
+
+fn publish_live_snapshot(
+    runs_root: &Path,
+    loop_name: &str,
+    backend: BoxBackend,
+    published: &mut BTreeMap<PathBuf, Vec<u8>>,
+    snapshot: &[u8],
+    expires_unix: u64,
+    mut publish: impl FnMut(&Path, u32) -> Result<(), LaneError>,
+) -> Result<RefreshReport, LaneError> {
     let mut changed = false;
     let mut refusals = Vec::new();
     let mut refusal_bytes = 2_usize;
@@ -1132,6 +1875,10 @@ fn refresh_live_at(
         {
             continue;
         }
+        // The protected backend confines publication to its own vendor homes.
+        if BoxBackend::from_plan(&record["plan"])? != backend {
+            continue;
+        }
         let Some(home) = record["plan"]["home"].as_str() else {
             return Err(failure("credential-publish", "live run home is absent"));
         };
@@ -1140,10 +1887,10 @@ fn refresh_live_at(
             .and_then(|value| u32::try_from(value).ok())
             .ok_or_else(|| failure("credential-publish", "live worker uid is absent"))?;
         let home = PathBuf::from(home);
-        if published.get(&home) == Some(&snapshot) {
+        if published.get(&home).map(Vec::as_slice) == Some(snapshot) {
             continue;
         }
-        if let Err(error) = publish(&home, uid, &next) {
+        if let Err(error) = publish(&home, uid) {
             let refusal = json!({"run": run, "kind": error.kind, "detail": error.detail});
             let entry_bytes = serde_json::to_vec(&refusal)
                 .map_err(|_| failure("credential-evidence", "run refusal cannot be encoded"))?
@@ -1158,24 +1905,64 @@ fn refresh_live_at(
             }
             continue;
         }
-        published.insert(home, snapshot.clone());
+        published.insert(home, snapshot.to_vec());
         changed = true;
     }
     Ok(RefreshReport {
         changed,
         refusals,
         refusals_omitted,
-        expires_unix: next.expires_at,
-        refresh_due_unix: next.refresh_due_unix(),
+        expires_unix,
+        refresh_due_unix: expires_unix.saturating_sub(REFRESH_AHEAD.as_secs()),
         authority_failure: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    mod transaction;
+    use crate::runtime_admission::RuntimeAdmission::Gate;
+
+    /// # Panics
+    /// Panics if a fixture can select a vendor endpoint without its thread-local guard.
+    /// ´claim:superlooplane:service-fixture-endpoint-required´
+    /// ´test:unit:service-fixture-endpoint-is-required-on-each-thread´
+    #[test]
+    fn service_fixture_endpoint_is_required_on_each_thread() {
+        std::thread::spawn(|| {
+            let refused = || {
+                let error = std::panic::catch_unwind(service_endpoint)
+                    .expect_err("missing fixture hook must refuse before spawning authority");
+                let message = error
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| error.downcast_ref::<&str>().copied());
+                assert!(
+                    message
+                        .is_some_and(|text| text.contains("service fixture endpoint is required"))
+                );
+            };
+            refused();
+            let endpoint = "http://127.0.0.1:1/fixture";
+            let guard = fixture_service_endpoint(endpoint.into());
+            assert_eq!(service_endpoint(), endpoint);
+            {
+                let _nested = fixture_service_endpoint("http://127.0.0.1:2/nested".into());
+                assert_eq!(service_endpoint(), "http://127.0.0.1:2/nested");
+            }
+            assert_eq!(service_endpoint(), endpoint);
+            std::thread::spawn(refused)
+                .join()
+                .expect("new thread refuses inherited hook");
+            drop(guard);
+            refused();
+        })
+        .join()
+        .expect("isolated endpoint policy");
+    }
     use super::*;
     use std::net::TcpListener;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
     use std::sync::{Arc, Mutex};
 
     fn fixture_root() -> tempfile::TempDir {
@@ -1186,6 +1973,1746 @@ mod tests {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
             .expect("private fixture root");
         root
+    }
+
+    fn claude_fixture_root() -> tempfile::TempDir {
+        let root = tempfile::Builder::new()
+            .prefix("lane-claude-credential-")
+            .tempdir()
+            .expect("private TMPDIR fixture");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
+            .expect("private fixture root");
+        root
+    }
+
+    /// # Panics
+    /// Panics if unheld executable custody can read authority or replace a worker file.
+    /// ´test:unit:claude-program-pin-precedes-owner-authority´
+    #[test]
+    fn claude_program_pin_precedes_owner_authority() {
+        let root = claude_fixture_root();
+        let loop_root = root.path().join(".config/loops/alpha");
+        fs::create_dir_all(&loop_root).expect("configuration fixture");
+        let record = json!({"schema":1,"phase":"complete", "image_digest":format!("sha256:{}", "b".repeat(64)),
+            "claude_sha256":CLAUDE_SCHEMA_PROGRAM_SHA256, "claude_image_program":"/opt/claude/bin/claude",
+            "claude_template_dir":format!("/owner/runner-templates/claude/{}", "b".repeat(64))});
+        fs::write(
+            loop_root.join("install-generation.json"),
+            serde_json::to_vec(&record).expect("record"),
+        )
+        .expect("configuration");
+        fs::set_permissions(
+            loop_root.join("install-generation.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("private generation");
+        let _configuration = crate::runtime_entry::fixture_configuration(root.path());
+        let worker = root.path().join("worker");
+        fs::create_dir_all(worker.join(".claude")).expect("worker directory");
+        let prior = worker.join(".claude/.credentials.json");
+        fs::write(&prior, b"synthetic prior worker file").expect("prior file");
+        let error = prepare_claude_run(
+            root.path(),
+            "alpha",
+            &worker,
+            owner_identity().0,
+            1_800_000_000,
+        )
+        .expect_err("unheld program precedes absent owner authority");
+        assert_eq!(error.kind, "credential-program-pin");
+        assert_eq!(error.detail, "Claude program has no held executable");
+        assert!(!claude_sign_in_dir(root.path(), "alpha").exists());
+        assert_eq!(
+            fs::read(prior).expect("prior worker"),
+            b"synthetic prior worker file"
+        );
+    }
+
+    /// # Panics
+    /// Panics only if an unheld owner program is admitted for refresh.
+    /// ´test:unit:claude-refresh-refuses-unheld-program´
+    #[test]
+    fn claude_refresh_refuses_unheld_program() {
+        let error = claude_refresh_program(Path::new("/unopened-helper-home"), &"a".repeat(64))
+            .expect_err("no ambient executable fallback");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(
+            error.detail,
+            "Claude refresh requires its held owner program"
+        );
+    }
+
+    /// # Panics
+    /// Panics only if stale authority is published or the owner refresh loses its lock.
+    /// ´test:unit:claude-preparation-refuses-expired-program-result´
+    #[test]
+    fn claude_preparation_refuses_expired_program_result() {
+        for (start, published) in [
+            (1_800_000_000, 1_800_000_000_000),
+            (1_799_999_990, 1_800_000_000_000),
+            (1_799_999_990, 1_800_000_000_001),
+        ] {
+            let fixture = claude_fixture_root();
+            let document = claude_document(1_800_000_000_000);
+            let home = fixture_claude(fixture.path(), &document);
+            let run = fixture.path().join("run");
+            fs::create_dir_all(run.join(".claude")).expect("worker home");
+            for path in [&run, &run.join(".claude")] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                    .expect("private worker home");
+            }
+            let calls = std::cell::Cell::new(0);
+            let error = prepare_claude_run_at(
+                &home,
+                &run,
+                owner_identity().0,
+                start,
+                || {
+                    calls.set(calls.get() + 1);
+                    let directory = open_dir(&home, owner_identity().0, owner_identity().0, 0o700)
+                        .expect("owner home");
+                    assert!(
+                        lock_with(&directory, FlockArg::LockExclusiveNonblock).is_err(),
+                        "refresh must hold the owner lock"
+                    );
+                    Ok(())
+                },
+                || {
+                    assert_eq!(calls.get(), 1, "publication clock must follow the program");
+                    Ok(published)
+                },
+            )
+            .expect_err("successful program did not supply unexpired authority");
+            assert_eq!(calls.get(), 1);
+            assert_eq!(error.kind, "credential-refresh");
+            assert_eq!(
+                error.detail,
+                "Claude owner program left expired access authority"
+            );
+            assert!(!run.join(".claude/.credentials.json").exists());
+            assert_eq!(
+                fs::read_to_string(home.join(".credentials.json")).expect("owner source"),
+                document.to_string()
+            );
+        }
+    }
+
+    /// # Panics
+    /// Panics if preflight publishes a worker file or admits expired owner authority.
+    /// ´test:unit:claude-preflight-checks-without-worker-publication´
+    #[test]
+    fn claude_preflight_checks_without_worker_publication() {
+        let fixture = claude_fixture_root();
+        let document = claude_document(1_800_000_000_000);
+        let home = fixture_claude(fixture.path(), &document);
+        with_claude_authority(
+            &home,
+            1_700_000_000,
+            || panic!("current source must not refresh"),
+            || Ok(1_700_000_000_000),
+            |_| Ok(()),
+        )
+        .expect("preflight");
+        assert!(!fixture.path().join("worker").exists());
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("source"),
+            document.to_string()
+        );
+        let error = with_claude_authority(
+            &home,
+            1_800_000_000,
+            || Ok(()),
+            || Ok(1_800_000_000_000),
+            |_| Ok(()),
+        )
+        .expect_err("expired authority");
+        assert_eq!(error.kind, "credential-refresh");
+        let absent = fixture.path().join("absent");
+        let backend = BoxBackend::Claude;
+        for result in [
+            preflight(&absent, "alpha", backend),
+            prepare_run(&absent, "alpha", &absent, owner_identity().0, backend),
+            publish_round_admitted(
+                &absent,
+                "alpha",
+                &absent,
+                owner_identity().0,
+                backend,
+                &Gate,
+            )
+            .map(|_| ()),
+        ] {
+            assert_eq!(
+                result.expect_err("trial gate precedes custody").kind,
+                "backend-unavailable"
+            );
+        }
+        assert!(!absent.exists());
+    }
+
+    /// # Panics
+    /// Panics if a resumed round uses stale authority, leaks host state or publishes on refusal.
+    /// ´test:unit:claude-round-publication-reloads-owner-authority´
+    #[test]
+    fn claude_round_publication_reloads_owner_authority() {
+        let fixture = claude_fixture_root();
+        let old = claude_document(1_700_000_010_000);
+        let home = fixture_claude(fixture.path(), &old);
+        let prior_source_inode = fs::metadata(home.join(".credentials.json"))
+            .expect("prior source")
+            .ino();
+        let run = fixture.path().join("worker");
+        fs::create_dir_all(run.join(".claude")).expect("worker");
+        for path in [&run, &run.join(".claude")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let mut next = claude_document(1_800_000_000_000);
+        next["claudeAiOauth"]["accessToken"] = json!("N".repeat(108));
+        let calls = std::cell::Cell::new(0);
+        let receipt = publish_claude_round_at(
+            &home,
+            &run,
+            owner_identity().0,
+            1_700_000_000,
+            || {
+                calls.set(calls.get() + 1);
+                let directory = open_dir(&home, owner_identity().0, owner_identity().0, 0o700)?;
+                assert!(lock_with(&directory, FlockArg::LockExclusiveNonblock).is_err());
+                let replacement = home.join("owner-program-next");
+                fs::write(&replacement, next.to_string()).expect("stand-in owner program");
+                fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600))
+                    .expect("owner mode");
+                fs::rename(replacement, home.join(".credentials.json")).expect("owner publication");
+                Ok(())
+            },
+            || Ok(1_700_000_001_000),
+        )
+        .expect("round publication");
+        assert_eq!(calls.get(), 1);
+        assert_ne!(
+            fs::metadata(home.join(".credentials.json"))
+                .expect("new source")
+                .ino(),
+            prior_source_inode
+        );
+        let worker_path = run.join(".claude/.credentials.json");
+        let bytes = fs::read(&worker_path).expect("worker bytes");
+        assert_eq!(
+            bytes,
+            ClaudeSource::parse(&next).expect("shape").worker_file()
+        );
+        let encoded: Value = serde_json::from_slice(&bytes).expect("worker JSON");
+        assert_eq!(encoded["claudeAiOauth"]["accessToken"], "N".repeat(108));
+        assert_eq!(encoded.as_object().expect("worker object").len(), 1);
+        assert!(encoded["claudeAiOauth"].get("refreshToken").is_none());
+        assert!(
+            encoded["claudeAiOauth"]
+                .get("refreshTokenExpiresAt")
+                .is_none()
+        );
+        let worker_inode = fs::metadata(&worker_path).expect("worker inode").ino();
+        assert_eq!(
+            fs::metadata(&worker_path)
+                .expect("mode")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            receipt["source_inode"],
+            fs::metadata(home.join(".credentials.json"))
+                .expect("source inode")
+                .ino()
+        );
+        assert!(receipt["published_unix_ns"].as_u64().is_some_and(|n| n > 0));
+        assert_eq!(receipt.as_object().expect("publication receipt").len(), 2);
+        let error = publish_claude_round_at(
+            &home,
+            &run,
+            owner_identity().0,
+            1_800_000_000,
+            || Ok(()),
+            || Ok(1_800_000_000_000),
+        )
+        .expect_err("expired resumed source");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(fs::read(&worker_path).expect("unchanged worker"), bytes);
+        assert_eq!(
+            fs::metadata(&worker_path).expect("unchanged inode").ino(),
+            worker_inode
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("unchanged owner"),
+            next.to_string()
+        );
+    }
+
+    /// # Panics
+    /// Panics if a failed refresh alters the prior worker's bytes or inode.
+    /// ´test:unit:claude-failed-round-refresh-preserves-worker-file´
+    #[test]
+    fn claude_failed_round_refresh_preserves_worker_file() {
+        let fixture = claude_fixture_root();
+        let home = fixture_claude(fixture.path(), &claude_document(1_800_000_000_000));
+        let run = fixture.path().join("worker");
+        fs::create_dir_all(run.join(".claude")).expect("worker leaf");
+        for path in [&run, &run.join(".claude")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("worker mode");
+        }
+        let worker_path = run.join(".claude/.credentials.json");
+        let bytes = b"synthetic prior worker file";
+        fs::write(&worker_path, bytes).expect("prior worker");
+        fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o600)).expect("worker mode");
+        let worker_inode = fs::metadata(&worker_path).expect("prior inode").ino();
+        let error = publish_claude_round_at(
+            &home,
+            &run,
+            owner_identity().0,
+            1_800_000_000,
+            || Err(failure("credential-refresh", "synthetic refusal")),
+            || panic!("a failed refresh must not reach the publication clock"),
+        )
+        .expect_err("failed resumed refresh");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(error.detail, "synthetic refusal");
+        assert_eq!(fs::read(&worker_path).expect("unchanged worker"), bytes);
+        assert_eq!(
+            fs::metadata(&worker_path).expect("unchanged inode").ino(),
+            worker_inode
+        );
+    }
+
+    fn claude_document(expires_ms: u64) -> Value {
+        json!({
+            "claudeAiOauth": {
+                "accessToken": "A".repeat(108), "refreshToken": "R".repeat(108),
+                "expiresAt": expires_ms, "refreshTokenExpiresAt": 1_900_000_000_000_u64,
+                "scopes": ["a".repeat(16), "b".repeat(14), "c".repeat(16), "d".repeat(12), "e".repeat(12), "f".repeat(25)],
+                "subscriptionType": "abc", "subscriptionTypeSource": "fixture", "rateLimitTier": "t".repeat(22)
+            },
+            "mcpOAuth": {"fixture-plugin": {"accessToken": "", "discoveryState": {"oauthMetadataFound": true}}}
+        })
+    }
+
+    /// ´test:unit:claude-exercise-snapshot-holds-publication-lock´
+    #[test]
+    fn claude_exercise_snapshot_holds_publication_lock() {
+        let root = tempfile::tempdir().expect("fixture");
+        let document = claude_document(1_800_000_000_000);
+        let home = fixture_claude(root.path(), &document);
+        let owner = owner_identity().0;
+        let held = open_dir(&home, owner, owner, 0o700).expect("held sign-in");
+        let result = with_claude_exercise_snapshot(
+            &held,
+            &home,
+            1_799_999_400,
+            |identity, projection, due| {
+                let directory = open_dir(&home, owner, owner, 0o700)?;
+                let Err(error) = lock_with(&directory, FlockArg::LockExclusiveNonblock) else {
+                    panic!("publication lock is not held");
+                };
+                assert_eq!(error.kind, "credential-lock-busy");
+                assert!(due);
+                assert_eq!(projection["claudeAiOauth"]["accessToken"], "A".repeat(108));
+                assert!(projection["claudeAiOauth"].get("refreshToken").is_none());
+                assert!(projection.get("mcpOAuth").is_none());
+                assert!(identity.get("digest").is_none());
+                assert!(!identity.to_string().contains(&"A".repeat(108)));
+                Ok(())
+            },
+        );
+        result.expect("locked read-only observation");
+        assert_eq!(
+            read_claude_source(&home).expect("unchanged").oauth,
+            document["claudeAiOauth"]
+        );
+        let due = with_claude_exercise_snapshot(&held, &home, 1_799_999_399, |_, _, due| Ok(due));
+        assert!(!due.expect("before margin"));
+        fs::rename(&home, root.path().join("retained")).expect("replace pathname");
+        let due = with_claude_exercise_snapshot(&held, &home, 1_799_999_400, |_, _, due| Ok(due));
+        assert!(due.expect("held directory supplies the source"));
+    }
+
+    /// # Panics
+    /// Panics if mapped owner publication loses worker ownership or exposes refresh authority.
+    /// ´test:unit:claude-namespace-publication-keeps-worker-authority-separate´
+    #[test]
+    fn claude_namespace_publication_keeps_worker_authority_separate() {
+        claude_namespace_case(
+            "claude_namespace_publication_keeps_worker_authority_separate",
+            "CLAUDE-NAMESPACE-PUBLICATION-MEASURED",
+            claude_namespace_publication,
+        );
+    }
+
+    /// # Panics
+    /// Panics if held stand-in execution or transferred publication loses its boundary.
+    /// ´test:unit:claude-namespace-held-program-standin´
+    #[test]
+    fn claude_namespace_held_program_standin() {
+        claude_namespace_case(
+            "claude_namespace_held_program_standin",
+            "CLAUDE-NAMESPACE-HELD-STANDIN-MEASURED",
+            claude_namespace_standin,
+        );
+    }
+
+    fn claude_namespace_case(name: &str, marker: &str, body: fn()) {
+        assert!(
+            !claude_namespace_run(name, marker, body, None, None),
+            "{name} exceeded its 60-second namespace watchdog"
+        );
+    }
+
+    fn claude_namespace_run(
+        name: &str,
+        marker: &str,
+        body: fn(),
+        probe: Option<&Path>,
+        observation: Option<&std::sync::Mutex<Option<ClaudeFixtureIdentity>>>,
+    ) -> bool {
+        use std::os::unix::process::CommandExt as _;
+        if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
+            if std::env::var_os("CLAUDE_NAMESPACE_INIT").is_some() {
+                claude_record_namespace_init();
+                body();
+                writeln!(std::io::stdout().lock(), "{marker}").expect("namespace marker");
+            } else {
+                claude_pid_namespace(name);
+            }
+            return false;
+        }
+        let standin = matches!(
+            name,
+            "claude_namespace_held_program_standin"
+                | "claude_namespace_fixture_cleanup_survives_timeout_and_panic"
+        )
+        .then(claude_standin_host);
+        let publication = (name == "claude_namespace_publication_keeps_worker_authority_separate")
+            .then(claude_fixture_root);
+        let fixture_root = standin
+            .as_ref()
+            .map(|(root, _)| root.path())
+            .or_else(|| publication.as_ref().map(tempfile::TempDir::path));
+        claude_retain_fixture(observation, fixture_root);
+        let identity = fixture_root
+            .or(probe)
+            .map(|root| root.join("namespace-init"));
+        let mut command = Command::new("/usr/bin/podman");
+        if let Some(root) = &publication {
+            command.env("CLAUDE_PUBLICATION_ROOT", root.path());
+        }
+        if let Some(path) = &identity {
+            command.env("CLAUDE_NAMESPACE_IDENTITY", path);
+        }
+        command.stdin(Stdio::null());
+        let channel = standin.as_ref().map(|(root, bundle)| {
+            let (sender, input) = std::os::unix::net::UnixStream::pair().expect("rights channel");
+            command
+                .env("CLAUDE_STANDIN_ROOT", root.path())
+                .env("CLAUDE_STANDIN_MANIFEST", &bundle.manifest)
+                .stdin(Stdio::from(OwnedFd::from(input)));
+            sender
+        });
+        if let Some(root) = probe {
+            command.env("CLAUDE_WATCHDOG_ROOT", root);
+        }
+        let child = command
+            .arg("unshare")
+            .arg(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                &format!("credential::tests::{name}"),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_remove("_CONTAINERS_USERNS_CONFIGURED")
+            .env_remove("_CONTAINERS_ROOTLESS_UID")
+            .env("SUPERLOOP_CLAUDE_NAMESPACE_PROOF", "1")
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("mapped namespace");
+        let mut child = ClaudeNamespaceChild {
+            child: Some(child),
+            root: fixture_root.map(Path::to_owned),
+            identity,
+            stopped: None,
+        };
+        claude_namespace_probe(probe, &child);
+        if let (Some(channel), Some((_, bundle))) = (channel, standin.as_ref()) {
+            loop_home::anchor::transport::send(&channel, &bundle.descriptors)
+                .expect("complete helper capability frame");
+        }
+        if claude_namespace_wait(&mut child, probe) {
+            return true;
+        }
+        let output = child.wait_with_output().expect("namespace output");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains(marker) && stdout.contains("1 passed"),
+            "{stdout}"
+        );
+        claude_namespace_output(name, &stdout);
+        false
+    }
+
+    fn claude_namespace_wait(child: &mut ClaudeNamespaceChild, probe: Option<&Path>) -> bool {
+        let began = std::time::Instant::now();
+        while child.try_wait().expect("namespace status").is_none() {
+            assert!(
+                !probe.is_some_and(|root| {
+                    root.join("ready").exists() && root.join("panic").exists()
+                }),
+                "injected host panic after namespace readiness"
+            );
+            if began.elapsed() > Duration::from_secs(60)
+                || probe.is_some_and(|root| root.join("ready").exists())
+            {
+                assert!(child.stop(), "namespace fixture did not terminate");
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    struct ClaudeNamespaceChild {
+        child: Option<std::process::Child>,
+        root: Option<PathBuf>,
+        identity: Option<PathBuf>,
+        stopped: Option<bool>,
+    }
+
+    impl std::ops::Deref for ClaudeNamespaceChild {
+        type Target = std::process::Child;
+        fn deref(&self) -> &Self::Target {
+            self.child.as_ref().expect("owned namespace child")
+        }
+    }
+
+    impl std::ops::DerefMut for ClaudeNamespaceChild {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.child.as_mut().expect("owned namespace child")
+        }
+    }
+
+    impl ClaudeNamespaceChild {
+        fn stop(&mut self) -> bool {
+            if let Some(stopped) = self.stopped {
+                return stopped;
+            }
+            if let Some(child) = &mut self.child {
+                if let Ok(group) = i32::try_from(child.id()) {
+                    let _ignored = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(group),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+                drop(child.kill());
+                drop(child.wait());
+            }
+            let stopped = claude_namespace_exited(self.identity.as_deref());
+            self.stopped = Some(stopped);
+            stopped
+        }
+
+        fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
+            let output = self
+                .child
+                .take()
+                .expect("owned namespace child")
+                .wait_with_output()?;
+            self.stopped = Some(true);
+            if let Some(root) = self.root.take() {
+                claude_cleanup_fixture(&root)?;
+            }
+            Ok(output)
+        }
+    }
+
+    impl Drop for ClaudeNamespaceChild {
+        fn drop(&mut self) {
+            if !self.stop() {
+                let _ignored = writeln!(
+                    std::io::stderr().lock(),
+                    "namespace fixture termination unconfirmed; mapped storage retained"
+                );
+                return;
+            }
+            if let Some(root) = self.root.take()
+                && let Err(error) = claude_cleanup_fixture(&root)
+            {
+                let _ignored = writeln!(
+                    std::io::stderr().lock(),
+                    "namespace fixture cleanup failed: {error}"
+                );
+            }
+        }
+    }
+
+    fn claude_namespace_exited(identity: Option<&Path>) -> bool {
+        use crate::container_helper::{ProcessPresence, process_presence};
+        let Some(path) = identity else {
+            return true;
+        };
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
+        };
+        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
+            return false;
+        };
+        let Some(pid) = record["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+        else {
+            return false;
+        };
+        let Some(start) = record["start"].as_u64() else {
+            return false;
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            match process_presence(pid, start) {
+                ProcessPresence::Absent => return true,
+                ProcessPresence::Unknown => return false,
+                ProcessPresence::Present => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn claude_record_namespace_init() {
+        if let Some(path) = std::env::var_os("CLAUDE_NAMESPACE_IDENTITY") {
+            let path = PathBuf::from(path);
+            let (pid, start) = claude_host_identity();
+            let record = serde_json::json!({"pid": pid, "start": start});
+            let pending = path.with_extension("pending");
+            fs::write(&pending, record.to_string()).expect("namespace identity");
+            fs::rename(pending, path).expect("namespace ready before fixture work");
+        }
+    }
+
+    fn claude_cleanup_fixture(root: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        if !root.is_absolute() {
+            return Err(std::io::Error::other("mapped fixture root is not absolute"));
+        }
+        let directory = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(root)
+        {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        claude_cleanup_fixture_at(&directory)
+    }
+
+    fn claude_cleanup_fixture_at(directory: &fs::File) -> std::io::Result<()> {
+        claude_cleanup_contents_at(directory, false)
+    }
+
+    fn claude_cleanup_contents_at(directory: &fs::File, all: bool) -> std::io::Result<()> {
+        let held = directory.metadata()?;
+        claude_cleanup_identity_at(directory, all, (held.dev(), held.ino()))
+    }
+
+    fn claude_cleanup_identity_at(
+        directory: &fs::File,
+        all: bool,
+        expected: (u64, u64),
+    ) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        // Enter the held directory before execution; no namespace-written path is followed.
+        let child = Command::new("/usr/bin/podman")
+            .args(["unshare", "/usr/bin/python3", "-I", "-c"])
+            .arg(format!("{}{}", concat!(
+                "import os,sys\n",
+                "root=os.open('.',os.O_RDONLY|os.O_DIRECTORY)\n",
+                "held=os.fstat(root)\n",
+                "if (held.st_dev,held.st_ino)!=(int(sys.argv[1]),int(sys.argv[2])):\n",
+                " raise RuntimeError('mapped fixture cleanup identity differs')\n",
+            ), if all {
+                concat!(
+                    "import os,shutil,stat\n",
+                    "for name in os.listdir(root):\n",
+                    " if stat.S_ISDIR(os.stat(name,dir_fd=root,follow_symlinks=False).st_mode):\n",
+                    "  shutil.rmtree(name,dir_fd=root)\n",
+                    " else: os.unlink(name,dir_fd=root)\n",
+                )
+            } else {
+                concat!(
+                    "import os,shutil\n",
+                    "try:\n",
+                    " r=os.open('runs',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=root)\n",
+                    "except FileNotFoundError: pass\n",
+                    "else:\n",
+                    " try: shutil.rmtree('worker',dir_fd=r)\n",
+                    " except FileNotFoundError: pass\n",
+                    " finally: os.close(r)\n",
+                )
+            }))
+            .args([expected.0.to_string(), expected.1.to_string()])
+            .env_remove("_CONTAINERS_USERNS_CONFIGURED")
+            .env_remove("_CONTAINERS_ROOTLESS_UID")
+            .current_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()?;
+        let mut child = ClaudeNamespaceChild {
+            child: Some(child),
+            root: None,
+            identity: None,
+            stopped: None,
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while child.try_wait()?.is_none() {
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::other("mapped fixture cleanup timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.stopped = Some(true);
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "mapped fixture cleanup refused: {}",
+                String::from_utf8_lossy(&output.stderr),
+            )));
+        }
+        Ok(())
+    }
+
+    fn claude_namespace_probe(probe: Option<&Path>, child: &ClaudeNamespaceChild) {
+        if let Some(root) = probe {
+            let pid = child.id();
+            let start = crate::container_helper::process_start(pid).expect("supervisor start");
+            let record = serde_json::json!({"pid": pid, "start": start});
+            fs::write(root.join("supervisor"), record.to_string()).expect("supervisor record");
+            if let Some(fixture) = &child.root {
+                fs::write(root.join("fixture"), fixture.as_os_str().as_encoded_bytes())
+                    .expect("fixture location");
+            }
+        }
+    }
+
+    /// # Panics
+    /// Panics if timeout or host unwind retains a supervisor or mapped fixture storage.
+    /// ´test:unit:claude-namespace-fixture-cleanup-survives-timeout-and-panic´
+    #[test]
+    fn claude_namespace_fixture_cleanup_survives_timeout_and_panic() {
+        let name = "claude_namespace_fixture_cleanup_survives_timeout_and_panic";
+        if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
+            claude_namespace_run(name, "CLEANUP-UNREACHABLE", claude_cleanup_body, None, None);
+            return;
+        }
+        for panic in [false, true] {
+            let probe = claude_fixture_root();
+            let outside = claude_fixture_root();
+            let sentinel = outside.path().join("sentinel");
+            fs::write(&sentinel, b"outside fixture").expect("outside sentinel");
+            let inode = fs::metadata(&sentinel).expect("sentinel identity").ino();
+            let observation = std::sync::Mutex::new(None);
+            if panic {
+                fs::write(probe.path().join("panic"), b"inject").expect("panic trigger");
+            }
+            let result = std::panic::catch_unwind(|| {
+                claude_namespace_run(
+                    name,
+                    "CLEANUP-UNREACHABLE",
+                    claude_cleanup_body,
+                    Some(probe.path()),
+                    Some(&observation),
+                )
+            });
+            let ready = probe.path().join("ready").exists();
+            fs::write(
+                probe.path().join("fixture"),
+                outside.path().as_os_str().as_encoded_bytes(),
+            )
+            .expect("namespace-writable target replaced");
+            let fixture = observation
+                .lock()
+                .expect("host observation")
+                .take()
+                .expect("fixture");
+            claude_cleanup_observation(probe.path(), &fixture);
+            assert_eq!(
+                fs::read(&sentinel).expect("outside retained"),
+                b"outside fixture"
+            );
+            assert_eq!(fs::metadata(&sentinel).expect("same sentinel").ino(), inode);
+            assert!(ready, "mapped worker existed before interruption");
+            if panic {
+                assert!(result.is_err(), "host panic reached");
+            } else {
+                assert!(
+                    result.expect("timeout without host panic"),
+                    "watchdog reached"
+                );
+            }
+        }
+    }
+
+    fn claude_cleanup_body() {
+        let root = PathBuf::from(std::env::var_os("CLAUDE_STANDIN_ROOT").expect("fixture root"));
+        let run = claude_standin_worker(&root.join("runs"));
+        fs::write(run.join(".claude/synthetic"), b"fixture storage").expect("worker storage");
+        let probe = PathBuf::from(std::env::var_os("CLAUDE_WATCHDOG_ROOT").expect("probe root"));
+        fs::write(probe.join("ready"), b"ready").expect("worker ready");
+        // A host killed without unwinding leaves this body for at most two minutes.
+        std::thread::sleep(Duration::from_secs(120));
+        panic!("cleanup body outlived its 120-second bound");
+    }
+
+    struct ClaudeFixtureIdentity {
+        path: PathBuf,
+        directory: fs::File,
+    }
+
+    fn claude_retain_fixture(
+        observation: Option<&std::sync::Mutex<Option<ClaudeFixtureIdentity>>>,
+        root: Option<&Path>,
+    ) {
+        if let Some(observation) = observation {
+            let path = root.expect("host-created fixture").to_owned();
+            let directory = fs::File::open(&path).expect("retain host-created directory");
+            *observation.lock().expect("host observation") =
+                Some(ClaudeFixtureIdentity { path, directory });
+        }
+    }
+
+    fn claude_fixture_identity_matches(fixture: &ClaudeFixtureIdentity) -> bool {
+        let current = match fs::symlink_metadata(&fixture.path) {
+            Ok(current) => current,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(error) => panic!("fixture identity: {error}"),
+        };
+        let held = fixture.directory.metadata().expect("held fixture identity");
+        assert!(
+            current.is_dir() && (current.dev(), current.ino()) == (held.dev(), held.ino()),
+            "fixture root replaced"
+        );
+        true
+    }
+
+    fn claude_remove_retained_fixture(fixture: &ClaudeFixtureIdentity) -> bool {
+        claude_remove_retained_fixture_with(fixture, |directory| {
+            claude_cleanup_fixture_at(directory).expect("negative-control mapped cleanup");
+        })
+    }
+
+    fn claude_remove_retained_fixture_with(
+        fixture: &ClaudeFixtureIdentity,
+        cleanup: impl FnOnce(&fs::File),
+    ) -> bool {
+        if !claude_fixture_identity_matches(fixture) {
+            return false;
+        }
+        cleanup(&fixture.directory);
+        if !claude_fixture_identity_matches(fixture) {
+            return false;
+        }
+        fs::remove_dir_all(&fixture.path).expect("negative-control host cleanup");
+        true
+    }
+
+    fn claude_assert_replaced(result: std::thread::Result<bool>) {
+        let panic = result.expect_err("replacement must refuse");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"fixture root replaced"));
+    }
+
+    /// # Panics
+    /// Panics if a replaced host fixture pathname authorizes removal of another directory.
+    /// ´test:unit:claude-cleanup-retains-host-fixture-identity´
+    #[test]
+    fn claude_cleanup_retains_host_fixture_identity() {
+        let parent = claude_fixture_root();
+        let path = parent.path().join("fixture");
+        fs::create_dir(&path).expect("fixture directory");
+        let fixture = ClaudeFixtureIdentity {
+            directory: fs::File::open(&path).expect("held fixture"),
+            path: path.clone(),
+        };
+        fs::rename(&path, parent.path().join("retained")).expect("move original");
+        fs::create_dir(&path).expect("foreign replacement");
+        let sentinel = path.join("sentinel");
+        fs::write(&sentinel, b"foreign directory").expect("sentinel");
+        let inode = fs::metadata(&sentinel).expect("sentinel identity").ino();
+        claude_assert_replaced(std::panic::catch_unwind(|| {
+            claude_remove_retained_fixture(&fixture)
+        }));
+        assert_eq!(
+            fs::read(&sentinel).expect("retained sentinel"),
+            b"foreign directory"
+        );
+        assert_eq!(fs::metadata(&sentinel).expect("same sentinel").ino(), inode);
+    }
+
+    /// # Panics
+    /// Panics if a non-directory replacement or a replacement during cleanup is removed.
+    /// ´test:unit:claude-cleanup-rechecks-host-identity-after-mapped-removal´
+    #[test]
+    fn claude_cleanup_rechecks_host_identity_after_mapped_removal() {
+        for (during, directory) in [(false, false), (true, false), (true, true)] {
+            let parent = claude_fixture_root();
+            let path = parent.path().join("fixture");
+            fs::create_dir(&path).expect("fixture");
+            let fixture = ClaudeFixtureIdentity {
+                directory: fs::File::open(&path).expect("held directory"),
+                path: path.clone(),
+            };
+            let replace = || {
+                fs::rename(&path, parent.path().join("retained")).expect("retain original");
+                if directory {
+                    fs::create_dir(&path).expect("foreign directory");
+                    fs::write(path.join("sentinel"), b"foreign file").expect("sentinel");
+                } else {
+                    fs::write(&path, b"foreign file").expect("non-directory replacement");
+                }
+            };
+            if !during {
+                replace();
+            }
+            claude_assert_replaced(std::panic::catch_unwind(|| {
+                claude_remove_retained_fixture_with(&fixture, |_| {
+                    assert!(during, "initial replacement must refuse before cleanup");
+                    replace();
+                })
+            }));
+            let sentinel = if directory {
+                path.join("sentinel")
+            } else {
+                path
+            };
+            assert_eq!(
+                fs::read(sentinel).expect("replacement retained"),
+                b"foreign file"
+            );
+        }
+    }
+
+    /// # Panics
+    /// Panics if a mapped cleanup can remove entries after a changed cwd identity.
+    /// ´test:unit:claude-cleanup-checks-mapped-enclosing-identity´
+    #[test]
+    fn claude_cleanup_checks_mapped_enclosing_identity() {
+        for all in [false, true] {
+            let root = claude_fixture_root();
+            fs::create_dir_all(root.path().join("runs/worker")).expect("worker");
+            let sentinel = root.path().join("runs/worker/sentinel");
+            fs::write(&sentinel, b"retained fixture").expect("sentinel");
+            let inode = fs::metadata(&sentinel).expect("sentinel identity").ino();
+            let held = fs::File::open(root.path()).expect("held root");
+            let identity = held.metadata().expect("identity");
+            let error = claude_cleanup_identity_at(
+                &held,
+                all,
+                (
+                    identity.dev(),
+                    identity.ino().checked_add(1).expect("foreign inode"),
+                ),
+            )
+            .expect_err("mapped cwd must match held identity");
+            assert!(
+                error
+                    .to_string()
+                    .contains("mapped fixture cleanup identity differs"),
+                "cleanup stderr: {error}"
+            );
+            assert_eq!(fs::read(&sentinel).expect("retained"), b"retained fixture");
+            assert_eq!(fs::metadata(&sentinel).expect("same inode").ino(), inode);
+            claude_cleanup_contents_at(&held, all).expect("matching mapped cwd");
+            assert!(!sentinel.exists());
+        }
+    }
+
+    /// # Panics
+    /// Panics if Podman's mapped cleanup loses the renamed held directory.
+    /// ´test:unit:claude-cleanup-measures-renamed-cwd-custody´
+    #[test]
+    fn claude_cleanup_measures_renamed_cwd_custody() {
+        let parent = claude_fixture_root();
+        let original = parent.path().join("enclosure");
+        let retained = parent.path().join("retained");
+        fs::create_dir(&original).expect("enclosure");
+        fs::write(original.join("synthetic"), b"fixture").expect("fixture file");
+        let held = fs::File::open(&original).expect("held enclosure");
+        fs::rename(&original, &retained).expect("rename before re-exec");
+        fs::create_dir(&original).expect("replacement");
+        fs::write(original.join("sentinel"), b"outside held enclosure").expect("sentinel");
+        claude_cleanup_contents_at(&held, true).expect("re-exec retains cwd identity");
+        assert_eq!(
+            fs::read_dir(&retained).expect("retained directory").count(),
+            0
+        );
+        assert_eq!(
+            fs::read(original.join("sentinel")).expect("replacement retained"),
+            b"outside held enclosure"
+        );
+    }
+
+    /// # Panics
+    /// Panics if mapped cleanup follows a namespace-written runs symlink.
+    /// ´test:unit:claude-cleanup-refuses-a-linked-runs-directory´
+    #[test]
+    fn claude_cleanup_refuses_a_linked_runs_directory() {
+        let root = claude_fixture_root();
+        let outside = claude_fixture_root();
+        fs::create_dir(outside.path().join("worker")).expect("outside worker");
+        let sentinel = outside.path().join("worker/sentinel");
+        fs::write(&sentinel, b"outside worker").expect("sentinel");
+        let inode = fs::metadata(&sentinel).expect("identity").ino();
+        symlink(outside.path(), root.path().join("runs")).expect("namespace link");
+        let error = claude_cleanup_fixture(root.path()).expect_err("linked runs must refuse");
+        assert!(
+            error
+                .to_string()
+                .contains("mapped fixture cleanup refused:")
+        );
+        assert!(
+            error.to_string().contains("'runs'"),
+            "cleanup stderr: {error}"
+        );
+        assert_eq!(
+            fs::read(&sentinel).expect("outside retained"),
+            b"outside worker"
+        );
+        assert_eq!(fs::metadata(&sentinel).expect("same inode").ino(), inode);
+    }
+
+    fn claude_cleanup_observation(probe: &Path, fixture: &ClaudeFixtureIdentity) {
+        let record: Value =
+            serde_json::from_slice(&fs::read(probe.join("supervisor")).expect("supervisor"))
+                .expect("identity");
+        let pid = u32::try_from(record["pid"].as_u64().expect("pid")).expect("u32 pid");
+        let start = record["start"].as_u64().expect("start");
+        let alive = crate::container_helper::process_alive(pid, start);
+        if alive {
+            let _ignored = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(i32::try_from(pid).expect("group")),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while crate::container_helper::process_alive(pid, start)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !crate::container_helper::process_alive(pid, start),
+            "negative-control supervisor cleanup"
+        );
+        let _ignored = nix::sys::wait::waitpid(
+            nix::unistd::Pid::from_raw(i32::try_from(pid).expect("supervisor")),
+            Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+        );
+        assert!(
+            claude_namespace_exited(Some(&fixture.path.join("namespace-init"))),
+            "negative-control namespace cleanup"
+        );
+        let retained = claude_remove_retained_fixture(fixture);
+        assert!(!alive, "fixture supervisor survived host unwind");
+        assert!(!retained, "mapped fixture home survived wrapper cleanup");
+    }
+
+    fn claude_namespace_output(name: &str, stdout: &str) {
+        if name == "claude_namespace_held_program_standin" {
+            let record = stdout
+                .lines()
+                .find_map(|line| {
+                    line.find("CLAUDE-STANDIN-PROGRAM ")
+                        .map(|index| &line[index..])
+                })
+                .expect("stand-in digest record");
+            writeln!(std::io::stdout().lock(), "{record}").expect("record fixture digest");
+        }
+    }
+
+    fn claude_pid_namespace(name: &str) {
+        let status = Command::new("/usr/bin/unshare")
+            .args(["--pid", "--fork", "--kill-child"])
+            .arg(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                &format!("credential::tests::{name}"),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("CLAUDE_NAMESPACE_INIT", "1")
+            .status()
+            .expect("fixture PID namespace");
+        assert!(status.success(), "fixture PID namespace: {status}");
+    }
+
+    /// # Panics
+    /// Panics if the wrapper watchdog leaves a separate-group descendant alive.
+    /// ´test:unit:claude-namespace-watchdog-contains-detached-descendant´
+    #[test]
+    fn claude_namespace_watchdog_contains_detached_descendant() {
+        if std::env::var_os("CLAUDE_WATCHDOG_DESCENDANT").is_some() {
+            claude_watchdog_descendant();
+        }
+        if std::env::var_os("SUPERLOOP_CLAUDE_NAMESPACE_PROOF").is_some() {
+            claude_namespace_run(
+                "claude_namespace_watchdog_contains_detached_descendant",
+                "WATCHDOG-UNREACHABLE",
+                claude_watchdog_body,
+                None,
+                None,
+            );
+            return;
+        }
+        let root = claude_fixture_root();
+        assert!(claude_namespace_run(
+            "claude_namespace_watchdog_contains_detached_descendant",
+            "WATCHDOG-UNREACHABLE",
+            claude_watchdog_body,
+            Some(root.path()),
+            None,
+        ));
+        let record: Value = serde_json::from_slice(
+            &fs::read(root.path().join("ready")).expect("descendant readiness"),
+        )
+        .expect("synthetic process identity");
+        let pid = u32::try_from(record["pid"].as_u64().expect("pid")).expect("u32 pid");
+        let start = record["start"].as_u64().expect("start");
+        let cleanup = ClaudeWatchdogDescendant(pid, start);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while crate::container_helper::process_alive(pid, start)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let survived = crate::container_helper::process_alive(pid, start);
+        drop(cleanup);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while crate::container_helper::process_alive(pid, start)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !crate::container_helper::process_alive(pid, start),
+            "negative-control descendant cleanup"
+        );
+        assert!(
+            !survived,
+            "separate-group descendant survived the wrapper watchdog"
+        );
+    }
+
+    struct ClaudeWatchdogDescendant(u32, u64);
+    impl Drop for ClaudeWatchdogDescendant {
+        fn drop(&mut self) {
+            if crate::container_helper::process_alive(self.0, self.1) {
+                let pid = i32::try_from(self.0).expect("fixture pid");
+                let _ignored = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+    }
+
+    fn claude_watchdog_body() {
+        use std::os::unix::process::CommandExt as _;
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "credential::tests::claude_namespace_watchdog_contains_detached_descendant",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("CLAUDE_WATCHDOG_DESCENDANT", "1")
+            .process_group(0)
+            .spawn()
+            .expect("separate-group descendant");
+        let status = child.wait().expect("descendant wait");
+        panic!("watchdog descendant exited early: {status}");
+    }
+
+    fn claude_watchdog_descendant() -> ! {
+        let root = PathBuf::from(std::env::var_os("CLAUDE_WATCHDOG_ROOT").expect("probe root"));
+        assert_eq!(
+            nix::unistd::getpgrp().as_raw().unsigned_abs(),
+            std::process::id()
+        );
+        let (pid, start) = claude_host_identity();
+        let record = serde_json::json!({"pid": pid, "start": start});
+        fs::write(root.join("pending"), record.to_string()).expect("process record");
+        fs::rename(root.join("pending"), root.join("ready")).expect("ready publication");
+        // A host killed without unwinding leaves this descendant for at most two minutes.
+        std::thread::sleep(Duration::from_secs(120));
+        panic!("synthetic descendant outlived its 120-second bound");
+    }
+
+    fn claude_host_identity() -> (u32, u64) {
+        // The retained host proc mount names the identity the host observer can check.
+        let pid: u32 = fs::read_link("/proc/self")
+            .expect("host proc identity")
+            .to_str()
+            .expect("numeric identity")
+            .parse()
+            .expect("pid");
+        let start = crate::container_helper::process_start(pid).expect("process start");
+        (pid, start)
+    }
+
+    struct ClaudeStandinWorker(PathBuf);
+    impl Drop for ClaudeStandinWorker {
+        fn drop(&mut self) {
+            drop(fs::remove_dir_all(&self.0));
+        }
+    }
+
+    fn claude_standin_host() -> (tempfile::TempDir, crate::container_entry::Bundle) {
+        claude_standin_host_with_root(claude_fixture_root())
+    }
+
+    fn claude_standin_host_with_root(
+        root: tempfile::TempDir,
+    ) -> (tempfile::TempDir, crate::container_entry::Bundle) {
+        let owner = root.path().join("owner");
+        let runs = root.path().join("runs");
+        for path in [&owner, &runs] {
+            fs::create_dir(path).expect("fixture directory");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        fixture_claude(&owner, &claude_document(1_800_000_000_000));
+        let config = owner.join(".config/loops");
+        for (name, text) in [
+            (
+                "registry.toml",
+                concat!(
+                    "namespace='org.superloop-tools.loophome.registry'\n",
+                    "version=[1,0,0]\n",
+                    "loops=[{name='alpha',uid=64000,launch='dev/alpha'}]\n"
+                ),
+            ),
+            (
+                "allocations.toml",
+                concat!(
+                    "mail_uid=64001\n[alpha]\n",
+                    "uids={base=64010,count=2}\n",
+                    "mail_gids={base=64020,count=3}\n"
+                ),
+            ),
+        ] {
+            fs::write(config.join(name), text).expect("synthetic configuration");
+            fs::set_permissions(config.join(name), fs::Permissions::from_mode(0o600))
+                .expect("private configuration");
+        }
+        let bundle = crate::container_entry::fixture_claude_helper_bundle(&owner, &runs);
+        (root, bundle)
+    }
+
+    // Native true returns success without rotating the synthetic authority.
+    // No vendor response or refresh behavior is emulated.
+    fn claude_namespace_standin() {
+        use sha2::{Digest as _, Sha256};
+        use std::fmt::Write as _;
+        assert_eq!(owner_identity(), (0, 0));
+        let root = PathBuf::from(std::env::var_os("CLAUDE_STANDIN_ROOT").expect("host root"));
+        let owner = root.join("owner");
+        let runs = root.join("runs");
+        let source = std::env::var("CLAUDE_STANDIN_MANIFEST").expect("host manifest");
+        let (_, mut anchors) = crate::container_entry::receive_for(
+            &source,
+            &std::io::stdin(),
+            "container-helper",
+            Some("alpha"),
+        )
+        .expect("production eight-role receiver");
+        loop_home::anchor::transport::replace_stdin("container-helper").expect("close setup input");
+        let _configuration = crate::container_entry::configuration(
+            &owner,
+            "alpha",
+            "container-helper",
+            anchors.pop().expect("configuration"),
+        )
+        .expect("held configuration");
+        let (_runtime, programs) =
+            crate::container_entry::take_support_programs(&mut anchors, BoxBackend::Claude)
+                .expect("selected credential roles");
+        let _home =
+            crate::home::activate_private_launch(&owner, &anchors[0], &runs, &anchors[1], None, 0)
+                .expect("received roots");
+        let _programs = crate::container_entry::activate_program_map("container-helper", programs);
+        let home = claude_sign_in_dir(&owner, "alpha");
+        let run = claude_standin_worker(&runs);
+        let _cleanup = ClaudeStandinWorker(run.clone());
+        let mut digest = String::with_capacity(64);
+        for byte in Sha256::digest(fs::read("/usr/bin/true").expect("public root-owned stand-in")) {
+            write!(&mut digest, "{byte:02x}").expect("hex digest");
+        }
+        let custody = crate::container_helper::CredentialThreadCustody::capture_admitted(
+            BoxBackend::Claude,
+            &Gate,
+        )
+        .expect("production transfer");
+        writeln!(
+            std::io::stdout().lock(),
+            "CLAUDE-STANDIN-PROGRAM sha256={digest}"
+        )
+        .expect("public fixture digest");
+        std::thread::spawn(move || {
+            let _custody = custody.activate().expect("authority thread activation");
+            assert!(
+                crate::container_entry::check(Path::new("/usr/bin/sha256sum"))
+                    .expect("active credential map")
+                    .is_err()
+            );
+            claude_standin_publication(&home, &run, &digest);
+            let configuration = crate::runtime_entry::snapshot_configuration().expect("snapshot");
+            let held = configuration
+                .open_private_directory(Path::new("alpha/claude"))
+                .expect("production configuration opener");
+            with_claude_exercise_snapshot(&held, &home, 1_799_999_990, |_, projection, due| {
+                assert!(due);
+                assert_eq!(
+                    fs::read(run.join(".claude/.credentials.json")).expect("worker"),
+                    format!("{projection}\n").as_bytes()
+                );
+                Ok(())
+            })
+            .expect("held exercise read");
+        })
+        .join()
+        .expect("namespace authority thread");
+        assert_eq!(
+            preflight(&owner, "alpha", BoxBackend::Claude)
+                .expect_err("public gate remains closed")
+                .kind,
+            "backend-unavailable"
+        );
+    }
+
+    fn claude_standin_worker(runs: &Path) -> PathBuf {
+        let run = runs.join("worker");
+        fs::create_dir(&run).expect("worker home");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o750)).expect("home mode");
+        fs::create_dir(run.join(".claude")).expect("worker state");
+        fs::set_permissions(run.join(".claude"), fs::Permissions::from_mode(0o700))
+            .expect("state mode");
+        nix::unistd::chown(
+            &run.join(".claude"),
+            Some(Uid::from_raw(3000)),
+            Some(Gid::from_raw(3000)),
+        )
+        .expect("distinct worker");
+        run
+    }
+
+    fn claude_standin_publication(home: &Path, run: &Path, digest: &str) {
+        let refresh = || {
+            let held = open_dir(home, 0, 0, 0o700)?;
+            let error = lock_with(&held, FlockArg::LockExclusiveNonblock)
+                .expect_err("owner lock stays held across program execution");
+            assert_eq!(error.kind, "credential-lock-busy");
+            claude_refresh_program(home, digest)
+        };
+        prepare_claude_run_at(home, run, 3000, 1_799_999_990, refresh, || {
+            Ok(1_799_999_990_000)
+        })
+        .expect("real held print and publication");
+        let path = run.join(".claude/.credentials.json");
+        let bytes = fs::read(&path).expect("projection");
+        let metadata = fs::metadata(&path).expect("worker identity");
+        assert_eq!(
+            (metadata.uid(), metadata.gid(), metadata.mode() & 0o777),
+            (3000, 3000, 0o600)
+        );
+        let projection: Value = serde_json::from_slice(&bytes).expect("projection JSON");
+        assert!(projection.get("mcpOAuth").is_none());
+        for field in ["refreshToken", "refreshTokenExpiresAt"] {
+            assert!(projection["claudeAiOauth"].get(field).is_none());
+        }
+        let error = publish_claude_round_at(
+            home,
+            run,
+            3000,
+            1_799_999_991,
+            || claude_refresh_program(home, &"0".repeat(64)),
+            || Ok(1_799_999_991_000),
+        )
+        .expect_err("wrong digest during due round publication");
+        assert_eq!(error.status, 2);
+        assert_eq!(error.kind, "credential-program-pin");
+        assert_eq!(
+            error.detail,
+            "held Claude program differs from the reviewed SHA-256"
+        );
+        assert_eq!(fs::read(&path).expect("wrong-pin retained bytes"), bytes);
+        assert_eq!(
+            fs::metadata(&path).expect("wrong-pin retained inode").ino(),
+            metadata.ino()
+        );
+        let error = publish_claude_round_at(home, run, 3000, 1_800_000_000, refresh, || {
+            Ok(1_800_000_000_000)
+        })
+        .expect_err("successful stand-in is not refreshed authority");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(
+            error.detail,
+            "Claude owner program left expired access authority"
+        );
+        assert_eq!(fs::read(&path).expect("retained bytes"), bytes);
+        assert_eq!(
+            fs::metadata(path).expect("retained identity").ino(),
+            metadata.ino()
+        );
+    }
+
+    fn claude_publication_root() -> PathBuf {
+        PathBuf::from(
+            std::env::var_os("CLAUDE_PUBLICATION_ROOT").expect("host-owned publication fixture"),
+        )
+    }
+
+    /// # Panics
+    /// Panics if the real provider and publisher violate custody in the mapped namespace.
+    fn claude_namespace_publication() {
+        assert_eq!(owner_identity(), (0, 0));
+        let root = claude_publication_root();
+        let owner_home = root.join("owner");
+        let runs = root.join("runs");
+        for path in [&owner_home, &runs] {
+            fs::create_dir(path).expect("fixture directory");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let _custody = crate::home::activate_private_launch(
+            &owner_home,
+            &File::open(&owner_home).expect("owner"),
+            &runs,
+            &File::open(&runs).expect("runs"),
+            None,
+            0,
+        )
+        .expect("received namespace roots");
+        let expiry = 1_800_000_000_u64;
+        let home = fixture_claude(&owner_home, &claude_document(expiry * 1000));
+        let run = runs.join("worker");
+        fs::create_dir(&run).expect("worker home");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o750)).expect("home mode");
+        let state = run.join(".claude");
+        fs::create_dir(&state).expect("worker state");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("state mode");
+        nix::unistd::chown(&state, Some(Uid::from_raw(3000)), Some(Gid::from_raw(3000)))
+            .expect("distinct mapped worker");
+        prepare_claude_run_at(
+            &home,
+            &run,
+            3000,
+            expiry - 3600,
+            || panic!("current fixture authority must not refresh"),
+            || Ok((expiry - 3600) * 1000),
+        )
+        .expect("mapped preparation");
+        let path = state.join(".credentials.json");
+        let before = fs::metadata(&path).expect("prepared worker");
+        assert_eq!(
+            (before.uid(), before.gid(), before.mode() & 0o777),
+            (3000, 3000, 0o600)
+        );
+        let receipt = publish_claude_round_at(
+            &home,
+            &run,
+            3000,
+            expiry - 10,
+            || claude_namespace_refresh(&home, expiry),
+            || Ok((expiry - 9) * 1000),
+        )
+        .expect("mapped round publication");
+        assert_eq!(receipt.as_object().expect("receipt").len(), 2);
+        let bytes = fs::read(&path).expect("published worker");
+        let metadata = fs::metadata(&path).expect("published identity");
+        assert_eq!(
+            (metadata.uid(), metadata.gid(), metadata.mode() & 0o777),
+            (3000, 3000, 0o600)
+        );
+        assert_ne!(metadata.ino(), before.ino());
+        let held = open_dir(&home, 0, 0, 0o700).expect("held sign-in");
+        with_claude_exercise_snapshot(&held, &home, expiry, |identity, projection, due| {
+            assert!(!due);
+            assert_ne!(identity["inode"], json!(metadata.ino()));
+            assert_eq!(bytes, format!("{projection}\n").as_bytes());
+            assert!(projection.get("mcpOAuth").is_none());
+            assert!(projection["claudeAiOauth"].get("refreshToken").is_none());
+            assert!(
+                projection["claudeAiOauth"]
+                    .get("refreshTokenExpiresAt")
+                    .is_none()
+            );
+            Ok(())
+        })
+        .expect("mapped exercise observation");
+        let error = publish_claude_round_at(
+            &home,
+            &run,
+            3000,
+            expiry + 3600,
+            || Ok(()),
+            || Ok((expiry + 3600) * 1000),
+        )
+        .expect_err("expired stand-in");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(
+            error.detail,
+            "Claude owner program left expired access authority"
+        );
+        assert_eq!(fs::read(&path).expect("unchanged worker"), bytes);
+        assert_eq!(
+            fs::metadata(&path).expect("unchanged inode").ino(),
+            metadata.ino()
+        );
+        assert_eq!(
+            preflight(&owner_home, "alpha", BoxBackend::Claude)
+                .expect_err("public gate remains closed")
+                .kind,
+            "backend-unavailable"
+        );
+    }
+
+    /// # Panics
+    /// Panics if the synthetic owner replacement loses the production refresh lock.
+    fn claude_namespace_refresh(home: &Path, expiry: u64) -> Result<(), LaneError> {
+        let directory = open_dir(home, 0, 0, 0o700)?;
+        let Err(error) = lock_with(&directory, FlockArg::LockExclusiveNonblock) else {
+            panic!("owner refresh lost the lock");
+        };
+        assert_eq!(error.kind, "credential-lock-busy");
+        // Stand-in for the owner's program; no vendor program or live sign-in is used.
+        let mut next = claude_document((expiry + 3600) * 1000);
+        next["claudeAiOauth"]["accessToken"] = json!("B".repeat(108));
+        let staged = home.join(".synthetic-replacement");
+        fs::write(&staged, next.to_string()).expect("synthetic replacement");
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o600)).expect("source mode");
+        fs::rename(staged, home.join(".credentials.json")).expect("owner publication");
+        Ok(())
+    }
+
+    fn fixture_claude(home: &Path, document: &Value) -> PathBuf {
+        fixture_sign_in(home, &source(1_900_000_000, "unused-codex"));
+        let dir = claude_sign_in_dir(home, "alpha");
+        fs::create_dir_all(&dir).expect("Claude fixture home");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("private home");
+        let path = dir.join(".credentials.json");
+        fs::write(&path, document.to_string()).expect("synthetic Claude source");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private source");
+        dir
+    }
+
+    /// # Panics
+    /// Panics only if the synthetic structural fixture leaks refresh authority or host state.
+    /// ´test:unit:claude-worker-encoding-excludes-owner-authority´
+    #[test]
+    fn claude_worker_encoding_excludes_owner_authority() {
+        let document = claude_document(1_800_000_000_001);
+        let source = ClaudeSource::parse(&document).expect("recorded structural shape");
+        let encoded = source.worker_file();
+        let worker: Value = serde_json::from_slice(&encoded).expect("worker JSON");
+        assert_eq!(worker.as_object().expect("object").len(), 1);
+        assert_eq!(
+            ClaudeSource::parse(&worker)
+                .err()
+                .expect("worker is not owner authority")
+                .kind,
+            "credential-sign-in"
+        );
+        let oauth = worker["claudeAiOauth"].as_object().expect("OAuth object");
+        assert_eq!(oauth.len(), 6);
+        assert!(!oauth.contains_key("refreshToken"));
+        assert!(!oauth.contains_key("refreshTokenExpiresAt"));
+        for field in [
+            "accessToken",
+            "expiresAt",
+            "scopes",
+            "subscriptionType",
+            "subscriptionTypeSource",
+            "rateLimitTier",
+        ] {
+            assert_eq!(oauth[field], document["claudeAiOauth"][field]);
+        }
+        assert_eq!(document["claudeAiOauth"]["refreshToken"], "R".repeat(108));
+        assert!(!source.needs_refresh(1_799_999_400));
+        assert!(source.needs_refresh(1_799_999_401));
+        assert!(source.needs_refresh(u64::MAX));
+    }
+
+    /// # Panics
+    /// Panics only if malformed owner inputs pass validation or appear in diagnostics.
+    /// ´test:unit:claude-owner-schema-refuses-malformed-fields´
+    #[test]
+    fn claude_owner_schema_refuses_malformed_fields() {
+        for (field, value) in [
+            ("accessToken", json!("A".repeat(107))),
+            ("refreshToken", json!("\n".repeat(108))),
+            ("accessToken", json!("é".repeat(54))),
+            ("expiresAt", json!(1_800_000_000)),
+            ("expiresAt", json!("1800000000000")),
+            ("expiresAt", json!(1_800_000_000_000.5)),
+            ("refreshTokenExpiresAt", json!(-1)),
+            ("scopes", json!([])),
+            ("scopes", json!([false])),
+            ("subscriptionType", json!(null)),
+            ("subscriptionTypeSource", json!("\u{7f}")),
+            ("rateLimitTier", json!("x".repeat(257))),
+        ] {
+            let mut document = claude_document(1_800_000_000_000);
+            document["claudeAiOauth"][field] = value;
+            let error = ClaudeSource::parse(&document)
+                .err()
+                .expect("malformed refusal");
+            assert_eq!(error.kind, "credential-sign-in");
+            assert!(!error.detail.contains(&"A".repeat(108)));
+            assert!(!error.detail.contains(&"R".repeat(108)));
+        }
+        let mut document = claude_document(1_800_000_000_000);
+        document["claudeAiOauth"]["futureAuthority"] = json!(true);
+        assert!(ClaudeSource::parse(&document).is_err());
+        assert!(ClaudeSource::parse(&json!({})).is_err());
+    }
+
+    /// # Panics
+    /// Panics only if the provider fails to adopt its owner program's synthetic replacement.
+    /// ´test:unit:claude-provider-adopts-owner-program-publication´
+    #[test]
+    fn claude_provider_adopts_owner_program_publication() {
+        let fixture = claude_fixture_root();
+        let old = claude_document(1_800_000_000_000);
+        let home = fixture_claude(fixture.path(), &old);
+        let mut next = claude_document(1_800_000_003_000);
+        next["claudeAiOauth"]["accessToken"] = json!("B".repeat(108));
+        next["mcpOAuth"]["fixture-plugin"]["hostOnly"] = json!(true);
+        let owner_bytes = next.to_string();
+        let calls = std::cell::Cell::new(0);
+        let provider = ClaudeOwnerProvider {
+            home: &home,
+            refresh_program: || {
+                calls.set(calls.get() + 1);
+                let staged = home.join(".owner-login.tmp");
+                fs::write(&staged, &owner_bytes).expect("owner program output");
+                fs::set_permissions(&staged, fs::Permissions::from_mode(0o600))
+                    .expect("owner program mode");
+                fs::rename(staged, home.join(".credentials.json"))
+                    .expect("owner program publication");
+                Ok(())
+            },
+        };
+        let directory =
+            open_dir(&home, owner_identity().0, owner_identity().0, 0o700).expect("home");
+        let refresh_lock = lock_with(&directory, FlockArg::LockExclusive).expect("refresh lock");
+        let result = refresh_provider(&provider, 1_800_000_000, || {
+            panic!("helper must not publish owner source")
+        })
+        .expect("provider refresh");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            result.oauth["accessToken"],
+            next["claudeAiOauth"]["accessToken"]
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("owner source"),
+            owner_bytes
+        );
+        let run = fixture.path().join("run");
+        fs::create_dir_all(run.join(".claude")).expect("worker home");
+        for path in [&run, &run.join(".claude")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("worker home mode");
+        }
+        write_claude_run(&run, owner_identity().0, &result).expect("worker publication");
+        let worker_path = run.join(".claude/.credentials.json");
+        assert_eq!(
+            fs::read(&worker_path).expect("worker bytes"),
+            result.worker_file()
+        );
+        assert_eq!(
+            fs::metadata(&worker_path)
+                .expect("worker metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(refresh_lock);
+        prepare_claude_run_at(
+            &home,
+            &run,
+            owner_identity().0,
+            1_700_000_000,
+            || panic!("current authority must not refresh"),
+            || Ok(1_700_000_000_000),
+        )
+        .expect("production preparation with current owner authority");
+        assert_eq!(
+            fs::read(worker_path).expect("prepared worker bytes"),
+            result.worker_file()
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("owner source preserved"),
+            owner_bytes
+        );
+    }
+
+    /// # Panics
+    /// Panics only if unsafe source custody is accepted or a refusal changes authority.
+    /// ´test:unit:claude-provider-refuses-unsafe-source-and-refresh´
+    #[test]
+    fn claude_provider_refuses_unsafe_source_and_refresh() {
+        let fixture = claude_fixture_root();
+        let document = claude_document(1_800_000_000_000);
+        let home = fixture_claude(fixture.path(), &document);
+        let provider = ClaudeOwnerProvider {
+            home: &home,
+            refresh_program: || Err(failure("credential-refresh", "synthetic refusal")),
+        };
+        assert_eq!(
+            refresh_provider(&provider, 1_800_000_000, || {})
+                .err()
+                .expect("refresh refusal")
+                .kind,
+            "credential-refresh"
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".credentials.json")).expect("unchanged source"),
+            document.to_string()
+        );
+        let source =
+            refresh_provider(&provider, 1_700_000_000, || {}).expect("not due, no program call");
+        assert_eq!(source.expires_ms, 1_800_000_000_000);
+        let path = home.join(".credentials.json");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("bad mode");
+        assert_eq!(
+            read_claude_source(&home).err().expect("mode refusal").kind,
+            "credential-sign-in"
+        );
+        fs::remove_file(&path).expect("remove fixture");
+        std::os::unix::fs::symlink(home.join("absent"), &path).expect("source symlink");
+        assert_eq!(
+            read_claude_source(&home)
+                .err()
+                .expect("symlink refusal")
+                .kind,
+            "credential-sign-in"
+        );
     }
 
     fn encoded(bytes: &[u8]) -> String {
@@ -1281,13 +3808,18 @@ mod tests {
         let first_inode = fs::metadata(&source_path)
             .expect("synthetic metadata")
             .ino();
-        let mut record = json!({"worker_uid":Uid::effective().as_raw(),"plan":{"home":run_home},"active_round":"dispatch","rounds":[{"step":"dispatch"}]});
+        let mut record = json!({"worker_uid":Uid::effective().as_raw(),"plan":{"backend":"codex","home":run_home},"active_round":"dispatch","rounds":[{"step":"dispatch"}]});
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        crate::container_helper::publish_round_credential(home, "alpha", &mut record)
-            .expect("first round barrier");
+        crate::container_helper::publish_round_credential_admitted(
+            home,
+            "alpha",
+            &mut record,
+            &Gate,
+        )
+        .expect("first round barrier");
         let first =
             crate::launch::report::credential_publication(&record).expect("first report evidence");
         let published: Value = serde_json::from_slice(
@@ -1310,8 +3842,13 @@ mod tests {
             .as_array_mut()
             .expect("rounds")
             .push(json!({"step":"resume"}));
-        crate::container_helper::publish_round_credential(home, "alpha", &mut record)
-            .expect("resumed round barrier");
+        crate::container_helper::publish_round_credential_admitted(
+            home,
+            "alpha",
+            &mut record,
+            &Gate,
+        )
+        .expect("resumed round barrier");
         let second =
             crate::launch::report::credential_publication(&record).expect("second report evidence");
         let published: Value = serde_json::from_slice(
@@ -1342,7 +3879,10 @@ mod tests {
         );
     }
 
-    fn fixture_endpoint(status: &str, response: Value) -> (String, std::thread::JoinHandle<Value>) {
+    pub(super) fn fixture_endpoint(
+        status: &str,
+        response: Value,
+    ) -> (String, std::thread::JoinHandle<Value>) {
         fixture_endpoint_with(status, response, || {})
     }
 
@@ -1410,7 +3950,7 @@ mod tests {
             "worker_uid": uid,
             "helper_pid": pid,
             "helper_start": crate::container_helper::process_start(pid).expect("fixture process start"),
-            "plan": {"home": runs.join(format!("home-{run}"))}
+            "plan": {"backend":"codex","home": runs.join(format!("home-{run}"))}
         });
         crate::launch::publish_reservation(&crate::launch::reservation_path(runs, run), &record)
             .expect("synthetic reservation");
@@ -1498,6 +4038,595 @@ mod tests {
         assert_eq!(reloaded["auth_mode"], "chatgptAuthTokens");
         assert_eq!(reloaded["tokens"]["refresh_token"], "");
         assert_eq!(reloaded["tokens"]["access_token"], token(now + 3600));
+    }
+
+    /// ´test:unit:boxed-backend-codex-refresh-skips-claude-run´
+    #[test]
+    fn boxed_backend_codex_refresh_skips_claude_run() {
+        let temp = fixture_root();
+        let now = 1_800_000_000;
+        fixture_sign_in(temp.path(), &source(now + 3600, "initial"));
+        let runs = temp.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        fixture_run(&runs, "codex-run", 3001);
+        fixture_run(&runs, "claude-run", 3002);
+        let path = crate::launch::reservation_path(&runs, "claude-run");
+        let mut record = crate::launch::read_reservation(&path)
+            .expect("read")
+            .expect("record");
+        record["plan"]["backend"] = json!("claude");
+        crate::launch::publish_reservation(&path, &record).expect("Claude fixture");
+        let mut recipients = Vec::new();
+        refresh_live_at(
+            temp.path(),
+            "alpha",
+            &runs,
+            "http://127.0.0.1:1",
+            now,
+            &mut BTreeMap::new(),
+            |_home, uid, _source| {
+                recipients.push(uid);
+                Ok(())
+            },
+        )
+        .expect("valid source needs no refresh request");
+        assert_eq!(recipients, [3001]);
+    }
+
+    fn claude_live_fixture(runs: &Path, name: &str) -> PathBuf {
+        fixture_run(runs, name, owner_identity().0);
+        let path = crate::launch::reservation_path(runs, name);
+        let mut record = crate::launch::read_reservation(&path)
+            .expect("read")
+            .expect("record");
+        record["plan"]["backend"] = json!("claude");
+        crate::launch::publish_reservation(&path, &record).expect("Claude reservation");
+        let home = PathBuf::from(record["plan"]["home"].as_str().expect("home"));
+        fs::create_dir_all(home.join(".claude")).expect("worker leaf");
+        for path in [&home, &home.join(".claude")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("worker mode");
+        }
+        home
+    }
+
+    /// # Panics
+    /// Panics if periodic publication crosses vendors, repeats unchanged writes or loses retries.
+    /// ´test:unit:claude-live-refresh-selects-live-homes-and-retries-publication´
+    #[test]
+    fn claude_live_refresh_selects_live_homes_and_retries_publication() {
+        let root = claude_fixture_root();
+        let now = 1_800_000_000;
+        let home = fixture_claude(root.path(), &claude_document((now + 500) * 1000));
+        let runs = root.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        let first = claude_live_fixture(&runs, "claude-first");
+        let second = claude_live_fixture(&runs, "claude-second");
+        fixture_run(&runs, "codex-control", owner_identity().0);
+        let retired = claude_live_fixture(&runs, "claude-retired");
+        let path = crate::launch::reservation_path(&runs, "claude-retired");
+        let mut record = crate::launch::read_reservation(&path)
+            .expect("read")
+            .expect("record");
+        record["phase"] = json!("retired");
+        crate::launch::publish_reservation(&path, &record).expect("retirement");
+        fs::set_permissions(second.join(".claude"), fs::Permissions::from_mode(0o755))
+            .expect("bad mode");
+        let calls = std::cell::Cell::new(0);
+        let mut cache = BTreeMap::new();
+        let report = refresh_claude_live_at(
+            &home,
+            "alpha",
+            &runs,
+            now,
+            &mut cache,
+            || {
+                calls.set(calls.get() + 1);
+                let dir = open_dir(&home, owner_identity().0, owner_identity().0, 0o700)?;
+                assert!(lock_with(&dir, FlockArg::LockExclusiveNonblock).is_err());
+                let mut next = claude_document((now + 3600) * 1000);
+                next["claudeAiOauth"]["accessToken"] = json!("N".repeat(108));
+                fs::write(home.join(".credentials.json"), next.to_string())
+                    .expect("synthetic owner refresh");
+                Ok(())
+            },
+            || Ok(now * 1000),
+        )
+        .expect("partial publication");
+        assert_eq!(calls.get(), 1);
+        assert!(report.changed);
+        assert_eq!(report.refusals.len(), 1);
+        assert_eq!(report.refusals[0]["run"], "claude-second");
+        assert_eq!(cache.len(), 1);
+        let bytes = fs::read(first.join(".claude/.credentials.json")).expect("first worker");
+        let worker: Value = serde_json::from_slice(&bytes).expect("encoding");
+        assert_eq!(worker.as_object().expect("object").len(), 1);
+        assert_eq!(worker["claudeAiOauth"].as_object().expect("OAuth").len(), 6);
+        assert_eq!(worker["claudeAiOauth"]["accessToken"], "N".repeat(108));
+        assert!(!retired.join(".claude/.credentials.json").exists());
+        assert!(!runs.join("home-codex-control").exists());
+        fs::set_permissions(second.join(".claude"), fs::Permissions::from_mode(0o700))
+            .expect("repair mode");
+        let prior = fs::metadata(first.join(".claude/.credentials.json"))
+            .expect("first inode")
+            .ino();
+        let report = refresh_claude_live_at(
+            &home,
+            "alpha",
+            &runs,
+            now,
+            &mut cache,
+            || panic!("current authority must not refresh"),
+            || Ok(now * 1000),
+        )
+        .expect("retry");
+        assert!(report.changed);
+        assert_eq!(report.refusals, [] as [Value; 0]);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            fs::read(second.join(".claude/.credentials.json")).expect("retry worker"),
+            bytes
+        );
+        assert_eq!(
+            fs::metadata(first.join(".claude/.credentials.json"))
+                .expect("retained inode")
+                .ino(),
+            prior
+        );
+        let report = refresh_claude_live_at(
+            &home,
+            "alpha",
+            &runs,
+            now,
+            &mut cache,
+            || panic!("current authority"),
+            || Ok(now * 1000),
+        )
+        .expect("unchanged");
+        assert!(!report.changed);
+    }
+
+    /// # Panics
+    /// Panics if unrotated authority hides repeated owner calls or crosses expiry.
+    /// ´test:unit:claude-periodic-unrotated-authority-keeps-the-refresh-window-visible´
+    #[test]
+    fn claude_periodic_unrotated_authority_keeps_the_refresh_window_visible() {
+        let root = claude_fixture_root();
+        let now = 1_800_000_000;
+        let expiry = now + REFRESH_AHEAD.as_secs();
+        let home = fixture_claude(root.path(), &claude_document(expiry * 1000));
+        let runs = root.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        let worker = claude_live_fixture(&runs, "claude-live").join(".claude/.credentials.json");
+        let calls = std::cell::Cell::new(0);
+        let mut helpers = [BTreeMap::new(), BTreeMap::new()];
+        // Stand-in calls leave the synthetic token unchanged. Injected samples
+        // model two helpers; no vendor margin or real elapsed cadence is measured.
+        for tick in 0..20 {
+            let sampled = now + tick * 30;
+            for published in &mut helpers {
+                let report = refresh_claude_live_at(
+                    &home,
+                    "alpha",
+                    &runs,
+                    sampled,
+                    published,
+                    || {
+                        let owner = owner_identity().0;
+                        let directory = open_dir(&home, owner, owner, 0o700).expect("owner home");
+                        assert!(lock_with(&directory, FlockArg::LockExclusiveNonblock).is_err());
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    },
+                    || Ok(sampled * 1000),
+                )
+                .expect("unrotated but unexpired authority");
+                assert_eq!(report.expires_unix, expiry);
+                assert_eq!(report.changed, tick == 0);
+            }
+        }
+        assert_eq!(calls.get(), 40);
+        let bytes = fs::read(&worker).expect("prior worker");
+        let inode = fs::metadata(&worker).expect("prior inode").ino();
+        let error = refresh_claude_live_at(
+            &home,
+            "alpha",
+            &runs,
+            expiry,
+            &mut helpers[0],
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+            || Ok(expiry * 1000),
+        )
+        .expect_err("expired authority cannot be published");
+        assert_eq!(error.kind, "credential-refresh");
+        assert_eq!(calls.get(), 41);
+        assert_eq!(fs::read(&worker).expect("unchanged bytes"), bytes);
+        assert_eq!(fs::metadata(&worker).expect("unchanged inode").ino(), inode);
+    }
+
+    /// # Panics
+    /// Panics if failed or expired owner refresh publishes any worker or cache entry.
+    /// ´test:unit:claude-live-refresh-refusal-preserves-workers´
+    #[test]
+    fn claude_live_refresh_refusal_preserves_workers() {
+        let root = claude_fixture_root();
+        let now = 1_800_000_000;
+        let home = fixture_claude(root.path(), &claude_document(now * 1000));
+        let runs = root.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        let worker = claude_live_fixture(&runs, "claude-live").join(".claude/.credentials.json");
+        fs::write(&worker, b"synthetic prior worker").expect("prior file");
+        let inode = fs::metadata(&worker).expect("inode").ino();
+        let mut cache = BTreeMap::new();
+        for refuse in [true, false] {
+            let error = refresh_claude_live_at(
+                &home,
+                "alpha",
+                &runs,
+                now,
+                &mut cache,
+                || {
+                    if refuse {
+                        Err(failure("credential-refresh", "synthetic refusal"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || Ok(now * 1000),
+            )
+            .expect_err("owner refusal or expired result");
+            assert_eq!(error.kind, "credential-refresh");
+            assert!(cache.is_empty());
+            assert_eq!(
+                fs::read(&worker).expect("prior bytes"),
+                b"synthetic prior worker"
+            );
+            assert_eq!(fs::metadata(&worker).expect("prior inode").ino(), inode);
+        }
+        let absent = root.path().join("absent-owner");
+        assert_eq!(
+            refresh_live_admitted(
+                &absent,
+                "alpha",
+                &runs,
+                &mut cache,
+                BoxBackend::Claude,
+                AUTH_ENDPOINT,
+                &Gate
+            )
+            .expect_err("closed gate")
+            .kind,
+            "backend-unavailable"
+        );
+        assert!(!absent.exists());
+    }
+
+    /// # Panics
+    /// Panics if either evidence boundary accepts mixed schemas or a foreign backend.
+    /// ´test:unit:credential-evidence-refuses-cross-schema-provider-fields´
+    #[test]
+    fn credential_evidence_refuses_cross_schema_provider_fields() {
+        let root = claude_fixture_root();
+        let runs = root.path().join("runs");
+        let driver = runs.join("pilot");
+        fs::create_dir_all(&driver).expect("driver");
+        fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected path");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700))
+            .expect("private evidence");
+        let file = protected.join("credential-refresh.json");
+        let owner = owner_identity().0;
+        let held = open_dir(&runs, owner, owner, 0o700).expect("held runs");
+        for (backend, field, value) in [
+            (BoxBackend::Codex, "backend", Value::Null),
+            (BoxBackend::Codex, "backend", json!("codex")),
+            (BoxBackend::Codex, "provider", Value::Null),
+            (
+                BoxBackend::Codex,
+                "provider",
+                json!({"kind":"owner-program"}),
+            ),
+            (BoxBackend::Claude, "backend", json!("codex")),
+            (BoxBackend::Claude, "backend", json!("unknown")),
+            (BoxBackend::Claude, "backend", Value::Null),
+        ] {
+            let valid = evidence_for_check(&Ok(fixture_report(1_900_000_000)), true, backend)
+                .expect("valid evidence");
+            publish_evidence(&driver, &valid).expect("valid writer control");
+            assert_eq!(
+                read_evidence(&held, "pilot", owner).expect("valid reader control"),
+                Some(EvidenceObservation::Current(valid.clone()))
+            );
+            let bytes = fs::read(&file).expect("prior evidence");
+            let inode = fs::metadata(&file).expect("prior identity").ino();
+            let mut invalid = valid;
+            invalid[field] = value;
+            let error = publish_evidence(&driver, &invalid).expect_err("mixed provider writer");
+            assert_eq!(error.kind, "credential-evidence");
+            assert_eq!(error.detail, "schema, provider or state is invalid");
+            assert_eq!(fs::read(&file).expect("evidence retained"), bytes);
+            assert_eq!(fs::metadata(&file).expect("identity retained").ino(), inode);
+            fs::write(&file, invalid.to_string()).expect("synthetic invalid persisted evidence");
+            let error = read_evidence(&held, "pilot", owner).expect_err("mixed provider reader");
+            assert_eq!(error.kind, "credential-evidence");
+            assert_eq!(error.detail, "credential evidence envelope is invalid");
+        }
+    }
+
+    /// # Panics
+    /// Panics if production evidence differs from its reviewed program binding.
+    /// ´test:unit:claude-reviewed-binding-keeps-schema-evidence´
+    #[test]
+    fn claude_reviewed_binding_keeps_schema_evidence() {
+        let root = claude_fixture_root();
+        let runs = root.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+        let driver = runs.join("pilot");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected path");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("mode");
+        let held =
+            open_dir(&runs, owner_identity().0, owner_identity().0, 0o700).expect("held runs");
+        let binding = &crate::runtime_admission::ReviewedProgramBinding::Schema;
+        for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+            for result in [
+                Ok(fixture_report(1_900_000_000)),
+                Err(failure("credential-refresh", "synthetic refusal")),
+            ] {
+                let evidence = evidence_for_check_bound(&result, true, backend, binding)
+                    .expect("production evidence");
+                if backend == BoxBackend::Claude {
+                    assert_eq!(
+                        evidence["provider"]["required_sha256"],
+                        CLAUDE_SCHEMA_PROGRAM_SHA256
+                    );
+                }
+                let mut expected = match &result {
+                    Ok(_) => json!({
+                        "schema":1, "host":REFRESH_HOST, "state":"current",
+                        "run_refusals":[], "run_refusals_omitted":0,
+                        "expires_unix":1_900_000_000_u64, "refresh_due_unix":1_899_999_400_u64,
+                        "kind":null, "detail":null,
+                    }),
+                    Err(_) => json!({
+                        "schema":1, "host":REFRESH_HOST, "state":"refused",
+                        "run_refusals":[], "run_refusals_omitted":0,
+                        "expires_unix":null, "refresh_due_unix":null,
+                        "kind":"credential-refresh", "detail":"synthetic refusal",
+                    }),
+                };
+                if backend == BoxBackend::Claude {
+                    expected.as_object_mut().expect("object").remove("host");
+                    expected["schema"] = json!(2);
+                    expected["backend"] = json!("claude");
+                    expected["provider"] = json!({
+                        "kind":"owner-program", "program":"/usr/bin/claude",
+                        "required_sha256":CLAUDE_SCHEMA_PROGRAM_SHA256,
+                    });
+                }
+                assert_eq!(
+                    serde_json::to_vec(&evidence).expect("evidence bytes"),
+                    serde_json::to_vec(&expected).expect("expected bytes")
+                );
+                let original = evidence_for_check(&result, true, backend).expect("original form");
+                publish_evidence(&driver, &original).expect("compiled writer");
+                let original_bytes =
+                    fs::read(protected.join("credential-refresh.json")).expect("original bytes");
+                publish_evidence_bound(&driver, &evidence, binding).expect("bound writer");
+                assert_eq!(
+                    fs::read(protected.join("credential-refresh.json")).expect("bound bytes"),
+                    original_bytes
+                );
+                assert_eq!(
+                    serde_json::to_vec(&evidence).expect("encoding"),
+                    original_bytes
+                );
+                assert_eq!(
+                    read_evidence(&held, "pilot", owner_identity().0).expect("census"),
+                    Some(EvidenceObservation::Current(evidence))
+                );
+            }
+        }
+        let mut foreign = evidence_for_check_bound(
+            &Ok(fixture_report(1_900_000_000)),
+            true,
+            BoxBackend::Claude,
+            binding,
+        )
+        .expect("production evidence");
+        let retained = fs::read(protected.join("credential-refresh.json")).expect("retained");
+        foreign["provider"]["required_sha256"] = json!("0".repeat(64));
+        let error = publish_evidence_bound(&driver, &foreign, binding)
+            .expect_err("bound writer validates before writing");
+        assert_eq!(error.kind, "credential-evidence");
+        assert_eq!(error.detail, "schema, provider or state is invalid");
+        assert_eq!(
+            fs::read(protected.join("credential-refresh.json")).expect("evidence retained"),
+            retained
+        );
+    }
+
+    /// # Panics
+    /// Panics if Claude evidence fabricates an endpoint or cannot be read by census.
+    /// ´test:unit:claude-refresh-evidence-names-owner-program-without-host´
+    #[test]
+    fn claude_refresh_evidence_names_owner_program_without_host() {
+        let backend = BoxBackend::Claude;
+        let root = claude_fixture_root();
+        let runs = root.path().join("runs");
+        let driver = runs.join("pilot");
+        fs::create_dir_all(&driver).expect("driver");
+        fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("protected path");
+        fs::create_dir(&protected).expect("protected directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("protected mode");
+        let held =
+            open_dir(&runs, owner_identity().0, owner_identity().0, 0o700).expect("held runs");
+        for result in [
+            Ok(fixture_report(1_900_000_000)),
+            Err(failure("credential-refresh", "synthetic refusal")),
+        ] {
+            let evidence = evidence_for_check(&result, true, backend).expect("evidence");
+            assert_eq!(evidence["schema"], 2);
+            assert_eq!(evidence["backend"], "claude");
+            assert!(evidence.get("host").is_none());
+            assert_eq!(evidence["provider"]["kind"], "owner-program");
+            assert_eq!(
+                evidence["provider"]["required_sha256"],
+                CLAUDE_SCHEMA_PROGRAM_SHA256
+            );
+            publish_evidence(&driver, &evidence).expect("publish");
+            assert_eq!(
+                read_evidence(&held, "pilot", owner_identity().0).expect("census"),
+                Some(EvidenceObservation::Current(evidence.clone()))
+            );
+            let mut foreign = evidence;
+            foreign["host"] = json!(REFRESH_HOST);
+            assert_eq!(
+                publish_evidence(&driver, &foreign)
+                    .expect_err("foreign host")
+                    .kind,
+                "credential-evidence"
+            );
+            foreign.as_object_mut().expect("object").remove("host");
+            foreign["provider"]["required_sha256"] = json!("0".repeat(64));
+            assert_eq!(
+                publish_evidence(&driver, &foreign)
+                    .expect_err("foreign program")
+                    .kind,
+                "credential-evidence"
+            );
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum StandInRefresh {
+        Unchanged,
+        Staged,
+        OwnerProgram,
+        OwnerProgramUnchanged,
+        OwnerLogin,
+        Refused,
+    }
+
+    // These counters stand in for opaque authority and file identity. They are
+    // neither a Claude credential schema nor a fixture of vendor output.
+    struct StandInProvider {
+        current: std::cell::Cell<u64>,
+        mode: StandInRefresh,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl OwnerProvider for StandInProvider {
+        type Snapshot = u64;
+        type Identity = u64;
+
+        fn read(&self) -> Result<u64, LaneError> {
+            self.calls.borrow_mut().push("read");
+            Ok(self.current.get())
+        }
+
+        fn due(&self, _source: &u64, _now: u64) -> bool {
+            !matches!(self.mode, StandInRefresh::Unchanged)
+        }
+
+        fn identity(&self, source: &u64) -> Result<u64, LaneError> {
+            Ok(*source)
+        }
+
+        fn refresh(&self, _source: &u64) -> Result<Option<u64>, LaneError> {
+            self.calls.borrow_mut().push("owner-refresh");
+            match self.mode {
+                StandInRefresh::Refused => Err(failure("credential-refresh", "stand-in refused")),
+                StandInRefresh::OwnerProgram => {
+                    self.current.set(2);
+                    Ok(None)
+                }
+                StandInRefresh::OwnerProgramUnchanged => Ok(None),
+                StandInRefresh::OwnerLogin => {
+                    self.current.set(3);
+                    Ok(Some(2))
+                }
+                StandInRefresh::Staged => Ok(Some(2)),
+                StandInRefresh::Unchanged => panic!("unneeded refresh"),
+            }
+        }
+
+        fn publish(&self, next: &u64, expected: u64) -> Result<bool, LaneError> {
+            self.calls.borrow_mut().push("publish");
+            if self.current.get() != expected {
+                return Ok(false);
+            }
+            self.current.set(*next);
+            Ok(true)
+        }
+    }
+
+    /// ´test:unit:credential-provider-preserves-owner-refresh-boundaries´
+    #[test]
+    fn credential_provider_preserves_owner_refresh_boundaries() {
+        for (mode, replace_before_publish, expected, calls) in [
+            (StandInRefresh::Unchanged, false, Some(1), vec!["read"]),
+            (
+                StandInRefresh::Staged,
+                false,
+                Some(2),
+                vec!["read", "owner-refresh", "read", "publish"],
+            ),
+            (
+                StandInRefresh::OwnerProgram,
+                false,
+                Some(2),
+                vec!["read", "owner-refresh", "read"],
+            ),
+            (
+                StandInRefresh::OwnerProgramUnchanged,
+                false,
+                Some(1),
+                vec!["read", "owner-refresh", "read"],
+            ),
+            (
+                StandInRefresh::OwnerLogin,
+                false,
+                Some(3),
+                vec!["read", "owner-refresh", "read"],
+            ),
+            (
+                StandInRefresh::Staged,
+                true,
+                Some(3),
+                vec!["read", "owner-refresh", "read", "publish", "read"],
+            ),
+            (
+                StandInRefresh::Refused,
+                false,
+                None,
+                vec!["read", "owner-refresh"],
+            ),
+        ] {
+            let provider = StandInProvider {
+                current: std::cell::Cell::new(1),
+                mode,
+                calls: std::cell::RefCell::new(Vec::new()),
+            };
+            let result = refresh_provider(&provider, 0, || {
+                if replace_before_publish {
+                    provider.current.set(3);
+                }
+            });
+            if let Some(value) = expected {
+                assert_eq!(result.expect("provider result"), value);
+            } else {
+                let error = result.expect_err("owner refresh refusal");
+                assert_eq!(error.kind, "credential-refresh");
+                assert_eq!(provider.current.get(), 1);
+            }
+            assert_eq!(*provider.calls.borrow(), calls);
+        }
     }
 
     /// ´test:unit:credential-two-distinct-workers-receive-one-refresh´
@@ -1658,8 +4787,9 @@ mod tests {
         let target = temp.path().join("owner-target");
         fs::write(&target, b"unchanged").expect("synthetic owner target");
         symlink(&target, old_launch.join("credential-refresh.json")).expect("loop-created symlink");
-        let evidence = evidence_for_check(&Ok(fixture_report(1_900_000_000)), true)
-            .expect("first check evidence");
+        let evidence =
+            evidence_for_check(&Ok(fixture_report(1_900_000_000)), true, BoxBackend::Codex)
+                .expect("first check evidence");
         publish_evidence(&driver, &evidence).expect("protected evidence publication");
         assert_eq!(fs::read(&target).expect("target"), b"unchanged");
         let written: Value = serde_json::from_slice(
@@ -1674,6 +4804,44 @@ mod tests {
                 .kind,
             "credential-evidence"
         );
+    }
+
+    fn assert_temporal_evidence_refusals(
+        evidence: &Value,
+        protected: &Path,
+        held: &OwnedFd,
+        driver: &Path,
+        owner: u32,
+    ) {
+        for (field, invalid, named) in [
+            ("expires_unix", Value::Null, "expires_unix"),
+            ("expires_unix", json!("1900000000"), "expires_unix"),
+            ("expires_unix", json!(1_900_000_000.5_f64), "expires_unix"),
+            ("refresh_due_unix", Value::Null, "refresh_due_unix"),
+            ("refresh_due_unix", json!("1899999400"), "refresh_due_unix"),
+            (
+                "refresh_due_unix",
+                json!(1_899_999_400.5_f64),
+                "refresh_due_unix",
+            ),
+            ("refresh_due_unix", json!(1_899_999_401_u64), "disagrees"),
+        ] {
+            let mut malformed = evidence.clone();
+            malformed[field] = invalid;
+            fs::write(
+                protected.join("credential-refresh.json"),
+                malformed.to_string(),
+            )
+            .expect("malformed fixture");
+            assert_eq!(
+                read_evidence(held, "R", owner).expect("temporal defect is observable"),
+                Some(EvidenceObservation::Current(malformed.clone()))
+            );
+            let error = publish_evidence(driver, &malformed)
+                .expect_err("writer still refuses malformed instant");
+            assert_eq!(error.status, 2);
+            assert!(error.detail.contains(named), "{}", error.line());
+        }
     }
 
     /// ´test:unit:credential-evidence-instants-follow-fixture-exp-and-refuse-missing-fields´
@@ -1703,7 +4871,8 @@ mod tests {
         let protected = crate::plan::protected_identity_dir(&driver).expect("protected name");
         fs::create_dir(&protected).expect("protected directory");
         fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("protected mode");
-        let evidence = evidence_for_check(&Ok(report), true).expect("first check publishes");
+        let evidence = evidence_for_check(&Ok(report), true, BoxBackend::Codex)
+            .expect("first check publishes");
         assert_eq!(evidence["state"], "current");
         publish_evidence(&driver, &evidence).expect("evidence publication");
         let held: OwnedFd = File::open(&runs).expect("held runs root").into();
@@ -1725,38 +4894,11 @@ mod tests {
                 json!({"schema":1,"host":REFRESH_HOST,"state":"published","run_refusals":[]})
             ))
         );
-        for (field, invalid, named) in [
-            ("expires_unix", Value::Null, "expires_unix"),
-            ("expires_unix", json!("1900000000"), "expires_unix"),
-            ("expires_unix", json!(1_900_000_000.5_f64), "expires_unix"),
-            ("refresh_due_unix", Value::Null, "refresh_due_unix"),
-            ("refresh_due_unix", json!("1899999400"), "refresh_due_unix"),
-            (
-                "refresh_due_unix",
-                json!(1_899_999_400.5_f64),
-                "refresh_due_unix",
-            ),
-            ("refresh_due_unix", json!(1_899_999_401_u64), "disagrees"),
-        ] {
-            let mut malformed = evidence.clone();
-            malformed[field] = invalid;
-            fs::write(
-                protected.join("credential-refresh.json"),
-                malformed.to_string(),
-            )
-            .expect("malformed fixture");
-            assert_eq!(
-                read_evidence(&held, "R", owner).expect("temporal defect is observable"),
-                Some(EvidenceObservation::Current(malformed.clone()))
-            );
-            let error = publish_evidence(&driver, &malformed)
-                .expect_err("writer still refuses malformed instant");
-            assert_eq!(error.status, 2);
-            assert!(error.detail.contains(named), "{}", error.line());
-        }
+        assert_temporal_evidence_refusals(&evidence, &protected, &held, &driver, owner);
         let refusal = failure("credential-sign-in", "source cannot be read");
         let failed_check: Result<RefreshReport, LaneError> = Err(refusal);
-        let refused = evidence_for_check(&failed_check, false).expect("error evidence");
+        let refused =
+            evidence_for_check(&failed_check, false, BoxBackend::Codex).expect("error evidence");
         assert_eq!(refused["expires_unix"], Value::Null);
         assert_eq!(refused["refresh_due_unix"], Value::Null);
         publish_evidence(&driver, &refused).expect("refusal replaces prior measurement");
@@ -1764,10 +4906,10 @@ mod tests {
             read_evidence(&held, "R", owner).expect("refused evidence"),
             Some(EvidenceObservation::Current(refused))
         );
-        let checked = failed_check.is_ok();
         let recovered_check = Ok(fixture_report(expires));
-        let recovered = evidence_for_check(&recovered_check, !checked)
-            .expect("healthy check after refusal republishes");
+        let recovered =
+            evidence_for_check(&recovered_check, failed_check.is_err(), BoxBackend::Codex)
+                .expect("healthy check after refusal republishes");
         assert_eq!(recovered["state"], "current");
         publish_evidence(&driver, &recovered).expect("recovered evidence publication");
         let EvidenceObservation::Current(measured) = read_evidence(&held, "R", owner)
@@ -1806,12 +4948,555 @@ mod tests {
         let protected = crate::plan::protected_identity_dir(&driver).expect("protected name");
         fs::create_dir(&protected).expect("protected directory");
         fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("protected mode");
-        let evidence = evidence_for_check(&Ok(report), false).expect("run refusals publish");
+        let evidence = evidence_for_check(&Ok(report), false, BoxBackend::Codex)
+            .expect("run refusals publish");
         publish_evidence(&driver, &evidence).expect("bounded evidence publication");
         let held: OwnedFd = File::open(&runs).expect("held runs root").into();
         assert_eq!(
             read_evidence(&held, "R0", Uid::effective().as_raw()).expect("bounded reader"),
             Some(EvidenceObservation::Current(evidence))
+        );
+    }
+
+    /// # Panics
+    /// Panics if the fixture cannot pin and validate the selected real executable files.
+    fn credential_test_programs(
+        client: &str,
+        clock: &str,
+    ) -> BTreeMap<PathBuf, std::sync::Arc<loop_home::anchor::Anchor>> {
+        use loop_home::anchor::{
+            HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement,
+            Transport,
+        };
+        let host = HostVerifier::current().expect("host map");
+        let policy = Policy {
+            kind: Kind::File,
+            owner: Owner::RootFile,
+            mode: ModePolicy::Executable,
+        };
+        let mut pins = Vec::new();
+        let mut requirements = Vec::new();
+        for (slot, purpose, path) in [
+            (0, "credential-client", client),
+            (1, "credential-clock", clock),
+        ] {
+            pins.push(
+                host.pin(Path::new(path), purpose, slot, policy)
+                    .expect("host executable"),
+            );
+            requirements.push(Requirement {
+                purpose: purpose.into(),
+                policy,
+                alias_group: None,
+            });
+        }
+        let manifest = Manifest {
+            version: 1,
+            transport: Transport::Rights,
+            operation: "credential-test".into(),
+            loop_name: "alpha".into(),
+            records: pins
+                .iter()
+                .map(loop_home::anchor::HostPin::record)
+                .collect(),
+        };
+        let anchors = Receiver::current()
+            .expect("receiver")
+            .validate(
+                &manifest,
+                pins.into_iter()
+                    .map(loop_home::anchor::HostPin::into_fd)
+                    .collect(),
+                "credential-test",
+                "alpha",
+                Transport::Rights,
+                &requirements,
+            )
+            .expect("validated programs");
+        ["/usr/bin/curl", "/usr/bin/date"]
+            .into_iter()
+            .zip(anchors)
+            .map(|(path, anchor)| (PathBuf::from(path), std::sync::Arc::new(anchor)))
+            .collect()
+    }
+
+    /// # Panics
+    /// Panics if the production helper composer, receiver or support extraction disagrees.
+    fn helper_custody_fixture(
+        client: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::home::PrivateHomeGuard,
+        crate::container_entry::ExecutableGuard,
+    ) {
+        let home = fixture_root();
+        let runs = home.path().join("runs");
+        fs::create_dir(&runs).expect("runs");
+        fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs mode");
+        let held_home = File::open(home.path()).expect("home").into();
+        let held_runs = File::open(&runs).expect("runs").into();
+        for path in [
+            home.path().join(".config"),
+            home.path().join(".config/loops"),
+        ] {
+            fs::create_dir_all(&path).expect("configuration directory");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let mut bundle = crate::container_entry::pin(
+            "alpha",
+            (home.path(), &held_home),
+            (&runs, &held_runs),
+            &std::env::current_exe().expect("entry image"),
+            Path::new("/usr/bin/podman"),
+            BoxBackend::Codex,
+        )
+        .expect("production helper composer");
+        if client != "/usr/bin/curl" {
+            use loop_home::anchor::{HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy};
+            let pin = HostVerifier::current()
+                .expect("host map")
+                .for_operation("container-helper")
+                .pin(
+                    Path::new(client),
+                    "credential-client",
+                    5,
+                    Policy {
+                        kind: Kind::File,
+                        owner: Owner::RootFile,
+                        mode: ModePolicy::Executable,
+                    },
+                )
+                .expect("substitute root-owned client capability");
+            let mut manifest = Manifest::parse(&bundle.manifest).expect("manifest");
+            manifest.records[5] = pin.record();
+            bundle.descriptors[5] = pin.into_fd();
+            bundle.manifest = serde_json::to_string(&manifest).expect("client declaration");
+        }
+        let (sender, input) = std::os::unix::net::UnixStream::pair().expect("rights channel");
+        loop_home::anchor::transport::send(&sender, &bundle.descriptors).expect("complete frame");
+        let (_, mut anchors) = crate::container_entry::receive_for(
+            &bundle.manifest,
+            &input,
+            "container-helper",
+            Some("alpha"),
+        )
+        .expect("production helper receiver");
+        let _configuration = anchors.pop().expect("configuration role");
+        let (runtime, mut support) =
+            crate::container_entry::take_support_programs(&mut anchors, BoxBackend::Codex)
+                .expect("production helper support roles");
+        support.insert(PathBuf::from("/usr/bin/podman"), Arc::new(runtime));
+        let guard = crate::home::activate_private_launch(
+            home.path(),
+            &anchors[0],
+            &runs,
+            &anchors[1],
+            None,
+            Uid::effective().as_raw(),
+        )
+        .expect("held home and runs");
+        let programs = crate::container_entry::activate_program_map("container-helper", support);
+        (home, guard, programs)
+    }
+
+    /// # Panics
+    /// Panics if the credential thread loses held executables or changes the refresh exchange.
+    /// ´claim:superlooplane:credential-thread-refreshes-through-held-executables´
+    /// ´test:unit:credential-thread-refreshes-through-held-executables´
+    #[test]
+    fn credential_thread_refreshes_through_held_executables() {
+        let (_home, _private, _guard) = helper_custody_fixture("/usr/bin/curl");
+        let custody = crate::container_helper::CredentialThreadCustody::capture_admitted(
+            BoxBackend::Codex,
+            &Gate,
+        )
+        .expect("production helper thread handoff");
+        let (endpoint, server) = fixture_endpoint(
+            "200 OK",
+            json!({"id_token":token(1_900_000_000),"access_token":token(1_900_000_000),"refresh_token":"fixture-rotated"}),
+        );
+        let refreshed = std::thread::spawn(move || {
+            let _guard = custody
+                .activate()
+                .expect("production helper thread activation");
+            assert!(
+                crate::container_entry::check(Path::new("/usr/bin/curl"))
+                    .expect("held client")
+                    .is_ok()
+            );
+            assert!(
+                crate::container_entry::check(Path::new("/usr/bin/date"))
+                    .expect("held clock")
+                    .is_ok()
+            );
+            assert!(
+                crate::container_entry::check(Path::new("/usr/bin/sha256sum"))
+                    .expect("scoped map")
+                    .is_err(),
+                "hashing authority is not transferred"
+            );
+            assert!(
+                crate::container_entry::check(Path::new("/usr/bin/podman"))
+                    .expect("scoped map")
+                    .is_err(),
+                "container authority is not transferred"
+            );
+            refresh_request(
+                &Source::parse(source(1_800_000_000, "initial")).expect("source"),
+                &endpoint,
+            )
+            .expect("held refresh exchange")
+        })
+        .join()
+        .expect("credential thread");
+        let request = server.join().expect("endpoint");
+        assert_eq!(request["grant_type"], "refresh_token");
+        assert_eq!(
+            refreshed.document["tokens"]["refresh_token"],
+            "fixture-rotated"
+        );
+        assert!(
+            refreshed.document["last_refresh"]
+                .as_str()
+                .expect("clock output")
+                .ends_with('Z')
+        );
+        let _clock = crate::container_entry::activate_program_map(
+            "credential-test",
+            credential_test_programs("/usr/bin/curl", "/usr/bin/false"),
+        );
+        let refusal = utc_timestamp().expect_err("held false image replaces the date program key");
+        assert_eq!(refusal.kind, "credential-clock");
+        assert_eq!(refusal.detail, "UTC date program failed");
+    }
+
+    /// # Panics
+    /// Panics if the service authority loses held roots, its first evidence or cancellation.
+    /// ´claim:superlooplane:service-credential-authority-retains-custody´
+    /// ´test:unit:service-credential-authority-retains-custody´
+    #[test]
+    fn service_credential_authority_retains_custody() {
+        for case in ["current", "absent", "client", "exchange"] {
+            service_authority_case(case);
+        }
+    }
+
+    /// # Panics
+    /// Panics if a service authority check escapes its capabilities or loses its evidence.
+    fn service_authority_case(case: &str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let present = case != "absent";
+        let due = matches!(case, "client" | "exchange");
+        let (home, private, programs) = helper_custody_fixture(if case == "client" {
+            "/usr/bin/true"
+        } else {
+            "/usr/bin/curl"
+        });
+        let expires = now_seconds().expect("current instant") + if due { 300 } else { 86_400 };
+        fixture_sign_in(home.path(), &source(expires, "service"));
+        if !present {
+            fs::remove_file(sign_in_dir(home.path(), "alpha").join("auth.json"))
+                .expect("absent authority source");
+        }
+        let runs = home.path().join("runs");
+        let driver = runs.join("R");
+        fs::create_dir(&driver).expect("driver");
+        let protected = crate::plan::protected_identity_dir(&driver).expect("evidence path");
+        fs::create_dir(&protected).expect("protected evidence directory");
+        fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).expect("evidence mode");
+        let lock = lock(home.path(), "alpha").expect("order the first authority check");
+        let retained = ReplacedAuthorityHome::new(home.path());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let exchange = (case == "exchange").then(|| fixture_endpoint(
+            "200 OK",
+            json!({"id_token":token(expires + 86_400),"access_token":token(expires + 86_400),"refresh_token":"service-rotated"}),
+        ));
+        // Retain the unserved listener so a lost program map can contact only loopback.
+        let refusal = TcpListener::bind("127.0.0.1:0").expect("closed fixture boundary");
+        let endpoint = exchange.as_ref().map_or_else(
+            || {
+                format!(
+                    "http://{}/token",
+                    refusal.local_addr().expect("local endpoint")
+                )
+            },
+            |(endpoint, _)| endpoint.clone(),
+        );
+        let _endpoint = fixture_service_endpoint(endpoint);
+        let authority = crate::container_helper::spawn_credential_authority_admitted(
+            home.path().to_path_buf(),
+            "alpha".into(),
+            runs,
+            driver,
+            BoxBackend::Codex,
+            Arc::clone(&cancelled),
+            &Gate,
+        )
+        .expect("service authority spawn");
+        drop(programs);
+        drop(private);
+        // The blocking lock orders both guard releases before refresh_live_at can read.
+        drop(lock);
+        let began = Instant::now();
+        let evidence_path = retained
+            .path()
+            .join(
+                protected
+                    .strip_prefix(home.path())
+                    .expect("relative evidence"),
+            )
+            .join("credential-refresh.json");
+        while !evidence_path.exists() && began.elapsed() < Duration::from_secs(10) {
+            if authority.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cancelled.store(true, Ordering::Release);
+        let result = finish_service_authority(authority);
+        assert!(
+            !home.path().join(".config").exists(),
+            "replacement home is untouched"
+        );
+        retained.restore();
+        result.expect("service authority result");
+        assert_service_authority_evidence(case, home.path(), &protected, expires, exchange);
+        assert!(
+            began.elapsed() < Duration::from_secs(12),
+            "cancellation joins the real service loop"
+        );
+    }
+
+    struct ReplacedAuthorityHome {
+        original: PathBuf,
+        retained: tempfile::TempDir,
+    }
+    impl ReplacedAuthorityHome {
+        /// # Panics
+        /// Panics if the fixture home cannot be retained and replaced.
+        fn new(home: &Path) -> Self {
+            let retained = tempfile::tempdir_in(home.parent().expect("home parent"))
+                .expect("owned retention directory");
+            fs::rename(home, retained.path().join("home")).expect("retain original home inode");
+            fs::create_dir(home).expect("replacement home");
+            fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("replacement mode");
+            Self {
+                original: home.to_path_buf(),
+                retained,
+            }
+        }
+        fn path(&self) -> PathBuf {
+            self.retained.path().join("home")
+        }
+        /// # Panics
+        /// Panics if the empty replacement cannot be removed and the retained home restored.
+        fn restore(self) {
+            fs::remove_dir(&self.original).expect("remove empty replacement");
+            fs::rename(self.path(), &self.original).expect("restore fixture for cleanup");
+        }
+    }
+
+    /// # Panics
+    /// Panics rather than joining indefinitely if the authority ignores cancellation.
+    fn finish_service_authority(
+        authority: std::thread::JoinHandle<Result<(), LaneError>>,
+    ) -> Result<(), LaneError> {
+        let began = std::time::Instant::now();
+        while !authority.is_finished() && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            authority.is_finished(),
+            "service authority ignored cancellation"
+        );
+        authority.join().expect("service authority join")
+    }
+
+    /// # Panics
+    /// Panics if an already cancelled authority reaches its blocked first check.
+    /// ´claim:superlooplane:service-authority-cancellation-prevents-first-check´
+    /// ´test:unit:service-authority-cancellation-prevents-first-check´
+    #[test]
+    fn service_authority_cancellation_prevents_first_check() {
+        let (home, _private, _programs) = helper_custody_fixture("/usr/bin/true");
+        fixture_sign_in(
+            home.path(),
+            &source(now_seconds().expect("clock") + 300, "cancelled"),
+        );
+        let _lock = lock(home.path(), "alpha").expect("block every first check");
+        let original =
+            fs::read(sign_in_dir(home.path(), "alpha").join("auth.json")).expect("source");
+        let refusal = TcpListener::bind("127.0.0.1:0").expect("local boundary");
+        let _endpoint = fixture_service_endpoint(format!(
+            "http://{}/token",
+            refusal.local_addr().expect("address")
+        ));
+        let driver = home.path().join("runs/R");
+        let authority = crate::container_helper::spawn_credential_authority_admitted(
+            home.path().to_path_buf(),
+            "alpha".into(),
+            home.path().join("runs"),
+            driver.clone(),
+            BoxBackend::Codex,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            &Gate,
+        )
+        .expect("cancelled service spawn");
+        finish_service_authority(authority).expect("cancelled before first check");
+        assert!(
+            !driver.exists(),
+            "cancelled authority publishes no evidence"
+        );
+        assert_eq!(
+            fs::read(sign_in_dir(home.path(), "alpha").join("auth.json"))
+                .expect("unchanged source"),
+            original
+        );
+    }
+
+    /// # Panics
+    /// Panics if unwinding leaks the owned retention directory or its contents.
+    /// ´claim:superlooplane:service-authority-retention-cleans-up-on-panic´
+    /// ´test:unit:service-authority-retention-cleans-up-on-panic´
+    #[test]
+    fn service_authority_retention_cleans_up_on_panic() {
+        let home = tempfile::tempdir().expect("home");
+        let retained = std::cell::RefCell::new(None);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let moved = ReplacedAuthorityHome::new(home.path());
+            *retained.borrow_mut() = Some(moved.retained.path().to_path_buf());
+            fs::write(moved.path().join("sentinel"), b"fictional").expect("retained contents");
+            panic!("fixture panic after home replacement");
+        }));
+        assert!(result.is_err());
+        assert!(!retained.borrow().as_ref().expect("retained path").exists());
+        assert!(home.path().exists());
+    }
+
+    /// # Panics
+    /// Panics if the service exchange or its persisted evidence differs from the check.
+    fn assert_service_authority_evidence(
+        case: &str,
+        home: &Path,
+        protected: &Path,
+        expires: u64,
+        exchange: Option<(String, std::thread::JoinHandle<Value>)>,
+    ) {
+        let present = case != "absent";
+        let due = matches!(case, "client" | "exchange");
+        let evidence: Value = serde_json::from_slice(
+            &fs::read(protected.join("credential-refresh.json"))
+                .expect("first service check publishes evidence"),
+        )
+        .expect("evidence JSON");
+        if let Some((_, server)) = exchange {
+            // A refused exchange must fail before joining an endpoint that saw no request.
+            assert_eq!(evidence["state"], "current");
+            assert_eq!(evidence["expires_unix"], expires + 86_400);
+            let request = server.join().expect("service refresh exchange");
+            assert_eq!(request["grant_type"], "refresh_token");
+            assert_eq!(request["refresh_token"], "fixture-refresh-service");
+            let refreshed: Value = serde_json::from_slice(
+                &fs::read(sign_in_dir(home, "alpha").join("auth.json")).expect("refreshed source"),
+            )
+            .expect("source JSON");
+            assert_eq!(refreshed["tokens"]["refresh_token"], "service-rotated");
+            assert!(
+                refreshed["last_refresh"]
+                    .as_str()
+                    .expect("held clock result")
+                    .ends_with('Z')
+            );
+            assert_eq!(evidence["run_refusals"], json!([]));
+        } else {
+            assert_eq!(
+                evidence["state"],
+                if present && !due {
+                    "current"
+                } else {
+                    "refused"
+                }
+            );
+            if due {
+                assert_eq!(evidence["kind"], "credential-refresh");
+                assert!(
+                    matches!(
+                        evidence["detail"].as_str(),
+                        Some(
+                            "token endpoint response is invalid"
+                                | "token request could not be sent"
+                        )
+                    ),
+                    "{evidence}"
+                );
+                assert_eq!(evidence["expires_unix"], expires);
+            } else if present {
+                assert_eq!(evidence["expires_unix"], expires);
+                assert_eq!(evidence["refresh_due_unix"], expires - 600);
+                assert_eq!(evidence["run_refusals"], json!([]));
+            } else {
+                assert_eq!(evidence["kind"], "credential-sign-in");
+                assert!(evidence["expires_unix"].is_null());
+            }
+        }
+    }
+
+    /// # Panics
+    /// Panics if the refresh client executes its pathname instead of the received capability.
+    /// ´claim:superlooplane:credential-client-executes-the-received-file´
+    /// ´test:unit:credential-client-executes-the-received-file´
+    #[test]
+    fn credential_client_executes_the_received_file() {
+        let (_home, _private, _programs) = helper_custody_fixture("/usr/bin/true");
+        let custody = crate::container_helper::CredentialThreadCustody::capture_admitted(
+            BoxBackend::Codex,
+            &Gate,
+        )
+        .expect("production handoff");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("endpoint");
+        listener.set_nonblocking(true).expect("bounded observation");
+        let endpoint = format!("http://{}/refresh", listener.local_addr().expect("address"));
+        let error = std::thread::spawn(move || {
+            let _guard = custody.activate().expect("production thread activation");
+            let output = crate::build::run_checked(
+                Path::new("/usr/bin/curl"),
+                Vec::new(),
+                &std::env::vars().collect(),
+                Path::new("/"),
+                10,
+                "credential-client-test",
+            )
+            .expect("held true client");
+            assert!(
+                output.is_empty(),
+                "the argument-free held client emits nothing"
+            );
+            let Err(error) = refresh_request(
+                &Source::parse(source(1_800_000_000, "initial")).expect("source"),
+                &endpoint,
+            ) else {
+                panic!("the held client produces no token response");
+            };
+            error
+        })
+        .join()
+        .expect("credential thread");
+        assert_eq!(error.kind, "credential-refresh");
+        assert!(
+            matches!(
+                error.detail.as_str(),
+                "token endpoint response is invalid" | "token request could not be sent"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            listener
+                .accept()
+                .expect_err("no pathname client connects")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
         );
     }
 

@@ -369,6 +369,15 @@ pub(crate) fn private_is_active() -> bool {
     PRIVATE_HOME.with(|active| active.borrow().is_some())
 }
 
+pub(crate) fn private_runs_path() -> Option<PathBuf> {
+    PRIVATE_HOME.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .map(|anchors| anchors.runs.0.clone())
+    })
+}
+
 pub(crate) fn private_runs() -> Result<(PathBuf, OwnedFd), LaneError> {
     PRIVATE_HOME.with(|active| {
         let active = active.borrow();
@@ -387,6 +396,9 @@ pub(crate) fn private_runs() -> Result<(PathBuf, OwnedFd), LaneError> {
 ///
 /// Refuses an unsafe private anchor or invalid allocation ledger.
 pub fn read_allocations(home: &Path) -> Result<loop_home::allocations::Allocations, LaneError> {
+    if let Some(configuration) = crate::runtime_entry::plan_configuration(home)? {
+        return Ok(configuration.allocations);
+    }
     let path = loop_home::allocations::allocations_path(home);
     let result = if let Some(prefix) = private_home() {
         if prefix != home {
@@ -1408,6 +1420,9 @@ fn make_home_pinned_with_sources(
     driver_parent: &OwnedFd,
     held_sources: &mut Option<OwnedFd>,
 ) -> Result<serde_json::Value, LaneError> {
+    let backend = crate::settings::BoxBackend::from_plan(&plan.document)?;
+    settings.launch_backend(Some(backend))?;
+    crate::plan::verify_home_layout(&plan.document)?;
     let declared_sources = crate::launch::declared_sources(letter_bytes)?;
     require_absent(home_parent, &plan.home)?;
     require_absent(driver_parent, &plan.driver_dir)?;
@@ -1494,24 +1509,26 @@ fn make_home_pinned_with_sources(
         0o640,
     )?;
     report_file(&mut reports, &file, &git_path, caller.0, loop_uid, 0o640)?;
-    let codex_path = plan.home.join(".codex");
-    let codex = make_dir(&h, &codex_path, 0o700)?;
-    report_dir(&mut reports, &codex, &codex_path, worker, worker, 0o700)?;
-    for name in ["config.toml", "AGENTS.md"] {
-        let path = codex_path.join(name);
-        let file = make_file(&codex, &path, b"", 0o600)?;
+    let state_path = plan.home.join(backend.state_leaf());
+    let state = make_dir(&h, &state_path, 0o700)?;
+    report_dir(&mut reports, &state, &state_path, worker, worker, 0o700)?;
+    for name in backend.template_files() {
+        let path = state_path.join(name);
+        let file = make_file(&state, &path, b"", 0o600)?;
         report_file(&mut reports, &file, &path, worker, worker, 0o600)?;
     }
-    let credential_path = codex_path.join("auth.json");
-    let credential = make_file(&codex, &credential_path, b"", 0o600)?;
-    report_file(
-        &mut reports,
-        &credential,
-        &credential_path,
-        worker,
-        worker,
-        0o600,
-    )?;
+    if backend == crate::settings::BoxBackend::Codex {
+        let credential_path = state_path.join("auth.json");
+        let credential = make_file(&state, &credential_path, b"", 0o600)?;
+        report_file(
+            &mut reports,
+            &credential,
+            &credential_path,
+            worker,
+            worker,
+            0o600,
+        )?;
+    }
     let cache_path = plan.home.join(".cache");
     let cache = make_dir(&h, &cache_path, 0o700)?;
     report_dir(&mut reports, &cache, &cache_path, worker, worker, 0o700)?;
@@ -1572,6 +1589,24 @@ fn make_home_pinned_with_sources(
     Ok(
         json!({"created": reports, "driver_dir": plan.driver_dir, "home": plan.home, "remaining": "launch must assign loop and worker ownership and bind fixed sources"}),
     )
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_scope_identities() -> Result<[(u64, u64); 2], LaneError> {
+    PRIVATE_HOME.with(|active| {
+        let active = active.borrow();
+        let held = active
+            .as_ref()
+            .ok_or_else(|| LaneError::input("fixture-scope", "home custody absent"))?;
+        let inspect = |fd: &OwnedFd| {
+            let stat = fstat(fd).map_err(|e| LaneError::input("fixture-scope", e.to_string()))?;
+            if stat.st_uid != Uid::effective().as_raw() || stat.st_mode & 0o7777 != 0o700 {
+                return Err(LaneError::input("fixture-scope", "root custody changed"));
+            }
+            Ok((stat.st_dev, stat.st_ino))
+        };
+        Ok([inspect(&held.home.1)?, inspect(&held.runs.1)?])
+    })
 }
 
 #[cfg(test)]

@@ -10,6 +10,75 @@ use nix::sys::stat::{Mode, fstat};
 use self::run_paths::{PinnedRunPath, pin_run_directory, pin_runs_root};
 use crate::{LoopError, LoopRecord};
 
+/// Backend explicitly carried across the private boxed entry boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriverBackend {
+    Codex,
+    Claude,
+}
+
+impl DriverBackend {
+    /// Parse a backend without selecting a default.
+    ///
+    /// # Errors
+    /// Refuses an unknown backend by value.
+    pub fn parse(value: &str) -> Result<Self, LoopError> {
+        match value {
+            "codex" => Ok(Self::Codex),
+            "claude" => Ok(Self::Claude),
+            _ => Err(LoopError::refusal(format!(
+                "driver backend must be codex or claude, not {value}"
+            ))),
+        }
+    }
+
+    /// Return the matching workers settings key and driver selector.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+}
+
+/// Bind the driver's one explicit selector to the protected launch's backend.
+///
+/// # Errors
+/// Refuses a missing, repeated or malformed configured selector.
+pub fn select_driver_backend(
+    argv: &[String],
+    backend: DriverBackend,
+) -> Result<Vec<String>, LoopError> {
+    let selectors = argv
+        .iter()
+        .enumerate()
+        .filter_map(|(index, word)| (word == "--backend").then_some(index))
+        .collect::<Vec<_>>();
+    let [index] = selectors.as_slice() else {
+        return Err(LoopError::refusal(
+            "driver_argv requires exactly one explicit --backend selector",
+        ));
+    };
+    if *index == 0 {
+        return Err(LoopError::refusal(
+            "driver_argv backend selector cannot name the program",
+        ));
+    }
+    let configured = argv
+        .get(index + 1)
+        .ok_or_else(|| LoopError::refusal("driver_argv backend selector has no value"))?;
+    if DriverBackend::parse(configured).is_err() {
+        return Err(LoopError::refusal(format!(
+            "driver_argv backend selector must be codex or claude, not {}",
+            configured.escape_debug()
+        )));
+    }
+    let mut selected = argv.to_vec();
+    backend.name().clone_into(&mut selected[index + 1]);
+    Ok(selected)
+}
+
 fn one_line_path(path: &Path) -> String {
     path.to_string_lossy().escape_debug().to_string()
 }
@@ -96,7 +165,9 @@ fn pin_settings_parent(path: &Path, owner: u32) -> Result<OwnedFd, LoopError> {
         previous = stat;
         fd = next;
     }
-    if previous.st_uid != owner || previous.st_mode & 0o7777 != 0o700 {
+    if previous.st_uid != owner
+        || previous.st_mode & 0o7777 != crate::mail::acl::preserved_mode(&fd, 0o700)
+    {
         return Err(LoopError::refusal(format!(
             "workers settings directory must be owner-owned at mode 0700: {}",
             one_line_path(path)
@@ -143,7 +214,9 @@ pub fn read_driver_setting(path: &Path, owner: u32) -> Result<String, LoopError>
             one_line_path(path)
         )));
     }
-    if metadata.uid() != owner || metadata.mode() & 0o7777 != 0o600 {
+    if metadata.uid() != owner
+        || metadata.mode() & 0o7777 != crate::mail::acl::preserved_mode(&file, 0o600)
+    {
         return Err(LoopError::refusal(format!(
             "workers settings must be owner-owned at mode 0600: {}",
             one_line_path(path)
@@ -178,6 +251,7 @@ fn parse_driver_setting(
     path: &Path,
     record: &LoopRecord,
     runs_root: Option<&Path>,
+    backend: DriverBackend,
 ) -> Result<(PathBuf, PathBuf), LoopError> {
     let settings = crate::workers_settings::validate_workers_settings(source, path)?;
     crate::workers_settings::validate_workers_grant(&settings, record, runs_root)?;
@@ -188,10 +262,11 @@ fn parse_driver_setting(
         settings
             .get("backend_argv")
             .and_then(toml::Value::as_table)
-            .and_then(|vendors| vendors.get("codex")),
-        "backend_argv.codex",
+            .and_then(|vendors| vendors.get(backend.name())),
+        &format!("backend_argv.{}", backend.name()),
     )?;
     let runs_root = crate::workers_settings::required_runs_root(&settings, record, runs_root)?;
+    select_driver_backend(&argv, backend)?;
     Ok((driver, runs_root))
 }
 
@@ -207,6 +282,7 @@ pub fn validate_driver_launch(
     run: &str,
     driver_bin: &Path,
     run_dir: &Path,
+    backend: DriverBackend,
 ) -> Result<PinnedRunPath, LoopError> {
     let owner = (
         nix::unistd::Uid::effective().as_raw(),
@@ -220,9 +296,11 @@ pub fn validate_driver_launch(
         driver_bin,
         run_dir,
         owner,
+        backend,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn validate_driver_launch_for_owner(
     caller_home: &Path,
     record: &LoopRecord,
@@ -231,6 +309,7 @@ pub fn validate_driver_launch_for_owner(
     driver_bin: &Path,
     run_dir: &Path,
     owner: (u32, u32),
+    backend: DriverBackend,
 ) -> Result<PinnedRunPath, LoopError> {
     if !valid_run_name(run) {
         return Err(LoopError::refusal(format!(
@@ -249,7 +328,7 @@ pub fn validate_driver_launch_for_owner(
     let settings = settings_path(caller_home, &record.name);
     let source = read_driver_setting(&settings, nix::unistd::Uid::effective().as_raw())?;
     let (configured, configured_root) =
-        parse_driver_setting(&source, &settings, record, runs_root)?;
+        parse_driver_setting(&source, &settings, record, runs_root, backend)?;
     if driver_bin.as_os_str() != configured.as_os_str() {
         return Err(LoopError::refusal(format!(
             "driver path differs from workers settings: {}",

@@ -194,7 +194,7 @@ impl Fixture {
 
 /// ´test:integration:rubric-entry-admits-service-custody-for-two-loop-uids´
 #[test]
-#[ignore = "requires namespace root with loop uids 41001 and 41002 and worker uids 3000/3001 mapped"]
+#[ignore = "requires namespace root with UID/GID 0, 3000, 3001, 41001, 41002 and 41003 mapped"]
 fn rubric_entry_admits_service_custody_for_two_loop_uids() {
     namespace();
     for uid in [41001, 41002] {
@@ -208,9 +208,126 @@ fn rubric_entry_admits_service_custody_for_two_loop_uids() {
     }
 }
 
+/// ´test:integration:rubric-entry-admits-distinct-non-root-service-custody´
+#[test]
+#[ignore = "requires namespace root with UID/GID 0, service 41000, loops 41001/41002 and outsider 41003 mapped"]
+fn rubric_entry_admits_distinct_non_root_service_custody() {
+    const CHILD: &str = "SUPERLOOP_RUBRIC_SERVICE_FIXTURE";
+    if std::env::var_os(CHILD).is_none() {
+        namespace();
+        let output = Command::new("/usr/bin/setpriv")
+            .args([
+                "--reuid=41000",
+                "--regid=41000",
+                "--clear-groups",
+                "--inh-caps=+chown,+dac_override,+fowner,+setuid,+setgid",
+                "--ambient-caps=+chown,+dac_override,+fowner,+setuid,+setgid",
+            ])
+            .arg(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "rubric_entry_admits_distinct_non_root_service_custody",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("distinct service process");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    assert_eq!(Uid::effective().as_raw(), 41000);
+    assert_eq!(Gid::effective().as_raw(), 41000);
+    for uid in [41001, 41002] {
+        let fixture = Fixture::new(uid);
+        // The service fixture retains only the capabilities needed to create
+        // real custody and enter a loop. The entered Python/agent gets none.
+        let entry = fs::read_to_string(&fixture.runner.entry).expect("entry source");
+        let entered = fixture.runner.entry.with_extension("entered");
+        let entered_source = entry.replace(&format!("os.setgroups([])\nos.setgid({uid})\nos.setuid({uid})\n"), "").replace("import os,sys\n", "import os,sys\nassert os.getgid() == os.getuid()\nassert all(int(line.split()[1],16) == 0 for line in open('/proc/self/status') if line.startswith(('CapEff:','CapInh:','CapAmb:')))\n");
+        file(&entered, entered_source.as_bytes(), 0o755);
+        file(&fixture.runner.entry, format!(
+            "#!/usr/bin/python3\nimport os,sys\nos.execv('/usr/bin/setpriv',['setpriv','--reuid={uid}','--regid={uid}','--clear-groups','--inh-caps=-all','--ambient-caps=-all','/usr/bin/python3',{}]+sys.argv[1:])\n", json!(entered)
+        ).as_bytes(), 0o700);
+        let admitted = fixture
+            .preflight()
+            .expect("non-root service rubric admitted");
+        let result = fixture.judge();
+        assert_eq!(result.status, "verdict", "{result:?}");
+        assert_eq!(json!(result.rubric_digest), admitted["rubric_digest"]);
+        assert_eq!(result.observations["loop_uid"], uid);
+        for custodian in [0, uid, 41000] {
+            chown(
+                &fixture.runner.rubric_path,
+                Some(Uid::from_raw(custodian)),
+                None,
+            )
+            .expect("accepted leaf custodian");
+            fixture.preflight().expect("root, loop or service leaf");
+        }
+        chown(
+            &fixture.runner.rubric_path,
+            Some(Uid::from_raw(41003)),
+            None,
+        )
+        .expect("foreign leaf");
+        fixture.refused("file-owner", &fixture.runner.rubric_path, Some(41003));
+        chown(
+            &fixture.runner.rubric_path,
+            Some(Uid::from_raw(41000)),
+            None,
+        )
+        .expect("restore leaf");
+        let ancestor = fixture.ancestor();
+        chown(&ancestor, Some(Uid::from_raw(41003)), None).expect("foreign ancestor");
+        fixture.refused("ancestor-owner", &ancestor, Some(41003));
+        chown(&ancestor, Some(Uid::from_raw(41000)), None).expect("restore ancestor");
+        mode(&ancestor, 0o733);
+        fixture.refused("ancestor-writable", &ancestor, Some(41000));
+        mode(&ancestor, 0o711);
+        install_refusals(&fixture);
+        drop(fixture);
+    }
+}
+
+/// ´test:integration:rubric-runtime-refuses-effective-only-uid-change´
+#[test]
+#[ignore = "requires namespace root with UID/GID 0 and loop 41001 mapped"]
+fn rubric_runtime_refuses_effective_only_uid_change() {
+    namespace();
+    let fixture = Fixture::new(41001);
+    assert_eq!(
+        fixture.judge().status,
+        "verdict",
+        "complete uid entry control"
+    );
+    let entry = fs::read_to_string(&fixture.runner.entry).expect("fixture entry");
+    let partial = entry
+        .replace("os.setuid(41001)", "os.seteuid(41001)")
+        .replace(
+            "assert os.getuid() == 41001",
+            "assert os.getuid() == 0 and os.geteuid() == 41001",
+        );
+    assert_ne!(entry, partial);
+    file(&fixture.runner.entry, partial.as_bytes(), 0o700);
+    let result = fixture.judge();
+    assert_eq!(result.reason, "door-rubric-unavailable", "{result:?}");
+    assert_eq!(result.observations["rubric_failure"]["check"], "entry-uid");
+    assert_eq!(
+        result.observations["rubric_failure"]["path"],
+        json!(fixture.runner.rubric_path)
+    );
+    assert!(result.rubric_digest.is_none());
+}
+
 /// ´test:integration:rubric-entry-refuses-third-uid-and-writable-ancestors´
 #[test]
-#[ignore = "requires namespace root with loop uids 41001 and 41002 and worker uids 3000/3001 mapped"]
+#[ignore = "requires namespace root with UID/GID 0, 3000, 3001, 41001, 41002 and 41003 mapped"]
 fn rubric_entry_refuses_third_uid_and_writable_ancestors() {
     namespace();
     for uid in [41001, 41002] {
@@ -242,7 +359,7 @@ fn rubric_entry_refuses_third_uid_and_writable_ancestors() {
 
 /// ´test:integration:install-and-refresh-refuse-runtime-invalid-rubric´
 #[test]
-#[ignore = "requires namespace root with loop uids 41001 and 41002 and worker uids 3000/3001 mapped"]
+#[ignore = "requires namespace root with UID/GID 0, 3000, 3001, 41001, 41002 and 41003 mapped"]
 fn install_and_refresh_refuse_runtime_invalid_rubric() {
     namespace();
     for uid in [41001, 41002] {
@@ -254,13 +371,19 @@ fn install_refusals(fixture: &Fixture) {
     mode(fixture.root.path(), 0o711);
     // The owner-facing installer reads its home. The entered runner's listing
     // assertion belongs to the separate search-only traversal fixtures.
-    let entry = fs::read_to_string(&fixture.runner.entry).expect("entry");
+    let entered = fixture.runner.entry.with_extension("entered");
+    let entry_path = if entered.exists() {
+        &entered
+    } else {
+        &fixture.runner.entry
+    };
+    let entry = fs::read_to_string(entry_path).expect("entry");
     let start = entry.find("try: os.listdir").expect("listing assertion");
     let end = entry.find("os.execv").expect("exec entry");
     file(
-        &fixture.runner.entry,
+        entry_path,
         format!("{}{}", &entry[..start], &entry[end..]).as_bytes(),
-        0o700,
+        if entered.exists() { 0o755 } else { 0o700 },
     );
     fixture.install_config();
     mode(&fixture.ancestor(), 0o733);
@@ -272,6 +395,7 @@ fn install_refusals(fixture: &Fixture) {
         if existing {
             file(&generation, b"{\"prior-generation\":true}", 0o600);
         }
+        let previous = fs::read(&generation).ok();
         for dry in [false, true] {
             let mut command = Command::new(env!("CARGO_BIN_EXE_superloop-lane"));
             command
@@ -295,15 +419,16 @@ fn install_refusals(fixture: &Fixture) {
                 "{refusal}"
             );
             assert_eq!(generation.exists(), existing);
+            assert_eq!(fs::read(&generation).ok(), previous);
         }
     }
 }
 
-/// ´test:integration:rubric-failure-survives-request-record-and-rewrite´
+/// ´test:integration:rubric-failure-survives-current-request-record´
 #[test]
-#[ignore = "requires namespace root with loop uids 41001 and 41002 and worker uids 3000/3001 mapped"]
-fn rubric_failure_survives_request_record_and_rewrite() {
-    // The approved historical test name is retained; this lane deliberately adds no record rewrite.
+#[ignore = "requires namespace root with UID/GID 0, 3000, 3001, 41001, 41002 and 41003 mapped"]
+fn rubric_failure_survives_current_request_record() {
+    // The mapped failure evidence survives the current strict record decoder.
     namespace();
     for uid in [41001, 41002] {
         let fixture = Fixture::new(uid);
@@ -327,7 +452,7 @@ fn rubric_failure_survives_request_record_and_rewrite() {
                 "1",
             )
             .expect("setting");
-            let mut record = json!({"schema":4,"id":"R:1a","loop":"alpha","run":"R",
+            let mut record = json!({"schema":6,"id":"R:1a","loop":"alpha","run":"R",
                 "worker_uid":worker,"class":"git","shape_key":"git:upload","operation":"git-upload",
                 "mirror_ref":"refs/heads/lane/alpha","mode":"audit","floor":"audit",
                 "class_setting":setting.value(),"loop_setting":setting.value(),
@@ -338,8 +463,15 @@ fn rubric_failure_survives_request_record_and_rewrite() {
             superloop_lane::requests::judgement::initialize(&mut record);
             superloop_lane::requests::judgement::apply(&mut record, &result, None, Some("fixture"));
             let decoded = superloop_lane::requests::RequestRecord::decode(record)
-                .expect("unchanged record schema");
-            assert_eq!(decoded.value()["schema"], 4);
+                .expect("current record schema");
+            assert_eq!(decoded.value()["schema"], 6);
+            assert!(
+                !decoded
+                    .value()
+                    .to_string()
+                    .contains("synthetic-fixture-only")
+            );
+            assert_eq!(decoded.value()["agent_observations"], result.observations);
             assert!(decoded.value().get("agent_evidence").is_none());
             assert!(decoded.value().get("rubric_failure").is_none());
         }
@@ -370,7 +502,7 @@ fn rubric_entry_compares_distinct_loop_uids_at_leaf() {
         assert_eq!(report["expected_uid"], expected);
         assert_eq!(
             report["rubric_failure"],
-            json!({"check":"file-owner",
+            json!({"check":"entry-uid",
             "path":fixture.runner.rubric_path,"owner_uid":observed,"mode":"0644","errno":null})
         );
     }
@@ -387,7 +519,7 @@ fn rubric_entry_checks_unprivileged_ancestors() {
         let output = Command::new(&fixture.runner.entry)
             .args(["enter", "alpha", "--", "/usr/bin/python3", "-I", "-c"])
             .arg(format!("{}{}", loop_home::runner::SIGN_IN_POLICY,
-                "\nimport json,sys\ntry:\n rubric_ancestor(os.stat(sys.argv[1]), sys.argv[1], int(sys.argv[2]))\nexcept RubricFailure as error:\n print(json.dumps(error.evidence))\n"))
+                "\nimport json,sys\ntry:\n rubric_ancestor(os.stat(sys.argv[1]), sys.argv[1], int(sys.argv[2]), int(sys.argv[2]))\nexcept RubricFailure as error:\n print(json.dumps(error.evidence))\n"))
             .arg(&ancestor).arg(expected.to_string()).output().expect("entry policy");
         assert!(output.status.success());
         let failure: Value = serde_json::from_slice(&output.stdout).expect("ancestor evidence");
@@ -433,19 +565,32 @@ fn install_and_refresh_report_unprivileged_rubric_failure() {
     install_refusals(&Fixture::unprivileged());
 }
 
-/// ´test:integration:rubric-failure-reaches-exercise-and-schema-four-readers´
+/// ´test:integration:rubric-failure-reaches-exercise-and-current-readers´
 #[test]
-fn rubric_failure_reaches_exercise_and_schema_four_readers() {
+fn rubric_failure_reaches_exercise_and_current_readers() {
     let fixture = Fixture::unprivileged();
     file(&fixture.runner.rubric_path, &[0xff], 0o644);
     let result = fixture.judge();
     let evidence = json!({"check":"file-utf8","path":fixture.runner.rubric_path,
         "owner_uid":fixture.uid,"mode":"0644","errno":null});
     assert_eq!(result.observations["rubric_failure"], evidence);
+    assert_eq!(result.reason, "door-rubric-unavailable", "{result:?}");
     assert_eq!(
         result.exercise_observation(5000, None)["observations"]["rubric_failure"],
         evidence
     );
+    record_readers(&fixture, &result);
+    drop(fixture);
+}
+
+/// ´test:integration:agent-signin-bytes-stay-out-of-records-and-listings´
+#[test]
+fn agent_signin_bytes_stay_out_of_records_and_listings() {
+    let fixture = Fixture::unprivileged();
+    let result = fixture.judge();
+    assert_eq!(result.status, "verdict", "{result:?}");
+    assert_eq!(result.observations["agent_calls"], 1);
+    assert_eq!(result.observations["sign_in_link_preserved"], true);
     record_readers(&fixture, &result);
     drop(fixture);
 }
@@ -483,7 +628,7 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
     )
     .expect("setting");
     for (nonce, worker) in [("1a", fixture.uid + 10), ("1b", fixture.uid + 11)] {
-        let mut record = json!({"schema":4,"id":format!("R:{nonce}"),"loop":"alpha","run":"R",
+        let mut record = json!({"schema":6,"id":format!("R:{nonce}"),"loop":"alpha","run":"R",
             "worker_uid":worker,"class":"git","shape_key":"git:upload","operation":"git-upload",
             "mirror_ref":"refs/heads/lane/alpha","mode":"audit","floor":"audit",
             "class_setting":setting.value(),"loop_setting":setting.value(),
@@ -492,7 +637,7 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
                 "stdout_bytes":0,"stderr_bytes":0,"queue_wall_seconds":null,"mediation_wall_seconds":0.0,"compute_wall_seconds":0.0},
             "state":"waiting","mark_reason":null,"review":null,"label":null,"filed_at":"1"});
         superloop_lane::requests::judgement::initialize(&mut record);
-        let mut record = RequestRecord::decode(record).expect("schema four");
+        let mut record = RequestRecord::decode(record).expect("schema six");
         record.mark("fixture review").expect("mark for review");
         store.file(record).expect("file request");
         store
@@ -500,10 +645,15 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
             .expect("production agent writer");
     }
     for row in store.list_run("R").expect("exercise run reader") {
-        assert_eq!(row.value()["schema"], 4);
-        assert_eq!(row.value()["agent_reason"], "door-rubric-unavailable");
+        assert_eq!(row.value()["schema"], 6);
+        assert!(!row.value().to_string().contains("synthetic-fixture-only"));
+        assert_eq!(row.value()["agent_reason"], result.reason);
         assert!(row.value().get("rubric_failure").is_none());
-        assert!(row.value().get("agent_evidence").is_none());
+        assert_eq!(row.value()["agent_observations"], result.observations);
+        assert_eq!(
+            row.value()["agent_observations"]["rubric_failure"],
+            result.observations["rubric_failure"]
+        );
         assert_eq!(
             store.request(row.id()).expect("single reader").value(),
             row.value()
@@ -517,6 +667,7 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
         vec!["review", "alpha", "R:1a"],
         vec!["rewrite", "alpha", "--dry-run"],
     ] {
+        let action = args[0];
         let output = Command::new(env!("CARGO_BIN_EXE_superloop-lane"))
             .arg("requests")
             .args(args)
@@ -532,7 +683,22 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-fixture-only"));
         let report: Value = serde_json::from_slice(&output.stdout).expect("reader JSON");
-        assert!(!report.to_string().contains("rubric_failure"));
+        assert_reader_observations(&report, action, result);
+    }
+}
+
+fn assert_reader_observations(report: &Value, action: &str, result: &RunnerOutcome) {
+    match action {
+        "review" => assert_eq!(report["agent_observations"], result.observations),
+        "rewrite" => assert_eq!(
+            report["plan"]["files"][0]["after"]["requests"][0]["agent_observations"],
+            result.observations
+        ),
+        _ => assert_eq!(
+            report["door_judgements"][0]["agent_observations"],
+            result.observations
+        ),
     }
 }

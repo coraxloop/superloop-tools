@@ -12,6 +12,124 @@ use crate::home::{pin_parent, pin_parent_beneath};
 
 pub const MAX_SETTINGS: u64 = 65_536;
 
+/// Vendor selected for one boxed launch, independently of the model name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoxBackend {
+    Codex,
+    Claude,
+}
+
+impl BoxBackend {
+    /// Parse the two supported vendor selectors.
+    ///
+    /// # Errors
+    /// Refuses an unknown vendor instead of falling back to Codex.
+    pub fn parse(value: &str) -> Result<Self, LaneError> {
+        match value {
+            "codex" => Ok(Self::Codex),
+            "claude" => Ok(Self::Claude),
+            _ => Err(LaneError::input(
+                "backend-selection",
+                format!("backend must be codex or claude, not {value}"),
+            )),
+        }
+    }
+
+    /// Return the workers settings map key.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+
+    /// Installed payload metadata for the protected selection.
+    pub(crate) const fn vendor(self) -> crate::build::payload::Vendor {
+        match self {
+            Self::Codex => crate::build::payload::CODEX,
+            Self::Claude => crate::build::payload::CLAUDE,
+        }
+    }
+
+    /// Select Claude's sibling template in a mixed installation.
+    /// Custody checks still require the result beneath this loop's installed root.
+    pub(crate) fn template_dir(self, settings: &Settings) -> Result<PathBuf, LaneError> {
+        let template = settings.template_dir.as_ref().ok_or_else(|| {
+            LaneError::input("missing-setting", "template_dir is absent in workers.toml")
+        })?;
+        if self == Self::Claude
+            && let Some(hash) = settings
+                .image_digest
+                .as_deref()
+                .and_then(|v| v.strip_prefix("sha256:"))
+            && template.ends_with(Path::new("runner-templates/codex").join(hash))
+            && let Some(root) = template.parent().and_then(Path::parent)
+        {
+            return Ok(root.join("claude").join(hash));
+        }
+        Ok(template.clone())
+    }
+
+    /// Worker-owned state leaf beneath the read-only home.
+    pub(crate) const fn state_leaf(self) -> &'static str {
+        match self {
+            Self::Codex => ".codex",
+            Self::Claude => ".claude",
+        }
+    }
+
+    /// Configuration root used by the selected program inside the box.
+    pub(crate) const fn state_home(self) -> &'static str {
+        match self {
+            Self::Codex => "/home/worker/.codex",
+            Self::Claude => "/home/worker/.claude",
+        }
+    }
+
+    /// Environment key selecting the vendor's state root.
+    pub(crate) const fn home_variable(self) -> &'static str {
+        match self {
+            Self::Codex => "CODEX_HOME",
+            Self::Claude => "CLAUDE_CONFIG_DIR",
+        }
+    }
+
+    /// Immutable configuration and charter files supplied by the template.
+    pub(crate) const fn template_files(self) -> [&'static str; 2] {
+        match self {
+            Self::Codex => ["config.toml", "AGENTS.md"],
+            Self::Claude => ["settings.json", "CLAUDE.md"],
+        }
+    }
+
+    /// Read an explicit backend from a protected plan, never from current defaults.
+    ///
+    /// # Errors
+    /// Refuses absent, non-string or unknown backend bindings.
+    pub fn from_plan(plan: &serde_json::Value) -> Result<Self, LaneError> {
+        let name = plan["backend"].as_str().ok_or_else(|| {
+            LaneError::input("backend-selection", "protected plan backend is absent or invalid; retire the old run before launching again")
+        })?;
+        Self::parse(name)
+    }
+
+    /// Refuse a vendor whose boxed runtime and credential adapter are not ready.
+    ///
+    /// # Errors
+    /// Claude selection is admitted, but execution remains unavailable until its
+    /// credential adapter, trial acceptance and runtime paths implement the same selection.
+    pub(crate) fn require_runtime(self) -> Result<(), LaneError> {
+        match self {
+            Self::Codex => Ok(()),
+            Self::Claude => Err(LaneError::input(
+                "backend-unavailable",
+                "claude boxed launch awaits its credential adapter, trial acceptance and runtime paths",
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub runs_root: Option<PathBuf>,
@@ -250,6 +368,44 @@ pub(crate) fn split_local_policies(
 }
 
 impl Settings {
+    /// Resolve the requested vendor and require its own absolute program vector.
+    /// With no flag, Codex remains the default when configured; a Claude-only
+    /// configuration selects Claude. Endpoint declarations do not supply a program.
+    ///
+    /// # Errors
+    /// Refuses an absent selected backend or a missing or relative program.
+    pub fn launch_backend(&self, requested: Option<BoxBackend>) -> Result<BoxBackend, LaneError> {
+        let backend = match requested {
+            Some(backend) => backend,
+            None if self.backend_argv.contains_key("codex") => BoxBackend::Codex,
+            None if self.backend_argv.contains_key("claude") => BoxBackend::Claude,
+            None => {
+                return Err(LaneError::input(
+                    "missing-setting",
+                    "backend_argv has no configured program",
+                ));
+            }
+        };
+        let name = backend.name();
+        let program = self
+            .backend_argv
+            .get(name)
+            .and_then(|argv| argv.first())
+            .ok_or_else(|| {
+                LaneError::input(
+                    "missing-setting",
+                    format!("backend_argv.{name} is absent or empty"),
+                )
+            })?;
+        if !Path::new(program).is_absolute() {
+            return Err(LaneError::input(
+                "missing-setting",
+                format!("backend_argv.{name} program is not absolute"),
+            ));
+        }
+        Ok(backend)
+    }
+
     /// Read the optional positive attempt wall from the local worker policy.
     ///
     /// # Errors
@@ -272,10 +428,7 @@ impl Settings {
     ///
     /// Refuses a widened runs root or an unconfigured default driver.
     pub fn validate_grant(&self, home: &Path, loop_name: &str) -> Result<(), LaneError> {
-        let registry_path =
-            loop_home::registry_path(std::env::var_os("ENTER_LOOP_REGISTRY").as_deref(), home);
-        let registry = loop_home::load_registry(&registry_path)
-            .map_err(|error| LaneError::input("registry-row", error.message()))?;
+        let registry = crate::read_plan_registry(home)?;
         let row = registry
             .row(loop_name, home)
             .map_err(|error| LaneError::input("registry-row", error.message()))?;
@@ -328,10 +481,13 @@ impl Settings {
                 format!("{}: {error}", parent_path.display()),
             )
         })?;
-        if parent_stat.st_mode & 0o7777 != 0o700 {
+        if parent_stat.st_mode & 0o7777 != loop_home::mail::acl::preserved_mode(&parent, 0o700) {
             return Err(LaneError::input(
                 "settings-owner",
-                format!("{}: expected mode 0700", parent_path.display()),
+                format!(
+                    "{}: expected nominal mode 0700 with a validated named ACL",
+                    parent_path.display()
+                ),
             ));
         }
         let name = path.file_name().ok_or_else(|| {
@@ -355,6 +511,14 @@ impl Settings {
             }
             LaneError::input("settings-read", format!("{}: {error}", path.display()))
         })?);
+        Self::from_private_file(file, path)
+    }
+
+    /// Read and parse one held settings inode using the host reader's leaf checks.
+    /// # Errors
+    /// Refuses unsafe ownership, mode, kind, size or malformed settings.
+    pub(crate) fn from_private_file(file: File, path: &Path) -> Result<Self, LaneError> {
+        let owner = nix::unistd::Uid::effective().as_raw();
         let meta = file.metadata().map_err(|error| {
             LaneError::input("settings-read", format!("{}: {error}", path.display()))
         })?;
@@ -364,11 +528,13 @@ impl Settings {
                 format!("{} is not a regular file", path.display()),
             ));
         }
-        if meta.uid() != owner || meta.mode() & 0o7777 != 0o600 {
+        if meta.uid() != owner
+            || meta.mode() & 0o7777 != loop_home::mail::acl::preserved_mode(&file, 0o600)
+        {
             return Err(LaneError::input(
                 "settings-owner",
                 format!(
-                    "{}: uid {} mode {:04o}; expected uid {owner} mode 0600",
+                    "{}: uid {} mode {:04o}; expected uid {owner}, nominal mode 0600 with a validated named ACL",
                     path.display(),
                     meta.uid(),
                     meta.mode() & 0o7777
@@ -517,6 +683,40 @@ fn configured_driver(table: &toml::Table) -> Result<Vec<String>, LaneError> {
 #[cfg(test)]
 mod tests {
     use super::{Resources, bounded_cpu_shares, page_aligned_memory, split_local_policies};
+
+    /// ´test:unit:settings-reader-validates-directory-and-file-acl-masks´
+    #[test]
+    fn settings_reader_validates_directory_and_file_acl_masks() {
+        use std::fs::{self, File};
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = fixture.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).expect("root mode");
+        let path = root.join("workers.toml");
+        fs::write(&path, "driver_argv = [\"/bin/true\"]\n").expect("settings");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("file mode");
+        let service = nix::unistd::Uid::effective().as_raw() + 1;
+        for (target, directory) in [(root, true), (path.as_path(), false)] {
+            loop_home::mail::acl::install(
+                &File::open(target).expect("descriptor"),
+                service,
+                directory,
+            )
+            .expect("real ACL");
+            super::Settings::read(&path).expect("accepted grant");
+        }
+        for (target, widened, restored) in [(root, 0o750, 0o710), (path.as_path(), 0o660, 0o640)] {
+            fs::set_permissions(target, fs::Permissions::from_mode(widened)).expect("widen mask");
+            assert_eq!(
+                super::Settings::read(&path).expect_err("widened mask").kind,
+                "settings-owner",
+                "widened {target:?}"
+            );
+            fs::set_permissions(target, fs::Permissions::from_mode(restored))
+                .expect("restore mask");
+        }
+        super::Settings::read(&path).expect("restored grants");
+    }
 
     /// ´test:unit:cpu-weight-conversion-preserves-runtime-boundaries´
     #[test]

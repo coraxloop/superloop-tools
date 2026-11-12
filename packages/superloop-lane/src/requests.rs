@@ -214,7 +214,7 @@ impl ModeSetting {
     }
 }
 
-/// One fully checked version-four door request.
+/// One fully checked version-six door request.
 #[derive(Clone, Debug)]
 pub struct RequestRecord(Value);
 
@@ -226,10 +226,10 @@ impl RequestRecord {
     /// Refuses a malformed or older record before any mutation.
     #[allow(clippy::too_many_lines)]
     pub fn decode(value: Value) -> Result<Self, LaneError> {
-        if value["schema"] == 3 {
+        if matches!(value["schema"].as_u64(), Some(3..=5)) {
             return Err(refusal(
                 "requests-rewrite-required",
-                "schema three requires requests rewrite LOOP --dry-run",
+                "schema three, four or five requires requests rewrite LOOP --dry-run",
             ));
         }
         let mut keys: Vec<_> = RECORD_KEYS
@@ -246,8 +246,8 @@ impl RequestRecord {
                 keys.push(key);
             }
         }
-        if value["schema"] != 4 {
-            return Err(refusal("requests-record-refusal", "schema must equal 4"));
+        if value["schema"] != 6 {
+            return Err(refusal("requests-record-refusal", "schema must equal 6"));
         }
         if !exact(&value, &keys) {
             let missing = keys
@@ -443,6 +443,16 @@ impl RequestRecord {
             return Err(refusal(
                 "requests-record-refusal",
                 "preflight state is absent",
+            ));
+        }
+        if preflight
+            && ["bound", "output_bytes"]
+                .iter()
+                .any(|key| value["effect"].get(key).is_some())
+        {
+            return Err(refusal(
+                "requests-record-refusal",
+                "preflight refusals cannot contain upload output evidence",
             ));
         }
         if value["effect"].get("bound").is_some() != value["effect"].get("output_bytes").is_some() {
@@ -852,6 +862,12 @@ pub(crate) mod tests {
                 .remove(key);
         }
         assert!(RequestRecord::decode(original.clone()).is_ok());
+        for bound in [1, super::MAX_UPLOAD_OUTPUT_LIMIT] {
+            let mut record = original.clone();
+            record["effect"]["bound"] = json!(bound);
+            record["effect"]["output_bytes"] = json!(super::MAX_UPLOAD_OUTPUT_LIMIT + 1);
+            assert!(RequestRecord::decode(record).is_ok());
+        }
         for (key, good, bad) in [
             (
                 "bound",
@@ -859,7 +875,7 @@ pub(crate) mod tests {
                 vec![
                     json!(0),
                     json!(-1),
-                    json!(1_073_741_825_u64),
+                    json!(super::MAX_UPLOAD_OUTPUT_LIMIT + 1),
                     json!(1.5),
                     json!("16"),
                     Value::Null,
@@ -1047,8 +1063,8 @@ pub(crate) mod tests {
             .remove("ref_check");
         let refusal = RequestRecord::decode(old.clone()).expect_err("old schema");
         assert_eq!(refusal.kind, "requests-record-refusal");
-        assert_eq!(refusal.detail, "schema must equal 4");
-        old["schema"] = json!(4);
+        assert_eq!(refusal.detail, "schema must equal 6");
+        old["schema"] = json!(6);
         let refusal = RequestRecord::decode(old.clone()).expect_err("missing ref check");
         assert_eq!(refusal.kind, "requests-record-refusal");
         assert_eq!(refusal.detail, "effect shape differs");

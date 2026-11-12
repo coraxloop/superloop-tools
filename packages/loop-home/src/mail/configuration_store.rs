@@ -94,6 +94,17 @@ impl ConfigurationStore {
     /// # Errors
     /// Refuses wrong ownership, unexpected grants, corrupt or missing prior state.
     pub fn open(private: &Path, service: u32) -> Result<Self> {
+        Self::open_with_initialization(private, service, true)
+    }
+
+    /// Open a provisioned configuration without inspecting history above its anchor.
+    /// # Errors
+    /// Refuses an absent configuration rather than authorizing initialization from a parent path.
+    pub(super) fn open_prepared(private: &Path, service: u32) -> Result<Self> {
+        Self::open_with_initialization(private, service, false)
+    }
+
+    fn open_with_initialization(private: &Path, service: u32, initialize: bool) -> Result<Self> {
         let mut directory = private_root(private)?;
         owned(&directory)?;
         acl::ensure_private(&directory, service, true)?;
@@ -124,6 +135,11 @@ impl ConfigurationStore {
             acl::ensure_private(file, service, false)?;
             configuration
         } else {
+            if !initialize {
+                return Err(MailError::Invalid(
+                    "invalid-directory: missing prepared configuration beneath anchor",
+                ));
+            }
             let loop_root = if private == Path::new(".") {
                 PathBuf::from("..")
             } else {

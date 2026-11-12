@@ -18,42 +18,42 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`repository_programme_policy_is_deferred`] | cli | Explicit local ownership defers opaque rows and keeps their checker visible. # Panics Panics only if fixture IO fails or the binary violates the deferral contract. |
-//! | [`unknown_policy_without_programme_still_refuses`] | cli | A bare unknown activation keeps the existing loader refusal. # Panics Panics only if fixture IO fails or the refusal changes. |
-//! | [`catalogued_policy_cannot_claim_programme`] | cli | A published policy cannot be claimed by a local checker. # Panics Panics only if fixture IO fails or a published policy can be deferred. |
-//! | [`programme_package_must_be_tracked_directory`] | cli | A programme package must be a tracked repository directory. # Panics Panics only if fixture IO fails or an invalid package is admitted. |
-//! | [`programme_binary_must_be_nonempty`] | cli | An empty or whitespace-only binary does not identify a checker. # Panics Panics only if fixture IO fails or an empty binary is admitted. |
-//! | [`malformed_programme_refuses`] | cli | A programme is exactly a package and binary string table. # Panics Panics only if fixture IO fails or a malformed declaration is admitted. |
-//! | [`deferred_list_requires_supported_shape`] | cli | Deferral admits opaque row tables but still checks their container shape. # Panics Panics only if fixture IO fails or an invalid list shape is admitted. |
-//! | [`deferred_policy_does_not_hide_catalogued_failure`] | cli | A deferred policy does not clear failures found by a catalogued policy. # Panics Panics only if fixture IO fails or deferral conceals a failure. |
-//! | [`inactive_prose_fails_the_check_command`] | cli | An inactive root's Markdown fails the command until prose activation is declared. # Panics Panics only if fixture IO or command execution fails, or the verdict differs. |
-//! | [`macro_doc_attributes_share_the_test_standard_place`] | carrier | A property-test macro's source-written documentation mints the same claim through line comments, separate doc attributes and one multiline attribute. Each form resolves from Markdown through the production entry. # Panics Panics only if fixture IO fails or the production check loses a macro carrier. |
-//! | [`invalid_macro_carriers_refuse_by_name`] | carrier | A marked macro body that cannot be read refuses by name, and a misplaced claim remains a placement failure instead of being rescued by its spelling. # Panics Panics only if fixture IO fails or the check accepts an invalid macro carrier. |
-//! | [`python_docstrings_participate_in_production_resolution`] | carrier | An owned Python unittest method mints a claim that a Markdown record can cite, and the active profiles count its docstring as a labelled test site. # Panics Panics only if fixture IO fails or the production check violates the contract. |
-//! | [`duplicate_python_claims_are_named`] | carrier | A second Python test minting the same claim is refused with the claim's name and both sites instead of disappearing from the label census. # Panics Panics only if fixture IO fails or the production check loses the duplicate. |
-//! | [`python_source_boundaries_are_explicit`] | carrier | Python syntax errors refuse by name, while ordinary strings and files outside the owned test-path convention never mint a claim. # Panics Panics only if fixture IO fails or source selection misclassifies the fixture. |
-//! | [`an_export_round_trips_through_the_import_loader`] | cli | Export writes every fixture mint with its kind and head, and the import loader reads it back with the same relation. # Panics Panics only if the temporary fixture cannot be created, written, tracked, executed, or parsed. |
-//! | [`two_exports_over_one_tree_are_byte_identical`] | cli | Two exports of one immutable tree have identical bytes, including the source header. # Panics Panics only if the temporary fixture cannot be created, written, tracked, executed, or read. |
-//! | [`an_export_refuses_an_unknown_owner`] | cli | An export whose owner is absent refuses as a command failure and writes no document. # Panics Panics only if the temporary fixture cannot be created, written, tracked, or executed. |
-//! | [`export_refuses_bad_configuration_and_output_path`] | cli | Export refuses a bad configuration before writing and reports an output failure by its path. # Panics Panics only if the temporary fixture cannot be created, written, tracked, or executed. |
-//! | [`export_build_mode_publishes_report_and_stamp`] | cli | Export build mode publishes its JSON report and touches its stamp after writing the registry. # Panics Panics only if the temporary fixture cannot be created, written, tracked, executed, or parsed. |
-//! | [`an_imported_citation_resolves_through_a_registry`] | check | A package's bracketed citation reaches a mint published by another repository when its may-cite row declares the edge. # Panics Panics only if the temporary fixture cannot be created, written, tracked, executed, or parsed. |
-//! | [`a_retired_imported_label_is_unresolved`] | check | Removing an imported label leaves its citation as the ordinary unresolved citation failure. # Panics Panics only if the temporary fixture cannot be created, written, tracked, executed, or parsed. |
-//! | [`an_import_with_different_kinds_is_refused`] | snapshot | A changed kind relation refuses the import before the corpus can be checked. # Panics Panics only if the temporary fixture cannot be created, written, tracked, executed, or parsed. |
-//! | [`format_namespaces_refuse_foreign_identities_before_checking`] | snapshot | Format namespaces admit corpus-owned core envelopes, preserve the declared burn surface, and refuse foreign lists, policy instances and registries with both the offending namespace and the expected identity before checking. # Panics Panics only if the temporary fixture cannot be created, written, tracked, executed or parsed, or if the binary violates the namespace contract. |
-//! | [`unknown_registry_namespace_and_major_are_refused`] | snapshot | The import loader names an unknown namespace and its expected identity, and distinguishes an unknown major version from a namespace refusal. # Panics Panics only if the temporary fixture cannot be created, written, tracked, executed, or parsed. |
-//! | [`a_malformed_imported_registry_is_refused`] | snapshot | A malformed published document refuses the importing snapshot by the registry's path. # Panics Panics only if the temporary fixture cannot be created, written, tracked, executed, or parsed. |
-//! | [`an_imported_owner_with_a_partition_is_refused`] | snapshot | An imported owner cannot also claim any partition of the importing tree. # Panics Panics only if the temporary fixture cannot be created, written, tracked, executed, or parsed. |
+//! | [`repository_programme_policy_is_deferred`] | cli | Explicit local ownership defers opaque rows and keeps their checker visible. |
+//! | [`unknown_policy_without_programme_still_refuses`] | cli | A bare unknown activation keeps the existing loader refusal. |
+//! | [`catalogued_policy_cannot_claim_programme`] | cli | A published policy cannot be claimed by a local checker. |
+//! | [`programme_package_must_be_tracked_directory`] | cli | A programme package must be a tracked repository directory. |
+//! | [`programme_binary_must_be_nonempty`] | cli | An empty or whitespace-only binary does not identify a checker. |
+//! | [`malformed_programme_refuses`] | cli | A programme is exactly a package and binary string table. |
+//! | [`deferred_list_requires_supported_shape`] | cli | Deferral admits opaque row tables but still checks their container shape. |
+//! | [`deferred_policy_does_not_hide_catalogued_failure`] | cli | A deferred policy does not clear failures found by a catalogued policy. |
+//! | [`inactive_prose_fails_the_check_command`] | cli | An inactive root's Markdown fails the command until prose activation is declared. |
+//! | [`macro_doc_attributes_share_the_test_standard_place`] | carrier | A property-test macro's source-written documentation mints the same claim through line comments, separate doc attributes and one multiline attribute. Each form resolves from Markdown through the production entry. |
+//! | [`invalid_macro_carriers_refuse_by_name`] | carrier | A marked macro body that cannot be read refuses by name, and a misplaced claim remains a placement failure instead of being rescued by its spelling. |
+//! | [`python_docstrings_participate_in_production_resolution`] | carrier | An owned Python unittest method mints a claim that a Markdown record can cite, and the active profiles count its docstring as a labelled test site. |
+//! | [`duplicate_python_claims_are_named`] | carrier | A second Python test minting the same claim is refused with the claim's name and both sites instead of disappearing from the label census. |
+//! | [`python_source_boundaries_are_explicit`] | carrier | Python syntax errors refuse by name, while ordinary strings and files outside the owned test-path convention never mint a claim. |
+//! | [`an_export_round_trips_through_the_import_loader`] | cli | Export writes every fixture mint with its kind and head, and the import loader reads it back with the same relation. |
+//! | [`two_exports_over_one_tree_are_byte_identical`] | cli | Two exports of one immutable tree have identical bytes, including the source header. |
+//! | [`an_export_refuses_an_unknown_owner`] | cli | An export whose owner is absent refuses as a command failure and writes no document. |
+//! | [`export_refuses_bad_configuration_and_output_path`] | cli | Export refuses a bad configuration before writing and reports an output failure by its path. |
+//! | [`export_build_mode_publishes_report_and_stamp`] | cli | Export build mode publishes its JSON report and touches its stamp after writing the registry. |
+//! | [`an_imported_citation_resolves_through_a_registry`] | check | A package's bracketed citation reaches a mint published by another repository when its may-cite row declares the edge. |
+//! | [`a_retired_imported_label_is_unresolved`] | check | Removing an imported label leaves its citation as the ordinary unresolved citation failure. |
+//! | [`an_import_with_different_kinds_is_refused`] | snapshot | A changed kind relation refuses the import before the corpus can be checked. |
+//! | [`format_namespaces_refuse_foreign_identities_before_checking`] | snapshot | Format namespaces admit corpus-owned core envelopes, preserve the declared burn surface, and refuse foreign lists, policy instances and registries with both the offending namespace and the expected identity before checking. |
+//! | [`unknown_registry_namespace_and_major_are_refused`] | snapshot | The import loader names an unknown namespace and its expected identity, and distinguishes an unknown major version from a namespace refusal. |
+//! | [`a_malformed_imported_registry_is_refused`] | snapshot | A malformed published document refuses the importing snapshot by the registry's path. |
+//! | [`an_imported_owner_with_a_partition_is_refused`] | snapshot | An imported owner cannot also claim any partition of the importing tree. |
 //! | [`every_covered_asset_of_a_fixture_seeds_one_derived_mint`] | check | Every covered asset seeds exactly one derived mint, so the count of derived mints is the count of covered assets and neither an asset nor a mint is lost between the census and the analysis. The relation is one-to-one rather than merely bounded, so a collision that folded two assets into one label would show as a shortfall here. |
 //! | [`a_document_citing_a_live_test_resolves_and_a_dead_one_does_not`] | check | Against a census taken from an invented workspace, all four ways of naming a test behave as the calculus says: a citation of a live test resolves, a citation of a name nobody wrote fails, a document of another owner reaches it by importing with the owner's prefix, and writing the label bare mints nothing. |
 //! | [`a_cross_owner_citation_without_brackets_fails`] | check | A citation crossing an ownership boundary must say so: written bare it fails, and the failure names the owner that minted the label and spells out the imported form to write instead — delimiters included, since a rendering without them is the one form the grammar reads as nothing. Written that way it resolves. The reader is handed the repair rather than the rule. |
 //! | [`a_head_the_registry_denies_fails_the_check`] | head | cites (´claim:head:a-head-whose-kind-contradicts-its-name-is-a-failure´) |
-//! | [`head_checks_follow_owner_activation`] | head | Head validation follows each declared owner's activation independently. # Panics Panics only if the fixture cannot be written or the binary violates the activation contract. |
+//! | [`head_checks_follow_owner_activation`] | head | Head validation follows each declared owner's activation independently. |
 //! | [`an_outline_and_its_document_track_both_ways`] | check | Outline tracking holds end to end and in both directions: a matching pair passes the command, a head the outline claims going missing fails at the claiming row, and a head no row claims fails at the head with the omitting outline named beside it. Each failure points where the repair belongs. |
 //! | [`the_report_command_describes_the_graph_without_judging_it`] | cli | The report describes and never judges: an uncited mint and a dangling citation are both listed and the command still exits zero, while the check over the same tree fails that citation. A reverse lookup answers when asked, and a malformed question is a usage failure that prints nothing. |
 //! | [`a_small_declared_graph_reports_totals_orphans_dangles_and_hubs`] | graph | The report over a small declared graph is internally consistent: the totals are the mints and citations the sources carry, a citation of a name nobody minted is listed as dangling, the mints nobody cites are the orphans and not every mint is one, the hubs come back ranked by how often they are cited, and within every owner the mints cited and the mints uncited add up to the mints there are. |
 //! | [`an_assembled_publication_stales_when_a_part_changes`] | assembly | The assemble and check commands agree through the whole cycle: unpublished parts are stale and the check mode writes nothing, writing settles them in the manifest's order, editing a part stales the publication again, reassembly repairs it, and a further write finds nothing to do. |
-//! | [`the_assemble_command_reports_elapsed_micros`] | cli | The assemble command reports its wall time in the result object, matching the judging commands that decide a corpus verdict. # Panics Panics only when the temporary fixture cannot be created, written, tracked, executed, or parsed. |
+//! | [`the_assemble_command_reports_elapsed_micros`] | cli | The assemble command reports its wall time in the result object, matching the judging commands that decide a corpus verdict. |
 //! | [`an_unlisted_part_is_reported_rather_than_dropped`] | assembly | cites (´claim:assembly:a-part-no-row-names-is-reported-and-the-rest-still-assemble´) |
 //! | [`a_draft_assembly_forms_no_freshness_verdict_and_refuses_write`] | assembly | A draft assembly is checked for membership but not for freshness, and writing one is refused outright so a partial assembly cannot overwrite the standing publication. An unlisted part still fires while the manifest is a draft, and removing the marker restores the freshness verdict over the very same tree. |
 //! | [`the_shape_command_measures_without_judging`] | cli | The shape report measures and never judges: it counts environments, marks which are divisions, distributes the two kinds apart, and exits zero regardless. It compares the corpus with nothing, so an invented tree is reported exactly as the repository is. |
@@ -63,27 +63,27 @@
 //! | [`a_fixture_corpus_reports_every_rule_it_breaks`] | check | A corpus breaking every rule at once is told about every one of them, not merely the first: each defect is reported with its own code, and the findings arrive ordered by source and then by position, which is the order a reader would walk the tree in. |
 //! | [`displayed_material_never_participates`] | prose | cites (´claim:prose:a-non-participating-region-yields-neither-occurrence-nor-finding´) |
 //! | [`the_check_command_emits_json_and_exits_clean`] | cli | The check command emits exactly one JSON object on standard output, carrying the run's counts and stating no version of itself, and exits zero over a clean tree. A caller can parse the result without reading prose. |
-//! | [`the_check_command_reports_elapsed_micros`] | cli | The check command reports its wall time in the result object, matching the other judging commands that decide a corpus verdict. # Panics Panics only when the temporary fixture cannot be created, written, tracked, executed, or parsed. |
+//! | [`the_check_command_reports_elapsed_micros`] | cli | The check command reports its wall time in the result object, matching the other judging commands that decide a corpus verdict. |
 //! | [`the_check_command_exits_nonzero_on_findings`] | cli | A tree with findings exits with the documented failure code and still emits its report, so a caller learns both that the run failed and precisely what failed from the same invocation. |
 //! | [`a_fixture_package_tree_checks_and_then_fixes_clean`] | cli | Check, sweep, and check again leaves a tree clean and settled: the first check counts what is missing, wrong and already right; the sweep inserts, repairs and leaves alone exactly those; the second check passes; the author's own line survives with the label indented to match; and a further sweep changes nothing. |
 //! | [`the_fix_command_writes_nothing_on_a_dry_run`] | fix | cites (´claim:fix:a-dry-run-counts-what-it-would-do-and-writes-nothing´) |
 //! | [`the_fix_command_refuses_a_dirty_tree`] | cli | The sweep refuses to run over a tree carrying uncommitted changes and writes nothing, so its edits always arrive as a diff a reviewer can read against a clean baseline. |
 //! | [`a_fixture_notice_tree_checks_and_then_fixes_clean`] | cli | cites (´claim:cli:check-then-sweep-then-check-leaves-a-tree-clean-and-settled´) |
-//! | [`todo_ownership_survives_check_and_fix`] | todo | A notice's ownership citation remains resolvable through check and fix while neither its target nor its owner becomes part of the derived notice name. # Panics Panics only if fixture IO fails or the executable violates the ownership slot. |
+//! | [`todo_ownership_survives_check_and_fix`] | todo | A notice's ownership citation remains resolvable through check and fix while neither its target nor its owner becomes part of the derived notice name. |
 //! | [`the_todo_sweep_writes_nothing_on_a_dry_run`] | fix | cites (´claim:fix:a-dry-run-counts-what-it-would-do-and-writes-nothing´) |
 //! | [`a_burn_list_fails_on_growth_and_on_a_stale_row`] | burn | The ratchet binds in both directions: the census as found passes, one more reference fails as growth with the new occurrence named, and one fewer fails as a stale row until the list falls with it. A file losing its last reference leaves the list rather than standing at zero. |
-//! | [`structural_root_rows_are_refused`] | layers | Root rows are refused only when workspace ownership supplies structural reach, including a root-owned member under a virtual manifest. # Panics Panics only if fixture IO fails or the binary violates the root-reach contract. |
-//! | [`catalogued_burns_subtract_declared_patterns`] | burn | Catalogued burns subtract exact policy-local patterns from prose and code, including root censuses. # Panics Panics only if fixture IO fails or the binary violates the exclusion contract. |
+//! | [`structural_root_rows_are_refused`] | layers | Root rows are refused only when workspace ownership supplies structural reach, including a root-owned member under a virtual manifest. |
+//! | [`catalogued_burns_subtract_declared_patterns`] | burn | Catalogued burns subtract exact policy-local patterns from prose and code, including root censuses. |
 //! | [`the_burn_command_emits_json_and_writes_nothing_by_default`] | cli | The burn command reports and writes nothing unless asked: every adopted family is registered at its census, none is rewritten, and the trees excluded from each census are named in the report rather than left to be remembered. |
-//! | [`kept_and_owed_counts_sum_across_families`] | cli | A family with kept and unkept rows retains their full registered count while reporting the two parts, and the check report sums each part across two families. # Panics Panics only if the temporary fixture cannot be read, written, executed, or parsed. |
+//! | [`kept_and_owed_counts_sum_across_families`] | cli | A family with kept and unkept rows retains their full registered count while reporting the two parts, and the check report sums each part across two families. |
 //! | [`the_burn_write_lowers_nothing_from_an_empty_declaration_and_keeps_growth`] | cli | A lowering write over empty declared lists has no ceiling to lower: growth in two files remains a finding for each file, and only append may record it. The declaration and the rest of the tree retain their bytes. |
-//! | [`the_burn_command_reports_elapsed_micros`] | cli | The burn command reports its wall time in the result object, matching the judging commands that decide a corpus verdict. # Panics Panics only when the temporary fixture cannot be created, written, tracked, executed, or parsed. |
+//! | [`the_burn_command_reports_elapsed_micros`] | cli | The burn command reports its wall time in the result object, matching the judging commands that decide a corpus verdict. |
 //! | [`the_external_document_in_public_pack_mode_is_honored_and_its_path_reported`] | burn | Public-pack mode reads the outside-tree document when the declared local document is absent, reports the supplied path and external source kind, and uses its modes to find public occurrences with their file and line while preserving the policy-local exclusion. |
 //! | [`two_runs_over_the_same_tree_produce_payload_identical_reports`] | report | Two superloop-pack checks over the same immutable tree and verifier input emit identical JSON payloads after eliding the wall-time field, so neither filesystem order nor value matching introduces report drift. |
-//! | [`a_clean_build_check_publishes_stable_report_bytes`] | cli | A clean build check publishes stable report bytes and an empty, refreshed stamp. # Panics Panics only if the fixture cannot be written or the linter violates the stamp contract. |
-//! | [`a_failing_build_check_never_stamps_success`] | cli | A completed check with findings writes a report but never a success stamp. # Panics Panics only if the fixture cannot be written or a failing check stamps success. |
-//! | [`a_nonempty_build_stamp_is_preserved_and_refused`] | cli | A stamp carrying foreign bytes is preserved and refused. # Panics Panics only if the fixture cannot be written or a foreign stamp is changed. |
-//! | [`incomplete_and_writing_output_pairs_are_usage_errors`] | cli | An incomplete pair and a write paired with check outputs are usage errors. # Panics Panics only if the subprocess cannot run or invalid arguments are admitted. |
+//! | [`a_clean_build_check_publishes_stable_report_bytes`] | cli | A clean build check publishes stable report bytes and an empty, refreshed stamp. |
+//! | [`a_failing_build_check_never_stamps_success`] | cli | A completed check with findings writes a report but never a success stamp. |
+//! | [`a_nonempty_build_stamp_is_preserved_and_refused`] | cli | A stamp carrying foreign bytes is preserved and refused. |
+//! | [`incomplete_and_writing_output_pairs_are_usage_errors`] | cli | An incomplete pair and a write paired with check outputs are usage errors. |
 //! | [`an_absent_declaration_refuses_without_running_the_command`] | cli | A tree with no declaration directory refuses with an empty stdout before command dispatch and names all five required documents on stderr in their declared order. |
 //! | [`a_refused_snapshot_exits_one_with_an_empty_stdout`] | cli | A declaration that is not a snapshot refuses the command entire: the exit is the shared failure class rather than the findings class, and stdout is empty. A command that cannot read its own configuration has no standing to say anything about the corpus, so it says nothing rather than reporting a verdict it could not have formed. |
 //! | [`a_dependent_policy_without_label_prerequisites_refuses_loudly`] | cli | A profile activated without the label calculus it reads refuses every command before dispatch. The shared configuration-failure surface keeps stdout empty and names the missing same-owner label prerequisite on stderr, so an incomplete declaration cannot silently run a partial policy. |
@@ -92,22 +92,24 @@
 //! | [`a_title_minting_the_departed_document_kind_fails_at_the_catalogue`] | head | cites (´claim:head:a-title-validates-on-every-kind-the-relation-rows-its-environment´) |
 //! | [`characterizes_no_surface_bytes`] | harness | Every command class refuses with the same empty data streams when the required shape document is absent from an invented root. |
 //! | [`characterizes_check_bytes`] | harness | A check over this deliberately undeclared fixture refuses before findings can be ordered. |
-//! | [`the_check_reports_a_corpus_finding_once`] | cli | A corpus finding is reported once because reporting it twice doubles a failure count a reader acts on and names the same repair twice. # Panics Panics only when the temporary fixture cannot be created, written, tracked, executed, inspected, or removed. |
-//! | [`the_check_reports_a_missing_tracked_path_once`] | cli | A missing tracked Markdown path draws one corpus finding and no reader failure, so one absent file names one repair; restoring its bytes clears it. # Panics Panics only when the temporary fixture cannot be created, written, tracked, executed, inspected, or removed. |
-//! | [`the_activation_reach_counts_a_missing_tracked_path`] | cli | A declared census surface counts both tracked paths before and after one leaves the checkout, while check reports the absent file once without calling the surface vacuous. # Panics Panics only when the temporary fixture cannot be created, written, tracked, executed, inspected, or removed. |
+//! | [`the_check_reports_a_corpus_finding_once`] | cli | A corpus finding is reported once because reporting it twice doubles a failure count a reader acts on and names the same repair twice. |
+//! | [`the_check_reports_a_missing_tracked_path_once`] | cli | A missing tracked Markdown path draws one corpus finding and no reader failure, so one absent file names one repair; restoring its bytes clears it. |
+//! | [`the_activation_reach_counts_a_missing_tracked_path`] | cli | A declared census surface counts both tracked paths before and after one leaves the checkout, while check reports the absent file once without calling the surface vacuous. |
 //! | [`characterizes_informational_bytes`] | harness | Each informational command refuses before dispatch over this deliberately undeclared fixture. |
 //! | [`characterizes_burn_bytes`] | harness | The burn report fixes its census rows and every surrounding report byte. |
 //! | [`characterizes_control_bytes`] | harness | The control response file and stdout are one frozen byte sequence. |
 //! | [`characterizes_projection_bytes`] | harness | Projection fixes the report and every file the writer owns. |
-//! | [`the_project_command_reports_elapsed_micros`] | cli | The project command reports its wall time in the result object, matching the judging commands that decide a corpus verdict. # Panics Panics only when the temporary fixture cannot be created, written, tracked, executed, or parsed. |
+//! | [`the_project_command_reports_elapsed_micros`] | cli | The project command reports its wall time in the result object, matching the judging commands that decide a corpus verdict. |
 //! | [`characterizes_assembly_bytes`] | harness | Assembly fixes both its report and the generated publication. |
 //! | [`characterizes_fix_bytes`] | harness | Both fix profiles refuse before writing over deliberately undeclared fixtures, freezing the refusal and the untouched sources. |
-//! | [`citation_sites_preserve_resolved_addresses`] | cli | The executable protocol preserves citations before the first mint and exposes no document text. # Panics Panics only if fixture IO fails or the command violates its versioned protocol. |
-//! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration. # Panics Panics only if fixture IO fails or the binary violates the containment contract. |
-//! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting lists removes deactivated catalogued tables and preserves deferred bytes and position. # Panics Panics only if fixture IO fails or a rewrite changes opaque source. |
-//! | [`deferred_family_replacements_are_disjoint`] | control | Active family containers survive beside deferred bytes, while stale siblings leave without overlapping the active family's replacement. # Panics Panics only if fixture IO fails or the writer violates the family contract. |
-//! | [`nondeferred_inline_owner_rewrite_is_valid`] | control | The shared envelope boundary rewrites inline owners without duplicating keys even without deferred policies, and malformed source is refused unchanged. # Panics Panics only if fixture IO fails or the writer violates the envelope contract. |
-//! | [`programme_outside_checkout_names_tracked_directory_requirement`] | cli | A programme outside Git names its row and its tracked-directory requirement. # Panics Panics only if fixture IO fails or the refusal loses its feature context. |
+//! | [`citation_sites_preserve_resolved_addresses`] | cli | The executable protocol preserves citations before the first mint and exposes no document text. |
+//! | [`non_participating_owner_keeps_upstream_bytes`] | cli | An explicit upstream owner preserves malformed upstream prose and census coverage through the CLI. |
+//! | [`nested_root_containment_uses_tracked_paths`] | cli | Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration. |
+//! | [`deferred_list_rewrite_preserves_bytes_and_order`] | cli | Rewriting lists removes deactivated catalogued tables and preserves deferred bytes and position. |
+//! | [`deferred_family_replacements_are_disjoint`] | control | Active family containers survive beside deferred bytes, while stale siblings leave without overlapping the active family's replacement. |
+//! | [`invalid_rendered_lists_are_refused_unchanged`] | control | An active dotted singleton beside a deferred table is refused before the writer can replace the source with duplicate TOML tables. |
+//! | [`nondeferred_inline_owner_rewrite_is_valid`] | control | The shared envelope boundary rewrites inline owners without duplicating keys even without deferred policies, and malformed source is refused unchanged. |
+//! | [`programme_outside_checkout_names_tracked_directory_requirement`] | cli | A programme outside Git names its row and its tracked-directory requirement. |
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -5478,6 +5480,88 @@ fn citation_sites_preserve_resolved_addresses() {
     );
 }
 
+/// An explicit upstream owner preserves malformed upstream prose and census coverage through the CLI.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the declaration bypasses ordinary owner admission.
+/// ´claim:cli:non-participating-owner-keeps-upstream-bytes´
+/// ´test:integration:non-participating-owner-keeps-upstream-bytes´
+#[test]
+fn non_participating_owner_keeps_upstream_bytes() {
+    let root = build_mode_fixture("## One · `sec:fixture:one`\n");
+    let upstream = "Unmodified upstream changelog with an unmatched ` delimiter.\n";
+    write(root.path(), "vendor/CHANGELOG.md", upstream);
+    let owners = DECLARED_OWNERS.replace("owners = [\"PROJECTA\"]", "owners = [\"PROJECTA\", \"PROJECTB\"]")
+        .replace("partitions = [", "partitions = [{ name = \"upstream\", owner = \"PROJECTB\", pattern = '%s\"vendor/\" *VCHAR' }, ");
+    let declared = format!(
+        "{owners}non_participating = [{{ owner = \"PROJECTB\", reason = \"Unchanged fixture upstream archive\" }}]\n"
+    );
+    declare(
+        root.path(),
+        &declared,
+        FIXTURE_ENVIRONMENTS,
+        DECLARED_POLICIES,
+        DECLARED_LISTS,
+    );
+    track(root.path());
+    let (code, report) = run(&["check"], root.path());
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["configuration"]["partition"]["unaccounted"], 0);
+    assert_eq!(
+        report["configuration"]["non_participating"][0]["owner"],
+        "PROJECTB"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("vendor/CHANGELOG.md")).expect("upstream"),
+        upstream
+    );
+    for policy in [
+        "labels.mints-well-formed",
+        "labels.citations-local-resolve",
+        "labels.upstream-fixture",
+    ] {
+        let programme = if policy == "labels.upstream-fixture" {
+            ", programme = { package = \"vendor\", binary = \"fixture-checker\" }"
+        } else {
+            ""
+        };
+        let policies = DECLARED_POLICIES.replace(
+            "policies = [",
+            &format!("policies = [{{ owner = \"PROJECTB\", policy = {policy:?}{programme} }}, "),
+        );
+        let lists = format!("{DECLARED_LISTS}\n[PROJECTB.{policy:?}]\nallowances = []\n");
+        declare(
+            root.path(),
+            &declared,
+            FIXTURE_ENVIRONMENTS,
+            &policies,
+            &lists,
+        );
+        let config = superloop_lint::configuration(root.path());
+        let errors = config.refusals();
+        assert!(
+            format!("{errors:?}").contains("owner must activate no labels.* policy"),
+            "{errors:?}"
+        );
+    }
+    declare(
+        root.path(),
+        &owners,
+        FIXTURE_ENVIRONMENTS,
+        DECLARED_POLICIES,
+        DECLARED_LISTS,
+    );
+    let (code, report) = run(&["check"], root.path());
+    assert_eq!(code, Some(3), "{report}");
+    assert!(
+        report["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(|finding| finding["code"] == "inactive_prose_owner")
+    );
+}
+
 /// Nested roots require tracked ownership metadata and refuse foreign ownership or failed enumeration.
 ///
 /// # Panics
@@ -5731,6 +5815,79 @@ fn deferred_family_replacements_are_disjoint() {
         assert_eq!(rewritten, expected_list_rewrite(name), "{name}");
         assert!(!superloop_lint::lower_lists(&plan).expect("repeat family"));
     }
+    for (name, dotted) in [
+        (
+            "dotted-family-owner",
+            "[PROJECTA]\n\"policy.references.fixture-numbers\".retired = { path_counts=[] }\n",
+        ),
+        (
+            "dotted-family-root",
+            "PROJECTA.\"policy.references.fixture-numbers\".retired = { path_counts=[] }\n",
+        ),
+        (
+            "dotted-singleton-owner",
+            "[PROJECTB]\n\"labels.mints-well-formed\".allowances = []\n",
+        ),
+        (
+            "dotted-singleton-root",
+            "PROJECTB.\"labels.mints-well-formed\".allowances = []\n",
+        ),
+    ] {
+        let envelope = "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n";
+        let source = format!(
+            "{envelope}{dotted}{}{headed}{deferred}",
+            &prefix[envelope.len()..]
+        );
+        toml::from_str::<toml::Table>(&source).expect("valid dotted fixture");
+        fs::write(&path, &source).expect("dotted source");
+        superloop_lint::lower_lists(&plan).expect("prune dotted entry");
+        let rewritten = fs::read_to_string(&path).expect("dotted output");
+        assert_eq!(rewritten, expected_list_rewrite(name), "{name}");
+        toml::from_str::<toml::Table>(&rewritten).expect("valid dotted output");
+        assert!(!superloop_lint::lower_lists(&plan).expect("repeat dotted family"));
+    }
+}
+
+/// An active dotted singleton beside a deferred table is refused before the
+/// writer can replace the source with duplicate TOML tables.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the writer changes refused bytes.
+///
+/// ´claim:control:invalid-rendered-lists-are-refused-unchanged´
+/// ´test:integration:invalid-rendered-lists-are-refused-unchanged´
+#[test]
+fn invalid_rendered_lists_are_refused_unchanged() {
+    let root = programme_fixture(LOCAL_POLICY, Some(LOCAL_PROGRAMME), "allowances = []");
+    let path = root.path().join(".linter/lists.toml");
+    let source = fs::read_to_string(&path).expect("lists").replace(
+        "[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []",
+        "[PROJECTA]\n\"labels.mints-well-formed\".allowances = []",
+    );
+    assert!(source.contains(".allowances"));
+    fs::write(&path, &source).expect("dotted singleton");
+    let plan =
+        ExecutionPlan::compile(root.path(), configuration(root.path())).expect("valid input");
+    let error = superloop_lint::lower_lists(&plan).expect_err("invalid output refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error
+            .to_string()
+            .contains("refusing invalid rendered lists")
+    );
+    assert_eq!(fs::read_to_string(&path).expect("unchanged"), source);
+    let output = programme_command(root.path(), &["burn", "--write"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing invalid rendered lists"));
+    assert_eq!(fs::read_to_string(&path).expect("CLI unchanged"), source);
+    fs::remove_file(&path).expect("remove lists");
+    assert_eq!(
+        superloop_lint::lower_lists(&plan)
+            .expect_err("missing source")
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert!(!path.exists());
 }
 
 /// The shared envelope boundary rewrites inline owners without duplicating keys
@@ -5761,7 +5918,7 @@ fn nondeferred_inline_owner_rewrite_is_valid() {
     );
 }
 
-/// Exact synthetic writer output recorded in the node round c-a02-probe.
+/// Exact synthetic writer output recorded in c-a02-probe and e-dotted-probe.
 ///
 /// # Panics
 /// Panics only if a test asks for an unrecorded fixture.
@@ -5793,6 +5950,15 @@ fn expected_list_rewrite(name: &str) -> &'static str {
         }
         "stale-headed-sibling" => {
             "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "dotted-family-owner" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTA]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "dotted-family-root" | "dotted-singleton-root" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
+        }
+        "dotted-singleton-owner" => {
+            "namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n\n[PROJECTB]\n\n[PROJECTA.\"labels.mints-well-formed\"]\nallowances = []\n\n[PROJECTA.\"policy.references.fixture-numbers\".\"active\"]\npath_counts = []\n\n# keep position\r\n[PROJECTA.'profile.notice-dispositions-conform']\r\nallowances = [] # opaque\r\n"
         }
         _ => panic!("unrecorded list layout: {name}"),
     }

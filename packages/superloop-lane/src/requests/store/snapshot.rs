@@ -4,6 +4,39 @@ use super::*;
 use execute_command::snapshot::{PolicySnapshot, Source};
 use nix::sys::stat::fchmod;
 
+fn observed_tier_identity(root: &OwnedFd, owner: u32) -> Result<(u32, u32), LaneError> {
+    let refusal = |detail: String| problem("execute-command-snapshot-custody", detail);
+    let mut identity = None;
+    for name in ["shared", "private", "direct"] {
+        let fd = nix::fcntl::openat2(
+            root,
+            name,
+            nix::fcntl::OpenHow::new()
+                .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+                .resolve(
+                    nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS
+                        | nix::fcntl::ResolveFlag::RESOLVE_BENEATH,
+                ),
+        )
+        .map_err(|error| refusal(error.to_string()))?;
+        let stat = fstat(&fd).map_err(|error| refusal(error.to_string()))?;
+        let current = (stat.st_uid, stat.st_gid);
+        if stat.st_uid == owner
+            || stat.st_mode & 0o022 != 0
+            || identity.is_some_and(|expected| expected != current)
+            || name != "shared"
+                && stat.st_mode & 0o7777 != loop_home::mail::acl::preserved_mode(&fd, 0o700)
+        {
+            return Err(refusal(
+                "shared, private and direct must have the same independent loop owner and group"
+                    .into(),
+            ));
+        }
+        identity = Some(current);
+    }
+    identity.ok_or_else(|| refusal("loop identity tiers are absent".into()))
+}
+
 impl Store {
     pub(crate) fn report_snapshot_failure(error: &LaneError) -> Value {
         let report = json!({"published":false,"rule":error.kind,"detail":error.detail});
@@ -71,31 +104,7 @@ impl Store {
                 "snapshot writer differs from the effective owner".into(),
             ));
         }
-        let mut identity = None;
-        for name in ["shared", "private", "direct"] {
-            let fd = nix::fcntl::openat2(
-                root,
-                name,
-                nix::fcntl::OpenHow::new()
-                    .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
-                    .resolve(
-                        nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS
-                            | nix::fcntl::ResolveFlag::RESOLVE_BENEATH,
-                    ),
-            )
-            .map_err(|error| refusal(error.to_string()))?;
-            let stat = fstat(&fd).map_err(|error| refusal(error.to_string()))?;
-            let current = (stat.st_uid, stat.st_gid);
-            if stat.st_uid == self.owner
-                || stat.st_mode & 0o022 != 0
-                || identity.is_some_and(|expected| expected != current)
-                || name != "shared" && stat.st_mode & 0o7707 != 0o700
-            {
-                return Err(refusal("shared, private and direct must have the same independent loop owner and group".into()));
-            }
-            identity = Some(current);
-        }
-        identity.ok_or_else(|| refusal("loop identity tiers are absent".into()))
+        observed_tier_identity(root, self.owner)
     }
 
     pub(super) fn invalidate_snapshot(&self) -> Result<(), LaneError> {
@@ -298,13 +307,43 @@ impl Store {
     }
 }
 
+fn rubric_ancestor(
+    uid: u32,
+    mode: u32,
+    owner: &loop_home::ancestor::Owners,
+    loop_owner: &loop_home::ancestor::Owners,
+) -> Result<(), LaneError> {
+    owner
+        .check(uid)
+        .or_else(|_| loop_owner.check(uid))
+        .map_err(|error| problem("door-rubric-unavailable", error))?;
+    let sticky_root = owner.is_root(uid) && mode & 0o1777 == 0o1777;
+    if mode & 0o022 != 0 && !sticky_root {
+        return Err(problem(
+            "door-rubric-unavailable",
+            "published rubric ancestor is replaceable",
+        ));
+    }
+    Ok(())
+}
+
 fn rubric_file(path: &Path, owner: u32, loop_uid: u32) -> Result<OwnedFd, LaneError> {
+    loop_home::anchor::HostVerifier::current()
+        .map_err(|error| problem("door-rubric-unavailable", error.to_string()))?;
+    let owners = loop_home::ancestor::Owners::current(owner)
+        .map_err(|error| problem("door-rubric-unavailable", error))?;
+    let loop_owners = loop_home::ancestor::Owners::current(loop_uid)
+        .map_err(|error| problem("door-rubric-unavailable", error))?;
+
     let mut parent = nix::fcntl::open(
         "/",
         OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
         FileMode::empty(),
     )
     .map_err(|error| problem("door-rubric-unavailable", error.to_string()))?;
+    let root =
+        fstat(&parent).map_err(|error| problem("door-rubric-unavailable", error.to_string()))?;
+    rubric_ancestor(root.st_uid, root.st_mode, &owners, &loop_owners)?;
     let relative = path
         .strip_prefix("/")
         .map_err(|error| problem("door-rubric-unavailable", error.to_string()))?;
@@ -337,15 +376,7 @@ fn rubric_file(path: &Path, owner: u32, loop_uid: u32) -> Result<OwnedFd, LaneEr
         }
         let stat =
             fstat(&fd).map_err(|error| problem("door-rubric-unavailable", error.to_string()))?;
-        let sticky_root = [0, 65534].contains(&stat.st_uid) && stat.st_mode & 0o1777 == 0o1777;
-        if ![0, 65534, owner, loop_uid].contains(&stat.st_uid)
-            || stat.st_mode & 0o022 != 0 && !sticky_root
-        {
-            return Err(problem(
-                "door-rubric-unavailable",
-                "published rubric ancestor is replaceable",
-            ));
-        }
+        rubric_ancestor(stat.st_uid, stat.st_mode, &owners, &loop_owners)?;
         parent = fd;
     }
     Err(problem("door-rubric-unavailable", "rubric file is absent"))
@@ -378,10 +409,71 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::MetadataExt as _;
 
+    /// # Panics
+    /// Panics if host ownership or the link-free rubric walk grants unrelated authority.
+    /// ´claim:superlooplane:host-rubric-walk-refuses-nobody´
+    /// ´test:unit:host-rubric-walk-refuses-nobody´
+    #[test]
+    fn host_rubric_walk_refuses_nobody() {
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let owner = loop_home::ancestor::Owners::current(uid).expect("host map");
+        let loop_owner = loop_home::ancestor::Owners::current(uid + 1).expect("loop map");
+        for mode in [0o755, 0o1777] {
+            assert_eq!(
+                rubric_ancestor(65534, mode, &owner, &loop_owner)
+                    .expect_err("nobody is not root")
+                    .kind,
+                "door-rubric-unavailable"
+            );
+        }
+        rubric_ancestor(0, 0o1777, &owner, &loop_owner).expect("sticky root");
+        rubric_ancestor(uid + 1, 0o700, &owner, &loop_owner).expect("granted loop");
+        let root = tempfile::tempdir().expect("root");
+        let file = root.path().join("rubric");
+        fs::write(&file, "rubric").expect("rubric");
+        rubric_file(&file, uid, uid + 1).expect("host file");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).expect("link");
+        assert_eq!(
+            rubric_file(&link, uid, uid + 1).expect_err("link").kind,
+            "door-rubric-unavailable"
+        );
+    }
+
     fn fixture() -> (super::super::tests::Fixture, Store) {
         let fixture = super::super::tests::Fixture::new();
         let store = fixture.snapshot_store();
         (fixture, store)
+    }
+
+    /// ´test:unit:observed-loop-tiers-validate-search-acl-masks´
+    #[test]
+    fn observed_loop_tiers_validate_search_acl_masks() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = File::open(fixture.path()).expect("root");
+        let owner = nix::unistd::Uid::effective().as_raw() + 1;
+        for name in ["shared", "private", "direct"] {
+            let path = fixture.path().join(name);
+            fs::create_dir(&path).expect("tier");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("private mode");
+            loop_home::mail::acl::install(&File::open(path).expect("tier"), owner + 1, true)
+                .expect("real search ACL");
+        }
+        let fd: OwnedFd = root.into();
+        observed_tier_identity(&fd, owner).expect("search grants");
+        for name in ["private", "direct"] {
+            let path = fixture.path().join(name);
+            // Read-only widening was accepted by the group-bit hotfix too.
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).expect("widen mask");
+            assert_eq!(
+                observed_tier_identity(&fd, owner)
+                    .expect_err("widened mask")
+                    .kind,
+                "execute-command-snapshot-custody"
+            );
+            fs::set_permissions(path, fs::Permissions::from_mode(0o710)).expect("restore mask");
+        }
+        observed_tier_identity(&fd, owner).expect("restored grants");
     }
 
     /// ´test:unit:direct-policy-writer-compares-policy-group-with-observed-loop-tiers´

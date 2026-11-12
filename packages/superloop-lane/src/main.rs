@@ -9,7 +9,7 @@ use superloop_lane::{
     load_plan, prepare, repair, requests,
 };
 
-const USAGE_TEMPLATE: &str = "usage: superloop-lane {bound-roots --runs-root DIR PATH [PATH...]|render-routes --registry FILE --loop LOOP --owner-home PATH --output DIR|gateway {register|deregister|status|check-request|migrate-proposals|serve} ARGS|launch --host LOOP RUN HOST-ARGS...|prepare-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES] [--reconcile {--dry-run|--expect-digest HEX}]|check-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES]|driver {start|resume} --backend {claude|codex} ARGS|driver status RUN|driver follow RUN [--save-offset]|prepare LOOP [--dry-run]|plan LOOP RUN|make-home LOOP RUN --letter FILE|launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]|launch LOOP RUN --repin-door {--dry-run|--expect-digest HEX}|read-launch-report LOOP RUN [--round STEP]|rewrite-launch-reports LOOP [--dry-run]|settle LOOP RUN --round STEP {--dry-run|--expect-digest HEX}|checkpoint LOOP RUN [--dry-run]|checkout LOOP RUN --repo REPO --into DIR [--dry-run]|harvest LOOP RUN --gate-object HEX [--dry-run]|mark-imported LOOP RUN --object HEX|bind-mail|bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT|follow LOOP RUN [--round STEP] [--round-only]|rotate LOOP RUN [--dry-run] [--expect-digest HEX] [--force REASON] [--next FILE]|census LOOP [--mail-migration]|census rewrite LOOP RUN {--dry-run|--expect-digest HEX}|pause LOOP|resume LOOP|exercise LOOP [--dry-run]|exercise LOOP --run RUN --case {context-use|harvest|run-identity|home-layout|mounts|rotation|resources|reaping|network|door-shape|door-attribution|door-extensions|door-audit|door-allow|door-enforce|door-agent}|network-evidence LOOP RUN < HOST-OBSERVATION.json|retire LOOP RUN [--confirm-uncertain] [--dry-run|--expect-digest HEX]|retire LOOP RUN --node [--dry-run|--expect-digest HEX]|retire LOOP --generations [--dry-run]|retire rewrite-node LOOP {--dry-run|--expect-digest HEX} [--full-plan]|record-hosts LOOP RUN {--list|--host HOST [--host HOST...]} [--dry-run]|build LOOP --base-image REF --codex-bin FILE --codex-host-bin FILE --codex-version VERSION --codex-sha256 HEX --codex-host-sha256 HEX --codex-source URL [--podman-bin FILE] [--template-dir DIR] [--dry-run]|install [--pilot [--refresh-proxy]] LOOP [--dry-run] [--podman-bin FILE] [--data-dir DIR] [--proxy-bin FILE] [--unit-dir DIR]|register-door-node LOOP --alias ALIAS --address ADDRESS --port PORT --user USER --host-key KEY {--dry-run|--expect-digest HEX}|install-door LOOP [--dry-run] [--podman-bin FILE]|door-sign-in LOOP [--dry-run|--expect-digest HEX]|repair LOOP [--dry-run]|requests {<REQUESTS_USAGE>}|--help|--version}\nexercise LOOP --run RUN --case door-attribution requires a started run before settle\nrepin-door: only boxed runs with a registered door can be re-pinned; otherwise repin-door: this run has no door\nsettle: --expect-digest takes the dry run JSON field preview_sha256 (the recorded preview digest)";
+const USAGE_TEMPLATE: &str = "usage: superloop-lane {bound-roots --runs-root DIR PATH [PATH...]|render-routes --registry FILE --loop LOOP --owner-home PATH --output DIR|gateway {register|deregister|status|check-request|migrate-proposals|serve} ARGS|launch --host LOOP RUN HOST-ARGS...|prepare-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES] [--reconcile {--dry-run|--expect-digest HEX}]|check-signin-home --backend codex LOOP [--charter PATH] [--nodes NAMES]|driver {start|resume} --backend {claude|codex} ARGS|driver status RUN|driver follow RUN [--save-offset]|prepare LOOP [--dry-run]|plan LOOP RUN|make-home LOOP RUN --letter FILE|launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]|launch LOOP RUN --repin-door {--dry-run|--expect-digest HEX}|read-launch-report LOOP RUN [--round STEP]|rewrite-launch-reports LOOP [--dry-run]|settle LOOP RUN --round STEP {--dry-run|--expect-digest HEX}|checkpoint LOOP RUN [--dry-run]|checkout LOOP RUN --repo REPO --into DIR [--dry-run]|harvest LOOP RUN --gate-object HEX [--dry-run]|mark-imported LOOP RUN --object HEX|bind-mail|bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT|follow LOOP RUN [--round STEP] [--round-only]|rotate LOOP RUN [--dry-run] [--expect-digest HEX] [--force REASON] [--next FILE]|census LOOP [--mail-migration]|census rewrite LOOP RUN {--dry-run|--expect-digest HEX}|pause LOOP|resume LOOP|exercise LOOP [--backend {codex|claude}] [--dry-run]|exercise LOOP --run RUN --case {context-use|harvest|run-identity|home-layout|mounts|rotation|resources|reaping|network|door-shape|door-attribution|door-extensions|door-audit|door-allow|door-enforce|door-agent}|network-evidence LOOP RUN < HOST-OBSERVATION.json|retire LOOP RUN [--confirm-uncertain] [--dry-run|--expect-digest HEX]|retire LOOP RUN --node [--dry-run|--expect-digest HEX]|retire LOOP --generations [--dry-run]|retire rewrite-node LOOP {--dry-run|--expect-digest HEX} [--full-plan]|record-hosts LOOP RUN {--list|--host HOST [--host HOST...]} [--dry-run]|build LOOP --base-image REF --codex-bin FILE --codex-host-bin FILE --codex-version VERSION --codex-sha256 HEX --codex-host-sha256 HEX --codex-source URL [--podman-bin FILE] [--template-dir DIR] [--dry-run]|install [--pilot [--refresh-proxy]] LOOP [--dry-run] [--podman-bin FILE] [--data-dir DIR] [--proxy-bin FILE] [--unit-dir DIR]|register-door-node LOOP --alias ALIAS --address ADDRESS --port PORT --user USER --host-key KEY {--dry-run|--expect-digest HEX}|install-door LOOP [--dry-run] [--podman-bin FILE]|door-sign-in LOOP [--dry-run|--expect-digest HEX]|repair LOOP [--dry-run]|requests {<REQUESTS_USAGE>}|--help|--version}\nexercise LOOP --run RUN --case door-attribution requires a started run before settle\nrepin-door: only boxed runs with a registered door can be re-pinned; otherwise repin-door: this run has no door\nsettle: --expect-digest takes the dry run JSON field preview_sha256 (the recorded preview digest)";
 
 static USAGE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     USAGE_TEMPLATE.replace("<REQUESTS_USAGE>", requests::commands::REQUESTS_USAGE)
@@ -25,181 +25,6 @@ fn print_launch_report(
 fn print_unsaved_launch_report(writer: impl io::Write, report: &serde_json::Value) {
     drop(print_launch_report(writer, report));
 }
-
-fn parse_checkpoint_private_argv(
-    args: &[String],
-) -> Result<(launch::checkpoint::CheckpointRequest, &Path), LaneError> {
-    let [_, loop_name, run, home_flag, owner_home, rest @ ..] = args else {
-        return Err(LaneError::input(
-            "checkpoint-private",
-            "private checkpoint form is incomplete",
-        ));
-    };
-    if home_flag != "--owner-home" {
-        return Err(LaneError::input(
-            "checkpoint-private",
-            "private checkpoint form is invalid",
-        ));
-    }
-    let (token, dry_run) = match rest {
-        [] => (None, false),
-        [dry] if dry == "--dry-run" => (None, true),
-        [flag, token] if flag == "--token" => (Some(token.clone()), false),
-        [flag, token, dry] if flag == "--token" && dry == "--dry-run" => {
-            (Some(token.clone()), true)
-        }
-        _ => {
-            return Err(LaneError::input(
-                "checkpoint-private",
-                "private checkpoint form is invalid",
-            ));
-        }
-    };
-    let mut words = vec![loop_name.clone(), run.clone()];
-    if dry_run {
-        words.push("--dry-run".to_owned());
-    }
-    let mut request = launch::checkpoint::CheckpointRequest::parse(&words)?;
-    request.invocation_token = token;
-    Ok((request, Path::new(owner_home)))
-}
-
-fn parse_checkout_private_argv(
-    args: &[String],
-) -> Result<(launch::checkout::CheckoutRequest, &Path), LaneError> {
-    let [
-        _,
-        loop_name,
-        run,
-        into_flag,
-        into,
-        home_flag,
-        owner_home,
-        repo_flag,
-        repo,
-        rest @ ..,
-    ] = args
-    else {
-        return Err(LaneError::input(
-            "checkout-private",
-            "private checkout form is incomplete",
-        ));
-    };
-    if into_flag != "--into" || home_flag != "--owner-home" || repo_flag != "--repo" {
-        return Err(LaneError::input(
-            "checkout-private",
-            "private checkout form is invalid",
-        ));
-    }
-    let mut words = vec![
-        loop_name.clone(),
-        run.clone(),
-        "--repo".into(),
-        repo.clone(),
-        "--into".into(),
-        into.clone(),
-    ];
-    let token = if rest == ["--dry-run"] {
-        words.push("--dry-run".into());
-        None
-    } else if let [flag, token] = rest
-        && flag == "--token"
-    {
-        Some(token.clone())
-    } else {
-        return Err(LaneError::input(
-            "checkout-private",
-            "private checkout form is invalid",
-        ));
-    };
-    let mut request = launch::checkout::CheckoutRequest::parse(&words)?;
-    request.invocation_token = token;
-    Ok((request, Path::new(owner_home)))
-}
-
-fn parse_harvest_private_argv(
-    args: &[String],
-) -> Result<(launch::harvest::HarvestRequest, &Path, bool), LaneError> {
-    let [
-        kind,
-        loop_name,
-        run,
-        object_flag,
-        object,
-        home_flag,
-        owner_home,
-        rest @ ..,
-    ] = args
-    else {
-        return Err(LaneError::input(
-            "harvest-private",
-            "private harvest form is incomplete",
-        ));
-    };
-    if (kind != "_harvest" && kind != "_harvest-recover")
-        || object_flag != "--gate-object"
-        || home_flag != "--owner-home"
-    {
-        return Err(LaneError::input(
-            "harvest-private",
-            "private harvest form is invalid",
-        ));
-    }
-    let mut words = vec![
-        loop_name.clone(),
-        run.clone(),
-        object_flag.clone(),
-        object.clone(),
-    ];
-    if rest == ["--dry-run"] {
-        words.push("--dry-run".into());
-    } else if !rest.is_empty() {
-        return Err(LaneError::input(
-            "harvest-private",
-            "private harvest form is invalid",
-        ));
-    }
-    Ok((
-        launch::harvest::HarvestRequest::parse(&words)?,
-        Path::new(owner_home),
-        kind == "_harvest-recover",
-    ))
-}
-
-fn parse_import_private_argv(
-    args: &[String],
-) -> Result<(launch::imports::MarkImportedRequest, &Path), LaneError> {
-    let [
-        _,
-        loop_name,
-        run,
-        object_flag,
-        object,
-        home_flag,
-        owner_home,
-    ] = args
-    else {
-        return Err(LaneError::input(
-            "import-private",
-            "private import form is incomplete",
-        ));
-    };
-    if object_flag != "--object" || home_flag != "--owner-home" {
-        return Err(LaneError::input(
-            "import-private",
-            "private import form is invalid",
-        ));
-    }
-    let request = launch::imports::MarkImportedRequest::parse(&[
-        loop_name.clone(),
-        run.clone(),
-        object_flag.clone(),
-        object.clone(),
-    ])?;
-    Ok((request, Path::new(owner_home)))
-}
-
-type FollowPrivateForm<'a> = (&'a Path, &'a str, &'a str, &'a str, &'a Path, &'a str);
 
 fn parse_follow_options(rest: &[String]) -> Result<(Option<&str>, bool), LaneError> {
     let (round, round_only) = match rest {
@@ -225,71 +50,6 @@ fn parse_follow_options(rest: &[String]) -> Result<(Option<&str>, bool), LaneErr
     Ok((round, round_only))
 }
 
-fn parse_follow_private_argv(args: &[String]) -> Result<FollowPrivateForm<'_>, LaneError> {
-    let [
-        _,
-        loop_name,
-        run,
-        home_flag,
-        owner_home,
-        round_flag,
-        step,
-        directory_flag,
-        directory,
-        identity_flag,
-        identity,
-    ] = args
-    else {
-        return Err(LaneError::input(
-            "follow-private",
-            "private follow form is incomplete",
-        ));
-    };
-    if home_flag != "--owner-home"
-        || round_flag != "--round"
-        || directory_flag != "--driver-dir"
-        || identity_flag != "--record-identity"
-    {
-        return Err(LaneError::input(
-            "follow-private",
-            "private follow form is malformed",
-        ));
-    }
-    Ok((
-        Path::new(owner_home),
-        loop_name,
-        run,
-        step,
-        Path::new(directory),
-        identity,
-    ))
-}
-
-fn validate_bite_private_argv(args: &[String]) -> Result<(), LaneError> {
-    match args.first().map(String::as_str) {
-        Some("_checkpoint") => {
-            parse_checkpoint_private_argv(args)?;
-        }
-        Some("_checkout") => {
-            parse_checkout_private_argv(args)?;
-        }
-        Some("_harvest" | "_harvest-recover") => {
-            parse_harvest_private_argv(args)?;
-        }
-        Some("_mark-imported") => {
-            parse_import_private_argv(args)?;
-        }
-        Some("_follow-private") => {
-            parse_follow_private_argv(args)?;
-        }
-        Some("_rotation-handover") => {
-            launch::rotation::parse_private_handover_argv(args)?;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_lines)]
 fn bind_private_launch_args<'a>(
     args: &'a [String],
@@ -298,33 +58,7 @@ fn bind_private_launch_args<'a>(
 ) -> Result<(&'a [String], Option<home::PrivateHomeGuard>), LaneError> {
     let private_launch = matches!(
         args.first().map(String::as_str),
-        Some(
-            "_choose-uid"
-                | "_settle-evidence"
-                | "_driver-report"
-                | "_exercise-measure"
-                | "_exercise-home-layout"
-                | "_exercise-harvest"
-                | "_exercise-mounts"
-                | "_exercise-door-shape"
-                | "_exercise-door-attribution"
-                | "_exercise-network"
-                | "_observed-hosts"
-                | "_make-home"
-                | "_checkpoint"
-                | "_harvest"
-                | "_harvest-recover"
-                | "_mark-imported"
-                | "_checkout"
-                | "_bind-mail"
-                | "_bind-reply"
-                | "_inspect-round"
-                | "_follow-private"
-                | "_exercise-context-private"
-                | "_rotation-handover"
-                | "_prepare-runtime"
-                | "_container-helper"
-        )
+        Some("_choose-uid" | "_settle-evidence" | "_make-home" | "_bind-mail")
     );
     if !private_launch {
         return Ok((args, None));
@@ -334,7 +68,7 @@ fn bind_private_launch_args<'a>(
         && args[args.len() - 2] == "--verified-letter-source-fd";
     let suffix_len = if rotation_source {
         12
-    } else if args[0] == "_make-home" || args[0] == "_checkout" {
+    } else if args[0] == "_make-home" {
         10
     } else {
         6
@@ -354,34 +88,6 @@ fn bind_private_launch_args<'a>(
             "private launch requires bound home, runs root and letter descriptors",
         ));
     }
-    if body
-        .first()
-        .is_some_and(|word| word == "_exercise-home-layout")
-    {
-        launch::exercise::parse_home_layout_private_argv(body)?;
-    }
-    if body.first().is_some_and(|word| word == "_exercise-harvest") {
-        launch::exercise::parse_harvest_private_argv(body)?;
-    }
-    if body.first().is_some_and(|word| word == "_exercise-mounts") {
-        launch::exercise::mounts::parse_private_argv(body)?;
-    }
-    if body
-        .first()
-        .is_some_and(|word| word == "_exercise-door-shape")
-    {
-        launch::exercise::door_shape::parse_private_argv(body)?;
-    }
-    if body
-        .first()
-        .is_some_and(|word| word == "_exercise-door-attribution")
-    {
-        launch::exercise::door_attribution::parse_private_argv(body)?;
-    }
-    if body.first().is_some_and(|word| word == "_exercise-network") {
-        launch::exercise::network::parse_private_argv(body)?;
-    }
-    validate_bite_private_argv(body)?;
     let mut homes = body.windows(2).filter(|pair| pair[0] == "--owner-home");
     let owner_home = homes.next().map(|pair| &pair[1]).ok_or_else(|| {
         LaneError::input("verified-prefix", "private launch is missing --owner-home")
@@ -512,6 +218,35 @@ fn bind_private_launch_args<'a>(
 
 #[allow(clippy::too_many_lines)]
 fn run(args: &[String]) -> Result<i32, LaneError> {
+    if args.first().is_some_and(|word| word == "_container-helper") {
+        return superloop_lane::container_entry::serve(args);
+    }
+    if args.first().is_some_and(|word| word == "_make-home") {
+        let report = superloop_lane::creation_entry::serve(args)?;
+        writeln!(io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
+        return Ok(0);
+    }
+    if args.first().is_some_and(|word| word == "_prepare-runtime") {
+        let report = superloop_lane::runtime_entry::serve(args)?;
+        writeln!(io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
+        return Ok(0);
+    }
+    if launch::reader_entry::handles(args) {
+        let report = launch::reader_entry::serve(args)?;
+        io::stdout()
+            .lock()
+            .write_all(report.as_bytes())
+            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
+        return Ok(0);
+    }
+    if launch::exercise_entry::handles(args) {
+        let report = launch::exercise_entry::serve(args)?;
+        writeln!(io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
+        return Ok(0);
+    }
     let (args, _private_home) = bind_private_launch_args(args, &io::stdin(), 0)?;
     if args.first().is_some_and(|word| word == "_container-client") {
         let [_, option, run_dir] = args else {
@@ -527,25 +262,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             ));
         }
         return container_helper::client(Path::new(run_dir));
-    }
-    if args.first().is_some_and(|word| word == "_container-helper") {
-        let [_, option, run_dir, home_option, owner_home] = args else {
-            return Err(LaneError::input(
-                "helper-usage",
-                "_container-helper --run-dir DIR --owner-home HOME",
-            ));
-        };
-        if option != "--run-dir"
-            || home_option != "--owner-home"
-            || !Path::new(run_dir).is_absolute()
-            || !Path::new(owner_home).is_absolute()
-        {
-            return Err(LaneError::input(
-                "helper-usage",
-                "_container-helper --run-dir DIR --owner-home HOME",
-            ));
-        }
-        return container_helper::serve(Path::new(run_dir)).map(|()| 0);
     }
     if args == ["--help"] {
         writeln!(io::stdout().lock(), "{}", USAGE.as_str())
@@ -787,79 +503,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
-    if args
-        .first()
-        .is_some_and(|value| value == "_rotation-handover")
-    {
-        let (loop_name, run, owner_home, runs_root, record_identity) =
-            launch::rotation::parse_private_handover_argv(args)?;
-        let report = launch::rotation::private_handover(
-            owner_home,
-            loop_name,
-            run,
-            runs_root,
-            record_identity,
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_follow-private") {
-        let (owner_home, loop_name, run, step, directory, identity) =
-            parse_follow_private_argv(args)?;
-        let lines =
-            launch::follow::private_read(owner_home, loop_name, run, step, directory, identity)?;
-        io::stdout()
-            .lock()
-            .write_all(lines.as_bytes())
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-context-private")
-    {
-        let [
-            _,
-            loop_name,
-            run,
-            home_option,
-            owner_home,
-            round_option,
-            step,
-            directory_option,
-            directory,
-            identity_option,
-            identity,
-        ] = args
-        else {
-            return Err(LaneError::input(
-                "exercise-context",
-                "private context form is incomplete",
-            ));
-        };
-        if home_option != "--owner-home"
-            || round_option != "--round"
-            || directory_option != "--driver-dir"
-            || identity_option != "--record-identity"
-        {
-            return Err(LaneError::input(
-                "exercise-context",
-                "private context form is malformed",
-            ));
-        }
-        let report = launch::follow::private_context(
-            Path::new(owner_home),
-            loop_name,
-            run,
-            step,
-            Path::new(directory),
-            identity,
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
     if args.first().is_some_and(|value| value == "census") {
         if args.get(1).is_some_and(|value| value == "rewrite") {
             let report = launch::census::rewrite::run(&caller_home()?, &args[2..])?;
@@ -898,7 +541,7 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
         let [_, loop_name, rest @ ..] = args else {
             return Err(LaneError::input(
                 "exercise-usage",
-                "exercise LOOP [--dry-run]",
+                "exercise LOOP [--backend {codex|claude}] [--dry-run]",
             ));
         };
         if let [run_flag, run, case_flag, case] = rest
@@ -911,17 +554,8 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
                 .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
             return Ok(status);
         }
-        let dry_run = match rest {
-            [] => false,
-            [flag] if flag == "--dry-run" => true,
-            _ => {
-                return Err(LaneError::input(
-                    "exercise-usage",
-                    "exercise LOOP [--dry-run]",
-                ));
-            }
-        };
-        let report = launch::exercise::run(&caller_home()?, loop_name, dry_run)?;
+        let (backend, dry_run) = launch::exercise::parse_options(rest)?;
+        let report = launch::exercise::run(&caller_home()?, loop_name, dry_run, backend)?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
@@ -976,41 +610,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
-    if args
-        .first()
-        .is_some_and(|value| value == "_harvest" || value == "_harvest-recover")
-    {
-        let (request, owner_home, recovery) = parse_harvest_private_argv(args)?;
-        let report = if recovery {
-            launch::harvest::private_recover(owner_home, &request)?
-        } else {
-            launch::harvest::private_run(owner_home, &request)?
-        };
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_mark-imported") {
-        let (request, owner_home) = parse_import_private_argv(args)?;
-        let report = launch::imports::private_run(owner_home, &request)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_checkpoint") {
-        let (request, owner_home) = parse_checkpoint_private_argv(args)?;
-        let report = launch::checkpoint::private_run(owner_home, &request)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_checkout") {
-        let (request, owner_home) = parse_checkout_private_argv(args)?;
-        let report = launch::checkout::private_run(owner_home, &request)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
     if args.first().is_some_and(|value| value == "record-hosts") {
         let request = launch::RecordHostsRequest::parse(&args[1..])?;
         let report = launch::record_hosts(&caller_home()?, &request)?;
@@ -1033,12 +632,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
         }
         let uid = launch::choose_worker_uid(Path::new(owner_home), loop_name, run)?;
         writeln!(io::stdout().lock(), "{uid}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_driver-report") {
-        let report = launch::driver_report::private(args)?;
-        writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
@@ -1091,111 +684,6 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
     }
     if args
         .first()
-        .is_some_and(|value| value == "_exercise-measure")
-    {
-        let [_, loop_name, run, option, owner_home] = args else {
-            return Err(LaneError::input(
-                "exercise-private",
-                "private exercise form is incomplete",
-            ));
-        };
-        if run != "all" || option != "--owner-home" {
-            return Err(LaneError::input(
-                "exercise-private",
-                "private exercise needs all and --owner-home",
-            ));
-        }
-        let report = launch::exercise::private_measure(Path::new(owner_home), loop_name)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-home-layout")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::parse_home_layout_private_argv(args)?;
-        let report =
-            launch::exercise::private_home_layout(owner_home, loop_name, run, expected_record)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-harvest")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::parse_harvest_private_argv(args)?;
-        let report =
-            launch::exercise::private_harvest_audit(owner_home, loop_name, run, expected_record)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-mounts")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::mounts::parse_private_argv(args)?;
-        let report =
-            launch::exercise::mounts::private_measure(owner_home, loop_name, run, expected_record)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-door-shape")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::door_shape::parse_private_argv(args)?;
-        let report = launch::exercise::door_shape::private_measure(
-            owner_home,
-            loop_name,
-            run,
-            expected_record,
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-door-attribution")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::door_attribution::parse_private_argv(args)?;
-        let report = launch::exercise::door_attribution::private_measure(
-            owner_home,
-            loop_name,
-            run,
-            expected_record,
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_exercise-network")
-    {
-        let (loop_name, run, expected_record, owner_home) =
-            launch::exercise::network::parse_private_argv(args)?;
-        let report = launch::exercise::network::private_measure(
-            owner_home,
-            loop_name,
-            run,
-            expected_record,
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
         .is_some_and(|value| value == "_exercise-layout-canary")
     {
         let [_, directory, worker, group] = args else {
@@ -1215,117 +703,13 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
-    if args.first().is_some_and(|value| value == "_observed-hosts") {
-        let [_, loop_name, run, option, owner_home] = args else {
-            return Err(LaneError::input(
-                "hosts-private",
-                "private observation form is incomplete",
-            ));
-        };
-        if option != "--owner-home" {
-            return Err(LaneError::input(
-                "hosts-private",
-                "private observation needs --owner-home",
-            ));
-        }
-        let report = launch::private_observed_hosts(Path::new(owner_home), loop_name, run)?;
+    if args.first().is_some_and(|word| word == "_bind-reply") {
+        let report = launch::reply_entry::serve(args)?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
         return Ok(0);
     }
-    if args.first().is_some_and(|value| value == "_make-home") {
-        let [
-            _,
-            loop_name,
-            run,
-            letter_option,
-            letter,
-            home_option,
-            owner_home,
-            uid_option,
-            worker_uid,
-            podman_option,
-            podman,
-            model_option,
-            model,
-            effort_option,
-            effort,
-            model_source_option,
-            model_source,
-            effort_source_option,
-            effort_source,
-            door_scope_option,
-            door_scope,
-            rest @ ..,
-        ] = args
-        else {
-            return Err(LaneError::input(
-                "make-home-private",
-                "private home form is incomplete",
-            ));
-        };
-        let (rotation_digest, observe) = match rest {
-            [] => (None, false),
-            [option] if option == "--observe" => (None, true),
-            [option, digest] if option == "--rotation-sha256" => (Some(digest.as_str()), false),
-            [option, digest, observe]
-                if option == "--rotation-sha256" && observe == "--observe" =>
-            {
-                (Some(digest.as_str()), true)
-            }
-            _ => {
-                return Err(LaneError::input(
-                    "make-home-private",
-                    "private home form has unexpected arguments",
-                ));
-            }
-        };
-        if letter_option != "--letter"
-            || home_option != "--owner-home"
-            || uid_option != "--worker-uid"
-            || podman_option != "--podman-bin"
-            || model_option != "--model"
-            || effort_option != "--effort"
-            || model_source_option != "--model-source"
-            || effort_source_option != "--effort-source"
-            || door_scope_option != "--door-scope"
-        {
-            return Err(LaneError::input(
-                "make-home-private",
-                "private home form has unexpected arguments",
-            ));
-        }
-        let report = launch::private_make(
-            Path::new(owner_home),
-            loop_name,
-            run,
-            Path::new(letter),
-            observe,
-            worker_uid
-                .parse()
-                .map_err(|_| LaneError::input("make-home-private", "worker UID is not decimal"))?,
-            Path::new(podman),
-            &serde_json::json!({"model":model,"effort":effort,"model_source":model_source,"effort_source":effort_source}),
-            rotation_digest,
-            match door_scope.as_str() {
-                "work" => superloop_lane::door::Scope::Work,
-                "review" => superloop_lane::door::Scope::Review,
-                _ => {
-                    return Err(LaneError::input(
-                        "make-home-private",
-                        "door scope is invalid",
-                    ));
-                }
-            },
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| matches!(value.as_str(), "_bind-mail" | "_bind-reply"))
-    {
+    if args.first().is_some_and(|value| value == "_bind-mail") {
         let [
             _,
             loop_name,
@@ -1360,78 +744,13 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
                 ));
             }
         };
-        let report = launch::steering::private_bind(
+        let report = launch::steering::private_mail(
             Path::new(owner_home),
             loop_name,
             run,
             step,
             delivery,
-            args[0] == "_bind-reply",
             verify_only,
-        )?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args.first().is_some_and(|value| value == "_inspect-round") {
-        let [_, loop_name, run, option, owner_home, rest @ ..] = args else {
-            return Err(LaneError::input(
-                "round-private",
-                "private round inspection is incomplete",
-            ));
-        };
-        if option != "--owner-home" {
-            return Err(LaneError::input(
-                "round-private",
-                "private round inspection needs --owner-home",
-            ));
-        }
-        let evidence = match rest {
-            [] => None,
-            [record_option, step, budget_option, seconds]
-                if record_option == "--record" && budget_option == "--budget" =>
-            {
-                Some((
-                    step.as_str(),
-                    seconds
-                        .parse::<u64>()
-                        .map_err(|_| LaneError::input("round-private", "budget is malformed"))?,
-                ))
-            }
-            _ => {
-                return Err(LaneError::input(
-                    "round-private",
-                    "private round evidence form is malformed",
-                ));
-            }
-        };
-        let report =
-            launch::rounds::private_inspect(Path::new(owner_home), loop_name, run, evidence)?;
-        writeln!(io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
-        return Ok(0);
-    }
-    if args
-        .first()
-        .is_some_and(|value| value == "_prepare-runtime")
-    {
-        let [_, loop_name, run, home_option, owner_home, option, podman] = args else {
-            return Err(LaneError::input(
-                "runtime-private",
-                "private runtime form is incomplete",
-            ));
-        };
-        if option != "--podman-bin" || home_option != "--owner-home" {
-            return Err(LaneError::input(
-                "runtime-private",
-                "private runtime needs --podman-bin and --owner-home",
-            ));
-        }
-        let report = launch::private_prepare_runtime(
-            Path::new(owner_home),
-            loop_name,
-            run,
-            Path::new(podman),
         )?;
         writeln!(io::stdout().lock(), "{report}")
             .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
@@ -1720,6 +1039,58 @@ fn refusal_line(error: &LaneError, wall_seconds: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// # Panics
+    /// Panics if a gated Claude credential exercise reaches descriptor or owner-home access.
+    /// ´test:unit:claude-credential-exercise-refuses-before-private-custody´
+    #[test]
+    fn claude_credential_exercise_refuses_before_private_custody() {
+        let root = tempfile::tempdir().expect("private fixture");
+        let absent = root.path().join("absent-owner");
+        let home_word = absent.to_str().expect("fixture path");
+        let body = [
+            "_exercise-measure",
+            "alpha",
+            "all",
+            "--backend",
+            "claude",
+            "--owner-home",
+            home_word,
+        ]
+        .map(str::to_owned);
+        let suffix = [
+            "--verified-runs-root",
+            "/absent-synthetic-runs",
+            "--anchor-manifest",
+            "{}",
+        ]
+        .map(str::to_owned);
+        let received = [body.as_slice(), suffix.as_slice()].concat();
+        let Err(error) = super::launch::reader_entry::serve(&received) else {
+            panic!("closed gate must precede the received bundle");
+        };
+        assert_eq!(error.kind, "backend-unavailable");
+        assert!(error.detail.starts_with("claude boxed launch awaits"));
+        let unusable = || {
+            let file = std::fs::File::open("/dev/null").expect("non-directory descriptor");
+            std::os::fd::OwnedFd::from(file)
+        };
+        let mut composed = vec!["unshare".to_owned(), "/synthetic-entry".to_owned()];
+        composed.extend(body);
+        let Err(error) = super::launch::reader_entry::command(
+            std::path::Path::new("/synthetic-namespace"),
+            &composed,
+            &absent,
+            &unusable(),
+            std::path::Path::new("/absent-synthetic-runs"),
+            &unusable(),
+            None,
+        ) else {
+            panic!("closed gate must precede the composed bundle");
+        };
+        assert_eq!(error.kind, "backend-unavailable");
+        assert!(!absent.exists());
+    }
+
     use super::{
         USAGE, bind_private_launch_args, parse_follow_options, print_launch_report,
         print_unsaved_launch_report, refusal_line, run,
@@ -2053,7 +1424,7 @@ mod tests {
     fn usage_names_the_digest_matched_proxy_override() {
         assert!(
             USAGE.contains(
-                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]"
+                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]"
             )
         );
     }
@@ -2065,57 +1436,6 @@ mod tests {
         assert!(
             USAGE.contains("triage LOOP [RUN (compatibility array)] (stdin cap 65,536 bytes; about 100 typical 600-byte label lines)")
         );
-    }
-
-    /// ´test:unit:private-checkout-binds-an-external-destination-parent´
-    #[test]
-    fn private_checkout_binds_an_external_destination_parent() {
-        let fixture = tempfile::TempDir::new_in("/tmp").expect("fixture");
-        let owner = nix::unistd::Uid::effective().as_raw();
-        let ancestor = fixture.path().join("namespace-overflow-ancestor");
-        fs::create_dir(&ancestor).expect("ancestor");
-        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o770))
-            .expect("untrusted ancestor mode");
-        let home = ancestor.join("owner");
-        let runs = home.join("runs");
-        let outside = ancestor.join("outside");
-        for path in [&home, &runs, &outside] {
-            fs::create_dir(path).expect("directory");
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
-        }
-        let home_fd = fs::File::open(&home).expect("home descriptor");
-        let runs_fd = fs::File::open(&runs).expect("runs descriptor");
-        let outside_fd = fs::File::open(&outside).expect("outside descriptor");
-        let body = super::launch::checkout::private_checkout_argv(
-            &super::launch::checkout::CheckoutRequest {
-                loop_name: "alpha".into(),
-                run: "R".into(),
-                repo: "tools".into(),
-                into: outside.join("R"),
-                dry_run: true,
-                invocation_token: None,
-            },
-            &home,
-            None,
-        )
-        .expect("public checkout builder");
-        let mut argv = body.clone();
-        argv.extend([
-            "--verified-home-fd".into(),
-            "0".into(),
-            "--verified-runs-root".into(),
-            runs.display().to_string(),
-            "--verified-runs-root-fd".into(),
-            runs_fd.as_raw_fd().to_string(),
-            "--verified-letter-dir".into(),
-            outside.display().to_string(),
-            "--verified-letter-fd".into(),
-            outside_fd.as_raw_fd().to_string(),
-        ]);
-        let (parsed, guard) =
-            bind_private_launch_args(&argv, &home_fd, owner).expect("bound checkout");
-        assert_eq!(parsed, body);
-        assert!(guard.is_some());
     }
 
     /// ´test:unit:refusal-line-reports-wall-seconds´
@@ -2208,43 +1528,6 @@ mod tests {
                 .expect("private inode")
                 .st_ino
         );
-    }
-
-    /// ´test:unit:private-import-binds-owner-home-after-object-argument´
-    #[test]
-    fn private_import_binds_owner_home_after_object_argument() {
-        let fixture = tempfile::TempDir::new().expect("fixture");
-        let owner = nix::unistd::Uid::effective().as_raw();
-        let home = fixture.path().join("home");
-        let runs = fixture.path().join("runs");
-        for path in [&home, &runs] {
-            fs::create_dir(path).expect("directory");
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("private mode");
-        }
-        let home_fd = fs::File::open(&home).expect("home descriptor");
-        let runs_fd = fs::File::open(&runs).expect("runs descriptor");
-        let body = vec![
-            "_mark-imported".into(),
-            "alpha".into(),
-            "R".into(),
-            "--object".into(),
-            "a".repeat(40),
-            "--owner-home".into(),
-            home.display().to_string(),
-        ];
-        let mut argv = body.clone();
-        argv.extend([
-            "--verified-home-fd".into(),
-            "0".into(),
-            "--verified-runs-root".into(),
-            runs.display().to_string(),
-            "--verified-runs-root-fd".into(),
-            runs_fd.as_raw_fd().to_string(),
-        ]);
-        let (parsed, guard) =
-            bind_private_launch_args(&argv, &home_fd, owner).expect("bound import request");
-        assert_eq!(parsed, body);
-        assert!(guard.is_some());
     }
 
     /// ´test:unit:private-make-home-requires-matching-letter-directory-descriptor´
@@ -2348,13 +1631,11 @@ mod tests {
         let fd = fs::File::open(&home).expect("bound home");
         let runs_fd = fs::File::open(&runs).expect("bound runs root");
         let argv = vec![
-            "_prepare-runtime".into(),
+            "_choose-uid".into(),
             "alpha".into(),
             "R".into(),
             "--owner-home".into(),
             home.display().to_string(),
-            "--podman-bin".into(),
-            "/usr/bin/podman".into(),
             "--verified-home-fd".into(),
             "0".into(),
             "--verified-runs-root".into(),

@@ -108,7 +108,7 @@ impl InstallGuard {
             .map_err(|error| LaneError::input("install-lock", error.to_string()))?;
         if actual.st_mode & libc::S_IFMT != libc::S_IFDIR
             || actual.st_uid != owner
-            || actual.st_mode & 0o7777 != 0o700
+            || actual.st_mode & 0o7777 != loop_home::mail::acl::preserved_mode(&named, 0o700)
             || (actual.st_dev, actual.st_ino) != (held.st_dev, held.st_ino)
         {
             return Err(LaneError::input(
@@ -158,7 +158,7 @@ fn validate_install_descriptor(path: &Path, fd: &impl AsFd) -> Result<(), LaneEr
         .map_err(|error| LaneError::input("install-lock", error.to_string()))?;
     if !named.is_dir()
         || named.uid() != nix::unistd::Uid::effective().as_raw()
-        || named.mode() & 0o7777 != 0o700
+        || named.mode() & 0o7777 != loop_home::mail::acl::preserved_mode(&fd.as_fd(), 0o700)
         || named.dev() != held.st_dev
         || named.ino() != held.st_ino
     {
@@ -2216,6 +2216,38 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::path::Path;
+
+    /// ´test:unit:install-lock-handoffs-validate-the-configuration-acl-mask´
+    #[test]
+    fn install_lock_handoffs_validate_the_configuration_acl_mask() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let path = fixture.path();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("private directory");
+        let owner = nix::unistd::Uid::effective().as_raw();
+        loop_home::mail::acl::install(&fs::File::open(path).expect("directory"), owner + 1, true)
+            .expect("real search ACL");
+        for mode in [0o710, 0o750] {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("mask");
+            let check = |result: Result<super::InstallGuard, crate::error::LaneError>| {
+                if mode == 0o710 {
+                    assert!(result.is_ok(), "named search grant");
+                } else {
+                    assert_eq!(result.expect_err("widened mask").kind, "install-lock");
+                }
+            };
+            check(super::lock_loop_config(path, false));
+            check(super::InstallGuard::from_transferred(
+                path,
+                fs::File::open(path).expect("lock").into(),
+            ));
+            check(super::InstallGuard::from_handed(
+                path,
+                path,
+                owner,
+                fs::File::open(path).expect("lock").into(),
+            ));
+        }
+    }
 
     /// ´test:unit:repair-unit-accepts-safe-byte-drift-and-refuses-unsafe-mode´
     #[test]

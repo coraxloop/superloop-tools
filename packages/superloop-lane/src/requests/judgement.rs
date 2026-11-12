@@ -1,9 +1,9 @@
-//! Schema-four judgement evidence, independent of effect and queue updates.
+//! Schema-six judgement evidence, independent of effect and queue updates.
 
 use crate::door::agent::RunnerOutcome;
 use serde_json::{Value, json};
 
-pub const KEYS: [&str; 11] = [
+pub const KEYS: [&str; 12] = [
     "decision_tier",
     "would_do_source",
     "matched_rule",
@@ -15,11 +15,12 @@ pub const KEYS: [&str; 11] = [
     "agent_wall_ms",
     "agent_status",
     "rubric_digest",
+    "agent_observations",
 ];
 
 /// Initialize an intent or mechanically convert historical evidence.
 pub fn initialize(record: &mut Value) {
-    record["schema"] = json!(4);
+    record["schema"] = json!(6);
     let source = if matches!(
         record["would_do"]["decision"].as_str(),
         Some("allow" | "refuse")
@@ -61,15 +62,24 @@ pub fn apply(
     record["agent_wall_ms"] = json!(result.wall_ms);
     record["agent_status"] = json!(result.status);
     record["rubric_digest"] = json!(digest);
+    record["agent_observations"] = result.observations.clone();
     result.record_runner_fields(record);
     if !record["label"].is_null() {
         record["label"]["would_do"] = record["would_do"].clone();
     }
 }
 
+/// Runner diagnostics are nullable, bounded JSON objects; no missing object is invented.
+fn valid_observations(value: &Value) -> bool {
+    value.is_null()
+        || (value.is_object() && serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= 65_536))
+}
+
 #[must_use]
 pub fn valid(record: &Value) -> bool {
-    if !crate::door::agent::valid_runner_fields(record) {
+    if !valid_observations(&record["agent_observations"])
+        || !crate::door::agent::valid_runner_fields(record)
+    {
         return false;
     }
     if !matches!(
@@ -139,6 +149,23 @@ pub fn valid(record: &Value) -> bool {
         && record["would_do"]["reason"] == record["agent_reason"]
 }
 
+fn invalid_runner_field(record: &Value) -> &'static str {
+    let mut with_line = record.clone();
+    with_line["agent_runner_first_line"] = json!("");
+    if crate::door::agent::valid_runner_fields(&with_line) {
+        return "agent_runner_first_line";
+    }
+    let mut without_tail = record.clone();
+    if let Some(object) = without_tail.as_object_mut() {
+        object.remove("agent_runner_stderr_tail");
+    }
+    if crate::door::agent::valid_runner_fields(&without_tail) {
+        "agent_runner_stderr_tail"
+    } else {
+        "agent_runner_exit"
+    }
+}
+
 pub(super) fn invalid_field(record: &Value) -> &'static str {
     for key in ["decision_tier", "would_do_source"] {
         if !matches!(
@@ -154,20 +181,7 @@ pub(super) fn invalid_field(record: &Value) -> &'static str {
         return "decision_tier differs from label or would_do_source";
     }
     if !crate::door::agent::valid_runner_fields(record) {
-        let mut with_line = record.clone();
-        with_line["agent_runner_first_line"] = json!("");
-        if crate::door::agent::valid_runner_fields(&with_line) {
-            return "agent_runner_first_line";
-        }
-        let mut without_tail = record.clone();
-        if let Some(object) = without_tail.as_object_mut() {
-            object.remove("agent_runner_stderr_tail");
-        }
-        return if crate::door::agent::valid_runner_fields(&without_tail) {
-            "agent_runner_stderr_tail"
-        } else {
-            "agent_runner_exit"
-        };
+        return invalid_runner_field(record);
     }
     if record["would_do_source"] != "agent" {
         for key in ["agent_runner_exit", "agent_runner_stderr_tail"] {
@@ -208,6 +222,10 @@ pub(super) fn invalid_field(record: &Value) -> &'static str {
             ),
         ),
         ("agent_wall_ms", record["agent_wall_ms"].as_u64().is_some()),
+        (
+            "agent_observations",
+            valid_observations(&record["agent_observations"]),
+        ),
     ] {
         if !accepted {
             return key;
@@ -245,6 +263,43 @@ pub(super) fn invalid_field(record: &Value) -> &'static str {
 mod tests {
     use super::*;
     use crate::requests::{Mode, RequestRecord, tests::waiting};
+
+    /// ´test:unit:agent-observations-survive-strict-record-round-trip´
+    #[test]
+    fn agent_observations_survive_strict_record_round_trip() {
+        let mut record = waiting("R", "1a", 3000, Mode::Audit).into_value();
+        assert_eq!(record["schema"], 6);
+        assert!(record["agent_observations"].is_null());
+        let mut result = RunnerOutcome::referral(
+            "failure",
+            "door-rubric-unavailable",
+            std::time::Instant::now(),
+        );
+        result.observations = json!({"rubric_failure":{"check":"file-owner","path":"/fixture/rubric","owner_uid":41002,"mode":"0600","errno":null},"agent_calls":0});
+        apply(&mut record, &result, None, None);
+        let decoded = RequestRecord::decode(record.clone()).expect("diagnostic record");
+        assert_eq!(decoded.value()["agent_observations"], result.observations);
+        for invalid in [
+            json!([]),
+            json!("not an object"),
+            json!({"oversize":"x".repeat(65_536)}),
+        ] {
+            record["agent_observations"] = invalid;
+            assert!(
+                RequestRecord::decode(record.clone())
+                    .expect_err("bounded object")
+                    .detail
+                    .contains("agent_observations")
+            );
+        }
+        result.observations = json!({"children_reaped":true,"private_directory_removed":true});
+        apply(&mut record, &result, None, None);
+        assert!(
+            record["agent_observations"].get("rubric_failure").is_none(),
+            "a later judgement replaces stale diagnostics"
+        );
+        RequestRecord::decode(record).expect("replacement diagnostics");
+    }
 
     /// ´test:unit:agent-runner-first-line-requires-bounded-single-line´
     #[test]
@@ -381,9 +436,9 @@ mod tests {
         );
     }
 
-    /// ´test:unit:schema-four-requires-every-key-and-separates-observed-model´
+    /// ´test:unit:current-schema-requires-every-key-and-separates-observed-model´
     #[test]
-    fn schema_four_requires_every_key_and_separates_observed_model() {
+    fn current_schema_requires_every_key_and_separates_observed_model() {
         let mut record = waiting("R", "1a", 3000, Mode::Audit).into_value();
         let result =
             RunnerOutcome::referral("failure", "missing sign-in", std::time::Instant::now());

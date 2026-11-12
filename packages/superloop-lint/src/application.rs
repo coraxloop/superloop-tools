@@ -7,10 +7,10 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`declared_package_owners_select_profiles_and_cited_pairs`] | report | Declared package owners satisfy imported dependencies and select profile censuses, even when their names differ from the workspace crate names. A file-list partition attributes the member through its manifest; both fix profiles leave its bytes untouched while inactive and report its declared owner when an active sweep refuses a block documentation comment. # Panics Panics only if the fixed fixture cannot be written or its check fails. |
-//! | [`missing_cited_pairs_name_the_declared_root`] | report | Missing prerequisites retain the declared root and citing owner names. # Panics Panics only if the fixed fixture cannot be written or its assertion fails. |
-//! | [`a_finding_in_a_file_named_with_a_percent_is_attributed_to_its_pair`] | report | A near miss in a file whose name contains a literal percent is counted against its pair and prints the percent in the reversible display. # Panics Panics only if the fixed temporary fixture cannot be written or read. |
-//! | [`a_surface_reach_counts_the_paths_under_a_partial_opening`] | report | A declared surface opening inside a component counts every participating path under its containing directory, including a different file name, because reach locates the census rather than filtering it by admission. # Panics Panics only if the fixed temporary fixture cannot be written or read. |
+//! | [`declared_package_owners_select_profiles_and_cited_pairs`] | report | Declared package owners satisfy imported dependencies and select profile censuses, even when their names differ from the workspace crate names. A file-list partition attributes the member through its manifest; both fix profiles leave its bytes untouched while inactive and report its declared owner when an active sweep refuses a block documentation comment. |
+//! | [`missing_cited_pairs_name_the_declared_root`] | report | Missing prerequisites retain the declared root and citing owner names. |
+//! | [`a_finding_in_a_file_named_with_a_percent_is_attributed_to_its_pair`] | report | A near miss in a file whose name contains a literal percent is counted against its pair and prints the percent in the reversible display. |
+//! | [`a_surface_reach_counts_the_paths_under_a_partial_opening`] | report | A declared surface opening inside a component counts every participating path under its containing directory, including a different file name, because reach locates the census rather than filtering it by admission. |
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -310,6 +310,7 @@ pub fn verify_configuration_with_guard(
     let dependency_findings = plan.dependencies().verify(citations);
 
     let counts = ConfigurationCounts {
+        non_participating: snapshot.non_participating().to_vec(),
         nested: snapshot.nested().to_vec(),
         owners: snapshot.owners().len(),
         inclusions: snapshot.partitions().len(),

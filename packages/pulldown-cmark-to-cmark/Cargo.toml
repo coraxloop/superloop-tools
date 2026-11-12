@@ -22,6 +22,7 @@ tier = 1
 release-group = "pulldown-cmark-to-cmark"
 
 [dependencies]
+tracing = { workspace = true }
 pulldown-cmark = { workspace = true }
 
 [lints]

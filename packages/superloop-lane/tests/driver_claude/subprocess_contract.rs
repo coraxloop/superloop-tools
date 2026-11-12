@@ -2520,3 +2520,205 @@ fn pure_mode_constructs_and_refuses_contaminated_homes() {
     assert_eq!(refusal.status.code(), Some(2));
     assert_eq!(contaminated.read("argv"), Vec::<u8>::new());
 }
+
+/// Completed state reads the real driver's publication without live PID authority.
+/// # Panics
+/// Panics if the driver fixture or its completed-state reader violates the contract.
+/// ´test:integration:claude-finished-state-retains-driver-and-monitor´
+#[test]
+fn claude_finished_state_retains_driver_and_monitor() {
+    let harness = Harness::new("finished-state");
+    let result = harness.run(&[OsStr::new("-t60"), OsStr::new("hello")]);
+    assert_eq!(result.status.code(), Some(0));
+    let run_dir = harness.run_dir("lane");
+    let capture = || finished_state_capture(&run_dir);
+    assert!(!run_dir.join(".claude-lane.lock").exists());
+    let state = capture();
+    assert_eq!(state["driver"]["lock"], ".claude-lane.lock");
+    assert_eq!(state["driver"]["alive"], false);
+    assert!(state["driver"]["pid"].as_u64().is_some_and(|pid| pid > 0));
+    assert!(state["driver"]["child"].as_u64().is_some_and(|pid| pid > 0));
+    assert!(state["monitor"]["wall"].is_u64());
+    assert!(
+        state["monitor"]["event_size"]
+            .as_u64()
+            .is_some_and(|size| size > 0)
+    );
+    let path = run_dir.join(".finished-step.json");
+    let original = fs::read(&path).expect("production completion");
+    let mut record: serde_json::Value = serde_json::from_slice(&original).expect("completion");
+    record["pid"] = std::process::id().into();
+    record["child"] = std::process::id().into();
+    fs::write(&path, record.to_string()).expect("simulate PID reuse");
+    assert_eq!(capture()["driver"]["alive"], false);
+    fs::write(run_dir.join(".codex-lane.lock"), b"malformed").expect("active boundary");
+    assert!(capture()["driver"].is_null());
+    fs::remove_file(run_dir.join(".codex-lane.lock")).expect("remove boundary");
+    record["step"] = "another-step\n".into();
+    fs::write(&path, record.to_string()).expect("stale step");
+    assert!(capture()["driver"].is_null());
+    record["step"] =
+        serde_json::from_slice::<serde_json::Value>(&original).expect("original")["step"].clone();
+    record["started_at"] = "another-start\n".into();
+    fs::write(&path, record.to_string()).expect("stale start");
+    assert!(capture()["driver"].is_null());
+    fs::write(&path, &original).expect("restore production record");
+    let session = fs::read_to_string(run_dir.join("thread-id.txt")).expect("session");
+    let resumed = harness.run(&[
+        OsStr::new("-t60"),
+        OsStr::new("-r"),
+        OsStr::new(session.trim()),
+        OsStr::new("-d"),
+        run_dir.as_os_str(),
+        OsStr::new("-nnext"),
+        OsStr::new("continue"),
+    ]);
+    assert_eq!(resumed.status.code(), Some(0), "{resumed:?}");
+    assert_eq!(
+        fs::read(run_dir.join("steps/lane/finished-step.json")).expect("archive"),
+        original
+    );
+    let next = capture();
+    assert_eq!(next["step"], "next");
+    assert_eq!(next["driver"]["alive"], false);
+    assert!(next["monitor"].is_object());
+}
+
+fn finished_state_capture(run_dir: &Path) -> serde_json::Value {
+    let config = superloop_lane::driver::follow::Config {
+        run_dir: run_dir.to_path_buf(),
+        cap: 50_000,
+        bounce: 0,
+        wait: 1,
+        save_offset: false,
+    };
+    let mut bytes = Vec::new();
+    superloop_lane::driver::follow::poll_once(&config, &mut bytes).expect("state reader");
+    let document: serde_json::Value = serde_json::from_slice(&bytes).expect("capture");
+    document["records"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .find(|record| record["kind"] == "state")
+        .expect("state")
+        .clone()
+}
+
+/// Malformed completed observations never supply historical identity.
+/// # Panics
+/// Panics if the production fixture or malformed-record checks fail.
+/// ´test:integration:claude-finished-state-refuses-malformed-snapshots´
+#[test]
+fn claude_finished_state_refuses_malformed_snapshots() {
+    let harness = Harness::new("finished-shape");
+    assert!(
+        harness
+            .run(&[OsStr::new("-t60"), OsStr::new("hello")])
+            .status
+            .success()
+    );
+    let run_dir = harness.run_dir("lane");
+    let path = run_dir.join(".finished-step.json");
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("snapshot")).expect("production snapshot");
+    for (key, value) in [
+        ("schema", serde_json::json!(2)),
+        ("pid", serde_json::json!(0)),
+        ("child", serde_json::json!(0)),
+        ("lock", serde_json::json!("foreign")),
+        ("monitor", serde_json::json!(3)),
+        ("extra", serde_json::json!(true)),
+    ] {
+        let mut changed = original.clone();
+        changed[key] = value;
+        fs::write(&path, changed.to_string()).expect("malformed shape");
+        assert!(
+            finished_state_capture(&run_dir)["driver"].is_null(),
+            "field {key}"
+        );
+    }
+    fs::write(&path, vec![b' '; 65_537]).expect("oversized snapshot");
+    assert!(finished_state_capture(&run_dir)["driver"].is_null());
+}
+
+/// Invalid embedded monitor text loses only the monitor, not historical identity.
+/// # Panics
+/// Panics if the production snapshot or follower violates the partial-observation contract.
+/// ´test:integration:claude-finished-state-keeps-identity-with-invalid-monitor´
+#[test]
+fn claude_finished_state_keeps_identity_with_invalid_monitor() {
+    let harness = Harness::new("finished-invalid-monitor");
+    assert!(
+        harness
+            .run(&[OsStr::new("-t60"), OsStr::new("hello")])
+            .status
+            .success()
+    );
+    let run_dir = harness.run_dir("lane");
+    let expected = finished_state_capture(&run_dir);
+    assert!(expected["driver"].is_object());
+    assert!(expected["monitor"].is_object());
+    let path = run_dir.join(".finished-step.json");
+    let original = fs::read(&path).expect("production snapshot");
+    let mut record: serde_json::Value = serde_json::from_slice(&original).expect("snapshot object");
+    for invalid in ["", "not a monitor record\n"] {
+        record["monitor"] = invalid.into();
+        fs::write(&path, record.to_string()).expect("invalid monitor text");
+        let state = finished_state_capture(&run_dir);
+        assert_eq!(state["driver"], expected["driver"]);
+        assert_eq!(state["driver"]["alive"], false);
+        assert!(state["monitor"].is_null());
+    }
+    fs::write(&path, original).expect("restore valid monitor text");
+    let restored = finished_state_capture(&run_dir);
+    assert_eq!(restored["driver"], expected["driver"]);
+    assert_eq!(restored["monitor"], expected["monitor"]);
+}
+
+/// Resume rollback restores the prior production snapshot before retry archives it.
+/// # Panics
+/// Panics if the interrupted preparation loses the completed snapshot or skips rollback.
+/// ´test:integration:claude-rollback-restores-completed-snapshot´
+#[test]
+fn claude_rollback_restores_completed_snapshot() {
+    let harness = Harness::new("rollback-finished-snapshot");
+    assert!(
+        harness
+            .run(&[
+                OsStr::new("-t60"),
+                OsStr::new("-ngate"),
+                OsStr::new("hello")
+            ])
+            .status
+            .success()
+    );
+    let original = fs::read(harness.run_dir("gate").join(".finished-step.json"))
+        .expect("real completed snapshot");
+    let run_dir = harness.seed_preparation_window_after_removal("interrupted", "session-1", "work");
+    let archived = run_dir.join("steps/gate/finished-step.json");
+    fs::write(&archived, &original).expect("snapshot archived before interruption");
+    fs::copy(
+        harness.run_dir("gate").join(".started-at"),
+        run_dir.join("steps/gate/started-at.txt"),
+    )
+    .expect("archive the matching production start marker");
+    assert!(!run_dir.join(".finished-step.json").exists());
+    let result = output(
+        harness.command().env("ORACLE_MODE", "resume"),
+        &[
+            OsStr::new("-t60"),
+            OsStr::new("-rsession-1"),
+            OsStr::new("-d"),
+            argument(&run_dir),
+            OsStr::new("-nwork"),
+            OsStr::new("PROCEED"),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("resume_preparation_rolled_back"));
+    assert_report(&result, "work", 60, "ok");
+    assert_eq!(
+        fs::read(&archived).expect("restored snapshot re-archived"),
+        original
+    );
+}

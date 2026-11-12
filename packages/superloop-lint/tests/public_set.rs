@@ -4,7 +4,8 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`publication_classification_is_optional_and_complete`] | integration | A missing manifest is inert; a declared set judges unknown files and dead rows. # Panics Panics only if fixture IO fails or the command violates the classification contract. |
+//! | [`publication_classification_is_optional_and_complete`] | integration | A missing manifest is inert; a declared set judges unknown files and dead rows. |
+//! | [`tools_manifest_classifies_generated_provenance`] | integration | The tools manifest admits the generated provenance member without requiring it in the source checkout, and does not admit neighboring undeclared files. |
 
 use std::fs;
 use std::path::Path;
@@ -211,5 +212,37 @@ fn publication_classification_is_optional_and_complete() {
         report
             .to_string()
             .contains("manifest must be a regular file")
+    );
+}
+
+/// The tools manifest admits the generated provenance member without requiring
+/// it in the source checkout, and does not admit neighboring undeclared files.
+///
+/// # Panics
+/// Panics only when the repository manifest cannot be read or its classification differs.
+/// ´claim:integration:tools-pack-provenance-is-an-optional-exact-member´
+/// ´test:integration:tools-manifest-classifies-generated-provenance´
+#[test]
+fn tools_manifest_classifies_generated_provenance() {
+    use superloop_cli_common::public_set::{Manifest, tracked_paths};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest =
+        Manifest::parse(&fs::read_to_string(root.join("public-set.toml")).expect("tools manifest"))
+            .expect("valid tools manifest");
+    let mut paths = tracked_paths(&root).expect("tracked tools files");
+    let source = manifest.select(&paths);
+    assert!(source.issues.is_empty(), "{:?}", source.issues);
+    let provenance = "docs/public-pack-provenance.toml";
+    assert!(!paths.iter().any(|path| path == provenance));
+    paths.push(provenance.to_owned());
+    let packed = manifest.select(&paths);
+    assert!(packed.issues.is_empty(), "{:?}", packed.issues);
+    assert!(packed.included.iter().any(|path| path == provenance));
+    paths.push("docs/public-pack-provenance-extra.toml".to_owned());
+    let unrelated = manifest.select(&paths);
+    assert_eq!(
+        unrelated.issues,
+        ["unclassified tracked file: docs/public-pack-provenance-extra.toml"]
     );
 }

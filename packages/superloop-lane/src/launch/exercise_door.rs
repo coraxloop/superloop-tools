@@ -25,11 +25,11 @@ pub(in crate::launch) fn settings(
     owner_home: &Path,
     loop_name: &str,
 ) -> Result<Settings, LaneError> {
-    let path = owner_home
-        .join(".config/loops")
-        .join(loop_name)
-        .join("workers.toml");
-    Settings::read(&path)
+    let settings = crate::read_worker_settings(owner_home, loop_name)?;
+    if crate::runtime_entry::plan_configuration(owner_home)?.is_some() {
+        settings.validate_grant(owner_home, loop_name)?;
+    }
+    Ok(settings)
 }
 
 #[allow(clippy::too_many_lines)]

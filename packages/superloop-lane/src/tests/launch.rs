@@ -1,3 +1,4 @@
+use crate::runtime_admission::RuntimeAdmission::Gate;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 
@@ -5,10 +6,1044 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use crate::build::sha256;
+use crate::fixture_exec::ENTRY_INTERFACE_PROBE;
 use crate::launch::{
     LaunchRequest, RecordHostsRequest, record_hosts_with_lane_bin_from, run_with_host_root,
     run_with_host_root_and_proxy, select_free_uid,
 };
+use crate::settings::BoxBackend;
+
+fn backend_settings(vendors: &[&str]) -> crate::settings::Settings {
+    let mut settings = super::fixture_settings(std::path::Path::new("/fixture/entry"));
+    settings.backend_argv = vendors
+        .iter()
+        .map(|vendor| ((*vendor).to_owned(), vec![format!("/fixture/{vendor}")]))
+        .collect();
+    settings
+}
+
+/// ´test:crate:boxed-backend-resume-vector-binds-protected-selection´
+#[test]
+fn boxed_backend_resume_vector_binds_protected_selection() {
+    for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+        let settings = backend_settings(&["codex", "claude"]);
+        let plan = crate::plan::Plan::build_with_door(
+            std::path::Path::new("/fixture/owner"),
+            "alpha",
+            "R",
+            &settings,
+            &super::fixture_row(),
+            super::fixture_block(),
+            (1000, 1000),
+            false,
+            Some(backend),
+        )
+        .expect("selected plan");
+        let vector: Vec<String> = plan.document["runtime_argv"]
+            .as_array()
+            .expect("vector")
+            .iter()
+            .map(|word| word.as_str().expect("word").to_owned())
+            .collect();
+        let session = "22222222-2222-4222-8222-222222222222";
+        let mut record = json!({"plan":plan.document,"active_round":"dispatch"});
+        assert_eq!(
+            crate::container_helper::command_for_request(&vector, &record, None).expect("fresh"),
+            vector
+        );
+        record["active_round"] = json!("work-1");
+        record["thread_id"] = json!(session);
+        let resumed = crate::container_helper::command_for_request(&vector, &record, Some(session))
+            .expect("resume");
+        match backend {
+            BoxBackend::Codex => {
+                assert!(resumed.ends_with(&["resume".into(), session.into(), "-".into()]));
+            }
+            BoxBackend::Claude => {
+                assert_eq!(&resumed[..vector.len()], vector);
+                let foreign: Vec<_> = vector
+                    .iter()
+                    .map(|word| {
+                        if word == "/home/worker/.local/bin/claude" {
+                            "/home/worker/.local/bin/codex".to_owned()
+                        } else {
+                            word.clone()
+                        }
+                    })
+                    .collect();
+                assert_eq!(
+                    crate::container_helper::command_for_request(&foreign, &record, Some(session))
+                        .expect_err("foreign program")
+                        .kind,
+                    "round-thread"
+                );
+                assert!(resumed.ends_with(&["--resume".into(), session.into()]));
+                assert!(
+                    crate::container_helper::resume_box_vector(backend, &resumed, session).is_err()
+                );
+            }
+        }
+        assert_eq!(
+            crate::container_helper::command_for_request(&vector, &record, Some("other"))
+                .expect_err("foreign session")
+                .kind,
+            "round-thread"
+        );
+        record["plan"]["backend"] = serde_json::Value::Null;
+        assert_eq!(
+            crate::container_helper::command_for_request(&vector, &record, Some(session))
+                .expect_err("no inferred backend")
+                .kind,
+            "backend-selection"
+        );
+    }
+}
+
+/// ´test:crate:boxed-backend-claude-runtime-transformations-retain-confinement´
+#[test]
+fn boxed_backend_claude_runtime_transformations_retain_confinement() {
+    for vendors in [&["claude"][..], &["codex", "claude"][..]] {
+        let mut settings = backend_settings(vendors);
+        settings.driver_argv = vec!["/fixture/driver".into()];
+        settings.driver_bin = Some("/fixture/driver".into());
+        let mut plan = crate::plan::Plan::build_with_door(
+            std::path::Path::new("/fixture/owner"),
+            "alpha",
+            "R",
+            &settings,
+            &super::fixture_row(),
+            super::fixture_block(),
+            (1000, 1000),
+            false,
+            Some(BoxBackend::Claude),
+        )
+        .expect("Claude candidate vector");
+        plan.select_worker_uid(3200).expect("reserved identity");
+        plan.select_mail_group(3300).expect("mail group");
+        plan.select_launch_model(&json!({"model":"fixture-claude", "effort":"high"}))
+            .expect("selected model");
+        plan.observe_vendor().expect("observing route");
+        crate::plan::box_gate(&plan.document).expect("structural confinement");
+        let words = plan.document["runtime_argv"]
+            .as_array()
+            .expect("runtime vector");
+        for required in [
+            "/home/worker/.local/bin/claude",
+            "--user=3200:3200",
+            "--group-add=3300",
+            "--network=none",
+            "CLAUDE_CONFIG_DIR=/home/worker/.claude",
+        ] {
+            assert!(
+                words.iter().any(|word| word == required),
+                "{required}: {words:?}"
+            );
+        }
+        assert!(words.ends_with(&[
+            json!("--model"),
+            json!("fixture-claude"),
+            json!("--effort"),
+            json!("high")
+        ]));
+        assert!(plan.document["environment"]["CODEX_HOME"].is_null());
+        assert_eq!(plan.document["owner_refresh_hosts"], json!([]));
+        assert_eq!(
+            crate::plan::verify_box_attestation(&plan.document)
+                .expect_err("structural vectors do not admit unmeasured credentials")
+                .kind,
+            "backend-unavailable"
+        );
+        plan.document["model_selection"]["model"] = json!("changed");
+        assert_eq!(
+            crate::plan::box_gate(&plan.document)
+                .expect_err("selected model must match the vector")
+                .kind,
+            "box-gate"
+        );
+    }
+}
+
+/// ´test:crate:boxed-backend-claude-runtime-refuses-cross-vendor-and-expanded-authority´
+#[test]
+fn boxed_backend_claude_runtime_refuses_cross_vendor_and_expanded_authority() {
+    let mut settings = backend_settings(&["codex", "claude"]);
+    settings.driver_argv = vec!["/fixture/driver".into()];
+    settings.driver_bin = Some("/fixture/driver".into());
+    let plan = crate::plan::Plan::build_with_door(
+        std::path::Path::new("/fixture/owner"),
+        "alpha",
+        "R",
+        &settings,
+        &super::fixture_row(),
+        super::fixture_block(),
+        (1000, 1000),
+        false,
+        Some(BoxBackend::Claude),
+    )
+    .expect("Claude candidate vector");
+    for (original, replacement) in [
+        (
+            "/home/worker/.local/bin/claude",
+            "/home/worker/.local/bin/codex",
+        ),
+        ("--network=none", "--network=host"),
+        ("--cap-drop=ALL", "--privileged"),
+        ("bypassPermissions", "acceptEdits"),
+        ("stream-json", "json"),
+        (
+            "--dangerously-skip-permissions",
+            "--allow-dangerously-skip-permissions",
+        ),
+    ] {
+        let mut changed = plan.document.clone();
+        let words = changed["runtime_argv"].as_array_mut().expect("vector");
+        let index = words
+            .iter()
+            .position(|word| word == original)
+            .expect("original word");
+        words[index] = json!(replacement);
+        assert_eq!(
+            crate::plan::box_gate(&changed)
+                .expect_err("expanded or cross-vendor vector refuses")
+                .kind,
+            "box-gate",
+            "{original} => {replacement}"
+        );
+    }
+    let mut changed = plan.document.clone();
+    let mounts = changed["mounts"].as_array_mut().expect("mounts");
+    let configuration = mounts
+        .iter_mut()
+        .find(|row| row["target"] == "/home/worker/.claude/settings.json")
+        .expect("immutable configuration");
+    configuration["access"] = json!("rw");
+    assert_eq!(
+        crate::plan::box_gate(&changed)
+            .expect_err("configuration cannot become worker writable")
+            .kind,
+        "box-gate"
+    );
+    let mut changed = plan.document;
+    changed["backend"] = json!("codex");
+    assert_eq!(
+        crate::plan::box_gate(&changed)
+            .expect_err("binding cannot select a different vector")
+            .kind,
+        "box-gate"
+    );
+}
+
+/// ´test:crate:boxed-backend-runtime-probe-requires-selected-program-evidence´
+#[test]
+fn boxed_backend_runtime_probe_requires_selected_program_evidence() {
+    let report = json!({"codex_exec_probe":{}, "image_digest":"sha256:fixture"});
+    let error = crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &json!([]))
+        .expect_err("Codex evidence cannot satisfy the Claude probe");
+    assert_eq!(error.kind, "build-report");
+    assert_eq!(error.detail, "build_environment.claude_bin is absent");
+    let error = crate::build::check_backend_exec_probe(
+        BoxBackend::Codex,
+        &json!({"claude_exec_probe":{}}),
+        &json!([]),
+    )
+    .expect_err("Claude evidence cannot satisfy the Codex probe");
+    assert_eq!(error.kind, "codex-exec-help");
+}
+
+/// ´test:crate:boxed-backend-claude-options-require-selected-capture´
+#[test]
+fn boxed_backend_claude_options_require_selected_capture() {
+    let image = format!("sha256:{}", "a".repeat(64));
+    let program = "b".repeat(64);
+    let help = [
+        "  -p, --print",
+        "  --output-format <format>  text, json or stream-json",
+        "  --verbose",
+        "  --permission-mode <mode>  acceptEdits, bypassPermissions, default or plan",
+        "  --dangerously-skip-permissions",
+        "  --model <model>",
+        "  --effort <level>",
+        "  -r, --resume [value]",
+        "  -h, --help",
+    ]
+    .join("\n");
+    let report = json!({"image_digest":image, "claude_version":"0.1.0", "claude_sha256":program,
+        "claude_source":"https://fixture.example/claude",
+        "claude_image_program":crate::build::payload::CLAUDE_IMAGE_PROGRAM,
+        "build_environment":{"claude_bin":"/fixture/claude"},
+        "claude_exec_probe":{"argv":["--help"], "stdout":help,
+            "required_options":crate::build::payload::CLAUDE_EXEC_OPTIONS,
+            "claude_sha256":program, "image_digest":image, "companions":[]},
+        "claude_runtime":{"image_digest":image,
+            "interpreter":{"path":"/lib64/ld-linux-x86-64.so.2", "sha256":"c".repeat(64)},
+            "libraries":[{"path":"/lib64/libc.so.6", "sha256":"d".repeat(64)}]},
+        "codex_exec_probe":{"stdout":"  --add-dir\n"}});
+    let planned = json!([
+        "/usr/bin/podman",
+        "run",
+        "--network=none",
+        image,
+        "/home/worker/.local/bin/claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "bypassPermissions",
+        "--dangerously-skip-permissions",
+        "--model",
+        "fixture-claude",
+        "--effort",
+        "high"
+    ]);
+    crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &planned)
+        .expect("captured Claude options");
+    let session = "22222222-2222-4222-8222-222222222222";
+    let words: Vec<String> = planned
+        .as_array()
+        .expect("vector")
+        .iter()
+        .map(|word| word.as_str().expect("word").to_owned())
+        .collect();
+    let resumed = crate::container_helper::resume_box_vector(BoxBackend::Claude, &words, session)
+        .expect("resumed Claude vector");
+    let resumed = json!(resumed);
+    crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &resumed)
+        .expect("captured help lists the resume option");
+    let mut stale = report.clone();
+    stale["claude_exec_probe"]["stdout"] = json!(help.replace("  -r, --resume [value]\n", ""));
+    let error = crate::build::check_backend_exec_probe(BoxBackend::Claude, &stale, &resumed)
+        .expect_err("a capture without the resume option refuses");
+    assert_eq!(error.kind, "claude-exec-help");
+    let mut unlisted = planned.clone();
+    unlisted
+        .as_array_mut()
+        .expect("vector")
+        .insert(5, json!("--add-dir"));
+    let error = crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &unlisted)
+        .expect_err("an option only the Codex capture lists refuses");
+    assert_eq!(error.kind, "claude-exec-help");
+    assert_eq!(
+        error.detail,
+        "planned Claude option --add-dir is absent from the pinned help"
+    );
+    let mut foreign = planned;
+    foreign[4] = json!("/home/worker/.local/bin/codex");
+    let error = crate::build::check_backend_exec_probe(BoxBackend::Claude, &report, &foreign)
+        .expect_err("another vendor's program refuses");
+    assert_eq!(error.kind, "claude-exec-help");
+    assert_eq!(error.detail, "planned Claude program differs");
+}
+
+/// ´test:crate:boxed-backend-image-program-uses-only-selected-generation´
+#[test]
+fn boxed_backend_image_program_uses_only_selected_generation() {
+    for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+        let name = backend.name();
+        let key = backend.vendor().program_key;
+        for vendors in [
+            &["codex"][..],
+            &["claude"][..],
+            &["codex", "claude"][..],
+            &[][..],
+        ] {
+            let settings = backend_settings(vendors);
+            let generation = json!({"codex_image_program":"/fixture/codex", "claude_image_program":"/fixture/claude"});
+            let result =
+                crate::launch::check_backend_image_program(&settings, &generation, backend);
+            if !vendors.contains(&name) {
+                let error = result.expect_err("selected program required");
+                assert_eq!(error.kind, "missing-setting");
+                assert_eq!(error.detail, format!("backend_argv.{name} is absent"));
+                continue;
+            }
+            result.expect("selected image program");
+            let mut changed = generation;
+            changed.as_object_mut().expect("object").remove(key);
+            let error = crate::launch::check_backend_image_program(&settings, &changed, backend)
+                .expect_err("no other-vendor generation fallback");
+            assert_eq!(error.kind, "install-generation");
+            assert_eq!(
+                error.detail,
+                format!("{key} is absent; repeat install --pilot")
+            );
+            changed[key] = json!("/fixture/wrong");
+            assert_eq!(
+                crate::launch::check_backend_image_program(&settings, &changed, backend)
+                    .expect_err("different measured program")
+                    .kind,
+                "backend-program"
+            );
+        }
+    }
+}
+
+/// ´test:crate:boxed-backend-image-pin-records-bind-selected-evidence´
+#[test]
+fn boxed_backend_image_pin_records_bind_selected_evidence() {
+    let template = std::path::Path::new("/fixture/template");
+    for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+        let vendor = backend.vendor();
+        let record = json!({"image_digest":"sha256:fixture", "codex_sha256":"codex-fixture-hash",
+            "claude_sha256":"claude-fixture-hash", "codex_host_sha256":"host-fixture-hash",
+            "codex_image_program":"/fixture/codex", "claude_image_program":"/fixture/claude",
+            "claude_template_dir":template});
+        crate::launch::check_backend_pin_records(backend, &record, &record, &record, template)
+            .expect("selected records agree");
+        for key in ["image_digest", vendor.hash_key, vendor.program_key] {
+            let mut changed = record.clone();
+            changed[key] = json!("changed");
+            assert_eq!(
+                crate::launch::check_backend_pin_records(
+                    backend, &record, &record, &changed, template
+                )
+                .expect_err("changed generation refuses")
+                .kind,
+                "template-pin"
+            );
+        }
+        let mut changed = record.clone();
+        changed[vendor.hash_key] = json!("changed");
+        assert_eq!(
+            crate::launch::check_backend_pin_records(backend, &record, &changed, &record, template)
+                .expect_err("changed build hash refuses")
+                .kind,
+            "template-pin"
+        );
+        let other = if backend == BoxBackend::Codex {
+            BoxBackend::Claude
+        } else {
+            BoxBackend::Codex
+        };
+        let mut unrelated = record.clone();
+        unrelated[other.vendor().hash_key] = json!("unrelated");
+        unrelated[other.vendor().program_key] = json!("/unrelated");
+        crate::launch::check_backend_pin_records(backend, &record, &record, &unrelated, template)
+            .expect("unselected evidence cannot substitute for selected pins");
+        if backend == BoxBackend::Claude {
+            unrelated["claude_template_dir"] = json!("/another-loop/template");
+            assert_eq!(
+                crate::launch::check_backend_pin_records(
+                    backend, &record, &record, &unrelated, template
+                )
+                .expect_err("generation template must be this selected root")
+                .kind,
+                "template-pin"
+            );
+        }
+    }
+}
+
+/// ´test:crate:boxed-backend-mixed-templates-use-selected-vendor-root´
+#[test]
+fn boxed_backend_mixed_templates_use_selected_vendor_root() {
+    let home = std::path::Path::new("/fixture/owner");
+    let root = home.join(".var/loops/alpha");
+    let hash = "a".repeat(64);
+    let mut settings = backend_settings(&["codex", "claude"]);
+    settings.driver_argv = vec!["/fixture/driver".into()];
+    settings.driver_bin = Some("/fixture/driver".into());
+    settings.image_digest = Some(format!("sha256:{hash}"));
+    settings.template_dir = Some(root.join("runner-templates/codex").join(&hash));
+    settings.socket_dir = Some(root.join("sockets"));
+    for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+        let mut plan = crate::plan::Plan::build_with_door(
+            home,
+            "alpha",
+            "R",
+            &settings,
+            &super::fixture_row(),
+            super::fixture_block(),
+            (1000, 1000),
+            false,
+            Some(backend),
+        )
+        .expect("selected layout");
+        crate::launch::check_mount_roots(&plan, &settings, home).expect("selected installed roots");
+        let template = root
+            .join("runner-templates")
+            .join(backend.name())
+            .join(&hash);
+        let config = backend.template_files()[0];
+        assert!(
+            plan.document["mounts"]
+                .as_array()
+                .expect("mounts")
+                .iter()
+                .any(
+                    |row| row["source"] == template.join(config).to_str().expect("path")
+                        && row["target"] == format!("{}/{config}", backend.state_home())
+                )
+        );
+        let other = if backend == BoxBackend::Codex {
+            "claude"
+        } else {
+            "codex"
+        };
+        plan.document["mounts"].as_array_mut().expect("mounts").push(json!({
+            "kind":"bind", "source":root.join("runner-templates").join(other).join(&hash).join("foreign"),
+            "target":"/foreign", "access":"ro"}));
+        assert_eq!(
+            crate::launch::check_mount_roots(&plan, &settings, home)
+                .expect_err("other vendor template refuses")
+                .kind,
+            "mount-source"
+        );
+    }
+}
+
+/// ´test:crate:boxed-backend-claude-pin-check-reads-selected-template´
+#[test]
+fn boxed_backend_claude_pin_check_reads_selected_template() {
+    let fixture = TempDir::new().expect("fixture");
+    let home = fixture.path();
+    let root = home.join(".var/loops/alpha");
+    let hash = "a".repeat(64);
+    let image = format!("sha256:{hash}");
+    let template = root.join("runner-templates/claude").join(&hash);
+    fs::create_dir_all(template.join("bin")).expect("template");
+    for (name, bytes, mode) in [
+        ("bin/claude", "fictional payload", 0o550),
+        ("settings.json", "{}", 0o440),
+        ("CLAUDE.md", "fictional charter", 0o440),
+    ] {
+        fs::write(template.join(name), bytes).expect("fixture file");
+        fs::set_permissions(template.join(name), fs::Permissions::from_mode(mode)).expect("mode");
+    }
+    let manifest = json!({"image_digest":image,
+        "claude_sha256":sha256(&template.join("bin/claude")).expect("hash"),
+        "config_sha256":"b".repeat(64),
+        "charter_sha256":sha256(&template.join("CLAUDE.md")).expect("hash")});
+    fs::write(
+        template.join("manifest"),
+        serde_json::to_vec(&manifest).expect("manifest"),
+    )
+    .expect("manifest file");
+    fs::set_permissions(template.join("manifest"), fs::Permissions::from_mode(0o440))
+        .expect("mode");
+    let mut settings = backend_settings(&["codex", "claude"]);
+    settings.image_digest = Some(image);
+    settings.template_dir = Some(root.join("runner-templates/codex").join(&hash));
+    let plan = crate::plan::Plan {
+        home: home.join("worker"),
+        driver_dir: root.join("runs/R"),
+        letter: home.join("letter"),
+        document: json!({"loop":"alpha", "backend":"claude"}),
+    };
+    let error = crate::launch::check_pins(&plan, &settings, home, false, false)
+        .expect_err("selected config digest differs");
+    assert_eq!(error.kind, "template-pin");
+    assert_eq!(
+        error.detail,
+        format!(
+            "{} differs from manifest config_sha256",
+            template.join("settings.json").display()
+        )
+    );
+    assert!(
+        !settings
+            .template_dir
+            .as_ref()
+            .expect("primary template")
+            .exists()
+    );
+}
+
+/// ´test:crate:boxed-backend-protected-plan-refuses-missing-or-changed-vendor´
+#[test]
+fn boxed_backend_protected_plan_refuses_missing_or_changed_vendor() {
+    let plan = super::gate_fixture();
+    assert_eq!(plan["backend"], "codex");
+    crate::plan::box_gate(&plan).expect("Codex control");
+    for value in [json!(null), json!(4), json!("other"), json!("claude")] {
+        let mut changed = plan.clone();
+        changed["backend"] = value.clone();
+        let error = crate::plan::box_gate(&changed).expect_err("backend must be bound");
+        assert_eq!(
+            error.kind,
+            if value == "claude" {
+                "box-gate"
+            } else {
+                "backend-selection"
+            }
+        );
+        let record = json!({"plan": changed});
+        let error = crate::launch::pinned_plan_from_record(
+            std::path::Path::new("/absent-owner"),
+            "alpha",
+            "R",
+            std::path::Path::new("/absent-container"),
+            &record,
+        )
+        .expect_err("never silently select Codex");
+        assert_eq!(
+            error.kind,
+            if value == "claude" {
+                "backend-unavailable"
+            } else {
+                "backend-selection"
+            }
+        );
+    }
+    let mut absent = plan;
+    absent
+        .as_object_mut()
+        .expect("plan object")
+        .remove("backend");
+    assert_eq!(
+        crate::plan::box_gate(&absent)
+            .expect_err("old plans need retirement")
+            .kind,
+        "backend-selection"
+    );
+}
+
+/// ´test:crate:boxed-backend-home-refuses-before-writing-any-path´
+#[test]
+fn boxed_backend_home_refuses_before_writing_any_path() {
+    let fixture = TempDir::new().expect("fixture");
+    let parent: std::os::fd::OwnedFd = fs::File::open(fixture.path())
+        .expect("fixture parent")
+        .into();
+    let caller = (
+        nix::unistd::Uid::effective().as_raw(),
+        nix::unistd::Gid::effective().as_raw(),
+    );
+    for value in [json!(null), json!("claude"), json!("other")] {
+        let mut document = super::gate_fixture();
+        document["backend"] = value.clone();
+        let plan = crate::plan::Plan {
+            home: fixture.path().join("home"),
+            driver_dir: fixture.path().join("run"),
+            letter: fixture.path().join("letter"),
+            document,
+        };
+        let error = crate::home::make_home_pinned(
+            &plan,
+            &backend_settings(&["codex", "claude"]),
+            b"",
+            caller,
+            &parent,
+            &parent,
+        )
+        .expect_err("unsupported or unbound backend");
+        assert_eq!(
+            error.kind,
+            if value == "claude" {
+                "backend-layout"
+            } else {
+                "backend-selection"
+            }
+        );
+        assert_eq!(
+            fs::read_dir(fixture.path()).expect("empty fixture").count(),
+            0
+        );
+    }
+}
+
+/// ´test:crate:boxed-backend-credential-refusal-precedes-custody-access´
+#[test]
+fn boxed_backend_credential_refusal_precedes_custody_access() {
+    let fixture = TempDir::new().expect("fixture");
+    let missing = fixture.path().join("absent-owner");
+    let run = fixture.path().join("absent-run");
+    assert_eq!(
+        crate::credential::preflight(&missing, "alpha", BoxBackend::Claude)
+            .expect_err("no Claude credential adapter")
+            .kind,
+        "backend-unavailable"
+    );
+    let error = crate::credential::prepare_run(&missing, "alpha", &run, 3000, BoxBackend::Claude)
+        .expect_err("Claude has no adapter");
+    assert_eq!(error.kind, "backend-unavailable");
+    let mut record = json!({"plan":{"backend":"claude","home":run},"worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch"}]});
+    let error = crate::container_helper::publish_round_credential_admitted(
+        &missing,
+        "alpha",
+        &mut record,
+        &Gate,
+    )
+    .expect_err("wrong credential adapter");
+    assert_eq!(error.kind, "backend-unavailable");
+    assert!(record["rounds"][0]["credential_publication"].is_null());
+    assert!(!missing.exists());
+    assert!(!run.exists());
+}
+
+/// ´test:crate:boxed-backend-codex-only-selects-its-own-program´
+#[test]
+fn boxed_backend_codex_only_selects_its_own_program() {
+    let settings = backend_settings(&["codex"]);
+    for requested in [None, Some(BoxBackend::Codex)] {
+        let backend = settings.launch_backend(requested).expect("Codex selection");
+        assert_eq!(backend, BoxBackend::Codex);
+        backend.require_runtime().expect("implemented runtime");
+    }
+    let error = settings
+        .launch_backend(Some(BoxBackend::Claude))
+        .expect_err("no fallback");
+    assert_eq!(error.kind, "missing-setting");
+    assert!(error.detail.contains("backend_argv.claude"));
+}
+
+/// ´test:crate:boxed-backend-claude-only-refuses-unimplemented-runtime´
+#[test]
+fn boxed_backend_claude_only_refuses_unimplemented_runtime() {
+    let settings = backend_settings(&["claude"]);
+    for requested in [None, Some(BoxBackend::Claude)] {
+        let backend = settings
+            .launch_backend(requested)
+            .expect("Claude selection");
+        assert_eq!(backend, BoxBackend::Claude);
+        let error = backend
+            .require_runtime()
+            .expect_err("Claude runtime remains incomplete");
+        assert_eq!(error.kind, "backend-unavailable");
+        assert!(error.detail.contains("claude"));
+    }
+    assert!(settings.launch_backend(Some(BoxBackend::Codex)).is_err());
+}
+
+/// ´test:crate:boxed-backend-mixed-configuration-keeps-explicit-selection´
+#[test]
+fn boxed_backend_mixed_configuration_keeps_explicit_selection() {
+    let settings = backend_settings(&["claude", "codex"]);
+    assert_eq!(
+        settings.launch_backend(None).expect("default"),
+        BoxBackend::Codex
+    );
+    for backend in [BoxBackend::Claude, BoxBackend::Codex] {
+        assert_eq!(
+            settings
+                .launch_backend(Some(backend))
+                .expect("explicit vendor"),
+            backend
+        );
+    }
+    assert_eq!(
+        settings
+            .launch_backend(Some(BoxBackend::Claude))
+            .expect("Claude selected")
+            .require_runtime()
+            .expect_err("must not run Codex instead")
+            .kind,
+        "backend-unavailable"
+    );
+}
+
+/// ´test:crate:boxed-backend-absent-program-never-uses-endpoints-as-a-selector´
+#[test]
+fn boxed_backend_absent_program_never_uses_endpoints_as_a_selector() {
+    let mut settings = backend_settings(&[]);
+    settings
+        .vendor_hosts
+        .insert("claude".into(), vec!["api.example.com".into()]);
+    let unselected = settings.launch_backend(None).expect_err("no program");
+    assert_eq!(unselected.kind, "missing-setting");
+    assert_eq!(unselected.detail, "backend_argv has no configured program");
+    for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+        let error = settings
+            .launch_backend(Some(backend))
+            .expect_err("no program");
+        assert_eq!(error.kind, "missing-setting");
+        assert_eq!(
+            error.detail,
+            format!("backend_argv.{} is absent or empty", backend.name())
+        );
+    }
+    for argv in [Vec::new(), vec!["relative-program".into()]] {
+        settings.backend_argv.insert("claude".into(), argv);
+        assert_eq!(
+            settings
+                .launch_backend(Some(BoxBackend::Claude))
+                .expect_err("invalid program")
+                .kind,
+            "missing-setting"
+        );
+    }
+}
+
+/// ´test:crate:boxed-backend-parser-refuses-unknown-repeated-and-resume-selectors´
+#[test]
+fn boxed_backend_parser_refuses_unknown_repeated_and_resume_selectors() {
+    for (name, backend) in [("codex", BoxBackend::Codex), ("claude", BoxBackend::Claude)] {
+        let args = [
+            "alpha",
+            "R",
+            "--letter",
+            "/fixture/letter",
+            "--backend",
+            name,
+        ]
+        .map(String::from);
+        assert_eq!(
+            LaunchRequest::parse(&args).expect("vendor flag").backend,
+            Some(backend)
+        );
+        let mut repeated = args.to_vec();
+        repeated.extend(["--backend".into(), name.into()]);
+        assert_eq!(
+            LaunchRequest::parse(&repeated).expect_err("duplicate").kind,
+            "usage"
+        );
+        let args = ["alpha", "R", "--round", "work", "--backend", name].map(String::from);
+        assert_eq!(
+            LaunchRequest::parse(&args)
+                .expect_err("resume cannot select vendor")
+                .kind,
+            "round-selection"
+        );
+    }
+    let args = [
+        "alpha",
+        "R",
+        "--letter",
+        "/fixture/letter",
+        "--backend",
+        "other",
+    ]
+    .map(String::from);
+    let unknown = LaunchRequest::parse(&args).expect_err("unknown");
+    assert_eq!(unknown.kind, "backend-selection");
+    assert!(unknown.detail.contains("other"));
+    assert_eq!(
+        LaunchRequest::parse(&args[..5])
+            .expect_err("missing value")
+            .kind,
+        "usage"
+    );
+}
+
+/// ´test:crate:boxed-backend-refusal-precedes-allocation-and-program-probes´
+#[test]
+fn boxed_backend_refusal_precedes_allocation_and_program_probes() {
+    let fixture = TempDir::new().expect("owner home");
+    let home = fixture.path();
+    let config = home.join(".config/loops/alpha");
+    fs::create_dir_all(&config).expect("settings parent");
+    for path in [
+        home.to_path_buf(),
+        home.join(".config"),
+        home.join(".config/loops"),
+        config.clone(),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("private directory");
+    }
+    let registry = home.join(".config/loops/registry.toml");
+    fs::write(&registry, "namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{ name = \"alpha\", uid = 41001, launch = \"src\" }]\n").expect("registry");
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o600)).expect("registry mode");
+    let path = config.join("workers.toml");
+    for vendors in [
+        "claude = [\"/fixture/claude\"]",
+        "codex = [\"/fixture/codex\"], claude = [\"/fixture/claude\"]",
+    ] {
+        fs::write(&path, format!("backend_argv = {{ {vendors} }}\n"))
+            .expect("vendor configuration");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("settings mode");
+        let error = crate::load_launch_plan(home, "alpha", "R", (0, 0), Some(BoxBackend::Claude))
+            .expect_err("do not reach allocation, template or executable probes");
+        assert_eq!(error.kind, "backend-unavailable");
+        assert!(!home.join(".var").exists());
+        assert!(!home.join(".config/loops/allocations.toml").exists());
+        let args = [
+            "launch",
+            "alpha",
+            "R",
+            "--letter",
+            "/fixture/letter",
+            "--backend",
+            "claude",
+        ]
+        .map(String::from);
+        let error = crate::launch::reaping::scope_preflight_with(home, &args, |_| {
+            panic!("backend refusal must precede the proxy probe")
+        })
+        .expect_err("outer scope refuses Claude before effects");
+        assert_eq!(error.kind, "backend-unavailable");
+    }
+}
+
+/// ´test:crate:boxed-backend-record-readers-do-not-use-launch-readiness´
+#[test]
+fn boxed_backend_record_readers_do_not_use_launch_readiness() {
+    let fixture = TempDir::new().expect("owner home");
+    let home = fixture.path();
+    let config = home.join(".config/loops/alpha");
+    fs::create_dir_all(&config).expect("configuration");
+    for path in [
+        home.to_path_buf(),
+        home.join(".config"),
+        home.join(".config/loops"),
+        config.clone(),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("private directory");
+    }
+    let path = config.join("workers.toml");
+    fs::write(&path, "backend_argv = { claude = [\"/fixture/claude\"] }\n")
+        .expect("Claude-only settings");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private settings");
+    for result in [
+        crate::load_plan(home, "alpha", "R", (0, 0)),
+        crate::load_plan_for_record(home, "alpha", "R", (0, 0)),
+    ] {
+        let error = result.expect_err("Codex reader requires its own configured program");
+        assert_eq!(error.kind, "missing-setting");
+        assert_eq!(error.detail, "backend_argv.codex is absent or empty");
+    }
+    let error = crate::load_launch_plan(home, "alpha", "R", (0, 0), None)
+        .expect_err("new Claude launch remains gated before registry access");
+    assert_eq!(error.kind, "backend-unavailable");
+    assert!(!home.join(".config/loops/registry.toml").exists());
+    assert!(!home.join(".var").exists());
+}
+
+/// ´test:crate:boxed-backend-claude-layout-is-vendor-specific-and-not-executable´
+#[test]
+fn boxed_backend_claude_layout_is_vendor_specific_and_not_executable() {
+    for vendors in [&["claude"][..], &["codex", "claude"][..]] {
+        let mut settings = backend_settings(vendors);
+        settings.driver_argv = vec!["/fixture/superloop-lane".into()];
+        settings.driver_bin = Some("/fixture/superloop-lane".into());
+        settings.template_dir = Some("/fixture/claude-template".into());
+        let plan = crate::plan::Plan::build_with_door(
+            std::path::Path::new("/fixture/owner"),
+            "alpha",
+            "R",
+            &settings,
+            &super::fixture_row(),
+            super::fixture_block(),
+            (1000, 1000),
+            false,
+            Some(BoxBackend::Claude),
+        )
+        .expect("Claude layout");
+        assert_eq!(plan.document["backend"], "claude");
+        assert_eq!(
+            plan.document["environment"]["CLAUDE_CONFIG_DIR"],
+            "/home/worker/.claude"
+        );
+        assert!(plan.document["environment"]["CODEX_HOME"].is_null());
+        assert!(
+            plan.document["runtime_argv"]
+                .as_array()
+                .expect("vector")
+                .iter()
+                .any(|word| word == "/home/worker/.local/bin/claude")
+        );
+        assert_eq!(plan.document["owner_refresh_hosts"], json!([]));
+        assert_eq!(plan.document["box_gate"]["verdict"], "passed");
+        assert_eq!(
+            crate::plan::verify_box_attestation(&plan.document)
+                .expect_err("layout is never runtime acceptance")
+                .kind,
+            "backend-unavailable"
+        );
+        let mounts = plan.document["mounts"].as_array().expect("mounts");
+        for (target, access) in [
+            ("/home/worker", "ro"),
+            ("/home/worker/.claude", "rw"),
+            ("/home/worker/.claude/settings.json", "ro"),
+            ("/home/worker/.claude/CLAUDE.md", "ro"),
+        ] {
+            assert!(
+                mounts
+                    .iter()
+                    .any(|row| row["target"] == target && row["access"] == access)
+            );
+        }
+        assert!(!plan.json().expect("layout JSON").contains("codex"));
+        for field in ["backend", "environment"] {
+            let mut changed = plan.document.clone();
+            if field == "backend" {
+                changed[field] = json!("codex");
+            } else {
+                changed[field]["CODEX_HOME"] = json!("/home/worker/.codex");
+            }
+            assert_eq!(
+                crate::plan::verify_home_layout(&changed)
+                    .expect_err("cross-vendor state")
+                    .kind,
+                "backend-layout"
+            );
+        }
+    }
+}
+
+/// ´test:crate:boxed-backend-claude-home-creates-only-its-state-and-immutable-mountpoints´
+#[test]
+fn boxed_backend_claude_home_creates_only_its_state_and_immutable_mountpoints() {
+    let fixture = TempDir::new().expect("home fixture");
+    let root = fixture.path();
+    fs::create_dir_all(root.join(".cache/tmp")).expect("home parent");
+    fs::create_dir(root.join("runs")).expect("runs parent");
+    let settings = backend_settings(&["claude"]);
+    let row = json!({"name":"alpha","uid":41001,"runs_root":root.join("runs")});
+    let caller = (
+        nix::unistd::Uid::effective().as_raw(),
+        nix::unistd::Gid::effective().as_raw(),
+    );
+    let plan = crate::plan::Plan::build_with_door(
+        root,
+        "alpha",
+        "R",
+        &settings,
+        &row,
+        super::fixture_block(),
+        caller,
+        false,
+        Some(BoxBackend::Claude),
+    )
+    .expect("Claude layout");
+    let home_parent: std::os::fd::OwnedFd = fs::File::open(root.join(".cache/tmp"))
+        .expect("home parent")
+        .into();
+    let runs_parent: std::os::fd::OwnedFd = fs::File::open(root.join("runs"))
+        .expect("runs parent")
+        .into();
+    let report = crate::home::make_home_pinned(
+        &plan,
+        &settings,
+        b"Fixture brief.\n",
+        caller,
+        &home_parent,
+        &runs_parent,
+    )
+    .expect("make Claude layout");
+    let state = plan.home.join(".claude");
+    assert_eq!(
+        fs::metadata(&state).expect("state").permissions().mode() & 0o777,
+        0o700
+    );
+    let mut names: Vec<_> = fs::read_dir(&state)
+        .expect("state entries")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["CLAUDE.md", "settings.json"]);
+    for name in ["CLAUDE.md", "settings.json"] {
+        let path = state.join(name);
+        assert_eq!(fs::read(&path).expect("empty mountpoint"), [] as [u8; 0]);
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("mountpoint")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    assert!(!plan.home.join(".codex").exists());
+    assert!(!plan.home.join(".local/sign-in").exists());
+    let created = report["created"].as_array().expect("created paths");
+    let state_row = created
+        .iter()
+        .find(|row| row["path"] == state.display().to_string())
+        .expect("state report");
+    assert_eq!(state_row["wanted"]["uid"], 3000);
+    assert_eq!(state_row["wanted"]["gid"], 3000);
+    assert_eq!(fs::read(&plan.letter).expect("brief"), b"Fixture brief.\n");
+}
 
 fn run(
     home: &std::path::Path,
@@ -38,6 +1073,20 @@ fn record_hosts_with_lane_bin(
 }
 
 fn executable(path: &std::path::Path, source: &str) {
+    let source = if path.file_name().is_some_and(|name| name == "entry-fixture") {
+        let (interpreter, body) = source.split_once('\n').expect("entry fixture header");
+        match interpreter {
+            "#!/bin/sh" => format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'driver-launch --interface-version' ]; then printf '%s\\n' '{ENTRY_INTERFACE_PROBE}'; exit 0; fi\n{body}"
+            ),
+            "#!/usr/bin/python3" => format!(
+                "#!/usr/bin/python3\nimport sys\nif sys.argv[1:] == ['driver-launch', '--interface-version']:\n    print('{ENTRY_INTERFACE_PROBE}')\n    sys.exit(0)\n{body}"
+            ),
+            _ => panic!("entry fixture interpreter is not declared"),
+        }
+    } else {
+        source.to_owned()
+    };
     crate::fixture_exec::write_executable(path, source.as_bytes())
         .expect("closed and synced fixture program");
 }
@@ -219,7 +1268,7 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
         .parent()
         .expect("runs")
         .join(".reservation-R.json");
-    let record = json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":request.letter,"launcher_pid":4_000_000,"launcher_start":1,"driver_entry_pid":4_000_001,"driver_entry_start":1,"helper_pid":4_000_002,"helper_start":1,"helper_parent_pid":4_000_003,"helper_parent_start":1,"observer_state":"running","observer_pid":4_000_004,"observer_start":1});
+    let record = json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":request.letter,"launcher_pid":crate::dead_pid::DEAD_LOCK_PID,"launcher_start":1,"driver_entry_pid":crate::dead_pid::DEAD_LOCK_PID + 1,"driver_entry_start":1,"helper_pid":crate::dead_pid::DEAD_LOCK_PID + 2,"helper_start":1,"helper_parent_pid":crate::dead_pid::DEAD_LOCK_PID + 3,"helper_parent_start":1,"observer_state":"running","observer_pid":crate::dead_pid::DEAD_LOCK_PID + 4,"observer_start":1});
     crate::launch::publish_reservation(&path, &record).expect("dead dispatch");
     let custody = crate::plan::protected_identity_dir(&plan.driver_dir).expect("custody path");
     fs::create_dir(&custody).expect("custody");
@@ -449,6 +1498,7 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     fs::set_permissions(&door_generation, fs::Permissions::from_mode(0o600))
         .expect("door generation mode");
     let mut request = LaunchRequest {
+        backend: None,
         loop_name: "alpha".into(),
         run: "R".into(),
         letter,
@@ -464,6 +1514,67 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
         door_scope: crate::door::Scope::Work,
         rotation_source: None,
     };
+    // Mutations of the recorded entry response exercise the production launcher,
+    // with both preview and changing forms refusing before any run reservation.
+    let accepted_entry = fs::read(&entry).expect("entry fixture");
+    let allocation_before = fs::read(&allocations).expect("allocation snapshot");
+    for response in [
+        ENTRY_INTERFACE_PROBE.replace(
+            env!("CARGO_PKG_VERSION"),
+            concat!(env!("CARGO_PKG_VERSION"), "-incompatible"),
+        ),
+        ENTRY_INTERFACE_PROBE.replace(
+            concat!(" ", env!("CARGO_PKG_VERSION"), " 1"),
+            concat!(" ", env!("CARGO_PKG_VERSION"), " 0"),
+        ),
+        String::new(),
+        "malformed".into(),
+    ] {
+        crate::fixture_exec::write_executable(
+            &entry,
+            format!("#!/bin/sh\nprintf '%s\\n' '{response}'\n").as_bytes(),
+        )
+        .expect("refusing entry");
+        for dry_run in [true, false] {
+            request.dry_run = dry_run;
+            let error = run(home, &request).expect_err("entry mismatch refuses first");
+            assert_eq!(error.kind, "entry-version");
+            assert!(error.detail.contains(ENTRY_INTERFACE_PROBE), "{error:?}");
+            assert!(error.detail.contains(&format!("{response:?}")), "{error:?}");
+            assert_eq!(fs::read_dir(&runs).expect("runs root").count(), 0);
+            assert!(!home.join("container-calls").exists());
+            assert_eq!(
+                fs::read(&allocations).expect("allocation unchanged"),
+                allocation_before
+            );
+        }
+    }
+    // The version record is the production j01 --version capture; this
+    // legacy stand-in deliberately omits only the new interface query.
+    crate::fixture_exec::write_executable(&entry, concat!(r#"#!/bin/sh
+if [ "$1" = --version ]; then
+    printf '%s\n' '{"schema":1,"command":"superloop","kind":"version","message":"version requested","fields":{"type":"version","version":"superloop "#, env!("CARGO_PKG_VERSION"), r#""}}' >&2
+    exit 0
+fi
+exit 2
+"#).as_bytes()).expect("legacy entry");
+    for dry_run in [true, false] {
+        request.dry_run = dry_run;
+        let error = run(home, &request).expect_err("legacy entry refuses before reservation");
+        assert_eq!(error.kind, "entry-version");
+        assert!(error.detail.contains(ENTRY_INTERFACE_PROBE), "{error:?}");
+        assert!(
+            error
+                .detail
+                .contains(concat!("superloop ", env!("CARGO_PKG_VERSION"))),
+            "{error:?}"
+        );
+        assert!(error.detail.contains("interface unavailable"), "{error:?}");
+        assert_eq!(fs::read_dir(&runs).expect("runs root").count(), 0);
+        assert!(!home.join("container-calls").exists());
+    }
+    crate::fixture_exec::write_executable(&entry, &accepted_entry).expect("restore entry");
+    request.dry_run = true;
     let refusal = run(home, &request).expect_err("empty list refuses enforcing launch");
     assert_eq!(refusal.kind, "missing-setting");
     assert!(refusal.detail.contains("vendor_hosts.codex"));
@@ -605,6 +1716,34 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     .expect("observing preview with inactive unit");
     assert_eq!(preview["proxy_service"]["verdict"], "not-applicable");
     assert_eq!(preview["plan"]["door"]["stub_sha256"], stub_digest);
+    assert_eq!(preview["selection"]["backend"], "codex");
+    request.backend = Some(BoxBackend::Codex);
+    let explicit = run(home, &request).expect("explicit Codex preview");
+    assert_eq!(explicit["plan"], preview["plan"]);
+    assert_eq!(explicit["selection"]["backend"], "codex");
+    let mut mixed: toml::Table = toml::from_str(&source).expect("worker settings");
+    mixed
+        .get_mut("backend_argv")
+        .and_then(toml::Value::as_table_mut)
+        .expect("backend table")
+        .insert(
+            "claude".into(),
+            toml::Value::Array(vec![toml::Value::String("/fixture/claude".into())]),
+        );
+    fs::write(&settings, toml::to_string(&mixed).expect("mixed settings")).expect("mixed vendors");
+    request.backend = None;
+    let mixed_preview = run(home, &request).expect("mixed configuration selects Codex");
+    assert_eq!(mixed_preview["plan"], preview["plan"]);
+    assert_eq!(mixed_preview["selection"]["backend"], "codex");
+    request.backend = Some(BoxBackend::Claude);
+    assert_eq!(
+        run(home, &request)
+            .expect_err("mixed configuration does not substitute Codex")
+            .kind,
+        "backend-unavailable"
+    );
+    fs::write(&settings, &source).expect("restore Codex configuration");
+    request.backend = None;
     assert_dead_dispatch_attempt_wall(home, &request);
     let saved_door_generation = fs::read(&door_generation).expect("saved door generation");
     let mut old_door_generation: serde_json::Value =
@@ -700,7 +1839,7 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     let reservation = runs.join(".reservation-R.json");
     crate::launch::publish_reservation(
         &reservation,
-        &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":old_plan,"letter_source":request.letter,"launcher_pid":4_000_000,"launcher_start":1,"observer_state":"running","observer_pid":4_000_001,"observer_start":1,"helper_spawn_state":"not-started","reservation_census":preview["plan"]["reservation_census"]}),
+        &json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":old_plan,"letter_source":request.letter,"launcher_pid":crate::dead_pid::DEAD_LOCK_PID,"launcher_start":1,"observer_state":"running","observer_pid":crate::dead_pid::DEAD_LOCK_PID + 1,"observer_start":1,"helper_spawn_state":"not-started","reservation_census":preview["plan"]["reservation_census"]}),
     )
     .expect("dead preparation");
     let dead = run(home, &request).expect("public preview reads owner custody only");
@@ -878,14 +2017,14 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
         13
     );
     assert_eq!(preview["helper_argv"]["argv"][7], "--verified-home-fd");
+    assert_eq!(
+        preview["helper_argv"]["anchor_manifest"],
+        json!({"state":"bound-on-launch","transport":"rights","purposes":["owner-home","runs-root","entry-executable","podman-executable","hash-executable","credential-client","credential-clock","configuration"]})
+    );
     assert_eq!(preview["prepare_argv"]["directory_transfer_socket_fd"], 0);
     assert_eq!(
         preview["prepare_argv"]["transferred_directory_descriptors"],
-        json!([
-            {"index":0,"role":"owner_home"},
-            {"index":1,"role":"runs_root"},
-            {"index":2,"role":"letter_directory"}
-        ])
+        json!([])
     );
     assert_eq!(
         preview["prepare_argv"]["direct_private_directory_fd"],
@@ -926,13 +2065,17 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     let prepare_words = external_preview["prepare_argv"]["argv"]
         .as_array()
         .expect("private vector");
+    assert!(prepare_words.iter().all(|word| !matches!(
+        word.as_str(),
+        Some("--verified-home-fd" | "--verified-runs-root-fd" | "--verified-letter-fd")
+    )));
     assert_eq!(
-        prepare_words[prepare_words.len() - 2],
-        "--verified-letter-fd"
-    );
-    assert_eq!(
-        prepare_words.last().and_then(serde_json::Value::as_str),
-        Some("2")
+        external_preview["prepare_argv"]["anchor_manifest"],
+        json!({"state":"bound-on-launch","transport":"rights","operation":"make-home",
+            "purposes":["owner-home","runs-root","entry-executable","podman-executable",
+                "hash-executable","configuration","loop-storage","private-storage",
+                "identity-executable","credential-client","credential-clock","letter-directory"],
+            "optional_purposes":["rotation-source"]})
     );
     assert_eq!(
         external_preview["helper_argv"]["argv"][10],
@@ -993,7 +2136,7 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     );
     assert_eq!(
         fs::read_to_string(home.join("container-calls")).expect("named image probes"),
-        "called\n".repeat(21)
+        "called\n".repeat(23)
     );
     let build_report = custody.join("image-build.json");
     let original_report = fs::read(&build_report).expect("pinned build report");
@@ -1119,6 +2262,7 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     );
 }
 
+/// ´claim:superlooplane:service-reservation-key-binds-held-runtime´
 /// ´test:crate:proxy-refresh-preserves-live-helper-pins´
 #[test]
 #[allow(clippy::too_many_lines)]
@@ -1203,6 +2347,16 @@ fn proxy_refresh_preserves_live_helper_pins() {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .expect("private runs ancestor");
     }
+    // This stand-in models child results; real mapped ownership is exercised by the rootless entry tests.
+    fs::set_permissions(
+        home.join(".var/loops/alpha"),
+        fs::Permissions::from_mode(0o711),
+    )
+    .expect("provisioned loop storage mode");
+    let private_storage = home.join(".var/loops/alpha/private");
+    fs::create_dir(&private_storage).expect("provisioned private storage");
+    fs::set_permissions(&private_storage, fs::Permissions::from_mode(0o700))
+        .expect("private storage mode");
     fs::create_dir_all(template.join("bin")).expect("template bin");
     fs::create_dir_all(template.join("libexec")).expect("template helper directory");
     fs::create_dir_all(sockets.join("vendor")).expect("vendor sockets");
@@ -1337,6 +2491,7 @@ fn proxy_refresh_preserves_live_helper_pins() {
         ),
     );
     let launch = LaunchRequest {
+        backend: None,
         loop_name: "alpha".into(),
         run: "R".into(),
         letter: letter.clone(),
@@ -1469,6 +2624,33 @@ fn proxy_refresh_preserves_live_helper_pins() {
         )
         .expect("fixture mailbox source for pin reconstruction");
     }
+    if [
+        "SUPERLOOP_READER_PROOF",
+        "SUPERLOOP_REPORT_PROOF",
+        "SUPERLOOP_HARVEST_PROOF",
+        "SUPERLOOP_IMPORT_PROOF",
+        "SUPERLOOP_CHECKPOINT_PROOF",
+        "SUPERLOOP_CHECKOUT_PROOF",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
+    {
+        super::reader_custody::exercise(home, &runs, &podman);
+        return;
+    }
+    if std::env::var_os("SUPERLOOP_CREATION_PROOF").is_some() {
+        super::runtime_preparation::exercise_creation(home, &runs, &podman);
+        return;
+    }
+    if std::env::var_os("SUPERLOOP_RUNTIME_PROOF").is_some() {
+        super::runtime_preparation::exercise(home, &runs, &podman);
+        return;
+    }
+    if std::env::var_os("SUPERLOOP_SERVICE_PROOF").is_some() {
+        super::helper_service::exercise(home, &runs, &podman);
+        return;
+    }
+    crate::container_helper::fixture_reserved_program_attempt(home, &runs.join("R"));
     let before = crate::container_helper::fixture_pinned_request(home, "R", &podman)
         .expect("helper before refresh");
     let mut install = crate::install::InstallRequest {
@@ -1979,13 +3161,29 @@ elif '_make-home' in args:
     save(home / '.var/loops/alpha/runs' / ('.reservation-' + f['seed']['run'] + '.json'), f['seed'])
     print('{}')
 elif '_prepare-runtime' in args:
+    transfer = socket.socket(fileno=0)
+    data, ancillary, flags, _ = transfer.recvmsg(1, socket.CMSG_SPACE(36))
+    assert data == bytes([1]) and flags == 0 and len(ancillary) == 1
+    assert len(ancillary[0][2]) == 36 and transfer.recv(1) == b''
+    for offset in range(0, 36, 4):
+        os.close(int.from_bytes(ancillary[0][2][offset:offset+4], sys.byteorder, signed=True))
+    manifest = json.loads(args[args.index('--anchor-manifest') + 1])
+    assert manifest['operation'] == 'prepare-runtime'
+    assert [record['purpose'] for record in manifest['records']] == ['owner-home', 'runs-root', 'entry-executable', 'podman-executable', 'hash-executable', 'configuration', 'loop-storage', 'private-storage', 'identity-executable']
     if 'SUPERLOOP_MATRIX_STAGE' not in os.environ:
         save(pathlib.Path(f['evidence']), {'runtime_argv': f['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'pending', 'rows': [{'name': 'letter', 'state': 'pending', 'target': '/home/worker/brief.txt', 'operation': 'read'}]}})
     elif f['before'] and os.environ['SUPERLOOP_MATRIX_STAGE'] == 'publish-primary':
         pathlib.Path(f['lane']).chmod(0o600)
     print('{}')
 elif '_container-helper' in args:
-    socket.socket(fileno=0).recvmsg(1, socket.CMSG_SPACE(8))
+    transfer = socket.socket(fileno=0)
+    data, ancillary, flags, _ = transfer.recvmsg(1, socket.CMSG_SPACE(32))
+    assert data == bytes([1]) and flags == 0 and len(ancillary) == 1
+    assert len(ancillary[0][2]) == 32 and transfer.recv(1) == b''
+    for offset in range(0, 32, 4):
+        os.close(int.from_bytes(ancillary[0][2][offset:offset+4], sys.byteorder, signed=True))
+    manifest = json.loads(args[args.index('--anchor-manifest') + 1])
+    assert [record['purpose'] for record in manifest['records']] == ['owner-home', 'runs-root', 'entry-executable', 'podman-executable', 'hash-executable', 'credential-client', 'credential-clock', 'configuration']
     sys.exit(9)
 elif args and args[0] == 'ps':
     pass
@@ -2289,6 +3487,7 @@ fn refresh_during_changing_launch(
     let _vendor = std::os::unix::net::UnixListener::bind(&vendor).expect("vendor socket");
     fs::set_permissions(&vendor, fs::Permissions::from_mode(0o660)).expect("vendor mode");
     let mut changing = LaunchRequest {
+        backend: None,
         loop_name: launch.loop_name.clone(),
         run: "T".into(),
         letter: launch.letter.clone(),
@@ -2347,12 +3546,27 @@ elif '_make-home' in args:
     wait('unidentified-release')
     print('{}')
 elif '_prepare-runtime' in args:
+    transfer = socket.socket(fileno=0)
+    data, ancillary, flags, _ = transfer.recvmsg(1, socket.CMSG_SPACE(36))
+    assert data == bytes([1]) and flags == 0 and len(ancillary) == 1
+    assert len(ancillary[0][2]) == 36 and transfer.recv(1) == b''
+    for offset in range(0, 36, 4):
+        os.close(int.from_bytes(ancillary[0][2][offset:offset+4], sys.byteorder, signed=True))
+    manifest = json.loads(args[args.index('--anchor-manifest') + 1])
+    assert manifest['operation'] == 'prepare-runtime'
+    assert [record['purpose'] for record in manifest['records']] == ['owner-home', 'runs-root', 'entry-executable', 'podman-executable', 'hash-executable', 'configuration', 'loop-storage', 'private-storage', 'identity-executable']
     if 'SUPERLOOP_MATRIX_STAGE' not in os.environ:
         save(pathlib.Path(fixture['evidence']), {'runtime_argv': fixture['seed']['plan']['runtime_argv'], 'bound_source_matrix': {'state': 'pending', 'rows': [{'name': 'letter', 'state': 'pending', 'target': '/home/worker/brief.txt', 'operation': 'read'}]}})
     print('{}')
 elif '_container-helper' in args:
     transfer = socket.socket(fileno=0)
-    transfer.recvmsg(1, socket.CMSG_SPACE(8))
+    data, ancillary, flags, _ = transfer.recvmsg(1, socket.CMSG_SPACE(32))
+    assert data == bytes([1]) and flags == 0 and len(ancillary) == 1
+    assert len(ancillary[0][2]) == 32 and transfer.recv(1) == b''
+    for offset in range(0, 32, 4):
+        os.close(int.from_bytes(ancillary[0][2][offset:offset+4], sys.byteorder, signed=True))
+    manifest = json.loads(args[args.index('--anchor-manifest') + 1])
+    assert [record['purpose'] for record in manifest['records']] == ['owner-home', 'runs-root', 'entry-executable', 'podman-executable', 'hash-executable', 'credential-client', 'credential-clock', 'configuration']
     (home / 'preparing-ready').touch()
     wait('preparing-release')
     request = socket.socket(socket.AF_UNIX)

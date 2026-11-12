@@ -146,6 +146,107 @@ fn cut_command(
     command
 }
 
+/// Batched projection preserves binary bytes, unusual paths, symlinks and executable modes.
+///
+/// # Panics
+/// Panics only if fixture IO fails, projection changes bytes or Git runs per file.
+/// ´test:integration:projection-batches-blobs-and-index-entries´
+#[test]
+fn projection_batches_blobs_and_index_entries() {
+    let root = fixture();
+    let source = root.path().join("source");
+    let mut files = Vec::new();
+    for index in 0..128 {
+        let path = format!("public/blob {index:03}");
+        let content = vec![0, b'\n', index, 255, b'\t'];
+        fs::write(source.join(&path), &content).expect("binary source");
+        files.push((path, content));
+    }
+    for (path, content) in [
+        ("public/empty", Vec::new()),
+        (
+            "public/large.bin",
+            (0..=255).cycle().take(131_072).collect(),
+        ),
+    ] {
+        fs::write(source.join(path), &content).expect("sized source blob");
+        files.push((path.into(), content));
+    }
+    for path in ["public/quote\"name", "public/tab\tname", "public/café"] {
+        fs::write(source.join(path), b"unusual\0bytes\n").expect("unusual source path");
+        files.push((path.into(), b"unusual\0bytes\n".to_vec()));
+    }
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-qm", "Binary projection fixture"]);
+    git(&source, &["tag", "-f", "source-v1"]);
+    let out = root.path().join("batched");
+    let trace = root.path().join("git-trace.json");
+    let output = cut_command(&source, &out, None, true, None, None)
+        .env("GIT_TRACE2_EVENT", &trace)
+        .output()
+        .expect("traced cut");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    for (path, content) in files {
+        assert_eq!(fs::read(out.join(path)).expect("projected bytes"), content);
+    }
+    assert_eq!(
+        fs::read_link(out.join("public/link")).expect("link"),
+        Path::new("tool")
+    );
+    assert_eq!(
+        fs::metadata(out.join("public/tool"))
+            .expect("mode")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(
+        git(&out, &["ls-tree", "-r", "-z", "HEAD", "--", "public"]),
+        git(&source, &["ls-tree", "-r", "-z", "HEAD", "--", "public"])
+    );
+    let starts: Vec<Vec<String>> = fs::read_to_string(trace)
+        .expect("trace")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("trace JSON"))
+        .filter(|row| row["event"] == "start")
+        .map(|row| {
+            row["argv"]
+                .as_array()
+                .expect("argv")
+                .iter()
+                .map(|v| v.as_str().expect("argument").to_owned())
+                .collect()
+        })
+        .collect();
+    let count = |op: &str| {
+        starts
+            .iter()
+            .filter(|args| args.iter().any(|arg| arg == op))
+            .count()
+    };
+    assert_eq!(count("hash-object"), 1);
+    assert_eq!(count("update-index"), 1);
+    assert_eq!(
+        starts
+            .iter()
+            .filter(|args| args.windows(2).any(|pair| pair == ["cat-file", "blob"]))
+            .count(),
+        0
+    );
+    assert_eq!(
+        starts
+            .iter()
+            .filter(|args| args.windows(2).any(|pair| pair == ["cat-file", "--batch"]))
+            .count(),
+        1
+    );
+}
+
 /// Public messages preserve overrides and reproduce commit and tag objects.
 ///
 /// # Panics

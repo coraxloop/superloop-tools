@@ -13,10 +13,10 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`a_refused_record_is_named_in_the_reversible_display`] | plan | A refused record is the path a reader most needs exactly: the reversible display preserves its bytes, while lossy text `docs/../opaque�.md` names a file the repository does not carry. # Panics Panics only if these fixed records yield anything but one traversal failure, which the parser cannot arrange. |
+//! | [`a_refused_record_is_named_in_the_reversible_display`] | plan | A refused record is the path a reader most needs exactly: the reversible display preserves its bytes, while lossy text `docs/../opaque�.md` names a file the repository does not carry. |
 //! | [`materializes_both_universe_kinds_without_following_links`] | plan | The declared universe kind alone selects tracked or as-written enumeration, and the as-written walk treats a symbolic link as one entry rather than following it. |
 //! | [`a_tracked_exclusive_universe_holds_the_checkout_to_version_control`] | plan | A tracked-exclusive corpus keeps the tracked base, reports a missing tracked path and an untracked checkout path, and lets a declared ignore row remove an untracked path without tallying it or walking version control's own store. |
-//! | [`a_missing_tracked_path_is_read_by_no_reader`] | plan | A missing tracked path remains participating and draws one corpus finding, but has no native path for a content reader to open and repeat the same repair as a traversal failure. # Panics Panics only if the temporary fixture cannot be created, written, tracked, or removed. |
+//! | [`a_missing_tracked_path_is_read_by_no_reader`] | plan | A missing tracked path remains participating and draws one corpus finding, but has no native path for a content reader to open and repeat the same repair as a traversal failure. |
 //! | [`distinguishes_an_ignored_path_from_one_that_was_absent`] | plan | Ignore is removed once while its membership remains inspectable, so an ignored path participates in no projection and is distinguishable from a path the base never held. |
 //! | [`admits_one_non_text_path_into_the_corpus`] | plan | A path is the bytes version control recorded, and the grammar decides those bytes. The corpus therefore retains a non-text path instead of turning the path away, with its native form for content readers wherever the platform has one. |
 //! | [`bounds_selection_by_owner_before_subtracting_exclusions`] | plan | Generic selection begins inside one owner share, admits by the inclusion union, and subtracts the exclusion union. |
@@ -1274,6 +1274,13 @@ impl LabelPlan {
             let Some(owner) = topology.partition().owner(path) else {
                 continue;
             };
+            if snapshot
+                .non_participating()
+                .iter()
+                .any(|row| row.owner == owner)
+            {
+                continue;
+            }
             if snapshot
                 .nested()
                 .iter()

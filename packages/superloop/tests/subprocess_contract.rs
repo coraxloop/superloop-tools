@@ -11,7 +11,7 @@
 //! | Status propagation | 2 | Child status seven becomes process status seven; verify probe and cleanup failures become status one |
 //! | Termination | 2 | External SIGTERM reaps the private group and closes its pipe within five seconds with a named trailer; private groups retain terminal input |
 //! | Refusal | 7 | Invalid names, nondirectory tiers, non-UTF-8 HOME, planted links, malformed ensure arguments, the owner-only row, and an ensure failure refuse without mounting |
-//! | Driver launch | 5 | Exact positional argv and child status, ordinary command dispatch, and byte-stable prelaunch refusals leave the stub untouched |
+//! | Driver launch | 6 | Exact positional argv and child status, ordinary command dispatch, byte-stable prelaunch refusals and the side-effect-free interface query |
 
 mod support;
 #[path = "subprocess_contract/termination.rs"]
@@ -273,6 +273,7 @@ fn fixture_verify_child_environment() {
             label: label.to_owned(),
             argv: vec![String::from("/usr/bin/env")],
             io: IoMode::Capture,
+            descriptors: loop_home::CommandDescriptors::default(),
         };
         let output = ProcessRunner.run(&request).expect("fixed env child");
         assert_eq!(output.status, 0);
@@ -480,7 +481,7 @@ fn driver_fixture(
 
 fn driver_settings(driver: &Path, runs: &Path) -> String {
     format!(
-        "driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
+        "driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
         driver.display(),
         runs.display()
     )
@@ -644,6 +645,8 @@ fn launch(
         driver.to_str().expect("driver path"),
         "--run-dir",
         run_dir.to_str().expect("run path"),
+        "--backend",
+        "codex",
         "--",
     ];
     words.extend_from_slice(args);
@@ -712,6 +715,8 @@ fn driver_launch_forwards_argv_and_child_status() {
     let settings = loop_home::workers_settings::ExecutionSettings {
         driver_argv: vec![
             driver.to_string_lossy().into_owned(),
+            "--backend".into(),
+            "codex".into(),
             "--fixed".into(),
             "fixed argument".into(),
         ],
@@ -722,7 +727,7 @@ fn driver_launch_forwards_argv_and_child_status() {
         path: root.join(".config/loops/alpha/workers.toml"),
     };
     assert!(recorded.ends_with(&format!(
-        "\nsh\n/usr/bin/env\nLANE_BOXED_RUNTIME=1\nLANE_RUNS_ROOT={}\nLANE_RUN_DIR={}\n{}\n{}\n--fixed\nfixed argument\na b\n$(touch nope)\ndriver-launch\n",
+        "\nsh\n/usr/bin/env\nLANE_BOXED_RUNTIME=1\nLANE_RUNS_ROOT={}\nLANE_RUN_DIR={}\n{}\n{}\n--backend\ncodex\n--fixed\nfixed argument\na b\n$(touch nope)\ndriver-launch\n",
         run_dir.parent().expect("configured root").display(),
         run_dir.display(),
         settings.environment().join("\n"),
@@ -745,7 +750,7 @@ fn driver_launch_missing_root_setting_refuses_by_name() {
     fs::write(
         &settings,
         format!(
-            "driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\n",
+            "driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\n",
             driver.display()
         ),
     )
@@ -807,6 +812,8 @@ fn driver_launch_with_configured_root_keeps_refusal_matrix() {
             driver.to_string_lossy().into_owned(),
             String::from("--run-dir"),
             run_dir.to_string_lossy().into_owned(),
+            String::from("--backend"),
+            String::from("codex"),
             String::from("--"),
             String::from("arg"),
         ];
@@ -815,11 +822,11 @@ fn driver_launch_with_configured_root_keeps_refusal_matrix() {
             "usage" => {
                 args.truncate(2);
                 String::from(
-                    "usage: superloop driver-launch LOOP RUN --driver-bin PATH --run-dir DIR -- ARGS...",
+                    "usage: superloop driver-launch LOOP RUN --driver-bin PATH --run-dir DIR --backend {codex|claude} -- ARGS...",
                 )
             }
             "separator" => {
-                args[7] = String::from("arg");
+                args[9] = String::from("arg");
                 String::from("driver-launch requires -- before arguments")
             }
             "empty arguments" => {
@@ -1013,6 +1020,8 @@ fn driver_launch_refuses_unregistered_and_malformed_invocations() {
             driver.to_str().expect("driver path"),
             "--run-dir",
             run_dir.to_str().expect("run path"),
+            "--backend",
+            "codex",
             "--",
             "arg",
         ],
@@ -1064,6 +1073,8 @@ fn driver_launch_refuses_unregistered_and_malformed_invocations() {
             driver.to_str().expect("driver path"),
             "--run-dir",
             run_dir.to_str().expect("run path"),
+            "--backend",
+            "codex",
             "arg",
         ],
     );
@@ -1121,7 +1132,7 @@ fn driver_launch_refuses_unsafe_settings_and_paths_before_launch() {
     fs::write(
         &target,
         format!(
-            "driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\n",
+            "driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\n",
             driver.display()
         ),
     )
@@ -2290,4 +2301,183 @@ fn ensure_roots_refuses_the_first_owner_row_under_an_unprivileged_uid() {
     );
     assert_eq!(fs::read(&report).expect("report"), b"");
     assert!(!home.join(".var/loops").exists());
+}
+
+/// ´claim:loophome:driver-launch-selects-only-the-requested-backend´
+/// ´test:integration:driver-launch-selects-only-the-requested-backend´
+#[test]
+fn driver_launch_selects_only_the_requested_backend() {
+    for (vendors, selected, admitted) in [
+        (vec!["codex"], "codex", true),
+        (vec!["claude"], "claude", true),
+        (vec!["codex", "claude"], "claude", true),
+        (vec!["codex", "claude"], "codex", true),
+        (vec!["codex"], "claude", false),
+        (vec!["claude"], "codex", false),
+        (vec![], "claude", false),
+    ] {
+        let directory = TestDir::new_safe("driver-backend");
+        let (root, stub) = directory.prepare();
+        let (_, driver, path, run_dir) = driver_fixture(&directory);
+        let mut settings: toml::Value =
+            toml::from_str(&fs::read_to_string(&path).expect("settings")).expect("TOML");
+        let configured = vendors
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_owned(),
+                    toml::Value::Array(vec![toml::Value::String(format!("/fixture/{name}"))]),
+                )
+            })
+            .collect::<toml::Table>();
+        settings["backend_argv"] = toml::Value::Table(configured);
+        fs::write(&path, toml::to_string(&settings).expect("settings TOML"))
+            .expect("configured vendors");
+        let log = root.join("driver-backend.log");
+        let output = run(
+            &root,
+            &stub,
+            &log,
+            0,
+            &[
+                "driver-launch",
+                "alpha",
+                "R",
+                "--driver-bin",
+                driver.to_str().expect("driver"),
+                "--run-dir",
+                run_dir.to_str().expect("run"),
+                "--backend",
+                selected,
+                "--",
+                "opaque argument",
+            ],
+        );
+        if admitted {
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let recorded = fs::read_to_string(&log).expect("actual entry command");
+            assert!(
+                recorded.ends_with(&format!(
+                    "\n{}\n--backend\n{selected}\nopaque argument\n",
+                    driver.display()
+                )),
+                "{recorded}"
+            );
+            assert!(
+                recorded.contains(&format!(
+                    "\nLANE_DRIVER_ARGV=[\"{}\",\"--backend\",\"codex\"]\n",
+                    driver.display()
+                )),
+                "{recorded}"
+            );
+            assert!(recorded.contains("LANE_BOXED_RUNTIME=1"));
+        } else {
+            assert_driver_refusal(
+                &output,
+                &log,
+                &format!("missing-setting: backend_argv.{selected}"),
+            );
+        }
+    }
+}
+
+/// ´claim:loophome:driver-launch-refuses-an-ambiguous-configured-selector´
+/// ´test:integration:driver-launch-refuses-an-ambiguous-configured-selector´
+#[test]
+fn driver_launch_refuses_an_ambiguous_configured_selector() {
+    for (selectors, expected) in [
+        (
+            vec![],
+            "driver_argv requires exactly one explicit --backend selector",
+        ),
+        (
+            vec!["--backend"],
+            "driver_argv backend selector has no value",
+        ),
+        (
+            vec!["--backend", "other"],
+            "driver_argv backend selector must be codex or claude, not other",
+        ),
+        (
+            vec!["--backend", "codex", "--backend", "claude"],
+            "driver_argv requires exactly one explicit --backend selector",
+        ),
+    ] {
+        let directory = TestDir::new_safe("driver-selector");
+        let (root, stub) = directory.prepare();
+        let (_, driver, path, run_dir) = driver_fixture(&directory);
+        let mut settings: toml::Value =
+            toml::from_str(&fs::read_to_string(&path).expect("settings")).expect("TOML");
+        settings["driver_argv"] = toml::Value::Array(
+            std::iter::once(driver.to_string_lossy().into_owned())
+                .chain(selectors.into_iter().map(String::from))
+                .map(toml::Value::String)
+                .collect(),
+        );
+        fs::write(&path, toml::to_string(&settings).expect("settings TOML")).expect("selector");
+        let log = root.join("driver-selector.log");
+        let output = launch(&root, &stub, &log, 0, "R", &driver, &run_dir, &["arg"]);
+        assert_driver_refusal(&output, &log, expected);
+    }
+}
+
+/// ´claim:loophome:driver-launch-requires-a-known-explicit-backend´
+/// ´test:integration:driver-launch-requires-a-known-explicit-backend´
+#[test]
+fn driver_launch_requires_a_known_explicit_backend() {
+    let directory = TestDir::new("driver-backend-arguments");
+    let (root, stub) = directory.prepare();
+    let (_, driver, _, run_dir) = driver_fixture(&directory);
+    let log = root.join("podman.log");
+    for (selector, expected) in [
+        (
+            vec!["--backend", "other"],
+            "driver backend must be codex or claude, not other",
+        ),
+        (vec![], "usage: superloop driver-launch"),
+    ] {
+        let mut words = vec![
+            "driver-launch",
+            "alpha",
+            "R",
+            "--driver-bin",
+            driver.to_str().expect("driver"),
+            "--run-dir",
+            run_dir.to_str().expect("run"),
+        ];
+        words.extend(selector);
+        words.extend(["--", "argument"]);
+        let output = run(&root, &stub, &log, 0, &words);
+        assert_driver_refusal(&output, &log, expected);
+    }
+}
+
+/// The production interface query has no dependency on a loop home or registry.
+/// ´claim:loophome:driver-entry-interface-probe-is-side-effect-free´
+/// ´test:integration:driver-entry-interface-probe-before-home-resolution´
+#[test]
+fn driver_entry_interface_probe_before_home_resolution() {
+    let directory = TestDir::new("entry-interface");
+    let output = enter_loop()
+        .env_clear()
+        .env("HOME", directory.path().join("absent"))
+        .args(["driver-launch", "--interface-version"])
+        .output()
+        .expect("production entry probe");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("interface text"),
+        format!(
+            "superloop-driver-entry {} {}\n",
+            env!("CARGO_PKG_VERSION"),
+            loop_home::DRIVER_ENTRY_INTERFACE_VERSION
+        )
+    );
+    assert_eq!(output.stderr, [] as [u8; 0]);
+    assert!(!directory.path().join("absent").exists());
 }

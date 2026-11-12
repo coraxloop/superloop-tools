@@ -6,6 +6,14 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+fn owner_program() -> String {
+    [
+        loop_home::ancestor::PYTHON_ANCESTOR_OWNERS,
+        include_str!("door_sign_in_owner.py"),
+    ]
+    .join("\n")
+}
+
 fn refusal(detail: impl Into<String>) -> LaneError {
     LaneError::input("door-sign-in", detail)
 }
@@ -76,7 +84,7 @@ pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
     let output = crate::fixture_exec::spawn(
         Command::new("/usr/bin/timeout")
             .args(["--kill-after=1", "20", "/usr/bin/python3", "-I", "-c"])
-            .arg(include_str!("door_sign_in_owner.py"))
+            .arg(owner_program())
             .arg(entry)
             .arg(loop_name)
             .arg(row.uid.to_string())

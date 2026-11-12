@@ -30,6 +30,8 @@ Protocol-coupled clients and server helpers share a release authority. A server 
 
 Internal source dependencies point strictly downward: tier 0 is common command vocabulary, tier 1 is domain libraries, tier 2 is public tools, and tier 3 is private helpers. Tier 3 may depend only on tiers 0 and 1. The rule covers ordinary, development, build and target-specific dependencies. Process invocation is a separately declared protocol and does not authorize a source edge. Owners, consumers, external admissions, resolved closure, test tools, executable-bearing calls and installation destinations are checked against the ledger; no unnamed exception disables a census.
 
+Every workspace package declares the shared `tracing` dependency, including binaries and test support. Spans and events are core vocabulary: adding an instrumentation point anywhere in the workspace requires no package dependency change. Executable entry points choose subscribers; libraries only emit observations.
+
 **Table (Package destinations)** · `tab:buildcontracts:package-destinations`
 
 |Present source|Destination and tier|
@@ -53,6 +55,7 @@ Internal source dependencies point strictly downward: tier 0 is common command v
 |`superloop-correspondence`|Tier 2; release group `correspondence`.|
 |`superloop-execwrap`|Tier 1; release group `superloop-execwrap`.|
 |`superloop-gate-submit`|Tier 2; release group `superloop-gate-submit`.|
+|`superloop-capture-admit`|Tier 2; release group `superloop-capture-admit`.|
 |`superloop-install`|Tier 2; release group `superloop-install`.|
 |`superloop-lane`|Tier 2; release group `lane`.|
 |`superloop-lint`|Tier 2; release group `superloop-lint`.|
@@ -69,3 +72,15 @@ Internal source dependencies point strictly downward: tier 0 is common command v
 |`session-core`|Internal tier 1: typed session observations, heartbeat and rulebook decisions, toggles and persistence.|ORCHESTRATORHOOK|The Claude adapter and loop session entry points.|
 |`request-core`|Internal tier 1: common request transitions, single-use claims, identical-retry completion, review identities and atomic transactions.|PERMISSIONTRIAGE|The permission/request release group and lane door integration.|
 |`execute-command`|Internal tier 1: command judgement, escalation and learning through bounded semantic persistence operations.|PERMISSIONTRIAGE|Door, permission hook, gateway and direct session adapters.|
+
+**Rule (Capture admission installation)** · `rule:buildcontracts:capture-admission-installation`
+
+Meson installs `superloop-capture-admit` in the binary directory and its provenance in the build-record directory. The tier-2 package takes the tier-1 `lane-lifecycle` dependency solely for the pure `parse_utc_instant` lease reader, sharing its validated UTC grammar instead of maintaining a second parser at the sudo boundary; the call performs no filesystem or process operations. Node provisioning installs those artifacts root-owned and grants the reading account a sudoers route naming only this binary running as the non-root store account; account creation, group membership and the initial 0750 store root belong to provisioning.
+
+**Problem (Confined capture admission and pruning)** · `prob:servers:capture-admit-admits-and-prunes-sealed-generations`
+
+`superloop-capture-admit` supplies the store account’s admission and prune boundary: copied bytes are verified against the strict manifest, a NAME is bound to its complete manifest digest, and current, kept and live-leased generations survive pruning. Its package guide states the admitted formats and refusal contract; node provisioning owns the confinement that makes a sealed generation immutable to its readers.
+
+**Problem (Capture admission write order and output mode)** · `prob:servers:capture-admit-orders-its-writes-and-declares-its-output-mode`
+
+Capture admission leaves receipt-less generations unsealed without blocking operations on sealed identities, reserves their names against overwrite, and publishes keep before the current selector. Its agent-text contract names its report stream, terminal fields and refusal classes. Its package guide names the pure UTC-parser dependency and the fixtures for interrupted publication and special-entry refusals.

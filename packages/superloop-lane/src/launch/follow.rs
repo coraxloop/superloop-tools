@@ -204,7 +204,7 @@ pub fn private_context(
         .driver_dir
         .parent()
         .ok_or_else(|| LaneError::input("exercise-context", "runs root is absent"))?;
-    let runs = home::pin_parent(root, 0)?;
+    let runs = received_runs(root)?;
     let record = bound_private_record(&runs, run, 0, expected_identity, "exercise-context-record")?;
     validate_record(&plan, &record, loop_name, run)?;
     let round = record["rounds"]
@@ -235,6 +235,17 @@ pub fn private_context(
     }
     let bytes = read_regular(file, "exercise-context")?;
     parse_context_state(&bytes)
+}
+
+fn received_runs(expected: &Path) -> Result<OwnedFd, LaneError> {
+    let (declared, runs) = home::private_runs()?;
+    if declared != expected {
+        return Err(LaneError::input(
+            "follow-record",
+            "plan runs root differs from received custody",
+        ));
+    }
+    Ok(runs)
 }
 
 fn parse_context_state(bytes: &[u8]) -> Result<Value, LaneError> {
@@ -468,7 +479,7 @@ pub fn private_read(
         .driver_dir
         .parent()
         .ok_or_else(|| LaneError::input("follow-record", "runs root is absent"))?;
-    let runs = home::pin_parent(root, 0)?;
+    let runs = received_runs(root)?;
     private_read_from_bound(
         &plan,
         &runs,

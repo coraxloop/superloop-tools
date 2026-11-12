@@ -8,6 +8,7 @@ import shutil
 import signal
 import sys
 import time
+import resource
 import contextlib
 import stat
 
@@ -74,7 +75,8 @@ def main():
     ref = "refs/heads/lane/" + run
     detail = dict(words=words, checkout_path=None, checkout_ref=None,
                   checkout_commit=None, wrapper_exit_status=None,
-                  wrapper_wall_seconds=None, preparation_wall_seconds=None,
+                  wrapper_wall_seconds=None, wrapper_user_cpu_seconds=None,
+                  wrapper_system_cpu_seconds=None, preparation_wall_seconds=None,
                   tree_clean=None, tree_change_count=None, discarded=None)
     reason = "door-compute-refresh-refusal"
     status = 125
@@ -167,9 +169,16 @@ def main():
                 reason = "door-request-deadline"
                 raise ValueError("no time remains for wrapper and termination grace")
             wrapper_started = time.monotonic()
-            result = run_wrapper(["/usr/bin/timeout", "-k", str(KILL_GRACE), str(remaining),
-                                  wrapper, *words], cwd=checkout, env=env)
-            wrapper_elapsed = time.monotonic() - wrapper_started
+            usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
+            try:
+                result = run_wrapper(["/usr/bin/timeout", "-k", str(KILL_GRACE), str(remaining),
+                                      wrapper, *words], cwd=checkout, env=env)
+            finally:
+                wrapper_elapsed = time.monotonic() - wrapper_started
+                usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+                detail["wrapper_wall_seconds"] = wrapper_elapsed
+                detail["wrapper_user_cpu_seconds"] = usage_after.ru_utime - usage_before.ru_utime
+                detail["wrapper_system_cpu_seconds"] = usage_after.ru_stime - usage_before.ru_stime
             # GNU timeout's KILL also kills its own process group: Python then
             # observes -SIGKILL rather than the shell's conventional 137.
             status = 137 if result.returncode == -signal.SIGKILL else result.returncode

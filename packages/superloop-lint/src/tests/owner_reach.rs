@@ -7,12 +7,14 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`does_not_report_owners_without_markdown`] | layers | Owners with no Markdown need no prose activation, even when they own other files. # Panics Panics only if fixture IO or planning fails, or a no-prose owner is reported. |
-//! | [`nested_prose_retains_other_policy_coverage`] | layers | Nested prose is exempt only under its declared root and remains in the burn census. # Panics Panics only if fixture IO or planning fails, or the measured scope differs. |
-//! | [`refuses_invalid_nested_corpus_declarations`] | layers | A nested declaration must name an owner, a contained directory, a snapshot and a reason. # Panics Panics only if fixture IO fails or a malformed nested declaration is accepted. |
-//! | [`reports_every_kind_of_inactive_prose_owner`] | layers | Root, crate-bearing, and crateless owners must activate their Markdown prose. # Panics Panics only if fixture IO or planning fails, or the activation finding differs. |
-//! | [`explains_inactive_prose_and_clears_it_on_activation`] | layers | Activating prose restores its mints; an inactive owner without Markdown is harmless. # Panics Panics only if fixture IO or planning fails, or resolution differs from the contract. |
-//! | [`resolves_a_prefixed_crateless_owner_before_checking_reach`] | layers | A rendered crateless mint resolves before its declared reach is checked. # Panics Panics only if fixture IO, planning, resolution, or reach differs from the contract. |
+//! | [`does_not_report_owners_without_markdown`] | layers | Owners with no Markdown need no prose activation, even when they own other files. |
+//! | [`nested_prose_retains_other_policy_coverage`] | layers | Nested prose is exempt only under its declared root and remains in the burn census. |
+//! | [`refuses_invalid_nested_corpus_declarations`] | layers | A nested declaration must name an owner, a contained directory, a snapshot and a reason. |
+//! | [`non_participating_owners_retain_census_coverage`] | layers | Explicit upstream owners keep partition coverage while their unmodified prose is not harvested. |
+//! | [`non_participating_owner_declarations_refuse_contradictions`] | layers | Non-participating rows require a known unique owner, a reason and no label policy activation. |
+//! | [`reports_every_kind_of_inactive_prose_owner`] | layers | Root, crate-bearing, and crateless owners must activate their Markdown prose. |
+//! | [`explains_inactive_prose_and_clears_it_on_activation`] | layers | Activating prose restores its mints; an inactive owner without Markdown is harmless. |
+//! | [`resolves_a_prefixed_crateless_owner_before_checking_reach`] | layers | A rendered crateless mint resolves before its declared reach is checked. |
 //! | [`derives_reach_from_every_dependency_table`] | layers | Reach is read from the manifests and from all three dependency tables — ordinary, development and build — so a dependency declared for tests warrants a citation exactly as one declared for the build does. A `path` key outside a dependency table, such as a library target's, declares no edge. |
 //! | [`derives_an_inherited_workspace_path_dependency`] | layers | A member dependency inherited from the workspace derives the edge carried by the root workspace dependency's path. |
 //! | [`derives_no_edge_from_an_inherited_dependency_without_a_path`] | layers | A member dependency inherited from a non-path workspace dependency derives no reach edge. |
@@ -24,8 +26,8 @@
 //! | [`a_generated_import_instantiates_its_cited_owner_prerequisite`] | depend | A generated imported citation enters the cited-owner relation and therefore instantiates the dependency pair of the owner it names, carrying the register row as the first requiring location. |
 //! | [`refuses_a_sideways_import_across_no_edge`] | layers | A package importing a head of a package neither manifest names is refused, naming the citing location, the cited prefix, and the manifest edge whose absence refuses it. |
 //! | [`refuses_a_package_import_in_the_root_corpus_prose`] | layers | Repo-wide policy imports no package: the root corpus's prose carrying an import of a package prefix is refused even where the root's manifest reaches that package, because the rule is about the prose rather than about the crate. |
-//! | [`admits_an_imported_owner_in_the_root_corpus_prose_along_a_declared_row`] | layers | The root corpus's prose may cite an imported owner's published label when an explicit may-cite row takes on that owner; the registry resolves the citation and reach admits it. # Panics Panics only if the temporary fixture cannot be created, written, loaded, or its imported citation does not resolve and reach its declared owner. |
-//! | [`refuses_an_unreached_imported_owner_in_the_root_corpus_prose`] | layers | Without a declared row, the same resolved root-prose citation of an imported owner raises an unreached-import finding, not a policy import. The declared root identity is PROJECTA; the undeclared index identity does not replace the declaration in the finding. # Panics Panics only if the temporary fixture cannot be created, written, loaded, or its imported citation does not raise the expected reach finding. |
+//! | [`admits_an_imported_owner_in_the_root_corpus_prose_along_a_declared_row`] | layers | The root corpus's prose may cite an imported owner's published label when an explicit may-cite row takes on that owner; the registry resolves the citation and reach admits it. |
+//! | [`refuses_an_unreached_imported_owner_in_the_root_corpus_prose`] | layers | Without a declared row, the same resolved root-prose citation of an imported owner raises an unreached-import finding, not a policy import. The declared root identity is PROJECTA; the undeclared index identity does not replace the declaration in the finding. |
 //! | [`admits_a_reached_package_import_in_the_root_corpus_code`] | layers | The narrow converse is narrow: the root crate's own commentary may import a package it declares a dependency on, because what the rule closes is policy resting on a private premise, not the crate's code resting on its dependencies. |
 //! | [`refuses_an_import_of_a_registered_but_absent_owner`] | layers | A prefix registered against no workspace member is reachable by nobody: no manifest can declare a dependency on a crate the workspace does not build, so an import naming it is refused like any other unreached one. |
 //! | [`sees_nothing_at_a_displayed_import`] | layers | A displayed import commits nothing: an import form standing in a fenced block or a double-backtick span never reaches this pass, so a record may exhibit a violating label as evidence without committing one. |
@@ -678,6 +680,157 @@ fn activate_prose(root: &Path, owners: &[&str]) {
         ".linter/lists.toml",
         &format!("namespace = \"class.linter.lists\"\nversion = [1, 0, 0]\n{lists}"),
     );
+}
+
+fn declare_non_participating(root: &Path, rows: &str) {
+    let path = root.join(".linter/owners.toml");
+    let mut text = fs::read_to_string(&path).expect("owners");
+    writeln!(text, "non_participating = [{rows}]").expect("declaration");
+    fs::write(path, text).expect("non-participating declaration");
+}
+
+/// Explicit upstream owners keep partition coverage while their unmodified prose is not harvested.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the declaration weakens another owner's activation guard.
+/// ´claim:layers:non-participating-owners-retain-census-coverage´
+/// ´test:crate:non-participating-owners-retain-census-coverage´
+#[test]
+fn non_participating_owners_retain_census_coverage() {
+    let root = crateless_owner_fixture(true);
+    activate_prose(root.path(), &["CAS", "PROJECTA"]);
+    write(
+        root.path(),
+        "docs/design/reuse-concept.md",
+        "Unchanged upstream prose with an unpaired ` delimiter. See § 12.3.\n",
+    );
+    write(
+        root.path(),
+        "crates/cas/README.md",
+        "No upstream citation.\n",
+    );
+    declare_non_participating(
+        root.path(),
+        "{ owner = \"DOCS\", reason = \"Unchanged fixture upstream archive\" }",
+    );
+    let policies_path = root.path().join(".linter/policies.toml");
+    let policies = fs::read_to_string(&policies_path).expect("policies");
+    fs::write(
+        &policies_path,
+        policies.replace(
+            "policies = [",
+            "policies = [{ owner = \"DOCS\", policy = \"legacy.section-references\" },",
+        ),
+    )
+    .expect("activate non-label policy");
+    let lists_path = root.path().join(".linter/lists.toml");
+    let mut lists = fs::read_to_string(&lists_path).expect("lists");
+    lists.push_str("\n[DOCS.\"legacy.section-references\"]\npath_counts = []\n");
+    fs::write(lists_path, lists).expect("burn list");
+    write(
+        root.path(),
+        ".linter/policy-legacy-section-references.toml",
+        "namespace = \"class.linter.policy.legacy.section-references\"\nversion = [1, 0, 0]\n[owners.DOCS]\nprose = '%s\"docs/design/\" *VCHAR'\n",
+    );
+    let plan = crate::plan::ExecutionPlan::compile(
+        root.path(),
+        crate::snapshot::configuration(root.path()),
+    )
+    .expect("explicit upstream plan");
+    assert!(
+        !plan
+            .labels()
+            .source_paths()
+            .iter()
+            .any(|path| path.starts_with("docs")),
+        "upstream prose must not enter the label surface"
+    );
+    let (counts, findings) = crate::application::verify_configuration_with_plan(&plan, &[]);
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| matches!(finding, Finding::InactiveProseOwner { .. })),
+        "{findings:?}"
+    );
+    assert_eq!(
+        plan.topology().partition().owner(
+            &crate::pattern::BytePath::from_bytes(b"docs/design/reuse-concept.md".to_vec())
+                .expect("fixture path")
+        ),
+        Some("DOCS")
+    );
+    let report = serde_json::to_value(counts).expect("report");
+    assert_eq!(report["non_participating"][0]["owner"], "DOCS");
+    assert_eq!(
+        report["non_participating"][0]["reason"],
+        "Unchanged fixture upstream archive"
+    );
+    let checked = crate::application::check_with_plan(&plan);
+    assert!(
+        checked
+            .findings
+            .iter()
+            .any(|finding| matches!(finding.finding, Finding::BurnListGrowth { .. })),
+        "non-label policies still inspect upstream bytes"
+    );
+    activate_prose(root.path(), &["CAS"]);
+    let plan = crate::plan::ExecutionPlan::compile(
+        root.path(),
+        crate::snapshot::configuration(root.path()),
+    )
+    .expect("other inactive owner plan");
+    let (_, findings) = crate::application::verify_configuration_with_plan(&plan, &[]);
+    assert!(findings.iter().any(|finding| matches!(finding, Finding::InactiveProseOwner { owner, .. } if owner == "PROJECTA")));
+}
+
+/// Non-participating rows require a known unique owner, a reason and no label policy activation.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a contradictory declaration compiles.
+/// ´claim:layers:non-participating-owner-declarations-refuse-contradictions´
+/// ´test:crate:non-participating-owner-declarations-refuse-contradictions´
+#[test]
+fn non_participating_owner_declarations_refuse_contradictions() {
+    for (rows, active, reason) in [
+        (
+            "{ owner = \"UNKNOWN\", reason = \"Upstream\" }",
+            false,
+            "owner must be registered",
+        ),
+        (
+            "{ owner = \"DOCS\", reason = \" \" }",
+            false,
+            "reason must not be empty",
+        ),
+        (
+            "{ owner = \"DOCS\", reason = \"One\" }, { owner = \"DOCS\", reason = \"Two\" }",
+            false,
+            "owner must occur only once",
+        ),
+        (
+            "{ owner = \"DOCS\", reason = \"Upstream\" }",
+            true,
+            "owner must activate no labels.* policy",
+        ),
+        ("{ owner = \"DOCS\" }", false, "reason"),
+    ] {
+        let root = crateless_owner_fixture(true);
+        activate_prose(
+            root.path(),
+            if active {
+                &["CAS", "PROJECTA", "DOCS"]
+            } else {
+                &["CAS", "PROJECTA"]
+            },
+        );
+        declare_non_participating(root.path(), rows);
+        let errors = crate::plan::ExecutionPlan::compile(
+            root.path(),
+            crate::snapshot::configuration(root.path()),
+        )
+        .expect_err("invalid declaration");
+        assert!(format!("{errors:?}").contains(reason), "{errors:?}");
+    }
 }
 
 /// Root, crate-bearing, and crateless owners must activate their Markdown prose.

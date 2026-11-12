@@ -64,6 +64,46 @@ fn checked_exec_help(help: &str) -> Result<(), LaneError> {
     Ok(())
 }
 
+/// Bind planned options to the selected program's captured image help.
+pub(crate) fn check_backend_exec_probe(
+    backend: crate::settings::BoxBackend,
+    report: &Value,
+    runtime_argv: &Value,
+) -> Result<(), LaneError> {
+    if backend == crate::settings::BoxBackend::Codex {
+        return check_exec_probe(report, runtime_argv);
+    }
+    payload::check_claude_report(report, true)?;
+    let help = report["claude_exec_probe"]["stdout"]
+        .as_str()
+        .ok_or_else(|| LaneError::input("claude-exec-help", "captured Claude help is absent"))?;
+    let argv = runtime_argv
+        .as_array()
+        .ok_or_else(|| LaneError::input("claude-exec-help", "planned runtime vector is absent"))?;
+    let image = argv
+        .iter()
+        .position(|word| word == &report["image_digest"])
+        .ok_or_else(|| LaneError::input("claude-exec-help", "planned runtime image is absent"))?;
+    if argv.get(image + 1).and_then(Value::as_str) != Some("/home/worker/.local/bin/claude") {
+        return Err(LaneError::input(
+            "claude-exec-help",
+            "planned Claude program differs",
+        ));
+    }
+    for word in &argv[image + 2..] {
+        let word = word
+            .as_str()
+            .ok_or_else(|| LaneError::input("claude-exec-help", "runtime word is not text"))?;
+        if word.starts_with('-') && !exec_help_has_option(help, word) {
+            return Err(LaneError::input(
+                "claude-exec-help",
+                format!("planned Claude option {word} is absent from the pinned help"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn check_exec_probe(report: &Value, runtime_argv: &Value) -> Result<(), LaneError> {
     let probe = &report["codex_exec_probe"];
     let help = probe["stdout"].as_str().ok_or_else(|| {
@@ -348,6 +388,7 @@ pub(crate) struct ChildSpec {
     name: &'static str,
     inherited_fd: Option<i32>,
     private_directory_stdin: Option<Arc<OwnedFd>>,
+    capabilities: Option<loop_home::CommandDescriptors>,
     private_extra_fds: Vec<Arc<OwnedFd>>,
 }
 
@@ -663,10 +704,15 @@ fn run_child_with_end(
     } else if transfer.is_none() && input.is_some() {
         command.stdin(Stdio::piped());
     }
+    if let Some(capabilities) = &spec.capabilities {
+        capabilities
+            .configure(&mut command)
+            .map_err(|error| LaneError::operation(spec.name, error.to_string()))?;
+    }
     crate::launch::reaping::attach_command(&mut command)?;
-    let mut child = crate::fixture_exec::spawn(&mut command).map_err(|error| {
-        LaneError::operation(spec.name, format!("{}: {error}", spec.program.display()))
-    })?;
+    crate::container_entry::configure(&mut command, &spec.program, &spec.argv, &spec.environment)?;
+    let mut child = crate::fixture_exec::spawn(&mut command)
+        .map_err(|error| crate::container_entry::spawn_error(&spec.program, spec.name, &error))?;
     if let Some(stream) = transfer {
         let home = spec.private_directory_stdin.as_ref().ok_or_else(|| {
             LaneError::input("verified-prefix", "private home descriptor is absent")
@@ -923,6 +969,30 @@ pub(crate) fn run_checked(
     )
 }
 
+/// Keep the bounded lane runner while passing the composer's owned capabilities.
+pub(crate) fn run_checked_command(
+    request: &loop_home::CommandSpec,
+    environment: &BTreeMap<String, String>,
+    cwd: &Path,
+    timeout_seconds: u64,
+    name: &'static str,
+) -> Result<String, LaneError> {
+    let (program, argv) = request
+        .argv
+        .split_first()
+        .ok_or_else(|| LaneError::input(name, "empty command"))?;
+    let mut spec = child(
+        Path::new(program),
+        argv.to_vec(),
+        environment,
+        cwd,
+        timeout_seconds,
+        name,
+    );
+    spec.capabilities = Some(request.descriptors.clone());
+    checked_output(&spec, None)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_checked_with_private_launch(
     program: &Path,
@@ -936,6 +1006,49 @@ pub(crate) fn run_checked_with_private_launch(
     runs: &OwnedFd,
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<String, LaneError> {
+    if argv.get(2).is_some_and(|word| word == "_bind-reply") {
+        let request =
+            crate::launch::reply_entry::command(program, &argv, (cwd, home), (runs_root, runs))?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
+    if argv.get(2).is_some_and(|word| word == "_make-home") {
+        let letter = letter.ok_or_else(|| {
+            LaneError::input(
+                "creation-anchor",
+                "anchor-missing: operation=make-home purpose=letter-directory",
+            )
+        })?;
+        let request = crate::creation_entry::command(
+            program,
+            &argv,
+            (cwd, home),
+            (runs_root, runs),
+            letter,
+            None,
+        )?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
+    if argv.get(2).is_some_and(|word| word == "_prepare-runtime") {
+        let request = crate::runtime_entry::command(program, &argv, cwd, home, runs_root, runs)?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
+    if argv
+        .get(2..)
+        .is_some_and(crate::launch::reader_entry::handles)
+    {
+        let request = crate::launch::reader_entry::command(
+            program, &argv, cwd, home, runs_root, runs, letter,
+        )?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
+    if argv
+        .get(2..)
+        .is_some_and(crate::launch::exercise_entry::handles)
+    {
+        let request =
+            crate::launch::exercise_entry::command(program, &argv, cwd, home, runs_root, runs)?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
     let spec = child(program, argv, environment, cwd, timeout_seconds, name)
         .with_private_launch(home, runs_root, runs, letter)?;
     checked_output(&spec, None)
@@ -955,6 +1068,17 @@ pub(crate) fn run_checked_with_private_rotation(
     letter: (&Path, &OwnedFd),
     source: &OwnedFd,
 ) -> Result<String, LaneError> {
+    if argv.get(2).is_some_and(|word| word == "_make-home") {
+        let request = crate::creation_entry::command(
+            program,
+            &argv,
+            (cwd, home),
+            (runs_root, runs),
+            letter,
+            Some(source),
+        )?;
+        return run_checked_command(&request, environment, cwd, timeout_seconds, name);
+    }
     let spec = child(program, argv, environment, cwd, timeout_seconds, name)
         .with_private_launch(home, runs_root, runs, Some(letter))?
         .with_private_rotation_source(source)?;
@@ -974,6 +1098,19 @@ pub(crate) fn private_launch_preview(
     runs: &OwnedFd,
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<Value, LaneError> {
+    if argv.get(2).is_some_and(|word| word == "_make-home") {
+        let backend = crate::creation_entry::selected_backend(&argv[2..])?;
+        let mut preview = child(program, argv, environment, cwd, timeout_seconds, name).preview();
+        preview["anchor_manifest"] = crate::creation_entry::preview(backend);
+        preview["directory_transfer_socket_fd"] = json!(0);
+        return Ok(preview);
+    }
+    if argv.get(2).is_some_and(|word| word == "_prepare-runtime") {
+        let mut preview = child(program, argv, environment, cwd, timeout_seconds, name).preview();
+        preview["anchor_manifest"] = crate::runtime_entry::preview();
+        preview["directory_transfer_socket_fd"] = json!(0);
+        return Ok(preview);
+    }
     let spec = child(program, argv, environment, cwd, timeout_seconds, name)
         .with_private_launch(home, runs_root, runs, letter)?;
     Ok(spec.preview())
@@ -1035,6 +1172,7 @@ fn hash_spec(cwd: &Path) -> ChildSpec {
         name: "sha256sum",
         inherited_fd: None,
         private_directory_stdin: None,
+        capabilities: None,
         private_extra_fds: Vec::new(),
     }
 }
@@ -1045,7 +1183,27 @@ pub(crate) fn hash_preview(cwd: &Path) -> Value {
 
 fn hash_bytes(bytes: &[u8], spec: &ChildSpec) -> Result<String, LaneError> {
     crate::pinned::owner_executable(&spec.program, nix::unistd::Uid::effective().as_raw())
-        .map_err(|_error| {
+        .map_err(|error| {
+            // A held operation capability keeps its named anchor cause;
+            // the pathname route keeps its fixed remedy without kernel detail.
+            if matches!(
+                error.kind,
+                "container-anchor"
+                    | "runtime-anchor"
+                    | "creation-anchor"
+                    | "exercise-anchor"
+                    | "observation-anchor"
+                    | "driver-report-private"
+                    | "follow-private"
+                    | "import-private"
+                    | "round-private"
+                    | "rotate-private"
+                    | "checkpoint-private"
+                    | "checkout-private"
+                    | "harvest-private"
+            ) {
+                return error;
+            }
             LaneError::input(
                 "hash-pin",
                 "the hashing program must be an owner-controlled regular executable reached without symlinks; run superloop-lane on the host with that pin",
@@ -1243,6 +1401,7 @@ pub(crate) fn child(
         name,
         inherited_fd: None,
         private_directory_stdin: None,
+        capabilities: None,
         private_extra_fds: Vec::new(),
     }
 }
@@ -2108,6 +2267,38 @@ mod tests {
             .expect("closed and synced fixture script");
     }
 
+    /// # Panics
+    /// Panics if reply dispatch falls back to the retired two-descriptor launcher.
+    /// ´test:unit:reply-dispatch-requires-capability-vector´
+    #[test]
+    fn reply_dispatch_requires_capability_vector() {
+        let root = tempfile::tempdir().expect("root");
+        let fd = std::fs::File::open(root.path()).expect("directory").into();
+        let error = super::run_checked_with_private_launch(
+            std::path::Path::new("/usr/bin/false"),
+            vec![
+                "unshare".into(),
+                "/usr/bin/false".into(),
+                "_bind-reply".into(),
+            ],
+            &std::collections::BTreeMap::new(),
+            root.path(),
+            10,
+            "reply-dispatch",
+            &fd,
+            root.path(),
+            &fd,
+            None,
+        )
+        .expect_err("incomplete frame");
+        assert!(
+            error
+                .detail
+                .contains("anchor-declaration: operation=mail-binding purpose=vector"),
+            "{error:?}"
+        );
+    }
+
     /// ´test:unit:door-listener-handoff-does-not-inherit-on-exec´
     #[test]
     fn door_listener_handoff_does_not_inherit_on_exec() {
@@ -2125,6 +2316,7 @@ mod tests {
             name: "door-handoff-fixture",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         }
         .with_private_door_listener(&directory, &listener)
@@ -2172,6 +2364,7 @@ done
             name: "private-directory-stdin-fixture",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         }
         .with_private_directory(&directory)
@@ -2212,6 +2405,7 @@ done
             name: "install-handoff-fixture",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         }
         .with_private_door_directories(
@@ -2851,6 +3045,7 @@ done
             name: "fixture-child",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         };
         executable(&program, "head -c 2097153 /dev/zero");
@@ -2916,6 +3111,7 @@ done
             name: "container-stop",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         };
         let holder = HeldWriterGuard::new();
@@ -3000,6 +3196,7 @@ done
             name: "image-build",
             inherited_fd: None,
             private_directory_stdin: None,
+            capabilities: None,
             private_extra_fds: Vec::new(),
         };
         let log = temp.path().join("image-build.log");

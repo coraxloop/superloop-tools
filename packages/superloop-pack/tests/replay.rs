@@ -1,4 +1,4 @@
-//! Built-binary replay metadata, deterministic mapping and no-write refusals.
+//! Built-binary cut and replay contracts, deterministic mapping and no-write refusals.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,7 @@ rows = [{pattern = "public-set.toml"}, {pattern = ".linter/"}, {pattern = "LICEN
 [exclude]
 rows = [{pattern = "private.txt", reason = "Private fixture."}]
 [public]
+unpublished = "docs/public/unpublished-labels.toml"
 name = "replay-fixture"
 readme = "docs/readme.txt"
 licence_code = "LICENSE-CODE"
@@ -277,6 +278,85 @@ fn report(output: Output) -> serde_json::Value {
     );
     let text = String::from_utf8(output.stdout).expect("report text");
     serde_json::from_str(text.lines().next().expect("report line")).expect("JSON")
+}
+
+/// Replay projects a large committed tree with bounded Git batches and unchanged blob identities.
+///
+/// # Panics
+/// Panics only if fixture IO fails, replay changes blobs or its Git calls scale per file.
+/// ´test:integration:replay-batches-projection-git-operations´
+#[test]
+fn replay_batches_projection_git_operations() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.source.join("public/bulk")).expect("bulk directory");
+    for index in 0..128 {
+        fs::write(
+            fixture.source.join(format!("public/bulk/{index:03}.bin")),
+            [0, index, 255, b'\n'],
+        )
+        .expect("binary source");
+    }
+    fixture.commit("public/file.txt", "bulk projection\n", "Bulk files\n");
+    let original = line(&fixture.out, &["rev-parse", "HEAD:public/file.txt"]);
+    let replacement = fixture.scratch.join("replacement-blob");
+    fs::write(&replacement, b"unrelated replacement bytes").expect("replacement bytes");
+    let replacement_oid = line(
+        &fixture.out,
+        &[
+            "hash-object",
+            "-w",
+            replacement.to_str().expect("fixture path"),
+        ],
+    );
+    git(&fixture.out, &["replace", &original, &replacement_oid]);
+    let trace = fixture.scratch.join("git-trace.json");
+    let result = report(
+        fixture
+            .replay(&fixture.out)
+            .env("GIT_TRACE2_EVENT", &trace)
+            .output()
+            .expect("traced replay"),
+    );
+    assert_eq!(result["mapping"].as_array().expect("mapping").len(), 1);
+    assert_eq!(
+        git(
+            &fixture.out,
+            &["ls-tree", "-r", "-z", "HEAD", "--", "public/bulk"]
+        ),
+        git(
+            &fixture.source,
+            &["ls-tree", "-r", "-z", "HEAD", "--", "public/bulk"]
+        )
+    );
+    let starts: Vec<Vec<String>> = fs::read_to_string(trace)
+        .expect("trace")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("trace JSON"))
+        .filter(|row| row["event"] == "start")
+        .map(|row| {
+            row["argv"]
+                .as_array()
+                .expect("argv")
+                .iter()
+                .map(|v| v.as_str().expect("argument").to_owned())
+                .collect()
+        })
+        .collect();
+    let count = |op: &str| {
+        starts
+            .iter()
+            .filter(|args| args.iter().any(|arg| arg == op))
+            .count()
+    };
+    assert!((1..16).contains(&count("hash-object")));
+    assert!((1..16).contains(&count("update-index")));
+    assert_eq!(
+        starts
+            .iter()
+            .filter(|args| args.windows(2).any(|pair| pair == ["cat-file", "blob"]))
+            .count(),
+        0
+    );
 }
 
 /// Original metadata survives a deterministic replay and excluded-only commits skip.
@@ -916,6 +996,97 @@ fn historical_publication_name_is_preserved() {
     assert!(final_manifest.contains("name = \"renamed-fixture\""));
 }
 
+/// A malformed historical manifest cannot borrow the repaired tip's policy.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a refused history changes the public destination.
+/// ´test:integration:malformed-historical-manifest-refuses-before-publication´
+#[test]
+fn malformed_historical_manifest_refuses_before_publication() {
+    let fixture = Fixture::new();
+    fixture.commit(
+        "public-set.toml",
+        "invalid [\n",
+        "Malformed historical manifest\n",
+    );
+    fixture.commit("public-set.toml", MANIFEST, "Repair final manifest\n");
+    fixture.unchanged_refusal("invalid historical manifest");
+    fixture.unchanged_refusal("check=manifest source ordinal=1");
+}
+
+/// Generated drift paths are burn-scanned before a refusal can print a private path.
+///
+/// # Panics
+/// Panics only if fixture IO fails or drift handling writes output or discloses a private value.
+/// ´test:integration:generated-drift-paths-retain-the-burn-guard´
+#[test]
+fn generated_drift_paths_retain_the_burn_guard() {
+    let mut fixture = Fixture::new();
+    fixture.commit("private.txt", "excluded change\n", "Excluded only\n");
+    fs::write(fixture.out.join("forbidden-value.txt"), "safe\n").expect("drift");
+    git(&fixture.out, &["add", "."]);
+    git(
+        &fixture.out,
+        &["commit", "--no-gpg-sign", "-m", "Published drift"],
+    );
+    fixture.public_root = line(&fixture.out, &["rev-parse", "HEAD"]);
+    fixture.unchanged_refusal("source ordinal 0 field path match kind substring");
+    fixture.unchanged_refusal("check=burn scan");
+}
+
+/// Unpublished owner and path-class audit failures map to their declared register destination.
+///
+/// # Panics
+/// Panics only if fixture IO fails or audit evidence loses the field, path or refusal boundary.
+/// ´test:integration:unpublished-audit-maps-owner-and-path-class´
+#[test]
+fn unpublished_audit_maps_owner_and_path_class() {
+    for (field, needle) in [("owner", "PROJECTA"), ("path_class", "private.md")] {
+        let fixture = Fixture::new();
+        let path = "docs/public/custom-labels.toml";
+        let manifest = MANIFEST
+            .replace("docs/public/unpublished-labels.toml", path)
+            .replace(
+                "[exclude]\nrows = [",
+                "[exclude]\nrows = [{pattern = \"private.md\", reason = \"Private definition.\"}, ",
+            );
+        fs::write(fixture.source.join("public-set.toml"), manifest).expect("manifest");
+        fs::write(
+            fixture.source.join("private.md"),
+            "# Private · `sec:fixture:private`\n",
+        )
+        .expect("private mint");
+        let oid = fixture.commit(
+            "docs/guide.md",
+            "# Guide · `guide:fixture:public`\n\nSee (`sec:fixture:private`).\n",
+            "Audited citation\n",
+        );
+        fs::write(
+            &fixture.burn,
+            format!("[[values]]\nvalue = {needle:?}\nmatch = \"substring\"\n"),
+        )
+        .expect("audit register");
+        let expected = format!("source ordinal 1 field unpublished.{field} match kind substring");
+        fixture.unchanged_refusal(&expected);
+        let output = fixture
+            .replay(&fixture.out)
+            .output()
+            .expect("audit refusal");
+        assert_eq!(output.status.code(), Some(3));
+        let text = String::from_utf8(output.stdout).expect("report");
+        let result: serde_json::Value =
+            serde_json::from_str(text.lines().next().expect("JSON report")).expect("JSON");
+        let current = &result["validation"]["current"];
+        assert_eq!(current["check"], "burn scan");
+        assert_eq!(current["field"], format!("unpublished.{field}"));
+        assert_eq!(current["path"], path);
+        assert_eq!(current["commit"], oid);
+        assert_eq!(current["ordinal"], 1);
+        assert_eq!(current["matcher_kind"], "substring");
+        assert_eq!(current["register_kind"], "values");
+    }
+}
+
 /// Missing manifests and unclassified historical paths cannot borrow a later policy.
 ///
 /// # Panics
@@ -1130,6 +1301,63 @@ fn historical_citations_use_their_own_commit() {
     assert!(!fixture.out.join("private.md").exists());
 }
 
+/// A final declaration does not backfill a historical manifest's missing register declaration.
+///
+/// # Panics
+/// Panics only if fixture IO fails or historical register admission differs from its declaration.
+/// ´test:integration:historical-register-declaration-does-not-fall-back´
+#[test]
+fn historical_register_declaration_does_not_fall_back() {
+    for declared_history in [false, true] {
+        let fixture = Fixture::new();
+        let declared = MANIFEST.replace(
+            "[exclude]\nrows = [",
+            "[exclude]\nrows = [{pattern = \"private.md\", reason = \"Private definition.\"}, ",
+        );
+        let historical = if declared_history {
+            declared.clone()
+        } else {
+            declared.replace(
+                "unpublished = \"docs/public/unpublished-labels.toml\"\n",
+                "",
+            )
+        };
+        fs::write(fixture.source.join("public-set.toml"), historical).expect("historical manifest");
+        fs::write(
+            fixture.source.join("private.md"),
+            "# Private definition · `sec:private:earlier`\n",
+        )
+        .expect("private definition");
+        let guide =
+            "# Public guide · `guide:replay:public-guide`\n\nSee (`sec:private:earlier`).\n";
+        fixture.commit("docs/guide.md", guide, "Historical citation\n");
+        fs::write(
+            fixture.source.join("docs/guide.md"),
+            format!("{guide}\nFinal text.\n"),
+        )
+        .expect("final guide");
+        fixture.commit("public-set.toml", &declared, "Declare final register\n");
+        if declared_history {
+            let result = report(fixture.replay(&fixture.out).output().expect("replay"));
+            let first = result["mapping"][0]["public_commit"]
+                .as_str()
+                .expect("first");
+            assert!(
+                line(
+                    &fixture.out,
+                    &[
+                        "show",
+                        &format!("{first}:docs/public/unpublished-labels.toml")
+                    ]
+                )
+                .contains("sec:private:earlier")
+            );
+        } else {
+            fixture.unchanged_refusal("check=projection source ordinal=1");
+        }
+    }
+}
+
 /// Final-bound omissions still produce audited historical citation snapshots.
 ///
 /// # Panics
@@ -1222,4 +1450,553 @@ fn declare_linter(source: &Path) {
         .expect("declaration bytes");
     }
     fs::write(declaration.join("policy-public-pack-values.toml"), "namespace = \"class.linter.policy.public-pack.values-absent\"\nversion = [1, 0, 0]\n[owners.PROJECTA]\nactivation = \"public-pack\"\nsurface = \"*VCHAR\"\nvalues = \"local/burn-register.toml\"\nexclude = '%s\"local\" [ \"/\" *VCHAR ]'\n").expect("burn policy");
+}
+
+/// Register planning and owner rewriting use tag blobs despite worktree changes after preflight.
+///
+/// # Panics
+/// Panics only if fixture IO fails or worktree bytes alter the committed public projection.
+/// ´test:integration:register-planning-uses-tag-blobs-after-preflight´
+#[test]
+fn register_planning_uses_tag_blobs_after_preflight() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.source.join("hidden")).expect("hidden definitions");
+    let manifest = MANIFEST.replace("reason = \"Private fixture.\"}]", "reason = \"Private fixture.\"}, {pattern = \"hidden/\", reason = \"Hidden fixture declarations.\"}]");
+    fixture.commit(
+        "hidden/definition.md",
+        "# Hidden · `sec:fixture:hidden`\n",
+        "Hidden definition\n",
+    );
+    fixture.commit(
+        "docs/citation.md",
+        "# Public · `sec:fixture:public`\n\nSee (`sec:fixture:hidden`).\n",
+        "Public citation\n",
+    );
+    fixture.commit(
+        "public-set.toml",
+        &manifest,
+        "Classify hidden definitions\n",
+    );
+    let control = fixture.scratch.join("tag-control");
+    let result = manifest_cut(&fixture, &control);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    let register = "docs/public/unpublished-labels.toml";
+    assert!(
+        fs::read_to_string(control.join(register))
+            .expect("control register")
+            .contains("sec:fixture:hidden")
+    );
+    let wrapper = fixture.scratch.join("change-worktree");
+    fs::write(&wrapper, "#!/bin/sh\n[ \"$3\" != \"$SOURCE_ROOT\" ] || exit 90\nprintf 'invalid [' > \"$SOURCE_ROOT/.linter/owners.toml\"\nprintf changed > \"$SOURCE_ROOT/hidden/definition.md\"\nprintf changed > \"$SOURCE_ROOT/docs/citation.md\"\nexec \"$REAL_LINTER\" \"$@\"\n").expect("wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("wrapper mode");
+    let out = fixture.scratch.join("tag-projection");
+    let output = manifest_cut_command(&fixture, &out)
+        .arg("--linter")
+        .arg(&wrapper)
+        .env("SOURCE_ROOT", &fixture.source)
+        .env(
+            "REAL_LINTER",
+            std::env::var_os("PUBLIC_PACK_TEST_LINTER").expect("real linter"),
+        )
+        .output()
+        .expect("cut during worktree mutation");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.source.join(".linter/owners.toml")).expect("mutated source"),
+        "invalid ["
+    );
+    assert_eq!(
+        fs::read(out.join(register)).expect("register"),
+        fs::read(control.join(register)).expect("control register")
+    );
+    assert_eq!(
+        fs::read(out.join(".linter/owners.toml")).expect("snapshot"),
+        fs::read(control.join(".linter/owners.toml")).expect("control snapshot")
+    );
+    assert_eq!(
+        line(&out, &["rev-parse", "HEAD^{tree}"]),
+        line(&control, &["rev-parse", "HEAD^{tree}"])
+    );
+}
+
+/// The manifest chooses the generated register destination and the snapshot follows it.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the cut loses the declared register binding.
+/// ´test:integration:manifest-register-destination-binds-the-snapshot´
+#[test]
+fn manifest_register_destination_binds_the_snapshot() {
+    let fixture = Fixture::new();
+    let path = "docs/public/citation-register.toml";
+    let manifest = MANIFEST.replace("docs/public/unpublished-labels.toml", path);
+    fixture.commit("public-set.toml", &manifest, "Declare custom register\n");
+    let out = fixture.scratch.join("custom-cut");
+    let result = manifest_cut(&fixture, &out);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(out.join(path).is_file());
+    assert!(!out.join("docs/public/unpublished-labels.toml").exists());
+    let owners: toml::Value =
+        toml::from_str(&fs::read_to_string(out.join(".linter/owners.toml")).expect("owners"))
+            .expect("owner TOML");
+    let manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(out.join("public-set.toml")).expect("manifest"))
+            .expect("manifest TOML");
+    assert_eq!(owners["unpublished"].as_str(), Some(path));
+    assert_eq!(manifest["public"]["unpublished"].as_str(), Some(path));
+    let check = Command::new(std::env::var_os("PUBLIC_PACK_TEST_LINTER").expect("real linter"))
+        .args(["check", "--root"])
+        .arg(&out)
+        .arg("--public-pack")
+        .arg("--burn-input")
+        .arg(&fixture.burn)
+        .output()
+        .expect("check generated snapshot");
+    assert!(
+        check.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    report(
+        fixture
+            .replay(&fixture.out)
+            .output()
+            .expect("replay custom destination"),
+    );
+    assert!(fixture.out.join(path).is_file());
+    assert!(
+        !fixture
+            .out
+            .join("docs/public/unpublished-labels.toml")
+            .exists()
+    );
+}
+
+/// A silent manifest emits no register and refuses source register declarations or excluded definitions.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an undeclared register is generated or required evidence is lost.
+/// ´test:integration:manifest-register-absence-is-explicit´
+#[test]
+fn manifest_register_absence_is_explicit() {
+    let fixture = Fixture::new();
+    let manifest = MANIFEST.replace(
+        "unpublished = \"docs/public/unpublished-labels.toml\"\n",
+        "",
+    );
+    fixture.commit("public-set.toml", &manifest, "No register\n");
+    let out = fixture.scratch.join("no-register");
+    let result = manifest_cut(&fixture, &out);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(!out.join("docs/public/unpublished-labels.toml").exists());
+    let owners: toml::Value =
+        toml::from_str(&fs::read_to_string(out.join(".linter/owners.toml")).expect("owners"))
+            .expect("owner TOML");
+    assert!(owners.get("unpublished").is_none());
+    let owner_path = fixture.source.join(".linter/owners.toml");
+    let original_owners = fs::read_to_string(&owner_path).expect("source owners");
+    for (register, policy) in [
+        ("docs/source-register.toml", manifest.clone()),
+        (
+            "private-register.toml",
+            manifest.replace(
+                "[exclude]\nrows = [",
+                "[exclude]\nrows = [{pattern = \"private-register.toml\", reason = \"Private register.\"}, ",
+            ),
+        ),
+    ] {
+        fs::write(
+            &owner_path,
+            format!("unpublished = {register:?}\n{original_owners}"),
+        )
+        .expect("source register declaration");
+        fs::write(
+            fixture.source.join(register),
+            "namespace = \"class.linter.unpublished-labels\"\nversion = [1, 0, 0]\nlabels = []\n",
+        )
+        .expect("source register");
+        fixture.commit("public-set.toml", &policy, "Source register without manifest declaration\n");
+        let refused = fixture.scratch.join(format!("source-register-refused-{}", register.starts_with("docs/")));
+        let result = manifest_cut(&fixture, &refused);
+        assert_eq!(result.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&result.stdout)
+            .contains("owner snapshot unpublished field requires public.unpublished"));
+        assert!(!refused.exists());
+        fs::remove_file(fixture.source.join(register)).expect("remove source register");
+    }
+    fs::write(&owner_path, original_owners).expect("restore owners");
+    fs::write(
+        fixture.source.join("public-set.toml"),
+        manifest.replace(
+            "[exclude]\nrows = [",
+            "[exclude]\nrows = [{pattern = \"private.md\", reason = \"Private definition.\"}, ",
+        ),
+    )
+    .expect("exclude definition");
+    fs::write(
+        fixture.source.join("private.md"),
+        "# Private · `sec:private:definition`\n",
+    )
+    .expect("private mint");
+    fixture.commit(
+        "docs/guide.md",
+        "# Guide · `guide:public:guide`\n\nSee (`sec:private:definition`).\n",
+        "Require register\n",
+    );
+    let refused = fixture.scratch.join("refused-cut");
+    let result = manifest_cut(&fixture, &refused);
+    assert_eq!(result.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&result.stdout)
+            .contains("excluded-definition citations require public.unpublished")
+    );
+    assert!(!refused.exists());
+}
+
+/// Register paths cannot replace selected ordinary files, manifests, or directory entries.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a conflicting register destination is admitted.
+/// ´test:integration:manifest-register-collisions-refuse-before-publication´
+#[test]
+fn manifest_register_collisions_refuse_before_publication() {
+    for (path, reason) in [
+        ("public/file.txt", "overwrite a selected non-register file"),
+        ("public/link", "must replace a regular register file"),
+        (
+            "public/file.txt/labels.toml",
+            "conflicts with a selected path",
+        ),
+        ("public", "conflicts with a selected path"),
+        ("public-set.toml", "cannot replace the manifest"),
+    ] {
+        let fixture = Fixture::new();
+        if path == "public/link" {
+            std::os::unix::fs::symlink("file.txt", fixture.source.join(path))
+                .expect("selected symlink");
+        }
+        fixture.commit(
+            "public-set.toml",
+            &MANIFEST.replace("docs/public/unpublished-labels.toml", path),
+            "Conflicting register\n",
+        );
+        let out = fixture.scratch.join("refused-cut");
+        let result = manifest_cut(&fixture, &out);
+        assert_eq!(result.status.code(), Some(3), "{path}");
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains(reason),
+            "{path}: {}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        assert!(!out.exists());
+    }
+}
+
+fn manifest_cut(fixture: &Fixture, out: &Path) -> Output {
+    manifest_cut_command(fixture, out)
+        .arg("--linter")
+        .arg(std::env::var_os("PUBLIC_PACK_TEST_LINTER").expect("real linter"))
+        .output()
+        .expect("manifest cut")
+}
+
+fn manifest_cut_command(fixture: &Fixture, out: &Path) -> Command {
+    let tag = format!(
+        "manifest-{}",
+        out.file_name()
+            .expect("output name")
+            .to_str()
+            .expect("UTF-8")
+    );
+    git(&fixture.source, &["tag", &tag]);
+    let mut command = pack(&fixture.source);
+    command
+        .args([
+            "cut",
+            "--tag",
+            &tag,
+            "--manifest",
+            "public-set.toml",
+            "--author",
+            "Publisher <publisher@example.com>",
+            "--out",
+        ])
+        .arg(out)
+        .arg("--burn-register")
+        .arg(&fixture.burn);
+    command
+}
+
+fn citation_probe(fixture: &Fixture) -> String {
+    let output = Command::new(std::env::var_os("PUBLIC_PACK_TEST_LINTER").expect("real linter"))
+        .args(["citation-sites", "--root"])
+        .arg(&fixture.source)
+        .output()
+        .expect("citation probe");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("citation protocol text");
+    let observed: serde_json::Value =
+        serde_json::from_str(&text).expect("recorded citation protocol");
+    assert!(observed.is_object());
+    text
+}
+
+fn citation_transport(fixture: &Fixture, payload: &str, status: u8) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = fixture.scratch.join("citation-transport");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n[ \"$#\" -eq 3 ] && [ \"$1\" = citation-sites ] && [ \"$2\" = --root ] && [ -d \"$3/.git\" ] || exit 90\ncat <<'CITATION_FIXTURE'\n{}\nCITATION_FIXTURE\nprintf '%s\\n' fixture-linter-stderr >&2\nexit {status}\n",
+            payload.trim_end()
+        ),
+    )
+    .expect("fixture transport");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("executable transport");
+    path
+}
+
+fn cut_route_refusal(fixture: &Fixture, linter: Option<&Path>, expected: &str) -> String {
+    let out = fixture.scratch.join("refused-route");
+    let mut command = manifest_cut_command(fixture, &out);
+    command.env("TMPDIR", &fixture.scratch);
+    if let Some(linter) = linter {
+        command.arg("--linter").arg(linter);
+    }
+    let refs = git(&fixture.source, &["show-ref"]);
+    let state = git(&fixture.source, &["status", "--porcelain=v1", "--ignored"]);
+    let output = command.output().expect("cut refusal");
+    let text = String::from_utf8(output.stdout).expect("cut report");
+    assert_eq!(output.status.code(), Some(3), "{text}");
+    assert!(text.contains(expected), "{text}");
+    assert!(!out.exists());
+    assert_eq!(git(&fixture.source, &["show-ref"]), refs);
+    assert_eq!(
+        git(&fixture.source, &["status", "--porcelain=v1", "--ignored"]),
+        state
+    );
+    text
+}
+
+/// A cut requiring citation sites refuses an absent linter before publication.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the built cut accepts a missing linter or changes output.
+/// ´test:integration:cut-route-refuses-missing-linter´
+#[test]
+fn cut_route_refuses_missing_linter() {
+    let fixture = Fixture::new();
+    cut_route_refusal(&fixture, None, "unpublished labels require --linter");
+}
+
+/// A failed citation executable retains its stdout and stderr and refuses before publication.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the cut loses diagnostics or changes output on refusal.
+/// ´test:integration:cut-route-refuses-failed-linter´
+#[test]
+fn cut_route_refuses_failed_linter() {
+    let fixture = Fixture::new();
+    let observed = citation_probe(&fixture);
+    let linter = citation_transport(&fixture, &observed, 7);
+    let report = cut_route_refusal(&fixture, Some(&linter), "citation-sites linter refused");
+    let path = report
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("cut outcome=")
+                .and_then(|line| line.split_once("diagnostic scratch=").map(|(_, path)| path))
+        })
+        .expect("retained diagnostic path");
+    assert!(Path::new(path).starts_with(&fixture.scratch), "{report}");
+    assert_eq!(
+        fs::read_to_string(Path::new(path).join("citation-sites.stdout")).expect("stdout"),
+        format!("{}\n", observed.trim_end())
+    );
+    assert_eq!(
+        fs::read_to_string(Path::new(path).join("citation-sites.stderr")).expect("stderr"),
+        "fixture-linter-stderr\n"
+    );
+}
+
+/// A successful executable with truncated measured citation JSON refuses before publication.
+///
+/// # Panics
+/// Panics only if fixture IO fails or malformed protocol bytes are accepted or change output.
+/// ´test:integration:cut-route-refuses-malformed-json´
+#[test]
+fn cut_route_refuses_malformed_json() {
+    let fixture = Fixture::new();
+    let observed = citation_probe(&fixture);
+    let observed = observed.trim_end();
+    assert!(observed.ends_with('}'));
+    let linter = citation_transport(&fixture, &observed[..observed.len() - 1], 0);
+    cut_route_refusal(&fixture, Some(&linter), "invalid citation-sites JSON");
+}
+
+/// A hung citation executable refuses at the production deadline without publication.
+///
+/// # Panics
+/// Panics only if fixture IO fails, the bound is outlived, or diagnostics or output change.
+/// ´test:integration:cut-route-refuses-a-hung-linter´
+#[test]
+fn cut_route_refuses_a_hung_linter() {
+    let fixture = Fixture::new();
+    let observed = citation_probe(&fixture);
+    let linter = citation_transport(&fixture, &observed, 0);
+    let script = fs::read_to_string(&linter).expect("transport script");
+    fs::write(&linter, script.replace("exit 0\n", "exec /bin/sleep 300\n"))
+        .expect("hung transport");
+    let started = std::time::Instant::now();
+    let report = cut_route_refusal(
+        &fixture,
+        Some(&linter),
+        "citation-sites linter timed out after 120 s",
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(180),
+        "deadline did not bound invocation"
+    );
+    let diagnostic = report
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("cut outcome=")
+                .and_then(|line| line.split_once("diagnostic scratch=").map(|(_, path)| path))
+        })
+        .expect("retained diagnostics");
+    assert!(
+        Path::new(diagnostic).starts_with(&fixture.scratch),
+        "{report}"
+    );
+    assert_eq!(
+        fs::read_to_string(Path::new(diagnostic).join("citation-sites.stdout")).expect("stdout"),
+        format!("{}\n", observed.trim_end())
+    );
+    assert_eq!(
+        fs::read_to_string(Path::new(diagnostic).join("citation-sites.stderr")).expect("stderr"),
+        "fixture-linter-stderr\n"
+    );
+}
+
+/// Unknown citation namespaces and versions refuse even when the executable returns valid JSON.
+///
+/// # Panics
+/// Panics only if fixture IO fails or an unknown protocol is accepted or changes output.
+/// ´test:integration:cut-route-refuses-unknown-protocol´
+#[test]
+fn cut_route_refuses_unknown_protocol() {
+    for field in ["namespace", "version"] {
+        let fixture = Fixture::new();
+        let observed = citation_probe(&fixture);
+        let mut document: serde_json::Value =
+            serde_json::from_str(&observed).expect("measured JSON");
+        document[field] = if field == "namespace" {
+            serde_json::json!("class.fixture.unknown-citation-sites")
+        } else {
+            serde_json::json!([99, 0, 0])
+        };
+        let linter = citation_transport(&fixture, &document.to_string(), 0);
+        cut_route_refusal(&fixture, Some(&linter), "unknown citation-sites protocol");
+    }
+}
+
+/// A generated register cannot be declared without a selected owner snapshot.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a register without its owner snapshot is published.
+/// ´test:integration:manifest-register-requires-a-selected-snapshot´
+#[test]
+fn manifest_register_requires_a_selected_snapshot() {
+    let fixture = Fixture::new();
+    let manifest = MANIFEST.replace("{pattern = \".linter/\"}, ", "").replace(
+        "[exclude]\nrows = [",
+        "[exclude]\nrows = [{pattern = \".linter/\", reason = \"Omit snapshot.\"}, ",
+    );
+    fixture.commit("public-set.toml", &manifest, "Exclude snapshot\n");
+    let out = fixture.scratch.join("no-snapshot");
+    let result = manifest_cut(&fixture, &out);
+    assert_eq!(result.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&result.stdout)
+            .contains("public.unpublished requires a selected owner snapshot")
+    );
+    assert!(!out.exists());
+}
+
+/// A replay cannot silently drop a register required by its historical snapshot.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a final bound removes a required register.
+/// ´test:integration:manifest-register-obeys-the-final-bound´
+#[test]
+fn manifest_register_obeys_the_final_bound() {
+    let fixture = Fixture::new();
+    let manifest = MANIFEST.replace("{pattern = \"docs/\"}", "{pattern = \"docs/readme.txt\"}");
+    fixture.commit("public-set.toml", &manifest, "Exclude generated register\n");
+    fixture.unchanged_refusal("field=public.unpublished path=docs/public/unpublished-labels.toml");
+}
+
+/// Replay audit evidence names the manifest's register path for a refused unpublished label.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the audit reports a different register path.
+/// ´test:integration:manifest-register-audit-names-the-declared-path´
+#[test]
+fn manifest_register_audit_names_the_declared_path() {
+    let fixture = Fixture::new();
+    let path = "docs/public/custom-labels.toml";
+    let manifest = MANIFEST
+        .replace("docs/public/unpublished-labels.toml", path)
+        .replace(
+            "[exclude]\nrows = [",
+            "[exclude]\nrows = [{pattern = \"private.md\", reason = \"Private definition.\"}, ",
+        );
+    fs::write(fixture.source.join("public-set.toml"), manifest).expect("manifest");
+    fs::write(
+        fixture.source.join("private.md"),
+        "# Private · `sec:private:forbidden-value`\n",
+    )
+    .expect("private mint");
+    fixture.commit(
+        "docs/guide.md",
+        "# Guide · `guide:public:guide`\n\nSee (`sec:private:forbidden-value`).\n",
+        "Audited citation\n",
+    );
+    let output = fixture
+        .replay(&fixture.out)
+        .output()
+        .expect("replay refusal");
+    assert_eq!(output.status.code(), Some(3));
+    let text = String::from_utf8(output.stdout).expect("report text");
+    let report: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("report")).expect("JSON");
+    let current = &report["validation"]["current"];
+    assert_eq!(current["check"], "burn scan");
+    assert_eq!(current["field"], "unpublished.label");
+    assert_eq!(current["path"], path);
+    assert_eq!(current["matcher_kind"], "substring");
+    assert_eq!(
+        line(&fixture.out, &["rev-parse", "HEAD"]),
+        fixture.public_root
+    );
 }

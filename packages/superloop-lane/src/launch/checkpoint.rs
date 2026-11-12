@@ -68,6 +68,42 @@ pub fn private_checkpoint_argv(
     Ok(argv)
 }
 
+pub(crate) fn parse_private_argv(args: &[String]) -> Result<(CheckpointRequest, &Path), LaneError> {
+    let [_, loop_name, run, home_flag, owner_home, rest @ ..] = args else {
+        return Err(LaneError::input(
+            "checkpoint-private",
+            "private checkpoint form is incomplete",
+        ));
+    };
+    if home_flag != "--owner-home" {
+        return Err(LaneError::input(
+            "checkpoint-private",
+            "private checkpoint form is invalid",
+        ));
+    }
+    let (token, dry_run) = match rest {
+        [] => (None, false),
+        [dry] if dry == "--dry-run" => (None, true),
+        [flag, token] if flag == "--token" => (Some(token.clone()), false),
+        [flag, token, dry] if flag == "--token" && dry == "--dry-run" => {
+            (Some(token.clone()), true)
+        }
+        _ => {
+            return Err(LaneError::input(
+                "checkpoint-private",
+                "private checkpoint form is invalid",
+            ));
+        }
+    };
+    let mut words = vec![loop_name.clone(), run.clone()];
+    if dry_run {
+        words.push("--dry-run".to_owned());
+    }
+    let mut request = CheckpointRequest::parse(&words)?;
+    request.invocation_token = token;
+    Ok((request, Path::new(owner_home)))
+}
+
 impl CheckpointRequest {
     /// Parse one checkpoint request.
     ///
@@ -271,15 +307,28 @@ fn make_directory(
 }
 
 pub(super) fn digest(fd: &OwnedFd, path: &Path) -> Result<String, LaneError> {
-    let mut child = Command::new("/usr/bin/sha256sum")
+    let mut command = Command::new("/usr/bin/sha256sum");
+    command
         .arg("-")
         .env_clear()
         .env("LC_ALL", "C")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| refused("checkpoint-digest", path, error))?;
+        .stderr(Stdio::null());
+    crate::container_entry::configure(
+        &mut command,
+        Path::new("/usr/bin/sha256sum"),
+        &["-".into()],
+        &BTreeMap::from([("LC_ALL".into(), "C".into())]),
+    )?;
+    let mut child = command.spawn().map_err(|error| {
+        let program = Path::new("/usr/bin/sha256sum");
+        if crate::container_entry::check(program).is_some() {
+            crate::container_entry::spawn_error(program, "checkpoint-digest", &error)
+        } else {
+            refused("checkpoint-digest", path, error)
+        }
+    })?;
     let mut stdin = child
         .stdin
         .take()
@@ -608,7 +657,30 @@ fn git_from_bare(bare: &OwnedFd, args: &[&str]) -> std::io::Result<std::process:
             }
         });
     }
-    command.output()
+    crate::container_entry::configure(
+        &mut command,
+        Path::new("/usr/bin/git"),
+        &["-c", "safe.directory=*", "--git-dir=."]
+            .into_iter()
+            .chain(args.iter().copied())
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        &BTreeMap::from([
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ]),
+    )
+    .map_err(|error| std::io::Error::other(error.line()))?;
+    command.output().map_err(|error| {
+        let program = Path::new("/usr/bin/git");
+        if crate::container_entry::check(program).is_some() {
+            std::io::Error::other(
+                crate::container_entry::spawn_error(program, "checkpoint-bare", &error).line(),
+            )
+        } else {
+            error
+        }
+    })
 }
 
 fn verify_bare(
@@ -1949,6 +2021,89 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::path::Path;
     use std::process::Command;
+
+    /// # Panics
+    /// Panics if a private audit ignores its held hashing or Git program.
+    /// ´claim:superlooplane:checkpoint-tools-use-received-capabilities´
+    /// ´test:unit:checkpoint-tools-use-received-capabilities´
+    #[test]
+    fn checkpoint_tools_use_received_capabilities() {
+        use loop_home::anchor::{HostVerifier, Manifest, Owner, Receiver, Requirement, Transport};
+        let fixture = tempfile::tempdir().expect("fixture");
+        let directory = fs::File::open(fixture.path()).expect("directory").into();
+        let data_path = fixture.path().join("data");
+        fs::write(&data_path, b"").expect("empty input");
+        let data = fs::File::open(&data_path).expect("input").into();
+        for key in ["/usr/bin/git", "/usr/bin/sha256sum"] {
+            let policy = crate::container_entry::executable_policy(Owner::RootFile);
+            let pin = HostVerifier::current()
+                .expect("host map")
+                .for_operation("exercise-harvest")
+                .pin(Path::new("/usr/bin/false"), "tool", 0, policy)
+                .expect("native refusal program");
+            let manifest = Manifest {
+                version: 1,
+                transport: Transport::Rights,
+                operation: "exercise-harvest".into(),
+                loop_name: "alpha".into(),
+                records: vec![pin.record()],
+            };
+            let anchor = Receiver::current()
+                .expect("receiver map")
+                .validate(
+                    &manifest,
+                    vec![pin.into_fd()],
+                    "exercise-harvest",
+                    "alpha",
+                    Transport::Rights,
+                    &[Requirement {
+                        purpose: "tool".into(),
+                        policy,
+                        alias_group: None,
+                    }],
+                )
+                .expect("held tool")
+                .pop()
+                .expect("one tool");
+            let _guard = crate::container_entry::activate_program_map(
+                "exercise-harvest",
+                std::iter::once((std::path::PathBuf::from(key), std::sync::Arc::new(anchor)))
+                    .collect(),
+            );
+            let cause = crate::container_entry::spawn_error(
+                Path::new(key),
+                "fallback",
+                &std::io::Error::other("fixture"),
+            );
+            assert_eq!(cause.kind, "anchor-exec");
+            let purpose = if key == "/usr/bin/git" {
+                "git-executable"
+            } else {
+                "hash-executable"
+            };
+            assert!(
+                cause
+                    .detail
+                    .contains(&format!("purpose={purpose} check=child-spawn"))
+            );
+            if key == "/usr/bin/git" {
+                let output = git_from_bare(&directory, &["--version"]).expect("held Git execution");
+                assert_eq!(output.status.code(), Some(1));
+                assert_eq!(output.stdout, [] as [u8; 0]);
+            } else {
+                let error = digest(&data, &data_path).expect_err("received false cannot hash");
+                assert_eq!(error.kind, "checkpoint-digest");
+            }
+        }
+        let _guard = crate::container_entry::activate_program_map(
+            "exercise-harvest",
+            std::collections::BTreeMap::default(),
+        );
+        let error = git_from_bare(&directory, &["--version"]).expect_err("ungranted Git");
+        assert!(error.to_string().contains("anchor-declaration"));
+        let error = digest(&data, &data_path).expect_err("ungranted hasher");
+        assert_eq!(error.kind, "exercise-anchor");
+    }
 
     /// ´test:unit:checkpoint-bare-record-carries-seed-and-refuses-malformed-shape´
     #[test]

@@ -14,6 +14,7 @@ tier = 1
 release-group = "loop-home"
 
 [dependencies]
+tracing = { workspace = true }
 serde.workspace = true
 sha2.workspace = true
 libc = { workspace = true }
@@ -23,3 +24,10 @@ toml = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[[test]]
+name = "reply_custody"
+harness = false

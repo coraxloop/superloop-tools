@@ -341,6 +341,14 @@ fn file_previews(
         .collect()
 }
 
+fn observed_plan_digest(plan: &mut serde_json::Value, rows: &[Row]) -> String {
+    if rows.is_empty() {
+        plan["observations"] = json!(["no-active-routes"]);
+    }
+    // Bind route observations and the charter alongside digest-only files.
+    digest(plan.to_string().as_bytes())
+}
+
 pub(super) fn run(args: &[String], check: bool) -> Result<String> {
     let options = options(args, check)?;
     if let Some(source) = &options.move_from {
@@ -407,8 +415,7 @@ pub(super) fn run(args: &[String], check: bool) -> Result<String> {
     }
     let changes = files.iter().filter(|(name, bytes)| before[*name].as_ref() != Some(*bytes)).map(|(name, bytes)| json!({"path":name,"before":before[name].as_ref().map(|bytes| digest(bytes)),"after":digest(bytes)})).collect::<Vec<_>>();
     let mut plan = json!({"charter":options.charter,"loop":options.name,"home":options.home,"identity":home.as_ref().map(Directory::identity).transpose()?,"create":!exists,"files":changes,"settings_digest":settings.as_ref().map(|bytes| digest(bytes))});
-    // Bind the charter input alongside the digest-only file representation.
-    let preview_digest = digest(plan.to_string().as_bytes());
+    let preview_digest = observed_plan_digest(&mut plan, &rows);
     plan["file_digests"] = json!(changes);
     plan["files"] = json!(file_previews(&options.home, &files, &before)?);
     let report = findings(

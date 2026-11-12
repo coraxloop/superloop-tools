@@ -35,9 +35,13 @@ pub(super) fn search_directory(path: &Path) -> Result<File> {
     let relative = path
         .strip_prefix("/")
         .map_err(|_| MailError::Invalid("unsafe-storage: absolute path required"))?;
+    search_child(&File::open("/")?, relative)
+}
+
+pub(super) fn search_child(parent: &File, path: &Path) -> Result<File> {
     Ok(File::from(openat2(
-        &File::open("/")?,
-        relative,
+        parent,
+        path,
         OpenHow::new()
             .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
             .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),

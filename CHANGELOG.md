@@ -6,6 +6,438 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-12
+
+### Added
+
+- Reply sessions can retain a worker lifetime lease across the service identity drop and bind or verify delivery pins through received configuration, storage, endpoint and journal custody, as a library prerequisite for the reply entry (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Reply-binding inventory can retain received configuration and storage custody through loop snapshots, mailbox metadata and endpoint freshness, sharing one loop-storage capability between endpoints (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:loophome:binding-inventory-retains-received-custody``).
+
+- Active lifetime verification exposes a non-admitting stage whose lease acquisition rechecks custody, receipts and loop-owned bindings, with rootless interleaving and read-only journal metadata regressions (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Mail endpoints can open and recheck freshness beneath received loop-storage custody, retaining canonical journal paths and existing endpoint identity, mode, group and filesystem checks (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:loophome:endpoint-opening-and-freshness-retain-loop-storage``).
+
+- Mail reservation binding and verification can use received journal custody without reopening the journal path, retaining delivery checks and compaction admission while the service writer remains active (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:loophome:journal-reservation-binding-retains-custody``).
+
+- Draft owner-operated Claude credential acceptance distinguishes external token-only startup, refresh attempts, same-process reload and the margin, binding-cost and contention measurements; it leaves vendor outcomes and activation unmeasured (``prob:box:claude-sign-in-and-endpoints-in-the-box``; ``prob:box:claude-print-probe-refresh-margin-measured-against-refresh-ahead``; ``sec:superlooplane:claude-credential-acceptance-draft``).
+
+- Gated Claude credential exercise payload observes the locked token-only projection and schema-2 provider evidence without reporting credential-derived digests; namespace and vendor acceptance remain unmeasured (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-credential-exercise-payload``).
+
+- Credential exercise selects one protected backend through the public and private forms, excludes foreign live runs and keeps Claude measurement gated before owner access (``prob:box:claude-boxed-workers``; ``proto:superlooplane:credential-exercise-backend``).
+
+- Add `superloop-capture-admit` for verified capture admission, manifest-bound identities, quota refusal and current/keep/lease-aware pruning (`prob:servers:capture-admit-admits-and-prunes-sealed-generations`).
+
+- Gated Claude harvest inventories and removes its selected worker state without preserving credentials or sessions, and refuses missing or foreign backend ownership (``prob:box:claude-resources-and-harvest-measured``; ``proto:superlooplane:harvest-selected-worker-state``).
+
+- Gated Claude program comparisons read the installation reference through held configuration custody retained across the authority thread, refusing unsafe or absent custody; the related entry refusal assertions use short constants (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-install-reference-custody``).
+
+- Gated Claude periodic publication selects live worker homes by protected backend and records owner-program evidence without a fabricated OAuth host (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-periodic-credential-publication``).
+
+- Gated Claude credential paths bind the held owner program to the completed installation's reviewed digest and the loop's credential-structure program pin before credential access and again before refresh execution (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-owner-program-binding``).
+
+- Gated Claude preflight and per-round credential publication share the locked provider and post-refresh expiry check, preserving token-only files and the existing publication receipt shape; a failed refresh or an expired result leaves the prior worker file untouched (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-round-credential-publication``).
+
+- The gated Claude owner provider reads only the ``claudeAiOauth`` object of the owner's credential file and refuses any departure from the loop's structural record, and its token-only worker encoding carries the access token with its expiry, scopes and account descriptors and neither refresh field nor the host's plugin state; the owner's own program refreshes, expiry is checked again on the clock read after that program returns, the Codex adapter is unchanged and Claude execution remains gated (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-owner-credential-encoding``; ``rec:superlooplane:claude-credential-structure-input``).
+
+- Boxed launch checks the entry deployment and interface before reservation and names both versions on refusal; the entry query resolves no loop state (``prob:box:launch-probes-the-entry-version-before-the-reservation``; ``req:superlooplane:entry-version-before-reservation``; ``proto:loophome:driver-entry-interface-query``).
+
+- Claude candidate launch vectors carry selected print and model arguments through structural container checks while execution remains gated on credential and trial acceptance (``prob:box:claude-boxed-workers``; ``proto:superlooplane:boxed-launch``; ``conv:superlooplane:backend-selection-compatibility``).
+
+- Boxed image checks bind the protected backend to its own measured program, template and manifest hashes, including the Claude sibling template in mixed installations; Claude execution remains gated (``prob:box:claude-boxed-workers``; ``pre:superlooplane:launch-input-checks``; ``proto:superlooplane:boxed-launch``).
+
+- Exact compute forms in the loop's installed configuration select longer whole-request deadlines while other forms retain 1,800 seconds; the service announces the remaining window to the stub and deadline refusals name the registered bound (``prob:door:door-compute-deadline-per-form``; ``setup:superlooplane:compute-deadline-registration``).
+
+- Owners can explicitly declare unchanged upstream trees non-participating with a reason, retaining partition and census coverage while refusing label activations and preserving the inactive-prose guard for all other owners (``prob:linter:non-participating-owner-for-unchanged-upstream-trees``).
+
+- Door capacity refusals identify the fixed sixteen-peer service bound and a 120-second retry cadence; the worker contract treats them as transient while node compute scheduling remains with the owner-controlled wrapper (``open:door:door-compute-capacity-under-many-lanes``; ``rule:superlooplane:door-peer-capacity``).
+
+- Registered `cargo test` commands admit `--no-run` for compile-only checks under the existing judgement tiers, retaining the exact argv and refusing the flag on other verbs or in runner arguments (``prob:door:door-compute-admits-test-no-run``).
+
+- The mail service emits structured stderr spans and events for inventory skips, each naming the skipped loop or worker and the reason the scan's failure report collects, and for delivery, refusal codes, restoration, recovery, pruning and clock waits, with `RUST_LOG` filtering and a quiet `info` default; refusal sidecars are unchanged (``prob:mail:inventory-skips-are-events-and-the-refusal-names-its-class``).
+
+- Claude plan and home construction select their own worker state leaf and immutable configuration mounts, refuse cross-vendor layouts before writes and leave runtime and credential acceptance explicitly unavailable (``prob:box:claude-boxed-workers``).
+
+- Registered test commands accept one restricted filter after a named test target, including the explicit exact-match suffix, while retaining the argv and refusing additional or unbound filters (``prob:door:door-compute-admits-test-name-filter``).
+
+- Boxed launch accepts an explicit `--backend {codex|claude}` selector, validates that vendor's configured program without cross-vendor fallback and names the selection in its preview; Claude execution remains refused as `backend-unavailable` pending its plan, home, entry, credential and runtime adapters, and resumed rounds refuse a backend selection; existing settings files select Codex as before (``prob:box:claude-boxed-workers``; ``conv:superlooplane:backend-selection-compatibility``).
+
+- Namespace entry has a shared capability foundation for verified maps, bounded descriptor handoff, operation-bound custody checks and ledger/registry reads beneath one configuration anchor; production caller migration remains deferred (``req:workercontracts:namespace-anchor-authority``).
+
+- Publication manifests declare the unpublished-label register destination through `public.unpublished`; cuts generate it there and bind the owner snapshot to it, refusing excluded-definition citations without a declaration and unsafe or conflicting destinations; readers built before this release (the linter, the build-sync census and the pack) refuse the field as unknown, so a tree that declares it is read by this release's linter, build-sync and pack, installed together (``prob:pack:manifest-declares-the-unpublished-register``).
+
+- The contributing guide gives slice workers the branch workflow, source declarations, node verification bar and working-step report contract (``guide:contributing:superloop-tools``).
+
+### Changed
+
+- Close the helper-authority cancellation record after its activation, scope and panic regressions, retaining the release compatibility statement beside the protocol (``prob:box:helper-service-cancels-when-its-authority-thread-exits``).
+
+- Pin fixture-admission absence in every workspace release artifact with a current unit-test positive control and an empty-set refusal (``test:integration:test-release-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
+
+- Reply binding now has an actual-package acceptance through the public binding body, including vector construction, rights handoff, result comparison, reservation publication and an identical retry. A fixture host-root seam leaves the normal launcher’s root walk and executable selection unchanged; no deployment action or command syntax change is required (``claim:superlooplane:reply-entry-retains-custody``; ``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Retain the fixture enclosure when a watchdog collects output after an unconfirmed namespace stop, so consuming the child handle cannot authorize removal during unwind (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-unconfirmed-stop-retains-enclosure``).
+
+- Pin the Claude fixture transaction's bound-evidence read-back, dead-helper exclusion and authority panic cancellation, and retain uncertain source custody and child output on fixture failures; production behavior is unchanged (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``prob:box:helper-service-cancels-when-its-authority-thread-exits``; ``test:unit:claude-fixture-periodic-dead-helper``; ``test:unit:helper-authority-panic-cancels-service``; ``test:unit:claude-fixture-move-rechecks-custody-before-drop``; ``test:unit:claude-fixture-watchdog-retains-child-output``).
+
+- The inbox watcher readiness problem is closed with its record in the hook package's README: a loop takes the fix by restarting its inbox watcher from the updated recipe with the same command, and a watcher that is not restarted keeps working on its previous recipe (``prob:hooks:inbox-recipe-resets-its-readiness-before-each-watcher-launch``).
+
+- Exercise the test-only Claude periodic authority over a live fixture reservation, including event-controlled evidence and configuration scope loss, mapped worker publication and exact enclosing-storage inventory; production remains gated (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-periodic-publication``).
+
+- The anchored mail service's refusal sidecar names an entry refusal by its anchor class in `code` (`anchor-declaration`, `anchor-missing`, `anchor-transport`, `anchor-owner`, `anchor-mode`, `anchor-kind`, `anchor-identity`, `anchor-escape`, `anchor-exec`, `anchor-io` or `anchor-uid-map`) and any other entry refusal as `entry-refusal`, where it wrote `io-failure`. Such a sidecar is written only when the service's own configuration custody fails before a letter's delivery is accepted and holds again when the refusal is projected, because a lasting fault stops the service at its next scan instead; filesystem failures keep `io-failure`, the `reason` text is unchanged, the letter stays refused until its sender withdraws or changes it, 0.4.1 wrote no entry refusal, and nothing in this tree reads the field. The reply-session library, which has no production caller, now receives its five mail capabilities into an owned bundle validated before lifetime repair, rechecks the live outbox at binding and inside the journal verifier, and revalidates journal custody after the admission wait; its direct lifetime guard refuses a registry override in the entry form, exit 2. The reply command, its pathname journal admission and the held caller switches are unchanged (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``test:unit:mail-service-records-anchor-refusal-code``; ``test:unit:mail-entry-refusal-code-uses-a-closed-allowlist``).
+
+- Keep a replacement enclosure intact when mapped fixture cleanup fails during host drop, disarming automatic pathname-recursive removal before fallible cleanup (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-cleanup-failure-keeps-replacement``).
+
+- Check the mapped fixture cleanup's current-directory identity against its held enclosure before removal, retaining stderr on refusal and measuring renamed-directory custody (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-cleanup-checks-mapped-enclosing-identity``).
+
+- Make the private credential-authority wait injectable for event-driven pass boundaries, retaining the production thirty-second cancellable interval (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:helper-authority-waits-for-pass-release``).
+
+- Inventory fixture cleanup reports metadata-query errors when checking that the parent-owned root and marker remain, retaining the directory and regular-file checks (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- The closed dead-pid fixture record now preserves the dated measurement of recurring collision windows at the node’s pid churn (``prob:gates:fixtures-name-a-dead-process-by-a-number-no-process-can-hold``).
+
+- Exercise one test-only Claude helper round through held namespace custody, with mapped worker publication and enclosing-storage cleanup controls; production remains gated (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-fixture-admitted-round``).
+
+- The anchored reply session refuses ambient registry overrides as entry declarations rather than backing-store I/O, converging on mail exit 2 before the command migration (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Fixture admissions validate actual helper-thread inputs and exact evidence destinations before exposing a binding, retain cleanup with the host, and reject noncanonical digests and password-database account roots (``proto:superlooplane:helper-runtime-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
+
+- Helper unit tests carry opaque fixture scope through consumer refusals and one-shot periodic custody, with root creation and held-anchor identity checks; production retains its closed Claude gate (``proto:superlooplane:helper-runtime-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
+
+- The inventory fixture removes its home root only from the parent that created it, and only after namespace cleanup has removed the mapped children; that cleanup retains the root and marker, its phases admit only a real directory directly beneath the temporary directory, and metadata failures are reported instead of treated as absence (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Bounded fixture output always gives the child the null device as standard input, as the replaced `Command::output` call did by default, instead of the test's own input, and retains both output streams in timeout diagnostics, with a non-null input control (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- The reply-session acceptance honours matching and nonmatching libtest filters, exact and skipped selections, listing, quiet and colour flags and libtest's `--option=value` spellings without accidentally running a filtered fixture (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Helper authority carries the same borrowed program binding through evidence construction and publication, retaining production evidence bytes and the compiled census boundary while custody tests pass an explicit runtime admission (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:helper-runtime-admission``).
+
+- Dead-process fixtures use distinct positive process IDs above Linux’s PID ceiling, with a live-lock control, so PID counter wrap cannot turn a recovery fixture into a live-owner refusal (``prob:gates:fixtures-name-a-dead-process-by-a-number-no-process-can-hold``; ``test:unit:dead-lock-fixture-pid-exceeds-kernel-limit-and-live-lock-refuses``).
+
+- The helper runtime-admission protocol uses the lane manual's bold protocol-statement form, retaining its label and contract (``proto:superlooplane:helper-runtime-admission``).
+
+- Helper-service custody alone constructs and consumes the admission thread token; program binding is borrowed from the admission without producing another owned proof (``proto:superlooplane:helper-runtime-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
+
+- Helper-service refusal tests call the admitted production cores with the gate explicitly; the six test-only forwarding wrappers are removed and the core documentation names the actual endpoint selection (``proto:superlooplane:helper-runtime-admission``; ``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
+
+- Claude fixture cleanup rechecks retained identity after mapped cleanup and refuses a linked runs directory, with precise replacement regressions (``prob:gates:lane-fixture-homes-leave-no-temporary-root-behind``; ``test:unit:claude-cleanup-rechecks-host-identity-after-mapped-removal``; ``test:unit:claude-cleanup-refuses-a-linked-runs-directory``).
+
+- The custom reply-session acceptance lists its test without entering the namespace and refuses unsupported filter arguments (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Mail inventory and reply-session acceptances bound subprocess waits, inherited output pipes and cleanup, reporting retained fixture paths on cleanup failure (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Helper credential pins and Claude evidence consume an explicit reviewed program binding while retaining the compiled reference and closed runtime gate (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-owner-program-binding``).
+
+- Claude helper-service refusal regressions distinguish publication custody, launcher identity and periodic refused evidence through cancellation (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:helper-service-periodic-claude-gate-publishes-refusal``).
+
+- Held mail inventory acceptance pins empty and canonical registry-override refusals and checks the service’s credentials against every registered loop before narrowing to the selected loop (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Helper-service runtime gates use explicit admission cores and a custody-bound thread token, retaining the existing refusals and introducing no fixture admission (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:helper-runtime-admission``).
+
+- Claude namespace mutation cleanup retains the host fixture identity instead of trusting a namespace-writable path record, with redirection and directory-replacement regressions (``prob:gates:lane-fixture-homes-leave-no-temporary-root-behind``; ``test:unit:claude-cleanup-retains-host-fixture-identity``).
+
+- Pin Claude helper-service gate refusals and their existing validation order before introducing fixture admission (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:helper-service-claude-gate-baseline``).
+
+- Pin the wrong-program digest refusal through a due Claude round publication, including retained worker bytes and inode (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-namespace-held-program-standin``).
+
+- Pin Claude namespace fixture cleanup across timeout and host panic, including subordinate-owned worker storage (``prob:gates:lane-fixture-homes-leave-no-temporary-root-behind``; ``test:unit:claude-namespace-fixture-cleanup-survives-timeout-and-panic``).
+
+- Contain Claude namespace fixture descendants across process-group changes with a per-case PID namespace and a watchdog regression (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:claude-namespace-watchdog-contains-detached-descendant``).
+
+- Record a synthetic probe of the namespace watchdog's kill sequence, in which a descendant in a process group of its own survives, keeping descendant cleanup and its regression through the namespace wrapper open (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``).
+
+- Bound the Claude trial draft's worker-file observations, same-process rejection evidence and expired print-call regime without selecting a repair policy (``prob:box:claude-sign-in-and-endpoints-in-the-box``; ``prob:box:claude-print-probe-refresh-margin-measured-against-refresh-ahead``).
+
+- Pin held Claude owner-program execution in the mapped namespace with a recorded-digest native stand-in, transferred custody and expired-result preservation (`prob:box:claude-program-binding-formats-pins-and-measures-its-hash`).
+
+- The capture state record specifies the completed-step driver and monitor fallback, and the finished-state observation item closes there on its retained historical observations, invalid-monitor and rollback regressions, corrected lock-name wording and the supplied watcher glossary (`prob:lanes:claude-lane-finished-state-null-driver`).
+
+- The remaining door merge-failure, deadline, wait-error, decided-enforce and learned-hit regressions consume validated lock-wait credits before their final reply within one bounded window (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:door-final-reply-follows-lock-wait-credits``).
+
+- Pin restoration of the completed observation through resume-preparation rollback, retaining the production snapshot bytes in the retried archive (``prob:lanes:claude-lane-finished-state-null-driver``; ``test:integration:claude-rollback-restores-completed-snapshot``).
+
+- Pin completed driver identity retention when embedded monitor text is invalid, with the real driver publication and follower as the control (``prob:lanes:claude-lane-finished-state-null-driver``; ``test:integration:claude-finished-state-keeps-identity-with-invalid-monitor``).
+
+- Door enforcement, adjudication and incomplete-record regressions consume request-lock credit frames before their final-reply assertions, with deterministic multi-credit coverage (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:door-final-reply-follows-lock-wait-credits``).
+
+- Five credential-exercise JSON macro bodies are split into reviewable lines without changing their fields or values (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-credential-exercise-payload``).
+
+- A mapped-identity fixture exercises Claude provider preparation, round publication and observation with synthetic authority, retaining the worker file on expired refresh and keeping the public runtime gate closed (``prob:box:claude-boxed-workers``; ``test:unit:claude-namespace-publication-keeps-worker-authority-separate``).
+
+- Credential binding regression checks isolate activation-start clearing and mid-activation anchor replacement, and census provider refusals pin their detail (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-program-binding-cadence``).
+
+- Capture admission uses the sanctioned agent-text terminal report with matched statuses, classed diagnostics and suppressed panic payloads; its interrupted-generation and write-order follow-ups are met (``prob:servers:capture-admit-orders-its-writes-and-declares-its-output-mode``).
+
+- Keep capture admission and pruning available after an interrupted generation rename, publish keep before current, and cover special-entry refusals (``prob:servers:capture-admit-orders-its-writes-and-declares-its-output-mode``).
+
+- The audit-before-effect regression waits through request-lock credit frames before asserting the final reply, retaining its no-effect-before-label checks (``test:unit:door-audit-label-precedes-effect``; ``proto:superlooplane:request-lock-wait-credit``).
+
+- Periodic Claude refresh regression coverage exposes repeated owner-program calls for unrotated authority inside the refresh-ahead window and retains worker bytes at expiry (``prob:box:claude-print-probe-refresh-margin-measured-against-refresh-ahead``; ``proto:superlooplane:claude-periodic-credential-publication``).
+
+- Credential evidence regression cases refuse cross-schema provider fields and foreign backends at both publication and census, retaining prior evidence on a refused publication (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-periodic-credential-publication``).
+
+- Gated Claude program bindings reuse successful verification only for unchanged held custody within one thread and activation; metadata, policy and required-pin checks remain on every boundary (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:claude-program-binding-cadence``).
+
+- Native creation is accepted through its production namespace composer, receiver and home creation, with reserve and finish bound to the protected receipt, active mail configuration, placed brief and redacted worker credential (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:native-creation-completes-reserve-and-finish``).
+
+- Runtime preparation executes its received container program through the production namespace receiver after pathname replacement, with real anchored birth setup and distinct image-inspection results (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:runtime-preparation-executes-received-podman``).
+
+- The complete rootless helper service refreshes a due synthetic owner source through its real periodic authority, publishes the rotated bearer without the refresh token to a live mapped worker, and records successful custody evidence before its socket attempt (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:helper-service-refreshes-live-credentials``).
+
+- Service credential-authority fixtures keep every refresh endpoint on loopback, order the first check after parent guard release, clean retained homes during unwinding and bound cancellation before joining (``prob:box:service-credential-spawner-fails-closed-and-pins-its-guards``; ``claim:superlooplane:service-authority-cancellation-prevents-first-check``; ``claim:superlooplane:service-authority-retention-cleans-up-on-panic``).
+
+- Credential regressions exercise the helper publication transaction with foreign client custody and retain the failed-refresh preservation case as its own bounded test (``prob:box:claude-credential-tests-the-mismatch-site-and-splits-the-long-test``; ``test:unit:helper-credential-mismatch-precedes-reservation-publication``; ``test:unit:claude-failed-round-refresh-preserves-worker-file``).
+
+- Native creation carries the selected backend into its private form and credential capability, reconstructs that plan through held configuration and keeps Claude preflight behind the runtime gate (``prob:box:claude-boxed-workers``; ``proto:superlooplane:native-creation-selected-credential-custody``).
+
+- The helper service's credential-authority spawn retains its own directory and executable custody after the parent releases its guards; a replaced-home fixture measures the real authority loop's first healthy and refused evidence, its received client execution and its cancellation (``test:unit:service-credential-authority-retains-custody``).
+
+- The helper transfers only the protected backend's credential client and clock into its authority thread; Claude has a distinct executable role and foreign-only capability maps refuse without ambient fallback (``prob:box:claude-boxed-workers``; ``proto:superlooplane:selected-credential-executable-custody``).
+
+- Owner credential refresh runs behind a provider boundary that keeps the Codex adapter's existing transport and custody, with test stand-ins for staged publication, an owner program's own publication, owner replacement and refusal, and Claude execution remains gated (``prob:box:claude-boxed-workers``; ``proto:superlooplane:owner-credential-provider``).
+
+- The private boxed entry argument form and its refusal boundaries are pinned beside the interface-version constant through the production parser, so an argument-contract change requires a deliberate update of the versioned test (``prob:box:entry-probe-fixtures-follow-the-workspace-version``; ``req:loophome:driver-entry-versioned-form``).
+
+- Boxed resumed paths bind session evidence and resume arguments to the protected backend; Claude quota rejection does not authorize capacity retries, and execution remains gated (``prob:box:claude-boxed-workers``; ``proto:superlooplane:selected-backend-round-evidence``).
+
+- Document the existing executable-byte pins and the verified door step owed by lane-crate rebuilds, including changes outside the helpers' own sources; this chooses the record's documentation option and adds no rebuild-invariance guarantee (``prob:door:runner-template-keyed-on-embedded-bytes``; ``rule:superlooplane:door-rebuild-rollout``).
+
+- Cut-tree acceptance retains its Cargo target and Meson build directories across rounds, resets fixture sources and checks fresh cut identities on every run; configuration compiles publication selectors once (``sec:publicpack:publication-follow-ups``).
+
+- Private boxed entry carries the protected backend explicitly, validates only its configured program and binds the driver selector without changing settings evidence; matching lane and entry versions are required, and Claude launch remains unavailable pending the image, runtime and credential adapters (``prob:box:claude-boxed-workers``; ``sec:loophome:driver-launch``; ``conv:superlooplane:backend-selection-compatibility``).
+
+- Every workspace package depends on the shared `tracing` crate so instrumentation requires no per-package dependency change (``rule:buildcontracts:tiers``).
+
+- Boxed plans bind the selected backend through home and runtime checks, resumed-plan reconstruction and credential publication; Codex refresh skips Claude records. Old runs without a binding must drain and retire before deployment; no backend is inferred for them (``prob:box:claude-boxed-workers``).
+
+- Replay regressions pin malformed historical manifests, unpublished owner and path-class audit context, and drift-path burn refusals before destination writes; existing tests already cover committer and email preservation and audit mapping (``prob:pack:replay-optional-tests``).
+
+- A built-binary cut regression pins existing tag-blob register planning and owner rewriting independently of clean-worktree admission, preserving the complete public tree when source files change after preflight (``prob:pack:register-planning-from-tag-blobs``).
+
+- ACL widening fixtures reach the settings and handed-lock readers with a non-writable mask and pin their named refusals; settings diagnostics describe nominal modes with validated ACLs (``prob:homes:exact-mode-readers-reason-about-the-acl-mask``).
+
+- The compute grammar explicitly retains dash-led run-binary names in the existing `-p` value domain; regressions pin that choice and the stricter check, clippy and test selector matrix (``open:door:compute-run-bin-value-rule``).
+
+- Built-binary cut regressions pin the refusals of an absent and a failed linter, malformed citation JSON and an unknown protocol namespace or version, with measured protocol fixtures, retained failure diagnostics and no publication on refusal (``prob:pack:cut-executable-route-refusals-tested``).
+
+- Read-only request listings expose admitted door judgements, runner observations, call-count provenance, rubric digests and effect walls without requiring review (``prob:door:requests-show-exposes-judgement-fields``).
+
+- Strict schema-five door records retain bounded agent observations, including rubric failures and cleanup probes; the explicit digest-bound rewrite preserves schema-four judgements with null historical observations (``prob:door:request-record-keeps-agent-observations``).
+
+- Request rewrite previews mark each custody file with a digest-bound `changed` flag and name the fixed conversion schema pair explicitly (``prob:door:requests-rewrite-preview-omits-unchanged-files``).
+
+- The README names the built and installed public commands, private helpers and build-only report tool while retaining the source-consumer lockfile policy (``sec:publictools:build``).
+
+- Replay coverage pins refusal before destination writes when a historical manifest lacks its required register declaration, even when TAG declares one; the replay contract states that this optional field has no fallback (``prob:pack:manifest-declares-the-unpublished-register``).
+
+- Door agent isolation documents that credential-free records and logs depend on the configured agent not emitting credentials; captured failed-agent stderr has no credential filter (``prob:door:agent-stderr-tail-credential-filter``).
+
+- Request-list shared-deadline regressions run the plain, pending and state-filtered forms on scoped threads, retaining their independent contention assertions while overlapping the production wait allowances (``rule:superlooplane:requests-list-contention``).
+
+- Real-Git regression coverage verifies repeated no-op pushes through the door stub and handler, including completion, unchanged mirror refs and recorded no-ref outcomes around a push carrying new objects, while the historical mixed-version refusal is not reproduced by this fixture (``proto:superlooplane:registered-ssh-transport``).
+
+- Two-identity request fixtures exercise valid documents and marked requests and assert named registry and state-root owner mismatches for both mapped callers; their ignore reasons name the required UID/GID map and fixture capability (``test:integration:requests-entry-requires-one-account-for-door-and-permission-custody``).
+
+### Fixed
+
+- `bind-reply LOOP RUN --step STEP --delivery INSTANT` hands its private `_bind-reply` entry one operation-bound bundle of the owner home, runs root, entry executable, configuration, loop storage, private storage, identity executable and journal; the entry reads the reservation and evidence directory beneath the received runs root, keeps the worker lifetime lease through the service identity drop and evidence publication, and rechecks the worker's outbox and the journal's custody after the admission wait. Compatibility: the public syntax, delivery selection and reservation records are unchanged, but the public command and its private entry must come from one build: an older public process reaching the new entry refuses as `anchor-missing: operation=mail-binding purpose=manifest` and a newer one reaching an older entry as `verified-prefix: private launch requires bound home, runs root and letter descriptors`, both before any binding, so install with no `bind-reply` running and run the same command again afterwards. `bind-reply` refuses an ambient `ENTER_LOOP_REGISTRY`, empty or canonical values included, and now needs a root-owned `/usr/bin/setpriv` reached without links; a host-owned `~/.config/loops` at 0700 whose registry, allocations and mail-service files are host-owned at 0600, the provisioned service search and read grants showing as 0710 and 0640 and passing; `~/.var/loops/LOOP` host-owned at 0711, its `private` directory loop-owned at 0700 and `~/.var/loops/.mail-service` service-owned at 0700; and an owner home and runs root that are distinct and give their owner full access with no setuid, setgid or sticky bit and no group or other write. Trees written by the mail provisioner and the home preparation pass; a hand-widened mode, a symlink, a foreign owner, unsafe reply evidence or custody changed during an admission wait refuses by its named anchor boundary (``claim:superlooplane:reply-entry-retains-custody``; ``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- The helper service stops when its credential-authority thread exits for any reason, including a custody activation or scope refusal and a panic, and the thread's own error remains the helper's reported error (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``test:unit:helper-authority-activation-failure-cancels-service``). Compatibility: in a release build the authority's activation and scope checks cannot refuse and an evidence-publication failure already stopped the service, so the one reachable change is a panicking authority thread, which now cancels the in-flight round at once and ends the helper with `credential-thread: authority thread panicked`, where the helper used to keep serving without refresh until the run ended and then report that error; successful refresh, evidence and the thirty-second cadence are unchanged, no file, argument, setting or gate changes, an upgrade needs no step, and a helper already running keeps its old behaviour until its run ends.
+
+- Inbox watchers start each watch with an empty readiness file, avoiding a stray missing-file error on the failure channel and premature arming after directory replacement. A running watcher keeps the old form until it is restarted from the updated recipe (``guide:superloopclaudehook:ordinary-inbox-waiting``).
+
+- Private rotation handover, the half of `rotate LOOP RUN`, `--dry-run` included, that reads the old run's settled replies, saved briefs and last context observation, receives the five-role reader bundle: its plan's settings, registry and allocations come from the validated configuration snapshot, its runs-root argument and the public read's reservation identity are bound to the received runs root, and the reservation, reply and brief digests execute the received hashing file. Compatibility: the public syntax and journal admission are unchanged, but the launcher and the private entry must come from one build, an older launcher's handover refusing as `rotate-private: anchor-missing: operation=rotation-handover purpose=manifest` and a newer launcher's handover to an older entry as `verified-prefix: private launch requires bound home, runs root and letter descriptors`; either refusal comes before any private read and before the rotation records an intent, so `rotate` is run again once both sides are installed, and a rotation whose intent is already recorded resumes without a handover. `rotate` now needs a root-owned `/usr/bin/sha256sum` reached without links, a host-owned `~/.config/loops` of mode 0700, and an owner home and runs root with full owner access and no setuid, setgid or sticky bit, and refuses an ambient `ENTER_LOOP_REGISTRY` at the handover (``claim:superlooplane:rotation-handover-retains-custody``; ``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Steward protocol fixtures separate ordinary list/read budgets from timeout measurements, with a delayed-list regression and controlled-clock repeated feeds (``prob:gates:steward-transcript-list-step-deterministic-under-stall``).
+
+- Private round inspection, the half of `launch LOOP RUN --round STEP` that reads the settled thread and records the next round's request, receives the five-role reader bundle: its plan's settings, registry and allocations come from the validated configuration snapshot, and its reservation, step events, event boundary and optional request publication stay beneath the received runs root. Private settlement's step-directory check and thread read take the same held walk. Compatibility: the public syntax is unchanged, but the launcher and the private entry must come from one build, an older launcher's descriptor suffix refusing as `round-private: anchor-missing` and an ambient `ENTER_LOOP_REGISTRY` refusing before private state reads; the launcher requires a root-owned `/usr/bin/sha256sum` and a host-owned `~/.config/loops` of mode 0700; and every directory beneath the runs root down to the step directory, the `steps` archive and each step archive must belong to the loop identity without group or other write, links refuse, and every step archive needs both its boundary files, where the pathname walk accepted the reported step's archive without its end (``claim:superlooplane:round-inspection-retains-custody``; ``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Process-absence fixtures share the kernel-impossible PID constant, including public retirement's real presence check (``prob:gates:fixtures-name-a-dead-process-by-a-number-no-process-can-hold``; ``test:unit:dead-lock-fixture-pid-exceeds-kernel-limit-and-live-lock-refuses``).
+
+- The node absence probe matches the paths retirement removes, the checkout beside the mirrors and the build and temporary directories beneath the registered node root, and worker-home components in whole arguments or option values, so a sibling run’s prefix collision or script text no longer holds retirement (``prob:lanes:node-absence-probe-binds-the-run-at-component-boundaries``).
+
+- Composed reply entry explicitly refuses registry overrides in its existing lifetime error envelope before lifetime admission or changing identity (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Held mail inventories preserve every snapshot refusal, including invalid service ACLs, rather than losing the cause and retirement state; pathname inventories retain their existing skip behavior (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Held mail inventories preserve namespace-entry and anchor refusals instead of reducing them to per-actor skips, and revalidate private-storage custody after acquiring the configuration's read lock (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Anchored lifetime admission revalidates loop-storage after waiting for its receipt lock, refusing custody changes during the wait before returning a lease (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Interrupted-settlement report tests compare measured walls within JSON floating-point precision while keeping every other report field exact, including resumed rounds and older socket evidence (``prob:lanes:settle-report-wall-survives-json-round-trip``).
+
+- Retirement process scans bind driver paths at argument and component boundaries and leave container-name ownership to the labelled container scan, so sibling fixtures and unrelated hub commands do not hold a run by a shared name substring (``prob:lanes:retire-busy-census-binds-to-the-runs-own-processes``).
+
+- Active worker lifetime leases can retain receiver-validated configuration, storage and identity-execution custody while verifying and locking the receipt, without reopening the owner-home paths; reply binding keeps its existing route until its journal and endpoint custody move (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Mail entry requires its exact two-record declaration before descriptor receipt and configuration reads, replaces the consumed stdin socket with the null binding, and preserves descriptor duplication and rights-socket inspection failure causes in mail and worker entry refusals (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Private checkout retains configuration, hashing, Git and its external destination parent across namespace entry, refusing mismatched capabilities before state reads; settled checkpoint, checkout, import and harvest-preview cases distinguish execution through the received tools (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:checkout-entry-retains-custody``).
+
+- Completed driver captures retain advisory driver and monitor state after lock removal, bound to the current step and start marker and never treated as live PID authority (``prob:lanes:claude-lane-finished-state-null-driver``; ``proto:lanelifecycle:completed-step-observation``; ``proto:workermonitor:completed-driver-observation``).
+
+- Harvest recovery carries only its five used capabilities and requires no Git executable; checkpoint restores its relative-home refusal before descriptor receipt and has a focused coverage witness, and the namespace recovery fixture receives its hashing capability from the host (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:harvest-entry-retains-configuration``; ``claim:superlooplane:checkpoint-entry-retains-configuration``).
+
+- Private import marking retains configuration, hashing and Git custody across namespace entry before validating the preserved checkpoint and import journal (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:import-entry-retains-configuration``).
+
+- Private harvest and recovery retain configuration, hashing and Git custody through namespace entry before inspecting collection state; measurement refuses surplus capability declarations and private-report custody has its production test witness (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:harvest-entry-retains-configuration``; ``claim:superlooplane:private-reports-retain-received-custody``).
+
+- Public harvest preserves protected backend refusals before child execution; namespace recovery independently pins its closed Claude gate and unchanged state (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:harvest-selected-worker-state``).
+
+- Private checkpoint entry retains configuration, hashing and Git custody through namespace entry, refusing malformed bundles before checkpoint state reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:checkpoint-entry-retains-configuration``).
+
+- Private credential exercise refuses relative owner homes before reader custody; its digest inventory retires the removed reply comparison instead of pointing at an unrelated line (``proto:superlooplane:credential-exercise-backend``; ``rule:digests:inventory-evidence``).
+
+- Credential measurement no longer requires or transfers an unused Git executable; its exact five-capability frame retains configuration and hashing custody (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-exercise-readers-retain-configuration``).
+
+- Gated Claude exercise refuses worker files whose bytes differ from the token-only encoding, including duplicate members hidden by JSON value equality (``prob:box:claude-boxed-workers``; ``proto:superlooplane:claude-credential-exercise-payload``).
+
+- Follow and context readers retain configuration and runs custody across namespace entry; replaced configuration paths supply no input, while raw follow events and bounded context evidence keep their public formats (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Driver reports and retirement lock reads retain operation-bound home, runs, entry and hashing custody across namespace entry; reader tool ownership and exact descriptor frames refuse before state reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-reports-retain-received-custody``).
+
+- Private observed-host reads retain operation-bound configuration custody through namespace entry, preserving the protected reservation and observation checks when the configuration pathname is replaced (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-exercise-readers-retain-configuration``).
+
+- Private credential measurement retains configuration, reservation and helper-evidence custody across namespace entry and pathname replacement, preserving worker token checks and refusing a disappearing census entry (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-exercise-readers-retain-configuration``; ``claim:superlooplane:reservation-census-stays-beneath-received-root``).
+
+- Harvest and removal recovery require the protected backend's runtime gate before collection processing, refusing Claude records while activation remains closed (``prob:box:claude-program-binding-formats-pins-and-measures-its-hash``; ``proto:superlooplane:harvest-selected-worker-state``).
+
+- Service authority fixtures require a spawning-thread endpoint and refuse before spawning when it is absent; nested guards restore the prior endpoint and a new thread inherits no hook, while production keeps its fixed endpoint (``prob:box:service-credential-test-hook-closes-by-default``; ``claim:superlooplane:service-fixture-endpoint-required``).
+
+- Private harvest and home-layout readers retain configuration and checkpoint-tool capabilities through namespace entry, refusing changed identities and unsafe modes before plan reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:private-exercise-readers-retain-configuration``; ``claim:superlooplane:checkpoint-tools-use-received-capabilities``).
+
+- Private worker-identity selection scans reservations, driver directories and protected residue beneath the received runs-root descriptor, retaining record validation and refusing a substituted root or linked record by name (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:reservation-census-stays-beneath-received-root``).
+
+- Helper custody regression checks execute the received runtime through the production namespace receiver and socket service after pathname replacement, authorize a mapped loop peer, retain authority-thread evidence, and complete a loopback refresh through the production spawner beneath the retained home (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:helper-service-executes-received-runtime``; ``claim:superlooplane:service-reservation-key-binds-held-runtime``; ``claim:superlooplane:service-credential-authority-retains-custody``).
+
+- Door-agent exercise probes give verdict and output checks execution headroom beyond cleanup while retaining the separate short timeout and child-reaping bound; delayed real-runner fixtures pin the distinction (``prob:gates:door-modes-runner-probes-red-intermittently-after-the-custody-move``; ``test:unit:agent-probes-separate-semantic-and-timeout-budgets``).
+
+- Native creation previews derive their ordered capability roles from the receiver definitions; the public preview fixture pins the complete required and optional lists, and partial-map exercise fixtures pin their runs-root alias refusal envelope (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- The network exercise acceptance executes its reservation-selected native capability through the production namespace entry after pathname replacement, distinguishing the held image-inspection exit from the replacement without claiming a measured box boundary (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Helper receipt names aliased home and runs roots as the runs-root refusal, and the credential handoff exercises the received client file through the refresh path while refusing a pathname fallback (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Runtime version-query regression derives its expected program version from the workspace package version, retaining its no-state-access assertion across release bumps (``prob:box:runtime-subprocess-contract-follows-the-workspace-version``; ``test:integration:version-and-usage-do-not-open-runtime-state``).
+
+- Credited compute refusal regressions drive the production stub with the 1,000 ms caller budget on early and queued refusals, retaining raw announcement checks, the shared credit cap and exact final diagnostic assertions (``proto:superlooplane:request-lock-wait-credit``).
+
+- Container helpers and the four container-backed exercises receive configuration custody alongside executable custody; registry, ledger and worker settings reads use the held directory despite pathname replacement, and ambient registry overrides refuse before helper pins or private reads (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``proto:workercontracts:namespace-anchor-handoff``).
+
+- Runtime and native creation read worker settings beneath the received configuration directory, retain the bounded parser and validated ACL checks, and refuse missing or unsafe held files despite substituted settings; isolated host-composer cases require registry-override refusal before pinning (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Compute deadline regressions retain the stronger unextended spawn-budget bound and force store contention on early execution-window refusals, queued deadline expiry and queued adjudicated refusals, keeping requested and registered figures exact while asserting their separate effective bound (``proto:superlooplane:request-lock-wait-credit``).
+
+- Entry-version fixtures derive the current package version and their mismatches at compilation, keeping fresh and resumed probe contracts valid across workspace version bumps (``prob:box:entry-probe-fixtures-follow-the-workspace-version``; ``req:superlooplane:entry-fixture-package-version``).
+
+- The credential refresh fixture joins the production helper bundle and its shared authority-thread handoff, verifying a real refresh exchange with only the client and clock capabilities transferred (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Native creation previews describe the capability bundle instead of retired descriptor flags, and creation receipt keeps owner home and runs root distinct while permitting the letter directory to reuse either (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Native creation selects worker UIDs from its verified configuration and held loop-storage history, preserving receipt and reconciliation checks after configuration or storage path replacement (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Admission-release regression readers consume store-wait progress before their final completion, with both release timings forced through a contended store and the execution and custody assertions retained (``proto:superlooplane:request-lock-wait-credit``).
+
+- A service-to-stub regression pins a contradictory RUN-REPORT beside the unchanged node measurements and its persisted refusal; the spawn-budget assertion retains the original requested bound while the registration and request assertions remain exact (``proto:superlooplane:compute-deadline-and-evidence``; ``proto:superlooplane:request-lock-wait-credit``).
+
+- The completed-command regression consumes sibling-record-wait progress through the production stub before checking the final completion, with a forced progress frame and unchanged execution-count and custody assertions (``proto:superlooplane:request-lock-wait-credit``).
+
+- Estate-referral regressions use the production stub to consume contention progress before asserting the final adjudicated refusal and unchanged custody evidence (``proto:superlooplane:request-lock-wait-credit``).
+
+- Compute replies preserve the exact registered and requested deadline bounds under store contention and name the credited bound separately as `effective_deadline_ms` (``proto:superlooplane:request-lock-wait-credit``).
+
+- Namespace executable checks share their pin and image validation, retain the active operation’s refusal envelope and reject surplus exercise arguments before parsing the private form; the attempt runner and real runtime entry exercise held execution across pathname replacement (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Runtime and native creation plans use the registry and allocation snapshot validated beneath their configuration capability, including settings grants and worker identity selection, without reopening ambient registry paths (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Anchored native creation and runtime verification refuse every ambient registry override, including the canonical registry path, before reading grants or changing custody (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Warm public-cut acceptance leaves its configured Meson tree intact; only the replaced archive is reconfigured, and both setup walls remain reported (``prob:build:cut-acceptance-reconfigures-only-the-changed-tree``; ``proto:publicpack:configure-changed-cut-tree``).
+
+- The container helper pins its credential client and clock before namespace entry and transfers only those held executable capabilities to the refresh thread, which executes them by descriptor (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Native creation reserves and finishes worker mail lifetimes beneath configuration and storage descriptors verified before namespace entry; its bundle retains the letter directory, any already-open rotation source, and credential refresh executables (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
+
+- Authenticated compute-shaped requests receive their deadline announcement before admission, including route and root-registration refusals, so the stub retains the named refusal through admission and record waits (``prob:door:compute-stub-first-wait-covers-admission``; ``proto:superlooplane:compute-deadline-and-evidence``).
+
+- A valid RUN-REPORT that disagrees with node measurements refuses as `door-compute-report-contradiction`, and a present report with an absent or invalid wall or exit as `door-compute-report-refusal`; replies retain the report's parsed wall and exit in `run_report` beside the node measurements, and missing node evidence keeps `door-compute-evidence-refusal` (``prob:door:run-report-contradiction-is-named-apart-from-missing-evidence``; ``proto:superlooplane:compute-deadline-and-evidence``).
+
+- Door store contention receives bounded, measured deadline credit in the service and matching stub, with cumulative wait frames and reply figures; a two-requester regression pins pending custody and the existing unlocked agent-judgement boundary, without attributing the historical long custody hold to the agent (``prob:door:request-record-lock-released-before-triage``; ``proto:superlooplane:request-lock-wait-credit``).
+
+- Mount, network, door-shape and door-attribution exercises retain their protected reservation’s selected executable and hashing custody through namespace entry, refusing changed records, programs and descriptor declarations (``proto:workercontracts:namespace-anchor-handoff``).
+
+- Runtime preparation carries its configuration, worker storage and executable capabilities across namespace entry, verifies the native lifetime beneath held storage, and previews the bundle without requiring provisioned private paths (``proto:workercontracts:namespace-anchor-handoff``).
+
+- Compute completion retains the node-measured wrapper wall and child user/system CPU even without a RUN-REPORT line; a present contradictory report refuses by name. Schema-six request custody uses the explicit rewrite for older records, preserving their walls with unmeasured CPU. The historical deployed null-wall observation has not been remeasured (``prob:door:door-compute-wrapper-wall-measured``; ``proto:superlooplane:compute-deadline-and-evidence``).
+
+- Release refuses a non-string declared public version in Cargo repositories before check, dry-run or apply can proceed, retaining destination refs, objects and worktree (``prob:pack:release-refuses-a-non-string-public-version``).
+
+- Container helpers retain host-verified entry, Podman and hashing file custody across namespace entry and execute protected-plan hashes, attempts and cleanup through held descriptors; the bundle refuses missing, substituted and excess descriptors and changed declarations (``proto:workercontracts:namespace-anchor-handoff``).
+
+- Route documentation distinguishes the door registration route, the registry-only check-mode finding and every empty artifact rendered for retired routes (``proto:superlooplane:door-node-registration``; ``prob:homes:home-preparation-admits-a-loop-with-no-active-route``).
+
+- Worker custody entry keeps consumed stdin bound to the null device and refuses non-UTF-8 launcher paths without lossy conversion; capability duplication failures name their system cause as `anchor-io` (``proto:workercontracts:namespace-anchor-handoff``).
+
+- The two-account mail fixture leaves coordinator verification to the rootless worker acceptance, which checks unchanged verification and missing-lock refusal through the production descriptor handoff instead of an obsolete private invocation (``proto:workercontracts:namespace-anchor-handoff``).
+
+- Worker-run birth and retirement and native lane retirement carry configuration, storage and executable custody through namespace entry and identity children; the runner retains only declared descriptors, and native retirement preserves its bounded command handling (``proto:workercontracts:namespace-anchor-handoff``).
+
+- Cut and replay projection batch blob reads, object hashing and index updates per tree instead of spawning Git per file, preserving binary contents, path spelling, symlinks and modes; real Git traces pin the bounded process counts (``prob:pack:replay-projection-spawns-git-per-file``).
+
+- Interrupted request rewrites can renew their helper snapshot after a concurrent helper arrival, requiring a new preview digest while retaining the original custody plan and preserving unrelated helper requests (``alg:superlooplane:request-schema-rewrite``).
+
+- Anchor refusals retain the caller operation, failed custody or transport check and configuration parser cause; writable ancestors refuse as mode failures and system failures retain their errno (``req:workercontracts:namespace-anchor-refusals``).
+
+- Mail startup carries verified configuration and executable descriptors through namespace entry, reads settings, ledger and registry beneath the held configuration, and preserves named capability and identity-drop refusals; scan-time configuration reads retain that anchor (``req:workercontracts:namespace-anchor-acceptance``).
+
+- Host rubric and sign-in source walks validate the initial UID map and reject unrelated nobody ownership, including sticky ancestors, while retaining explicit owner and loop grants (``req:workercontracts:namespace-anchor-authority``).
+
+- Citation planning bounds each linter invocation and both output streams to 120 seconds, killing its process group and reaping its leader on timeout while retaining diagnostics and refusing before publication; real-process and built-binary regressions pin cleanup and unchanged destinations (``prob:pack:cut-linter-invocation-time-bound``).
+
+- Door agent calls give Codex sibling private configuration and temporary directories, keeping its home outside the child temporary root and removing both after reaping (``prob:door:door-agent-codex-home-outside-temp``).
+
+- Cuts refuse a selected owner snapshot carrying an `unpublished` field when the publication manifest has no register declaration, preventing unaudited register publication and dangling snapshot references (``prob:pack:manifest-declares-the-unpublished-register``).
+
+- Registered state-root ownership refusals name the state root instead of the loop registry; mapped request fixtures assert the custody root and both uids (``prob:door:two-uid-fixtures-assert-owner-mismatch``).
+
+- Runtime rubric admission compares the effective uid with the real entered uid, restoring refusal of entries that change only the effective uid (``proto:superlooplane:bounded-rubric-judgement``).
+
+- Custody readers compare the complete mode with the named read/search ACL mask for private files, the registry, loop tiers, settings and transferred configuration locks, refusing ordinary group grants and widened masks; fixtures also preserve the ledger readers’ ACL contract (``prob:homes:exact-mode-readers-reason-about-the-acl-mask``).
+
+- The route-rendering contract names the owner-side Codex home as the destination for door-only loops and distinguishes it from the canonical credential source (``prob:homes:render-routes-codex-home-from-custody``).
+
+- Standalone route rendering refuses an absent loop before publication while retaining empty node sections for retired routes; fixtures pin missing-key refusal without active routes and preserve home contents across registry refusals and route reactivation (``prob:homes:home-preparation-admits-a-loop-with-no-active-route``).
+
+- Codex reconciliation collapses identical complete generated SSH headers to one, preserves owner comments and refuses conflicting or incomplete duplicate headers (``prob:homes:reconciled-ssh-config-header-written-once``).
+
+- Codex home preparation and reconciliation select the loop’s active registry routes when no nodes are named, while an explicit node list remains the selection override (``prob:homes:codex-reconcile-resolves-nodes-from-routes-row``).
+
+- Sign-in home checks resolve the loop’s active registry rows when no nodes are named, preserving explicit subsets and reporting registry failures without changing the home (``prob:homes:check-signin-home-resolves-active-registry-rows``).
+
+- Sign-in homes prepare and reconcile an empty node section when the loop has no active routes, report the observation, and retain credentials, worker-key bindings and unrelated SSH stanzas (``prob:homes:home-preparation-admits-a-loop-with-no-active-route``).
+
+- The empty-route home fixture declares its executable dependency in the build ledger, including the shifted call-site identities (``prob:homes:home-preparation-admits-a-loop-with-no-active-route``).
+
+- Registry path admission and worker-identity refusal text share component-fault classification, preserving dot-component precedence and accepted path forms (``prob:homes:routes-worker-form-shares-path-component-predicate``).
+
+- The shared route-path classification test carries the inventory label derived from its function name (``prob:homes:routes-worker-form-shares-path-component-predicate``).
+
+- A registered Git receive can complete beside its box’s running compute request while same-class requests and other operations retain bounded admission exclusion (``rule:superlooplane:door-request-admission``).
+
+- Deferred list rewrites remove complete dotted stale-family and singleton assignments; rendered TOML is parsed before replacement, so active dotted-singleton duplication refuses without changing the source (``prob:linter:deferred-writer-parses-its-output-before-replacing``; ``prob:linter:deferred-mode-rewrite-keeps-a-stale-catalogued-table``).
+
+- Folder-matrix checks and writes ignore cell padding and valid table delimiter layout while preserving exact cell content, row identity, order and count; equivalent layouts remain unchanged, while a tab anywhere in a delimiter row and an empty delimiter cell remain stale, matching the formatter’s space-only delimiter grammar (``prob:linter:matrix-comparison-normalises-cell-layout``).
+
+- Claim projections stop the introductory gloss at the first trimmed level-one rustdoc heading, leaving section headings and bodies out of test-index and folder-matrix cells (``prob:linter:claim-extractor-stops-at-rustdoc-sections``).
+
+- Request-list contention refusals add listing-level elapsed time; regressions pin the shared deadline at a contended second acquisition and include helper state in read-only snapshots (``rule:superlooplane:requests-list-contention``).
+
+- The door rubric check admits the caller’s service uid alongside root and the loop uid at install and runtime; a mapped non-root service fixture verifies distinct loop custody and foreign-owner refusal (``prob:door:door-rubric-custody-admits-service-uid``; ``proto:superlooplane:bounded-rubric-judgement``).
+
+- The shared request reader rejects upload bounds and output counts on preflight refusal records (``conv:superlooplane:door-transport-compatibility``).
+
+- Tools packs classify their generated provenance as an optional exact publication member; a fresh pack audit against the supplied 41-entry estate register measures zero occurrences and zero owed debt (``prob:pack:tools-tree-burn-register-matches``).
+
 ## [0.4.1] - 2026-11-06
 
 ### Changed
@@ -223,7 +655,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/coraxloop/superloop-tools/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/coraxloop/superloop-tools/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/coraxloop/superloop-tools/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/coraxloop/superloop-tools/compare/v0.3.1...v0.3.2

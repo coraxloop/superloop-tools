@@ -13,6 +13,7 @@ tier = 1
 release-group = "session-core"
 
 [dependencies]
+tracing = { workspace = true }
 petgraph.workspace = true
 serde_json.workspace = true
 

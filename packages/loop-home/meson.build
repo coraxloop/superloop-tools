@@ -1,5 +1,10 @@
 pkg_loop_home_rust = files(
   'src/allocations.rs',
+  'src/ancestor.rs',
+  'src/anchor.rs',
+  'src/anchor/transport.rs',
+  'src/anchor/tests.rs',
+  'src/ancestor_owners.py',
   'src/app.rs',
   'src/custody.rs',
   'src/driver_launch.rs',
@@ -17,9 +22,11 @@ pkg_loop_home_rust = files(
   'src/mail/migration_tree.rs',
   'src/mail/migration_metadata.rs',
   'src/mail/steering.rs',
+  'src/mail/reply_entry.rs',
   'src/mail/provision.rs',
   'src/mail/birth.rs',
   'src/mail/worker_provision.rs',
+  'src/mail/worker_anchors.rs',
   'src/mail/birth_tests.rs',
   'src/mail/configuration_store.rs',
   'src/mail/configuration_store_tests.rs',
@@ -32,6 +39,7 @@ pkg_loop_home_rust = files(
   'src/mail/service.rs',
   'src/mail/service_tests.rs',
   'src/mail/command.rs',
+  'src/mail/entry_anchors.rs',
 
   'src/mail/instant.rs',
   'src/mail/journal.rs',
@@ -49,6 +57,8 @@ pkg_loop_home_rust = files(
   'src/tests/mod.rs',
   'src/verify.rs',
   'src/workers_settings.rs',
+  'tests/reply_custody.rs',
+  'tests/support/bounded.rs',
 )
 
 pkg_loop_home_prose = files(
@@ -93,14 +103,10 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
-{"kind":"payload","path":"packages/loop-home/src/runner/agent_runner.py","form":"python","sha256":"8ecdc8e7889ee0a0c84c7d4a1b5ca9d5e1fb37efc2fc6c8852891ff1d98e8226","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Run the configured Codex executable with tool-free exec arguments and record bounded result evidence","calls":[{"callee":"external:configured-codex-agent","selector":"program argument","anchor":"subprocess.Popen(argv","contract":"Pinned agent path receives tool-free Codex exec JSON arguments with bounded streams and process-group cleanup","lookup":"configured-external","execution_host":"entered loop"}]}
-{"kind":"payload","path":"packages/loop-home/src/runner/sign_in_policy.py","form":"python","sha256":"b328b67875d90f119a655f20a2bda2e1e2466ff8cd3fa301fe64a3fc52d5a08c","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Shared credential custody predicate embedded in metadata and agent programs","calls":[]}
+{"kind":"payload","path":"packages/loop-home/src/ancestor_owners.py","form":"python","sha256":"86432698c5cf7e3322fc262c97b3d77a545ab3e3f94c7c622260e786a66fdb20","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"host or namespace receiver","version_authority":"packages/loop-home/Cargo.toml","contract":"UID-map foundation with verified procfs reads; legacy caller migration is separate","calls":[]}
+{"kind":"payload","path":"packages/loop-home/src/runner/agent_runner.py","form":"python","sha256":"61c7f2413afe77949f3d331ecb22c59056070ea0abd596793c90f6e279cc12ea","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Run the configured Codex executable with tool-free exec arguments and record bounded result evidence","calls":[{"callee":"external:configured-codex-agent","selector":"program argument","anchor":"subprocess.Popen(argv","contract":"Pinned agent path receives tool-free Codex exec JSON arguments with bounded streams and process-group cleanup","lookup":"configured-external","execution_host":"entered loop"}]}
+{"kind":"payload","path":"packages/loop-home/src/runner/sign_in_policy.py","form":"python","sha256":"0cddefbb2a477d5934c27a1cf35bf30a37378323fbd49f5899b023314d4fc4bb","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Shared credential custody predicate embedded in metadata and agent programs","calls":[]}
 ''']
-
-dependency_ledger += ['''
-{"kind":"call","site":"packages/loop-home/src/mail/command.rs:& podman [0]#1","caller":"loop-home","owner":"LOOPHOME","selector":"& podman [0]","callee":"external:podman","lookup":"configured-external","setting":"ENTER_LOOP_PODMAN","contract":"Enter the existing host-session user namespace through the loop-home Podman resolver, preserving its optional host prefix and exact private mail arguments"}
-''']
-
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/mail/provision.rs:\"/usr/bin/setpriv\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/setpriv\"","callee":"external:/usr/bin/setpriv","lookup":"configured-external","contract":"Namespace-root provisioning pins its executing image, enters the loop private cwd before dropping credentials, and invokes the same-image configuration or journal entry through an inherited descriptor with only the allocated mailbox group"}
@@ -114,4 +120,42 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/mail/migration_control.rs:& program#1","caller":"loop-home","owner":"LOOPHOME","selector":"& program","callee":"external:reviewed-mail-migration-controller","lookup":"configured-external","setting":"mail migration deployment artifact","contract":"Execute a digest-pinned namespace-root deployment controller or native lane census through its held executable inode with fixed migration arguments; retain output and refuse changed artifacts or failure"}
+''']
+
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/ancestor.rs:\"python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"python3\"","callee":"external:python3","lookup":"test-executable","contract":"Execute the embedded rubric policy against namespace ownership fixtures and the live kernel map"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/mail/entry_anchors.rs:& program#1","caller":"loop-home","owner":"LOOPHOME","selector":"& program","callee":"external:namespace-entry-command","lookup":"configured-external","contract":"Host-verified namespace command receives the pinned mail entry word and one operation-bound descriptor bundle; tests inject unshare through the same composer"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/mail/worker_anchors.rs:\"/usr/bin/setpriv\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/setpriv\"","callee":"external:/usr/bin/setpriv","lookup":"configured-external","contract":"Drop only to the validated worker-mail role with the held image and operation-bound private or journal capability"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:& path#1","caller":"loop-home","owner":"LOOPHOME","selector":"& path","callee":"external:anchor-fixture-executable","lookup":"configured-external","setting":"anchor_fixture_image","contract":"Execute the held native fixture after removing its pathname, with no fallback lookup"}
+{"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:& path#2","caller":"loop-home","owner":"LOOPHOME","selector":"& path","callee":"external:anchor-fixture-executable","lookup":"configured-external","setting":"anchor_fixture_image","contract":"Refuse an unsupported script without invoking an unpinned interpreter by pathname"}
+{"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:& image#1","caller":"loop-home","owner":"LOOPHOME","selector":"& image","callee":"external:anchor-fixture-executable","lookup":"configured-external","setting":"anchor_fixture_image","contract":"Prepare held execution under descriptor exhaustion without spawning a child"}
+{"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:std :: env :: current_exe () . expect (\"test executable\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Isolate descriptor exhaustion and stdin replacement in the same test binary"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/mail/configuration_tests.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Rootless inventory fixture enters the real test binary with the received configuration and storage descriptors, then drops to the reserved service identity"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/tests/support/bounded.rs:\"/usr/bin/python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Probe bounded fixture child and inherited-pipe deadlines with an owned process group"}
+{"kind":"call","site":"packages/loop-home/tests/support/bounded.rs:std :: env :: current_exe () . expect (\"bounded fixture executable\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"bounded fixture executable\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Measure a named cleanup refusal in an isolated copy of the fixture test binary"}
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:std :: env :: current_exe () . expect (\"reply fixture executable\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"reply fixture executable\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Bounded self-executable probes pin filtered selection, listing and invalid arguments before fixture dispatch"}
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Remove only the fixture root created by the parent through rootless namespace cleanup; no environment-supplied cleanup path"}
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/podman\"#2","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Run the received reply-session library fixture under the real rootless namespace and reserved service identity"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Install the principal mailbox fixture's exact named service ACL inside the test namespace"}
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#2","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Bounded snapshot of all fixture lifetime repair surfaces before and after receiving refusals"}
+{"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#3","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Pipe-controlled namespace fault injector and admission lock holder, killed and reaped after the service identity drop"}
 ''']

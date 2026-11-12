@@ -142,17 +142,26 @@ fn validate_version(
         if let Some(declared) = manifest
             .get("public")
             .and_then(|public| public.get("version"))
-            .and_then(toml::Value::as_str)
-            && Some(declared) != version
         {
-            return Err(refuse(
-                "version-mismatch",
-                format!(
-                    "{}:public.version={declared} differs from {source}={}",
-                    request.manifest.display(),
-                    version.unwrap_or("<missing>"),
-                ),
-            ));
+            let declared = declared.as_str().ok_or_else(|| {
+                refuse(
+                    "version",
+                    format!(
+                        "{}:public.version must be a string",
+                        request.manifest.display()
+                    ),
+                )
+            })?;
+            if Some(declared) != version {
+                return Err(refuse(
+                    "version-mismatch",
+                    format!(
+                        "{}:public.version={declared} differs from {source}={}",
+                        request.manifest.display(),
+                        version.unwrap_or("<missing>")
+                    ),
+                ));
+            }
         }
         (version.map(str::to_owned), source)
     };

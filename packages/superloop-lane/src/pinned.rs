@@ -118,6 +118,9 @@ pub fn open_protected(anchor: &Path, path: &Path, owner_uid: u32) -> Result<Owne
 ///
 /// Refuses a path whose parent or inode the loop identity could replace.
 pub fn owner_executable(path: &Path, owner_uid: u32) -> Result<(), LaneError> {
+    if let Some(result) = crate::container_entry::check(path) {
+        return result;
+    }
     loop_home::workers_settings::owner_executable(path, owner_uid).map_err(|error| {
         LaneError::input(
             "owner-program",
@@ -167,7 +170,7 @@ pub fn read_private(
     let stat = fstat(&fd).map_err(|error| LaneError::input("protected-file", error.to_string()))?;
     if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
         || stat.st_uid != owner_uid
-        || stat.st_mode & 0o7707 != mode & 0o7707
+        || stat.st_mode & 0o7777 != loop_home::mail::acl::preserved_mode(&fd, mode)
         || usize::try_from(stat.st_size)
             .ok()
             .is_none_or(|size| size > limit)
@@ -359,6 +362,38 @@ mod tests {
     use std::fs;
     use std::os::unix::ffi::OsStringExt as _;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    /// ´test:unit:private-reader-validates-acl-mask-instead-of-ignoring-group-bits´
+    #[test]
+    fn private_reader_validates_acl_mask_instead_of_ignoring_group_bits() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
+            .expect("private root");
+        let path = fixture.path().join("registry.toml");
+        fs::write(&path, b"registry").expect("file");
+        let owner = nix::unistd::Uid::effective().as_raw();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("ordinary group read");
+        assert_eq!(
+            read_private(fixture.path(), &path, owner, 0o600, 32)
+                .expect_err("group is not a named grant")
+                .kind,
+            "protected-file"
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private file");
+        let file = fs::File::open(&path).expect("descriptor");
+        loop_home::mail::acl::install(&file, owner + 1, false).expect("real read ACL");
+        assert_eq!(
+            read_private(fixture.path(), &path, owner, 0o600, 32).expect("named grant"),
+            b"registry"
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).expect("widen mask");
+        assert_eq!(
+            read_private(fixture.path(), &path, owner, 0o600, 32)
+                .expect_err("widened mask")
+                .kind,
+            "protected-file"
+        );
+    }
 
     /// ´test:unit:owner-executable-word-refuses-an-invalid-byte-path´
     #[test]

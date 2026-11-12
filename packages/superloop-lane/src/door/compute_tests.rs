@@ -4,6 +4,7 @@ use super::{
     Registration, Scope, compute, frame_read, frame_read_until, frame_write, serve_request,
 };
 use crate::requests::{
+    RequestRecord,
     modes::Rubric,
     store::{Store, tests::Fixture},
 };
@@ -22,6 +23,7 @@ struct NodeRunner {
     store: Store,
     calls: Arc<AtomicUsize>,
     program: PathBuf,
+    remaining: Option<Arc<std::sync::Mutex<f64>>>,
 }
 
 impl Runner for NodeRunner {
@@ -35,7 +37,10 @@ impl Runner for NodeRunner {
         words: &[String],
         seconds: f64,
     ) -> io::Result<Child> {
-        assert!(seconds > 0.0 && seconds <= 1800.0);
+        assert!(seconds > 0.0 && seconds <= 86400.0);
+        if let Some(remaining) = &self.remaining {
+            *remaining.lock().expect("remaining") = seconds;
+        }
         let records = self.store.list().expect("filed intent").0;
         let record = records
             .iter()
@@ -55,6 +60,9 @@ impl Runner for NodeRunner {
         detail["checkout_commit"] = json!("a".repeat(40));
         detail["preparation_wall_seconds"] = json!(0.125);
         detail["wrapper_exit_status"] = json!(3);
+        detail["wrapper_wall_seconds"] = json!(0.2);
+        detail["wrapper_user_cpu_seconds"] = json!(0.02);
+        detail["wrapper_system_cpu_seconds"] = json!(0.01);
         detail["tree_clean"] = json!(true);
         detail["tree_change_count"] = json!(0);
         detail["discarded"] = json!({"tracked":0,"untracked":0});
@@ -68,13 +76,32 @@ impl Runner for NodeRunner {
     }
 }
 
-fn compute_service(
+pub(super) fn compute_service(
     fixture: &Fixture,
     run: &str,
     worker: u32,
     peer: u32,
     scope: Scope,
     decision: Option<&str>,
+) -> (
+    PathBuf,
+    Arc<AtomicUsize>,
+    thread::JoinHandle<io::Result<Value>>,
+) {
+    compute_service_with_policy(fixture, run, worker, peer, scope, decision, &[], None, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_service_with_policy(
+    fixture: &Fixture,
+    run: &str,
+    worker: u32,
+    peer: u32,
+    scope: Scope,
+    decision: Option<&str>,
+    forms: &[super::config::ComputeDeadline],
+    remaining: Option<Arc<std::sync::Mutex<f64>>>,
+    contended: Option<std::sync::mpsc::Sender<()>>,
 ) -> (
     PathBuf,
     Arc<AtomicUsize>,
@@ -91,8 +118,9 @@ fn compute_service(
         store: fixture.store(),
         calls: Arc::clone(&calls),
         program,
+        remaining,
     };
-    let route = route_for(&fixture.home);
+    let route = route_for(&fixture.home).with_compute_deadlines(forms);
     let home = fixture.home.clone();
     let store = fixture.store();
     let registration = Registration::from_row(
@@ -109,6 +137,7 @@ fn compute_service(
     )
     .expect("rubric");
     let server = thread::spawn(move || {
+        super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = contended);
         let (mut stream, _) = listener.accept()?;
         let started = Instant::now();
         let request = frame_read_until(&mut stream, started + Duration::from_secs(2))?;
@@ -178,6 +207,72 @@ fn door_compute_generator_forms_use_production_entry() {
             );
         }
     }
+}
+
+/// # Panics
+/// Panics if preflight upload evidence reaches a reader or a refused read changes custody.
+/// ´test:unit:door-preflight-readers-refuse-upload-evidence´
+#[test]
+fn door_preflight_readers_refuse_upload_evidence() {
+    let fixture = Fixture::new();
+    let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+    let (reply, _, _) = compute_call(&socket, "/opt/fixture/bin/report cargo run --bin generator");
+    server.join().expect("server").expect("service");
+    assert_eq!(reply["reason"], "door-compute-locked-refusal");
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    let path = fixture.home.join("runs/.launch-R/door-requests.json");
+    let original_bytes = std::fs::read(&path).expect("production preflight record");
+    let original: Value = serde_json::from_slice(&original_bytes).expect("run record");
+    let record = &original["requests"][0];
+    assert_eq!(record["state"], "preflight-refused");
+    assert!(record["effect"].get("bound").is_none());
+    assert!(record["effect"].get("output_bytes").is_none());
+    RequestRecord::decode(record.clone()).expect("ordinary preflight accepted");
+    for action in ["status", "list"] {
+        fixture
+            .command(&[action, "alpha"], b"")
+            .expect("ordinary preflight reader");
+    }
+    for evidence in [
+        json!({"bound":1,"output_bytes":0}),
+        json!({"bound":crate::requests::MAX_UPLOAD_OUTPUT_LIMIT,"output_bytes":0}),
+        json!({"bound":1}),
+        json!({"output_bytes":0}),
+        json!({"bound":null,"output_bytes":null}),
+    ] {
+        let mut changed = original.clone();
+        changed["requests"][0]["effect"]
+            .as_object_mut()
+            .expect("effect")
+            .extend(evidence.as_object().expect("evidence").clone());
+        let error = RequestRecord::decode(changed["requests"][0].clone())
+            .expect_err("preflight upload evidence refused");
+        assert_eq!(error.kind, "requests-record-refusal");
+        assert_eq!(
+            error.detail,
+            "preflight refusals cannot contain upload output evidence"
+        );
+        let bytes = serde_json::to_vec(&changed).expect("changed record");
+        fixture
+            .store()
+            .fixture_replace_run_bytes("R", &bytes)
+            .expect("inject evidence");
+        for action in ["status", "list"] {
+            let error = fixture
+                .command(&[action, "alpha"], b"")
+                .expect_err("shared reader refuses preflight upload evidence");
+            assert_eq!(error.kind, "requests-record-refusal");
+            assert_eq!(
+                error.detail,
+                "preflight refusals cannot contain upload output evidence"
+            );
+            assert_eq!(std::fs::read(&path).expect("unchanged custody"), bytes);
+        }
+    }
+    fixture
+        .store()
+        .fixture_replace_run_bytes("R", &original_bytes)
+        .expect("restore record");
 }
 
 /// ´test:unit:door-compute-preflight-refusals-survive-request-readers´
@@ -342,6 +437,7 @@ fn door_preflight_sites_file_or_report_persistence_failure() {
                 store: fixture.store(),
                 calls: Arc::clone(&calls),
                 program: fixture.home.join("must-not-run"),
+                remaining: None,
             };
             let (request, expected) = preflight_request(site, run);
             let (mut server, mut client) = UnixStream::pair().expect("pair");
@@ -368,7 +464,11 @@ fn door_preflight_sites_file_or_report_persistence_failure() {
             );
             crate::requests::store::fixture_file_cap(None);
             let reply = result.expect("service").0;
-            assert_eq!(frame_read(&mut client).expect("frame"), reply);
+            let mut frame = frame_read(&mut client).expect("frame");
+            if frame["type"] == "compute-deadline" {
+                frame = frame_read(&mut client).expect("final frame");
+            }
+            assert_eq!(frame, reply);
             assert_eq!(reply["reason"], expected, "{site}: {reply}");
             assert_eq!(calls.load(Ordering::Relaxed), 0);
             if matches!(site, "capacity" | "store" | "store-open") {
@@ -450,6 +550,14 @@ fn door_compute_service_modes_streams_and_attribution() {
                 "a".repeat(40)
             );
             assert_eq!(record["effect"]["compute"]["wrapper_wall_seconds"], 0.2);
+            assert_eq!(
+                record["effect"]["compute"]["wrapper_user_cpu_seconds"],
+                0.02
+            );
+            assert_eq!(
+                record["effect"]["compute"]["wrapper_system_cpu_seconds"],
+                0.01
+            );
             assert_eq!(record["effect"]["compute"]["wrapper_exit_status"], 3);
             assert_eq!(record["effect"]["compute"]["tree_clean"], true);
             assert_eq!(record["effect"]["compute"]["tree_change_count"], 0);
@@ -562,6 +670,14 @@ fn door_compute_check_and_no_default_features_keep_judgement_and_wall() {
             assert_eq!(record["shape_key"], format!("compute:cargo {verb}"));
             assert_eq!(record["effect"]["state"], "completed");
             assert_eq!(record["effect"]["compute"]["wrapper_wall_seconds"], 0.2);
+            assert_eq!(
+                record["effect"]["compute"]["wrapper_user_cpu_seconds"],
+                0.02
+            );
+            assert_eq!(
+                record["effect"]["compute"]["wrapper_system_cpu_seconds"],
+                0.01
+            );
             assert_eq!(record["effect"]["compute"]["wrapper_exit_status"], 3);
             assert_eq!(
                 record["effect"]["compute"]["words"],
@@ -786,6 +902,145 @@ fn door_compute_gates_preserve_lock_placement_and_shape() {
     }
 }
 
+/// ´test:unit:door-compute-test-no-run-retains-exact-argv´
+#[test]
+fn door_compute_test_no_run_retains_exact_argv() {
+    for tail in [
+        "cargo test -p fixture --locked --no-run",
+        "cargo --locked test -p fixture --no-default-features --no-run",
+        "cargo test -p fixture --locked --all-features --no-run",
+        "cargo test --locked --test integration --no-run",
+        "cargo test --locked --bin fixture --no-run",
+    ] {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+        let (reply, _, _) = compute_call(&socket, &format!("/opt/fixture/bin/report {tail}"));
+        server.join().expect("server").expect("service");
+        assert_eq!(reply["reason"], "door-complete", "{tail}: {reply}");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let records = fixture.store().list_run("R").expect("record reader");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].value()["effect"]["compute"]["words"],
+            json!(tail.split(' ').collect::<Vec<_>>())
+        );
+    }
+}
+
+/// ´test:unit:door-compute-test-no-run-refuses-other-verbs-and-forwarding´
+#[test]
+fn door_compute_test_no_run_refuses_other_verbs_and_forwarding() {
+    for tail in [
+        "cargo check --locked --no-run",
+        "cargo clippy --locked --no-run -- -D warnings",
+        "cargo doc --locked --no-run",
+        "cargo run --locked --no-run",
+        "cargo test --locked --test integration -- --no-run",
+        "cargo test --locked --test integration -- filter --no-run",
+    ] {
+        assert_compute_preflight(
+            &format!("/opt/fixture/bin/report {tail}"),
+            "door-compute-command-refusal",
+        );
+    }
+}
+
+/// ´test:unit:door-compute-test-filters-retain-exact-argv´
+#[test]
+fn door_compute_test_filters_retain_exact_argv() {
+    for tail in [
+        "cargo test -p fixture --all-features --locked --test integration module::case_2",
+        "cargo --locked test --test integration module::case_2",
+        "cargo test --locked --test integration -- module::case_2",
+        "cargo test --locked --test integration -- module::case_2 --exact",
+    ] {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+        let (reply, _, _) = compute_call(&socket, &format!("/opt/fixture/bin/report {tail}"));
+        server.join().expect("server").expect("service");
+        assert_eq!(reply["reason"], "door-complete", "{tail}: {reply}");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let records = fixture.store().list_run("R").expect("record reader");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].value()["effect"]["compute"]["words"],
+            json!(tail.split(' ').collect::<Vec<_>>())
+        );
+    }
+}
+
+/// ´test:unit:door-compute-test-filters-refuse-extra-or-unbound-words´
+#[test]
+fn door_compute_test_filters_refuse_extra_or_unbound_words() {
+    for tail in [
+        "cargo test --locked --test integration first second",
+        "cargo test --locked --test integration filter --all-features",
+        "cargo test --locked --test integration first -- second --exact",
+        "cargo test --locked --test integration -- first second --exact",
+        "cargo test --locked --test integration -- filter --nocapture",
+        "cargo test --locked --test integration -- --exact",
+        "cargo test --locked --test integration filter.name",
+        "cargo test --locked --test integration filter-name",
+        "cargo test --locked --test integration path/name",
+        "cargo test --locked filter",
+        "cargo test --locked --bin integration filter",
+        "cargo check --locked --test integration filter",
+        "cargo clippy --locked --test integration filter -- -D warnings",
+    ] {
+        assert_compute_preflight(
+            &format!("/opt/fixture/bin/report {tail}"),
+            "door-compute-command-refusal",
+        );
+    }
+}
+
+/// ´test:unit:door-compute-test-filters-refuse-empty-misplaced-and-late-lock-words´
+#[test]
+fn door_compute_test_filters_refuse_empty_misplaced_and_late_lock_words() {
+    for (tail, check) in [
+        ("cargo test --locked --test integration --", "command"),
+        (
+            "cargo test --locked --test integration --  --exact",
+            "words",
+        ),
+        ("cargo test --locked filter --test integration", "command"),
+        (
+            "cargo test --locked --test integration filter --exact",
+            "command",
+        ),
+        ("cargo test --test integration filter --locked", "locked"),
+    ] {
+        assert_compute_preflight(
+            &format!("/opt/fixture/bin/report {tail}"),
+            &format!("door-compute-{check}-refusal"),
+        );
+    }
+}
+
+/// ´test:unit:door-compute-target-selectors-refuse-dash-led-names´
+#[test]
+fn door_compute_target_selectors_refuse_dash_led_names() {
+    for verb in ["check", "clippy", "test"] {
+        for selector in ["--bin", "--test"] {
+            for name in ["-x", "--all-features"] {
+                let suffix = if verb == "clippy" {
+                    " -- -D warnings"
+                } else {
+                    ""
+                };
+                assert_compute_preflight(
+                    &format!(
+                        "/opt/fixture/bin/report cargo {verb} --locked {selector} {name}{suffix}"
+                    ),
+                    "door-compute-command-refusal",
+                );
+            }
+        }
+    }
+}
+
 /// ´test:unit:door-compute-preserves-dash-led-package-records´
 #[test]
 fn door_compute_preserves_dash_led_package_records() {
@@ -793,6 +1048,8 @@ fn door_compute_preserves_dash_led_package_records() {
         "cargo test --locked -p --all-features",
         "cargo doc --locked -p --no-deps",
         "cargo run --locked -p --release -- check --root .",
+        "cargo run --locked --bin -x",
+        "cargo run --locked --bin --all-features",
         "cargo test --locked -p --locked",
         "cargo test --locked -p -pkg --all-features",
         "cargo clippy --locked -p -pkg --all-features -- -D warnings",
@@ -815,6 +1072,39 @@ fn door_compute_preserves_dash_led_package_records() {
             records[0].value()["effect"]["compute"]["words"],
             json!(tail.split(' ').collect::<Vec<_>>())
         );
+    }
+}
+
+/// ´test:unit:door-compute-run-bin-shares-the-dash-p-value-bound´
+#[test]
+fn door_compute_run_bin_shares_the_dash_p_value_bound() {
+    for selector in ["-p", "--bin"] {
+        for name in ["a".repeat(256), "-x".to_owned()] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let (socket, calls, server) =
+                compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+            let (reply, _, _) = compute_call(
+                &socket,
+                &format!("/opt/fixture/bin/report cargo run --locked {selector} {name}"),
+            );
+            server.join().expect("server").expect("service");
+            assert_eq!(
+                reply["reason"], "door-complete",
+                "{selector} {name}: {reply}"
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+        for (name, check) in [
+            ("a".repeat(257), "words"),
+            ("pkg.name".to_owned(), "command"),
+            ("--".to_owned(), "command"),
+        ] {
+            assert_compute_preflight(
+                &format!("/opt/fixture/bin/report cargo run --locked {selector} {name}"),
+                &format!("door-compute-{check}-refusal"),
+            );
+        }
     }
 }
 
@@ -1049,6 +1339,10 @@ fn door_compute_queue_deadline_and_disconnect_have_no_effect() {
         if disconnect {
             drop(client);
         } else {
+            assert_eq!(
+                frame_read(&mut client).expect("announcement")["type"],
+                "compute-deadline"
+            );
             let reply = frame_read(&mut client).expect("deadline reply");
             assert_eq!(reply["reason"], "door-request-deadline");
         }
@@ -1082,6 +1376,9 @@ fn door_compute_record_is_strict_and_evidence_is_required() {
     for exit in [124, 137] {
         let mut detail = compute::pending(&words);
         detail["wrapper_exit_status"] = json!(exit);
+        detail["wrapper_wall_seconds"] = json!(0.01);
+        detail["wrapper_user_cpu_seconds"] = json!(0.0);
+        detail["wrapper_system_cpu_seconds"] = json!(0.0);
         let evidence = format!(
             "RUN-REPORT exit={exit} wall=0.01s\nDOOR-COMPUTE {}\n",
             json!({"reason":"door-complete","detail":detail})
@@ -1130,6 +1427,10 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
         if disconnect {
             drop(client);
         } else {
+            assert_eq!(
+                frame_read(&mut client).expect("announcement")["type"],
+                "compute-deadline"
+            );
             let reply = frame_read_until(&mut client, Instant::now() + Duration::from_secs(15))
                 .expect("deadline reply");
             assert_eq!(reply["reason"], "door-deadline-refusal");
@@ -1144,4 +1445,523 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].value()["effect"]["compute"]["wrapper_exit_status"].is_null());
     }
+}
+
+/// ´test:unit:door-compute-deadline-selects-only-the-exact-owner-form´
+#[test]
+fn door_compute_deadline_selects_only_the_exact_owner_form() {
+    let form = super::config::ComputeDeadline {
+        words: ["cargo", "test", "--locked", "-p", "fixture"]
+            .map(str::to_owned)
+            .to_vec(),
+        deadline_ms: 3_600_000,
+    };
+    for induce_wait in [false, true] {
+        for (tail, bound) in [
+            ("cargo test --locked -p fixture", 3_600_000),
+            ("cargo test --locked -p other", compute::DEADLINE_MS),
+            (
+                "cargo test --locked -p fixture --release",
+                compute::DEADLINE_MS,
+            ),
+            ("cargo --locked test -p fixture", compute::DEADLINE_MS),
+        ] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            store
+                .ensure_first_mode("compute")
+                .expect("initial compute mode");
+            let (contended, release) = if induce_wait {
+                let held = store.fixture_exclusive_lock().expect("competing writer");
+                let (contended, observed) = std::sync::mpsc::channel();
+                let release = thread::spawn(move || {
+                    observed
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("measured store contention");
+                    drop(held);
+                });
+                (Some(contended), Some(release))
+            } else {
+                (None, None)
+            };
+            let remaining = Arc::new(std::sync::Mutex::new(0.0));
+            let (socket, calls, server) = compute_service_with_policy(
+                &fixture,
+                "R",
+                3000,
+                3000,
+                Scope::Work,
+                None,
+                std::slice::from_ref(&form),
+                Some(Arc::clone(&remaining)),
+                contended,
+            );
+            let (reply, _, _) = compute_call(&socket, &format!("/opt/fixture/bin/report {tail}"));
+            server.join().expect("server").expect("service");
+            let credit = reply["request_lock_wait_credit_ms"]
+                .as_u64()
+                .expect("credit");
+            if let Some(release) = release {
+                release.join().expect("holder released");
+                assert!(credit >= 50);
+            }
+            assert_eq!(reply["effective_deadline_ms"], bound + credit);
+            assert_eq!(reply["reason"], "door-complete");
+            assert_eq!(reply["registered_deadline_ms"], bound);
+            assert_eq!(reply["request_deadline_ms"], bound);
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            let remaining = *remaining.lock().expect("remaining");
+            assert!(remaining <= Duration::from_millis(bound).as_secs_f64());
+            if bound > compute::DEADLINE_MS {
+                assert!(remaining > 1800.0);
+            }
+        }
+    }
+}
+
+fn compute_refusal_frame(client: &mut UnixStream) -> (Value, u64) {
+    let mut observed_credit = 0;
+    loop {
+        let frame = frame_read(client).expect("deadline progress or final");
+        if frame["type"] != "request-lock-wait" {
+            assert_eq!(frame["type"], "final");
+            return (frame, observed_credit);
+        }
+        assert_eq!(frame["schema"], 2);
+        let credit = frame["wait_ms"].as_u64().expect("credit milliseconds");
+        assert!(credit >= observed_credit && credit <= super::MAX_LOCK_WAIT_CREDIT_MS);
+        observed_credit = credit;
+    }
+}
+
+fn compute_refusal_call(socket: &std::path::Path, use_stub: bool) -> (Value, Option<u64>) {
+    if use_stub {
+        let previous = super::transport::STUB_TEST_BUDGET.with(|slot| slot.replace(Some(1000)));
+        let (reply, _, _) = compute_call(socket, "/opt/fixture/bin/report cargo test --locked");
+        super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(previous));
+        return (reply, None);
+    }
+    let mut client = UnixStream::connect(socket).expect("socket");
+    frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":1000})).expect("shorter caller bound");
+    client.shutdown(Shutdown::Write).expect("EOF");
+    let announcement = frame_read(&mut client).expect("announcement");
+    assert_eq!(announcement["type"], "compute-deadline");
+    assert_eq!(announcement["registered_deadline_ms"], 3_600_000);
+    assert_eq!(announcement["request_deadline_ms"], 1000);
+    let (reply, observed_credit) = compute_refusal_frame(&mut client);
+    (reply, Some(observed_credit))
+}
+
+fn compute_queue_refusal(fixture: &Fixture) -> thread::JoinHandle<()> {
+    let store = fixture.store();
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let id = loop {
+            if let Some(record) = store.list_run("R").expect("queued request").first() {
+                break record.id().to_owned();
+            }
+            assert!(Instant::now() < deadline, "compute request never queued");
+            thread::sleep(Duration::from_millis(5));
+        };
+        store.triage("R", &[json!({"id":id,"action":"adjudicate","treatment":"refuse","reason":"fixture refusal"})], "fixture", "1").expect("queued refusal");
+    })
+}
+
+fn compute_deadline_refusal_case(
+    floor: &str,
+    reason: &str,
+    queue: &str,
+    induce_wait: bool,
+    use_stub: bool,
+) {
+    let fixture = Fixture::new();
+    fixture.set_floor(floor);
+    let store = fixture.store();
+    store
+        .ensure_first_mode("compute")
+        .expect("initial compute mode");
+    let (contended, release) = if induce_wait {
+        let held = store.fixture_exclusive_lock().expect("competing writer");
+        let (contended, observed) = std::sync::mpsc::channel();
+        let release = thread::spawn(move || {
+            observed
+                .recv_timeout(Duration::from_secs(10))
+                .expect("measured store contention");
+            drop(held);
+        });
+        (Some(contended), Some(release))
+    } else {
+        (None, None)
+    };
+    let form = super::config::ComputeDeadline {
+        words: ["cargo", "test", "--locked"].map(str::to_owned).to_vec(),
+        deadline_ms: 3_600_000,
+    };
+    let (socket, calls, server) = compute_service_with_policy(
+        &fixture,
+        "R",
+        3000,
+        3000,
+        Scope::Work,
+        None,
+        &[form],
+        None,
+        contended,
+    );
+    let answer = (queue == "refused").then(|| compute_queue_refusal(&fixture));
+    let (reply, observed_credit) = compute_refusal_call(&socket, use_stub);
+    server.join().expect("server").expect("service");
+    if let Some(answer) = answer {
+        answer.join().expect("queued refusal recorded");
+    }
+    let credit = reply["request_lock_wait_credit_ms"]
+        .as_u64()
+        .expect("credit");
+    if let Some(release) = release {
+        release.join().expect("holder released after progress");
+        assert!(credit >= 50);
+        if let Some(observed_credit) = observed_credit {
+            assert!(observed_credit >= 50);
+            assert!(credit >= observed_credit);
+        }
+    }
+    assert!(credit <= super::MAX_LOCK_WAIT_CREDIT_MS);
+    assert_eq!(reply["effective_deadline_ms"], 1000 + credit);
+    assert_eq!(reply["reason"], reason);
+    assert_eq!(reply["queue_state"], queue);
+    assert_eq!(reply["registered_deadline_ms"], 3_600_000);
+    assert_eq!(reply["request_deadline_ms"], 1000);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    let expected_line = if reason == "door-request-deadline" {
+        "door-request-deadline: registered_deadline_ms=3600000 request_deadline_ms=1000"
+    } else {
+        "door-adjudicated-refusal"
+    };
+    assert_eq!(
+        super::final_line(&["fixture".into(), "cargo test".into()], &reply).as_deref(),
+        Some(expected_line)
+    );
+}
+
+/// ´test:unit:door-compute-deadline-refusal-names-the-owner-bound´
+#[test]
+fn door_compute_deadline_refusal_names_the_owner_bound() {
+    for (induce_wait, use_stub) in [(false, false), (true, false), (true, true)] {
+        for (floor, reason, queue) in [
+            ("allow", "door-request-deadline", "no-queue"),
+            ("enforce", "door-request-deadline", "deadline"),
+            ("enforce", "door-adjudicated-refusal", "refused"),
+        ] {
+            compute_deadline_refusal_case(floor, reason, queue, induce_wait, use_stub);
+        }
+    }
+}
+
+/// ´test:unit:door-compute-node-measurements-do-not-require-a-report-line´
+#[test]
+fn door_compute_node_measurements_do_not_require_a_report_line() {
+    let words = vec!["git".to_owned(), "diff".to_owned()];
+    let mut detail = compute::pending(&words);
+    detail["wrapper_exit_status"] = json!(3);
+    detail["wrapper_wall_seconds"] = json!(0.8);
+    detail["wrapper_user_cpu_seconds"] = json!(0.2);
+    detail["wrapper_system_cpu_seconds"] = json!(0.1);
+    let evidence = format!(
+        "DOOR-COMPUTE {}\n",
+        json!({"reason":"door-complete","detail":detail})
+    );
+    let mut reply = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+    compute::finish(&mut reply, &words, evidence.as_bytes());
+    assert_eq!(reply["reason"], "door-complete");
+    assert_eq!(reply["compute"], detail);
+    assert!(reply.get("run_report").is_none());
+    let mut wrong_exit = detail.clone();
+    wrong_exit["wrapper_exit_status"] = json!(4);
+    let evidence = format!(
+        "DOOR-COMPUTE {}\n",
+        json!({"reason":"door-complete","detail":wrong_exit})
+    );
+    let mut reply = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+    compute::finish(&mut reply, &words, evidence.as_bytes());
+    assert_eq!(
+        reply["reason"], "door-compute-evidence-refusal",
+        "node status must match the transport status"
+    );
+    let mut unmeasured = detail.clone();
+    unmeasured["wrapper_user_cpu_seconds"] = Value::Null;
+    unmeasured["wrapper_system_cpu_seconds"] = Value::Null;
+    assert!(
+        compute::valid_detail(&unmeasured),
+        "historical CPU remains unmeasured"
+    );
+    let evidence = format!(
+        "DOOR-COMPUTE {}\n",
+        json!({"reason":"door-complete","detail":unmeasured})
+    );
+    let mut reply = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+    compute::finish(&mut reply, &words, evidence.as_bytes());
+    assert_eq!(
+        reply["reason"], "door-compute-evidence-refusal",
+        "new completion requires CPU measurement"
+    );
+    for key in [
+        "wrapper_wall_seconds",
+        "wrapper_user_cpu_seconds",
+        "wrapper_system_cpu_seconds",
+    ] {
+        let mut invalid = detail.clone();
+        invalid[key] = json!(-1);
+        assert!(!compute::valid_detail(&invalid), "{key}");
+        invalid.as_object_mut().expect("detail").remove(key);
+        assert!(!compute::valid_detail(&invalid), "{key}");
+    }
+    let mut missing = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+    compute::finish(&mut missing, &words, b"RUN-REPORT exit=3 wall=0.2s\n");
+    assert_eq!(missing["reason"], "door-compute-evidence-refusal");
+    assert_eq!(
+        missing["run_report"],
+        json!({"wall_seconds":0.2,"exit_status":3})
+    );
+    assert!(missing["compute"]["wrapper_wall_seconds"].is_null());
+}
+
+/// ´test:unit:door-rejected-compute-announces-before-admission´
+#[test]
+fn door_rejected_compute_announces_before_admission() {
+    for (command, scope, reason) in [
+        (
+            "/wrong/wrapper cargo test --locked",
+            Scope::Work,
+            "door-compute-wrapper-refusal",
+        ),
+        (
+            "/opt/fixture/bin/report cargo test --locked;id",
+            Scope::Work,
+            "door-compute-words-refusal",
+        ),
+        (
+            "/opt/fixture/bin/report cargo test",
+            Scope::Work,
+            "door-compute-locked-refusal",
+        ),
+        (
+            "/opt/fixture/bin/report git diff",
+            Scope::Review,
+            "door-review-compute-refusal",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            scope,
+        )
+        .expect("registration");
+        let held = super::RequestGuard::acquire(&fixture.home, &registration)
+            .expect("guard")
+            .expect("free admission");
+        let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, scope, None);
+        let mut client = UnixStream::connect(socket).expect("connect");
+        frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),command.as_bytes().to_vec()],"deadline_ms":60000})).expect("compute-shaped request");
+        let announced = frame_read_until(&mut client, Instant::now() + Duration::from_secs(5))
+            .expect("announcement precedes the held admission guard");
+        assert_eq!(announced["type"], "compute-deadline");
+        assert_eq!(announced["registered_deadline_ms"], compute::DEADLINE_MS);
+        assert_eq!(announced["request_deadline_ms"], 60000);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(
+            fixture
+                .store()
+                .list_run("R")
+                .expect("no preflight before admission")
+                .is_empty()
+        );
+        drop(held);
+        let reply = frame_read_until(&mut client, Instant::now() + Duration::from_secs(5))
+            .expect("named refusal after admission");
+        server.join().expect("server").expect("service");
+        assert_eq!(reply["reason"], reason);
+        assert_eq!(reply["status"], 125);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+}
+
+/// ´test:unit:door-compute-report-refusals-keep-inner-and-node-measurements´
+#[test]
+fn door_compute_report_refusals_keep_inner_and_node_measurements() {
+    let words = vec!["git".to_owned(), "diff".to_owned()];
+    let mut detail = compute::pending(&words);
+    detail["wrapper_exit_status"] = json!(3);
+    detail["wrapper_wall_seconds"] = json!(0.8);
+    detail["wrapper_user_cpu_seconds"] = json!(0.2);
+    detail["wrapper_system_cpu_seconds"] = json!(0.1);
+    for (report, expected, reported) in [
+        (
+            "RUN-REPORT exit=3 wall=0.2s\n",
+            "door-complete",
+            Some(json!({"wall_seconds":0.2,"exit_status":3})),
+        ),
+        (
+            "RUN-REPORT exit=2 wall=0.2s\n",
+            "door-compute-report-contradiction",
+            Some(json!({"wall_seconds":0.2,"exit_status":2})),
+        ),
+        (
+            "RUN-REPORT exit=3 wall=2.0s\n",
+            "door-compute-report-contradiction",
+            Some(json!({"wall_seconds":2.0,"exit_status":3})),
+        ),
+        (
+            "RUN-REPORT malformed\n",
+            "door-compute-report-refusal",
+            Some(json!({"wall_seconds":null,"exit_status":null})),
+        ),
+        (
+            "RUN-REPORT exit=3 wall=-0.2s\n",
+            "door-compute-report-refusal",
+            Some(json!({"wall_seconds":-0.2,"exit_status":3})),
+        ),
+        (
+            "RUN-REPORT exit=3 wall=NaNs\n",
+            "door-compute-report-refusal",
+            Some(json!({"wall_seconds":null,"exit_status":3})),
+        ),
+    ] {
+        let evidence = format!(
+            "{report}DOOR-COMPUTE {}\n",
+            json!({"reason":"door-complete","detail":detail})
+        );
+        let mut reply = json!({"reason":"door-complete","status":3,"compute_exit_status":3});
+        compute::finish(&mut reply, &words, evidence.as_bytes());
+        assert_eq!(reply["reason"], expected, "{report}");
+        assert_eq!(reply["compute"]["wrapper_exit_status"], 3);
+        assert_eq!(reply["compute_exit_status"], 3);
+        assert_eq!(reply["compute"]["wrapper_wall_seconds"], 0.8);
+        assert_eq!(reply["compute"]["wrapper_user_cpu_seconds"], 0.2);
+        assert_eq!(reply["compute"]["wrapper_system_cpu_seconds"], 0.1);
+        assert_eq!(reply.get("run_report"), reported.as_ref());
+        assert_eq!(
+            reply["status"],
+            if expected == "door-complete" { 3 } else { 125 }
+        );
+    }
+}
+
+/// ´test:unit:door-root-refusal-announces-before-admission´
+#[test]
+fn door_root_refusal_announces_before_admission() {
+    let fixture = Fixture::new();
+    let registration = Registration::from_row(
+        &json!({"name":"alpha","uid":41001}),
+        "alpha",
+        "R",
+        3000,
+        Scope::Work,
+    )
+    .expect("registration");
+    let held = super::RequestGuard::acquire(&fixture.home, &registration)
+        .expect("guard")
+        .expect("free admission");
+    let (mut client, mut service) = UnixStream::pair().expect("socket pair");
+    let home = fixture.home.clone();
+    let server = thread::spawn(move || {
+        let home_fd = std::fs::File::open(&home).expect("home");
+        let runs = home.join("runs");
+        let runs_fd = std::fs::File::open(&runs).expect("runs");
+        let _namespace = crate::home::activate_private_launch(
+            &home,
+            &home_fd,
+            &runs,
+            &runs_fd,
+            None,
+            nix::unistd::Uid::effective().as_raw(),
+        )
+        .expect("private fixture namespace");
+        let request = frame_read(&mut service).expect("request");
+        super::root_refusal(
+            &mut service,
+            &registration,
+            3000,
+            &request,
+            &home,
+            &crate::error::LaneError::input("door-compute-root-refusal", "fixture root absent"),
+            Instant::now(),
+        )
+    });
+    frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":60000})).expect("request");
+    let announced = frame_read_until(&mut client, Instant::now() + Duration::from_secs(5))
+        .expect("root refusal announces while admission is held");
+    assert_eq!(announced["type"], "compute-deadline");
+    assert_eq!(announced["registered_deadline_ms"], compute::DEADLINE_MS);
+    assert!(
+        fixture
+            .store()
+            .list_run("R")
+            .expect("no premature record")
+            .is_empty()
+    );
+    drop(held);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let reply = loop {
+        let frame = frame_read_until(&mut client, deadline).expect("root refusal frames");
+        if frame.get("reason").is_some() {
+            break frame;
+        }
+        assert_eq!(frame["type"], "stderr");
+    };
+    server.join().expect("server").expect("root refusal");
+    assert_eq!(reply["reason"], "door-compute-root-refusal");
+    assert_eq!(reply["status"], 125);
+    let rows = fixture.store().list_run("R").expect("refusal record");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].value()["state"], "preflight-refused");
+}
+
+/// ´test:unit:door-compute-report-contradiction-reaches-stub-and-record´
+#[test]
+fn door_compute_report_contradiction_reaches_stub_and_record() {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+    let program = fixture.home.join("node-R");
+    let source = std::fs::read_to_string(&program).expect("fixture node program");
+    let contradicting =
+        source.replace("RUN-REPORT exit=3 wall=0.2s", "RUN-REPORT exit=7 wall=1.5s");
+    assert_ne!(source, contradicting, "fixture report replaced");
+    crate::fixture_exec::write_executable(&program, contradicting.as_bytes())
+        .expect("contradicting inner report");
+    let (reply, stdout, _) = compute_call(&socket, "/opt/fixture/bin/report git diff");
+    let service_reply = server
+        .join()
+        .expect("server")
+        .expect("served contradiction");
+    let wire_reply: Value =
+        serde_json::from_slice(&serde_json::to_vec(&service_reply).expect("encode service reply"))
+            .expect("decode service reply");
+    assert_eq!(reply, wire_reply, "stub retains the complete wire reply");
+    assert_eq!(reply["reason"], "door-compute-report-contradiction");
+    assert_eq!(reply["status"], 125);
+    assert_eq!(reply["compute_exit_status"], 3);
+    assert_eq!(
+        reply["run_report"],
+        json!({"wall_seconds":1.5,"exit_status":7})
+    );
+    assert_eq!(reply["compute"]["wrapper_exit_status"], 3);
+    assert_eq!(reply["compute"]["wrapper_wall_seconds"], 0.2);
+    assert_eq!(reply["compute"]["wrapper_user_cpu_seconds"], 0.02);
+    assert_eq!(reply["compute"]["wrapper_system_cpu_seconds"], 0.01);
+    assert_eq!(stdout, b"generator output\n");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    let rows = fixture.store().list_run("R").expect("persisted effect");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value()["effect"]["reason"],
+        "door-compute-report-contradiction"
+    );
+    assert_eq!(rows[0].value()["effect"]["compute"], reply["compute"]);
+    assert!(rows[0].value()["effect"].get("run_report").is_none());
 }

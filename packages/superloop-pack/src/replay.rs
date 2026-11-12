@@ -667,6 +667,16 @@ fn project(
     });
     validate_required_entries(oid, manifest, &selected.included, &entries, evidence)?;
     let bounded = bounded_policy(&historical, &selected.included, &removed)?;
+    if let Some(path) = bounded.manifest.public.unpublished.as_deref()
+        && !policy.permits_public_path(path)
+    {
+        evidence.current.check = "manifest".into();
+        evidence.current.field = "public.unpublished".into();
+        evidence.current.path = Some(path.to_owned());
+        return Err(refuse(
+            "declared unpublished register excluded by final bound",
+        ));
+    }
     let omitted = selected.tracked.saturating_sub(selected.included.len());
     let mut projected = cut::project_tree_with_policy(
         &cut_request(request),
@@ -675,7 +685,13 @@ fn project(
         selected.included,
         Some(&bounded.bytes),
     )
-    .map_err(|error| annotate_projection_error(evidence, error))?;
+    .map_err(|error| {
+        annotate_projection_error(
+            evidence,
+            error,
+            bounded.manifest.public.unpublished.as_deref(),
+        )
+    })?;
     // Generated paths obey the same public destination bound as source paths.
     projected.retain(|path, _| policy.permits_public_path(path));
     refresh_projected_manifest(request, &mut projected, &bounded.bytes).inspect_err(|_| {
@@ -763,6 +779,7 @@ fn refresh_projected_manifest(
 fn annotate_projection_error(
     evidence: &mut ValidationEvidence,
     error: cut::CutError,
+    register: Option<&str>,
 ) -> ReplayError {
     evidence.current.field = "public projection inputs".into();
     if error.to_string().contains("citation-sites") {
@@ -775,7 +792,7 @@ fn annotate_projection_error(
                 if suffix == format!("{field} matches private audit kind {kind}") {
                     evidence.current.check = "burn scan".into();
                     evidence.current.field = format!("unpublished.{field}");
-                    evidence.current.path = Some("docs/public/unpublished-labels.toml".into());
+                    evidence.current.path = register.map(str::to_owned);
                     evidence.current.matcher_kind = Some(kind.into());
                     evidence.current.register_kind = Some("values".into());
                 }
@@ -821,10 +838,21 @@ fn output_ready(request: &ReplayRequest<'_>, expected: &str) -> Result<PathBuf, 
 }
 
 fn read_projection(root: &Path, oid: &str) -> Result<Projection, ReplayError> {
-    cut::tree_entries(root, oid)?
+    let entries = cut::tree_entries(root, oid)?;
+    let contents = cut::blobs(root, entries.values().map(|(_, object)| object), true)?;
+    entries
         .into_iter()
         .map(|(path, (mode, object))| {
-            Ok((path, (mode, git(root, &["cat-file", "blob", &object])?)))
+            Ok((
+                path,
+                (
+                    mode,
+                    contents
+                        .get(&object)
+                        .ok_or_else(|| refuse("missing projected blob"))?
+                        .clone(),
+                ),
+            ))
         })
         .collect()
 }
@@ -1514,7 +1542,10 @@ fn plan_trees(
 
 fn projection_refusal(ordinal: usize, error: &ReplayError) -> ReplayError {
     let reason = error.0.strip_prefix("cut refused: ").unwrap_or(&error.0);
-    if reason.starts_with("citation-sites linter refused; diagnostic scratch=") {
+    if reason.starts_with("citation-sites linter refused; diagnostic scratch=")
+        || (reason.starts_with("citation-sites linter timed out after ")
+            && reason.contains(" s; diagnostic scratch="))
+    {
         return refuse(format!("source ordinal {ordinal}: {reason}"));
     }
     if [
@@ -1555,6 +1586,13 @@ fn projection_refusal(ordinal: usize, error: &ReplayError) -> ReplayError {
         "unpublished site has no path class",
         "owner snapshot envelope missing",
         "owners must be UTF-8",
+        "missing batch blob header",
+        "invalid batch blob header",
+        "invalid batch blob type",
+        "unexpected batch blob identity",
+        "invalid batch blob size",
+        "truncated batch blob",
+        "unexpected batch blob bytes",
     ]
     .contains(&reason)
     {
@@ -1679,6 +1717,51 @@ mod tests {
             let mut changed = report.clone();
             *changed.pointer_mut(pointer).expect("fixture field") = replacement;
             assert!(!accepts(changed), "{pointer}");
+        }
+    }
+
+    /// Replay keeps the reason and scratch path of each citation refusal retaining diagnostics.
+    ///
+    /// # Panics
+    /// Panics only if replay collapses a citation refusal that names retained diagnostics.
+    /// ´test:unit:projection-refusal-names-retained-citation-diagnostics´
+    #[test]
+    fn projection_refusal_names_retained_citation_diagnostics() {
+        for reason in [
+            "citation-sites linter refused; diagnostic scratch=/retained",
+            "citation-sites linter timed out after 120 s; diagnostic scratch=/retained",
+        ] {
+            let error = super::ReplayError(format!("cut refused: {reason}"), None);
+            assert_eq!(
+                super::projection_refusal(3, &error).0,
+                format!("source ordinal 3: {reason}")
+            );
+        }
+    }
+
+    /// Replay names each batched blob-read refusal its projection can raise.
+    ///
+    /// # Panics
+    /// Panics only if replay collapses a batched blob-read refusal to a bare projection refusal.
+    /// ´test:unit:projection-refusal-names-batched-blob-reads´
+    #[test]
+    fn projection_refusal_names_batched_blob_reads() {
+        for reason in [
+            "git operation failed",
+            "invalid git response",
+            "missing batch blob header",
+            "invalid batch blob header",
+            "invalid batch blob type",
+            "unexpected batch blob identity",
+            "invalid batch blob size",
+            "truncated batch blob",
+            "unexpected batch blob bytes",
+        ] {
+            let error = super::ReplayError(format!("cut refused: {reason}"), None);
+            assert_eq!(
+                super::projection_refusal(3, &error).0,
+                format!("source ordinal 3: {reason}")
+            );
         }
     }
 }

@@ -14,6 +14,7 @@ tier = 3
 release-group = "run-worker"
 
 [dependencies]
+tracing = { workspace = true }
 superloop-cli-common.workspace = true
 loop-home.workspace = true
 serde_json.workspace = true

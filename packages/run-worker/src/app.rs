@@ -259,31 +259,26 @@ fn mail_birth<R: Runner>(
         uid,
         format!("worker-run:{}:{uid}:{}", row.lane, row.claimed),
     );
-    let command = CommandSpec {
-        label: format!("mail-birth-{phase}"),
-        argv: namespaced(
-            &environment.podman,
-            vec![
-                executable.to_string_lossy().into_owned(),
-                if phase == "retire-home" {
-                    "_mail-worker-home".into()
-                } else {
-                    "_mail-worker-birth".into()
-                },
-                environment.caller_home.to_string_lossy().into_owned(),
-                loop_name.into(),
-                if phase == "retire-home" {
-                    row.lane.clone()
-                } else {
-                    phase.into()
-                },
-                identity.name,
-                uid.to_string(),
-                identity.reservation,
-            ],
-        ),
-        io: IoMode::Inherit,
-    };
+    let namespace = namespaced(&environment.podman, Vec::new());
+    let mut command = loop_home::mail::worker_provision::anchored_command(
+        &environment.caller_home,
+        loop_name,
+        &identity,
+        if phase == "retire-home" {
+            "_mail-worker-home"
+        } else {
+            "_mail-worker-birth"
+        },
+        if phase == "retire-home" {
+            &row.lane
+        } else {
+            phase
+        },
+        &executable,
+        &namespace,
+    )
+    .map_err(|error| WorkerError::runtime(error.to_string()))?;
+    command.label = format!("mail-birth-{phase}");
     run_one(runner, &command).map(|_| ())
 }
 
@@ -295,6 +290,7 @@ fn git(label: &str, podman: &[String], words: Vec<String>) -> CommandSpec {
             std::iter::once(String::from("git")).chain(words).collect(),
         ),
         io: IoMode::Inherit,
+        descriptors: loop_home::CommandDescriptors::default(),
     }
 }
 
@@ -520,6 +516,7 @@ fn unwind<R: Runner>(
             .to_vec(),
         ),
         io: IoMode::Inherit,
+        descriptors: loop_home::CommandDescriptors::default(),
     };
     if let Err(tree) = run_one(runner, &removal) {
         message.push_str("; the lane tree could not be removed: ");
@@ -547,6 +544,7 @@ fn head_of<R: Runner>(
             .to_vec(),
         ),
         io: IoMode::Capture,
+        descriptors: loop_home::CommandDescriptors::default(),
     };
     let output = runner
         .run(&command)

@@ -168,6 +168,7 @@ mod tests {
             "launch-paused"
         );
         let request = super::super::LaunchRequest {
+            backend: None,
             loop_name: "alpha".into(),
             run: "R".into(),
             letter: fixture.path().join("letter"),

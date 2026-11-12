@@ -61,6 +61,21 @@ pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Opt
                 .as_str()
                 .map_or_else(String::new, |cause| format!(": {cause}"))
         ))
+    } else if reason == "door-capacity-refusal"
+        && reply["peer_limit"].as_u64().is_some()
+        && reply["retry_after_seconds"].as_u64().is_some()
+    {
+        Some(format!(
+            "{reason}: peer_limit={} retry_after={}s; no request was dispatched",
+            reply["peer_limit"], reply["retry_after_seconds"]
+        ))
+    } else if matches!(reason, "door-request-deadline" | "door-deadline-refusal")
+        && reply["registered_deadline_ms"].is_u64()
+    {
+        Some(format!(
+            "{reason}: registered_deadline_ms={} request_deadline_ms={}",
+            reply["registered_deadline_ms"], reply["request_deadline_ms"]
+        ))
     } else if reason == "door-request-concurrent" {
         Some(format!(
             "{reason}: waited={}s retry_after={}s; {}",
@@ -88,15 +103,109 @@ const FRAME_LIMIT: usize = 65_536;
 pub const INPUT_LIMIT: usize = 16 * 1024 * 1024;
 const PEER_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_PEERS: usize = 16;
+const CAPACITY_RETRY_SECONDS: u64 = 120;
 const ADMISSION_WAIT: Duration = Duration::from_secs(30);
 const ADMISSION_POLL: Duration = Duration::from_millis(100);
 const ADMISSION_REPLY_MARGIN: Duration = Duration::from_secs(2);
 pub(crate) const FULL_STORE_REASON_PREFIX: &str = "door-requests-full-refusal: ";
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+// Credit measured contention sleeps, never arbitrary work, up to one bounded
+// extra window per request. The shared writer keeps progress frames whole even
+// when an allow-mode agent publishes beside effect output.
+#[cfg(test)]
+thread_local! {
+    static WAIT_CREDIT_OBSERVED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+    static WAIT_CREDIT_CAP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) const MAX_LOCK_WAIT_CREDIT_MS: u64 = 120_000;
+pub(crate) struct RequestWait {
+    pub(super) writer: std::sync::Arc<std::sync::Mutex<UnixStream>>,
+    micros: AtomicU64,
+    cap_ms: u64,
+    announced: std::sync::Mutex<u64>,
+}
+
+impl RequestWait {
+    fn new(stream: &UnixStream) -> io::Result<Self> {
+        let cap_ms = MAX_LOCK_WAIT_CREDIT_MS;
+        #[cfg(test)]
+        let cap_ms = WAIT_CREDIT_CAP
+            .with(std::cell::Cell::take)
+            .unwrap_or(cap_ms);
+        Ok(Self {
+            writer: std::sync::Arc::new(std::sync::Mutex::new(stream.try_clone()?)),
+            micros: AtomicU64::new(0),
+            cap_ms,
+            announced: std::sync::Mutex::new(0),
+        })
+    }
+
+    pub(crate) fn elapsed(&self) -> Duration {
+        Duration::from_micros(self.micros.load(Ordering::Relaxed).min(self.cap_ms * 1000))
+    }
+
+    pub(crate) fn deadline(&self, base: Instant) -> Instant {
+        base + self.elapsed()
+    }
+
+    pub(crate) fn credit(&self, elapsed: Duration) {
+        let extra = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+        let mut previous = self.micros.load(Ordering::Relaxed);
+        loop {
+            let next = previous.saturating_add(extra);
+            match self.micros.compare_exchange_weak(
+                previous,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => previous = current,
+            }
+        }
+        let total = (self.micros.load(Ordering::Relaxed) / 1000).min(self.cap_ms);
+        let mut announced = self
+            .announced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if total.saturating_sub(*announced) >= 50 {
+            let frame = json!({"schema":2,"type":"request-lock-wait","wait_ms":total});
+            let _sent = transport::write_frame_locked(
+                &self.writer,
+                &frame,
+                Instant::now() + Duration::from_secs(2),
+            );
+            *announced = total;
+            // A fixture may release its holder only after the progress frame.
+            #[cfg(test)]
+            {
+                drop(announced);
+                WAIT_CREDIT_OBSERVED.with(|slot| {
+                    if let Some(sender) = slot.borrow_mut().take() {
+                        let _sent = sender.send(());
+                    }
+                });
+            }
+        }
+    }
+
+    fn report(&self, reply: &mut Value) {
+        let waited = self.micros.load(Ordering::Relaxed) / 1000;
+        let credit = waited.min(self.cap_ms);
+        reply["request_lock_wait_ms"] = json!(waited);
+        reply["request_lock_wait_credit_ms"] = json!(credit);
+        reply["request_lock_wait_credit_cap_ms"] = json!(self.cap_ms);
+        if let Some(requested) = reply["request_deadline_ms"].as_u64() {
+            reply["effective_deadline_ms"] = json!(requested.saturating_add(credit));
+        }
+    }
+}
+
 // The service and host exercises share this inode; never unlink a lock on release.
 struct RequestGuard {
-    _held: nix::fcntl::Flock<File>,
+    _held: Vec<nix::fcntl::Flock<File>>,
 }
 
 impl RequestGuard {
@@ -104,6 +213,7 @@ impl RequestGuard {
         home: &Path,
         registration: &Registration,
         request: &Value,
+        operation: Option<transport::Operation>,
         started: Instant,
     ) -> io::Result<(Option<Self>, Duration)> {
         let began = Instant::now();
@@ -112,7 +222,7 @@ impl RequestGuard {
             .saturating_sub(ADMISSION_REPLY_MARGIN);
         let budget = remaining.min(ADMISSION_WAIT);
         loop {
-            if let Some(guard) = Self::acquire(home, registration)? {
+            if let Some(guard) = Self::acquire_operation(home, registration, operation)? {
                 return Ok((Some(guard), began.elapsed()));
             }
             #[cfg(test)]
@@ -137,7 +247,40 @@ impl RequestGuard {
         }
     }
 
+    #[cfg(test)]
     fn acquire(home: &Path, registration: &Registration) -> io::Result<Option<Self>> {
+        Self::acquire_operation(home, registration, None)
+    }
+
+    fn acquire_operation(
+        home: &Path,
+        registration: &Registration,
+        operation: Option<transport::Operation>,
+    ) -> io::Result<Option<Self>> {
+        let class = match operation {
+            Some(transport::Operation::Compute) => Some("compute"),
+            Some(transport::Operation::GitReceive) => Some("receive"),
+            _ => None,
+        };
+        let Some(common) = Self::acquire_lock(home, registration, "", class.is_some())? else {
+            return Ok(None);
+        };
+        let mut held = vec![common];
+        if let Some(class) = class {
+            let Some(slot) = Self::acquire_lock(home, registration, class, false)? else {
+                return Ok(None);
+            };
+            held.push(slot);
+        }
+        Ok(Some(Self { _held: held }))
+    }
+
+    fn acquire_lock(
+        home: &Path,
+        registration: &Registration,
+        class: &str,
+        shared: bool,
+    ) -> io::Result<Option<nix::fcntl::Flock<File>>> {
         use nix::fcntl::{Flock, FlockArg, OFlag, OpenHow, ResolveFlag, openat2};
         loop_home::validate_name(&registration.loop_name).map_err(io::Error::other)?;
         let owner = nix::unistd::Uid::effective().as_raw();
@@ -149,7 +292,11 @@ impl RequestGuard {
             owner,
         )
         .map_err(io::Error::other)?;
-        let name = format!("door-admission-{}.lock", registration.worker_uid);
+        let name = if class.is_empty() {
+            format!("door-admission-{}.lock", registration.worker_uid)
+        } else {
+            format!("door-admission-{}-{class}.lock", registration.worker_uid)
+        };
         let fd = openat2(
             &directory,
             Path::new(&name),
@@ -169,8 +316,13 @@ impl RequestGuard {
                 "door admission lock owner, type, mode or links differ",
             ));
         }
-        match Flock::lock(File::from(fd), FlockArg::LockExclusiveNonblock) {
-            Ok(held) => Ok(Some(Self { _held: held })),
+        let operation = if shared {
+            FlockArg::LockSharedNonblock
+        } else {
+            FlockArg::LockExclusiveNonblock
+        };
+        match Flock::lock(File::from(fd), operation) {
+            Ok(held) => Ok(Some(held)),
             Err((_, nix::errno::Errno::EWOULDBLOCK)) => Ok(None),
             Err((_, error)) => Err(io::Error::from(error)),
         }
@@ -224,7 +376,8 @@ fn admit_peer(active: &Arc<AtomicUsize>, stream: &mut UnixStream) -> Option<Peer
         if let Err(error) = frame_write_no_drain(
             stream,
             &json!({"schema":2,"type":"final","status":125,
-                "reason":"door-capacity-refusal","ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
+                "reason":"door-capacity-refusal","peer_limit":MAX_PEERS,
+                "retry_after_seconds":CAPACITY_RETRY_SECONDS,"ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
                 "queue_state":"no-queue","queue_wall_seconds":null,"compute_exit_status":null,
                 "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
         ) {
@@ -776,14 +929,15 @@ thread_local! {
     static REQUEST_READY: std::cell::RefCell<Option<RequestReadiness>> = const { std::cell::RefCell::new(None) };
 }
 
-fn wait_answer(store: &Store, id: &str, stream: &UnixStream, deadline: Instant) -> Answer {
+fn wait_answer(store: &Store, id: &str, stream: &UnixStream, base_deadline: Instant) -> Answer {
     let queued = Instant::now();
     let mut interval = Duration::from_millis(10);
     loop {
-        let record = match store.waiting_request_until(id, deadline) {
+        let record = match store.waiting_request_until(id, base_deadline) {
             Ok(record) => record,
             Err(error) => {
                 if crate::requests::store::is_lock_contention(&error) {
+                    let deadline = store.request_deadline(base_deadline);
                     #[cfg(test)]
                     AFTER_WAIT_LOCK_TIMEOUT.with(|slot| {
                         if let Some(sender) = slot.borrow_mut().take() {
@@ -807,6 +961,7 @@ fn wait_answer(store: &Store, id: &str, stream: &UnixStream, deadline: Instant) 
                 action();
             }
         });
+        let deadline = store.request_deadline(base_deadline);
         match peer_disconnected(stream) {
             Ok(true) => return Answer::Disconnect(queued.elapsed().as_secs_f64()),
             Err(error) => {
@@ -1003,8 +1158,11 @@ fn root_refusal(
     error: &LaneError,
     started: Instant,
 ) -> io::Result<()> {
+    let (bounded_request, _) =
+        announce_compute_deadline(stream, registration, peer, request, None, started);
+    let request = &bounded_request;
     let (_request_guard, admission_error) = if peer == registration.worker_uid {
-        match RequestGuard::acquire_wait(owner_home, registration, request, started) {
+        match RequestGuard::acquire_wait(owner_home, registration, request, None, started) {
             Ok((Some(guard), _)) => (Some(guard), None),
             Ok((None, waited)) => {
                 return concurrent_refusal(stream, registration, peer, started, waited).map(|_| ());
@@ -1057,6 +1215,61 @@ fn root_refusal(
     frame_write_until(stream, &reply, deadline)
 }
 
+fn announce_compute_deadline(
+    stream: &mut UnixStream,
+    registration: &Registration,
+    peer: u32,
+    request: &Value,
+    route: Option<&transport::HostRunner>,
+    started: Instant,
+) -> (Value, u64) {
+    // Announce every well-formed authenticated compute candidate before admission.
+    // Only a route-validated work request can select a longer owner deadline.
+    let mut bounded_request = request.clone();
+    let mut registered_deadline_ms = compute::DEADLINE_MS;
+    let compute_args = transport::argument_bytes(request);
+    if peer == registration.worker_uid
+        && compute_args.as_deref().is_some_and(compute::candidate)
+        && request.as_object().is_some_and(|row| {
+            row.len() == 3
+                && row.contains_key("schema")
+                && row.contains_key("argv")
+                && row.contains_key("deadline_ms")
+        })
+        && request["schema"] == 2
+        && request["deadline_ms"]
+            .as_u64()
+            .is_some_and(|ms| ms > 0 && ms <= compute::MAX_DEADLINE_MS)
+    {
+        if registration.scope == Scope::Work
+            && let (Some(route), Some(args)) = (route, compute_args.as_ref())
+            && route.allowed(args, registration) == Some(transport::Operation::Compute)
+        {
+            registered_deadline_ms = route.compute_deadline_ms(args);
+        }
+        let bound = request["deadline_ms"]
+            .as_u64()
+            .unwrap_or(0)
+            .min(registered_deadline_ms);
+        bounded_request["deadline_ms"] = json!(bound);
+        let deadline = started + Duration::from_millis(bound);
+        // Preserve the normal disconnect record even when the peer leaves before this frame.
+        let _announcement = frame_write_until(
+            stream,
+            &transport::compute_deadline_frame(registered_deadline_ms, bound, deadline),
+            Instant::now() + Duration::from_secs(2),
+        );
+    }
+    if compute_args.as_deref().is_some_and(compute::candidate)
+        && let Some(ms) = request["deadline_ms"]
+            .as_u64()
+            .filter(|ms| *ms > 0 && *ms <= compute::MAX_DEADLINE_MS)
+    {
+        bounded_request["deadline_ms"] = json!(ms.min(registered_deadline_ms));
+    }
+    (bounded_request, registered_deadline_ms)
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn serve_request_with_agent(
     stream: &mut UnixStream,
@@ -1072,20 +1285,29 @@ fn serve_request_with_agent(
     configured_model: Option<&str>,
     started: Instant,
 ) -> io::Result<(Value, Vec<u8>)> {
+    let (bounded_request, registered_deadline_ms) =
+        announce_compute_deadline(stream, registration, peer, request, route, started);
+    let request = &bounded_request;
+    // Classify only a route-validated operation; all other shapes retain exclusive admission.
+    let admission_operation = route.and_then(|route| {
+        transport::argument_bytes(request).and_then(|args| route.allowed(&args, registration))
+    });
     // Claim the authenticated box before any preflight or intent record write,
     // and retain it through the final effect publication and reply.
-    let (_request_guard, admission_error) =
-        if let Some(home) = owner_home.filter(|_| peer == registration.worker_uid) {
-            match RequestGuard::acquire_wait(home, registration, request, started) {
-                Ok((Some(guard), _)) => (Some(guard), None),
-                Ok((None, waited)) => {
-                    return concurrent_refusal(stream, registration, peer, started, waited);
-                }
-                Err(error) => (None, Some(error)),
+    let (_request_guard, admission_error) = if let Some(home) =
+        owner_home.filter(|_| peer == registration.worker_uid)
+    {
+        match RequestGuard::acquire_wait(home, registration, request, admission_operation, started)
+        {
+            Ok((Some(guard), _)) => (Some(guard), None),
+            Ok((None, waited)) => {
+                return concurrent_refusal(stream, registration, peer, started, waited);
             }
-        } else {
-            (None, None)
-        };
+            Err(error) => (None, Some(error)),
+        }
+    } else {
+        (None, None)
+    };
     let refuse = |reason| {
         // Preserve preflight evidence when custody cannot be opened, but never
         // attempt a record write without owning this box's admission lock.
@@ -1106,7 +1328,7 @@ fn serve_request_with_agent(
     let args = transport::argument_bytes(request);
     let compute_candidate = args.as_deref().is_some_and(compute::candidate);
     let maximum = if compute_candidate {
-        compute::DEADLINE_MS
+        registered_deadline_ms
     } else {
         120_000
     };
@@ -1185,10 +1407,13 @@ fn serve_request_with_agent(
         frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
     };
+    let wait = std::sync::Arc::new(RequestWait::new(stream)?);
     let bound_runner = transport::ComputeRunner {
         inner: runner,
         words: &words,
         deadline,
+        registered_deadline_ms,
+        wait: Some(&wait),
     };
     let runner: &dyn transport::Runner = if compute_candidate {
         &bound_runner
@@ -1215,47 +1440,71 @@ fn serve_request_with_agent(
     let store = fixture_store
         .or(opened.as_ref())
         .ok_or_else(|| io::Error::other("door store is absent"))?;
-    let store = store.for_request(deadline).map_err(io::Error::other)?;
+    let store = store
+        .for_request(deadline)
+        .map_err(io::Error::other)?
+        .with_wait_credit(std::sync::Arc::clone(&wait));
     let default_class = if compute_candidate { "compute" } else { "ssh" };
     let default_rubric = Rubric::decode(&json!({"schema":1,"class":default_class,
         "undecided_reason":"no registered rule for this operation","rules":[]}))
     .map_err(io::Error::other)?;
     let class = rubric.unwrap_or(&default_rubric).class();
-    let setting = store.ensure_first_mode(class).map_err(io::Error::other)?;
+    let setting = match store.ensure_first_mode(class) {
+        Ok(setting) => setting,
+        Err(error) if crate::requests::store::is_lock_contention(&error) => {
+            let mut reply =
+                transport::refusal(registration, peer, "door-request-record-refusal", started);
+            reply["request_record_error"] = json!(error.line());
+            wait.report(&mut reply);
+            frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+            return Ok((reply, Vec::new()));
+        }
+        Err(error) => return Err(io::Error::other(error)),
+    };
     let shape_key = if compute_candidate {
         compute::shape(&words)
     } else {
         format!("{class}:{}", operation.name())
     };
-    let (mut would_do, matched_rule, history) = rubric
-        .map_or_else(
-            || {
-                store
-                    .learned_judgement(class, operation.name(), &shape_key)
-                    .or_else(|error| {
-                        if crate::requests::store::is_lock_contention(&error) {
-                            return Err(error);
-                        }
-                        Ok((
-                            json!({"decision":"undecided","reason":error.line()}),
-                            Value::Null,
-                            json!([]),
-                        ))
-                    })
-            },
-            |rubric| {
-                Ok((
-                    rubric.would_do(class, operation.name(), &shape_key),
-                    Value::Null,
-                    json!([]),
-                ))
-            },
-        )
-        .map_err(io::Error::other)?;
+    let (mut would_do, matched_rule, history) = match rubric.map_or_else(
+        || {
+            store
+                .learned_judgement(class, operation.name(), &shape_key)
+                .or_else(|error| {
+                    if crate::requests::store::is_lock_contention(&error) {
+                        return Err(error);
+                    }
+                    Ok((
+                        json!({"decision":"undecided","reason":error.line()}),
+                        Value::Null,
+                        json!([]),
+                    ))
+                })
+        },
+        |rubric| {
+            Ok((
+                rubric.would_do(class, operation.name(), &shape_key),
+                Value::Null,
+                json!([]),
+            ))
+        },
+    ) {
+        Ok(judgement) => judgement,
+        Err(error) if crate::requests::store::is_lock_contention(&error) => {
+            let mut reply =
+                transport::refusal(registration, peer, "door-request-record-refusal", started);
+            reply["request_record_error"] = json!(error.line());
+            wait.report(&mut reply);
+            frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+            return Ok((reply, Vec::new()));
+        }
+        Err(error) => return Err(io::Error::other(error)),
+    };
     let mode = match execute_command::policy::DoorMode::from_record(setting["mode"].as_str()) {
         Ok(mode) => mode.as_str(),
         Err(error) => {
-            let reply = refuse(error.0);
+            let mut reply = refuse(error.0);
+            wait.report(&mut reply);
             frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             return Ok((reply, Vec::new()));
         }
@@ -1277,9 +1526,11 @@ fn serve_request_with_agent(
         let mut result = agent.map_or_else(
             || agent::RunnerOutcome::referral("failure", "door-agent-unconfigured", Instant::now()),
             |runner| match input.encode() {
-                Ok(bytes) => {
-                    runner.judge(&bytes, deadline.saturating_duration_since(Instant::now()))
-                }
+                Ok(bytes) => runner.judge(
+                    &bytes,
+                    wait.deadline(deadline)
+                        .saturating_duration_since(Instant::now()),
+                ),
                 Err(error) => agent::RunnerOutcome::referral("failure", error.0, Instant::now()),
             },
         );
@@ -1328,6 +1579,7 @@ fn serve_request_with_agent(
         };
         let mut reply = transport::refusal(registration, peer, &reason, started);
         reply["request_record_error"] = json!(error.line());
+        wait.report(&mut reply);
         frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
     }
@@ -1358,6 +1610,7 @@ fn serve_request_with_agent(
                 transport::refusal(registration, peer, "door-request-record-refusal", started);
             reply["request_record_error"] = json!(error.line());
             reply["request_id"] = json!(id);
+            wait.report(&mut reply);
             frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             return Ok((reply, Vec::new()));
         }
@@ -1378,6 +1631,7 @@ fn serve_request_with_agent(
             reply["reason"] = json!("door-record-incomplete");
             reply["request_record_error"] = json!(error.line());
         }
+        wait.report(&mut reply);
         frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
     }
@@ -1413,6 +1667,7 @@ fn serve_request_with_agent(
                     None,
                     Some(&would_do),
                     Some(&complete),
+                    Some(&wait),
                 );
                 let judgement = agent_task
                     .join()
@@ -1461,6 +1716,7 @@ fn serve_request_with_agent(
             None,
             Some(&would_do),
             Some(&complete),
+            Some(&wait),
         );
         if result.is_err() {
             let _recorded =
@@ -1490,6 +1746,7 @@ fn serve_request_with_agent(
                 Some(wall),
                 Some(&would_do),
                 Some(&complete),
+                Some(&wait),
             );
             if result.is_err() {
                 let _recorded =
@@ -1498,7 +1755,7 @@ fn serve_request_with_agent(
             result.map(|reply| (reply, Vec::new()))
         }
         Answer::ReadFailure(wall) => {
-            let reply = queue_reply(
+            let mut reply = queue_reply(
                 registration,
                 peer,
                 "door-request-read-refusal",
@@ -1516,6 +1773,7 @@ fn serve_request_with_agent(
                     error.line()
                 );
             }
+            wait.report(&mut reply);
             frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             Ok((reply, Vec::new()))
         }
@@ -1527,12 +1785,17 @@ fn serve_request_with_agent(
                 Answer::Allow(_) | Answer::ReadFailure(_) => unreachable!(),
             };
             let mut reply = queue_reply(registration, peer, reason, started, state, wall, &id);
+            if compute_candidate {
+                reply["registered_deadline_ms"] = json!(registered_deadline_ms);
+                reply["request_deadline_ms"] = request["deadline_ms"].clone();
+            }
             if let Err(error) = store.record_effect(&id, effect_from_final(&reply)) {
                 let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
                 reply["reason"] = json!("door-record-incomplete");
                 reply["request_record_error"] = json!(error.line());
             }
             if !disconnected {
+                wait.report(&mut reply);
                 frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
             }
             Ok((reply, Vec::new()))
@@ -1955,6 +2218,7 @@ fn run_service_with_snapshot(
     if let Err(error) = publish(&owner_home, loop_name) {
         Store::report_snapshot_failure(&error);
     }
+    let compute_deadlines = Arc::new(config::compute_deadlines(&generation["agent"])?);
     let agent_runner = Arc::new(config::runner(
         &generation["agent"],
         &owner_home,
@@ -2050,6 +2314,7 @@ fn run_service_with_snapshot(
         let owner_home = Arc::clone(&owner_home);
         let peer_map = Arc::clone(&peer_map);
         let agent_runner = Arc::clone(&agent_runner);
+        let compute_deadlines = Arc::clone(&compute_deadlines);
         thread::spawn(move || {
             let _guard = guard;
             let started = Instant::now();
@@ -2081,7 +2346,7 @@ fn run_service_with_snapshot(
                     &loop_name,
                     owner,
                 ) {
-                    Ok(route) => Some(route),
+                    Ok(route) => Some(route.with_compute_deadlines(&compute_deadlines)),
                     Err(error) if error.kind == "door-compute-root-refusal" => {
                         return root_refusal(
                             &mut stream,
@@ -3815,6 +4080,12 @@ mod tests {
             let finished = AtomicBool::new(false);
             let observed = Arc::new(std::sync::Mutex::new(HashSet::new()));
             let watched = thread::scope(|scope| {
+                struct FinishWatch<'a>(&'a AtomicBool);
+                impl Drop for FinishWatch<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::Release);
+                    }
+                }
                 let watcher = scope.spawn(|| {
                     crate::launch::exercise::door_attribution::watch_requests_with_observer(
                         &store,
@@ -3829,6 +4100,17 @@ mod tests {
                         },
                     )
                 });
+                // Drop before scope joins even when a client assertion panics.
+                let _finish_watch = FinishWatch(&finished);
+                let read_reply = |client: &mut UnixStream| {
+                    let until = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        let frame = frame_read_until(client, until).expect("reply or credit");
+                        if frame["type"] != "request-lock-wait" {
+                            break frame;
+                        }
+                    }
+                };
                 for _ in 0..2 {
                     let observed = Arc::clone(&observed);
                     // Keep the watcher live while the receive is waiting. Only
@@ -3861,7 +4143,7 @@ mod tests {
                     )
                     .expect("receive request");
                     client.shutdown(Shutdown::Write).expect("receive end");
-                    let _reply = frame_read(&mut client).expect("receive frame");
+                    let _reply = read_reply(&mut client);
                     server
                         .join()
                         .expect("service thread")
@@ -3870,7 +4152,7 @@ mod tests {
                 let (runner, _, _) = counting_runner(&fixture);
                 let (socket, server) = fixture_service(&fixture, runner, rubric(None), 2000, None);
                 let mut echo = send_probe(&socket, 2000);
-                let echo_frame = frame_read(&mut echo).expect("echo frame");
+                let echo_frame = read_reply(&mut echo);
                 assert_eq!(
                     echo_frame["queue_state"],
                     if floor == "allow" {
@@ -4051,6 +4333,16 @@ mod tests {
         use crate::requests::store::{
             AFTER_WRITER_LOCK_TIMEOUT, BEFORE_LEAF_SYNC, WRITER_LOCK_WAIT_OVERRIDE,
         };
+        struct ProbeOutput(std::sync::mpsc::Sender<Vec<u8>>);
+        impl io::Write for ProbeOutput {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.send(bytes.to_vec()).map_err(io::Error::other)?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
         let fixture = Fixture::new();
         fixture.set_floor("allow");
         let store = fixture.store();
@@ -4081,8 +4373,10 @@ mod tests {
         effect["ref_check"] = json!("not-applicable");
         store.file(sibling).expect("sibling admitted");
         let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
         super::REQUEST_READY.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move |_| {
+                super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = Some(progress_tx));
                 WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(Some(Duration::from_millis(20))));
                 AFTER_WRITER_LOCK_TIMEOUT.with(|hook| {
                     *hook.borrow_mut() = Some(Box::new(move || {
@@ -4094,12 +4388,19 @@ mod tests {
         });
         let (runner, calls, _) = counting_runner(&fixture);
         let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 5000, None);
-        let mut client = UnixStream::connect(socket).expect("second connection");
-        frame_write(
-            &mut client,
-            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":5000}),
-        )
-        .expect("second request");
+        let (mut input, stub_input) = UnixStream::pair().expect("controlled input");
+        let (output_tx, output_rx) = std::sync::mpsc::channel();
+        let client = thread::spawn(move || {
+            super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(Some(5000)));
+            super::transport::stub_call_stream(
+                &socket,
+                &[std::ffi::OsString::from("door-attribution-probe")],
+                stub_input,
+                ProbeOutput(output_tx),
+                Vec::new(),
+            )
+            .expect("stub retains the completed effect after progress")
+        });
         let deadline = Instant::now() + Duration::from_secs(4);
         while calls.load(Ordering::Relaxed) == 0 {
             assert!(Instant::now() < deadline, "second command never started");
@@ -4107,10 +4408,12 @@ mod tests {
         }
         // Seeing stdout proves spawn's custody read has finished; the child
         // stays live on stdin while the sibling takes the record lock.
-        client.write_all(b"x").expect("running command input");
+        input.write_all(b"x").expect("running command input");
         assert_eq!(
-            frame_read(&mut client).expect("running command output")["type"],
-            "stdout"
+            output_rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("running command output"),
+            b"x"
         );
         let sibling_store = store
             .for_request(deadline)
@@ -4126,6 +4429,9 @@ mod tests {
                         release_rx
                             .recv_timeout(Duration::from_secs(4))
                             .expect("second record retried");
+                        progress_rx
+                            .recv_timeout(Duration::from_secs(4))
+                            .expect("progress frame emitted before release");
                     }));
                 });
                 sibling_store
@@ -4135,10 +4441,16 @@ mod tests {
             held_rx
                 .recv_timeout(Duration::from_secs(4))
                 .expect("sibling holds lock");
-            client
+            input
                 .shutdown(Shutdown::Write)
                 .expect("second command finishes");
-            let reply = frame_read(&mut client).expect("second final frame");
+            let reply = client.join().expect("stub client");
+            assert!(
+                reply["request_lock_wait_credit_ms"]
+                    .as_u64()
+                    .expect("measured credit")
+                    >= 50
+            );
             assert_eq!(reply["reason"], "door-complete");
             assert_eq!(reply["status"], 0);
             writer.join().expect("sibling writer");
@@ -4179,6 +4491,49 @@ mod tests {
         }
     }
 
+    /// ´test:unit:door-initial-store-refusal-withholds-non-lock-cause´
+    #[test]
+    fn door_initial_store_refusal_withholds_non_lock_cause() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store.ensure_first_mode("ssh").expect("initial custody");
+        std::fs::set_permissions(
+            fixture.home.join(".config/loops/alpha/door-requests.lock"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .expect("invalid fixture custody");
+        let route = route_for(&fixture.home);
+        let (runner, calls, _) = counting_runner(&fixture);
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("registration");
+        let (mut server, _worker) = UnixStream::pair().expect("worker connection");
+        let started = Instant::now();
+        let error = serve_request(
+            &mut server,
+            &registration,
+            3000,
+            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":3000}),
+            Some(&route),
+            Some(&runner),
+            Some(&fixture.home),
+            Some(&rubric(Some("allow"))),
+            Some(&store),
+            started,
+        )
+        .expect_err("non-contention failure stays at the connection boundary");
+        let reply = super::connection_refusal(&error, started);
+        assert_eq!(reply["reason"], "door-request-refusal");
+        assert!(reply.get("request_record_error").is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
     /// # Panics
     /// Panics only if a store contention refusal loses its cause at the worker boundary.
     /// ´test:unit:door-admission-lock-refusal-retains-worker-cause´
@@ -4201,7 +4556,8 @@ mod tests {
         let started = Instant::now();
         crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE
             .with(|bound| bound.set(Some(Duration::from_millis(30))));
-        let error = serve_request(
+        super::WAIT_CREDIT_CAP.with(|cap| cap.set(Some(60)));
+        let (reply, _) = serve_request(
             &mut server,
             &registration,
             3000,
@@ -4213,12 +4569,29 @@ mod tests {
             Some(&store),
             started,
         )
-        .expect_err("admission lock deadline");
+        .expect("named admission lock deadline reply");
         crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(None));
-        let reply = super::connection_refusal(&error, started);
-        frame_write(&mut server, &reply).expect("production connection refusal");
-        let reply = frame_read(&mut worker).expect("worker final frame");
-        assert_eq!(reply["reason"], "door-request-refusal");
+        let mut observed_credit = 0;
+        let delivered = loop {
+            let frame = frame_read(&mut worker).expect("worker frame");
+            if frame["type"] != "request-lock-wait" {
+                break frame;
+            }
+            let credit = frame["wait_ms"].as_u64().expect("credit milliseconds");
+            assert!(credit >= observed_credit && credit <= 60);
+            observed_credit = credit;
+        };
+        assert!(observed_credit >= 50);
+        assert_eq!(delivered, reply);
+        assert_eq!(reply["reason"], "door-request-record-refusal");
+        assert_eq!(reply["request_lock_wait_credit_ms"], 60);
+        assert_eq!(reply["request_lock_wait_credit_cap_ms"], 60);
+        assert!(
+            reply["request_lock_wait_ms"]
+                .as_u64()
+                .expect("measured contention")
+                >= 60
+        );
         let line = super::final_line(&["fixture".into(), "git status --short".into()], &reply)
             .expect("worker diagnostic");
         assert!(line.contains("request lock:"), "{line}");
@@ -4321,15 +4694,59 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
+    struct EstateReferral(&'static str, &'static str);
+    impl super::agent::AgentRunner for EstateReferral {
+        fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+            super::agent::RunnerOutcome::referral(self.0, self.1, Instant::now())
+        }
+    }
+    fn referral_client(
+        fixture: &Fixture,
+    ) -> (
+        UnixStream,
+        serde_json::Value,
+        thread::JoinHandle<serde_json::Value>,
+    ) {
+        let socket = crate::fixture_exec::fixture_socket_path(fixture.home.join("referral.sock"));
+        let listener = UnixListener::bind(&socket).expect("listener");
+        let client = thread::spawn(move || {
+            super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(Some(30_000)));
+            super::transport::stub_call_stream(
+                &socket,
+                &[std::ffi::OsString::from("door-attribution-probe")],
+                io::empty(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("stub retains the final referral refusal")
+        });
+        let (mut stream, _) = listener.accept().expect("client connection");
+        let request = frame_read(&mut stream).expect("stub request");
+        (stream, request, client)
+    }
+
+    fn referral_contender(
+        store: &crate::requests::store::Store,
+        induce_wait: bool,
+    ) -> Option<thread::JoinHandle<()>> {
+        if induce_wait {
+            let held = store.fixture_exclusive_lock().expect("competing writer");
+            let (contended, observed) = std::sync::mpsc::channel();
+            super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = Some(contended));
+            Some(thread::spawn(move || {
+                observed
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("measured store contention");
+                drop(held);
+            }))
+        } else {
+            None
+        }
+    }
+
     /// ´test:unit:door-unprovisioned-estate-referral-has-no-effect´
     #[test]
     fn door_unprovisioned_estate_referral_has_no_effect() {
-        struct Estate(&'static str, &'static str);
-        impl super::agent::AgentRunner for Estate {
-            fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
-                super::agent::RunnerOutcome::referral(self.0, self.1, Instant::now())
-            }
-        }
         let cases = [
             ("verdict", "estate judgement needed"),
             ("timeout", "door-agent-timeout"),
@@ -4339,75 +4756,94 @@ mod tests {
             ("failure", "door-rubric-unavailable"),
             ("failure", "door-agent-sign-in-unavailable"),
         ];
-        for (mode, (status, reason)) in
-            [crate::requests::Mode::Audit, crate::requests::Mode::Enforce]
-                .into_iter()
-                .flat_map(|mode| cases.into_iter().map(move |case| (mode, case)))
-        {
-            let fixture = Fixture::new();
-            fixture.set_floor("allow");
-            let store = fixture.store();
-            set_fixture_mode(&store, mode);
-            let registration = Registration::from_row(
-                &json!({"name":"alpha","uid":41001}),
-                "alpha",
-                "R",
-                3000,
-                Scope::Work,
-            )
-            .expect("registration");
-            let (mut stream, mut peer) = UnixStream::pair().expect("socket pair");
-            let (runner, calls, _) = counting_runner(&fixture);
-            let route = route_for(&fixture.home);
-            let review_store = fixture.store();
-            super::AFTER_WAIT_READ.with(|slot| {
-                *slot.borrow_mut() = Some(Box::new(move || {
-                    let rows = review_store.list_run("R").expect("waiting review");
-                    let row = &rows[0];
-                    assert_eq!(row.value()["state"], "waiting");
-                    assert_eq!(row.value()["would_do"]["decision"], "refer");
-                    assert_eq!(row.value()["agent_reason"], reason);
-                    assert_eq!(row.value()["effect"]["state"], "pending");
-                    assert!(row.value()["label"].is_null());
-                    review_store
-                        .triage(
-                            "R",
-                            &[json!({"id":row.id(),"action":"adjudicate",
+        for induce_wait in [false, true] {
+            for (mode, (status, reason)) in
+                [crate::requests::Mode::Audit, crate::requests::Mode::Enforce]
+                    .into_iter()
+                    .flat_map(|mode| cases.into_iter().map(move |case| (mode, case)))
+            {
+                let fixture = Fixture::new();
+                fixture.set_floor("allow");
+                let store = fixture.store();
+                set_fixture_mode(&store, mode);
+                let registration = Registration::from_row(
+                    &json!({"name":"alpha","uid":41001}),
+                    "alpha",
+                    "R",
+                    3000,
+                    Scope::Work,
+                )
+                .expect("registration");
+                let (mut stream, request, client) = referral_client(&fixture);
+                let (runner, calls, _) = counting_runner(&fixture);
+                let route = route_for(&fixture.home);
+                let review_store = fixture.store();
+                super::AFTER_WAIT_READ.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        let rows = review_store.list_run("R").expect("waiting review");
+                        let row = &rows[0];
+                        assert_eq!(row.value()["state"], "waiting");
+                        assert_eq!(row.value()["would_do"]["decision"], "refer");
+                        assert_eq!(row.value()["agent_reason"], reason);
+                        assert_eq!(row.value()["effect"]["state"], "pending");
+                        assert!(row.value()["label"].is_null());
+                        review_store
+                            .triage(
+                                "R",
+                                &[json!({"id":row.id(),"action":"adjudicate",
                                 "treatment":"refuse","reason":"loop review answer"})],
-                            "fixture-reviewer",
-                            "2",
-                        )
-                        .expect("loop answer");
-                }));
-            });
-            let (reply, _) = super::serve_request_with_agent(
-                &mut stream,
-                &registration,
-                3000,
-                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":30_000}),
-                Some(&route),
-                Some(&runner),
-                Some(&fixture.home),
-                None,
-                Some(&store),
-                Some(&Estate(status, reason)),
-                None,
-                Instant::now(),
-            )
-            .expect("loop review refusal");
-            assert_eq!(reply["reason"], "door-adjudicated-refusal");
-            let wire = frame_read(&mut peer).expect("worker reply");
-            for field in ["reason", "request_id", "queue_state", "status"] {
-                assert_eq!(wire[field], reply[field], "{field}");
+                                "fixture-reviewer",
+                                "2",
+                            )
+                            .expect("loop answer");
+                    }));
+                });
+                let release = referral_contender(&store, induce_wait);
+                let (reply, _) = super::serve_request_with_agent(
+                    &mut stream,
+                    &registration,
+                    3000,
+                    &request,
+                    Some(&route),
+                    Some(&runner),
+                    Some(&fixture.home),
+                    None,
+                    Some(&store),
+                    Some(&EstateReferral(status, reason)),
+                    None,
+                    Instant::now(),
+                )
+                .expect("loop review refusal");
+                assert_eq!(reply["reason"], "door-adjudicated-refusal");
+                let wire = client.join().expect("stub client");
+                if let Some(release) = release {
+                    release.join().expect("holder released");
+                    assert!(
+                        wire["request_lock_wait_credit_ms"]
+                            .as_u64()
+                            .expect("credit")
+                            >= 50
+                    );
+                }
+                for field in [
+                    "reason",
+                    "request_id",
+                    "queue_state",
+                    "status",
+                    "request_lock_wait_ms",
+                    "request_lock_wait_credit_ms",
+                ] {
+                    assert_eq!(wire[field], reply[field], "{field}");
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                let rows = store.list_run("R").expect("retained review evidence");
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].value()["agent_scope"], "estate");
+                assert_eq!(
+                    rows[0].value()["effect"]["reason"],
+                    "door-adjudicated-refusal"
+                );
             }
-            assert_eq!(calls.load(Ordering::SeqCst), 0);
-            let rows = store.list_run("R").expect("retained review evidence");
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].value()["agent_scope"], "estate");
-            assert_eq!(
-                rows[0].value()["effect"]["reason"],
-                "door-adjudicated-refusal"
-            );
         }
     }
 
@@ -4461,10 +4897,7 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(reply["reason"], "door-request-record-refusal");
             assert_eq!(reply["request_id"], rows[0].id());
-            assert_eq!(
-                frame_read(&mut peer).expect("worker receives refusal"),
-                reply
-            );
+            assert_eq!(fixture_final_frame(&mut peer), reply);
             assert!(rows[0].value()["agent_status"].is_null());
             assert!(rows[0].value()["state"].is_null());
             assert_incomplete(&fixture, rows[0].id());
@@ -4533,7 +4966,7 @@ mod tests {
                 Instant::now(),
             )
             .expect("learned request");
-            let frame = frame_read(&mut peer).expect("final frame");
+            let frame = fixture_final_frame(&mut peer);
             assert_eq!(frame["would_do"], reply["would_do"]);
             assert_eq!(frame["reason"], "door-complete");
             assert_eq!(frame["status"], 0);
@@ -4558,6 +4991,40 @@ mod tests {
         }
     }
 
+    // Keep one bounded read window across all request-lock credit frames.
+    fn fixture_final_frame(client: &mut UnixStream) -> Value {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            let frame = frame_read_until(client, until).expect("reply or lock-wait credit");
+            if frame["type"] != "request-lock-wait" {
+                return frame;
+            }
+            assert_eq!(frame["schema"], 2);
+            assert!(frame["wait_ms"].as_u64().is_some_and(|wait| wait > 0));
+        }
+    }
+
+    /// ´test:unit:door-final-reply-follows-lock-wait-credits´
+    #[test]
+    fn door_final_reply_follows_lock_wait_credits() {
+        for credits in [0, 1, 3] {
+            let (mut writer, mut reader) = UnixStream::pair().expect("reply channel");
+            for wait_ms in 1..=credits {
+                frame_write(
+                    &mut writer,
+                    &json!({"schema":2,"type":"request-lock-wait","wait_ms":wait_ms}),
+                )
+                .expect("credit frame");
+            }
+            let reply = super::connection_refusal(
+                &io::Error::other("synthetic framing case"),
+                Instant::now(),
+            );
+            super::frame_write_no_drain(&mut writer, &reply).expect("final reply");
+            assert_eq!(fixture_final_frame(&mut reader), reply);
+        }
+    }
+
     /// ´test:unit:door-audit-label-precedes-effect´
     #[test]
     fn door_audit_label_precedes_effect() {
@@ -4577,7 +5044,7 @@ mod tests {
         assert_eq!(first["class"]["setter"], "door-service");
         assert_eq!(first["class"]["floor"], "audit");
         label(&store, &id, "allow");
-        let final_frame = frame_read(&mut client).expect("final frame");
+        let final_frame = fixture_final_frame(&mut client);
         assert_eq!(final_frame["queue_state"], "answered");
         assert!(
             final_frame["queue_wall_seconds"]
@@ -4638,7 +5105,7 @@ mod tests {
                 assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
                 label(&store, &id, "allow");
             }
-            let final_frame = frame_read(&mut client).expect("final frame");
+            let final_frame = fixture_final_frame(&mut client);
             server.join().expect("service").expect("reply");
             assert_eq!(final_frame["reason"], expected);
             assert_eq!(
@@ -4734,7 +5201,7 @@ mod tests {
             if disconnect {
                 drop(client);
             } else {
-                let final_frame = frame_read(&mut client).expect("deadline frame");
+                let final_frame = fixture_final_frame(&mut client);
                 assert_eq!(final_frame["reason"], "door-request-deadline");
                 assert_eq!(final_frame["queue_state"], "deadline");
             }
@@ -4805,7 +5272,7 @@ mod tests {
         let mut client = send_probe(&socket, 2000);
         let id = wait_filed(&store);
         label(&store, &id, "refuse");
-        let reply = frame_read(&mut client).expect("refusal frame");
+        let reply = fixture_final_frame(&mut client);
         server.join().expect("service").expect("refusal");
         assert_eq!(reply["reason"], "door-adjudicated-refusal");
         assert_eq!(reply["queue_state"], "refused");
@@ -4852,7 +5319,7 @@ mod tests {
             if !allow {
                 label(&store, &id, "allow");
             }
-            let reply = frame_read(&mut client).expect("incomplete final frame");
+            let reply = fixture_final_frame(&mut client);
             server.join().expect("service").expect("incomplete reply");
             assert_eq!(reply["status"], 125);
             assert_eq!(reply["reason"], "door-record-incomplete");
@@ -4886,7 +5353,7 @@ mod tests {
                 true,
             );
             let mut client = send_probe(&socket, 2000);
-            let reply = frame_read(&mut client).expect("incomplete enforce frame");
+            let reply = fixture_final_frame(&mut client);
             server.join().expect("service").expect("reply");
             assert_eq!(reply["reason"], "door-record-incomplete");
             assert_eq!(reply["status"], 125);
@@ -4988,7 +5455,7 @@ mod tests {
             if answer == "disconnect" {
                 drop(client);
             } else {
-                let reply = frame_read(&mut client).expect("wait error frame");
+                let reply = fixture_final_frame(&mut client);
                 assert_eq!(
                     reply["reason"],
                     if answer == "read" {
@@ -5620,14 +6087,36 @@ mod tests {
         let reply = frame_read(&mut client).expect("typed capacity reply");
         assert_eq!(reply["reason"], "door-capacity-refusal");
         assert_eq!(reply["queue_state"], "no-queue");
+        assert_eq!(reply["peer_limit"], 16);
+        assert_eq!(reply["retry_after_seconds"], 120);
+        assert_eq!(reply["status"], 125);
+        assert_eq!(reply["ref_check"], "not-reached");
+        assert!(reply["compute_exit_status"].is_null());
+        assert!(reply["queue_wall_seconds"].is_null());
+        for key in ["stdin_bytes", "stdout_bytes", "stderr_bytes"] {
+            assert_eq!(reply[key], 0);
+        }
+        assert_eq!(
+            super::final_line(&["fixture".into(), "cargo test".into()], &reply),
+            Some(
+                "door-capacity-refusal: peer_limit=16 retry_after=120s; no request was dispatched"
+                    .into()
+            )
+        );
+        let old_reply = json!({"type":"final", "reason":"door-capacity-refusal"});
+        assert_eq!(
+            super::final_line(&["fixture".into(), "cargo test".into()], &old_reply),
+            Some("door-capacity-refusal".into())
+        );
         let (closed, mut overflow) = UnixStream::pair().expect("early closing peer");
         drop(closed);
         assert!(admit_peer(&active, &mut overflow).is_none());
         assert_eq!(active.load(std::sync::atomic::Ordering::Relaxed), MAX_PEERS);
-        drop(grants);
-        drop(peers);
+        drop(grants.pop().expect("one released slot"));
+        assert_eq!(active.load(Ordering::Relaxed), MAX_PEERS - 1);
         let (mut next, mut next_server) = UnixStream::pair().expect("next peer");
-        let _grant = admit_peer(&active, &mut next_server).expect("released slot");
+        let grant = admit_peer(&active, &mut next_server).expect("released slot");
+        assert_eq!(active.load(Ordering::Relaxed), MAX_PEERS);
         let registration = Registration::from_row(
             &json!({"name":"alpha","uid":41001}),
             "alpha",
@@ -5643,6 +6132,10 @@ mod tests {
             frame_read(&mut next).expect("next final")["reason"],
             "door-compute-unregistered"
         );
+        drop(grant);
+        drop(grants);
+        drop(peers);
+        assert_eq!(active.load(Ordering::Relaxed), 0);
     }
 
     /// ´test:unit:fixture-socket-binds-peer-and-keeps-exact-arguments´
@@ -5753,6 +6246,9 @@ mod tests {
         )
         .expect("probe request");
         serve_one_for_peer(&mut server, &registration, worker).expect("review refusal");
+        let announced = frame_read(&mut client).expect("compute-shaped probe announcement");
+        assert_eq!(announced["type"], "compute-deadline");
+        assert_eq!(announced["request_deadline_ms"], 1000);
         let reply = frame_read(&mut client).expect("typed reply");
         assert_eq!(reply["reason"], "door-review-compute-refusal");
         assert_eq!(reply["peer_uid"], 3001);

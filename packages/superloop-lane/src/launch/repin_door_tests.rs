@@ -1063,8 +1063,12 @@ fn door_repin_installer_transition_preserves_round_pins() {
             .iter()
             .map(|word| word.as_str().expect("argument").to_owned())
             .collect::<Vec<_>>();
-        let resumed = crate::container_helper::resume_box_vector(&vector, "thread-1")
-            .expect("resume uses the admitted current plan");
+        let resumed = crate::container_helper::resume_box_vector(
+            crate::settings::BoxBackend::Codex,
+            &vector,
+            "thread-1",
+        )
+        .expect("resume uses the admitted current plan");
         assert!(resumed.ends_with(&["resume".into(), "thread-1".into(), "-".into()]));
         let root = fixture.path.parent().expect("root");
         let bound =

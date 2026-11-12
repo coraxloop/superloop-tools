@@ -47,16 +47,40 @@ fn token(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
 
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum PathFault {
+    DotComponent,
+    UnsafeCharacter,
+}
+
+fn component_fault(part: &str) -> Option<PathFault> {
+    if matches!(part, "." | "..") {
+        Some(PathFault::DotComponent)
+    } else if part
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    {
+        None
+    } else {
+        Some(PathFault::UnsafeCharacter)
+    }
+}
+
+fn path_fault(value: &str) -> Option<PathFault> {
+    // A dot component keeps precedence when another component is also unsafe.
+    value.split('/').filter_map(component_fault).min()
+}
+
 fn path_valid(value: &str) -> bool {
-    value.starts_with('/')
-        && value.split('/').all(|part| {
-            part.is_empty()
-                || (part != ".."
-                    && part != "."
-                    && part
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)))
-        })
+    value.starts_with('/') && path_fault(value).is_none()
+}
+
+fn absolute_path_form(value: &str) -> &'static str {
+    match path_fault(value) {
+        Some(PathFault::DotComponent) => "an absolute path with a dot component",
+        Some(PathFault::UnsafeCharacter) => "an absolute path with an unsafe character",
+        None => "an absolute path",
+    }
 }
 
 fn validate(row: &Row, line: usize) -> Result<()> {
@@ -110,11 +134,7 @@ fn validate(row: &Row, line: usize) -> Result<()> {
                 "an empty value"
             } else if value.starts_with('/') {
                 if field == "worker_identity" {
-                    if value.split('/').any(|part| matches!(part, "." | "..")) {
-                        "an absolute path with a dot component"
-                    } else {
-                        "an absolute path with an unsafe character"
-                    }
+                    absolute_path_form(value)
                 } else {
                     "an absolute path"
                 }
@@ -256,11 +276,6 @@ pub(super) fn registry_rows(source: &str, selected: &str, retired: bool) -> Resu
         }
     }
     rows.sort_by(|left, right| left["node"].cmp(&right["node"]));
-    if rows.is_empty() {
-        return Err(String::from(
-            "registry-loop: no active routes for selected loop",
-        ));
-    }
     let active = rows
         .iter()
         .filter(|row| row["status"] == "active")
@@ -450,7 +465,14 @@ fn run(args: &[OsString]) -> Result<serde_json::Value> {
         .ok_or("arguments: invalid owner-home")?;
     let source = fs::read_to_string(required("--registry")?)
         .map_err(|_| String::from("registry-read: inspection failed"))?;
-    let rows = registry(&source, name)?;
+    let rows = registry_rows(&source, name, true)?;
+    if rows.is_empty() {
+        return Err("registry-loop: no routes for selected loop".into());
+    }
+    let rows = rows
+        .into_iter()
+        .filter(|row| row["status"] == "active")
+        .collect::<Vec<_>>();
     let output = PathBuf::from(
         required("--output")?
             .to_str()
@@ -497,4 +519,47 @@ pub fn command(args: &[OsString]) -> std::process::ExitCode {
         return std::process::ExitCode::from(1);
     }
     std::process::ExitCode::from(status)
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::{absolute_path_form, path_valid};
+
+    /// # Panics
+    /// Panics if path admission and its refusal form disagree on a component fault.
+    /// ´claim:superlooplane:route-path-component-faults-are-shared´
+    /// ´test:unit:component-faults-preserve-admission-and-diagnostic-precedence´
+    #[test]
+    fn component_faults_preserve_admission_and_diagnostic_precedence() {
+        for accepted in [
+            "/",
+            "/keys//worker-key",
+            "/keys/.hidden_key",
+            "/keys/three...dots",
+        ] {
+            assert!(path_valid(accepted), "{accepted}");
+            assert_eq!(absolute_path_form(accepted), "an absolute path");
+        }
+        for (rejected, form) in [
+            ("/keys/./worker", "an absolute path with a dot component"),
+            ("/keys/../worker", "an absolute path with a dot component"),
+            (
+                "/unsafe key/../worker",
+                "an absolute path with a dot component",
+            ),
+            (
+                "/keys/worker key",
+                "an absolute path with an unsafe character",
+            ),
+            (
+                "/keys/worker\tkey",
+                "an absolute path with an unsafe character",
+            ),
+            ("/keys/κ", "an absolute path with an unsafe character"),
+        ] {
+            assert!(!path_valid(rejected), "{rejected}");
+            assert_eq!(absolute_path_form(rejected), form, "{rejected}");
+        }
+        assert!(!path_valid("relative/key"));
+    }
 }

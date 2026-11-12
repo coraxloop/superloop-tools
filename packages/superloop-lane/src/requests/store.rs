@@ -270,7 +270,12 @@ pub(super) fn replace_leaf(
 }
 
 #[cfg(test)]
+type ReaderAttemptHook = Box<dyn FnOnce(Option<Instant>)>;
+
+#[cfg(test)]
 thread_local! {
+    static BEFORE_READER_LOCK_SLEEP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_READER_LOCK_ATTEMPT: std::cell::RefCell<Option<ReaderAttemptHook>> = const { std::cell::RefCell::new(None) };
     pub(crate) static WRITER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static READER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static BEFORE_LEAF_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -505,6 +510,7 @@ pub struct Store {
     reader_budget: Option<Duration>,
     writer_deadline: Option<Instant>,
     request_id: Option<String>,
+    wait_credit: Option<std::sync::Arc<crate::door::RequestWait>>,
 }
 
 impl Store {
@@ -530,7 +536,28 @@ impl Store {
             reader_budget: None,
             writer_deadline: Some(deadline),
             request_id: None,
+            wait_credit: None,
         })
+    }
+
+    pub(crate) fn with_wait_credit(
+        mut self,
+        wait: std::sync::Arc<crate::door::RequestWait>,
+    ) -> Self {
+        self.wait_credit = Some(wait);
+        self
+    }
+
+    pub(crate) fn request_deadline(&self, base: Instant) -> Instant {
+        self.wait_credit
+            .as_ref()
+            .map_or(base, |wait| wait.deadline(base))
+    }
+
+    fn credited_wait(&self) -> Duration {
+        self.wait_credit
+            .as_ref()
+            .map_or(Duration::ZERO, |wait| wait.elapsed())
     }
 
     pub(crate) fn with_request_id(mut self, id: &str) -> Self {
@@ -587,7 +614,7 @@ impl Store {
             .map_err(|error| problem("requests-record-refusal", error.to_string()))?;
         if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
             || stat.st_uid != owner
-            || stat.st_mode & 0o7707 != 0o600
+            || stat.st_mode & 0o7777 != loop_home::mail::acl::preserved_mode(&registry_fd, 0o600)
         {
             return Err(problem(
                 "requests-record-refusal",
@@ -618,6 +645,7 @@ impl Store {
             reader_budget: None,
             writer_deadline: None,
             request_id: None,
+            wait_credit: None,
             runs,
             state,
             owner,
@@ -1092,20 +1120,27 @@ impl Store {
         deadline: Option<Instant>,
     ) -> Result<StoreLock, ReadFailure> {
         let started = Instant::now();
+        let initial_credit = self.credited_wait();
+        let deadline = deadline.map(|end| end + initial_credit);
         // A late effect, deadline outcome or agent publication still gets the
         // base writer allowance. Fix this bound once, never at each retry.
-        let deadline = if changing {
+        let base_deadline = if changing {
             deadline.map(|end| end.max(started + writer_lock_wait()))
         } else {
             deadline
         };
         loop {
+            let deadline =
+                base_deadline.map(|end| end + self.credited_wait().saturating_sub(initial_credit));
             let result = self.lock_attempt(changing, deadline, true);
+            let deadline =
+                base_deadline.map(|end| end + self.credited_wait().saturating_sub(initial_credit));
             match result {
                 Err(ReadFailure::Contended(_))
                     if deadline.is_some_and(|end| Instant::now() < end) =>
                 {
                     // Yield between bounded acquisitions just as wait callers do.
+                    let waiting = Instant::now();
                     std::thread::sleep(
                         Duration::from_millis(10).min(
                             deadline
@@ -1113,6 +1148,9 @@ impl Store {
                                 .saturating_duration_since(Instant::now()),
                         ),
                     );
+                    if let Some(credit) = &self.wait_credit {
+                        credit.credit(waiting.elapsed());
+                    }
                 }
                 Err(ReadFailure::Contended(mut error)) => {
                     use std::fmt::Write as _;
@@ -1135,6 +1173,13 @@ impl Store {
         caller_deadline: Option<Instant>,
         retry: bool,
     ) -> Result<StoreLock, ReadFailure> {
+        #[cfg(test)]
+        if !changing {
+            let hook = BEFORE_READER_LOCK_ATTEMPT.with(|slot| slot.borrow_mut().take());
+            if let Some(hook) = hook {
+                hook(caller_deadline);
+            }
+        }
         let state = self.state_dir();
         let flags = if changing {
             OFlag::O_RDWR
@@ -1224,11 +1269,13 @@ impl Store {
         let mut contended = false;
         let mut holder = None;
         let key = (stat.st_dev, stat.st_ino);
-        let mut deadline = started + if changing { writer_wait } else { reader_wait };
-        if let Some(caller_deadline) = caller_deadline {
-            deadline = deadline.min(caller_deadline);
-        }
+        let attempt_deadline = started + if changing { writer_wait } else { reader_wait };
+        let initial_credit = self.credited_wait();
         loop {
+            let caller_deadline = caller_deadline
+                .map(|end| end + self.credited_wait().saturating_sub(initial_credit));
+            let deadline =
+                caller_deadline.map_or(attempt_deadline, |end| end.min(attempt_deadline));
             // SAFETY: flock receives a live file descriptor and a fixed operation.
             if unsafe { libc::flock(fd.as_raw_fd(), operation) } == 0 {
                 if contended {
@@ -1284,10 +1331,22 @@ impl Store {
                 continue;
             }
             if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline {
+                #[cfg(test)]
+                if !changing {
+                    BEFORE_READER_LOCK_SLEEP.with(|slot| {
+                        if let Some(hook) = slot.borrow_mut().take() {
+                            hook();
+                        }
+                    });
+                }
+                let sleep_started = Instant::now();
                 std::thread::sleep(
                     Duration::from_millis(10)
                         .min(deadline.saturating_duration_since(Instant::now())),
                 );
+                if let Some(wait) = &self.wait_credit {
+                    wait.credit(sleep_started.elapsed());
+                }
                 continue;
             }
             let refusal = problem(
@@ -1993,7 +2052,7 @@ impl Store {
         if index["schema"] != 1 || !index["groups"].is_object() {
             return Err(problem(
                 "requests-learned-index",
-                "index unavailable; requests rebuild-index LOOP rebuilds schema-four custody; older records need requests rewrite",
+                "index unavailable; requests rebuild-index LOOP rebuilds schema-six custody; older records need requests rewrite",
             ));
         }
         let key = json!([class, operation, shape]).to_string();
@@ -2580,6 +2639,28 @@ pub(crate) mod tests {
         FAIL_MODE_WRITE.with(|fail| fail.set(true));
     }
 
+    /// ´test:unit:requests-registry-reader-validates-the-named-acl-mask´
+    #[test]
+    fn requests_registry_reader_validates_the_named_acl_mask() {
+        let fixture = Fixture::new();
+        let path = fixture.home.join(".config/loops/registry.toml");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("group read");
+        assert!(Store::open(&fixture.home, "alpha", false).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private mode");
+        loop_home::mail::acl::install(
+            &File::open(&path).expect("registry"),
+            nix::unistd::Uid::effective().as_raw() + 1,
+            false,
+        )
+        .expect("real read ACL");
+        Store::open(&fixture.home, "alpha", false).expect("named read grant");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).expect("widen mask");
+        let error = Store::open(&fixture.home, "alpha", false)
+            .err()
+            .expect("widened mask refuses");
+        assert_eq!(error.kind, "requests-record-refusal");
+    }
+
     /// # Panics
     /// Panics only if the synchronized fixture fails to preserve both completed effects.
     /// ´test:unit:request-writers-retry-record-until-request-deadline´
@@ -2735,6 +2816,188 @@ pub(crate) mod tests {
         );
     }
 
+    /// ´test:unit:rewrite-upgrades-helper-copies-and-resumes-after-custody-publication´
+    #[test]
+    fn rewrite_upgrades_helper_copies_and_resumes_after_custody_publication() {
+        rewrite_helper_resume(false);
+    }
+
+    /// ´test:unit:rewrite-resume-refreshes-changed-helper-preimage´
+    #[test]
+    fn rewrite_resume_refreshes_changed_helper_preimage() {
+        rewrite_helper_resume(true);
+    }
+
+    fn older_door_record(record: &mut serde_json::Value) {
+        record["schema"] = json!(4);
+        record
+            .as_object_mut()
+            .expect("record")
+            .remove("agent_observations");
+    }
+
+    fn rewrite_helper_resume(helper_arrival: bool) {
+        use serde_json::Value;
+        use std::fmt::Write as _;
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store
+            .file(waiting("R", "1a", 3000, Mode::Audit))
+            .expect("file");
+        fixture
+            .command(
+                &["triage", "alpha", "R"],
+                br#"[{"id":"R:1a","action":"mark","reason":"fixture"}]"#,
+            )
+            .expect("publish helper copy");
+        let path = fixture.run_file("R");
+        let mut custody: Value =
+            serde_json::from_slice(&fs::read(&path).expect("custody")).expect("JSON");
+        older_door_record(&mut custody["requests"][0]);
+        let before = serde_json::to_vec(&custody).expect("old custody");
+        fs::write(&path, &before).expect("downgrade fixture");
+        let journal = fixture
+            .permission_registry
+            .parent()
+            .expect("root")
+            .join("permission-state/escalations.jsonl");
+        let mut old_journal = String::new();
+        for line in fs::read_to_string(&journal).expect("journal").lines() {
+            let mut value: Value = serde_json::from_str(line).expect("journal JSON");
+            if let Some(rows) = value["collection"]["requests"].as_array_mut() {
+                for row in rows {
+                    older_door_record(&mut row["body"]["record"]);
+                }
+            }
+            writeln!(old_journal, "{value}").expect("fixture line");
+        }
+        fs::write(&journal, &old_journal).expect("old helper copy");
+        assert_eq!(
+            fixture
+                .command(&["list", "alpha"], b"")
+                .expect_err("strict helper reader")
+                .kind,
+            "requests-rewrite-required"
+        );
+        let preview = store.rewrite(None).expect("complete preview");
+        assert_eq!(preview["changed"], 2);
+        assert_eq!(preview["plan"]["files"][0]["changed"], true);
+        assert_eq!(preview["plan"]["channel"]["changed"], 1);
+        assert_eq!(fs::read(&path).expect("preview custody"), before);
+        assert_eq!(
+            fs::read_to_string(&journal).expect("preview helper"),
+            old_journal
+        );
+        assert_eq!(
+            store.rewrite(Some("wrong")).expect_err("wrong digest").kind,
+            "requests-rewrite-digest"
+        );
+        assert_eq!(
+            fs::read_to_string(&journal).expect("refused helper"),
+            old_journal
+        );
+        let pending = json!({"schema":1,"phase":"pending","digest":preview["preview_sha256"],"plan":preview["plan"]});
+        super::replace_leaf(
+            &store.state,
+            "door-rewrite.json",
+            &serde_json::to_vec(&pending).expect("pending"),
+            store.owner,
+            64 * 1_048_576,
+        )
+        .expect("pending journal");
+        fs::write(
+            &path,
+            serde_json::to_vec(&preview["plan"]["files"][0]["after"]).expect("published custody"),
+        )
+        .expect("partial publication");
+        let resumed = if helper_arrival {
+            refresh_helper_preview(&store, &journal, &old_journal, &path, &preview)
+        } else {
+            preview
+        };
+        store
+            .rewrite(resumed["preview_sha256"].as_str())
+            .expect("resume helper publication");
+        let row = store.request("R:1a").expect("read converted");
+        assert_eq!(row.value()["schema"], 6);
+        assert_eq!(row.value()["state"], "marked");
+        assert!(row.value()["agent_observations"].is_null());
+        fixture
+            .command(&["list", "alpha"], b"")
+            .expect("converted helper reader");
+        let after = fs::read(&journal).expect("converted helper bytes");
+        let repeat = store.rewrite(None).expect("repeat");
+        assert_eq!(repeat["changed"], 0);
+        store
+            .rewrite(repeat["preview_sha256"].as_str())
+            .expect("no-op");
+        assert_eq!(fs::read(&journal).expect("no-op helper"), after);
+    }
+
+    fn refresh_helper_preview(
+        store: &Store,
+        journal: &Path,
+        old_journal: &str,
+        path: &Path,
+        preview: &serde_json::Value,
+    ) -> serde_json::Value {
+        use serde_json::Value;
+        use std::fmt::Write as _;
+        let mut entries: Vec<Value> = old_journal
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("journal row"))
+            .collect();
+        let collection = &mut entries.last_mut().expect("last snapshot")["collection"];
+        let gateway = request_core::Request::filed(
+            "b".repeat(64),
+            "gateway-proposal".into(),
+            json!({"schema":1,"loop_name":"alpha","gateway_id":"c".repeat(64),
+        "registration_digest":"d".repeat(64),"proposal":{"schema":1,"lane":"fixture",
+        "seq":1,"argv":["true"],"reason":"fixture","queued_unix_ms":1,"timeout_seconds":1}}),
+            "worker".into(),
+            "R".into(),
+            1,
+        );
+        collection["requests"]
+            .as_array_mut()
+            .expect("requests")
+            .push(serde_json::to_value(&gateway).expect("gateway"));
+        collection["revision"] = json!(collection["revision"].as_u64().expect("revision") + 1);
+        let mut arrived = String::new();
+        for row in entries {
+            writeln!(arrived, "{row}").expect("fixture journal row");
+        }
+        fs::write(journal, &arrived).expect("helper arrival after custody publication");
+        let custody_before_retry = fs::read(path).expect("partial custody");
+        assert_eq!(
+            store
+                .rewrite(preview["preview_sha256"].as_str())
+                .expect_err("stale helper-inclusive digest")
+                .kind,
+            "requests-rewrite-digest"
+        );
+        assert_eq!(
+            fs::read(path).expect("refused custody"),
+            custody_before_retry
+        );
+        assert_eq!(
+            fs::read_to_string(journal).expect("refused helper"),
+            arrived
+        );
+        let resumed = store.rewrite(None).expect("renewed preview");
+        assert_ne!(resumed["preview_sha256"], preview["preview_sha256"]);
+        assert_eq!(resumed["plan"]["files"], preview["plan"]["files"]);
+        assert_eq!(
+            resumed["plan"]["channel"]["after"]["requests"]
+                .as_array()
+                .expect("target requests")
+                .last()
+                .expect("gateway"),
+            &serde_json::to_value(gateway).expect("unchanged gateway")
+        );
+        resumed
+    }
+
     /// ´test:unit:agent-merge-preserves-effect-and-supervisory-label´
     #[test]
     fn agent_merge_preserves_effect_and_supervisory_label() {
@@ -2747,11 +3010,12 @@ pub(crate) mod tests {
         effect["exit_status"] = json!(0);
         effect["ref_check"] = json!("not-applicable");
         store.file(request).expect("intent");
-        let result = crate::door::agent::RunnerOutcome::referral(
+        let mut result = crate::door::agent::RunnerOutcome::referral(
             "timeout",
             "deadline",
             std::time::Instant::now(),
         );
+        result.observations = json!({"children_reaped":true,"agent_calls":1});
         std::thread::scope(|scope| {
             let judgement =
                 scope.spawn(|| store.record_agent("R:1a", &result, None, Some("configured")));
@@ -2774,6 +3038,7 @@ pub(crate) mod tests {
         assert_eq!(record["decision_tier"], "superloop");
         assert_eq!(record["would_do_source"], "agent");
         assert_eq!(record["agent_status"], "timeout");
+        assert_eq!(record["agent_observations"], result.observations);
     }
 
     /// ´test:unit:learned-rubric-keeps-retired-conflicts-and-citations´
@@ -3216,7 +3481,7 @@ pub(crate) mod tests {
         );
         let converted: Value =
             serde_json::from_slice(&fs::read(&request_path).expect("converted")).expect("JSON");
-        assert_eq!(converted["requests"][0]["schema"], 4);
+        assert_eq!(converted["requests"][0]["schema"], 6);
         assert_eq!(
             fs::read(&archive).expect("archive unchanged"),
             archive_bytes
@@ -4412,6 +4677,127 @@ pub(crate) mod tests {
         assert_eq!(attempt["latest"]["withdrawal-failed"], failed);
     }
 
+    fn judgement_listing_fixture() -> Fixture {
+        let fixture = Fixture::new();
+        fixture.set_floor("enforce");
+        let setting = crate::requests::ModeSetting::first(
+            Mode::Enforce,
+            Mode::Enforce,
+            "owner",
+            "fixture",
+            "1",
+        )
+        .expect("mode");
+        let store = fixture.store();
+        for nonce in ["1a", "2b", "3c"] {
+            let mut value = waiting("R", nonce, 3000, Mode::Enforce).into_value();
+            value["mode"] = json!("enforce");
+            value["class_setting"] = setting.value().clone();
+            value["loop_setting"] = setting.value().clone();
+            value["state"] = json!("observed");
+            value["effect"]["state"] = json!("completed");
+            value["effect"]["reason"] = json!("door-complete");
+            value["effect"]["exit_status"] = json!(0);
+            value["effect"]["ref_check"] = json!("admitted");
+            value["effect"]["queue_wall_seconds"] = json!(0.25);
+            value["effect"]["mediation_wall_seconds"] = json!(0.5);
+            value["effect"]["compute_wall_seconds"] = json!(1.5);
+            store
+                .file(RequestRecord::decode(value).expect("admitted record"))
+                .expect("file");
+        }
+        let mut outcome = crate::door::agent::RunnerOutcome::referral(
+            "timeout",
+            "fixture",
+            std::time::Instant::now(),
+        );
+        outcome.status = "verdict".to_owned();
+        outcome.verdict = "allow".to_owned();
+        outcome.wall_ms = 125;
+        outcome.observations = json!({"agent_calls":1,"children_reaped":true});
+        store
+            .record_agent("R:2b", &outcome, Some(&"a".repeat(64)), Some("fixture"))
+            .expect("measured judgement");
+        outcome.observations = serde_json::Value::Null;
+        store
+            .record_agent("R:3c", &outcome, None, Some("fixture"))
+            .expect("unmeasured judgement");
+        fixture
+    }
+
+    /// ´test:unit:request-listings-expose-admitted-judgements-without-mutation´
+    #[test]
+    fn request_listings_expose_admitted_judgements_without_mutation() {
+        fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            let mut result = std::collections::BTreeMap::new();
+            for entry in fs::read_dir(root).expect("directory") {
+                let entry = entry.expect("entry");
+                if entry.file_type().expect("type").is_dir() {
+                    result.extend(files(&entry.path()));
+                } else if entry.file_type().expect("type").is_file() {
+                    result.insert(entry.path(), fs::read(entry.path()).expect("bytes"));
+                }
+            }
+            result
+        }
+        let fixture = judgement_listing_fixture();
+        let store = fixture.store();
+        let root = fixture.permission_registry.parent().expect("whole fixture");
+        let before = files(root);
+        for args in [
+            vec!["list", "alpha"],
+            vec!["list", "alpha", "--pending"],
+            vec!["status", "alpha"],
+            vec!["list", "alpha", "--state", "observed"],
+            vec!["wait", "alpha", "--state", "observed", "--timeout", "30"],
+        ] {
+            let result = fixture.command(&args, b"").expect("read-only listing");
+            let rows = result["door_judgements"].as_array().expect("judgements");
+            assert_eq!(rows.len(), 3);
+            for (index, id) in ["R:1a", "R:2b", "R:3c"].into_iter().enumerate() {
+                let row = rows
+                    .iter()
+                    .find(|row| row["source_id"] == id)
+                    .expect("source");
+                // Fixed SHA-256 vectors for b"door\0alpha\0R:...", independent
+                // of the collection_id implementation that produced the row.
+                assert_eq!(
+                    row["id"],
+                    [
+                        "ac5a2e5c5cacd8d42768dca36c5895a3acdfe3c2662c60627efef415ee51ce2a",
+                        "cfb45d028aafa9d72c8aa619477a34d37545555699f38b8e0808ec66e7600a61",
+                        "eb6d4f27a8835599e56de2a5dce3de168f7fec237bf80766ed4163b1b770c884",
+                    ][index]
+                );
+                let native = store.request(id).expect("retained record");
+                for key in crate::requests::judgement::KEYS {
+                    assert_eq!(row[key], native.value()[key], "{id}: {key}");
+                }
+                assert_eq!(row["effect"], native.value()["effect"]);
+                assert_eq!(row["agent_calls"], [json!(0), json!(1), json!(null)][index]);
+                assert_eq!(
+                    row["agent_calls_source"],
+                    ["fast-lane-provenance", "runner-observation", "unmeasured"][index]
+                );
+            }
+            if args == ["list", "alpha"] {
+                let common = result["requests"].as_array().expect("common summaries");
+                assert_eq!(common.len(), 3);
+                assert!(
+                    common
+                        .iter()
+                        .all(|row| row["kind"] == "door-after-effect" && row["state"] == "filed")
+                );
+            }
+            assert_eq!(
+                files(root),
+                before,
+                "{} mutates custody or helper state",
+                args.join(" ")
+            );
+        }
+    }
+
     /// ´test:unit:commands-cover-forms-batches-and-state-filter´
     #[test]
     fn commands_cover_forms_batches_and_state_filter() {
@@ -4689,7 +5075,8 @@ pub(crate) mod tests {
                 store
                     .file(waiting("R", "1a", 3000, Mode::Audit))
                     .expect("request");
-                let before = files(&fixture.home);
+                let snapshot_root = fixture.permission_registry.parent().expect("fixture root");
+                let before = files(snapshot_root);
                 let lock = store.fixture_exclusive_lock().expect("writer lock");
                 let mut held = Some(lock);
                 if release {
@@ -4698,7 +5085,14 @@ pub(crate) mod tests {
                         *hook.borrow_mut() = Some(Box::new(move || drop(lock)));
                     });
                 }
-                let bound = Duration::from_millis(300);
+                // Release is signalled by observed contention, not elapsed wall.
+                // Keep the production allowance for setup under a loaded node;
+                // only the expiry case needs a shortened wait.
+                let bound = if release {
+                    super::READER_LOCK_WAIT
+                } else {
+                    Duration::from_millis(300)
+                };
                 super::READER_LOCK_WAIT_OVERRIDE.set(Some(bound));
                 let args: Vec<_> = ["list", "alpha"]
                     .into_iter()
@@ -4732,17 +5126,124 @@ pub(crate) mod tests {
                     assert_eq!(error.kind, "requests-record-refusal");
                     assert!(super::is_lock_contention(&error));
                     assert!(error.detail.contains("wait_seconds="));
+                    assert!(error.detail.contains("listing_elapsed_seconds="));
+                    assert!(error.detail.contains("holder_request_id=unknown"));
                     assert!(error.detail.contains(
                         "retry requests list after the active request releases the lock"
                     ));
                     assert_eq!(output, Vec::<u8>::new());
                     assert!(wall >= bound);
                 }
-                assert!(wall < Duration::from_secs(5), "listing wall: {wall:?}");
                 drop(held);
-                assert_eq!(files(&fixture.home), before);
+                assert_eq!(files(snapshot_root), before);
             }
         }
+    }
+
+    /// # Panics
+    /// Panics if a second acquisition renews a listing's deadline or loses total elapsed time.
+    /// ´test:unit:requests-list-shares-deadline-across-acquisitions´
+    #[test]
+    fn requests_list_shares_deadline_across_acquisitions() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use std::time::Instant;
+        std::thread::scope(|scope| {
+            for suffix in [vec![], vec!["--pending"], vec!["--state", "waiting"]] {
+                scope.spawn(move || {
+                    let fixture = Fixture::new();
+                    let store = fixture.store();
+                    store
+                        .file(waiting("R", "1a", 3000, Mode::Audit))
+                        .expect("request");
+                    let acquired = Rc::new(Cell::new(0));
+                    let held = Rc::new(RefCell::new(None));
+                    let observations = Rc::clone(&acquired);
+                    let holder = Rc::clone(&held);
+                    let bound = super::READER_LOCK_WAIT;
+                    super::READER_LOCK_WAIT_OVERRIDE.set(Some(bound));
+                    super::BEFORE_READER_LOCK_ATTEMPT.with(|slot| {
+                        *slot.borrow_mut() = Some(Box::new(move |first| {
+                            let first = first.expect("listing has an absolute deadline");
+                            observations.set(observations.get() + 1);
+                            AFTER_READER_LOCK_ACQUIRED.with(|hook| {
+                                *hook.borrow_mut() = Some(Box::new(move || {
+                                    std::thread::sleep(
+                                        first.saturating_duration_since(Instant::now()),
+                                    );
+                                }));
+                            });
+                            super::BEFORE_READER_LOCK_ATTEMPT.with(|next| {
+                                *next.borrow_mut() = Some(Box::new(move |second| {
+                                    observations.set(observations.get() + 1);
+                                    assert_eq!(
+                                        second,
+                                        Some(first),
+                                        "the second read must share the deadline"
+                                    );
+                                    assert!(
+                                        Instant::now() >= first,
+                                        "first read consumed the allowance"
+                                    );
+                                    *holder.borrow_mut() = Some(
+                                        store.fixture_exclusive_lock().expect("second-read writer"),
+                                    );
+                                    super::BEFORE_READER_LOCK_SLEEP.with(|sleep| {
+                                        *sleep.borrow_mut() = Some(Box::new(|| {
+                                            panic!("expired second read must not wait again")
+                                        }));
+                                    });
+                                }));
+                            });
+                        }));
+                    });
+                    let args: Vec<_> = ["list", "alpha"]
+                        .into_iter()
+                        .chain(suffix)
+                        .map(str::to_owned)
+                        .collect();
+                    let mut output = Vec::new();
+                    let error = super::channel::with_test_client(
+                        super::test_helper::binary(),
+                        &fixture.permission_registry,
+                        || {
+                            crate::requests::commands::run(
+                                &fixture.home,
+                                &args,
+                                &mut &b""[..],
+                                &mut output,
+                            )
+                        },
+                    )
+                    .expect_err("second read refuses on its exhausted shared deadline");
+                    super::READER_LOCK_WAIT_OVERRIDE.set(None);
+                    assert_eq!(acquired.get(), 2, "{error:?}");
+                    super::BEFORE_READER_LOCK_SLEEP
+                        .with(|hook| assert!(hook.borrow_mut().take().is_some()));
+                    assert!(super::is_lock_contention(&error));
+                    assert!(error.detail.contains("holder_request_id=unknown"));
+                    assert!(error.detail.contains("retry requests list"));
+                    let figure = |key: &str| -> f64 {
+                        error
+                            .detail
+                            .split(';')
+                            .map(str::trim)
+                            .find_map(|part| part.strip_prefix(key))
+                            .expect("elapsed figure")
+                            .parse()
+                            .expect("numeric elapsed figure")
+                    };
+                    let listing = figure("listing_elapsed_seconds=");
+                    let last_read = figure("total_wait_seconds=");
+                    assert!(
+                        listing - last_read >= bound.as_secs_f64() - 0.002,
+                        "listing={listing} last={last_read}"
+                    );
+                    assert_eq!(output, Vec::<u8>::new());
+                    drop(held.borrow_mut().take());
+                });
+            }
+        });
     }
 
     /// # Panics

@@ -16,6 +16,7 @@ Each correspondence binds its named interface to the ledger's installed, build-o
 |`claude-lane`, `codex-lane`|`superloop-lane driver start\|resume --backend claude\|codex`|search path|
 |`lane-watch`, `worker-monitor`|`superloop-lane driver status`, `superloop-lane driver follow [--save-offset]`|search path|
 |`lane-verify`|`superloop-gate-submit`|search path|
+|new capture admission program|`superloop-capture-admit`|search path|
 |`run-worker`|private `worker-run`; `superloop-lane launch`|private directory; search path|
 |`lane-gateway`, `gateway-runner`|private `gateway-service`, `gateway-runner`; `superloop-lane gateway`|private directory; search path|
 |`LOOP-gpg`, `LOOP-ssh`|generated `LOOP-gpg`, `LOOP-ssh`|user private directory|

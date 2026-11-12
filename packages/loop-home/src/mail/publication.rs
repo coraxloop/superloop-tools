@@ -122,12 +122,35 @@ fn publication_custody(directory: &File, actor_group: u32, device: u64) -> Resul
     Ok(())
 }
 
+struct EndpointPaths {
+    mailbox: PathBuf,
+    staging: PathBuf,
+}
+
+struct HeldEndpoint {
+    storage: std::sync::Arc<crate::anchor::Anchor>,
+    mailbox: PathBuf,
+    staging: PathBuf,
+}
+impl HeldEndpoint {
+    fn open(&self, path: &Path) -> Result<File> {
+        let (_, descriptor) = self.storage.relay()?;
+        child(
+            &File::from(descriptor),
+            path.to_str()
+                .ok_or(MailError::Invalid("endpoint path encoding"))?,
+            true,
+        )
+    }
+}
+
 /// Pinned service publication directories for one registered actor.
 ///
 /// Actor identity
 /// allocation, ACL provisioning and directory registry freshness belong to the
 /// provisioner and admission service, not to a body or an outgoing filename.
 pub struct Endpoint {
+    held: Option<HeldEndpoint>,
     retired: bool,
     address: Address,
     group: u32,
@@ -153,6 +176,95 @@ impl Endpoint {
         Self::open_with(loops_root, address, actor_group, durability, false)
     }
 
+    /// Open one actor beneath a received loop-storage capability.
+    ///
+    /// The caller supplies the row from its validated configuration snapshot.
+    /// Its home is retained only for canonical journal paths; opening and freshness
+    /// checks use the capability, including after its original pathname is replaced.
+    /// # Errors
+    /// Refuses a different loop, invalid canonical home, changed anchor custody,
+    /// unsafe endpoint storage or undeclared durability.
+    pub fn open_beneath(
+        storage: crate::anchor::Anchor,
+        row: &crate::registry::LoopRecord,
+        address: Address,
+        actor_group: u32,
+        durability: Durability,
+    ) -> Result<Self> {
+        Self::open_shared_beneath(
+            &std::sync::Arc::new(storage),
+            row,
+            address,
+            actor_group,
+            durability,
+        )
+    }
+
+    /// Retain a shared received capability for opening and every freshness check.
+    /// Multiple endpoints borrow the same capability; no extra manifest slot or alias is needed.
+    /// # Errors
+    /// Refuses the same scope, custody and durability failures as `open_beneath`.
+    pub fn open_shared_beneath(
+        storage: &std::sync::Arc<crate::anchor::Anchor>,
+        row: &crate::registry::LoopRecord,
+        address: Address,
+        actor_group: u32,
+        durability: Durability,
+    ) -> Result<Self> {
+        Self::open_held(storage, row, address, actor_group, durability, false)
+    }
+
+    pub(super) fn open_held(
+        storage: &std::sync::Arc<crate::anchor::Anchor>,
+        row: &crate::registry::LoopRecord,
+        address: Address,
+        actor_group: u32,
+        durability: Durability,
+        retired: bool,
+    ) -> Result<Self> {
+        Self::durability(durability)?;
+        if address.loop_name() != row.name
+            || !row.home.is_absolute()
+            || row.home.components().any(|c| {
+                !matches!(
+                    c,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )
+            })
+        {
+            return Err(MailError::Invalid("unsafe-storage: endpoint loop binding"));
+        }
+        let mailbox = address
+            .relative_mailbox()
+            .strip_prefix(&row.name)
+            .map_err(|_| MailError::Invalid("unsafe-storage: endpoint loop binding"))?
+            .to_owned();
+        let staging = mailbox
+            .parent()
+            .ok_or(MailError::Invalid("endpoint parent"))?
+            .join(".mail-staging");
+        let paths = EndpointPaths {
+            mailbox: row.home.join(&mailbox),
+            staging: row.home.join(&staging),
+        };
+        let held = HeldEndpoint {
+            storage: std::sync::Arc::clone(storage),
+            mailbox,
+            staging,
+        };
+        let mailbox = held.open(&held.mailbox)?;
+        Self::finish(paths, &mailbox, address, actor_group, retired, Some(held))
+    }
+
+    const fn durability(durability: Durability) -> Result<()> {
+        if !durability.crash_consistent_rename || !durability.durable_sync {
+            return Err(MailError::Invalid(
+                "unsafe-storage: durability is not established",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn open_retired(
         loops_root: &Path,
         address: Address,
@@ -174,11 +286,7 @@ impl Endpoint {
         durability: Durability,
         retired: bool,
     ) -> Result<Self> {
-        if !durability.crash_consistent_rename || !durability.durable_sync {
-            return Err(MailError::Invalid(
-                "unsafe-storage: durability is not established",
-            ));
-        }
+        Self::durability(durability)?;
         let root = absolute_directory(loops_root)?;
         let mailbox_path = loops_root.join(address.relative_mailbox());
         let staging_path = mailbox_path
@@ -186,15 +294,39 @@ impl Endpoint {
             .ok_or(MailError::Invalid("endpoint parent"))?
             .join(".mail-staging");
         let mailbox = address.open_mailbox(&root)?;
+        Self::finish(
+            EndpointPaths {
+                mailbox: mailbox_path,
+                staging: staging_path,
+            },
+            &mailbox,
+            address,
+            actor_group,
+            retired,
+            None,
+        )
+    }
+
+    fn finish(
+        paths: EndpointPaths,
+        mailbox: &File,
+        address: Address,
+        actor_group: u32,
+        retired: bool,
+        held: Option<HeldEndpoint>,
+    ) -> Result<Self> {
         if retired {
-            retired_mailbox_custody(&mailbox)?;
+            retired_mailbox_custody(mailbox)?;
         } else {
-            mailbox_custody(&mailbox, actor_group)?;
+            mailbox_custody(mailbox, actor_group)?;
         }
-        let inbox = child(&mailbox, "inbox", true)?;
-        let sent = child(&mailbox, "sent", true)?;
-        let outbox = child(&mailbox, "outbox", true)?;
-        let staging = absolute_directory(&staging_path)?;
+        let inbox = child(mailbox, "inbox", true)?;
+        let sent = child(mailbox, "sent", true)?;
+        let outbox = child(mailbox, "outbox", true)?;
+        let staging = match &held {
+            Some(root) => root.open(&root.staging)?,
+            None => absolute_directory(&paths.staging)?,
+        };
         store::private(&staging, true)?;
         for directory in [&inbox, &sent] {
             publication_custody(directory, actor_group, staging.metadata()?.dev())?;
@@ -202,11 +334,12 @@ impl Endpoint {
         }
         staging.sync_all()?;
         Ok(Self {
+            held,
             retired,
             address,
             group: actor_group,
-            mailbox_path,
-            staging_path,
+            mailbox_path: paths.mailbox,
+            staging_path: paths.staging,
             inbox,
             sent,
             outbox,
@@ -214,8 +347,11 @@ impl Endpoint {
         })
     }
 
-    fn fresh(&self) -> Result<()> {
-        let mailbox = absolute_directory(&self.mailbox_path)?;
+    pub(super) fn fresh(&self) -> Result<()> {
+        let mailbox = match &self.held {
+            Some(root) => root.open(&root.mailbox)?,
+            None => absolute_directory(&self.mailbox_path)?,
+        };
         if self.retired {
             retired_mailbox_custody(&mailbox)?;
         } else {
@@ -235,9 +371,11 @@ impl Endpoint {
                 return Err(MailError::Invalid("endpoint identity changed"));
             }
         }
-        if identity(&absolute_directory(&self.staging_path)?.metadata()?)
-            != identity(&self.staging.metadata()?)
-        {
+        let current_staging = match &self.held {
+            Some(root) => root.open(&root.staging)?,
+            None => absolute_directory(&self.staging_path)?,
+        };
+        if identity(&current_staging.metadata()?) != identity(&self.staging.metadata()?) {
             return Err(MailError::Invalid("staging identity changed"));
         }
         Ok(())
@@ -702,6 +840,7 @@ pub fn discard(
     delivery: &Instant,
 ) -> Result<()> {
     let record = journal.record(delivery)?;
+    let _span = tracing::info_span!("mail.discard", sender = %sender.address, recipient = %recipient.address, letter = %record.outgoing).entered();
     bindings(sender, recipient, &record)?;
     if record.phase != Phase::Discarded {
         return Err(MailError::Invalid("discard decision is not durable"));
@@ -757,6 +896,7 @@ pub fn discard(
     )?;
     #[cfg(test)]
     boundary(13)?;
+    tracing::info!(restored = 1, "discarded letter restored");
     Ok(())
 }
 
@@ -1005,6 +1145,7 @@ pub fn reconcile_accepted_preparation(
     recipient: &Endpoint,
     outgoing: &str,
 ) -> Result<Instant> {
+    let _span = tracing::info_span!("mail.reconcile_accepted_preparation", sender = %sender.address, recipient = %recipient.address, letter = %outgoing).entered();
     preparation_names(journal, sender, recipient, outgoing)?
         .ok_or(MailError::Invalid("missing preparation"))?;
     let key = preparation_key(&sender.address, outgoing);
@@ -1030,6 +1171,7 @@ pub fn reconcile_accepted_preparation(
         })
         .ok_or(MailError::Invalid("preparation lacks matching acceptance"))?;
     store::remove(journal.publication_root(), &key)?;
+    tracing::info!(recovered = 1, delivery = %record.delivery, "accepted preparation recovered");
     Ok(record.delivery)
 }
 
@@ -1186,6 +1328,7 @@ pub fn reconcile_unpublished(
     recipient: &Endpoint,
     outgoing: &str,
 ) -> Result<()> {
+    let _span = tracing::info_span!("mail.reconcile_unpublished", sender = %sender.address, recipient = %recipient.address, letter = %outgoing).entered();
     let parsed = Outgoing::parse(outgoing).map_err(|_| MailError::Invalid("invalid-name"))?;
     if parsed.recipient != recipient.address {
         return Err(MailError::Invalid("recipient binding"));
@@ -1281,7 +1424,9 @@ pub fn reconcile_unpublished(
     if store::names(journal.publication_root())?.contains(&key) {
         store::remove(journal.publication_root(), &key)?;
     }
-    store::remove(journal.publication_root(), &intent_name)
+    store::remove(journal.publication_root(), &intent_name)?;
+    tracing::info!(restored = 1, "unpublished letter restored");
+    Ok(())
 }
 
 #[cfg(test)]

@@ -21,6 +21,7 @@ name = "account"
 path = "src/bin/account.rs"
 
 [dependencies]
+tracing = { workspace = true }
 superloop-cli-common.workspace = true
 
 [dev-dependencies]

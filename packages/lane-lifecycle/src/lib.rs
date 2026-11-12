@@ -1,5 +1,9 @@
 #![doc = include_str!("../README.md")]
 
+#[cfg(test)]
+mod dead_pid;
+
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt::Write as _;
@@ -1705,6 +1709,7 @@ fn undo_preparation(run_dir: &Path, prior: &str, step: &str) -> io::Result<()> {
         (RATE_LIMIT_FILE, RATE_LIMIT_FILE),
         (CAPACITY_ATTEMPTS_FILE, CAPACITY_ATTEMPTS_FILE),
         ("kill-evidence.txt", "kill-evidence.txt"),
+        ("finished-step.json", ".finished-step.json"),
     ] {
         restore_optional(&history.join(archived), &run_dir.join(live))?;
     }
@@ -2333,6 +2338,9 @@ fn execute_with_clock(
         execution_settings::annotate(&mut report, evidence);
     }
     let publication = atomic_write(&run_dir.join("run-report.txt"), &report);
+    if publication.is_ok() {
+        let _ignored = lock.record_finished(&run_dir);
+    }
     drop(lock);
     if publication.is_err() {
         let mut failed_report = report_bytes(
@@ -2684,6 +2692,11 @@ fn prepare_resume_with_size<F: FnOnce(&Path) -> io::Result<u64>>(
     )
     .map_err(|_error| PreparationFailure::Runtime { live: false })?;
     archive_optional(
+        &run_dir.join(".finished-step.json"),
+        &history.join("finished-step.json"),
+    )
+    .map_err(|_error| PreparationFailure::Runtime { live: false })?;
+    archive_optional(
         &run_dir.join("backend-settings.json"),
         &history.join("backend-settings.json"),
     )
@@ -2739,7 +2752,8 @@ fn prepare_resume_with_size<F: FnOnce(&Path) -> io::Result<u64>>(
     .and_then(|()| write_started_at(run_dir))
     .map_err(|_error| PreparationFailure::Runtime { live: false })?;
 
-    remove_optional(run_dir.join(".feed-offset"))
+    remove_optional(run_dir.join(".finished-step.json"))
+        .and_then(|()| remove_optional(run_dir.join(".feed-offset")))
         .and_then(|()| remove_optional(run_dir.join("last-message.txt")))
         .and_then(|()| remove_optional(run_dir.join(RECONSTRUCTED_FILE)))
         .and_then(|()| remove_optional(run_dir.join(RATE_LIMIT_FILE)))
@@ -3808,7 +3822,9 @@ fn run_child(
             Some((context_state, context_turn, &context_at)),
             Some((readings, expiry, decision)),
         );
-        let _ignored = atomic_write(&monitor_file, &sidecar);
+        if atomic_write(&monitor_file, &sidecar).is_ok() {
+            lock.monitor.replace(Some(monitor_file.clone()));
+        }
         if let Some(status) = child_status {
             if let Some(error) = context_error {
                 return Err(format!("context record: {error}"));
@@ -4890,6 +4906,7 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 
 struct StepLock {
     path: PathBuf,
+    monitor: RefCell<Option<PathBuf>>,
 }
 
 impl StepLock {
@@ -4904,7 +4921,32 @@ impl StepLock {
                 file.sync_all()
             })
             .map_err(|_error| ())?;
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            monitor: RefCell::new(None),
+        })
+    }
+
+    // Advisory completion evidence, never authority to resume or reclaim a PID.
+    fn record_finished(&self, run_dir: &Path) -> io::Result<()> {
+        let bytes = fs::read(&self.path)?;
+        let (pid, child) = parse_lock(&bytes)
+            .ok_or_else(|| io::Error::other("completed driver lock is malformed"))?;
+        let monitor = self
+            .monitor
+            .borrow()
+            .as_ref()
+            .and_then(|path| fs::read_to_string(path).ok());
+        let record = serde_json::json!({
+            "schema":1, "step":fs::read_to_string(run_dir.join(STEP_NAME_FILE))?,
+            "started_at":fs::read_to_string(run_dir.join(STARTED_AT_FILE))?,
+            "lock":self.path.file_name().and_then(OsStr::to_str),
+            "pid":pid, "child":child, "monitor":monitor
+        });
+        atomic_write(
+            &run_dir.join(".finished-step.json"),
+            record.to_string().as_bytes(),
+        )
     }
 
     /// Name the spawned child beneath the driver that holds this lock.
@@ -5125,6 +5167,7 @@ fn boottime_seconds() -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use crate::dead_pid::DEAD_LOCK_PID;
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io::{self, Write as _};
@@ -5616,6 +5659,32 @@ mod tests {
         ));
     }
 
+    /// ´claim:lifecycle:dead-lock-fixture-pid-exceeds-kernel-limit-and-live-lock-refuses´
+    /// ´test:unit:dead-lock-fixture-pid-exceeds-kernel-limit-and-live-lock-refuses´
+    #[test]
+    fn dead_lock_fixture_pid_exceeds_kernel_limit_and_live_lock_refuses() {
+        let limit: u32 = fs::read_to_string("/proc/sys/kernel/pid_max")
+            .expect("kernel PID limit")
+            .trim()
+            .parse()
+            .expect("numeric PID limit");
+        let (dead, child) =
+            parse_lock(format!("{DEAD_LOCK_PID}\n").as_bytes()).expect("ordinary positive PID");
+        assert!(child.is_none());
+        assert!(dead > 4_194_304);
+        assert!(dead > limit);
+        assert!(!super::process_exists(dead));
+        let fixture = FreshRunFixture::new("live-lock-control");
+        let lock = fixture.0.join(".test-lane.lock");
+        let live = std::process::id();
+        fs::write(&lock, format!("{live}\n")).expect("live driver lock");
+        assert!(matches!(
+            recover_dead_lock(&TestBackend, &fixture.0),
+            Err(ResumeRefusal::LiveLock { pid: Some(pid), .. }) if pid == live
+        ));
+        assert!(lock.exists(), "a live driver's lock must remain");
+    }
+
     /// ´claim:lifecycle:dead-driver-reconciles-unrecorded-turn-by-event-boundary´
     /// ´test:unit:dead-driver-reconciles-unrecorded-turn-by-event-boundary´
     #[test]
@@ -5631,7 +5700,11 @@ mod tests {
             .expect("events")
             .write_all(b"{\"type\":\"turn.completed\"}\n")
             .expect("second turn");
-        fs::write(fixture.0.join(".test-lane.lock"), b"4000000\n").expect("dead lock");
+        fs::write(
+            fixture.0.join(".test-lane.lock"),
+            format!("{DEAD_LOCK_PID}\n"),
+        )
+        .expect("dead lock");
         fs::write(
             fixture.0.join("run-report.txt"),
             b"RUN-REPORT lane=lane exit=0\n",
@@ -5662,7 +5735,7 @@ mod tests {
         fs::write(history.join("event-end.txt"), format!("{}\n", events.len()))
             .expect("archived prior end");
         let lock = fixture.0.join(".test-lane.lock");
-        fs::write(&lock, b"4000000\n").expect("dead driver lock");
+        fs::write(&lock, format!("{DEAD_LOCK_PID}\n")).expect("dead driver lock");
 
         let recovery = recover_dead_lock(&TestBackend, &fixture.0)
             .expect("rollback then reconciliation succeeds");
@@ -5781,7 +5854,11 @@ mod tests {
         );
         assert_eq!(fs::read(&context_path).expect("record survives"), before);
 
-        fs::write(fixture.0.join(".test-lane.lock"), b"4000000\n").expect("dead driver");
+        fs::write(
+            fixture.0.join(".test-lane.lock"),
+            format!("{DEAD_LOCK_PID}\n"),
+        )
+        .expect("dead driver");
         let refusal = recover_dead_lock(&TestBackend, &fixture.0).expect_err("recovery refuses");
         assert!(
             String::from_utf8_lossy(&refusal.diagnostic("test-lane"))

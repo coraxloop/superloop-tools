@@ -3431,6 +3431,8 @@ fn driver_launch_parser_keeps_the_ordinary_command_form() {
             "/bin/true",
             "--run-dir",
             "/runs/R",
+            "--backend",
+            "codex",
             "arg",
         ],
         None,
@@ -3452,6 +3454,8 @@ fn driver_launch_parser_keeps_the_ordinary_command_form() {
             "/bin/true",
             "--run-dir",
             "/runs/R",
+            "--backend",
+            "codex",
             "--",
         ],
         None,
@@ -3660,7 +3664,15 @@ fn driver_launch_validation_refuses_settings_driver_and_links() {
     );
     let settings = settings_dir.join("workers.toml");
     let check = |run: &str, driver: &Path, run_dir: &Path| {
-        validate_driver_launch(home, &record, Some(&runs), run, driver, run_dir)
+        validate_driver_launch(
+            home,
+            &record,
+            Some(&runs),
+            run,
+            driver,
+            run_dir,
+            crate::driver_launch::DriverBackend::Codex,
+        )
     };
     assert!(check("R", &driver, &run_dir).is_err());
     fs::write(
@@ -3675,7 +3687,7 @@ fn driver_launch_validation_refuses_settings_driver_and_links() {
     );
     fs::write(
         &settings,
-        format!("driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nfuture_key = 1\n", driver.display()),
+        format!("driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nfuture_key = 1\n", driver.display()),
     )
     .expect("workers settings");
     fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).expect("settings file mode");
@@ -3684,7 +3696,7 @@ fn driver_launch_validation_refuses_settings_driver_and_links() {
     fs::write(
         &settings,
         format!(
-            "driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
+            "driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
             driver.display(),
             runs.display()
         ),
@@ -3710,7 +3722,7 @@ fn driver_launch_validation_refuses_settings_driver_and_links() {
         fs::write(
             &settings,
             format!(
-                "driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n{setting}\n",
+                "driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n{setting}\n",
                 driver.display(),
                 runs.display()
             ),
@@ -3730,15 +3742,23 @@ fn driver_launch_validation_refuses_settings_driver_and_links() {
     fs::write(
         &settings,
         format!(
-            "driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
+            "driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
             driver.display(),
             runs.display()
         ),
     )
     .expect("restore valid settings");
     write_allocation(home, "[beta]\nuids = { base = 40000, count = 2 }\n");
-    let refusal = validate_driver_launch(home, &record, Some(&runs), "R", &driver, &run_dir)
-        .expect_err("missing worker identities");
+    let refusal = validate_driver_launch(
+        home,
+        &record,
+        Some(&runs),
+        "R",
+        &driver,
+        &run_dir,
+        crate::driver_launch::DriverBackend::Codex,
+    )
+    .expect_err("missing worker identities");
     assert!(
         refusal
             .message()
@@ -3924,7 +3944,7 @@ fn driver_launch_uses_registry_runs_root_when_present() {
     fs::write(
         &settings,
         format!(
-            "driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
+            "driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
             driver.display(),
             selected.display()
         ),
@@ -3943,10 +3963,27 @@ fn driver_launch_uses_registry_runs_root_when_present() {
         &home.join(".var/loops/alpha").to_string_lossy(),
     );
     assert!(
-        validate_driver_launch(home, &record, Some(&selected), "R", &driver, &selected_run).is_ok()
+        validate_driver_launch(
+            home,
+            &record,
+            Some(&selected),
+            "R",
+            &driver,
+            &selected_run,
+            crate::driver_launch::DriverBackend::Codex
+        )
+        .is_ok()
     );
-    let failure = validate_driver_launch(home, &record, Some(&selected), "R", &driver, &old_run)
-        .expect_err("old derivation differs from declared root");
+    let failure = validate_driver_launch(
+        home,
+        &record,
+        Some(&selected),
+        "R",
+        &driver,
+        &old_run,
+        crate::driver_launch::DriverBackend::Codex,
+    )
+    .expect_err("old derivation differs from declared root");
     assert_eq!(failure.status(), 2);
     assert!(
         failure
@@ -3971,7 +4008,7 @@ fn driver_launch_refuses_missing_root_setting() {
     fs::write(
         &settings,
         format!(
-            "driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\n",
+            "driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\n",
             driver.display()
         ),
     )
@@ -3988,10 +4025,18 @@ fn driver_launch_refuses_missing_root_setting() {
         &home.join(".var/loops/alpha").to_string_lossy(),
     );
     assert!(
-        validate_driver_launch(home, &record, Some(&root), "R", &driver, &run)
-            .expect_err("missing settings root cannot fall back to the registry")
-            .message()
-            .contains("runs_root_required")
+        validate_driver_launch(
+            home,
+            &record,
+            Some(&root),
+            "R",
+            &driver,
+            &run,
+            crate::driver_launch::DriverBackend::Codex
+        )
+        .expect_err("missing settings root cannot fall back to the registry")
+        .message()
+        .contains("runs_root_required")
     );
     assert!(
         inspect_runs_root(&record, None)
@@ -4056,7 +4101,7 @@ fn declared_runs_root_refuses_owner_group_and_mode_mismatch() {
     fs::write(
         &settings,
         format!(
-            "driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
+            "driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
             driver.display(),
             root.display()
         ),
@@ -4077,9 +4122,17 @@ fn declared_runs_root_refuses_owner_group_and_mode_mismatch() {
         ((metadata.uid().wrapping_add(1), metadata.gid()), "uid"),
         ((metadata.uid(), metadata.gid().wrapping_add(1)), "gid"),
     ] {
-        let launch =
-            validate_driver_launch_for_owner(home, &record, Some(&root), "R", &driver, &run, owner)
-                .expect_err("mismatched launch identity");
+        let launch = validate_driver_launch_for_owner(
+            home,
+            &record,
+            Some(&root),
+            "R",
+            &driver,
+            &run,
+            owner,
+            crate::driver_launch::DriverBackend::Codex,
+        )
+        .expect_err("mismatched launch identity");
         assert_eq!(launch.status(), 2);
         assert!(launch.message().contains("runs_root for loop alpha"));
         assert!(launch.message().contains(word));
@@ -4090,8 +4143,16 @@ fn declared_runs_root_refuses_owner_group_and_mode_mismatch() {
         assert!(verify.message().contains(word));
     }
     fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("wrong root mode");
-    let mode = validate_driver_launch(home, &record, Some(&root), "R", &driver, &run)
-        .expect_err("root mode mismatch");
+    let mode = validate_driver_launch(
+        home,
+        &record,
+        Some(&root),
+        "R",
+        &driver,
+        &run,
+        crate::driver_launch::DriverBackend::Codex,
+    )
+    .expect_err("root mode mismatch");
     assert_eq!(mode.status(), 2);
     assert!(mode.message().contains("expected mode 0711"));
 }
@@ -4119,7 +4180,7 @@ fn declared_runs_root_rejects_replaceable_ancestor() {
     fs::write(
         &settings,
         format!(
-            "driver_argv = [\"{}\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
+            "driver_argv = [\"{}\", \"--backend\", \"codex\"]\nbackend_argv = {{ codex = [\"/usr/bin/codex\"] }}\nruns_root = \"{}\"\n",
             driver.display(),
             root.display()
         ),
@@ -4131,8 +4192,16 @@ fn declared_runs_root_rejects_replaceable_ancestor() {
         41001,
         &home.join(".var/loops/alpha").to_string_lossy(),
     );
-    let launch = validate_driver_launch(home, &record, Some(&root), "R", &driver, &run)
-        .expect_err("replaceable launch ancestor");
+    let launch = validate_driver_launch(
+        home,
+        &record,
+        Some(&root),
+        "R",
+        &driver,
+        &run,
+        crate::driver_launch::DriverBackend::Codex,
+    )
+    .expect_err("replaceable launch ancestor");
     assert_eq!(launch.status(), 2);
     assert!(
         launch
@@ -4258,4 +4327,130 @@ fn words_outside_entry_inventory_reach_ordinary_execution() {
             );
         }
     }
+}
+
+/// ´claim:loophome:driver-settings-reader-validates-directory-and-file-acl-masks´
+/// ´test:crate:driver-settings-reader-validates-directory-and-file-acl-masks´
+#[test]
+fn driver_settings_reader_validates_directory_and_file_acl_masks() {
+    let fixture = TestDir::new_safe("settings-acl");
+    let root = &fixture.path;
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700)).expect("private root");
+    let path = root.join("workers.toml");
+    fs::write(&path, "driver_argv = []\n").expect("settings");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private settings");
+    let owner = nix::unistd::Uid::effective().as_raw();
+    for (target, directory) in [(root.as_path(), true), (path.as_path(), false)] {
+        crate::mail::acl::install(
+            &fs::File::open(target).expect("descriptor"),
+            owner + 1,
+            directory,
+        )
+        .expect("real ACL");
+        crate::driver_launch::read_driver_setting(&path, owner).expect("accepted ACL");
+    }
+    for (target, widened, restored) in [
+        (root.as_path(), 0o730, 0o710),
+        (path.as_path(), 0o660, 0o640),
+    ] {
+        fs::set_permissions(target, fs::Permissions::from_mode(widened)).expect("widen mask");
+        assert!(crate::driver_launch::read_driver_setting(&path, owner).is_err());
+        fs::set_permissions(target, fs::Permissions::from_mode(restored)).expect("restore mask");
+    }
+    crate::driver_launch::read_driver_setting(&path, owner).expect("restored grants");
+}
+
+/// ´claim:loophome:allocations-readers-validate-parent-and-ledger-acl-masks´
+/// ´test:crate:allocations-readers-validate-parent-and-ledger-acl-masks´
+#[test]
+fn allocations_readers_validate_parent_and_ledger_acl_masks() {
+    use crate::allocations::{Allocations, allocations_path};
+    let fixture = TestDir::new_safe("allocation-acl");
+    write_allocation(
+        &fixture.path,
+        "[alpha]\nuids = { base = 3000, count = 64 }\n",
+    );
+    let path = allocations_path(&fixture.path);
+    let parent = path.parent().expect("parent");
+    let service = nix::unistd::Uid::effective().as_raw() + 1;
+    for (target, directory) in [(parent, true), (path.as_path(), false)] {
+        crate::mail::acl::install(
+            &fs::File::open(target).expect("descriptor"),
+            service,
+            directory,
+        )
+        .expect("real ACL");
+    }
+    let fd = fs::File::open(parent).expect("parent descriptor").into();
+    Allocations::read(&path).expect("absolute reader");
+    Allocations::read_beneath(&path, parent, &fd).expect("anchored reader");
+    for (target, widened, restored) in [(parent, 0o730, 0o710), (path.as_path(), 0o660, 0o640)] {
+        fs::set_permissions(target, fs::Permissions::from_mode(widened)).expect("widen mask");
+        assert!(Allocations::read(&path).is_err());
+        assert!(Allocations::read_beneath(&path, parent, &fd).is_err());
+        fs::set_permissions(target, fs::Permissions::from_mode(restored)).expect("restore mask");
+    }
+}
+
+/// ´claim:loophome:driver-launch-backend-selection-is-explicit-and-bounded´
+/// ´test:crate:driver-launch-backend-selection-is-explicit-and-bounded´
+#[test]
+fn driver_launch_backend_selection_is_explicit_and_bounded() {
+    use crate::driver_launch::{DriverBackend, select_driver_backend};
+    for name in ["codex", "claude"] {
+        let words = [
+            "driver-launch",
+            "alpha",
+            "R",
+            "--driver-bin",
+            "/fixture/driver",
+            "--run-dir",
+            "/fixture/runs/R",
+            "--backend",
+            name,
+            "--",
+            "opaque argument",
+        ];
+        let invocation = parse_invocation(
+            OsStr::new("superloop"),
+            words,
+            None,
+            Some(OsStr::new("/fixture")),
+        )
+        .expect("explicit private backend");
+        assert!(
+            matches!(invocation.action, Action::DriverLaunch { backend, arguments, .. }
+            if backend.name() == name && arguments == ["opaque argument"])
+        );
+        let original = [
+            "/fixture/driver",
+            "driver",
+            "start",
+            "--backend",
+            "codex",
+            "opaque argument",
+        ]
+        .map(String::from);
+        let selected =
+            select_driver_backend(&original, DriverBackend::parse(name).expect("backend"))
+                .expect("one driver selector");
+        assert_eq!(selected[4], name);
+        assert_eq!(&selected[..4], &original[..4]);
+        assert_eq!(&selected[5..], &original[5..]);
+        assert_eq!(original[4], "codex");
+    }
+    for tail in [
+        vec![],
+        vec!["--backend"],
+        vec!["--backend", "other"],
+        vec!["--backend", "codex", "--backend", "claude"],
+    ] {
+        let words = std::iter::once("/fixture/driver")
+            .chain(tail)
+            .map(String::from)
+            .collect::<Vec<_>>();
+        assert!(select_driver_backend(&words, DriverBackend::Claude).is_err());
+    }
+    let failure = DriverBackend::parse("other").expect_err("no fallback");
+    assert!(failure.message().contains("other"));
 }

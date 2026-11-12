@@ -14,6 +14,488 @@ use std::io::Read as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
+/// Selected-loop inventory retained beneath receiver-validated storage and private custody.
+/// This is an endpoint inventory, not a lifetime lease or a published reply binding.
+pub struct BindingInventory {
+    inventory: super::directory::Inventory,
+    snapshot: super::directory::Snapshot,
+    loop_name: String,
+    service: u32,
+}
+impl BindingInventory {
+    /// Open the selected loop using a validated configuration snapshot and held directories.
+    /// The caller must receive loop-storage and private-storage under their declared policies
+    /// and enter the reserved service identity before calling this function.
+    /// Global credential collision checks still use every registry row and allocation.
+    /// # Errors
+    /// Refuses an override, wrong service identity, invalid snapshot or unsafe mailbox storage.
+    pub fn open_beneath(
+        home: &Path,
+        loop_name: &str,
+        configuration: &crate::anchor::Configuration,
+        storage: std::sync::Arc<crate::anchor::Anchor>,
+        private: std::sync::Arc<crate::anchor::Anchor>,
+        durability: Durability,
+    ) -> Result<Self> {
+        use super::directory::{LoopCustody, Snapshot};
+        if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+            return Err(MailError::Entry(
+                "anchor-declaration: operation=mail-binding purpose=registry-override".into(),
+            ));
+        }
+        let service = nix::unistd::Uid::effective().as_raw();
+        if configuration.allocations.mail_uid() != Some(service) {
+            return Err(MailError::Invalid(
+                "unsafe-storage: service identity reservation mismatch",
+            ));
+        }
+        let row = configuration
+            .registry
+            .row(loop_name, home)
+            .map_err(|_| MailError::Invalid("invalid-directory: registered loop"))?;
+        let (_, descriptor) = storage.relay()?;
+        let owner = std::fs::File::from(descriptor).metadata()?.uid();
+        let directory = Directory {
+            configuration: None,
+            home: home.to_owned(),
+            service,
+            owner,
+            durability,
+        };
+        let snapshot = Snapshot::open_with(&row, service, Some(std::sync::Arc::clone(&private)))?;
+        let custody = LoopCustody {
+            row,
+            storage,
+            private,
+        };
+        let inventory = directory.inventory_beneath(configuration, &custody)?;
+        Ok(Self {
+            inventory,
+            snapshot,
+            loop_name: loop_name.into(),
+            service,
+        })
+    }
+
+    /// Recheck the retained configuration and active principal/worker endpoint pair.
+    /// # Errors
+    /// Refuses a missing, retired, changed or differently owned endpoint or configuration.
+    pub fn verify_worker(&self, identity: &Identity) -> Result<()> {
+        self.snapshot.current()?;
+        self.snapshot.config.active(&identity.name)?;
+        let worker = Address::parse(&format!("{}+{}", self.loop_name, identity.name))
+            .map_err(|_| MailError::Invalid("invalid-name: worker address"))?;
+        for address in [
+            Address::parse(&self.loop_name)
+                .map_err(|_| MailError::Invalid("invalid-name: loop"))?,
+            worker,
+        ] {
+            let actor = self
+                .inventory
+                .actors
+                .get(&address)
+                .filter(|actor| {
+                    actor.active && (address.worker().is_none() || actor.uid == identity.uid)
+                })
+                .ok_or(MailError::Invalid(
+                    "invalid-directory: binding endpoint unavailable",
+                ))?;
+            super::directory::verify_outbox(&actor.outbox, actor.uid, self.service, actor.active)?;
+            actor.endpoint.fresh()?;
+        }
+        Ok(())
+    }
+}
+
+/// Owned mail capabilities whose coherence is established only by receipt.
+///
+/// Private fields prevent callers assembling independent snapshots and anchors.
+/// The production command switches only with its complete lane entry.
+pub struct ReplyCustody {
+    home: std::path::PathBuf,
+    owner_home: crate::anchor::Anchor,
+    runs_root: crate::anchor::Anchor,
+    entry_executable: crate::anchor::Anchor,
+    loop_name: String,
+    configuration: crate::anchor::Configuration,
+    configuration_directory: std::sync::Arc<crate::anchor::Anchor>,
+    loop_storage: std::sync::Arc<crate::anchor::Anchor>,
+    private_storage: std::sync::Arc<crate::anchor::Anchor>,
+    identity_executable: crate::anchor::Anchor,
+    journal: std::sync::Arc<crate::anchor::Anchor>,
+}
+
+const REPLY_OPERATION: &str = "mail-binding";
+pub const REPLY_PURPOSES: [&str; 8] = [
+    "owner-home",
+    "runs-root",
+    "entry-executable",
+    "configuration",
+    "loop-storage",
+    "private-storage",
+    "identity-executable",
+    "journal",
+];
+pub(super) fn reply_refusal(purpose: &str) -> MailError {
+    MailError::Entry(format!(
+        "anchor-declaration: operation={REPLY_OPERATION} purpose={purpose}"
+    ))
+}
+pub(super) fn reply_io(purpose: &str, check: &str, error: impl std::fmt::Display) -> MailError {
+    MailError::Entry(format!(
+        "anchor-io: operation={REPLY_OPERATION} purpose={purpose} check={check}: {error}"
+    ))
+}
+pub(super) fn reply_override() -> Result<()> {
+    if std::env::var_os("ENTER_LOOP_REGISTRY").is_some() {
+        return Err(reply_refusal("registry-override"));
+    }
+    Ok(())
+}
+pub(super) fn reply_requirements(loop_uid: u32, service: u32) -> Vec<crate::anchor::Requirement> {
+    use crate::anchor::{Kind, ModePolicy, Owner, Policy, Requirement};
+    [
+        (Owner::Host, Kind::Directory, ModePolicy::Exact(0o700)),
+        (Owner::Host, Kind::Directory, ModePolicy::Exact(0o700)),
+        (Owner::Host, Kind::File, ModePolicy::Executable),
+        (Owner::Host, Kind::Directory, ModePolicy::Exact(0o700)),
+        (Owner::Host, Kind::Directory, ModePolicy::Exact(0o711)),
+        (
+            Owner::Mapped(loop_uid),
+            Kind::Directory,
+            ModePolicy::Exact(0o700),
+        ),
+        (Owner::RootFile, Kind::File, ModePolicy::Executable),
+        (
+            Owner::Mapped(service),
+            Kind::Directory,
+            ModePolicy::Exact(0o700),
+        ),
+    ]
+    .into_iter()
+    .zip(REPLY_PURPOSES)
+    .map(|((owner, kind, mode), purpose)| Requirement {
+        purpose: purpose.into(),
+        alias_group: None,
+        policy: Policy { kind, owner, mode },
+    })
+    .collect()
+}
+fn reply_core(
+    receiver: &crate::anchor::Receiver,
+    manifest: &crate::anchor::Manifest,
+    descriptors: &[std::os::fd::OwnedFd],
+    scope: &str,
+) -> Result<(std::path::PathBuf, Vec<crate::anchor::Requirement>)> {
+    use crate::anchor::{ModePolicy, Owner};
+    if descriptors.len() != REPLY_PURPOSES.len() {
+        // Keep the bootstrap's exact frame diagnostics for direct library callers.
+        return Err(MailError::Entry(format!(
+            "{}: operation={REPLY_OPERATION} purpose=configuration",
+            if descriptors.len() < REPLY_PURPOSES.len() {
+                "anchor-missing"
+            } else {
+                "anchor-transport"
+            }
+        )));
+    }
+    crate::anchor::Manifest::parse(
+        &serde_json::to_string(manifest).map_err(|_| reply_refusal("manifest"))?,
+    )?;
+    let mut required = reply_requirements(0, 0);
+    for slot in 0..2 {
+        let stat = nix::sys::stat::fstat(&descriptors[slot])
+            .map_err(|error| reply_io(REPLY_PURPOSES[slot], "fstat", error))?;
+        let mode = stat.st_mode & 0o7777;
+        if mode & 0o7022 != 0 || mode & 0o700 != 0o700 {
+            return Err(MailError::Entry(format!(
+                "anchor-mode: operation={REPLY_OPERATION} purpose={} check=directory-mode",
+                REPLY_PURPOSES[slot]
+            )));
+        }
+        required[slot].policy.mode = ModePolicy::Exact(mode);
+    }
+    required[2].policy.owner = if manifest.records[2].owner_uid == 0 {
+        Owner::RootFile
+    } else {
+        Owner::Host
+    };
+    required.truncate(3);
+    let mut declaration = manifest.clone();
+    declaration.records.truncate(3);
+    let fds = descriptors[..3]
+        .iter()
+        .enumerate()
+        .map(|(slot, fd)| {
+            fd.try_clone()
+                .map_err(|error| reply_io(REPLY_PURPOSES[slot], "duplicate", error))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if manifest.records[0].device == manifest.records[1].device
+        && manifest.records[0].inode == manifest.records[1].inode
+    {
+        return Err(reply_refusal("runs-root"));
+    }
+    let anchors = receiver.validate(
+        &declaration,
+        fds,
+        REPLY_OPERATION,
+        scope,
+        crate::anchor::Transport::Rights,
+        &required,
+    )?;
+    Ok((anchors[0].directory_path()?, required))
+}
+
+impl ReplyCustody {
+    /// Receive the exact reply bundle, deriving mapped policies from its held grant.
+    /// This is the sole constructor; no lifetime repair or identity drop occurs here.
+    /// # Errors
+    /// Refuses namespace, declaration, grant, settings or capability-policy mismatches.
+    pub fn receive(
+        receiver: &crate::anchor::Receiver,
+        manifest: &crate::anchor::Manifest,
+        descriptors: Vec<std::os::fd::OwnedFd>,
+        loop_name: &str,
+    ) -> Result<Self> {
+        use crate::anchor::{Entry, Transport};
+        reply_override()?;
+        if nix::unistd::Uid::effective().as_raw() != 0 {
+            return Err(reply_refusal("namespace"));
+        }
+        if manifest.records.len() != REPLY_PURPOSES.len() {
+            return Err(reply_refusal("count"));
+        }
+        if !manifest
+            .records
+            .iter()
+            .zip(REPLY_PURPOSES)
+            .all(|(r, name)| r.purpose == name)
+        {
+            return Err(reply_refusal("purposes"));
+        }
+        let (home, core) = reply_core(receiver, manifest, &descriptors, loop_name)?;
+        let configuration = receiver.configuration(
+            manifest,
+            &descriptors,
+            Entry {
+                operation: REPLY_OPERATION,
+                loop_name,
+                transport: Transport::Rights,
+            },
+            &home,
+            false,
+        )?;
+        let row = configuration
+            .registry
+            .row(loop_name, &home)
+            .map_err(|_| reply_refusal("loop"))?;
+        let service = configuration
+            .allocations
+            .mail_uid()
+            .ok_or_else(|| reply_refusal("service"))?;
+        let mut required = reply_requirements(row.uid, service);
+        required[..3].clone_from_slice(&core);
+        let mut anchors = receiver.validate(
+            manifest,
+            descriptors,
+            REPLY_OPERATION,
+            loop_name,
+            Transport::Rights,
+            &required,
+        )?;
+        let mut take = || anchors.pop().ok_or_else(|| reply_refusal("count"));
+        let journal = std::sync::Arc::new(take()?);
+        let identity_executable = take()?;
+        let private_storage = std::sync::Arc::new(take()?);
+        let loop_storage = std::sync::Arc::new(take()?);
+        let configuration_directory = std::sync::Arc::new(take()?);
+        let entry_executable = take()?;
+        let runs_root = take()?;
+        let owner_home = take()?;
+        let custody = Self {
+            home,
+            owner_home,
+            runs_root,
+            entry_executable,
+            loop_name: loop_name.into(),
+            configuration,
+            configuration_directory,
+            loop_storage,
+            private_storage,
+            identity_executable,
+            journal,
+        };
+        custody.settings()?;
+        Ok(custody)
+    }
+    /// Home identity obtained from the received owner-home descriptor.
+    #[must_use]
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+    /// Borrow the validated lane roots and entry image without releasing ownership.
+    #[must_use]
+    pub const fn entry_anchors(
+        &self,
+    ) -> (
+        &crate::anchor::Anchor,
+        &crate::anchor::Anchor,
+        &crate::anchor::Anchor,
+    ) {
+        (&self.owner_home, &self.runs_root, &self.entry_executable)
+    }
+    /// Borrow the receiver-validated configuration and its directory for plan activation.
+    #[must_use]
+    pub fn configuration(
+        &self,
+    ) -> (
+        &crate::anchor::Configuration,
+        std::sync::Arc<crate::anchor::Anchor>,
+    ) {
+        (
+            &self.configuration,
+            std::sync::Arc::clone(&self.configuration_directory),
+        )
+    }
+    fn settings(&self) -> Result<command::Settings> {
+        let file = super::entry_anchors::configuration_file(
+            &self.configuration_directory,
+            Path::new("mail-service.toml"),
+        )?;
+        let settings = command::parse_settings(&io::bounded(&file, 4096)?)?;
+        if self.configuration.allocations.mail_uid() != Some(settings.uid) {
+            return Err(reply_refusal("service"));
+        }
+        Ok(settings)
+    }
+}
+
+/// A service-identity reply session retaining the protected worker lifetime lock.
+/// Dropping this value releases the lease. The caller must not exec or change
+/// identity again while relying on this session.
+#[must_use = "keep the session alive through reply binding"]
+pub struct ReplySession {
+    inventory: BindingInventory,
+    journal: std::sync::Arc<crate::anchor::Anchor>,
+    identity: Identity,
+    service: u32,
+    _lifetime: nix::fcntl::Flock<std::fs::File>,
+}
+impl ReplyCustody {
+    /// Acquire the lease, permanently drop to the reserved service identity,
+    /// and open the reply inventory beneath the same received storage.
+    /// Call only in a short-lived namespace-root entry process.
+    /// # Errors
+    /// Refuses changed custody, settings, lifetime, identity drop or inventory.
+    pub fn enter(self, identity: &Identity, verify_only: bool) -> Result<ReplySession> {
+        reply_override()?;
+        let home = self.home.as_path();
+        let loop_name = self.loop_name.as_str();
+        let settings = self.settings()?;
+        let lifetime = worker_provision::hold_active_beneath(
+            home,
+            loop_name,
+            identity,
+            verify_only,
+            &self.configuration,
+            &self.loop_storage,
+            &self.private_storage,
+            &self.identity_executable,
+        )?;
+        self.journal.revalidate()?;
+        command::enter_with(
+            home,
+            &settings,
+            &self.configuration.registry,
+            &self.configuration.allocations,
+        )?;
+        let inventory = BindingInventory::open_beneath(
+            home,
+            loop_name,
+            &self.configuration,
+            self.loop_storage,
+            self.private_storage,
+            Durability {
+                crash_consistent_rename: settings.crash_consistent_rename,
+                durable_sync: settings.durable_sync,
+            },
+        )?;
+        inventory.verify_worker(identity)?;
+        Ok(ReplySession {
+            inventory,
+            journal: self.journal,
+            identity: identity.clone(),
+            service: settings.uid,
+            _lifetime: lifetime,
+        })
+    }
+}
+impl ReplySession {
+    /// Bind a worker-to-principal delivery while retaining the lifetime lease.
+    /// # Errors
+    /// Refuses changed inventory, delivery evidence or journal custody.
+    pub fn reply(&self, step: &str, delivery: &Instant) -> Result<(Record, Vec<u8>)> {
+        self.resolve(step, delivery, false)
+    }
+    /// Verify an existing reply pin without creating one.
+    /// # Errors
+    /// Refuses an absent pin or any changed inventory or delivery evidence.
+    pub fn verify_reply(&self, step: &str, delivery: &Instant) -> Result<(Record, Vec<u8>)> {
+        self.resolve(step, delivery, true)
+    }
+    fn resolve(
+        &self,
+        step: &str,
+        delivery: &Instant,
+        verify_only: bool,
+    ) -> Result<(Record, Vec<u8>)> {
+        binding_step(step)?;
+        self.inventory.verify_worker(&self.identity)?;
+        let loop_name = &self.inventory.loop_name;
+        let recipient =
+            Address::parse(loop_name).map_err(|_| MailError::Invalid("invalid-name: loop"))?;
+        let actor = self
+            .inventory
+            .inventory
+            .actors
+            .get(&recipient)
+            .ok_or(MailError::Invalid(
+                "invalid-directory: recipient endpoint unavailable",
+            ))?;
+        let sender = format!("{loop_name}+{}", self.identity.name);
+        let verify = |record: &Record| {
+            self.inventory.verify_worker(&self.identity)?;
+            verified_payload(actor, self.service, &sender, &recipient, record)
+        };
+        let family = self.identity.pin_family(loop_name);
+        let reference = format!("reply:{step}");
+        if verify_only {
+            journal::verify_reservation_beneath(
+                &self.journal,
+                &family,
+                &reference,
+                delivery,
+                verify,
+            )
+        } else {
+            journal::bind_reservation_beneath(&self.journal, &family, &reference, delivery, verify)
+        }
+    }
+}
+
+fn binding_step(step: &str) -> Result<()> {
+    if step.is_empty()
+        || step.len() > 64
+        || !step
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(MailError::Invalid("invalid-name: round step"));
+    }
+    Ok(())
+}
+
 /// Resolve one delivery under namespace-root entry, then drop permanently to
 /// the service identity before journal verification and pin publication.
 ///
@@ -67,18 +549,12 @@ fn bind_direction(
     reply: bool,
     verify_only: bool,
 ) -> Result<(Record, Vec<u8>)> {
-    if step.is_empty()
-        || step.len() > 64
-        || !step
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(MailError::Invalid("invalid-name: round step"));
-    }
+    binding_step(step)?;
     let _lifetime = worker_provision::hold_active(home, loop_name, identity, verify_only)?;
     let settings = command::settings(home)?;
     command::enter(home, &settings)?;
     let directory = Directory {
+        configuration: None,
         home: home.to_owned(),
         service: settings.uid,
         owner: io::search_directory(home)?.metadata()?.uid(),

@@ -912,6 +912,63 @@ mod tests {
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
 
+    /// # Panics
+    /// Panics if a wall changes beyond JSON precision or any other report field changes.
+    fn assert_report_roundtrip(mut actual: Value, mut expected: Value) {
+        let actual_wall = actual["wall_seconds"].as_f64().expect("actual wall");
+        let expected_wall = expected["wall_seconds"].as_f64().expect("expected wall");
+        let tolerance = 4.0 * f64::EPSILON * expected_wall.abs().max(1.0);
+        assert!(
+            actual_wall.is_finite()
+                && expected_wall.is_finite()
+                && (actual_wall - expected_wall).abs() <= tolerance,
+            "report wall changed: {actual_wall} != {expected_wall}"
+        );
+        actual
+            .as_object_mut()
+            .expect("actual report")
+            .remove("wall_seconds");
+        expected
+            .as_object_mut()
+            .expect("expected report")
+            .remove("wall_seconds");
+        assert_eq!(actual, expected);
+    }
+
+    /// # Panics
+    /// Panics if JSON precision changes fail or changed report evidence passes.
+    /// ´test:unit:settle-report-roundtrip-compares-only-wall-with-tolerance´
+    #[test]
+    fn settle_report_roundtrip_compares_only_wall_with_tolerance() {
+        // Each pair is a wall as Duration::as_secs_f64 wrote it and the value the gate parsed
+        // back from its JSON, one ULP apart.
+        for (wall, recorded) in [
+            (1.327_694_488_000_000_1, 1.327_694_488),
+            (1.782_030_800_999_999_9, 1.782_030_801),
+        ] {
+            let report = json!({"wall_seconds":wall,"evidence":{"state":"complete"}});
+            let bytes = serde_json::to_vec(&report).expect("serialized report");
+            let actual = serde_json::from_slice(&bytes).expect("parsed report");
+            assert_report_roundtrip(actual, report.clone());
+            // These parsed values are the discrepancies recorded by the gates.
+            let recorded = json!({"wall_seconds":recorded,"evidence":{"state":"complete"}});
+            assert_ne!(recorded["wall_seconds"], report["wall_seconds"]);
+            assert_report_roundtrip(recorded, report.clone());
+            for changed in [
+                json!({"wall_seconds":wall + 0.001,"evidence":{"state":"complete"}}),
+                json!({"wall_seconds":wall,"evidence":{"state":"changed"}}),
+                json!({"evidence":{"state":"complete"}}),
+            ] {
+                assert!(
+                    std::panic::catch_unwind(|| {
+                        assert_report_roundtrip(changed, report.clone());
+                    })
+                    .is_err()
+                );
+            }
+        }
+    }
+
     fn collected_record(record: &mut Value) {
         record["run_scope"] = json!({"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"proxy.service","proxy_invocation":"fixture"});
         for (pid, start) in [
@@ -919,13 +976,13 @@ mod tests {
             ("helper_pid", "helper_start"),
             ("helper_parent_pid", "helper_parent_start"),
         ] {
-            record[pid] = json!(4_000_001);
+            record[pid] = json!(crate::dead_pid::DEAD_LOCK_PID + 1);
             record[start] = json!(1);
         }
         record["driver_end"] = json!({"state":"absent-on-recovery"});
         record["helper_end"] = json!({"state":"absent-on-recovery"});
         record["reaping"] = Value::Null;
-        record["reaping_recovery"] = json!({"state":"collected","cgroup":record["run_scope"]["cgroup"],"scope":record["run_scope"],"container_payload":{"state":"absent","by":"loop-and-run-label"},"presence":"all-absent","identities":{"launcher":[4_000_001,1],"driver":[4_000_000,1],"helper":[4_000_001,1],"helper_parent":[4_000_001,1],"observer":null},"attempt_evidence":{"state":"absence-confirmed-with-missing-evidence","attempts":[],"container_absence_checked":true}});
+        record["reaping_recovery"] = json!({"state":"collected","cgroup":record["run_scope"]["cgroup"],"scope":record["run_scope"],"container_payload":{"state":"absent","by":"loop-and-run-label"},"presence":"all-absent","identities":{"launcher":[crate::dead_pid::DEAD_LOCK_PID + 1,1],"driver":[crate::dead_pid::DEAD_LOCK_PID,1],"helper":[crate::dead_pid::DEAD_LOCK_PID + 1,1],"helper_parent":[crate::dead_pid::DEAD_LOCK_PID + 1,1],"observer":null},"attempt_evidence":{"state":"absence-confirmed-with-missing-evidence","attempts":[],"container_absence_checked":true}});
     }
 
     fn custody_plan(fixture: &Path, old: &crate::plan::Plan) -> crate::plan::Plan {
@@ -1453,7 +1510,7 @@ mod tests {
         .expect("launch evidence");
         std::fs::set_permissions(&evidence, std::fs::Permissions::from_mode(0o600))
             .expect("evidence mode");
-        let document = json!({"loop":"alpha","home":home_dir,"driver_dir":driver_dir,"worker_uid":owner,"paths":[{"path":home_dir,"gid":owner},{"path":driver_dir,"uid":owner,"gid":owner,"kind":"directory"}]});
+        let document = json!({"backend":"codex","loop":"alpha","home":home_dir,"driver_dir":driver_dir,"worker_uid":owner,"paths":[{"path":home_dir,"gid":owner},{"path":driver_dir,"uid":owner,"gid":owner,"kind":"directory"}]});
         let plan = crate::plan::Plan {
             home: home_dir,
             driver_dir,
@@ -1520,6 +1577,14 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
                 .expect("config mode");
         }
+        let entry = h.join("entry");
+        crate::fixture_exec::write_executable(
+            &entry,
+            format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'driver-launch --interface-version' ]; then printf '%s\\n' '{}'; fi\n",
+                crate::fixture_exec::ENTRY_INTERFACE_PROBE
+            ).as_bytes(),
+        ).expect("recorded entry interface");
         let runtime = h.join("runtime");
         crate::fixture_exec::write_executable(&runtime, b"#!/bin/sh\ncase \"$1\" in\nps) exit 0;;\nunshare) echo 'settle-evidence: no thread or reply' >&2; exit 2;;\n*) exit 9;;\nesac\n").expect("runtime");
         for (path, text) in [
@@ -1537,7 +1602,8 @@ mod tests {
             (
                 config.join("workers.toml"),
                 format!(
-                    "runs_root = \"{}\"\nentry_bin = \"/usr/bin/true\"\ndriver_argv = [\"/usr/bin/true\"]\nimage_digest = \"sha256:{}\"\ntemplate_dir = \"{}/template\"\nsocket_dir = \"{}/sockets\"\nbackend_argv = {{ codex = [\"/usr/bin/true\"] }}\nresources = {{ memory_bytes = 2147483648, pids_max = 128, cpu_shares = 512 }}\nvendor_hosts = {{ codex = [\"api.example.com\"] }}\n",
+                    "runs_root = \"{}\"\nentry_bin = \"{}/entry\"\ndriver_argv = [\"/usr/bin/true\"]\nimage_digest = \"sha256:{}\"\ntemplate_dir = \"{}/template\"\nsocket_dir = \"{}/sockets\"\nbackend_argv = {{ codex = [\"/usr/bin/true\"] }}\nresources = {{ memory_bytes = 2147483648, pids_max = 128, cpu_shares = 512 }}\nvendor_hosts = {{ codex = [\"api.example.com\"] }}\n",
+                    h.display(),
                     h.display(),
                     "a".repeat(64),
                     h.display(),
@@ -1583,7 +1649,8 @@ mod tests {
         collected_record(&mut record);
         record["plan"] = plan.document.clone();
         record["worker_uid"] = json!(owner);
-        record["reaping_recovery"]["identities"]["driver"] = json!([4_000_002, 1]);
+        record["reaping_recovery"]["identities"]["driver"] =
+            json!([crate::dead_pid::DEAD_LOCK_PID + 2, 1]);
         record["model_selection"] = selection;
         record["phase"] = json!(phase);
         record["active_round"] = json!("work-1");
@@ -2168,10 +2235,10 @@ mod tests {
                 .get("removed_helper_sockets")
                 .is_none()
         );
-        assert_eq!(
+        assert_report_roundtrip(
             super::super::report::read_bound(&root, "R", Some("work-2"), owner)
                 .expect("second report"),
-            second
+            second,
         );
         assert_eq!(
             super::super::report::read_bound(&root, "R", Some("work-1"), owner)
@@ -2200,10 +2267,10 @@ mod tests {
         let paths = bind_dead_sockets(&plan);
         request.dry_run = false;
         let report = complete_socket_fixture(h, &plan, &request).expect("completion");
-        assert_eq!(
+        assert_report_roundtrip(
             super::super::report::read_bound(&root, "R", Some("work-1"), owner)
                 .expect("valid report"),
-            report
+            report.clone(),
         );
         let path = h.join(".report=R=work-1.json");
         for invalid in [
@@ -2246,18 +2313,18 @@ mod tests {
             .expect("completion")
             .remove("removed_helper_sockets");
         std::fs::write(&path, serde_json::to_vec(&older).expect("report bytes")).expect("report");
-        assert_eq!(
+        assert_report_roundtrip(
             super::super::report::read_bound(&root, "R", Some("work-1"), owner)
                 .expect("older report"),
-            older
+            older,
         );
         let mut single = report;
         single["interrupted_settlement"]["removed_helper_sockets"] = json!([paths[0]]);
         std::fs::write(&path, serde_json::to_vec(&single).expect("report bytes")).expect("report");
-        assert_eq!(
+        assert_report_roundtrip(
             super::super::report::read_bound(&root, "R", Some("work-1"), owner)
                 .expect("one removed socket"),
-            single
+            single,
         );
     }
 
@@ -2363,7 +2430,7 @@ mod tests {
             super::super::reaping::recovery_verdict(&failed).expect("same measured proof");
             let published = super::super::report::read_bound(&root, "R", Some("work-1"), owner)
                 .expect("recovered report");
-            assert_eq!(published, recovered);
+            assert_report_roundtrip(published, recovered);
             let mut settle = SettleRequest {
                 loop_name: "alpha".into(),
                 run: "R".into(),
@@ -2490,15 +2557,7 @@ mod tests {
 
         if std::env::var("SUPERLOOP_RESUME_ENTRY_FIXTURE").as_deref() == Ok("inspect") {
             let h = PathBuf::from(std::env::var_os("HOME").expect("fixture home"));
-            let owner = Uid::effective().as_raw();
-            let fds = home::receive_private_descriptors(&std::io::stdin(), 2)
-                .expect("inspection descriptors");
-            let _guard = home::activate_private_launch(&h, &fds[0], &h, &fds[1], None, owner)
-                .expect("mapped custody");
-            let result = rounds::inspect_current_round(&h, "alpha", "R", None)
-                .expect("production private inspection");
-            std::fs::write(h.join("inspection.json"), result.to_string())
-                .expect("inspection result");
+            threadless_inspection(&h);
             return;
         }
         if std::env::var_os("SUPERLOOP_RESUME_ENTRY_FIXTURE").is_none() {
@@ -2550,6 +2609,90 @@ mod tests {
         row_144_cleanup_uses_owner_not_worker();
     }
 
+    fn threadless_inspection(h: &Path) {
+        use loop_home::anchor::{
+            Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement, Transport,
+        };
+        let manifest = Manifest::parse(
+            &std::env::var("SUPERLOOP_RESUME_ANCHORS").expect("inspection manifest"),
+        )
+        .expect("manifest");
+        let socket = std::os::unix::net::UnixStream::from(
+            nix::unistd::dup(std::io::stdin()).expect("input socket"),
+        );
+        let descriptors =
+            loop_home::anchor::transport::receive(&socket, 5, std::time::Duration::from_secs(30))
+                .expect("inspection rights frame");
+        // This host-identity stand-in deliberately shares its home and runs root.
+        // The real namespace acceptance separately requires distinct roots.
+        let requirements = [
+            "owner-home",
+            "runs-root",
+            "entry-executable",
+            "hash-executable",
+            "configuration",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(slot, purpose)| {
+            let program = matches!(slot, 2 | 3);
+            Requirement {
+                purpose: purpose.into(),
+                policy: Policy {
+                    kind: if program { Kind::File } else { Kind::Directory },
+                    owner: if slot == 3 {
+                        Owner::RootFile
+                    } else {
+                        Owner::Host
+                    },
+                    mode: if program {
+                        ModePolicy::Executable
+                    } else {
+                        ModePolicy::Exact(0o700)
+                    },
+                },
+                alias_group: (slot < 2).then(|| "fixture-root".into()),
+            }
+        })
+        .collect::<Vec<_>>();
+        let mut anchors = Receiver::current()
+            .expect("receiver")
+            .validate(
+                &manifest,
+                descriptors,
+                "inspect-round",
+                "alpha",
+                Transport::Rights,
+                &requirements,
+            )
+            .expect("inspection custody");
+        crate::container_entry::check_image("inspect-round", &anchors[2]).expect("entry image");
+        let configuration = anchors.pop().expect("configuration");
+        let hash = anchors.pop().expect("hash");
+        let _programs = crate::container_entry::activate_program_map(
+            "inspect-round",
+            std::collections::BTreeMap::from([(
+                PathBuf::from("/usr/bin/sha256sum"),
+                std::sync::Arc::new(hash),
+            )]),
+        );
+        let _home = home::activate_private_launch(
+            h,
+            &anchors[0],
+            h,
+            &anchors[1],
+            None,
+            Uid::effective().as_raw(),
+        )
+        .expect("mapped custody");
+        let _configuration =
+            crate::container_entry::configuration(h, "alpha", "inspect-round", configuration)
+                .expect("configuration custody");
+        let result = rounds::inspect_current_round(h, "alpha", "R", None)
+            .expect("production inspection reader");
+        std::fs::write(h.join("inspection.json"), result.to_string()).expect("inspection result");
+    }
+
     fn exited_container_runtime(h: &Path, program: &Path) -> Value {
         let container = json!({"id":"a".repeat(64),"name":"superloop-lane-alpha-R-attempt-1",
             "labels":{"org.superloop.loop":"alpha","org.superloop.run":"R"},
@@ -2583,7 +2726,8 @@ elif args[0] == 'unshare':
         if '--record' in args:
             print('fixture-round-evidence-stop', file=sys.stderr)
             sys.exit(17)
-        env = dict(os.environ, SUPERLOOP_RESUME_ENTRY_FIXTURE='inspect')
+        env = dict(os.environ, SUPERLOOP_RESUME_ENTRY_FIXTURE='inspect',
+                   SUPERLOOP_RESUME_ANCHORS=args[-1])
         result = subprocess.run([args[1], '--exact', 'launch::settle::tests::interrupted_dispatch_without_thread_continues_in_same_run'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode:
             sys.stderr.buffer.write(result.stdout + result.stderr)
@@ -3056,6 +3200,39 @@ else:
             b"#!/bin/sh\nfor word do\n if [ \"$word\" = _bind-mail ]; then cat \"$HOME/binding.json\"; exit 0; fi\n if [ \"$word\" = --record ]; then echo fixture-round-evidence-stop >&2; exit 17; fi\ndone\nprintf '{\"thread_id\":null}\\n'\n")
             .expect("fake container entry");
         request.dry_run = false;
+        let entry = h.join("entry");
+        let entry_source = std::fs::read_to_string(&entry).expect("recorded entry fixture");
+        crate::fixture_exec::write_executable(
+            &entry,
+            entry_source
+                .replace(
+                    env!("CARGO_PKG_VERSION"),
+                    concat!(env!("CARGO_PKG_VERSION"), "-incompatible"),
+                )
+                .as_bytes(),
+        )
+        .expect("different entry deployment");
+        let refusal = super::super::run_with_host_root_and_proxy(h, &request, h, owner, |_| {
+            Ok(("active".into(), "fixture-invocation".into()))
+        })
+        .expect_err("resume probes entry before reservation");
+        assert_eq!(refusal.kind, "entry-version");
+        assert!(
+            refusal
+                .detail
+                .contains(crate::fixture_exec::ENTRY_INTERFACE_PROBE)
+        );
+        assert!(
+            refusal
+                .detail
+                .contains(concat!(env!("CARGO_PKG_VERSION"), "-incompatible"))
+        );
+        assert_eq!(
+            read_reservation(&path).expect("read").expect("record"),
+            saved
+        );
+        crate::fixture_exec::write_executable(&entry, entry_source.as_bytes())
+            .expect("restore matching entry");
         let error = super::super::run_with_host_root_and_proxy(h, &request, h, owner, |_| {
             Ok(("active".into(), "fixture-invocation".into()))
         })
@@ -3422,7 +3599,7 @@ else:
     }
 
     fn failed_record(worker_uid: u32) -> Value {
-        json!({"schema":1,"phase":"failed","active_round":"work","worker_uid":worker_uid,"driver_entry_pid":4_000_000,"driver_entry_start":1,"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"observation_end":"completed","observer_state":"not-started","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}},"settlement_uncertain":false,"reaping":{"state":"verified-empty","container_payload":{"state":"absent"}},"readback_end":"settle-evidence: old refusal","rounds":[{"step":"work","phase":"failed"}]})
+        json!({"schema":1,"phase":"failed","active_round":"work","worker_uid":worker_uid,"driver_entry_pid":crate::dead_pid::DEAD_LOCK_PID,"driver_entry_start":1,"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"observation_end":"completed","observer_state":"not-started","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}},"settlement_uncertain":false,"reaping":{"state":"verified-empty","container_payload":{"state":"absent"}},"readback_end":"settle-evidence: old refusal","rounds":[{"step":"work","phase":"failed"}]})
     }
 
     fn fail_completed_round(plan: &crate::plan::Plan, record: &mut Value) {
@@ -3754,8 +3931,12 @@ else:
     fn public_settle_helper_child() {
         use std::io::Read as _;
         let h = PathBuf::from(std::env::var_os("HOME").expect("fixture home"));
+        let socket = std::os::unix::net::UnixStream::from(
+            nix::unistd::dup(std::io::stdin()).expect("input socket"),
+        );
         let fds =
-            home::receive_private_descriptors(&std::io::stdin(), 2).expect("helper descriptors");
+            loop_home::anchor::transport::receive(&socket, 8, std::time::Duration::from_secs(30))
+                .expect("helper descriptors and EOF");
         let record = read_reservation(&h.join(".reservation-R.json"))
             .expect("read")
             .expect("record");

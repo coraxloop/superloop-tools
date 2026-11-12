@@ -167,6 +167,20 @@ assert (checkout / "extra").read_text() == "new tracked path"
 assert invoke(["git", "diff"], seconds="0")[1]["reason"] == "door-request-deadline"
 assert len(wrappers) == 5
 
+# A real child with no RUN-REPORT still produces independently measured evidence.
+real_wrapper = namespace["run_wrapper"]
+def silent_wrapper(command, **kwargs):
+    if command[0] == "/usr/bin/timeout":
+        return real_wrapper([sys.executable, "-c", "sum(range(1000000))"], **kwargs)
+    return real_run(command, **kwargs)
+status, metadata = invoke(["git", "diff"], runner=silent_wrapper)
+assert status == 0 and metadata["reason"] == "door-complete"
+assert metadata["detail"]["wrapper_wall_seconds"] > 0
+assert metadata["detail"]["wrapper_user_cpu_seconds"] >= 0
+assert metadata["detail"]["wrapper_system_cpu_seconds"] >= 0
+assert (metadata["detail"]["wrapper_user_cpu_seconds"]
+        + metadata["detail"]["wrapper_system_cpu_seconds"]) > 0
+
 # Ignored output is measured, retained at the same commit, then discarded.
 (checkout / ".git/info/exclude").write_text("ignored-output\n")
 (checkout / "ignored-output").write_text("cached output")
@@ -286,7 +300,7 @@ for ignore_term, expected in [("yes", 137), ("no", 124), ("outer", 124),
         assert not process.exists() or process.read_text().split(") ", 1)[1][0] == "Z"
         with (root / "lanes/R.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-print("node cases=19: original 13, ignored output, interrupted unborn HEAD, interrupted default HEAD, early 124, early 137, outer TERM kills wrapper group")
+print("node cases=20: original 13, ignored output, interrupted unborn HEAD, interrupted default HEAD, early 124, early 137, outer TERM kills wrapper group, no-report measured child")
 
 # Root selection is explicit for equal and differing loop/account names.
 for loop_name, account in [("alpha", "alpha"), ("project-a", "loop-b")]:

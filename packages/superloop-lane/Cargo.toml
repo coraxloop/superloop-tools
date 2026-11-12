@@ -13,6 +13,7 @@ tier = 2
 release-group = "lane"
 
 [dependencies]
+tracing = { workspace = true }
 execute-command.workspace = true
 superloop-cli-common.workspace = true
 libc.workspace = true
@@ -63,3 +64,11 @@ path = "tests/driver_status/subprocess_contract.rs"
 [[test]]
 name = "driver_follow_subprocess_contract"
 path = "tests/driver_follow/subprocess_contract.rs"
+
+[[test]]
+name = "native_creation_custody"
+harness = false
+
+[[test]]
+name = "reply_entry"
+harness = false

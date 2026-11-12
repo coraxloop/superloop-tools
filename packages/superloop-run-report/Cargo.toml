@@ -14,6 +14,7 @@ tier = 2
 release-group = "superloop-run-report"
 
 [dependencies]
+tracing = { workspace = true }
 superloop-cli-common.workspace = true
 superloop-execwrap = { workspace = true }
 

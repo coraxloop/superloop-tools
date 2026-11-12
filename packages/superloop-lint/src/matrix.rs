@@ -81,6 +81,9 @@
 //! | [`bounds_the_region_at_the_next_heading`] | projection | The generated region ends at the next heading, so prose an author adds in a section of its own below the matrix is outside the region and survives every regeneration. |
 //! | [`counts_a_folder_with_no_readme_rather_than_reporting_it`] | projection | A folder of tests with no readme at all is counted as lacking a matrix and reported nowhere, so the projection can be adopted gradually rather than failing every folder that has not yet been reached. |
 //! | [`counts_a_readme_with_no_matrix_rather_than_reporting_it`] | projection | A readme of prose alone is likewise counted rather than reported: having a readme and having a matrix are separate facts, and a folder that documents itself without one is not yet a defect. |
+//! | [`matrix_layout_preserves_current_rows`] | projection | Cell padding, optional edge pipes and valid delimiter layout do not change a matrix's rows, and a writer preserves an equivalent layout. |
+//! | [`matrix_layout_refuses_changed_rows`] | projection | Layout tolerance does not hide changed identities, row order or count, extra cells, malformed delimiters, code blocks or changed cell text. |
+//! | [`matrix_layout_preserves_pipe_content`] | projection | Escaped and inline-code pipes stay inside their cell, whose interior bytes remain significant while padding around it may change. |
 //! | [`reports_a_stale_matrix`] | projection | cites (´claim:projection:an-index-that-is-not-what-the-labels-give-is-stale´) |
 //! | [`reports_a_hand_edit_inside_the_matrix_region`] | projection | cites (´claim:projection:a-hand-edited-projection-is-stale-and-is-regenerated´) |
 //! | [`reports_a_title_stating_the_wrong_level`] | projection | A title stating a level the folder does not hold is reported, naming both the title written and the level the folder actually classifies at, so a matrix cannot misdescribe the tests beneath it. |
@@ -660,7 +663,7 @@ fn verify_folder_rows(
             .get(folder.directory())
             .map_or_else(Vec::new, Clone::clone);
 
-        if matrix.lines != region(folder, &owned) {
+        if !same_region(&matrix.lines, &region(folder, &owned)) {
             analysis.stale += 1;
             findings.push(Finding::StaleFolderMatrix {
                 path: displayed,
@@ -673,6 +676,74 @@ fn verify_folder_rows(
     findings.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
 
     (analysis, findings)
+}
+
+/// Compare generated regions without making table presentation authoritative.
+/// Non-table lines and cell interiors stay exact, as do row order and count.
+fn same_region(actual: &[String], expected: &[String]) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(actual, expected)| {
+            if !expected.starts_with('|') {
+                return actual == expected;
+            }
+            let delimiter_has_tab = actual.contains('\t');
+            let (Some(actual), Some(expected)) = (table_cells(actual), table_cells(expected))
+            else {
+                return false;
+            };
+            actual.len() == expected.len()
+                && if expected.iter().all(|cell| delimiter_cell(cell)) {
+                    !delimiter_has_tab && actual.iter().all(|cell| delimiter_cell(cell))
+                } else {
+                    actual == expected
+                }
+        })
+}
+
+/// Retain cell bytes while discarding only table padding and optional edge pipes.
+/// Four-space and tab indentation describe a code block rather than a table.
+fn table_cells(row: &str) -> Option<Vec<&str>> {
+    let unindented = row.trim_start_matches(' ');
+    if row.len() - unindented.len() >= 4 || unindented.starts_with('\t') {
+        return None;
+    }
+    let row = unindented.trim_end_matches([' ', '\t']);
+    let code: Vec<_> = pulldown_cmark::Parser::new(row)
+        .into_offset_iter()
+        .filter_map(|(event, range)| {
+            matches!(event, pulldown_cmark::Event::Code(_)).then_some(range)
+        })
+        .collect();
+    let mut separators = Vec::new();
+    let mut escaped = false;
+    for (offset, byte) in row.bytes().enumerate() {
+        if byte == b'|' && !escaped && !code.iter().any(|range| range.contains(&offset)) {
+            separators.push(offset);
+        }
+        escaped = byte == b'\\' && !escaped;
+    }
+    if separators.is_empty() {
+        return None;
+    }
+    let mut cells = Vec::new();
+    let mut start = 0;
+    for &offset in &separators {
+        if offset != 0 {
+            cells.push(row[start..offset].trim_matches([' ', '\t']));
+        }
+        start = offset + 1;
+    }
+    if start < row.len() {
+        cells.push(row[start..].trim_matches([' ', '\t']));
+    }
+    Some(cells)
+}
+
+/// Delimiter width and alignment are layout, but the delimiter must be valid.
+fn delimiter_cell(cell: &str) -> bool {
+    let core = cell.strip_prefix(':').unwrap_or(cell);
+    let core = core.strip_suffix(':').unwrap_or(core);
+    !core.is_empty() && core.bytes().all(|byte| byte == b'-')
 }
 
 /// Report a readme carrying more than one matrix head.
@@ -727,7 +798,8 @@ fn line_location(path: &Path, text: &str, line: usize) -> Location {
 /// Rewrite one readme's matrix region, or author the readme and its head.
 ///
 /// Returns the new text when it differs from the old, and nothing when the
-/// committed matrix is already what the labels say it is. A readme carrying no
+/// committed matrix already has the derived rows, ignoring only table layout.
+/// Equivalent cell padding and delimiter spelling are preserved. A readme carrying no
 /// head at all gains the head at its end, below whatever its authors wrote; a
 /// folder carrying no readme gains one holding the head and the region alone.
 #[must_use]
@@ -764,7 +836,7 @@ pub fn write_matrix(
 
     let head = folder.head();
 
-    if matrix.lines == body && lines.get(matrix.head_line) == Some(&head) {
+    if same_region(&matrix.lines, &body) && lines.get(matrix.head_line) == Some(&head) {
         return None;
     }
 
@@ -1117,6 +1189,167 @@ mod tests {
         let borrowed: Vec<&CoveredAsset> = assets.iter().collect();
 
         write_matrix(None, &folder, &borrowed).expect("a first write")
+    }
+
+    /// Cell padding, optional edge pipes and valid delimiter layout do not
+    /// change a matrix's rows, and a writer preserves an equivalent layout.
+    ///
+    /// ´claim:projection:matrix-layout-is-independent-of-row-identity´
+    /// ´test:unit:matrix-layout-preserves-current-rows´
+    #[test]
+    fn matrix_layout_preserves_current_rows() {
+        let canonical = current_readme();
+        let folder = demo_folder(Area::Crate, "packages/demo/src/tests");
+        for (edges, delimiters) in [
+            (true, [":--------", "---:", ":-----:"]),
+            (false, [":--------", "---:", ":-----:"]),
+            (true, ["-", "--", ":-:"]),
+            (false, ["-", "--", ":-:"]),
+        ] {
+            let laid_out = canonical
+                .lines()
+                .map(|line| {
+                    if !line.starts_with('|') {
+                        return line.to_owned();
+                    }
+                    let cells: Vec<_> = if line == "|----|----|-----|" {
+                        delimiters.to_vec()
+                    } else {
+                        line.trim_matches('|').split('|').collect()
+                    };
+                    let body = cells.join("  |  ");
+                    if edges { format!("|  {body}  |") } else { body }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            let (root, packages, assets) = root_with(Some(&laid_out));
+            let (analysis, findings) = verify_matrices(
+                root.path(),
+                &packages,
+                &assets,
+                Some(&names()),
+                &corpus(root.path()),
+                &Subscription::fictional_all(),
+            );
+            assert_eq!(analysis.stale, 0, "{findings:?}");
+            assert!(findings.is_empty(), "{findings:?}");
+            let borrowed: Vec<_> = assets.iter().collect();
+            assert_eq!(write_matrix(Some(&laid_out), &folder, &borrowed), None);
+        }
+    }
+
+    /// Layout tolerance does not hide changed identities, row order or count,
+    /// extra cells, malformed delimiters, code blocks or changed cell text.
+    ///
+    /// ´claim:projection:matrix-layout-keeps-row-and-cell-identity-strict´
+    /// ´test:unit:matrix-layout-refuses-changed-rows´
+    #[test]
+    fn matrix_layout_refuses_changed_rows() {
+        let second = minting()
+            .replace("widths_are_identical", "second")
+            .replace("test:crate:widths-are-identical", "test:crate:second")
+            .replace("claim:resonance:crossover-widths", "claim:resonance:second");
+        let source = minting() + &second;
+        let assets = assets_of("packages/demo/src/tests/demo.rs", &source);
+        let borrowed: Vec<_> = assets.iter().collect();
+        let folder = demo_folder(Area::Crate, "packages/demo/src/tests");
+        let canonical = write_matrix(None, &folder, &borrowed).expect("matrix");
+        let rows: Vec<_> = canonical
+            .lines()
+            .filter(|line| line.starts_with("|(`"))
+            .collect();
+        let swapped = canonical
+            .replace(rows[0], "ROW_TO_SWAP")
+            .replace(rows[1], rows[0])
+            .replace("ROW_TO_SWAP", rows[1]);
+        let indented = canonical
+            .lines()
+            .map(|line| {
+                if line.starts_with('|') {
+                    format!("    {line}")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let mutations = [
+            canonical.replace("|Test|", "|Other|"),
+            canonical.replace("test:crate:second", "test:crate:absent"),
+            canonical.replace("|resonance|", "|other|"),
+            canonical.replace("The widths are identical.", "The widths differ."),
+            canonical.replace("The widths", "The  widths"),
+            canonical.replace(rows[0], &format!("{}\n{}", rows[0], rows[0])),
+            canonical.replace(&format!("{}\n", rows[0]), ""),
+            swapped,
+            canonical.replace(rows[0], &format!("{}|", rows[0])),
+            canonical.replace("|----|----|-----|", "|:-x|----|-----|"),
+            canonical.replace("|----|----|-----|", "|:|----|-----|"),
+            canonical.replace("|----|----|-----|", "||----|-----|"),
+            canonical.replace("|----|----|-----|", "|----\t|----|-----|"),
+            canonical.replace("|----|----|-----|", "|----|----|-----|\t"),
+            indented,
+        ];
+        let (root, packages, _) = root_with(None);
+        fs::write(root.path().join("packages/demo/src/tests/demo.rs"), source).expect("source");
+        for changed in mutations {
+            fs::write(
+                root.path().join("packages/demo/src/tests/README.md"),
+                &changed,
+            )
+            .expect("matrix");
+            let (analysis, findings) = verify_matrices(
+                root.path(),
+                &packages,
+                &assets,
+                Some(&names()),
+                &corpus(root.path()),
+                &Subscription::fictional_all(),
+            );
+            assert_eq!(analysis.stale, 1, "{changed}: {findings:?}");
+            assert!(
+                matches!(findings.as_slice(), [Finding::StaleFolderMatrix { .. }]),
+                "{findings:?}"
+            );
+            let repaired = write_matrix(Some(&changed), &folder, &borrowed).expect("repair");
+            assert_eq!(repaired, canonical);
+            assert_eq!(write_matrix(Some(&repaired), &folder, &borrowed), None);
+        }
+    }
+
+    /// Escaped and inline-code pipes stay inside their cell, whose interior
+    /// bytes remain significant while padding around it may change.
+    ///
+    /// ´claim:projection:matrix-layout-preserves-pipe-and-code-content´
+    /// ´test:unit:matrix-layout-preserves-pipe-content´
+    #[test]
+    fn matrix_layout_preserves_pipe_content() {
+        let folder = demo_folder(Area::Crate, "packages/demo/src/tests");
+        let source = minting().replace(
+            "The widths are identical.",
+            "The `a | b` and x | y values agree.",
+        );
+        let assets = assets_of("packages/demo/src/tests/demo.rs", &source);
+        let borrowed: Vec<_> = assets.iter().collect();
+        let canonical = write_matrix(None, &folder, &borrowed).expect("matrix");
+        let padded = canonical
+            .replace(
+                "|(`test:crate:widths-are-identical`)|resonance|",
+                "|  (`test:crate:widths-are-identical`)  | resonance | ",
+            )
+            .replace("values agree.|", "values agree.  |");
+        assert_eq!(write_matrix(Some(&padded), &folder, &borrowed), None);
+        for changed in [
+            padded.replace("a \\| b", "a \\|b"),
+            padded.replace("x \\| y", "x \\|y"),
+        ] {
+            assert_eq!(
+                write_matrix(Some(&changed), &folder, &borrowed),
+                Some(canonical.clone())
+            );
+        }
     }
 
     /// A matrix that exists must be exactly what the labels give: one whose

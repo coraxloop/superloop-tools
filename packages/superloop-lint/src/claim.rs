@@ -56,6 +56,8 @@
 //! | [`reads_a_mint_above_the_test_label`] | claim | A claim standing bare on the line above the derived test label is a mint, and the prose above it is read as the statement it names. The three parts — gloss, claim, derived label — are recovered from one documentation comment in the order the convention fixes them. |
 //! | [`reads_a_citation_above_the_test_label`] | claim | The same line parenthesised is a citation instead, and a citing test needs no gloss of its own: the statement is said where it was minted, which is the whole point of citing rather than restating it. |
 //! | [`joins_a_wrapped_gloss_into_one_line`] | claim | A gloss wrapped across several documentation lines joins into one line for projection, because a documentation comment wraps where its author wrapped it and a table cell cannot. The author writes prose; the generator gets a sentence. |
+//! | [`rustdoc_sections_end_the_projected_gloss`] | claim | A rustdoc section ends the claim's introductory gloss without moving its claim or test labels, and both projection syntaxes use that gloss. |
+//! | [`rustdoc_nonboundary_hashes_remain_in_the_gloss`] | claim | Only a trimmed level-one heading starts the rustdoc section boundary; inline hashes and other hash prefixes remain authored gloss text. |
 //! | [`counts_a_test_with_no_claim_rather_than_reporting_it`] | claim | A covered test carrying no claim is counted and reported nowhere, and counted against its own package. That is the whole of the staging: the scale of the corpus is met with a coverage figure rather than with thousands of findings nobody can act on at once. |
 //! | [`reports_a_claim_written_last`] | claim | A claim written below the derived test label is a placement defect: the derived label is the final line, and a claim after it is reported rather than read. |
 //! | [`reports_a_claim_above_the_gloss`] | claim | Any other placement is a defect too: a claim standing above its own gloss is misplaced, because the standard place is the line directly above the derived label and nowhere else. |
@@ -285,11 +287,14 @@ fn is_sole_occurrence(line: &str, label: &Label, parenthesized: bool) -> bool {
 ///
 /// Blank documentation lines separate the gloss from the claim below it and are
 /// dropped; a blank line inside the prose joins its two halves with one space,
-/// because a table cell has one line to say the statement in.
+/// because a table cell has one line to say the statement in. The first trimmed
+/// level-one rustdoc heading ends that introductory prose; section content is
+/// documentation of the test, not part of the statement it establishes.
 fn gloss_above(lines: &[String], claim: usize) -> String {
     lines[..claim]
         .iter()
         .map(|line| line.trim())
+        .take_while(|line| !line.starts_with("# "))
         .filter(|line| !line.is_empty())
         .collect::<Vec<&str>>()
         .join(" ")
@@ -755,6 +760,73 @@ mod tests {
             claim.gloss(),
             "The crossover landscape translates rigidly with p-hat: widths are identical across the whole sweep."
         );
+    }
+
+    /// A rustdoc section ends the claim's introductory gloss without moving
+    /// its claim or test labels, and both projection syntaxes use that gloss.
+    ///
+    /// ´claim:claim:rustdoc-sections-end-the-projected-gloss´
+    /// ´test:unit:rustdoc-sections-end-the-projected-gloss´
+    #[test]
+    fn rustdoc_sections_end_the_projected_gloss() {
+        for heading in ["# Panics", "  # Errors  ", "# Witness", "# Details"] {
+            for introduction in ["The reader preserves\n/// the input.", ""] {
+                let source = format!(
+                    "/// {introduction}\n///\n/// {heading}\n\
+                     /// Section detail is not the claim.\n/// # Later\n/// Nor is this.\n///\n\
+                     /// {ACUTE}claim:reader:preserves-input{ACUTE}\n\
+                     /// {ACUTE}test:crate:covered{ACUTE}\n#[test]\nfn covered() {{}}\n"
+                );
+                let assets = assets_of(&[("packages/demo/src/tests/demo.rs", &source)]);
+                let [asset] = assets.as_slice() else {
+                    panic!("expected one covered test");
+                };
+                let Standing::Claimed(claim) = read_claim(asset) else {
+                    panic!("the heading must not change claim placement");
+                };
+                let expected = if introduction.is_empty() {
+                    ""
+                } else {
+                    "The reader preserves the input."
+                };
+                assert_eq!(claim.gloss(), expected, "{heading}");
+                for syntax in [
+                    crate::occurrence::Syntax::Prose,
+                    crate::occurrence::Syntax::Code,
+                ] {
+                    let cells = super::project_cells(asset, syntax);
+                    assert_eq!(cells.area, "reader");
+                    assert_eq!(
+                        cells.claim,
+                        if expected.is_empty() {
+                            super::NO_CLAIM_YET
+                        } else {
+                            expected
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    /// Only a trimmed level-one heading starts the rustdoc section boundary;
+    /// inline hashes and other hash prefixes remain authored gloss text.
+    ///
+    /// ´claim:claim:nonboundary-hash-prefixes-remain-in-the-gloss´
+    /// ´test:unit:rustdoc-nonboundary-hashes-remain-in-the-gloss´
+    #[test]
+    fn rustdoc_nonboundary_hashes_remain_in_the_gloss() {
+        for line in ["The # token is preserved.", "#Panics", "## Details", "#"] {
+            let standing = sole_standing(&format!(
+                "/// {line}\n///\n/// Still introductory.\n///\n\
+                 /// {ACUTE}claim:reader:preserves-input{ACUTE}\n\
+                 /// {ACUTE}test:crate:covered{ACUTE}\n#[test]\nfn covered() {{}}\n"
+            ));
+            let Standing::Claimed(claim) = standing else {
+                panic!("expected a claim");
+            };
+            assert_eq!(claim.gloss(), format!("{line} Still introductory."));
+        }
     }
 
     /// A covered test carrying no claim is counted and reported nowhere, and

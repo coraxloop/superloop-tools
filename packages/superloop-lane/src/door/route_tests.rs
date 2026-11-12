@@ -194,6 +194,7 @@ fn route_service(
         mirror_root: "~/mirrors".into(),
         key_path: PathBuf::from("unused"),
         upload_output_limit: runner.limit,
+        compute_deadlines: Vec::new(),
         compute_wrapper: Some("/opt/fixture/bin/report".to_owned()),
         compute_environment: Some(
             json!({"RUSTUP_HOME":"/opt/fixture/rustup","PATH":"/opt/fixture/tools:/opt/fixture/cargo/bin:/usr/bin:/bin","PUBLIC_PACK_TEST_LINTER":"/opt/fixture/tools/superloop-lint"}),
@@ -1160,4 +1161,85 @@ fn assert_packet_case(bodies: &[Vec<u8>], expected: &str, first: Option<&str>) {
         assert!(reply.get("ref_packet").is_none());
     }
     assert!(!reply.to_string().contains("PACK-secret"));
+}
+
+/// # Panics
+/// Panics if a no-op push waits for its deadline or loses the remote result or record.
+/// ´test:unit:door-no-op-push-completes-through-route´
+#[test]
+fn door_no_op_push_completes_through_route() {
+    let fixture = Fixture::new();
+    let storage = tempfile::tempdir().expect("Git storage");
+    let mirror = seed_route(storage.path(), 64);
+    let source = storage.path().join("source");
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut ids = std::collections::BTreeSet::new();
+    for changed in [false, false, true, false] {
+        let before = git_ok(&mirror, &["rev-parse", "refs/heads/lane/R"]).stdout;
+        if changed {
+            fs::write(
+                source.join("next"),
+                b"a real object sent through receive-pack\n",
+            )
+            .expect("new content");
+            git_ok(&source, &["add", "next"]);
+            git_ok(
+                &source,
+                &["-c", "commit.gpgsign=false", "commit", "-qm", "next"],
+            );
+        }
+        let runner = RouteRunner {
+            mirror: mirror.clone(),
+            limit: None,
+            output: None,
+            calls: Arc::clone(&calls),
+        };
+        let (socket, server) = route_service(&fixture, "R", 3000, 3000, runner);
+        let started = Instant::now();
+        let reply = git_through_route(
+            &fixture,
+            &socket,
+            route_args("R", true),
+            &source,
+            &["push", "fixture:~/mirrors/R.git", "HEAD:refs/heads/lane/R"],
+            None,
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "push must finish before its 120-second command deadline"
+        );
+        assert_eq!(reply["reason"], "door-complete");
+        assert_eq!(reply["compute_exit_status"], 0);
+        assert_eq!(
+            reply["ref_check"],
+            if changed { "admitted" } else { "no-ref" }
+        );
+        let service = route_join(server, "route-service-join-deadline").expect("service result");
+        for field in [
+            "status",
+            "reason",
+            "compute_exit_status",
+            "ref_check",
+            "stdin_bytes",
+            "stdout_bytes",
+            "stderr_bytes",
+        ] {
+            assert_eq!(service[field], reply[field], "{field}");
+        }
+        let after = git_ok(&mirror, &["rev-parse", "refs/heads/lane/R"]).stdout;
+        assert_eq!(after, git_ok(&source, &["rev-parse", "HEAD"]).stdout);
+        assert_eq!(after != before, changed);
+        let rows = fixture.store().list_run("R").expect("push records");
+        let new_rows: Vec<_> = rows.iter().filter(|row| !ids.contains(row.id())).collect();
+        assert_eq!(new_rows.len(), 1);
+        let row = new_rows[0];
+        assert_eq!(row.value()["operation"], "git-receive");
+        assert_eq!(row.value()["effect"]["state"], "completed");
+        assert_eq!(row.value()["effect"]["reason"], "door-complete");
+        assert_eq!(row.value()["effect"]["ref_check"], reply["ref_check"]);
+        assert!(ids.insert(row.id().to_owned()));
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 4);
+    assert_eq!(ids.len(), 4);
+    git_ok(&mirror, &["fsck", "--full"]);
 }

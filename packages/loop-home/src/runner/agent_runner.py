@@ -76,7 +76,7 @@ def main():
     if os.getppid() != parent:
         raise Cancelled()
     started = time.monotonic()
-    program, model, effort, budget, rubric_path, deadline, loop_name = sys.argv[1:]
+    program, model, effort, budget, rubric_path, deadline, loop_name, service_uid = sys.argv[1:]
     remaining = min(int(budget) / 1000, float(deadline) - time.time())
     end = started + remaining - 2.0
     if remaining <= 2.0:
@@ -96,7 +96,7 @@ def main():
                 raise RubricFailure("snapshot-input", rubric_path)
             rubric_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         else:
-            text, rubric_digest = read_rubric(rubric_path)
+            text, rubric_digest = read_rubric(rubric_path, os.getuid(), int(service_uid))
     except RubricFailure as error:
         EVIDENCE["rubric_failure"] = error.evidence
         emit({"service_status": "failure", "reason": "door-rubric-unavailable"})
@@ -145,8 +145,10 @@ def main():
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
         cwd = os.path.join(call, "cwd")
         config = os.path.join(call, "config")
+        temporary = os.path.join(call, "tmp")
         os.mkdir(cwd, 0o700)
         os.mkdir(config, 0o700)
+        os.mkdir(temporary, 0o700)
         EVIDENCE["working_directory_empty"] = os.listdir(cwd) == []
         EVIDENCE["working_directory_mode"] = os.stat(cwd).st_mode & 0o777
         # Authentication stays in loop custody. No credential byte is copied,
@@ -174,7 +176,7 @@ def main():
         EVIDENCE["agent_calls"] = 1
         EVIDENCE["available_wall_ms"] = int(remaining * 1000)
         EVIDENCE["cleanup_reserve_ms"] = 2000
-        environment = {"HOME": call, "CODEX_HOME": config, "TMPDIR": call,
+        environment = {"HOME": call, "CODEX_HOME": config, "TMPDIR": temporary,
                        "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
         # Adopt orphaned descendants so cleanup observes their termination.
         if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:

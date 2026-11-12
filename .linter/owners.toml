@@ -1,6 +1,6 @@
 namespace = "org.superloop-tools.linter.owners"
 version = [1, 0, 0]
-owners = ["SUPERLOOPCLAUDEDESKTOP", "SUPERLOOPNODESTATUS", "SUPERLOOPSTEWARD", "SUPERLOOPCORRESPONDENCE", "BUILDSYNC", "SUPERLOOPCHATEXPORT", "SUPERLOOPCLICOMMON", "SUPERLOOPEXECWRAP", "LANEGATEWAY", "LANELIFECYCLE", "SUPERLOOPGATESUBMIT", "SUPERLOOPLINT", "LOOPHOME", "SUPERLOOP", "ORCHESTRATION", "PERMISSIONTRIAGE", "SUPERLOOPPACK", "PULLDOWNCMARKTOCMARK", "SUPERLOOPINSTALL", "SUPERLOOPRUNREPORT", "SUPERLOOPRUNTIME", "RUNWORKER", "SUPERLOOPCLAUDEHOOK", "REQUESTCORE", "EXECUTECOMMAND", "SESSIONCORE", "STAFFPROVISION", "SUPERLOOPLANE", "TOOLS"]
+owners = ["SUPERLOOPCAPTUREADMIT", "SUPERLOOPCLAUDEDESKTOP", "SUPERLOOPNODESTATUS", "SUPERLOOPSTEWARD", "SUPERLOOPCORRESPONDENCE", "BUILDSYNC", "SUPERLOOPCHATEXPORT", "SUPERLOOPCLICOMMON", "SUPERLOOPEXECWRAP", "LANEGATEWAY", "LANELIFECYCLE", "SUPERLOOPGATESUBMIT", "SUPERLOOPLINT", "LOOPHOME", "SUPERLOOP", "ORCHESTRATION", "PERMISSIONTRIAGE", "SUPERLOOPPACK", "PULLDOWNCMARKTOCMARK", "SUPERLOOPINSTALL", "SUPERLOOPRUNREPORT", "SUPERLOOPRUNTIME", "RUNWORKER", "SUPERLOOPCLAUDEHOOK", "REQUESTCORE", "EXECUTECOMMAND", "SESSIONCORE", "STAFFPROVISION", "SUPERLOOPLANE", "TOOLS"]
 root_owner = "TOOLS"
 unpublished = "docs/public/unpublished-labels.toml"
 
@@ -297,7 +297,7 @@ pattern = '%s"packages/session-core" [ "/" *VCHAR ]'
 [[partitions]]
 name = "root-files"
 owner = "TOOLS"
-pattern = '( %s"CHANGELOG.md" / %s"LICENSE-CODE" / %s"LICENSE-DOCS" / %s"public-set.toml" / %s".gitignore" / %s"Cargo.lock" / %s"Cargo.toml" / %s"README.md" / %s"meson.build" / %s"meson.options" / %s"rust-toolchain.toml" )'
+pattern = '( %s"CHANGELOG.md" / %s"LICENSE-CODE" / %s"LICENSE-DOCS" / %s"public-set.toml" / %s".gitignore" / %s"Cargo.lock" / %s"Cargo.toml" / %s"README.md" / %s"CONTRIBUTING.md" / %s"meson.build" / %s"meson.options" / %s"rust-toolchain.toml" )'
 
 [[partitions]]
 name = "package-register"
@@ -413,3 +413,20 @@ pattern = '%s"packages/staff-provision" [ "/" *VCHAR ]'
 name = "superloop-lane-package"
 owner = "SUPERLOOPLANE"
 pattern = '%s"packages/superloop-lane" [ "/" *VCHAR ]'
+
+[[partitions]]
+name = "superloop-capture-admit-package"
+owner = "SUPERLOOPCAPTUREADMIT"
+pattern = '%s"packages/superloop-capture-admit" [ "/" *VCHAR ]'
+
+[[may_cite]]
+owner = "SUPERLOOPCAPTUREADMIT"
+target = "TOOLS"
+
+[[may_cite]]
+owner = "SUPERLOOPCAPTUREADMIT"
+target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPCAPTUREADMIT"
+target = "LANELIFECYCLE"

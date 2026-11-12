@@ -19,22 +19,66 @@ use crate::error::LaneError;
 use crate::plan::Plan;
 use crate::{build, home, load_plan};
 
-fn step_event_thread(dir: &Path) -> Result<String, LaneError> {
+fn round_evidence_uid(plan: &Plan) -> Result<u32, LaneError> {
+    if home::private_is_active() {
+        crate::plan::loop_uid(&plan.document)
+    } else {
+        Ok(Uid::effective().as_raw())
+    }
+}
+
+fn held_round_directory(path: &Path, loop_uid: u32) -> Result<std::fs::File, LaneError> {
+    let root = home::private_runs_path()
+        .ok_or_else(|| LaneError::input("verified-prefix", "private runs anchor is absent"))?;
+    home::pin_loop_round(&root, path, Uid::effective().as_raw(), loop_uid).map(std::fs::File::from)
+}
+
+fn thread_evidence(dir: &Path, loop_uid: u32) -> Result<(std::fs::File, usize, usize), LaneError> {
     let path = dir.join("events.jsonl");
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)
+    let pinned = if home::private_is_active() {
+        Some(held_round_directory(dir, loop_uid)?)
+    } else {
+        None
+    };
+    let file = pinned
+        .as_ref()
+        .map_or_else(
+            || {
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(&path)
+            },
+            |directory| {
+                nix::fcntl::openat2(
+                    directory,
+                    "events.jsonl",
+                    nix::fcntl::OpenHow::new()
+                        .flags(
+                            nix::fcntl::OFlag::O_RDONLY
+                                | nix::fcntl::OFlag::O_CLOEXEC
+                                | nix::fcntl::OFlag::O_NONBLOCK,
+                        )
+                        .resolve(
+                            nix::fcntl::ResolveFlag::RESOLVE_BENEATH
+                                | nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS,
+                        ),
+                )
+                .map(std::fs::File::from)
+                .map_err(std::io::Error::from)
+            },
+        )
         .map_err(|error| {
             LaneError::input("round-thread", format!("{}: {error}", path.display()))
         })?;
+    let parent = pinned
+        .as_ref()
+        .map_or_else(|| std::fs::symlink_metadata(dir), std::fs::File::metadata)
+        .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
     let meta = file
         .metadata()
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
-    let owner = std::fs::symlink_metadata(dir)
-        .map_err(|error| LaneError::input("round-thread", error.to_string()))?
-        .uid();
-    if !meta.is_file() || meta.uid() != owner {
+    if !meta.is_file() || meta.uid() != parent.uid() {
         return Err(LaneError::input(
             "round-thread",
             "events are not directory-owned regular evidence",
@@ -42,11 +86,25 @@ fn step_event_thread(dir: &Path) -> Result<String, LaneError> {
     }
     let size = usize::try_from(meta.len())
         .map_err(|_| LaneError::input("round-thread", "event size exceeds addressable range"))?;
-    let boundaries = lane_lifecycle::validated_event_boundaries(dir, size)
-        .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
-    let start = *boundaries
-        .last()
-        .ok_or_else(|| LaneError::input("round-thread", "step event boundary is absent"))?;
+    let start = if let Some(directory) = &pinned {
+        lane_lifecycle::validated_event_boundaries_at(directory, size, loop_uid)
+            .map_err(|error| LaneError::input("round-thread", error.to_string()))?
+            .current_start
+    } else {
+        *lane_lifecycle::validated_event_boundaries(dir, size)
+            .map_err(|error| LaneError::input("round-thread", error.to_string()))?
+            .last()
+            .ok_or_else(|| LaneError::input("round-thread", "step event boundary is absent"))?
+    };
+    Ok((file, size, start))
+}
+
+fn step_event_thread(
+    backend: crate::settings::BoxBackend,
+    dir: &Path,
+    loop_uid: u32,
+) -> Result<String, LaneError> {
+    let (mut file, size, start) = thread_evidence(dir, loop_uid)?;
     file.seek(SeekFrom::Start(start as u64))
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
     let mut reader = BufReader::new(file.take((size - start) as u64));
@@ -58,32 +116,27 @@ fn step_event_thread(dir: &Path) -> Result<String, LaneError> {
         != 0
     {
         if line.last() == Some(&b'\n')
-            && let Ok(event) = serde_json::from_slice::<Value>(&line)
-            && event["type"] == "thread.started"
+            && let Some(actual) = crate::container_helper::session_event(backend, &line)?
         {
-            let actual = event["thread_id"]
-                .as_str()
-                .filter(|id| {
-                    !id.is_empty()
-                        && id.len() <= 128
-                        && id
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                })
-                .ok_or_else(|| {
-                    LaneError::input("round-thread", "step thread event has a malformed id")
-                })?;
             if observed.as_deref().is_some_and(|prior| prior != actual) {
                 return Err(LaneError::input(
                     "round-thread",
                     "step contains two thread ids",
                 ));
             }
-            observed = Some(actual.to_owned());
+            observed = Some(actual);
         }
         line.clear();
     }
-    observed.ok_or_else(|| LaneError::input("round-thread", "step has no thread.started event"))
+    observed.ok_or_else(|| {
+        LaneError::input(
+            "round-thread",
+            match backend {
+                crate::settings::BoxBackend::Codex => "step has no thread.started event",
+                crate::settings::BoxBackend::Claude => "step has no system.init event",
+            },
+        )
+    })
 }
 
 fn recovered_threadless_round(round: &Value) -> bool {
@@ -206,9 +259,12 @@ fn recorded_step_dir(plan: &Plan, record: &Value, round: &Value) -> Result<PathB
             "round directory differs from row",
         ));
     }
-    let meta = std::fs::symlink_metadata(&path).map_err(|error| {
-        LaneError::input("round-directory", format!("{}: {error}", path.display()))
-    })?;
+    let meta = if home::private_is_active() {
+        held_round_directory(&path, crate::plan::loop_uid(&plan.document)?)?.metadata()
+    } else {
+        std::fs::symlink_metadata(&path)
+    }
+    .map_err(|error| LaneError::input("round-directory", format!("{}: {error}", path.display())))?;
     if !meta.is_dir() || meta.file_type().is_symlink() {
         return Err(LaneError::input(
             "round-directory",
@@ -300,7 +356,11 @@ pub(super) fn recovery_thread(
     round: &Value,
 ) -> Result<String, LaneError> {
     let directory = recorded_step_dir(plan, record, round)?;
-    let actual = step_event_thread(&directory)?;
+    let actual = step_event_thread(
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+        &directory,
+        round_evidence_uid(plan)?,
+    )?;
     if let Some(expected) = record["thread_id"].as_str() {
         if expected != actual {
             return Err(LaneError::input(
@@ -457,7 +517,11 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
                 .find(|round| round["phase"] == "settled")
         })
         .ok_or_else(|| LaneError::input("round-record", "settled round is absent"))?;
-    let actual = step_event_thread(&recorded_step_dir(plan, record, round)?)?;
+    let actual = step_event_thread(
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+        &recorded_step_dir(plan, record, round)?,
+        round_evidence_uid(plan)?,
+    )?;
     if actual != saved {
         return Err(LaneError::input(
             "round-thread",
@@ -465,6 +529,58 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
         ));
     }
     Ok(())
+}
+
+type InspectionSelection<'a> = (&'a Path, Option<(&'a str, u64)>);
+
+/// Parse the operation body before receiving round inspection custody.
+/// # Errors
+/// Refuses an incomplete vector, relative home or malformed round evidence selection.
+pub(super) fn parse_private_inspect(args: &[String]) -> Result<InspectionSelection<'_>, LaneError> {
+    let [mode, loop_name, run, option, owner_home, rest @ ..] = args else {
+        return Err(LaneError::input(
+            "round-private",
+            "private round inspection is incomplete",
+        ));
+    };
+    if mode != "_inspect-round"
+        || option != "--owner-home"
+        || !crate::valid_run_name(run)
+        || loop_home::validate_name(loop_name).is_err()
+    {
+        return Err(LaneError::input(
+            "round-private",
+            "private round inspection vector is malformed",
+        ));
+    }
+    let home = Path::new(owner_home);
+    if !home.is_absolute() {
+        return Err(LaneError::input(
+            "verified-prefix",
+            "private launch has duplicate or non-absolute owner home",
+        ));
+    }
+    let evidence = match rest {
+        [] => None,
+        [record_option, step, budget_option, seconds]
+            if record_option == "--record" && budget_option == "--budget" =>
+        {
+            super::letters::valid_step(step)?;
+            Some((
+                step.as_str(),
+                seconds
+                    .parse::<u64>()
+                    .map_err(|_| LaneError::input("round-private", "budget is malformed"))?,
+            ))
+        }
+        _ => {
+            return Err(LaneError::input(
+                "round-private",
+                "private round evidence form is malformed",
+            ));
+        }
+    };
+    Ok((home, evidence))
 }
 
 /// Check the driver thread from the namespace that owns the protected directory.
@@ -498,10 +614,14 @@ pub(super) fn inspect_current_round(
         .driver_dir
         .parent()
         .ok_or_else(|| LaneError::input("round-home", "runs root is absent"))?;
-    let record = read_reservation(&reservation_path(root, run))?
-        .ok_or_else(|| LaneError::input("round-record", "reservation is absent"))?;
+    let record = inspection_record(root, run)?;
     check_identity(&plan, &record)?;
     inspect_loaded_round(&plan, &record, evidence)
+}
+
+fn inspection_record(root: &Path, run: &str) -> Result<Value, LaneError> {
+    read_reservation(&reservation_path(root, run))?
+        .ok_or_else(|| LaneError::input("round-record", "reservation is absent"))
 }
 
 fn inspect_loaded_round(
@@ -546,26 +666,41 @@ pub(super) fn publish_round_request(
     step: &str,
     budget: u64,
 ) -> Result<(), LaneError> {
-    let parent = std::fs::symlink_metadata(&plan.driver_dir)
+    let directory = if home::private_is_active() {
+        held_round_directory(&plan.driver_dir, crate::plan::loop_uid(&plan.document)?)?
+    } else {
+        let parent = std::fs::symlink_metadata(&plan.driver_dir)
+            .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+        if !parent.is_dir() || parent.file_type().is_symlink() {
+            return Err(LaneError::input(
+                "round-evidence",
+                "run directory is not a directory",
+            ));
+        }
+        std::fs::File::open(&plan.driver_dir)
+            .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?
+    };
+    let parent = directory
+        .metadata()
         .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    if !parent.is_dir() || parent.file_type().is_symlink() {
-        return Err(LaneError::input(
-            "round-evidence",
-            "run directory is not a directory",
-        ));
-    }
     let name = format!("round-launch-{step}.json");
     let temporary = format!(".round-launch-{step}-{}.tmp", std::process::id());
     let path = plan.driver_dir.join(&temporary);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)
-        .map_err(|error| {
-            LaneError::operation("round-evidence", format!("{}: {error}", path.display()))
-        })?;
+    let mut file = nix::fcntl::openat(
+        &directory,
+        temporary.as_str(),
+        nix::fcntl::OFlag::O_WRONLY
+            | nix::fcntl::OFlag::O_CREAT
+            | nix::fcntl::OFlag::O_EXCL
+            | nix::fcntl::OFlag::O_NOFOLLOW
+            | nix::fcntl::OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::from_bits_truncate(0o600),
+    )
+    .map(std::fs::File::from)
+    .map_err(std::io::Error::from)
+    .map_err(|error| {
+        LaneError::operation("round-evidence", format!("{}: {error}", path.display()))
+    })?;
     let binding = record["mail"]
         .as_array()
         .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
@@ -583,8 +718,6 @@ pub(super) fn publish_round_request(
     )
     .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
     file.sync_all()
-        .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    let directory = std::fs::File::open(&plan.driver_dir)
         .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
     renameat2(
         &directory,
@@ -647,7 +780,11 @@ pub(super) fn record_settlement_with_recovery(
     }
     if round["phase"] == "settled" {
         let directory = recorded_step_dir(plan, &record, &round)?;
-        let actual = step_event_thread(&directory)?;
+        let actual = step_event_thread(
+            crate::settings::BoxBackend::from_plan(&plan.document)?,
+            &directory,
+            round_evidence_uid(plan)?,
+        )?;
         if record["thread_id"] != actual {
             return Err(LaneError::input(
                 "round-thread",
@@ -684,7 +821,11 @@ pub(super) fn record_settlement_with_recovery(
         ended_by
             .as_ref()
             .map_err(|error| LaneError::input(error.kind, error.detail.clone()))?;
-        let actual = step_event_thread(&step_dir?)?;
+        let actual = step_event_thread(
+            crate::settings::BoxBackend::from_plan(&plan.document)?,
+            &step_dir?,
+            round_evidence_uid(plan)?,
+        )?;
         if let Some(saved) = record["thread_id"].as_str() {
             if saved != actual {
                 return Err(LaneError::input(
@@ -953,6 +1094,12 @@ fn resume_with_program(
     reap: impl FnOnce(&Value) -> Result<Value, LaneError>,
     lane_bin: &Path,
 ) -> Result<Value, LaneError> {
+    if request.backend.is_some() {
+        return Err(LaneError::input(
+            "round-selection",
+            "resume cannot change the recorded backend",
+        ));
+    }
     let began = Instant::now();
     let caller = Uid::effective().as_raw();
     let step = request
@@ -1060,6 +1207,15 @@ fn resume_with_program(
         ));
     }
     super::compare_pinned_plan(&record["plan"], &plan.document)?;
+    // The entry probe precedes the private mail binding, so a mismatched pair
+    // refuses before any child touches the run (´req:superlooplane:entry-version-before-reservation´).
+    let entry_program = settings
+        .entry_bin
+        .as_deref()
+        .ok_or_else(|| LaneError::input("round-program", "entry_bin is absent"))?;
+    let environment = launch_environment(owner_home)?;
+    crate::pinned::owner_executable(entry_program, caller)?;
+    super::entry_interface(entry_program, owner_home, &environment)?;
     let entry = record["mail"]
         .as_array()
         .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
@@ -1111,14 +1267,9 @@ fn resume_with_program(
         .driver_bin
         .as_deref()
         .ok_or_else(|| LaneError::input("round-program", "driver_bin is absent"))?;
-    let entry_program = settings
-        .entry_bin
-        .as_deref()
-        .ok_or_else(|| LaneError::input("round-program", "entry_bin is absent"))?;
     let verified_home = home::verify_host_prefix_from(host_root, owner_home, caller, root_uid)?;
     let verified_runs =
         home::verify_host_launch_root(host_root, owner_home, &root, caller, root_uid)?;
-    let environment = launch_environment(owner_home)?;
     let inspect = vec![
         "unshare".into(),
         exe_word.clone(),
@@ -1163,7 +1314,13 @@ fn resume_with_program(
             .collect::<Result<Vec<_>, _>>()?;
         let box_command = thread.map_or_else(
             || Ok(saved_box.clone()),
-            |thread| crate::container_helper::resume_box_vector(&saved_box, thread),
+            |thread| {
+                crate::container_helper::resume_box_vector(
+                    crate::settings::BoxBackend::from_plan(&plan.document)?,
+                    &saved_box,
+                    thread,
+                )
+            },
         )?;
         return Ok(
             json!({"schema":1,"command":"launch","dry_run":true,"round":step,"budget_seconds":request.budget,"letter":letter_name,"letter_reconciliation_preview":letter_reconciliation,"proxy_service":proxy_service,"thread_id":thread,"home":plan.home,"worker_uid":worker,"invocation":{"program":entry_program,"argv":argv},"box_command":box_command,"changed":false,"wall_seconds":began.elapsed().as_secs_f64()}),
@@ -1464,6 +1621,67 @@ mod tests {
         (fixture, plan)
     }
 
+    /// ´test:unit:boxed-selected-session-reader-rejects-foreign-and-conflicting-evidence´
+    #[test]
+    fn boxed_selected_session_reader_rejects_foreign_and_conflicting_evidence() {
+        use crate::settings::BoxBackend;
+        let fixture = tempfile::tempdir().expect("event fixture");
+        let path = fixture.path().join("events.jsonl");
+        std::fs::write(fixture.path().join(".event-start"), b"0\n").expect("step boundary");
+        // The driver's recorded init event supplies the session schema.
+        let init = br#"{"type":"system","subtype":"init","cwd":"/x","session_id":"22222222-2222-4222-8222-222222222222","tools":[],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"auto"}"#;
+        let mut stream = b"{\"type\":\"thread.started\",\"thread_id\":\"codex-thread\"}\n".to_vec();
+        stream.extend_from_slice(init);
+        stream.push(b'\n');
+        std::fs::write(&path, &stream).expect("events");
+        assert_eq!(
+            super::step_event_thread(
+                BoxBackend::Codex,
+                fixture.path(),
+                nix::unistd::Uid::effective().as_raw()
+            )
+            .expect("Codex event"),
+            "codex-thread"
+        );
+        assert_eq!(
+            super::step_event_thread(
+                BoxBackend::Claude,
+                fixture.path(),
+                nix::unistd::Uid::effective().as_raw()
+            )
+            .expect("Claude event"),
+            "22222222-2222-4222-8222-222222222222"
+        );
+        let changed = String::from_utf8(init.to_vec())
+            .expect("capture text")
+            .replace(
+                "22222222-2222-4222-8222-222222222222",
+                "44444444-4444-4444-8444-444444444444",
+            );
+        stream.extend_from_slice(changed.as_bytes());
+        stream.push(b'\n');
+        std::fs::write(&path, stream).expect("conflicting event");
+        assert_eq!(
+            super::step_event_thread(
+                BoxBackend::Claude,
+                fixture.path(),
+                nix::unistd::Uid::effective().as_raw()
+            )
+            .expect_err("session changed")
+            .kind,
+            "round-thread"
+        );
+        std::fs::write(&path, init).expect("incomplete event");
+        assert!(
+            super::step_event_thread(
+                BoxBackend::Claude,
+                fixture.path(),
+                nix::unistd::Uid::effective().as_raw()
+            )
+            .is_err()
+        );
+    }
+
     /// # Panics
     ///
     /// Panics only if fixture setup or per-launch client preparation fails.
@@ -1652,6 +1870,181 @@ mod tests {
         );
     }
 
+    /// # Panics
+    /// Panics if inspection reopens a replaced reservation pathname after receipt.
+    /// ´test:unit:inspection-reservation-retains-received-runs´
+    #[test]
+    fn inspection_reservation_retains_received_runs() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = fixture.path().join("runs");
+        std::fs::create_dir(&root).expect("runs");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        let record = serde_json::json!({"schema":1,"loop":"alpha","run":"R",
+            "worker_uid":3000,"phase":"settled"});
+        super::publish_reservation(&super::reservation_path(&root, "R"), &record).expect("record");
+        let held = std::fs::File::open(&root).expect("held runs");
+        let _guard =
+            crate::home::activate_handed_home(&root, &held, nix::unistd::Uid::effective().as_raw())
+                .expect("activate");
+        std::fs::rename(&root, fixture.path().join("retained")).expect("rename");
+        std::fs::create_dir(&root).expect("replacement");
+        std::fs::write(super::reservation_path(&root, "R"), b"not a reservation")
+            .expect("replacement record");
+        assert_eq!(
+            super::inspection_record(&root, "R").expect("held reservation"),
+            record
+        );
+    }
+
+    /// # Panics
+    /// Panics if event reads or request publication reopen the replaced runs pathname.
+    /// ´claim:superlooplane:private-round-evidence-retains-replaced-runs´
+    /// ´test:unit:private-round-evidence-retains-replaced-runs´
+    #[test]
+    fn private_round_evidence_retains_replaced_runs() {
+        let (fixture, plan) = client_environment_fixture();
+        let root = fixture.path().join("runs");
+        let held = fs::File::open(&root).expect("root descriptor");
+        let owner = nix::unistd::Uid::effective().as_raw();
+        let loop_uid = crate::plan::loop_uid(&plan.document).expect("loop identity");
+        let _anchor = crate::home::activate_handed_home(&root, &held, owner).expect("root anchor");
+        let retained = fixture.path().join("retained-runs");
+        fs::rename(&root, &retained).expect("retain received root");
+        fs::create_dir_all(root.join("R")).expect("replacement path");
+        let directory = retained.join("R");
+        let earlier = b"{\"type\":\"thread.started\",\"thread_id\":\"earlier-thread\"}\n";
+        fs::write(
+            directory.join(".event-start"),
+            format!("{}\n", earlier.len()),
+        )
+        .expect("held boundary");
+        fs::write(root.join("R/.event-start"), b"0\n").expect("replacement boundary");
+        seed_prior_boundary(&directory, earlier.len(), loop_uid);
+        fs::write(
+            directory.join("events.jsonl"),
+            [
+                earlier.as_slice(),
+                b"{\"type\":\"thread.started\",\"thread_id\":\"held-thread\"}\n",
+            ]
+            .concat(),
+        )
+        .expect("held events");
+        for name in [".event-start", "events.jsonl"] {
+            nix::unistd::chown(
+                &directory.join(name),
+                Some(nix::unistd::Uid::from_raw(loop_uid)),
+                Some(nix::unistd::Gid::from_raw(loop_uid)),
+            )
+            .expect("evidence owner");
+            fs::set_permissions(directory.join(name), fs::Permissions::from_mode(0o600))
+                .expect("evidence mode");
+        }
+        fs::write(root.join("R/events.jsonl"), b"not held evidence").expect("replacement");
+        assert_eq!(
+            super::step_event_thread(
+                crate::settings::BoxBackend::Codex,
+                &plan.driver_dir,
+                loop_uid
+            )
+            .expect("held thread"),
+            "held-thread"
+        );
+        let archives = directory.join("steps");
+
+        nix::unistd::chown(
+            &archives,
+            Some(nix::unistd::Uid::from_raw(loop_uid)),
+            Some(nix::unistd::Gid::from_raw(loop_uid)),
+        )
+        .expect("archive owner");
+        fs::set_permissions(&archives, fs::Permissions::from_mode(0o770))
+            .expect("widen archive directory");
+        let error = super::step_event_thread(
+            crate::settings::BoxBackend::Codex,
+            &plan.driver_dir,
+            loop_uid,
+        )
+        .expect_err("writable boundary archive");
+        assert_eq!(error.kind, "round-thread");
+        assert!(
+            error.detail.contains("context-boundary: steps:"),
+            "{error:?}"
+        );
+        fs::set_permissions(&archives, fs::Permissions::from_mode(0o700))
+            .expect("restore archive directory");
+        let record = json!({"phase":"preparing","active_round":"review",
+            "thread_id":"held-thread","worker_uid":3000,
+            "rounds":[{"step":"review","budget_seconds":900}],
+            "mail":[{"step":"review","inbox_name":"fixture-letter"}]});
+        inspect_loaded_round(&plan, &record, Some(("review", 900))).expect("held publication");
+        let published: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("round-launch-review.json")).expect("held request"),
+        )
+        .expect("request JSON");
+        assert_eq!(published["thread_id"], "held-thread");
+        assert!(!root.join("R/round-launch-review.json").exists());
+        assert_eq!(
+            fs::read(root.join("R/events.jsonl")).expect("replacement survives"),
+            b"not held evidence"
+        );
+    }
+
+    fn seed_prior_boundary(directory: &Path, end: usize, uid: u32) {
+        let archives = directory.join("steps");
+        let prior = archives.join("earlier");
+        fs::create_dir_all(&prior).expect("prior archive");
+        fs::write(prior.join("event-start.txt"), b"0\n").expect("prior start");
+        fs::write(prior.join("event-end.txt"), format!("{end}\n")).expect("prior end");
+        for path in [
+            archives,
+            prior.clone(),
+            prior.join("event-start.txt"),
+            prior.join("event-end.txt"),
+        ] {
+            nix::unistd::chown(
+                &path,
+                Some(nix::unistd::Uid::from_raw(uid)),
+                Some(nix::unistd::Gid::from_raw(uid)),
+            )
+            .expect("prior owner");
+            let mode = if path.is_dir() { 0o700 } else { 0o600 };
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("prior mode");
+        }
+    }
+
+    /// # Panics
+    /// Panics if the recorded-directory check observes the replacement pathname.
+    /// ´test:unit:recorded-step-directory-check-retains-custody´
+    #[test]
+    fn recorded_step_directory_check_retains_custody() {
+        let (fixture, plan) = client_environment_fixture();
+        let root = fixture.path().join("runs");
+        let path = plan.driver_dir.join("fixture-dispatch");
+        fs::create_dir(&path).expect("step directory");
+        let loop_uid = crate::plan::loop_uid(&plan.document).expect("loop identity");
+        nix::unistd::chown(
+            &path,
+            Some(nix::unistd::Uid::from_raw(loop_uid)),
+            Some(nix::unistd::Gid::from_raw(loop_uid)),
+        )
+        .expect("step owner");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("step mode");
+        let held = fs::File::open(&root).expect("root descriptor");
+        let _anchor =
+            crate::home::activate_handed_home(&root, &held, nix::unistd::Uid::effective().as_raw())
+                .expect("root anchor");
+        fs::rename(&root, fixture.path().join("retained-runs")).expect("retain root");
+        fs::create_dir_all(root.join("R")).expect("replacement root");
+        fs::write(&path, b"not a directory").expect("replacement step");
+        let record = json!({"rounds":[{"step":"dispatch","driver_dir":path}]});
+        assert_eq!(
+            super::recorded_step_dir(&plan, &record, &record["rounds"][0])
+                .expect("held recorded directory"),
+            path
+        );
+    }
+
     /// ´test:unit:private-inspector-request-is-readable-by-round-client´
     #[test]
     fn private_inspector_request_is_readable_by_round_client() {
@@ -1695,7 +2088,7 @@ mod tests {
             home: PathBuf::from("/home/worker"),
             driver_dir: PathBuf::from("/runs/R"),
             letter: PathBuf::new(),
-            document: json!({}),
+            document: json!({"backend":"codex"}),
         };
         let selection = super::super::LaunchModel::select(
             b"Model: gpt-6-sol\nEffort: high\nReview this round.\n",
@@ -1730,6 +2123,8 @@ mod tests {
                 "/bin/driver",
                 "--run-dir",
                 "/runs/R",
+                "--backend",
+                "codex",
                 "--",
                 "-t",
                 "900",
@@ -1768,7 +2163,7 @@ mod tests {
             home: PathBuf::from("/home/worker"),
             driver_dir: PathBuf::from("/runs/R"),
             letter: PathBuf::new(),
-            document: json!({}),
+            document: json!({"backend":"codex"}),
         };
         let words = entry_argv_round(
             Path::new("/bin/driver"),
@@ -1792,6 +2187,8 @@ mod tests {
                 "/bin/driver",
                 "--run-dir",
                 "/runs/R",
+                "--backend",
+                "codex",
                 "--",
                 "-t",
                 "900",
@@ -1824,7 +2221,7 @@ mod tests {
             home: PathBuf::from("/home/worker"),
             driver_dir: fixture.path().join("R"),
             letter: PathBuf::new(),
-            document: json!({}),
+            document: json!({"backend":"codex"}),
         };
         let record = json!({
             "phase":"settled", "thread_id":null, "readback_end":"completed",
@@ -1869,6 +2266,8 @@ mod tests {
                 "/bin/driver",
                 "--run-dir",
                 run_dir,
+                "--backend",
+                "codex",
                 "--",
                 "-t",
                 "900",
@@ -1924,9 +2323,9 @@ mod tests {
             home: fixture.path().join("home-R"),
             driver_dir,
             letter: PathBuf::new(),
-            document: json!({"worker_uid":3000}),
+            document: json!({"backend":"codex","worker_uid":3000}),
         };
-        let record = json!({"schema":1,"loop":"alpha","run":"R","phase":"started","active_round":"dispatch","worker_uid":3000,"plan":{"worker_uid":3000,"home":plan.home,"driver_dir":plan.driver_dir},"mail":[],"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}]});
+        let record = json!({"schema":1,"loop":"alpha","run":"R","phase":"started","active_round":"dispatch","worker_uid":3000,"plan":{"backend":"codex","worker_uid":3000,"home":plan.home,"driver_dir":plan.driver_dir},"mail":[],"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}]});
         super::publish_reservation(&super::reservation_path(fixture.path(), "R"), &record)
             .expect("reservation");
         (fixture, plan)

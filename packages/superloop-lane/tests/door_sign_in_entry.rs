@@ -410,3 +410,41 @@ fn door_sign_in_entry_binds_source_and_retains_a_replacement() {
         b"synthetic credential fixture only"
     );
 }
+
+/// # Panics
+/// Panics if the host predicate treats nobody as root or accepts a link.
+/// ´claim:superlooplane:host-sign-in-walk-refuses-nobody´
+/// ´test:integration:host-sign-in-walk-refuses-nobody´
+#[test]
+fn host_sign_in_walk_refuses_nobody() {
+    let program = [
+        loop_home::ancestor::PYTHON_ANCESTOR_OWNERS,
+        include_str!("../src/door_sign_in_owner.py")
+            .split("\ntry:\n    main()")
+            .next()
+            .expect("definitions"),
+        r"
+from types import SimpleNamespace
+owners = AncestorOwners.current(os.geteuid())
+assert owners.ranges == [(0, 0, 2**32 - 1)]
+for mode in (0o755, 0o1777):
+    try:
+        source_ancestor(SimpleNamespace(st_uid=65534, st_mode=mode), owners)
+    except ValueError as error:
+        assert str(error) == 'ancestor owner unrelated'
+    else:
+        raise AssertionError('nobody accepted')
+source_ancestor(SimpleNamespace(st_uid=0, st_mode=0o1777), owners)
+",
+    ]
+    .join("\n");
+    let output = Command::new("/usr/bin/python3")
+        .args(["-I", "-c", &program])
+        .output()
+        .expect("probe");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

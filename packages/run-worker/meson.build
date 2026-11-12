@@ -12,6 +12,7 @@ pkg_run_worker_rust = files(
   'src/tests/mod.rs',
   'src/watch.rs',
   'tests/settings_contract.rs',
+  'tests/mail_anchors.rs',
 )
 
 pkg_run_worker_prose = files(
@@ -51,10 +52,16 @@ dependency_ledger += ['''
 {"kind":"package","name":"run-worker","manifest":"packages/run-worker/Cargo.toml","tier":3,"release_group":"run-worker","version_authority":"packages/run-worker/Cargo.toml"}
 {"kind":"program","identity":"libexec/worker-run","output":"packages/run-worker/worker-run","package":"run-worker","version_authority":"packages/run-worker/Cargo.toml","form":"rust","installation_class":"libexec","cargo_binary":"worker-run","callers":["release-suite","run-worker","superloop-lane"]}
 {"kind":"call","site":"packages/run-worker/src/tests/mod.rs:\"/bin/sh\"#1","caller":"run-worker","owner":"RUNWORKER","selector":"\"/bin/sh\"","callee":"external:/bin/sh","lookup":"configured-external","contract":"POSIX shell command execution with the supplied arguments, streams and exit status"}
-{"kind":"meson-call","site":"packages/run-worker/meson.build:custom_target#1","sha256":"aae81b7f83a3be4002c71886f36a1ac71c8a6557bec7083f02b90f8abd0df1bf","caller":"meson:run-worker","owner":"run-worker","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"03053f0783fb7838e1f253e41b41e471ca7c1f7811b963835d2e5da9ae6fb974"}
-{"kind":"meson-call","site":"packages/run-worker/meson.build:find_program#1","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","caller":"meson:run-worker","owner":"run-worker","callees":["external:env"],"lookup":"public-command","contract":"Resolve the required env executable during configuration and refuse if unavailable","scope_sha256":"03053f0783fb7838e1f253e41b41e471ca7c1f7811b963835d2e5da9ae6fb974"}
+{"kind":"meson-call","site":"packages/run-worker/meson.build:custom_target#1","sha256":"aae81b7f83a3be4002c71886f36a1ac71c8a6557bec7083f02b90f8abd0df1bf","caller":"meson:run-worker","owner":"run-worker","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"1b944d67c80ccdd9738b972c3b5796ef52a6e7dad1ebe6d25c007051ddcdbe6e"}
+{"kind":"meson-call","site":"packages/run-worker/meson.build:find_program#1","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","caller":"meson:run-worker","owner":"run-worker","callees":["external:env"],"lookup":"public-command","contract":"Resolve the required env executable during configuration and refuse if unavailable","scope_sha256":"1b944d67c80ccdd9738b972c3b5796ef52a6e7dad1ebe6d25c007051ddcdbe6e"}
 {"kind":"installation","route":"native","source":"build:packages/run-worker/worker-run","destination":"@libexecdir@/superloop/worker-run","owner":"run-worker"}
 {"kind":"installation","route":"native","source":"build:packages/run-worker/worker-run.build.json","destination":"@datadir@/superloop/build-records/worker-run.build.json","owner":"run-worker"}
 {"kind":"call","site":"packages/run-worker/tests/settings_contract.rs:& binary#1","caller":"run-worker","owner":"RUNWORKER","selector":"& binary","callee":"libexec/worker-run","lookup":"test-executable","binding":"CARGO_BIN_EXE_worker-run","contract":"Run the resolved built binary from a protected fixture path and assert the retired-setting replacement from production output"}
 {"kind":"test-tool","consumer":"run-worker","binding":"CARGO_BIN_EXE_worker-run","provider":"cargo-target","callee":"libexec/worker-run","suite":"cargo-test","contract":"Cargo supplies worker-run for the private reader refusal fixture"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/run-worker/tests/mail_anchors.rs:\"/usr/bin/podman\"#1","caller":"run-worker","owner":"RUNWORKER","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Create and inspect fictional worker storage under the real rootless map"}
+{"kind":"call","site":"packages/run-worker/tests/mail_anchors.rs:\"/usr/bin/podman\"#2","caller":"run-worker","owner":"RUNWORKER","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Remove only the isolated worker fixture after the namespace acceptance"}
+{"kind":"call","site":"packages/run-worker/tests/mail_anchors.rs:binary ()#1","caller":"run-worker","owner":"RUNWORKER","selector":"binary ()","callee":"libexec/worker-run","lookup":"test-executable","binding":"CARGO_BIN_EXE_worker-run","contract":"Require a named missing-manifest refusal from the real private entry"}
 ''']

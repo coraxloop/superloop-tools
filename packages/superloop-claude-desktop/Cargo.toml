@@ -17,6 +17,7 @@ name = "superloop-claude-desktop"
 path = "src/main.rs"
 
 [dependencies]
+tracing = { workspace = true }
 superloop-cli-common.workspace = true
 clap.workspace = true
 libc.workspace = true

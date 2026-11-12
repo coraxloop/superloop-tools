@@ -7,9 +7,14 @@ use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
 
 use crate::{resolve_tag, run_git, validate_checkout, validate_repository, write_terminal_report};
 use superloop_cli_common::public_set::{Manifest, safe_path};
@@ -659,6 +664,23 @@ pub fn project_tree_with_policy(
         selected.remove(readme_source);
         selected.insert("README.md".to_owned(), readme);
     }
+    if manifest
+        .public
+        .unpublished
+        .as_deref()
+        .is_some_and(|path| Path::new(path) == manifest_path)
+    {
+        return Err(refuse("public.unpublished cannot replace the manifest"));
+    }
+    if manifest.public.unpublished.as_ref().is_some_and(|path| {
+        selected
+            .get(path)
+            .is_some_and(|(mode, _)| !matches!(mode.as_str(), "100644" | "100755"))
+    }) {
+        return Err(refuse(
+            "public.unpublished must replace a regular register file",
+        ));
+    }
     let generated = unpublished_register(
         root,
         commit,
@@ -673,11 +695,22 @@ pub fn project_tree_with_policy(
             .entry(path.clone())
             .or_insert_with(|| ("100644".into(), String::new()));
     }
+    let contents = blobs(
+        root,
+        selected
+            .iter()
+            .filter(|(path, _)| !generated.contains_key(*path))
+            .map(|(_, (_, object))| object),
+        false,
+    )?;
     let mut projected = BTreeMap::new();
     for (path, (mode, object)) in &selected {
         let content = match generated.get(path) {
             Some(content) => content.clone(),
-            None => git(root, &["cat-file", "blob", object])?,
+            None => contents
+                .get(object)
+                .ok_or_else(|| refuse("missing selected blob"))?
+                .clone(),
         };
         let content = if Path::new(path) == manifest_path {
             public_manifest(policy_bytes.unwrap_or(&content), selected.keys())?
@@ -689,19 +722,137 @@ pub fn project_tree_with_policy(
     Ok(projected)
 }
 
+// A regular-file input avoids a pipe deadlock when Git emits output while reading
+// a large request. Command::output drains both output streams concurrently.
+fn batch_git(root: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, CutError> {
+    batch_git_command(crate::git_command(root), args, input)
+}
+
+fn batch_git_command(
+    mut command: Command,
+    args: &[&str],
+    input: &[u8],
+) -> Result<Vec<u8>, CutError> {
+    use std::io::{Seek as _, Write as _};
+    let mut request = tempfile::tempfile()?;
+    request.write_all(input)?;
+    request.rewind()?;
+    let output = command
+        .args(["-c", "core.hooksPath=/dev/null"])
+        .args(args)
+        .stdin(request)
+        .output()?;
+    if !output.status.success() {
+        return Err(refuse("git operation failed"));
+    }
+    Ok(output.stdout)
+}
+
+pub fn blobs<'a>(
+    root: &Path,
+    objects: impl Iterator<Item = &'a String>,
+    ignore_replacements: bool,
+) -> Result<BTreeMap<String, Vec<u8>>, CutError> {
+    let objects: std::collections::BTreeSet<_> = objects.collect();
+    if objects.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut request = String::new();
+    for object in &objects {
+        request.push_str(object);
+        request.push('\n');
+    }
+    let mut command = crate::git_command(root);
+    if ignore_replacements {
+        command
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_NO_REPLACE_OBJECTS", "1");
+    }
+    let output = batch_git_command(command, &["cat-file", "--batch"], request.as_bytes())?;
+    let mut remaining = output.as_slice();
+    let mut result = BTreeMap::new();
+    for object in objects {
+        let end = remaining
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(|| refuse("missing batch blob header"))?;
+        let header = std::str::from_utf8(&remaining[..end])
+            .map_err(|_| refuse("invalid batch blob header"))?;
+        let fields: Vec<_> = header.split(' ').collect();
+        let [actual, "blob", size] = fields.as_slice() else {
+            return Err(refuse("invalid batch blob type"));
+        };
+        if *actual != object {
+            return Err(refuse("unexpected batch blob identity"));
+        }
+        let size: usize = size
+            .parse()
+            .map_err(|_| refuse("invalid batch blob size"))?;
+        remaining = &remaining[end + 1..];
+        if remaining.get(size) != Some(&b'\n') {
+            return Err(refuse("truncated batch blob"));
+        }
+        result.insert(object.clone(), remaining[..size].to_vec());
+        remaining = &remaining[size + 1..];
+    }
+    if !remaining.is_empty() {
+        return Err(refuse("unexpected batch blob bytes"));
+    }
+    Ok(result)
+}
+
+fn quoted_git_path(path: &str) -> String {
+    use std::fmt::Write as _;
+    let mut quoted = String::from("\"");
+    for byte in path.bytes() {
+        match byte {
+            b'"' => quoted.push_str("\\\""),
+            b'\\' => quoted.push_str("\\\\"),
+            32..=126 => quoted.push(char::from(byte)),
+            _ => write!(quoted, "\\{byte:03o}").expect("writing to a string"),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 pub fn write_projection(stage: &Path, projected: &Projection) -> Result<(usize, u64), CutError> {
+    use std::io::Write as _;
+    if projected.is_empty() {
+        return Ok((0, 0));
+    }
     let mut bytes = 0;
-    for (path, (mode, content)) in projected {
+    let mut paths = String::new();
+    for (path, (_, content)) in projected {
         bytes += content.len() as u64;
         let target = stage.join(path);
         fs::create_dir_all(crate::usable_parent(&target))?;
         // Hash regular staging bytes without Git filters, then restore link/mode semantics.
         fs::write(&target, content)?;
-        let object = line(stage, &["hash-object", "-w", "--no-filters", "--", path])?;
-        git(
-            stage,
-            &["update-index", "--add", "--cacheinfo", mode, &object, path],
-        )?;
+        paths.push_str(&quoted_git_path(path));
+        paths.push('\n');
+    }
+    let hashes = batch_git(
+        stage,
+        &["hash-object", "-w", "--no-filters", "--stdin-paths"],
+        paths.as_bytes(),
+    )?;
+    let hashes = std::str::from_utf8(&hashes).map_err(|_| refuse("invalid git response"))?;
+    let hashes: Vec<_> = hashes.lines().collect();
+    if hashes.len() != projected.len()
+        || hashes.iter().any(|hash| {
+            !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(refuse("invalid git response"));
+    }
+    let mut index = Vec::new();
+    for ((path, (mode, _)), object) in projected.iter().zip(hashes) {
+        write!(index, "{mode} {object}\t{path}\0")?;
+    }
+    batch_git(stage, &["update-index", "-z", "--index-info"], &index)?;
+    for (path, (mode, content)) in projected {
+        let target = stage.join(path);
         if mode == "120000" {
             fs::remove_file(&target)?;
             symlink(std::ffi::OsStr::from_bytes(content), &target)?;
@@ -714,8 +865,6 @@ pub fn write_projection(stage: &Path, projected: &Projection) -> Result<(usize, 
     }
     Ok((projected.len(), bytes))
 }
-
-const UNPUBLISHED_PATH: &str = "docs/public/unpublished-labels.toml";
 
 #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
 struct UnpublishedLabel {
@@ -759,6 +908,87 @@ enum CitationSurface {
     Unpublished,
 }
 
+#[derive(Debug)]
+struct CitationFailure {
+    reason: String,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn citation_output(mut child: Child, bound: Duration) -> Result<Output, CitationFailure> {
+    let started = Instant::now();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = (|| {
+        let mut out = child.stdout.take().ok_or("citation stdout unavailable")?;
+        let mut err = child.stderr.take().ok_or("citation stderr unavailable")?;
+        fcntl(&out, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+            .map_err(|_| "citation stdout could not be made nonblocking")?;
+        fcntl(&err, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+            .map_err(|_| "citation stderr could not be made nonblocking")?;
+        let mut out_done = false;
+        let mut err_done = false;
+        loop {
+            if started.elapsed() >= bound {
+                return Err(format!(
+                    "citation-sites linter timed out after {} s",
+                    bound.as_secs_f64()
+                ));
+            }
+            let previous = stdout.len() + stderr.len();
+            out_done |= citation_chunk(&mut out, &mut stdout)?;
+            err_done |= citation_chunk(&mut err, &mut stderr)?;
+            // Keep the leader unreaped until both streams close: its PID continues
+            // to identify this process group if a descendant holds a pipe open.
+            if out_done
+                && err_done
+                && let Some(status) = child.try_wait().map_err(|_| "citation wait failed")?
+            {
+                return Ok(status);
+            }
+            if previous == stdout.len() + stderr.len() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    })();
+    match result {
+        Ok(status) => Ok(Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        Err(reason) => {
+            let _killed = killpg(Pid::from_raw(child.id().cast_signed()), Signal::SIGKILL);
+            let _reaped = child.wait();
+            Err(CitationFailure {
+                reason,
+                stdout,
+                stderr,
+            })
+        }
+    }
+}
+
+fn citation_chunk(reader: &mut impl io::Read, bytes: &mut Vec<u8>) -> Result<bool, String> {
+    let mut chunk = [0; 8192];
+    match reader.read(&mut chunk) {
+        Ok(0) => Ok(true),
+        Ok(count) => {
+            bytes.extend_from_slice(&chunk[..count]);
+            Ok(false)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(_) => Err("citation stream read failed".into()),
+    }
+}
+
 fn resolved_sites(
     root: &Path,
     commit: &str,
@@ -768,22 +998,36 @@ fn resolved_sites(
     let linter =
         fs::canonicalize(linter).map_err(|_| refuse("unreadable citation-sites linter"))?;
     let scratch = historical_tree(root, commit)?;
-    let output = Command::new(linter)
+    let child = Command::new(linter)
         .arg("citation-sites")
         .arg("--root")
         .arg(scratch.path())
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
         .map_err(|_| refuse("citation-sites linter could not run"))?;
-    if !output.status.success() {
-        let retained = scratch.keep();
-        fs::write(retained.join("citation-sites.stdout"), &output.stdout)?;
-        fs::write(retained.join("citation-sites.stderr"), &output.stderr)?;
-        return Err(refuse(&format!(
-            "citation-sites linter refused; diagnostic scratch={}",
-            retained.display()
-        )));
-    }
+    let output = match citation_output(child, Duration::from_secs(120)) {
+        Ok(output) if output.status.success() => output,
+        result => {
+            let (reason, stdout, stderr) = match result {
+                Ok(output) => (
+                    "citation-sites linter refused".to_owned(),
+                    output.stdout,
+                    output.stderr,
+                ),
+                Err(failure) => (failure.reason, failure.stdout, failure.stderr),
+            };
+            let retained = scratch.keep();
+            fs::write(retained.join("citation-sites.stdout"), stdout)?;
+            fs::write(retained.join("citation-sites.stderr"), stderr)?;
+            return Err(refuse(&format!(
+                "{reason}; diagnostic scratch={}",
+                retained.display()
+            )));
+        }
+    };
     let report: CitationSites = serde_json::from_slice(&output.stdout)
         .map_err(|_| refuse("invalid citation-sites JSON"))?;
     if report.namespace != "class.linter.citation-sites" || report.version != [1, 0, 0] {
@@ -807,9 +1051,31 @@ fn unpublished_register<'a>(
     included.insert(readme_source.to_owned());
     let mut generated = BTreeMap::new();
     if !included.contains(".linter/owners.toml") {
+        if manifest.public.unpublished.is_some() {
+            return Err(refuse(
+                "public.unpublished requires a selected owner snapshot",
+            ));
+        }
         return Ok(generated);
     }
-    let burn = cut_burn_register(root, burn_register)?;
+    if manifest.public.unpublished.is_none() {
+        let content = git(root, &["show", &format!("{commit}:.linter/owners.toml")])?;
+        let owners: toml::Value = toml::from_str(
+            std::str::from_utf8(&content).map_err(|_| refuse("owners must be UTF-8"))?,
+        )
+        .map_err(|error| CutError(error.to_string()))?;
+        if owners.get("unpublished").is_some() {
+            return Err(refuse(
+                "owner snapshot unpublished field requires public.unpublished",
+            ));
+        }
+    }
+    let register_input = manifest
+        .public
+        .unpublished
+        .as_deref()
+        .map(|path| cut_burn_register(root, burn_register).map(|burn| (path, burn)))
+        .transpose()?;
     let sites = resolved_sites(root, commit, linter)?;
     let mut labels = std::collections::BTreeSet::new();
     for site in sites.sites {
@@ -837,6 +1103,24 @@ fn unpublished_register<'a>(
             });
         }
     }
+    let Some((register, burn)) = register_input else {
+        if !labels.is_empty() {
+            return Err(refuse(
+                "excluded-definition citations require public.unpublished",
+            ));
+        }
+        return Ok(generated);
+    };
+    if included.iter().any(|path| {
+        path.strip_prefix(register)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+            || register
+                .strip_prefix(path.as_str())
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }) {
+        return Err(refuse("public.unpublished conflicts with a selected path"));
+    }
+    let owners = public_owners(root, commit, register, included.contains(register))?;
     let document = UnpublishedLabels {
         namespace: "class.linter.unpublished-labels".to_owned(),
         version: [1, 0, 0],
@@ -844,15 +1128,17 @@ fn unpublished_register<'a>(
     };
     let content = toml::to_string(&document).map_err(|error| CutError(error.to_string()))?;
     guard_unpublished(&document, &burn)?;
-    generated.insert(UNPUBLISHED_PATH.to_owned(), content.into_bytes());
-    generated.insert(
-        ".linter/owners.toml".to_owned(),
-        public_owners(root, commit)?,
-    );
+    generated.insert(register.to_owned(), content.into_bytes());
+    generated.insert(".linter/owners.toml".to_owned(), owners);
     Ok(generated)
 }
 
-fn public_owners(root: &Path, commit: &str) -> Result<Vec<u8>, CutError> {
+fn public_owners(
+    root: &Path,
+    commit: &str,
+    register: &str,
+    replaces_selected: bool,
+) -> Result<Vec<u8>, CutError> {
     let content = git(root, &["show", &format!("{commit}:.linter/owners.toml")])?;
     let mut owners: toml::Value =
         toml::from_str(std::str::from_utf8(&content).map_err(|_| refuse("owners must be UTF-8"))?)
@@ -860,6 +1146,12 @@ fn public_owners(root: &Path, commit: &str) -> Result<Vec<u8>, CutError> {
     let table = owners
         .as_table_mut()
         .ok_or_else(|| refuse("owner snapshot must be a table"))?;
+    if replaces_selected && table.get("unpublished").and_then(toml::Value::as_str) != Some(register)
+    {
+        return Err(refuse(
+            "public.unpublished would overwrite a selected non-register file",
+        ));
+    }
     let mut envelope = BTreeMap::new();
     for key in ["namespace", "version"] {
         envelope.insert(
@@ -871,7 +1163,7 @@ fn public_owners(root: &Path, commit: &str) -> Result<Vec<u8>, CutError> {
     }
     table.insert(
         "unpublished".to_owned(),
-        toml::Value::String(UNPUBLISHED_PATH.to_owned()),
+        toml::Value::String(register.to_owned()),
     );
     let mut content = toml::to_string(&envelope).map_err(|error| CutError(error.to_string()))?;
     content.push_str(&toml::to_string(table).map_err(|error| CutError(error.to_string()))?);
@@ -1022,12 +1314,26 @@ fn historical_tree(root: &Path, commit: &str) -> Result<tempfile::TempDir, CutEr
         .prefix("pack-citations-")
         .tempdir()?;
     git(scratch.path(), &["init", "-q", "--template="])?;
+    let entries = tree_entries(root, commit)?;
+    if entries
+        .values()
+        .any(|(mode, _)| !matches!(mode.as_str(), "100644" | "100755" | "120000"))
+    {
+        return Err(refuse("unsupported historical tree entry"));
+    }
+    let contents = blobs(root, entries.values().map(|(_, object)| object), false)?;
     let mut projected = Projection::new();
-    for (path, (mode, object)) in tree_entries(root, commit)? {
-        if !matches!(mode.as_str(), "100644" | "100755" | "120000") {
-            return Err(refuse("unsupported historical tree entry"));
-        }
-        projected.insert(path, (mode, git(root, &["cat-file", "blob", &object])?));
+    for (path, (mode, object)) in entries {
+        projected.insert(
+            path,
+            (
+                mode,
+                contents
+                    .get(&object)
+                    .ok_or_else(|| refuse("missing historical blob"))?
+                    .clone(),
+            ),
+        );
     }
     write_projection(scratch.path(), &projected)?;
     Ok(scratch)
@@ -1077,6 +1383,96 @@ pub fn write_cut_report<W: io::Write>(
 
 #[cfg(test)]
 mod guard_tests {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    fn citation_fixture(script: &str) -> (tempfile::TempDir, Child) {
+        let root = tempfile::tempdir().expect("fixture");
+        let child = Command::new("/bin/sh")
+            .args(["-c", script])
+            .env("READY", root.path().join("ready"))
+            .env("PIDFILE", root.path().join("pid"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect("fixture process");
+        let started = Instant::now();
+        while !root.path().join("ready").exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "fixture did not arm"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (root, child)
+    }
+
+    /// Citation deadlines kill silent leaders and descendants retaining inherited pipes.
+    ///
+    /// # Panics
+    /// Panics only if fixture IO fails or a timed-out process remains running.
+    /// ´test:unit:citation-deadline-reaps-the-invocation-group´
+    #[test]
+    fn citation_deadline_reaps_the_invocation_group() {
+        for script in [
+            "printf out; printf err >&2; printf '%s' $$ > \"$PIDFILE\"; printf ready > \"$READY\"; exec /bin/sleep 30",
+            "printf out; printf err >&2; /bin/sleep 30 & printf '%s' $! > \"$PIDFILE\"; printf ready > \"$READY\"; exit 0",
+        ] {
+            let (root, child) = citation_fixture(script);
+            let pid = std::fs::read_to_string(root.path().join("pid")).expect("fixture pid");
+            let started = Instant::now();
+            let failure =
+                super::citation_output(child, Duration::from_millis(100)).expect_err("deadline");
+            assert_eq!(
+                failure.reason,
+                "citation-sites linter timed out after 0.1 s"
+            );
+            assert_eq!(failure.stdout, b"out");
+            assert_eq!(failure.stderr, b"err");
+            assert!(started.elapsed() < Duration::from_secs(10));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let state = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+                if state
+                    .as_ref()
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                    || state.as_ref().is_ok_and(|text| {
+                        text.rsplit_once(") ")
+                            .is_some_and(|(_, fields)| fields.starts_with('Z'))
+                    })
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture process still running: {state:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// Both citation streams drain beyond pipe capacity before a successful exit is collected.
+    ///
+    /// # Panics
+    /// Panics only if fixture IO fails or successful stream bytes change.
+    /// ´test:unit:citation-collection-drains-both-streams´
+    #[test]
+    fn citation_collection_drains_both_streams() {
+        let (root, child) = citation_fixture(
+            "printf ready > \"$READY\"; i=0; while [ $i -lt 131072 ]; do printf x; printf y >&2; i=$((i+1)); done",
+        );
+        let output =
+            super::citation_output(child, Duration::from_secs(10)).expect("successful capture");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, vec![b'x'; 131_072]);
+        assert_eq!(output.stderr, vec![b'y'; 131_072]);
+        drop(root);
+    }
+
     use super::{cut_burn_register, guard_unpublished};
 
     /// Message overrides refuse blank text and embedded NUL bytes.

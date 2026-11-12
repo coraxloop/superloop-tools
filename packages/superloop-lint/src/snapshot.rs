@@ -346,6 +346,16 @@ pub struct ReachRow {
     pub target: String,
 }
 
+/// An unchanged upstream owner explicitly excluded from all label policies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NonParticipatingOwner {
+    /// Registered owner whose files remain in the partition and census.
+    pub owner: String,
+    /// Why this upstream tree does not participate in label policies.
+    pub reason: String,
+}
+
 /// A nested corpus whose own snapshot accounts for its prose.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1070,6 +1080,7 @@ pub struct Snapshot {
     imports: BTreeMap<String, crate::export::RegistryDocument>,
     unpublished: Option<(PathBuf, crate::export::UnpublishedLabels)>,
     partitions: Vec<OwnerRow>,
+    non_participating: Vec<NonParticipatingOwner>,
     nested: Vec<NestedCorpus>,
     shape: CorpusShape,
     may_cite: Vec<ReachRow>,
@@ -1100,6 +1111,7 @@ pub struct DeclarationCore {
     imports: BTreeMap<String, crate::export::RegistryDocument>,
     unpublished: Option<(PathBuf, crate::export::UnpublishedLabels)>,
     partitions: Vec<OwnerRow>,
+    non_participating: Vec<NonParticipatingOwner>,
     nested: Vec<NestedCorpus>,
     shape: CorpusShape,
     may_cite: Vec<ReachRow>,
@@ -1165,6 +1177,7 @@ impl DeclarationCore {
             imports: self.imports,
             unpublished: self.unpublished,
             partitions: self.partitions,
+            non_participating: self.non_participating,
             nested: self.nested,
             shape: self.shape,
             may_cite: self.may_cite,
@@ -1525,6 +1538,12 @@ impl Snapshot {
         &self.root_owner
     }
 
+    /// Owners explicitly taking part in no label policy.
+    #[must_use]
+    pub fn non_participating(&self) -> &[NonParticipatingOwner] {
+        &self.non_participating
+    }
+
     /// The declared corpora whose prose is checked through their own snapshots.
     #[must_use]
     pub fn nested(&self) -> &[NestedCorpus] {
@@ -1791,6 +1810,8 @@ struct RawOwners {
     /// Explicit repository carrier, validated against the registered owners.
     #[serde(default)]
     root_owner: Option<String>,
+    #[serde(default)]
+    non_participating: Vec<NonParticipatingOwner>,
     #[serde(default)]
     nested: Vec<NestedCorpus>,
     /// Imported owners cite a registry in place of taking a partition.
@@ -2154,6 +2175,13 @@ fn load(
     });
     let (policies, deferred) =
         activation_pairs(root, &raw_policies.policies, &registered, &mut refusals);
+    let non_participating = non_participating_owners(
+        &raw_owners.non_participating,
+        &registered,
+        &policies,
+        &deferred,
+        &mut refusals,
+    );
     let raw_lists: Option<crate::surface::ListDocument> = if deferred.is_empty() {
         if strict {
             read_ast_file(&surface, LISTS_FILE, &mut refusals)
@@ -2230,6 +2258,7 @@ fn load(
         imports,
         unpublished,
         partitions,
+        non_participating,
         nested,
         shape,
         may_cite,
@@ -4085,6 +4114,43 @@ fn path_rows(
 
     parsed.sort();
     parsed
+}
+
+/// Validate explicit abstention without weakening any other owner's prose admission.
+fn non_participating_owners(
+    rows: &[NonParticipatingOwner],
+    registered: &BTreeSet<String>,
+    policies: &[Pair],
+    deferred: &[DeferredPolicy],
+    refusals: &mut Vec<Refusal>,
+) -> Vec<NonParticipatingOwner> {
+    let mut seen = BTreeSet::new();
+    for row in rows {
+        let problem = if !registered.contains(&row.owner) {
+            Some("owner must be registered")
+        } else if !seen.insert(&row.owner) {
+            Some("owner must occur only once")
+        } else if row.reason.trim().is_empty() {
+            Some("reason must not be empty")
+        } else if policies
+            .iter()
+            .any(|pair| pair.owner == row.owner && pair.policy.starts_with("labels."))
+            || deferred
+                .iter()
+                .any(|pair| pair.owner == row.owner && pair.policy.starts_with("labels."))
+        {
+            Some("owner must activate no labels.* policy")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            refusals.push(Refusal::Malformed {
+                file: OWNERS_FILE,
+                message: format!("non_participating owner {}: {problem}", row.owner),
+            });
+        }
+    }
+    rows.to_vec()
 }
 
 /// Validate the evidence behind each independently checked nested corpus.

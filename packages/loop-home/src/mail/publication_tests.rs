@@ -793,3 +793,186 @@ fn retired_custody_finishes_pending_publication_with_mailbox_sealed() {
         );
     }
 }
+
+/// # Panics
+/// Panics if the fixture cannot receive its real host-verified loop storage.
+fn endpoint_storage(path: &Path) -> crate::anchor::Anchor {
+    use crate::anchor::{
+        HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement, Transport,
+    };
+    let policy = Policy {
+        kind: Kind::Directory,
+        owner: Owner::Host,
+        mode: ModePolicy::Exact(0o711),
+    };
+    let pin = HostVerifier::current()
+        .expect("host map")
+        .pin(path, "loop-storage", 0, policy)
+        .expect("storage pin");
+    let manifest = Manifest {
+        version: 1,
+        transport: Transport::Rights,
+        operation: "mail-bind".into(),
+        loop_name: "alpha".into(),
+        records: vec![pin.record()],
+    };
+    Receiver::current()
+        .expect("receiver map")
+        .validate(
+            &manifest,
+            vec![pin.into_fd()],
+            "mail-bind",
+            "alpha",
+            Transport::Rights,
+            &[Requirement {
+                purpose: "loop-storage".into(),
+                policy,
+                alias_group: None,
+            }],
+        )
+        .expect("storage receipt")
+        .pop()
+        .expect("capability")
+}
+
+/// # Panics
+/// Panics if replacement children or widened custody evade freshness checks.
+fn endpoint_freshness_refusals(endpoint: &Endpoint, mailbox: &Path, staging: &Path) {
+    let inbox = mailbox.join("inbox");
+    let retained = mailbox.join("retained-inbox");
+    fs::rename(&inbox, &retained).expect("retain inbox");
+    fs::create_dir(&inbox).expect("substitute inbox");
+    fs::set_permissions(&inbox, fs::Permissions::from_mode(0o770)).expect("inbox mode");
+    assert!(matches!(
+        endpoint.fresh(),
+        Err(MailError::Invalid("endpoint identity changed"))
+    ));
+    fs::remove_dir(&inbox).expect("remove substitute");
+    symlink("retained-inbox", &inbox).expect("linked inbox");
+    let linked = endpoint
+        .fresh()
+        .expect_err("freshness must not follow a link");
+    let loop_errno = Some(nix::errno::Errno::ELOOP as i32);
+    assert!(matches!(linked, MailError::Io(ref error) if error.raw_os_error() == loop_errno));
+    fs::remove_file(&inbox).expect("remove link");
+    fs::rename(&retained, &inbox).expect("restore inbox");
+    let retained = staging.with_file_name("retained-staging");
+    fs::rename(staging, &retained).expect("retain staging");
+    fs::create_dir(staging).expect("substitute staging");
+    fs::set_permissions(staging, fs::Permissions::from_mode(0o700)).expect("staging mode");
+    assert!(matches!(
+        endpoint.fresh(),
+        Err(MailError::Invalid("staging identity changed"))
+    ));
+    fs::remove_dir(staging).expect("remove substitute");
+    fs::rename(&retained, staging).expect("restore staging");
+    fs::set_permissions(mailbox, fs::Permissions::from_mode(0o770)).expect("widen mailbox");
+    assert!(matches!(
+        endpoint.fresh(),
+        Err(MailError::Invalid("unsafe-storage: mailbox root custody"))
+    ));
+    fs::set_permissions(mailbox, fs::Permissions::from_mode(0o750)).expect("restore mailbox");
+    endpoint.fresh().expect("restored endpoint");
+}
+
+/// # Panics
+/// Panics if opening or freshness uses a replaced absolute path or loses custody checks.
+/// ´claim:loophome:endpoint-opening-and-freshness-retain-loop-storage´
+/// ´test:unit:endpoint-opening-and-freshness-retain-loop-storage´
+#[test]
+fn endpoint_opening_and_freshness_retain_loop_storage() {
+    for name in ["alpha", "alpha+worker"] {
+        let fixture = Fixture::new();
+        drop(fixture.endpoint(name, group()));
+        let original = fixture.root.join("alpha");
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o711)).expect("storage mode");
+        let row = crate::registry::LoopRecord {
+            name: "alpha".into(),
+            uid: geteuid().as_raw(),
+            home: original.clone(),
+            launch: original.clone(),
+            session: None,
+            door_floor: None,
+        };
+        let storage = endpoint_storage(&original);
+        let retained = fixture.root.join("retained");
+        fs::rename(&original, &retained).expect("retain storage");
+        fs::create_dir(&original).expect("replacement storage");
+        fs::write(original.join("mail"), b"not an endpoint").expect("replacement sentinel");
+        let address = Address::parse(name).expect("address");
+        let relative = address
+            .relative_mailbox()
+            .strip_prefix("alpha")
+            .expect("relative")
+            .to_owned();
+        let endpoint = Endpoint::open_beneath(storage, &row, address, group(), DURABLE)
+            .expect("open received storage after replacement");
+        endpoint.fresh().expect("freshness keeps storage");
+        let mailbox = retained.join(relative);
+        let staging = mailbox.parent().expect("parent").join(".mail-staging");
+        let temporary = endpoint
+            .temporary("custody-probe", b"held storage")
+            .expect("held write");
+        assert_eq!(
+            Path::new(&temporary.path),
+            endpoint.staging_path.join("custody-probe")
+        );
+        assert_eq!(
+            fs::read(staging.join("custody-probe")).expect("held bytes"),
+            b"held storage"
+        );
+        assert_eq!(
+            fs::read(original.join("mail")).expect("untouched sentinel"),
+            b"not an endpoint"
+        );
+        endpoint_freshness_refusals(&endpoint, &mailbox, &staging);
+        fs::set_permissions(&retained, fs::Permissions::from_mode(0o731)).expect("widen storage");
+        assert!(matches!(endpoint.fresh(), Err(MailError::Entry(ref detail))
+            if detail.contains("anchor-mode") && detail.contains("purpose=loop-storage")));
+        fs::set_permissions(&retained, fs::Permissions::from_mode(0o711)).expect("restore storage");
+        endpoint.fresh().expect("restored storage");
+        endpoint_admission_refusals(&row, &retained, name);
+    }
+}
+
+/// # Panics
+/// Panics if the held route omits scope, canonical-home, group or durability admission.
+fn endpoint_admission_refusals(row: &crate::registry::LoopRecord, root: &Path, name: &str) {
+    for case in ["loop", "relative", "parent", "group", "durability"] {
+        let mut row = row.clone();
+        if case == "relative" {
+            row.home = PathBuf::from("relative");
+        }
+        if case == "parent" {
+            row.home.push("..");
+        }
+        let address = Address::parse(if case == "loop" { "beta" } else { name }).expect("address");
+        let actor_group = if case == "group" {
+            group().wrapping_add(1)
+        } else {
+            group()
+        };
+        let durability = Durability {
+            durable_sync: case != "durability",
+            ..DURABLE
+        };
+        let error = Endpoint::open_beneath(
+            endpoint_storage(root),
+            &row,
+            address,
+            actor_group,
+            durability,
+        )
+        .err()
+        .expect("admission refusal");
+        let expected = match case {
+            "group" => "unsafe-storage: mailbox root custody",
+            "durability" => "unsafe-storage: durability is not established",
+            _ => "unsafe-storage: endpoint loop binding",
+        };
+        assert!(
+            matches!(error, MailError::Invalid(detail) if detail == expected),
+            "{case}: {error}"
+        );
+    }
+}

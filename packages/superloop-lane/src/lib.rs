@@ -1,7 +1,9 @@
 #![doc = include_str!("../README.md")]
 
 pub mod build;
+pub mod container_entry;
 pub mod container_helper;
+pub mod creation_entry;
 pub mod credential;
 pub mod door;
 pub mod door_node;
@@ -9,6 +11,10 @@ pub mod door_sign_in;
 pub mod driver;
 pub mod error;
 mod fixture_exec;
+
+#[cfg(test)]
+#[path = "../../lane-lifecycle/src/dead_pid.rs"]
+mod dead_pid;
 pub mod gateway_dispatch;
 pub mod home;
 pub mod install;
@@ -21,6 +27,8 @@ pub mod prepare;
 pub mod repair;
 pub mod requests;
 pub mod routes;
+mod runtime_admission;
+pub mod runtime_entry;
 pub mod settings;
 pub mod sign_in;
 pub mod signin_home;
@@ -222,6 +230,42 @@ pub fn load_plan(
     load_plan_with_door(home, loop_name, run, caller, true)
 }
 
+pub(crate) fn load_launch_plan(
+    home: &Path,
+    loop_name: &str,
+    run: &str,
+    caller: (u32, u32),
+    backend: Option<settings::BoxBackend>,
+) -> Result<(Plan, Settings), LaneError> {
+    load_launch_plan_admitted(
+        home,
+        loop_name,
+        run,
+        caller,
+        backend,
+        &runtime_admission::RuntimeAdmission::Gate,
+    )
+}
+
+pub(crate) fn load_launch_plan_admitted(
+    home: &Path,
+    loop_name: &str,
+    run: &str,
+    caller: (u32, u32),
+    backend: Option<settings::BoxBackend>,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+) -> Result<(Plan, Settings), LaneError> {
+    let settings = read_plan_settings(home, loop_name, run)?;
+    let backend = settings.launch_backend(backend)?;
+    admission.check(backend)?;
+    #[cfg(test)]
+    admission.scope_names(home, loop_name, run)?;
+    let loaded = load_plan_with_settings(home, loop_name, run, caller, true, settings, backend)?;
+    #[cfg(test)]
+    admission.scope_plan(&loaded.0.document)?;
+    Ok(loaded)
+}
+
 /// Load a protected run's paths without consulting a current door generation.
 ///
 /// # Errors
@@ -243,21 +287,62 @@ fn load_plan_with_door(
     caller: (u32, u32),
     include_door: bool,
 ) -> Result<(Plan, Settings), LaneError> {
+    let settings = read_plan_settings(home, loop_name, run)?;
+    // These legacy readers reconstruct the deployed Codex form, not a new launch.
+    let backend = settings.launch_backend(Some(settings::BoxBackend::Codex))?;
+    load_plan_with_settings(
+        home,
+        loop_name,
+        run,
+        caller,
+        include_door,
+        settings,
+        backend,
+    )
+}
+
+fn read_plan_settings(home: &Path, loop_name: &str, run: &str) -> Result<Settings, LaneError> {
     loop_home::validate_name(loop_name)
         .map_err(|error| LaneError::input("loop-name", error.message()))?;
     if !valid_run_name(run) {
         return Err(LaneError::input("run-name", format!("bad run name: {run}")));
     }
+    read_worker_settings(home, loop_name)
+}
+
+fn read_worker_settings(home: &Path, loop_name: &str) -> Result<Settings, LaneError> {
     let settings_path = home
         .join(".config/loops")
         .join(loop_name)
         .join("workers.toml");
-    let settings = Settings::read(&settings_path)?;
+    let settings = if let Some(configuration) = runtime_entry::plan_configuration(home)? {
+        configuration.read_settings(loop_name, &settings_path)?
+    } else {
+        Settings::read(&settings_path)?
+    };
+    Ok(settings)
+}
+
+pub(crate) fn read_plan_registry(home: &Path) -> Result<loop_home::registry::Registry, LaneError> {
+    if let Some(configuration) = runtime_entry::plan_configuration(home)? {
+        return Ok(configuration.registry);
+    }
+    let path = loop_home::registry_path(std::env::var_os("ENTER_LOOP_REGISTRY").as_deref(), home);
+    loop_home::load_registry(&path)
+        .map_err(|error| LaneError::input("registry-row", error.message()))
+}
+
+fn load_plan_with_settings(
+    home: &Path,
+    loop_name: &str,
+    run: &str,
+    caller: (u32, u32),
+    include_door: bool,
+    settings: Settings,
+    backend: settings::BoxBackend,
+) -> Result<(Plan, Settings), LaneError> {
     settings.validate_grant(home, loop_name)?;
-    let registry_path =
-        loop_home::registry_path(std::env::var_os("ENTER_LOOP_REGISTRY").as_deref(), home);
-    let registry_file = loop_home::load_registry(&registry_path)
-        .map_err(|error| LaneError::input("registry-row", error.message()))?;
+    let registry_file = read_plan_registry(home)?;
     let row = registry_file
         .row(loop_name, home)
         .map_err(|error| LaneError::input("registry-row", error.message()))?;
@@ -270,7 +355,7 @@ fn load_plan_with_door(
         .require(loop_name)
         .map_err(|error| LaneError::input("allocations", error.message()))?;
     let mut plan = if include_door {
-        Plan::build(
+        Plan::build_with_door(
             home,
             loop_name,
             run,
@@ -278,6 +363,8 @@ fn load_plan_with_door(
             &registry,
             worker_block,
             caller,
+            true,
+            Some(backend),
         )?
     } else {
         Plan::build_for_record(

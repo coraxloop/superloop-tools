@@ -11,9 +11,13 @@ use crate::plan::{Plan, box_gate, registry_with_timeout, verify_box_attestation}
 use crate::settings::{Resources, Settings};
 use crate::{load_plan, valid_run_name};
 
+pub mod helper_admission;
+mod helper_service;
 mod install;
 mod launch;
 mod prepare;
+mod reader_custody;
+mod runtime_preparation;
 
 fn gate_fixture() -> serde_json::Value {
     Plan::build(
@@ -272,7 +276,7 @@ fn box_gate_refuses_unknown_option() {
     );
 }
 
-fn fixture_settings(entry: &Path) -> Settings {
+pub fn fixture_settings(entry: &Path) -> Settings {
     Settings {
         sandbox_mode: "danger-full-access".into(),
         runs_root: None,
@@ -334,7 +338,11 @@ fn plan_refuses_missing_backend_before_allocation() {
     )
     .expect_err("required selector");
     assert_eq!(failure.kind, "missing-setting");
-    assert!(failure.detail.contains("backend_argv.codex"));
+    assert!(
+        failure
+            .detail
+            .contains("backend_argv has no configured program")
+    );
 }
 
 /// ´test:crate:full-plan-is-pinned-for-the-fixture´

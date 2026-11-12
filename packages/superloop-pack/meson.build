@@ -73,12 +73,14 @@ dependency_ledger += ['''
 
 # Publication command dependencies.
 dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-pack/tests/replay.rs:std :: env :: var_os (\"PUBLIC_PACK_TEST_LINTER\") . expect (\"real linter\")#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"std :: env :: var_os (\"PUBLIC_PACK_TEST_LINTER\") . expect (\"real linter\")","callee":"bin/superloop-lint","lookup":"test-executable","setting":"PUBLIC_PACK_TEST_LINTER","contract":"Check that a custom unpublished register destination produces a valid public owner snapshot with the built real linter"}
+{"kind":"call","site":"packages/superloop-pack/tests/replay.rs:std :: env :: var_os (\"PUBLIC_PACK_TEST_LINTER\") . expect (\"real linter\")#2","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"std :: env :: var_os (\"PUBLIC_PACK_TEST_LINTER\") . expect (\"real linter\")","callee":"bin/superloop-lint","lookup":"test-executable","setting":"PUBLIC_PACK_TEST_LINTER","contract":"Measure the real citation-sites protocol before mutating its transport in cut refusal fixtures"}
 {"kind":"call","site":"packages/superloop-pack/src/replay.rs:& linter#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"superloop-lint","callee":"bin/superloop-lint","lookup":"configured-external","setting":"--linter","contract":"Record the candidate linter version before replay preflight"}
 {"kind":"call","site":"packages/superloop-pack/tests/replay.rs:\"git\"#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"git\"","callee":"external:git","lookup":"test-executable","contract":"Create and inspect isolated replay histories and prove no-write refusals"}
 {"kind":"call","site":"packages/superloop-pack/tests/replay.rs:env ! (\"CARGO_BIN_EXE_superloop-pack\")#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"env ! (\"CARGO_BIN_EXE_superloop-pack\")","callee":"bin/superloop-pack","lookup":"test-executable","contract":"Exercise replay metadata preservation, deterministic mapping and preflight refusals through the built binary","binding":"CARGO_BIN_EXE_superloop-pack"}
 {"kind":"call","site":"packages/superloop-pack/tests/release.rs:\"git\"#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"git\"","callee":"external:git","lookup":"public-command","contract":"Create and inspect public release fixtures and prove ref and object preservation on refusal"}
 {"kind":"call","site":"packages/superloop-pack/tests/release.rs:env ! (\"CARGO_BIN_EXE_superloop-pack\")#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"env ! (\"CARGO_BIN_EXE_superloop-pack\")","callee":"bin/superloop-pack","lookup":"test-executable","binding":"CARGO_BIN_EXE_superloop-pack","contract":"Exercise patch and minor releases, pinned tree metadata, dry run, notes overrides and atomic named refusals through the built command"}
-{"kind":"call","site":"packages/superloop-pack/src/cut.rs:linter#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"superloop-lint","callee":"bin/superloop-lint","lookup":"configured-external","setting":"--linter","contract":"Read the versioned citation-sites JSON from the built linter recognizer; refuse unsuccessful status or malformed protocol"}
+{"kind":"call","site":"packages/superloop-pack/src/cut.rs:linter#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"superloop-lint","callee":"bin/superloop-lint","lookup":"configured-external","setting":"--linter","contract":"Read citation-sites JSON with a 120-second process-group deadline; retain diagnostics and refuse timeout, unsuccessful status or malformed protocol"}
 {"kind":"call","site":"packages/superloop-pack/tests/cut.rs:\"git\"#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"git\"","callee":"external:git","lookup":"public-command","contract":"Create and inspect isolated source and public history fixtures"}
 {"kind":"call","site":"packages/superloop-pack/tests/cut.rs:\"git\"#2","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"git\"","callee":"external:git","lookup":"public-command","contract":"Read the written public commit object to verify its exact message bytes"}
 {"kind":"call","site":"packages/superloop-pack/tests/cut.rs:\"git\"#3","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"git\"","callee":"external:git","lookup":"public-command","contract":"Read the release tag contents to verify changelog link definitions and trailing blank lines are omitted"}
@@ -87,4 +89,9 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
+''']
+
+# Bounded citation-process fixtures.
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-pack/src/cut.rs:\"/bin/sh\"#1","caller":"superloop-pack","owner":"SUPERLOOPPACK","selector":"\"/bin/sh\"","callee":"external:/bin/sh","lookup":"configured-external","contract":"Exercise bounded citation stream collection with armed silent and pipe-holding process fixtures"}
 ''']

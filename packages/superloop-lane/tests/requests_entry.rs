@@ -424,12 +424,12 @@ fn own_fixture_tree(path: &std::path::Path, uid: nix::unistd::Uid) {
 
 /// ´test:integration:requests-entry-requires-one-account-for-door-and-permission-custody´
 #[test]
-#[ignore = "requires provisioned namespace root with UIDs 41001 and 41002 mapped"]
+#[ignore = "requires privileged namespace root with UID/GID 0, 41001 and 41002 mapped and dac_override for caller fixtures; podman unshare supplies the map"]
+#[allow(clippy::too_many_lines)]
 fn requests_entry_requires_one_account_for_door_and_permission_custody() {
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use nix::unistd::{Uid, chown};
     use std::os::fd::AsRawFd as _;
-    use std::os::unix::process::CommandExt as _;
     assert!(
         Uid::effective().is_root(),
         "provisioned namespace root required"
@@ -443,9 +443,20 @@ fn requests_entry_requires_one_account_for_door_and_permission_custody() {
         let other = if caller == 41001 { 41002 } else { 41001 };
         let fixture = Fixture::new();
         let id = fixture.file("R");
+        let triage_id = fixture.file("S");
         own_fixture_tree(fixture.home.path(), Uid::from_raw(caller));
+        // Fixture-only DAC override reaches the application owner check through
+        // foreign 0700 directories; an unprivileged caller can fail earlier in the kernel.
         let run = |args: &[&str], document: Option<&Value>| {
-            let mut child = Command::new(format!("/proc/self/fd/{}", binary.as_raw_fd()))
+            let mut child = Command::new("/usr/bin/setpriv")
+                .args([
+                    format!("--reuid={caller}"),
+                    format!("--regid={caller}"),
+                    "--clear-groups".into(),
+                    "--inh-caps=-all,+dac_override".into(),
+                    "--ambient-caps=-all,+dac_override".into(),
+                ])
+                .arg(format!("/proc/self/fd/{}", binary.as_raw_fd()))
                 .arg("requests")
                 .args(args)
                 .env_clear()
@@ -455,8 +466,6 @@ fn requests_entry_requires_one_account_for_door_and_permission_custody() {
                     format!("/proc/self/fd/{}", helper.as_raw_fd()),
                 )
                 .env("PERMISSION_TRIAGE_LOOP_REGISTRY", &fixture.registry)
-                .uid(caller)
-                .gid(caller)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -473,32 +482,6 @@ fn requests_entry_requires_one_account_for_door_and_permission_custody() {
             }
             child.wait_with_output().expect("mapped lane completion")
         };
-        for foreign in [
-            &fixture.registry,
-            &fixture.home.path().join("permission-state"),
-        ] {
-            chown(foreign, Some(Uid::from_raw(other)), None).expect("foreign permission owner");
-            for command in ["status", "list", "triage", "review", "adjudicate"] {
-                let mut args = vec![command, "alpha"];
-                if command == "review" {
-                    args.push(&id);
-                }
-                let output = run(&args, Some(&json!({"schema":1,"items":[]})));
-                assert_eq!(output.status.code(), Some(2), "{command}");
-                assert_eq!(output.stdout, b"");
-                assert_ne!(output.stderr, b"");
-            }
-            chown(foreign, Some(Uid::from_raw(caller)), None).expect("restore permission owner");
-        }
-        for command in ["status", "list"] {
-            let output = run(&[command, "alpha"], None);
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(serde_json::from_slice::<Value>(&output.stdout).is_ok());
-        }
         let mark = json!({"schema":1,"items":[{"id":id,"mark_for_review":true}]});
         let output = run(&["triage", "alpha"], Some(&mark));
         assert!(
@@ -512,8 +495,57 @@ fn requests_entry_requires_one_account_for_door_and_permission_custody() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let review: Value = serde_json::from_slice(&output.stdout).expect("current review");
+        let mut decision = json!({"schema":1,"id":id,"review_id":review["review"]["review_id"],"decision":{"answer":{"outcome":"refuse"},"reason":"mapped owner decision"}});
+        let mark = json!({"schema":1,"items":[{"id":triage_id,"mark_for_review":true}]});
+        for (foreign, kind) in [
+            (&fixture.registry, "loop registry"),
+            (&fixture.home.path().join("permission-state"), "state-root"),
+        ] {
+            chown(foreign, Some(Uid::from_raw(other)), None).expect("foreign permission owner");
+            for command in ["status", "list", "triage", "review", "adjudicate"] {
+                let mut args = vec![command, "alpha"];
+                if command == "review" {
+                    args.push(&id);
+                }
+                let document = match command {
+                    "triage" => Some(&mark),
+                    "adjudicate" => Some(&decision),
+                    _ => None,
+                };
+                let output = run(&args, document);
+                assert_eq!(output.status.code(), Some(2), "{command}");
+                assert_eq!(output.stdout, b"");
+                let detail = String::from_utf8_lossy(&output.stderr);
+                let expected =
+                    format!("{kind} owner uid is {other}, not process effective uid {caller}");
+                assert!(detail.contains(&expected), "{command} {kind}: {detail}");
+            }
+            chown(foreign, Some(Uid::from_raw(caller)), None).expect("restore permission owner");
+        }
+        for command in ["status", "list"] {
+            let output = run(&[command, "alpha"], None);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(serde_json::from_slice::<Value>(&output.stdout).is_ok());
+        }
+        let output = run(&["triage", "alpha"], Some(&mark));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = run(&["review", "alpha", &id], None);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let review: Value = serde_json::from_slice(&output.stdout).expect("review");
-        let decision = json!({"schema":1,"id":id,"review_id":review["review"]["review_id"],"decision":{"answer":{"outcome":"refuse"},"reason":"mapped owner decision"}});
+        decision["review_id"] = review["review"]["review_id"].clone();
         let output = run(&["adjudicate", "alpha"], Some(&decision));
         assert!(
             output.status.success(),

@@ -61,6 +61,7 @@ pub(super) fn code(error: &MailError) -> &'static str {
     match error {
         MailError::Capacity => "service-capacity",
         MailError::Io(_) | MailError::ClockWait => "io-failure",
+        MailError::Entry(reason) => entry_code(reason),
         MailError::Invalid(reason) => match reason.split(':').next().unwrap_or("") {
             "invalid-name" => "invalid-name",
             "invalid-file" => "invalid-file",
@@ -74,6 +75,22 @@ pub(super) fn code(error: &MailError) -> &'static str {
             "changed-source" => "changed-source",
             _ => "io-failure",
         },
+    }
+}
+fn entry_code(reason: &str) -> &'static str {
+    match reason.split(':').next().unwrap_or("") {
+        "anchor-declaration" => "anchor-declaration",
+        "anchor-missing" => "anchor-missing",
+        "anchor-transport" => "anchor-transport",
+        "anchor-owner" => "anchor-owner",
+        "anchor-mode" => "anchor-mode",
+        "anchor-kind" => "anchor-kind",
+        "anchor-identity" => "anchor-identity",
+        "anchor-escape" => "anchor-escape",
+        "anchor-exec" => "anchor-exec",
+        "anchor-io" => "anchor-io",
+        "anchor-uid-map" => "anchor-uid-map",
+        _ => "entry-refusal",
     }
 }
 fn matches_name(parent: &File, name: &str, binding: &Binding) -> Result<bool> {

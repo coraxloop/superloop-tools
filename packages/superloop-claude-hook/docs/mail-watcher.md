@@ -4,7 +4,7 @@ At session start the loop starts or resumes its Sonnet inbox watcher independent
 
 The watcher hands back only `You've got mail.` and waits for the session to resume it. On that resume it runs the recipe again; a repeated notice is harmless. The session chooses whether to use ordinary `ls`, `cat` and `mv` to read or move a letter into `read`. A notice does not authorize a lane resume, provide sender authority, or create a HOLD/RELEASE queue. Journal verification remains required for steering.
 
-The watch arms before the first listing. Every event, including overflow, triggers a fresh listing; directory replacement stops the old watch before rearming. When inotify is unavailable or refuses the directory, bounded ordinary listings supply the fallback. The recipe observes only directory presence and filesystem identity, never letter contents, subjects, sender lists, timestamps or counts. It keeps no delivery receipt and ignores read history.
+The parent creates and clears the readiness file before each watcher launch, so the first readiness check cannot read a missing file or a previous watcher's acknowledgement. The watch arms before the first listing. Every event, including overflow, triggers a fresh listing; directory replacement stops the old watch before rearming. When inotify is unavailable or refuses the directory, bounded ordinary listings supply the fallback. The recipe observes only directory presence and filesystem identity, never letter contents, subjects, sender lists, timestamps or counts. It keeps no delivery receipt and ignores read history.
 
 A missing or unreadable inbox at start, or an unreadable one later, ends the recipe with status 3 and a stderr line, which the watcher hands back as a failure rather than as mail.
 
@@ -56,10 +56,11 @@ while :; do
         rm -f -- "$scratch/events"
         mkfifo "$scratch/events"
         exec {events}<>"$scratch/events"
+        : > "$scratch/ready"
         LC_ALL=C inotifywait -m --format '%e' -e create -e moved_to -e delete_self -e move_self -e unmount -- "$inbox" >&"$events" 2>"$scratch/ready" &
         child=$!
         for ((attempt=0; attempt<100; attempt++)); do
-            if grep -Fq 'Watches established.' "$scratch/ready"; then armed=true; break; fi
+            if grep -Fqs 'Watches established.' "$scratch/ready"; then armed=true; break; fi
             kill -0 "$child" 2>/dev/null || break
             sleep 0.02
         done

@@ -334,9 +334,6 @@ fn settings(args: &[String], verify: bool) -> Result<Settings> {
     if selected.is_empty() && values.contains_key("--nodes") {
         return Err("invalid --nodes; expected one or more distinct node names".into());
     }
-    if selected.is_empty() && !verify {
-        return Err(refused("nodes"));
-    }
     let mut names = if selected.is_empty() {
         Vec::new()
     } else {
@@ -349,13 +346,13 @@ fn settings(args: &[String], verify: bool) -> Result<Settings> {
     }
     names.sort_unstable();
     let mut missing = Vec::new();
-    let (routes, route_refusal) = match selected_routes(&owner, &name, &names, &value("--hosts"))
-        .and_then(|rows| registry_account(rows, values.get("--user")))
-    {
-        Ok(rows) => (rows, None),
-        Err(error) if verify => (Vec::new(), Some(error)),
-        Err(error) => return Err(error),
-    };
+    let selected = selected_routes(&owner, &name, &names, &value("--hosts"));
+    let (routes, route_refusal) =
+        match selected.and_then(|rows| registry_account(rows, values.get("--user"))) {
+            Ok(rows) => (rows, None),
+            Err(error) if verify => (Vec::new(), Some(error)),
+            Err(error) => return Err(error),
+        };
     let nodes = routes
         .iter()
         .map(|row| Node {
@@ -399,17 +396,19 @@ fn settings(args: &[String], verify: bool) -> Result<Settings> {
             .unwrap_or_default()
     };
     for (needed, label) in [
-        (nodes.is_empty(), "nodes"),
         (project.is_empty() && !reconcile, "project"),
         (
-            nodes.is_empty()
-                || nodes
-                    .iter()
-                    .any(|node| node.host.is_empty() || node.port.is_empty()),
+            nodes
+                .iter()
+                .any(|node| node.host.is_empty() || node.port.is_empty()),
             "hosts",
         ),
-        (account.is_empty(), "user"),
-        (key.as_os_str().is_empty() || !key.exists(), "key"),
+        (!nodes.is_empty() && account.is_empty(), "user"),
+        (
+            (!nodes.is_empty() || repair || values.contains_key("--key"))
+                && (key.as_os_str().is_empty() || !key.exists()),
+            "key",
+        ),
     ] {
         if needed && route_refusal.is_none() {
             if !verify {
@@ -452,19 +451,14 @@ fn selected_routes(
     nodes: &[&str],
     hosts: &str,
 ) -> Result<Vec<crate::routes::Row>> {
-    if nodes.is_empty() {
-        return Ok(Vec::new());
-    }
     let source = fs::read_to_string(owner.join(".local/share/orchestration-instance/servers.md"))
         .map_err(|_| "registry-read: inspection failed")?;
-    let active = crate::routes::registry(&source, name).map_err(|error| {
-        if error.starts_with("registry-loop:") {
-            format!("registry-node: {}: no active row", nodes[0])
-        } else {
-            error
-        }
-    })?;
-    let mut rows = Vec::new();
+    let active = crate::routes::registry(&source, name)?;
+    let mut rows = if nodes.is_empty() {
+        active.clone()
+    } else {
+        Vec::new()
+    };
     for node in nodes {
         let row = active
             .iter()
@@ -726,8 +720,8 @@ fn check_location(settings: &mut Settings) {
 }
 
 fn verify(mut settings: Settings) -> Result<(u8, String)> {
-    if let Some(refusal) = settings.route_refusal.take() {
-        settings.missing.push(refusal);
+    if let Some(refusal) = &settings.route_refusal {
+        settings.missing.push(refusal.clone());
         return Ok(verification_report(&settings));
     }
     if validate_charter(&settings.charter).is_err() {
@@ -757,13 +751,13 @@ fn verify(mut settings: Settings) -> Result<(u8, String)> {
     } else if !canonical_ready(&settings).unwrap_or(false) {
         settings.missing.push("sign-in-source".into());
     }
-    for (path, target, label) in [
-        (
-            settings.home.join("AGENTS.md"),
-            settings.charter.clone(),
-            "AGENTS.md".into(),
-        ),
-        (
+    let mut links = vec![(
+        settings.home.join("AGENTS.md"),
+        settings.charter.clone(),
+        String::from("AGENTS.md"),
+    )];
+    if !settings.key.as_os_str().is_empty() {
+        links.push((
             home_key(&settings)?,
             settings.key.clone(),
             format!(
@@ -774,8 +768,9 @@ fn verify(mut settings: Settings) -> Result<(u8, String)> {
                     .ok_or("key filename missing")?
                     .to_string_lossy()
             ),
-        ),
-    ] {
+        ));
+    }
+    for (path, target, label) in links {
         if !link_matches(&path, &target) {
             settings.missing.push(label);
         }
@@ -820,7 +815,6 @@ fn verify_ssh(settings: &mut Settings) -> Result<()> {
     {
         settings.missing.push("ssh-header".into());
     }
-    let key = home_key(settings)?.to_string_lossy().into_owned();
     let known = settings
         .home
         .join("known_hosts.routes")
@@ -831,6 +825,10 @@ fn verify_ssh(settings: &mut Settings) -> Result<()> {
     {
         settings.missing.push("known-hosts".into());
     }
+    if settings.nodes.is_empty() {
+        return Ok(());
+    }
+    let key = home_key(settings)?.to_string_lossy().into_owned();
     for node in &settings.nodes {
         for (option, value, label) in [
             ("hostname", node.host.as_str(), "host"),
@@ -869,10 +867,15 @@ fn verification_report(settings: &Settings) -> (u8, String) {
             )
         )
     };
+    let observation = if settings.nodes.is_empty() && settings.route_refusal.is_none() {
+        ",\"observations\":[\"no-active-routes\"]"
+    } else {
+        ""
+    };
     (
         u8::from(!settings.missing.is_empty()),
         format!(
-            "{{\"loop\":{},\"home\":{},\"charter\":{},\"ok\":{},\"missing\":{},\"varied\":{},\"varied_lines\":{}{location}}}",
+            "{{\"loop\":{},\"home\":{},\"charter\":{},\"ok\":{},\"missing\":{},\"varied\":{},\"varied_lines\":{}{location}{observation}}}",
             json!(settings.name),
             json!(settings.home),
             json!(settings.charter),
@@ -1011,12 +1014,14 @@ fn create(settings: &Settings) -> Result<String> {
             .write_all(bytes.as_bytes())
             .map_err(|e| e.to_string())?;
     }
-    nix::unistd::symlinkat(
-        &settings.key,
-        &keys,
-        settings.key.file_name().ok_or("key filename missing")?,
-    )
-    .map_err(|e| e.to_string())?;
+    if !settings.key.as_os_str().is_empty() {
+        nix::unistd::symlinkat(
+            &settings.key,
+            &keys,
+            settings.key.file_name().ok_or("key filename missing")?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     nix::unistd::symlinkat(&settings.charter, &staged.directory, "AGENTS.md")
         .map_err(|e| e.to_string())?;
     let linked = canonical_ready(settings)?;
@@ -1050,8 +1055,13 @@ fn create(settings: &Settings) -> Result<String> {
         "Owner: sign in once in the canonical mode-0700 root with CODEX_HOME={quoted_home} superloop-runtime exec -- login; prepare again to bind the lane home, then probe with the roster's explicit model and effort:\nCODEX_HOME={quoted_home} superloop-runtime exec -- exec -m MODEL -c model_reasoning_effort=EFFORT -C {quoted_probe} --skip-git-repo-check -s read-only 'Reply with the single word OK.' < /dev/null"
     );
     Ok(format!(
-        "CODEX-HOME {} READY{}",
+        "CODEX-HOME {} READY{}{}",
         settings.name,
+        if settings.nodes.is_empty() {
+            " routes=no-active-routes"
+        } else {
+            ""
+        },
         if linked {
             format!(" sign-in-link={}", canonical_auth(settings).display())
         } else {
@@ -1099,9 +1109,14 @@ pub fn command(args: &[String], check: bool) -> u8 {
                 return Ok((
                     0,
                     format!(
-                        "CODEX-HOME {} SIGN-IN-LINKED sign-in-link={}",
+                        "CODEX-HOME {} SIGN-IN-LINKED sign-in-link={}{}",
                         settings.name,
-                        canonical_auth(&settings).display()
+                        canonical_auth(&settings).display(),
+                        if settings.nodes.is_empty() {
+                            " routes=no-active-routes"
+                        } else {
+                            ""
+                        }
                     ),
                 ));
             }

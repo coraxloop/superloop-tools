@@ -99,24 +99,31 @@ impl Service {
         Ok(())
     }
     fn tick(&mut self) -> Result<Instant> {
-        let mut waiting = false;
+        let mut waiting = None;
         loop {
             let now = self.clock.now()?;
             match self.journal.check_clock(&now) {
-                Ok(()) => return Ok(now),
+                Ok(()) => {
+                    if waiting.is_some() {
+                        tracing::info!(now = %now, reserved = ?self.journal.greatest_reserved(), "clock wait left");
+                    }
+                    return Ok(now);
+                }
                 Err(MailError::ClockWait) => {
-                    if !waiting {
+                    if waiting.is_none() {
+                        waiting = Some(tracing::info_span!("mail.clock_wait", reserved = ?self.journal.greatest_reserved()).entered());
+                        tracing::info!(reserved = ?self.journal.greatest_reserved(), "clock wait entered");
                         writeln!(
                             std::io::stderr().lock(),
                             "mail condition: {}",
                             MailError::ClockWait
                         )?;
-                        waiting = true;
                     }
                     if self.last_prune.elapsed() >= Duration::from_secs(PRUNE_INTERVAL_SECONDS) {
                         let inventory = self.directory.inventory()?;
                         self.prune(&inventory)?;
                     }
+                    tracing::trace!(now = %now, "clock wait tick");
                     self.clock.wait();
                 }
                 Err(error) => return Err(error),
@@ -126,11 +133,14 @@ impl Service {
     fn recover(&mut self, inventory: &Inventory) -> Result<Vec<String>> {
         let mut failures = Vec::new();
         for (sender, recipient, name) in publication::pending_restorations(&self.journal)? {
+            let _span = tracing::info_span!("mail.recover_restoration", %sender, %recipient, letter = %name).entered();
             if let Err(error) = self.reconcile(inventory, &sender, &recipient, &name) {
+                tracing::warn!(reason = %error, "recovery failed");
                 failures.push(error.to_string());
             }
         }
         for (sender, recipient, name) in publication::pending_preparations(&self.journal)? {
+            let _span = tracing::info_span!("mail.recover_preparation", %sender, %recipient, letter = %name).entered();
             let accepted = self.journal.records()?.into_iter().any(|record| {
                 record.sender == sender.to_string()
                     && record.outgoing == name
@@ -148,6 +158,7 @@ impl Service {
                 self.reconcile(inventory, &sender, &recipient, &name)
             };
             if let Err(error) = result {
+                tracing::warn!(reason = %error, "recovery failed");
                 failures.push(error.to_string());
             }
         }
@@ -157,7 +168,10 @@ impl Service {
             .into_iter()
             .filter(|record| record.completed.is_none())
         {
+            let _span = tracing::info_span!("mail.recover_publication", sender = %record.sender, recipient = %record.recipient, letter = %record.outgoing, delivery = %record.delivery).entered();
+            tracing::info!("recovering pending publication");
             if let Err(error) = self.finish(inventory, &record) {
+                tracing::warn!(reason = %error, "publication remains pending");
                 self.journal.pending(&record.delivery, &error.to_string())?;
                 let sender = Address::parse(&record.sender)
                     .map_err(|_| MailError::Invalid("journal sender"))?;
@@ -188,6 +202,7 @@ impl Service {
                 &actor.staging,
                 &sender.to_string(),
             ) {
+                tracing::warn!(%sender, reason = %error, "refusal maintenance failed");
                 failures.push(error.to_string());
             }
             for name in io::names(&actor.staging)? {
@@ -196,6 +211,7 @@ impl Service {
                     && !pending.contains(&(sender.to_string(), name.to_owned()))
                     && let Err(error) = self.reconcile(inventory, sender, &outgoing.recipient, name)
                 {
+                    tracing::warn!(%sender, recipient = %outgoing.recipient, letter = %name, reason = %error, "recovery failed");
                     failures.push(error.to_string());
                 }
             }
@@ -209,6 +225,8 @@ impl Service {
         recipient: &Address,
         name: &str,
     ) -> Result<()> {
+        let _span =
+            tracing::info_span!("mail.reconcile", %sender, %recipient, letter = %name).entered();
         let sender = actor(inventory, sender)?;
         let recipient = actor(inventory, recipient)?;
         publication::reconcile_unpublished(
@@ -219,6 +237,7 @@ impl Service {
         )
     }
     fn finish(&mut self, inventory: &Inventory, record: &Record) -> Result<()> {
+        let _span = tracing::info_span!("mail.finish", sender = %record.sender, recipient = %record.recipient, letter = %record.outgoing, delivery = %record.delivery).entered();
         let sender_address =
             Address::parse(&record.sender).map_err(|_| MailError::Invalid("journal sender"))?;
         let recipient_address = Address::parse(&record.recipient)
@@ -270,6 +289,7 @@ impl Service {
                 &Witness::Absent,
                 Instant::now()?,
             )?;
+            tracing::info!(delivered = 1, "letter delivered");
         }
         Ok(())
     }
@@ -282,6 +302,11 @@ impl Service {
         diagnostic: (&str, &str),
         delivery: Option<Instant>,
     ) -> Result<()> {
+        let recipient = name
+            .to_str()
+            .and_then(|name| Outgoing::parse(name).ok())
+            .map(|outgoing| outgoing.recipient.to_string());
+        let _span = tracing::info_span!("mail.refusal", %sender, recipient = recipient.as_deref(), letter = %name.to_string_lossy(), code = diagnostic.0).entered();
         refusal::project(
             &self.journal,
             &actor.outbox,
@@ -305,7 +330,23 @@ impl Service {
                         .collect::<Vec<_>>(),
                 )?,
             },
-        )
+        )?;
+        if diagnostic.0 == "pending-delivery" {
+            tracing::warn!(
+                pending = 1,
+                code = diagnostic.0,
+                reason = diagnostic.1,
+                "letter pending"
+            );
+        } else {
+            tracing::warn!(
+                refused = 1,
+                code = diagnostic.0,
+                reason = diagnostic.1,
+                "letter refused"
+            );
+        }
+        Ok(())
     }
     fn candidates(&self, inventory: &Inventory) -> Result<BTreeMap<Address, VecDeque<OsString>>> {
         let mut queues = BTreeMap::new();
@@ -326,6 +367,7 @@ impl Service {
     }
     /// One finite round-robin scan; arrivals during it wait for the next call.
     pub fn scan(&mut self) -> Result<Vec<String>> {
+        let _span = tracing::trace_span!("mail.scan").entered();
         let inventory = self.directory.inventory()?;
         let mut failures = inventory.failures.clone();
         failures.extend(self.recover(&inventory)?);
@@ -339,6 +381,11 @@ impl Service {
         Ok(failures)
     }
     fn candidate(&mut self, sender_address: &Address, name: &OsStr) -> Result<()> {
+        let recipient = name
+            .to_str()
+            .and_then(|name| Outgoing::parse(name).ok())
+            .map(|outgoing| outgoing.recipient.to_string());
+        let _span = tracing::info_span!("mail.delivery", sender = %sender_address, recipient = recipient.as_deref(), letter = %name.to_string_lossy()).entered();
         let inventory = self.directory.inventory()?;
         if self.last_prune.elapsed() >= Duration::from_secs(PRUNE_INTERVAL_SECONDS) {
             self.prune(&inventory)?;
@@ -348,46 +395,57 @@ impl Service {
         match self.deliver(&inventory, sender_address, name) {
             Ok(()) => Ok(()),
             Err(error) => {
-                let accepted = self.journal.records()?.into_iter().find(|record| {
-                    record.sender == sender_address.to_string()
-                        && Some(record.outgoing.as_str()) == name.to_str()
-                        && record.completed.is_none()
-                });
-                if let Some(record) = accepted {
-                    self.journal.pending(&record.delivery, &error.to_string())?;
-                    self.project(
-                        sender,
-                        sender_address,
-                        name,
-                        Some((record.bytes, record.digest)),
-                        ("pending-delivery", &error.to_string()),
-                        Some(record.delivery),
-                    )?;
-                } else {
-                    if let Some(text) = name.to_str()
-                        && let Ok(outgoing) = Outgoing::parse(text)
-                        && inventory.actors.contains_key(&outgoing.recipient)
-                        && nix::sys::stat::fstatat(
-                            &sender.staging,
-                            text,
-                            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-                        )
-                        .is_ok()
-                    {
-                        self.reconcile(&inventory, sender_address, &outgoing.recipient, text)?;
-                    }
-                    self.project(
-                        sender,
-                        sender_address,
-                        name,
-                        observation,
-                        (refusal::code(&error), &error.to_string()),
-                        None,
-                    )?;
-                }
-                Err(error)
+                self.refuse_candidate(&inventory, sender_address, name, observation, error)
             }
         }
+    }
+    fn refuse_candidate(
+        &mut self,
+        inventory: &Inventory,
+        sender_address: &Address,
+        name: &OsStr,
+        observation: Option<(u64, String)>,
+        error: MailError,
+    ) -> Result<()> {
+        let sender = actor(inventory, sender_address)?;
+        let accepted = self.journal.records()?.into_iter().find(|record| {
+            record.sender == sender_address.to_string()
+                && Some(record.outgoing.as_str()) == name.to_str()
+                && record.completed.is_none()
+        });
+        if let Some(record) = accepted {
+            self.journal.pending(&record.delivery, &error.to_string())?;
+            self.project(
+                sender,
+                sender_address,
+                name,
+                Some((record.bytes, record.digest)),
+                ("pending-delivery", &error.to_string()),
+                Some(record.delivery),
+            )?;
+        } else {
+            if let Some(text) = name.to_str()
+                && let Ok(outgoing) = Outgoing::parse(text)
+                && inventory.actors.contains_key(&outgoing.recipient)
+                && nix::sys::stat::fstatat(
+                    &sender.staging,
+                    text,
+                    nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+                )
+                .is_ok()
+            {
+                self.reconcile(inventory, sender_address, &outgoing.recipient, text)?;
+            }
+            self.project(
+                sender,
+                sender_address,
+                name,
+                observation,
+                (refusal::code(&error), &error.to_string()),
+                None,
+            )?;
+        }
+        Err(error)
     }
     fn deliver(
         &mut self,

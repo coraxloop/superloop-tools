@@ -348,8 +348,8 @@ fn preparing_retirement_fixture() -> Fixture {
     fixture
 }
 
-// Reuse the custody model, including protected /tmp ancestry, for the new private
-// lock entry. This exercises production code without claiming kernel uid separation.
+// Enter a real rootless namespace so the declaration and receiver see the same map.
+// The interposer still models loop ownership and does not prove loop uid separation.
 fn private_retirement_runtime(fixture: &Fixture, runtime: &Path) {
     let home = fixture.home.path();
     let library = home.join("report-custody.so");
@@ -365,7 +365,9 @@ fn private_retirement_runtime(fixture: &Fixture, runtime: &Path) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    write(runtime, br"#!/usr/bin/python3
+    write(
+        runtime,
+        br"#!/usr/bin/python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
 if args == ['ps'] or args[0] == 'ps':
@@ -380,9 +382,16 @@ if not driver.exists():
         if pair['source'] == str(driver):
             driver = pathlib.Path(pair['target'])
             break
-env = dict(os.environ, LD_PRELOAD=str(home / 'report-custody.so'), REPORT_FIXTURE_PRIVATE='1', REPORT_FIXTURE_RUN=str(driver))
-os.execve(args[1], args[1:], env)
-");
+env = dict(os.environ)
+for key in ['LD_PRELOAD','REPORT_FIXTURE_PRIVATE',
+            '_CONTAINERS_USERNS_CONFIGURED','_CONTAINERS_ROOTLESS_UID']:
+    env.pop(key, None)
+words = ['/usr/bin/podman','unshare','/usr/bin/env',
+         'LD_PRELOAD='+str(home/'report-custody.so'),'REPORT_FIXTURE_PRIVATE=1',
+         'REPORT_FIXTURE_RUN='+str(driver),*args[1:]]
+os.execve(words[0], words, env)
+",
+    );
 }
 
 /// # Panics

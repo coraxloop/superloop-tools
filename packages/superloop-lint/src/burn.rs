@@ -70,9 +70,9 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`a_register_row_meets_the_tally_of_a_name_outside_the_plain_set`] | burn | A path containing a space meets its declared count in the reversible display, and growth names that same path when no row declares it. # Panics Panics only if the fixed temporary fixture cannot be written. |
-//! | [`a_surface_reaches_the_paths_under_a_partial_opening`] | burn | A surface opening inside a file component starts its census at the containing directory, so both admitted paths beneath that locator are read. # Panics Panics only if the fixed temporary fixture cannot be written. |
-//! | [`a_surface_opening_with_bytes_that_are_not_text_reaches_only_its_own_tree`] | burn | A surface opening with a non-text byte keeps that byte as its place and reads only paths beneath its own tree. # Panics Panics only if the fixed temporary fixture cannot be written. |
+//! | [`a_register_row_meets_the_tally_of_a_name_outside_the_plain_set`] | burn | A path containing a space meets its declared count in the reversible display, and growth names that same path when no row declares it. |
+//! | [`a_surface_reaches_the_paths_under_a_partial_opening`] | burn | A surface opening inside a file component starts its census at the containing directory, so both admitted paths beneath that locator are read. |
+//! | [`a_surface_opening_with_bytes_that_are_not_text_reaches_only_its_own_tree`] | burn | A surface opening with a non-text byte keeps that byte as its place and reads only paths beneath its own tree. |
 //!
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

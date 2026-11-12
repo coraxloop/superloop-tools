@@ -191,9 +191,6 @@ fn host_process_table_with_environment(
     let run = record["run"]
         .as_str()
         .ok_or_else(|| failure("run absent"))?;
-    let loop_name = record["loop"]
-        .as_str()
-        .ok_or_else(|| failure("loop absent"))?;
     let driver = record["plan"]["driver_dir"]
         .as_str()
         .ok_or_else(|| failure("driver path absent"))?;
@@ -242,8 +239,16 @@ fn host_process_table_with_environment(
             continue;
         }
         let path_match = words.iter().any(|word| {
-            let word = String::from_utf8_lossy(word);
-            word.contains(driver) || word.contains(&format!("lane-{loop_name}-{run}"))
+            let path = word
+                .iter()
+                .position(|byte| *byte == b'=')
+                .filter(|_| word.starts_with(b"-"))
+                .map_or(*word, |index| &word[index + 1..]);
+            let path = Path::new(std::ffi::OsStr::from_bytes(path));
+            path.starts_with(driver)
+                || record["plan"]["home"]
+                    .as_str()
+                    .is_some_and(|home| !home.is_empty() && path.starts_with(home))
         });
         if path_match {
             busy = Some(holder_detail(pid, &entry.path()));
@@ -785,7 +790,7 @@ mod tests {
             decode_locks(&absent.to_string(), 41001).expect("absent")["driver_directory"],
             "absent"
         );
-        let present = json!({"locks":{"measurement":{"state":"absent","driver_locks":[{"name":".codex-lane.lock","state":"absent","pids":[4_000_000,4_000_001]},{"name":".claude-lane.lock","state":"absent"}],"retirement_locks":"held-by-measurer"},"directory_identity":{"device":1,"inode":2,"uid":41001}}});
+        let present = json!({"locks":{"measurement":{"state":"absent","driver_locks":[{"name":".codex-lane.lock","state":"absent","pids":[crate::dead_pid::DEAD_LOCK_PID,crate::dead_pid::DEAD_LOCK_PID + 1]},{"name":".claude-lane.lock","state":"absent"}],"retirement_locks":"held-by-measurer"},"directory_identity":{"device":1,"inode":2,"uid":41001}}});
         assert_eq!(
             decode_locks(&present.to_string(), 41001).expect("locks"),
             present["locks"]["measurement"]
@@ -890,6 +895,50 @@ mod tests {
             error.detail,
             "process 30 (he\u{fffd}per (R), parent 1) names this run"
         );
+    }
+
+    /// # Panics
+    /// Panics if the fixture cannot be built or unrelated argv binds a retirement.
+    /// ´test:unit:retirement-process-scan-binds-driver-path-components´
+    #[test]
+    fn retirement_process_scan_binds_driver_path_components() {
+        let root = tempfile::tempdir().expect("process table");
+        let process = root.path().join("30");
+        fs::create_dir(&process).expect("process");
+        fixture_stat(root.path(), 30, 1, 100);
+        fs::write(process.join("environ"), b"HOME=/other-owner\0").expect("environment");
+        let record = json!({"run":"R","loop":"alpha","worker_uid":u32::MAX,
+            "plan":{"driver_dir":"/fixture-runs/R","home":"/fixture-worker"}});
+        for (argument, busy) in [
+            ("--name=superloop-lane-alpha-R-attempt-1", false),
+            ("/other-owner/.cache/tmp/lane-alpha-R", false),
+            ("/fixture-runs/R-other", false),
+            ("/other/fixture-runs/R", false),
+            ("fixture-runs/R", false),
+            ("", false),
+            ("print('/fixture-runs/R')", false),
+            ("R", false),
+            ("/fixture-worker", true),
+            ("/fixture-worker/socket", true),
+            ("/fixture-worker-other", false),
+            ("/fixture-runs/R", true),
+            ("/fixture-runs/R/", true),
+            ("/fixture-runs/R/dispatch/socket", true),
+            ("--directory=/fixture-runs/R", true),
+        ] {
+            fs::write(process.join("cmdline"), format!("python3\0{argument}\0")).expect("command");
+            let result = host_process_table(
+                &record,
+                Path::new("/fixture-owner"),
+                &ProcessExclusions::default(),
+                fs::read_dir(root.path()).expect("table"),
+            );
+            if busy {
+                assert_eq!(result.expect_err(argument).kind, "retire-busy");
+            } else {
+                assert_eq!(result.expect(argument)["state"], "absent");
+            }
+        }
     }
 
     /// # Panics
