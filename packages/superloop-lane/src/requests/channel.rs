@@ -282,14 +282,13 @@ impl Store {
         Ok(())
     }
 
-    pub(super) fn rewrite_channel_apply(&self, plan: &Value) -> Result<(), LaneError> {
-        self.rewrite_channel_check(plan)?;
+    pub(super) fn rewrite_channel_input(
+        &self,
+        plan: &Value,
+        cap: u64,
+    ) -> Result<Vec<u8>, LaneError> {
         if plan.is_null() || plan["changed"] == 0 {
-            return Ok(());
-        }
-        let client = Client::decode(&plan["binding"], &self.loop_name)?;
-        if client.call("--owner-read", "", &self.loop_name, None)? == plan["after"] {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let _validated = decode(plan["after"].clone())?;
         let mut input = envelope(
@@ -301,12 +300,34 @@ impl Store {
         );
         input["expected"] = plan["before"].clone();
         input["publication"] = plan["after"].clone();
-        let result = client.call(
-            "--owner-commit",
-            "rewrite-door",
-            &self.loop_name,
-            Some(&input),
-        )?;
+        let bytes = serde_json::to_vec(&input).map_err(core)?;
+        if bytes.len() as u64 > cap {
+            return Err(problem(
+                "requests-rewrite-refusal",
+                format!(
+                    "collection={} commit input bytes={} exceeds cap={cap}",
+                    self.loop_name,
+                    bytes.len()
+                ),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub(super) fn rewrite_channel_apply(
+        &self,
+        plan: &Value,
+        input: Vec<u8>,
+    ) -> Result<(), LaneError> {
+        self.rewrite_channel_check(plan)?;
+        if plan.is_null() || plan["changed"] == 0 {
+            return Ok(());
+        }
+        let client = Client::decode(&plan["binding"], &self.loop_name)?;
+        if client.call("--owner-read", "", &self.loop_name, None)? == plan["after"] {
+            return Ok(());
+        }
+        let result = client.call_bytes("--owner-commit", "rewrite-door", &self.loop_name, input)?;
         if result["collection"] != plan["after"] {
             return Err(core("rewrite channel publication differs"));
         }

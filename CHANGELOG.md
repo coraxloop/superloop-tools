@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Request-schema conversion (`superloop-lane requests rewrite`) now refuses a helper collection whose commit input exceeds the helper's 64 MiB input cap in both the dry run and the apply, before writing custody or a pending journal, even when applying an older preview; the refusal names the collection, the measured bytes and the cap (``test:unit:rewrite-refuses-helper-input-before-publication``).
+
 - Request-schema conversion (`superloop-lane requests rewrite`) now admits plans up to 128 MiB, up from 32 MiB, so loops with larger retired request stores can preview and apply their conversion; a loop whose preview was refused with `plan exceeds bound` reruns the dry run, and oversized-plan refusals now report the measured bytes and bound. Record shapes and the door and helper readers are unchanged (``test:unit:rewrite-converts-plan-above-old-bound``; ``test:unit:rewrite-plan-bound-reports-measured-bytes``).
 
 - The generic repository's public pack verifies: its root documentation partition owns the generated ``docs/public-pack-provenance.toml``, and its publication manifest classifies that member with a reserved exact row and declares the unpublished-label register through `public.unpublished`, which the public-set readers released in 0.4.2 accept. With those declarations, the pack and linter built for this closure passed all eight verification checks against the supplied 41-entry external register with zero occurrences (``prob:pack:pack-verify-burn-evidence-rule``).

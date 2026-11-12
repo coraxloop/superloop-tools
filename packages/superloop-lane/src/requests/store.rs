@@ -2836,7 +2836,7 @@ pub(crate) mod tests {
             .remove("agent_observations");
     }
 
-    fn rewrite_helper_resume(helper_arrival: bool) {
+    fn rewrite_helper_fixture() -> (Fixture, Vec<u8>, PathBuf, String) {
         use serde_json::Value;
         use std::fmt::Write as _;
         let fixture = Fixture::new();
@@ -2879,6 +2879,58 @@ pub(crate) mod tests {
                 .kind,
             "requests-rewrite-required"
         );
+        (fixture, before, journal, old_journal)
+    }
+
+    /// ´test:unit:rewrite-refuses-helper-input-before-publication´
+    #[test]
+    fn rewrite_refuses_helper_input_before_publication() {
+        let (fixture, before, journal, old_journal) = rewrite_helper_fixture();
+        let store = fixture.store();
+        let preview = store.rewrite(None).expect("older preview");
+        let bytes = store
+            .rewrite_channel_input(&preview["plan"]["channel"], u64::MAX)
+            .expect("commit bytes")
+            .len() as u64;
+        let cap = bytes - 1;
+        for expected in [None, preview["preview_sha256"].as_str(), Some("wrong")] {
+            let error = store
+                .rewrite_with_channel_cap(expected, cap)
+                .expect_err("helper input cap precedes publication and digest");
+            assert_eq!(error.kind, "requests-rewrite-refusal");
+            assert_eq!(
+                error.detail,
+                format!("collection=alpha commit input bytes={bytes} exceeds cap={cap}")
+            );
+            assert_eq!(fs::read(fixture.run_file("R")).expect("custody"), before);
+            assert_eq!(fs::read_to_string(&journal).expect("helper"), old_journal);
+            assert!(
+                super::read_leaf(
+                    &store.state,
+                    "door-rewrite.json",
+                    store.owner,
+                    super::rewrite::PLAN_LIMIT,
+                )
+                .expect("journal absence")
+                .is_none()
+            );
+        }
+        let accepted = store
+            .rewrite_with_channel_cap(None, bytes)
+            .expect("input at the inclusive cap");
+        store
+            .rewrite_with_channel_cap(accepted["preview_sha256"].as_str(), bytes)
+            .expect("convert at the cap");
+        assert_eq!(store.rewrite(None).expect("repeat")["changed"], 0);
+        fixture
+            .command(&["list", "alpha"], b"")
+            .expect("helper converted");
+    }
+
+    fn rewrite_helper_resume(helper_arrival: bool) {
+        let (fixture, before, journal, old_journal) = rewrite_helper_fixture();
+        let store = fixture.store();
+        let path = fixture.run_file("R");
         let preview = store.rewrite(None).expect("complete preview");
         assert_eq!(preview["changed"], 2);
         assert_eq!(preview["plan"]["files"][0]["changed"], true);
@@ -2902,7 +2954,7 @@ pub(crate) mod tests {
             "door-rewrite.json",
             &serde_json::to_vec(&pending).expect("pending"),
             store.owner,
-            64 * 1_048_576,
+            super::rewrite::PLAN_LIMIT,
         )
         .expect("pending journal");
         fs::write(

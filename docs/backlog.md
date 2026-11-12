@@ -140,6 +140,8 @@ The census classifies these shapes (an unattributed run name, a reservation olde
 
 **OPEN.** The schema rewrite embeds every custody file's before and after images plus helper copies in one digest-bound plan, serializes it whole and retains it in the journal. A 119-file, 19.9 MiB store met the former 32 MiB plan ceiling. The hotfix admits 128 MiB plans with a 256 MiB journal ceiling and reports measured bytes on refusal; it preserves the whole-plan digest, eager preview and journal resumption, but increases the possible memory and output cost (``alg:superlooplane:request-schema-rewrite``; ``test:unit:rewrite-converts-plan-above-old-bound``; ``test:unit:rewrite-plan-bound-reports-measured-bytes``).
 
+The helper commit's 64 MiB input cap is the second size the by-value design meets; preview and apply refuse it before publication (``test:unit:rewrite-refuses-helper-input-before-publication``).
+
 Choose the durable design separately: a plan of per-file digests with file-by-file conversion and a per-file journal bounds working memory, but must preserve operator approval, detect changed inventory and make crash recovery across custody and helper publication explicit. Lazy conversion of retired custody avoids eagerly scanning all history, but moves migration into readers and complicates mixed-schema compatibility. Archiving retired custody reduces the active conversion set, but needs a retention, lookup and restoration contract. The choice remains open; this hotfix implements none of them.
 
 **Problem (the escalation process moves into one execute-command crate in bites)** · `prob:door:execute-command-extraction-bites`

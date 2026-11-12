@@ -4,7 +4,7 @@ use super::*;
 use sha2::{Digest as _, Sha256};
 
 const JOURNAL: &str = "door-rewrite.json";
-const PLAN_LIMIT: usize = 256 * 1_048_576;
+pub(super) const PLAN_LIMIT: usize = 256 * 1_048_576;
 
 fn check_plan_size(bytes: usize) -> Result<(), LaneError> {
     let bound = PLAN_LIMIT / 2;
@@ -317,9 +317,17 @@ impl Store {
     /// List the whole conversion or apply exactly its supplied digest.
     ///
     /// # Errors
-    /// Refuses changed evidence, unsafe custody, or an oversized migration plan.
-    #[allow(clippy::too_many_lines)]
+    /// Refuses changed evidence, unsafe custody, an oversized plan or oversized helper input.
     pub fn rewrite(&self, expected: Option<&str>) -> Result<Value, LaneError> {
+        self.rewrite_with_channel_cap(expected, super::super::channel_client::CAP)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn rewrite_with_channel_cap(
+        &self,
+        expected: Option<&str>,
+        cap: u64,
+    ) -> Result<Value, LaneError> {
         let _lock = self.lock(true)?;
         let saved = read_leaf(&self.state, JOURNAL, self.owner, PLAN_LIMIT)?;
         let mut journal: Value = saved
@@ -376,6 +384,7 @@ impl Store {
         let bytes = serde_json::to_vec(&plan)
             .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
         check_plan_size(bytes.len())?;
+        let channel_input = self.rewrite_channel_input(&plan["channel"], cap)?;
         let plan_digest = digest(&bytes);
         if expected.is_none() {
             return Ok(
@@ -455,7 +464,7 @@ impl Store {
                 .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
             replace_leaf(&custody, RUN_FILE, &target, self.owner, MAX_RUN_BYTES)?;
         }
-        self.rewrite_channel_apply(&plan["channel"])?;
+        self.rewrite_channel_apply(&plan["channel"], channel_input)?;
         self.repair_shapes(&self.all_runs(None)?)?;
         let mut learned = json!({"schema":1,"groups":{}});
         let mut indexed = HashSet::new();
