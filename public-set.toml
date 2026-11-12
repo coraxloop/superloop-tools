@@ -2660,6 +2660,9 @@ pattern = "packages/superloop-lane/tests/support/temporary_root.rs"
 pattern = "packages/superloop-lane/tests/support/vendor_fixture.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/tests/test_release_admission.py"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/tests/vendor_build_entry.rs"
 
 [[include.rows]]
