@@ -78,7 +78,7 @@ pub(super) fn convert_record(before: &Value) -> Result<RequestRecord, LaneError>
     RequestRecord::decode(row)
 }
 
-fn convert(before: &Value) -> Result<Value, LaneError> {
+fn convert(before: &Value, custody: &str) -> Result<Value, LaneError> {
     let mut after = before.clone();
     let rows = after["requests"]
         .as_array_mut()
@@ -88,6 +88,15 @@ fn convert(before: &Value) -> Result<Value, LaneError> {
     }
     let bytes = serde_json::to_vec(&after)
         .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
+    if bytes.len() > MAX_RUN_BYTES {
+        return Err(problem(
+            "requests-rewrite-refusal",
+            format!(
+                "custody={custody}/{RUN_FILE} converted bytes={} exceeds limit={MAX_RUN_BYTES}",
+                bytes.len()
+            ),
+        ));
+    }
     let run = after["run"]
         .as_str()
         .ok_or_else(|| problem("requests-rewrite-refusal", "run absent"))?;
@@ -297,7 +306,7 @@ impl Store {
             checked_dir(&custody, self.owner)?;
             let before: Value = serde_json::from_slice(&bytes)
                 .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
-            let after = convert(&before)?;
+            let after = convert(&before, &name)?;
             if after["requests"]
                 .as_array()
                 .is_some_and(|rows| rows.iter().any(|row| row["loop"] != self.loop_name))
@@ -373,7 +382,10 @@ impl Store {
             .as_array_mut()
             .ok_or_else(|| problem("requests-rewrite-refusal", "journal files absent"))?
         {
-            file["after"] = convert(&file["before"])?;
+            let custody = file["custody"]
+                .as_str()
+                .ok_or_else(|| problem("requests-rewrite-refusal", "custody absent"))?;
+            file["after"] = convert(&file["before"], custody)?;
             let changed = file["before"] != file["after"];
             file.as_object_mut()
                 .ok_or_else(|| {
@@ -534,6 +546,103 @@ mod tests {
         row["schema"] = json!(3);
         std::fs::write(&path, serde_json::to_vec(&value).expect("bytes")).expect("old record");
         path
+    }
+
+    fn boundary_custody(fixture: &Fixture, target: usize) -> Vec<u8> {
+        let path = old_file(fixture);
+        let mut file: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("file")).expect("JSON");
+        file["requests"] = Value::Array(
+            (0..4)
+                .map(|index| {
+                    let mut row =
+                        waiting("R", &format!("{index:x}"), 3000, Mode::Audit).into_value();
+                    row["matched_rule"] = json!({"class":"git","operation":"git-upload",
+                "shape_key":"git:upload","request_ids":[]});
+                    row
+                })
+                .collect(),
+        );
+        for index in 0..4 {
+            let remaining = target - serde_json::to_vec(&file).expect("size").len();
+            let count = ((remaining + 1) / 163).min(16_384);
+            file["requests"][index]["matched_rule"]["request_ids"] =
+                json!(vec!["x".repeat(160); count]);
+        }
+        let padding = target - serde_json::to_vec(&file).expect("size").len();
+        let reason = file["requests"][3]["would_do"]["reason"]
+            .as_str()
+            .expect("reason");
+        file["requests"][3]["would_do"]["reason"] =
+            json!(format!("{reason}{}", "x".repeat(padding)));
+        assert_eq!(
+            serde_json::to_vec(&file).expect("target size").len(),
+            target
+        );
+        for row in file["requests"].as_array_mut().expect("rows") {
+            RequestRecord::decode(row.clone()).expect("valid target record");
+            row["schema"] = json!(4);
+            row.as_object_mut()
+                .expect("row")
+                .remove("agent_observations");
+        }
+        let before = serde_json::to_vec(&file).expect("historical bytes");
+        assert!(before.len() <= MAX_RUN_BYTES);
+        std::fs::write(path, &before).expect("historical custody");
+        before
+    }
+
+    /// ´test:unit:rewrite-checks-converted-custody-byte-bound-before-publication´
+    #[test]
+    fn rewrite_checks_converted_custody_byte_bound_before_publication() {
+        for excess in [1, 0] {
+            let fixture = Fixture::new();
+            let before = boundary_custody(&fixture, MAX_RUN_BYTES + excess);
+            let path = fixture.home.join("runs/.launch-R/door-requests.json");
+            let store = fixture.store();
+            if excess == 1 {
+                for expected in [None, Some("older-preview")] {
+                    let result = store.rewrite(expected);
+                    assert!(
+                        result.is_err(),
+                        "converted custody bound precedes publication"
+                    );
+                    let error = result.expect_err("converted custody bound");
+                    assert_eq!(error.status, 2);
+                    assert_eq!(error.kind, "requests-rewrite-refusal");
+                    assert_eq!(
+                        error.detail,
+                        format!(
+                            "custody=.launch-R/{RUN_FILE} converted bytes={} exceeds limit={MAX_RUN_BYTES}",
+                            MAX_RUN_BYTES + 1
+                        )
+                    );
+                    assert_eq!(std::fs::read(&path).expect("unchanged custody"), before);
+                    assert!(
+                        read_leaf(&store.state, JOURNAL, store.owner, PLAN_LIMIT)
+                            .expect("no pending journal")
+                            .is_none()
+                    );
+                }
+            } else {
+                let preview = store.rewrite(None).expect("inclusive custody bound");
+                let approved = preview["preview_sha256"]
+                    .as_str()
+                    .expect("digest")
+                    .to_owned();
+                drop(preview);
+                let applied = store
+                    .rewrite(Some(&approved))
+                    .expect("apply at custody bound");
+                assert_eq!(applied["complete"], true);
+                drop(applied);
+                assert_eq!(
+                    std::fs::metadata(&path).expect("target").len(),
+                    MAX_RUN_BYTES as u64
+                );
+                assert_eq!(store.rewrite(None).expect("repeat")["changed"], 0);
+            }
+        }
     }
 
     /// ´test:unit:rewrite-plan-bound-reports-measured-bytes´

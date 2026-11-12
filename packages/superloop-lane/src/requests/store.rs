@@ -2927,6 +2927,64 @@ pub(crate) mod tests {
             .expect("helper converted");
     }
 
+    /// ´test:unit:rewrite-pending-helper-cap-retains-all-images´
+    #[test]
+    fn rewrite_pending_helper_cap_retains_all_images() {
+        let (fixture, _before, helper, old_helper) = rewrite_helper_fixture();
+        let store = fixture.store();
+        let preview = store.rewrite(None).expect("original preview");
+        let bytes = store
+            .rewrite_channel_input(&preview["plan"]["channel"], u64::MAX)
+            .expect("commit input")
+            .len() as u64;
+        let cap = bytes - 1;
+        let pending = serde_json::to_vec(&json!({"schema":1,"phase":"pending",
+            "digest":preview["preview_sha256"],"plan":preview["plan"]}))
+        .expect("journal");
+        super::replace_leaf(
+            &store.state,
+            "door-rewrite.json",
+            &pending,
+            store.owner,
+            super::rewrite::PLAN_LIMIT,
+        )
+        .expect("pending journal");
+        let custody = serde_json::to_vec(&preview["plan"]["files"][0]["after"])
+            .expect("already published target");
+        fs::write(fixture.run_file("R"), &custody).expect("partial conversion");
+        for expected in [None, preview["preview_sha256"].as_str(), Some("wrong")] {
+            let error = store
+                .rewrite_with_channel_cap(expected, cap)
+                .expect_err("pending helper cap precedes every write");
+            assert_eq!(error.status, 2);
+            assert_eq!(error.kind, "requests-rewrite-refusal");
+            assert_eq!(
+                error.detail,
+                format!("collection=alpha commit input bytes={bytes} exceeds cap={cap}")
+            );
+            assert_eq!(fs::read(fixture.run_file("R")).expect("custody"), custody);
+            assert_eq!(fs::read_to_string(&helper).expect("helper"), old_helper);
+            assert_eq!(
+                super::read_leaf(
+                    &store.state,
+                    "door-rewrite.json",
+                    store.owner,
+                    super::rewrite::PLAN_LIMIT
+                )
+                .expect("journal")
+                .expect("still pending"),
+                pending
+            );
+        }
+        store
+            .rewrite_with_channel_cap(preview["preview_sha256"].as_str(), bytes)
+            .expect("resume at inclusive cap");
+        assert_eq!(store.rewrite(None).expect("repeat")["changed"], 0);
+        fixture
+            .command(&["list", "alpha"], b"")
+            .expect("helper converted");
+    }
+
     fn rewrite_helper_resume(helper_arrival: bool) {
         let (fixture, before, journal, old_journal) = rewrite_helper_fixture();
         let store = fixture.store();
