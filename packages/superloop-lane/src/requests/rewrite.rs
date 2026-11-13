@@ -197,7 +197,7 @@ impl Store {
                 format!("stop the door service: {error}"),
             )
         })?;
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("rebuild_index_stopped")?;
         self.write_learned(&json!({"unavailable":true,"reason":"index rebuild incomplete"}))?;
         let mut directory = Dir::openat(
             &self.runs,
@@ -337,7 +337,7 @@ impl Store {
         expected: Option<&str>,
         cap: u64,
     ) -> Result<Value, LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("rewrite_with_channel_cap")?;
         let saved = read_leaf(&self.state, JOURNAL, self.owner, PLAN_LIMIT)?;
         let mut journal: Value = saved
             .as_deref()

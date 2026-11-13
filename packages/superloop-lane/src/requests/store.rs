@@ -2,6 +2,7 @@
 
 #[path = "channel.rs"]
 mod channel;
+pub(super) mod hold;
 #[path = "rewrite.rs"]
 mod rewrite;
 mod snapshot;
@@ -90,10 +91,14 @@ static LOCK_HOLDERS: Mutex<BTreeMap<(u64, u64), String>> = Mutex::new(BTreeMap::
 pub(crate) struct StoreLock {
     _file: File,
     holder: Option<(u64, u64)>,
+    observation: Option<hold::Guard>,
 }
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
+        if let Some(observation) = &mut self.observation {
+            observation.releasing();
+        }
         if let Some(key) = self.holder
             && let Ok(mut holders) = LOCK_HOLDERS.lock()
         {
@@ -692,7 +697,11 @@ impl Store {
             if dry_run && read_leaf(self.state_dir(), LOCK_FILE, self.owner, 4096)?.is_none() {
                 None
             } else {
-                Some(self.lock(!dry_run)?)
+                Some(if dry_run {
+                    self.lock(false)?
+                } else {
+                    self.write_lock("retirement_guard")?
+                })
             };
         let rows = match openat2(
             &self.runs,
@@ -754,6 +763,7 @@ impl Store {
     }
 
     fn write_modes(&self, ledger: &ModeLedger) -> Result<Value, LaneError> {
+        let _phase = hold::phase(hold::Phase::Modes);
         #[cfg(test)]
         if FAIL_MODE_WRITE.with(|fail| fail.replace(false)) {
             return Err(problem(
@@ -846,7 +856,7 @@ impl Store {
     /// Refuses a changed history or an invalid class without filing a request.
     pub fn ensure_first_mode(&self, class: &str) -> Result<Value, LaneError> {
         let target = ModeTarget::class(class)?;
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("ensure_first_mode")?;
         let mut ledger = self.read_modes()?;
         let initial = execute_command::policy::initial_setting(None, self.floor.domain())
             .map_err(super::command::shape)?
@@ -1003,7 +1013,7 @@ impl Store {
 
     /// Recover an interrupted agent exercise under the mode lock.
     pub(crate) fn recover_agent_loop(&self) -> Result<Value, LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("recover_agent_loop")?;
         let mut ledger = self.read_modes()?;
         let report = ledger.recover_agent_loop(self.floor, &now_nanos().to_string())?;
         if report["status"] == "restored" {
@@ -1028,7 +1038,7 @@ impl Store {
         citations: &[String],
     ) -> Result<Value, LaneError> {
         mode.within(self.floor)?;
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("set_mode")?;
         let mut ledger = self.read_modes()?;
         if !citations.is_empty() {
             let relaxing = ledger
@@ -1056,7 +1066,8 @@ impl Store {
         at: &str,
     ) -> Result<Value, LaneError> {
         let target = ModeTarget::class(class)?;
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("correct_mode")?;
+        hold::request(id);
         let runs = self.all_runs(None)?;
         let request = runs
             .iter()
@@ -1161,6 +1172,12 @@ impl Store {
                     );
                     return Err(ReadFailure::Contended(error));
                 }
+                Ok(mut guard) => {
+                    if let Some(observation) = &mut guard.observation {
+                        observation.waited(started);
+                    }
+                    return Ok(guard);
+                }
                 result => return result,
             }
         }
@@ -1256,6 +1273,7 @@ impl Store {
             )
             .into());
         }
+        let mut observation = changing.then(|| hold::Guard::prepare(self.request_id.as_deref()));
         let operation = if changing {
             libc::LOCK_EX
         } else {
@@ -1278,6 +1296,7 @@ impl Store {
                 caller_deadline.map_or(attempt_deadline, |end| end.min(attempt_deadline));
             // SAFETY: flock receives a live file descriptor and a fixed operation.
             if unsafe { libc::flock(fd.as_raw_fd(), operation) } == 0 {
+                let acquired = Instant::now();
                 if contended {
                     self.log_lock_wait(changing, started, "acquired", holder.as_deref());
                 }
@@ -1289,9 +1308,13 @@ impl Store {
                 } else {
                     None
                 };
+                if let Some(observation) = &mut observation {
+                    observation.acquired(acquired);
+                }
                 let guard = StoreLock {
                     _file: File::from(fd),
                     holder: holder_key,
+                    observation,
                 };
                 #[cfg(test)]
                 if changing {
@@ -1401,6 +1424,12 @@ impl Store {
         self.lock_inner(changing).map_err(ReadFailure::into_error)
     }
 
+    fn write_lock(&self, path: &'static str) -> Result<StoreLock, LaneError> {
+        let guard = self.lock(true)?;
+        hold::name(path);
+        Ok(guard)
+    }
+
     fn custody(&self, run: &str) -> Result<OwnedFd, LaneError> {
         if !crate::valid_run_name(run) {
             return Err(problem("requests-request-refusal", "run name is invalid"));
@@ -1454,6 +1483,7 @@ impl Store {
         &self,
         candidate: Option<(&str, u64, &[RequestRecord])>,
     ) -> Result<Vec<(String, u64, Vec<RequestRecord>)>, LaneError> {
+        let _phase = hold::inventory();
         let mut directory = Dir::openat(
             &self.runs,
             ".",
@@ -1592,6 +1622,7 @@ impl Store {
     }
 
     fn record_attempt(&self, event: Value) -> Result<(), LaneError> {
+        let _phase = hold::phase(hold::Phase::AttemptJournal);
         let phase = event["phase"]
             .as_str()
             .ok_or_else(|| problem("requests-record-refusal", "attempt phase is absent"))?;
@@ -1694,13 +1725,15 @@ impl Store {
                 "incomplete outcome identity differs",
             ));
         }
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("record_incomplete")?;
+        hold::request(id);
         self.record_attempt(json!({"phase":"incomplete","run":run,
             "reason":format!("{id}: {reason}"),"rollback":"not-required",
             "at_unix_ns":now_nanos()}))
     }
 
     fn repair_shapes(&self, runs: &[(String, u64, Vec<RequestRecord>)]) -> Result<(), LaneError> {
+        let _phase = hold::phase(hold::Phase::Shapes);
         if self.shape_status(runs)? {
             let expected = Self::shapes(runs)?;
             let bytes = serde_json::to_vec(&expected)
@@ -1725,8 +1758,12 @@ impl Store {
         requests: &[RequestRecord],
     ) -> Result<(), LaneError> {
         let custody = self.custody(run)?;
-        let prior_runs = self.all_runs(None)?;
+        let prior_runs = {
+            let _phase = hold::phase(hold::Phase::InventoryBefore);
+            self.all_runs(None)?
+        };
         self.repair_shapes(&prior_runs)?;
+        let index = hold::phase(hold::Phase::Learned);
         let mut learned = self
             .read_learned()
             .unwrap_or_else(|_| json!({"unavailable":true}));
@@ -1742,11 +1779,18 @@ impl Store {
             let prior = old_rows.iter().find(|old| old.id() == row.id());
             Self::index_judgement(&mut learned, row.value(), prior.map(RequestRecord::value));
         }
+        drop(index);
         let prior_shapes = read_leaf(self.state_dir(), SHAPES_FILE, self.owner, MAX_SHAPES_BYTES)?;
         let next = encode_run(run, revision, requests)?;
-        let runs = self.all_runs(Some((run, revision, requests)))?;
-        let shapes = serde_json::to_vec(&Self::shapes(&runs)?)
-            .map_err(|error| problem("requests-record-refusal", error.to_string()))?;
+        let runs = {
+            let _phase = hold::phase(hold::Phase::InventoryAfter);
+            self.all_runs(Some((run, revision, requests)))?
+        };
+        let shapes = {
+            let _phase = hold::phase(hold::Phase::Shapes);
+            serde_json::to_vec(&Self::shapes(&runs)?)
+                .map_err(|error| problem("requests-record-refusal", error.to_string()))?
+        };
         if shapes.len() > MAX_SHAPES_BYTES {
             return Err(problem(
                 "requests-store-full",
@@ -1756,14 +1800,21 @@ impl Store {
         // Invalidate before changing custody. A crash or failed publication
         // leaves a miss, never an index that can grant from stale labels.
         self.withdraw_snapshot_for_write();
-        replace_leaf(
-            self.state_dir(),
-            LEARNED_FILE,
-            b"{\"unavailable\":true}",
-            self.owner,
-            MAX_LEARNED_BYTES,
-        )?;
-        replace_leaf(&custody, RUN_FILE, &next, self.owner, MAX_RUN_BYTES)?;
+        {
+            let _phase = hold::phase(hold::Phase::Tombstone);
+            replace_leaf(
+                self.state_dir(),
+                LEARNED_FILE,
+                b"{\"unavailable\":true}",
+                self.owner,
+                MAX_LEARNED_BYTES,
+            )?;
+        }
+        {
+            let _phase = hold::phase(hold::Phase::RunWrite);
+            replace_leaf(&custody, RUN_FILE, &next, self.owner, MAX_RUN_BYTES)?;
+        }
+        let shape_write = hold::phase(hold::Phase::ShapeWrite);
         if let Err(error) = write_shapes_after_run(
             self.state_dir(),
             SHAPES_FILE,
@@ -1801,6 +1852,7 @@ impl Store {
             shape_rollback?;
             return Err(error);
         }
+        drop(shape_write);
         // Index publication is optional for recording a request. Its tombstone
         // survives failure; the one-time rewrite can rebuild it from custody.
         let _published = self.write_learned(&learned);
@@ -1814,7 +1866,8 @@ impl Store {
     ///
     /// Refuses duplicate IDs, changed grants or a full record before any effect.
     pub fn file(&self, request: RequestRecord) -> Result<(), LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("file")?;
+        hold::request(request.id());
         let run = request.run().to_owned();
         let (old, revision, mut requests) = self.read_run(&run)?;
         #[cfg(test)]
@@ -1895,7 +1948,8 @@ impl Store {
                 "fixture effect write failure",
             ));
         }
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("record_effect")?;
+        hold::request(id);
         if let Some(record) = self.channel_record_effect(id, &effect)? {
             return Ok(record);
         }
@@ -1914,7 +1968,7 @@ impl Store {
         digest: Option<&str>,
         model: Option<&str>,
     ) -> Result<RequestRecord, LaneError> {
-        self.change_one(id, false, |request| {
+        self.change_one("record_agent", id, false, |request| {
             let mut value = request.value().clone();
             super::judgement::apply(&mut value, result, digest, model);
             if value["state"].is_null()
@@ -1975,6 +2029,11 @@ impl Store {
     }
 
     fn write_learned(&self, value: &Value) -> Result<(), LaneError> {
+        let _phase = hold::phase(if value["unavailable"] == true {
+            hold::Phase::Tombstone
+        } else {
+            hold::Phase::Learned
+        });
         self.withdraw_snapshot_for_write();
         let bytes = serde_json::to_vec(value)
             .map_err(|error| problem("requests-learned-index", error.to_string()))?;
@@ -2099,7 +2158,7 @@ impl Store {
                 "fixture waiting write failure",
             ));
         }
-        self.change_one(id, false, RequestRecord::publish_waiting)
+        self.change_one("publish_waiting", id, false, RequestRecord::publish_waiting)
             .map(|(request, _)| request)
     }
 
@@ -2116,8 +2175,13 @@ impl Store {
                 "fixture observed write failure",
             ));
         }
-        self.change_one(id, false, RequestRecord::publish_observed)
-            .map(|(request, _)| request)
+        self.change_one(
+            "publish_observed",
+            id,
+            false,
+            RequestRecord::publish_observed,
+        )
+        .map(|(request, _)| request)
     }
 
     /// Read only one run while a filed request waits for its answer.
@@ -2234,7 +2298,7 @@ impl Store {
         run: &str,
         bytes: &[u8],
     ) -> Result<(), LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("fixture_replace_run_bytes")?;
         let custody = self.custody(run)?;
         replace_leaf(&custody, RUN_FILE, bytes, self.owner, MAX_RUN_BYTES)
     }
@@ -2245,7 +2309,7 @@ impl Store {
         run: &str,
         edit: impl FnOnce(&mut Value),
     ) -> Result<(), LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("fixture_edit_run")?;
         let (bytes, _, _) = self.read_run(run)?;
         let bytes =
             bytes.ok_or_else(|| problem("requests-record-refusal", "fixture run is absent"))?;
@@ -2256,7 +2320,10 @@ impl Store {
             .map_err(|error| problem("requests-record-refusal", error.to_string()))?;
         decode_run(Some(&next), run)?;
         let custody = self.custody(run)?;
-        replace_leaf(&custody, RUN_FILE, &next, self.owner, MAX_RUN_BYTES)?;
+        {
+            let _phase = hold::phase(hold::Phase::RunWrite);
+            replace_leaf(&custody, RUN_FILE, &next, self.owner, MAX_RUN_BYTES)?;
+        }
         let runs = self.all_runs(None)?;
         self.repair_shapes(&runs)
     }
@@ -2266,7 +2333,7 @@ impl Store {
         &self,
         edit: impl FnOnce(&mut Value),
     ) -> Result<(), LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("fixture_edit_modes")?;
         let mut value = self.read_modes()?.value();
         edit(&mut value);
         let ledger = ModeLedger::decode(&value, &self.loop_name)?;
@@ -2275,7 +2342,7 @@ impl Store {
 
     #[cfg(test)]
     pub(crate) fn fixture_exclusive_lock(&self) -> Result<StoreLock, LaneError> {
-        self.lock(true)
+        self.write_lock("fixture_exclusive_lock")
     }
 
     /// Read one request selected by its service-generated ID.
@@ -2404,7 +2471,7 @@ impl Store {
         if decisions.is_empty() || decisions.len() > MAX_REQUESTS_PER_RUN {
             return Err(problem("requests-batch-refusal", "batch size is invalid"));
         }
-        let guard = self.lock(true)?;
+        let guard = self.write_lock("triage_with_reports")?;
         if self.channel_bound()? {
             drop(guard);
             return self
@@ -2470,7 +2537,8 @@ impl Store {
     ///
     /// Refuses an unknown or unmarked request.
     pub fn review(&self, id: &str, at: &str) -> Result<RequestRecord, LaneError> {
-        let guard = self.lock(true)?;
+        let guard = self.write_lock("review")?;
+        hold::request(id);
         if self.channel_bound()? {
             drop(guard);
             return self.collection_legacy_review(id);
@@ -2521,7 +2589,8 @@ impl Store {
         adjudicator: &str,
         at: &str,
     ) -> Result<(RequestRecord, Vec<Value>), LaneError> {
-        let guard = self.lock(true)?;
+        let guard = self.write_lock("adjudicate_with_reports")?;
+        hold::request(id);
         if self.channel_bound()? {
             drop(guard);
             return self
@@ -2535,11 +2604,13 @@ impl Store {
 
     fn change_one(
         &self,
+        path: &'static str,
         id: &str,
         apply_correction: bool,
         change: impl FnOnce(&mut RequestRecord) -> Result<(), LaneError>,
     ) -> Result<(RequestRecord, Vec<Value>), LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock(path)?;
+        hold::request(id);
         self.change_one_locked(id, apply_correction, change)
     }
 

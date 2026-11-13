@@ -108,6 +108,7 @@ impl Store {
     }
 
     pub(super) fn invalidate_snapshot(&self) -> Result<(), LaneError> {
+        let _phase = super::hold::phase(super::hold::Phase::Withdraw);
         if let Some(directory) = self.policy_directory(false, false)? {
             match unlinkat(&directory, "snapshot.json", UnlinkatFlags::NoRemoveDir) {
                 Ok(()) | Err(Errno::ENOENT) => {}
@@ -147,7 +148,7 @@ impl Store {
     /// # Errors
     /// Refuses unsafe tiers, unreadable sources or incomplete publication.
     pub fn publish_snapshot(&self) -> Result<Value, LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("publish_snapshot")?;
         self.invalidate_snapshot()?;
         self.publish_snapshot_locked(true)
             .inspect_err(|_| self.withdraw_snapshot_for_write())
@@ -193,6 +194,7 @@ impl Store {
     }
 
     pub(super) fn publish_snapshot_locked(&self, required: bool) -> Result<Value, LaneError> {
+        let _phase = super::hold::phase(super::hold::Phase::Policy);
         let Some(directory) = self.policy_directory(required, true)? else {
             return Ok(json!({"published":false,"reason":"policy tier is not provisioned"}));
         };

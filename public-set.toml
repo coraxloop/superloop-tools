@@ -2084,6 +2084,9 @@ pattern = "packages/superloop-lane/src/requests/rewrite.rs"
 pattern = "packages/superloop-lane/src/requests/store.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/requests/store/hold.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/requests/store/snapshot.rs"
 
 [[include.rows]]

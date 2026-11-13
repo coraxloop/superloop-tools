@@ -99,6 +99,12 @@ impl Client {
         loop_name: &str,
         bytes: Vec<u8>,
     ) -> Result<Value, LaneError> {
+        let _observation = super::store::hold::phase(match phase {
+            "--owner-read" => super::store::hold::Phase::HelperRead,
+            "--owner-preview" => super::store::hold::Phase::HelperPreview,
+            "--owner-commit" => super::store::hold::Phase::HelperCommit,
+            _ => super::store::hold::Phase::HelperOther,
+        });
         let mut command = Command::new(&self.helper);
         command.arg(phase);
         if phase != "--owner-read" {

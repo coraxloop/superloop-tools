@@ -21,6 +21,15 @@ pub(super) fn with_test_client<T>(
 
 const BINDING: &str = "requests-channel.json";
 
+fn lock_path(action: &str) -> &'static str {
+    match action {
+        "triage" => "collection_triage",
+        "review" => "collection_review",
+        "adjudicate" => "collection_adjudicate",
+        _ => "collection_write",
+    }
+}
+
 fn core(error: impl std::fmt::Display) -> LaneError {
     problem("requests-channel-refusal", error.to_string())
 }
@@ -464,7 +473,7 @@ impl Store {
     ) -> Result<Value, LaneError> {
         let changing = !matches!(action, "status" | "list");
         let guard = if changing {
-            Some(self.lock(true)?)
+            Some(self.write_lock(lock_path(action))?)
         } else {
             if read_leaf(self.state_dir(), super::LOCK_FILE, self.owner, 4096)?.is_none() {
                 self.list_with_status()?;
@@ -475,6 +484,9 @@ impl Store {
                 Some(self.lock(false)?)
             }
         };
+        if let Some(id) = id {
+            super::hold::request(id);
+        }
         let client = self.bound_client()?.map_or_else(Client::configured, Ok)?;
         let collection = decode(client.call("--owner-read", "", &self.loop_name, None)?)?;
         let doors = if guard.is_some() {
@@ -626,6 +638,7 @@ impl Store {
     }
 
     fn channel_mirror(&self, collection: &Collection) -> Result<(), LaneError> {
+        let _phase = super::hold::phase(super::hold::Phase::Mirror);
         let runs = collection
             .requests
             .iter()
@@ -708,7 +721,8 @@ impl Store {
     /// # Errors
     /// Refuses a conflicting claim, changed source or unavailable helper.
     pub fn claim_request(&self, source_id: &str) -> Result<bool, LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("claim_request")?;
+        super::hold::request(source_id);
         let Some(client) = self.bound_client()? else {
             return Ok(true);
         };
