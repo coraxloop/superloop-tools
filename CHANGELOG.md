@@ -26,6 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The preserved-checkout fixture disables automatic Git maintenance in both repositories before snapshotting the pushed objects, so a transient maintenance lock cannot change its verified file list (``test:unit:checkout-clones-only-verified-preserved-objects``).
+
 - The boxed first dispatch tells the worker to carry out the brief and report as it asks. Install `superloop-lane` with no launch in flight: the launcher, its container helper and the box's prompt client are that one program, so only a launch that crosses the install can pair builds that disagree on that exact prompt, and the prompt client then refuses with `round prompt does not name a mail delivery and step` before it reaches the helper (``proto:superlooplane:container-attempt-completion``).
 
 - A resumed launch, preview or apply, no longer reads the round before it: a dispatch `--letter` file moved, deleted or edited after the dispatch, a rotated run’s absent home `brief.txt`, or a previous step’s absent retained mail no longer refuses the next round, which needs only its own bound retained `mail-STEP.txt`. The preview’s `helper_preflight.not_checked` now reads `busy lease and scope admission before publication`, `every step after the preparing reservation is published` and `launch-time descriptor transfer and intervening changes` (``test:crate:built-helper-resume-retains-mail-custody``).

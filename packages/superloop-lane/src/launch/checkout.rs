@@ -1269,6 +1269,14 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    /// # Panics
+    /// Panics if the fixture Git config cannot be read or updated.
+    fn disable_auto_maintenance(config: &Path) {
+        let mut bytes = fs::read(config).expect("fixture Git config");
+        bytes.extend_from_slice(b"\n[maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n");
+        fs::write(config, bytes).expect("disable automatic Git maintenance");
+    }
+
     fn mode(path: &Path, value: u32) {
         fs::set_permissions(path, fs::Permissions::from_mode(value)).expect("fixture mode");
     }
@@ -1420,10 +1428,12 @@ mod tests {
         git(Command::new("/usr/bin/git")
             .args(["init", "-q", "--bare"])
             .arg(&bare));
+        disable_auto_maintenance(&bare.join("config"));
         mode(&bare, 0o700);
         mode(&bare.join("config"), 0o600);
         let work = fixture.path().join("work");
         git(Command::new("/usr/bin/git").args(["init", "-q"]).arg(&work));
+        disable_auto_maintenance(&work.join(".git/config"));
         fs::write(work.join("note"), b"preserved commit\n").expect("note");
         git(Command::new("/usr/bin/git")
             .arg("-C")
