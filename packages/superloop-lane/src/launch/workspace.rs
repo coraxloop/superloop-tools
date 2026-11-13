@@ -420,6 +420,33 @@ mod tests {
             "round-selection"
         );
     }
+    /// ´test:unit:workspace-private-make-uses-birth-publication-boundary´
+    #[test]
+    fn workspace_private_make_uses_birth_publication_boundary() {
+        // Structural companion to the binding-level transaction fixture below.
+        // Pin the production call, not a claim about receipt-layer recovery.
+        let source = include_str!("../launch.rs");
+        let body = source.split_once("fn private_make(").unwrap().1;
+        let before_home = body.split_once("let mut result =").unwrap().0;
+        let (_, call) = before_home
+            .split_once("let retired = workspace::reserve_before_publish(")
+            .expect("private_make must use the birth-before-publication helper");
+        let compact: String = call.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(
+            compact.starts_with("||{custody.create_birth(owner_home,loop_name,&birth,\"reserve\")"),
+            "the first closure reserves the production birth"
+        );
+        assert!(
+            compact.contains("},||{ifletSome(record)=prior{replace_preparation_with("),
+            "replacement publication belongs to the second closure"
+        );
+        assert!(
+            compact
+                .ends_with("}else{publish_reservation(&reservation,&next)?;Ok(Vec::new())}},)?;"),
+            "fresh publication belongs to the second closure"
+        );
+    }
+
     /// ´test:unit:workspace-publication-cut-keeps-retirable-mail-birth´
     #[test]
     fn workspace_publication_cut_keeps_retirable_mail_birth() {

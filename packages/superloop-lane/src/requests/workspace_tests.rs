@@ -292,14 +292,17 @@ fn workspace_preflight_reader_bounds_truncated_evidence() {
         );
     }
     for check in ["door-changed-ref-refusal", "door-request-refusal"] {
-        let row = preflight(
-            check,
+        for words in [
             json!({"schema":3,"wire_bytes":[1,2],"truncated":false}),
-        );
-        assert_eq!(
-            RequestRecord::decode(row.clone()).unwrap().into_value(),
-            row
-        );
+            json!({"schema":3,"wire_bytes":[256],"truncated":true}),
+        ] {
+            let row = preflight(check, words);
+            assert_eq!(
+                RequestRecord::decode(row.clone()).unwrap().into_value(),
+                row,
+                "legacy evidence for {check} is not decoded as tagged workspace evidence"
+            );
+        }
     }
     let too_long = json!({"schema":3,"wire_bytes":vec![255;maximum+1],"truncated":false});
     assert!(RequestRecord::decode(preflight("door-workspace-protocol-refusal", too_long)).is_err());
