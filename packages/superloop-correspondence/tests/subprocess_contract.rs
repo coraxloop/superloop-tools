@@ -47,6 +47,31 @@ fn fixture_output_after_busy(
 }
 
 /// # Panics
+/// Panics if the fixture cannot run, exceeds the 120-second hang bound, or exits without the named transport event.
+fn output_after_exit_event(command: &mut Command, event: impl Fn() -> bool) -> Output {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if started.elapsed() >= std::time::Duration::from_secs(120) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("fixture process exceeded 120 seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(event(), "fixture transport event absent");
+    output
+}
+
+/// # Panics
 /// Panics only if fixture setup, executable retry or readiness verification fails.
 ///
 /// ´test:integration:fixture-readiness-retries-held-executable-writer´
@@ -247,18 +272,30 @@ fn failure_isolation_admin_publication_and_deadlines() {
     let other = metadata(&f.root.path().join("state/cursor-beta"));
     assert!(f.run("poll", "empty", true).status.success());
     assert_eq!(other, metadata(&f.root.path().join("state/cursor-beta")));
-    let output = f
-        .command("poll", "partial")
-        .args(["alpha", "beta"])
-        .output()
-        .unwrap();
+    // Fresh alpha content ends the round after beta's failed transport is observed.
+    fs::remove_file(&cursor).unwrap();
+    let calls = f.root.path().join("calls");
+    fs::remove_file(&calls).unwrap();
+    let output = output_after_exit_event(
+        f.command("poll", "partial")
+            .env("CORRESPONDENCE_FEED_DEADLINE_MS", "120000")
+            .args(["alpha", "beta"]),
+        || {
+            fs::read_to_string(&calls)
+                .is_ok_and(|log| log.lines().any(|line| line.starts_with("beta ")))
+        },
+    );
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("FEED-WARNING"));
     let mut slow = f.command("poll", "slow");
+    slow.env("CORRESPONDENCE_FEED_DEADLINE_MS", "5000");
     slow.arg("alpha");
-    let start = std::time::Instant::now();
-    assert!(!slow.output().unwrap().status.success());
-    assert!(start.elapsed().as_secs() < 3);
+    fs::remove_file(&calls).unwrap();
+    let output = output_after_exit_event(&mut slow, || {
+        fs::read_to_string(&calls)
+            .is_ok_and(|log| log.lines().any(|line| line.starts_with("alpha ")))
+    });
+    assert!(!output.status.success());
 }
 
 /// ´test:integration:output-failure-unknown-alias-and-key-do-not-acknowledge´
