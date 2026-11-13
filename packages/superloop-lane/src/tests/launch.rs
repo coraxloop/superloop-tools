@@ -2654,7 +2654,14 @@ fn proxy_refresh_preserves_live_helper_pins() {
         return;
     }
     if std::env::var_os("SUPERLOOP_ROUND_PROOF").is_some() {
+        let root = fixture.path().to_path_buf();
         super::helper_service::rounds_acceptance(home, &runs, &podman);
+        drop(fixture);
+        assert!(
+            !root.exists(),
+            "resumed helper fixture root removed: {}",
+            root.display()
+        );
         return;
     }
     if std::env::var_os("SUPERLOOP_SERVICE_PROOF").is_some() {

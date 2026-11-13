@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{Read as _, Write as _};
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -674,9 +674,17 @@ struct RoundOwner<'a> {
     home: &'a Path,
     run: PathBuf,
     identity: (u64, u64),
+    template_directories: [fs::File; 3],
 }
 impl Drop for RoundOwner<'_> {
     fn drop(&mut self) {
+        // TempDir cannot unlink children of the fixture's read-only templates.
+        // These descriptors were opened while creating this fixture, not from output.
+        for directory in &self.template_directories {
+            directory
+                .set_permissions(fs::Permissions::from_mode(0o700))
+                .expect("restore fixture directory write permission");
+        }
         let input =
             json!({"run":self.run,"device":self.identity.0,"inode":self.identity.1}).to_string();
         let output = namespace_python(
@@ -702,6 +710,23 @@ os.fchown(fd,0,0)
     }
 }
 
+fn template_directories(home: &Path) -> [fs::File; 3] {
+    let template = home
+        .join(".var/loops/alpha/runner-templates/codex")
+        .join("a".repeat(64));
+    ["", "bin", "libexec"].map(|name| {
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(template.join(name))
+            .expect("created template directory");
+        let metadata = directory.metadata().expect("held template metadata");
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.uid(), nix::unistd::Uid::effective().as_raw());
+        directory
+    })
+}
+
 /// # Panics
 /// Panics if the built helper refuses the correctly provisioned synthetic rounds.
 pub(super) fn rounds_acceptance(home: &Path, runs: &Path, podman: &Path) {
@@ -716,6 +741,7 @@ pub(super) fn rounds_acceptance(home: &Path, runs: &Path, podman: &Path) {
         home,
         run: run.clone(),
         identity: (metadata.dev(), metadata.ino()),
+        template_directories: template_directories(home),
     };
     let uid = crate::plan::loop_uid(&record["plan"]).expect("loop uid");
     let input = json!({"run":run,"uid":uid}).to_string();
