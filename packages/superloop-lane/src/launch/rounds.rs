@@ -765,29 +765,51 @@ impl PreparedRoundRequest {
         .map_err(|error| {
             LaneError::operation("round-evidence", format!("{}: {error}", path.display()))
         })?;
-        file.write_all(&bytes)
-            .and_then(|()| file.write_all(b"\n"))
+        let result = (|| {
+            file.write_all(&bytes)
+                .and_then(|()| file.write_all(b"\n"))
+                .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+            fchown(
+                &file,
+                Some(Uid::from_raw(parent.uid())),
+                Some(Gid::from_raw(parent.gid())),
+            )
             .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-        fchown(
-            &file,
-            Some(Uid::from_raw(parent.uid())),
-            Some(Gid::from_raw(parent.gid())),
-        )
-        .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-        file.sync_all()
+            file.sync_all()
+                .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+            renameat2(
+                &directory,
+                temporary.as_str(),
+                &directory,
+                name.as_str(),
+                RenameFlags::RENAME_NOREPLACE,
+            )
             .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-        renameat2(
-            &directory,
-            temporary.as_str(),
-            &directory,
-            name.as_str(),
-            RenameFlags::RENAME_NOREPLACE,
-        )
-        .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-        directory
-            .sync_all()
-            .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-        Ok(())
+            directory
+                .sync_all()
+                .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let held = file.metadata();
+            let named = nix::sys::stat::fstatat(
+                &directory,
+                temporary.as_str(),
+                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+            );
+            if held.as_ref().is_ok_and(|held| {
+                named
+                    .as_ref()
+                    .is_ok_and(|named| held.dev() == named.st_dev && held.ino() == named.st_ino)
+            }) {
+                let _removed = nix::unistd::unlinkat(
+                    &directory,
+                    temporary.as_str(),
+                    nix::unistd::UnlinkatFlags::NoRemoveDir,
+                );
+            }
+        }
+        result
     }
 }
 
@@ -1882,6 +1904,50 @@ mod tests {
             metadata.ino()
         );
         assert_eq!(names(), original, "only exact temporary considered");
+    }
+
+    /// ´test:unit:round-request-failure-removes-only-its-temporary´
+    #[test]
+    fn round_request_failure_removes_only_its_temporary() {
+        let (_fixture, plan) = client_environment_fixture();
+        let record = json!({"mail":[{"step":"review"}],"thread_id":"thread-1", "worker_uid":0});
+        let prepared =
+            super::prepare_round_request(&plan, &record, "review", 900).expect("prepared");
+        let temporary = plan.driver_dir.join(&prepared.temporary);
+        let destination = plan.driver_dir.join(&prepared.name);
+        fs::write(&destination, b"foreign request").expect("race destination");
+        let error = prepared
+            .publish()
+            .expect_err("rename refuses occupied name");
+        assert_eq!(error.kind, "round-evidence");
+        assert!(
+            !temporary.exists(),
+            "failed publication removes its own temporary"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("retained destination"),
+            b"foreign request"
+        );
+        fs::remove_file(&destination).expect("fixture destination");
+        let prepared =
+            super::prepare_round_request(&plan, &record, "review", 900).expect("retry prepared");
+        fs::write(&temporary, b"foreign temporary").expect("race temporary");
+        prepared.publish().expect_err("exclusive creation refuses");
+        assert_eq!(
+            fs::read(&temporary).expect("foreign temporary retained"),
+            b"foreign temporary"
+        );
+        assert!(!destination.exists(), "refusal publishes no request");
+        fs::remove_file(&temporary).expect("fixture temporary");
+        super::prepare_round_request(&plan, &record, "review", 900)
+            .expect("same step reusable")
+            .publish()
+            .expect("retry publishes");
+        assert!(!temporary.exists());
+        let request: serde_json::Value =
+            serde_json::from_slice(&fs::read(destination).expect("published"))
+                .expect("request JSON");
+        assert_eq!(request["step"], "review");
     }
 
     /// # Panics

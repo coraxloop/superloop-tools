@@ -900,7 +900,33 @@ fn check_previous_sources(home: &Path, runs: &Path, podman: &Path, settled: &Val
     writeln!(std::io::stdout().lock(), "PREVIOUS-SOURCES-NOT-READ").expect("source marker");
 }
 
-#[allow(clippy::too_many_lines)]
+fn check_preflight_report(bytes: &[u8], record: &Value) {
+    let preview: Value = serde_json::from_slice(bytes).expect("preview JSON");
+    assert_eq!(preview["state"], "passed");
+    assert!(
+        preview["checked"]
+            .as_array()
+            .expect("checked inputs")
+            .contains(&json!(
+                "saved runtime environment and unoccupied final round-request name"
+            )),
+        "preflight limits occupancy claim to final name: {preview}"
+    );
+    assert!(
+        preview["not_checked"]
+            .as_array()
+            .expect("unchecked window")
+            .contains(&json!(
+                "every step after the preparing reservation is published"
+            )),
+        "preflight names whole publication window: {preview}"
+    );
+    assert!(
+        record["plan"]["compute_workspace"].is_object(),
+        "real declaration reaches helper preflight"
+    );
+}
+
 fn check_round_previews(home: &Path, runs: &Path, podman: &Path, record: &Value, uid: u32) {
     let run = runs.join("R");
     let reservation = runs.join(".reservation-R.json");
@@ -919,21 +945,7 @@ fn check_round_previews(home: &Path, runs: &Path, podman: &Path, record: &Value,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let preview: Value = serde_json::from_slice(&output.stdout).expect("preview JSON");
-    assert_eq!(preview["state"], "passed");
-    assert!(
-        record["plan"]["compute_workspace"].is_object(),
-        "real declaration reaches helper preflight"
-    );
-    assert!(
-        preview["not_checked"]
-            .as_array()
-            .expect("unchecked window")
-            .contains(&json!(
-                "every step after the preparing reservation is published"
-            )),
-        "preflight names whole publication window: {preview}"
-    );
+    check_preflight_report(&output.stdout, record);
     assert_eq!(fs::read(&reservation).expect("after preview"), before);
     assert!(!run.join("round-launch-review.json").exists());
     writeln!(std::io::stdout().lock(), "ROUND-PREFLIGHT-READONLY").expect("preview marker");

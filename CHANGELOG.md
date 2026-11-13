@@ -26,6 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A refused resumed-round request publication now removes the temporary it created and preserves an occupied destination; the preview’s `helper_preflight.checked` now reads `saved runtime environment and unoccupied final round-request name`, claiming nothing about the later inspector’s temporary. This does not yet roll back a published preparing reservation (``test:unit:round-request-failure-removes-only-its-temporary``).
+
 - The preserved-checkout fixture disables automatic Git maintenance in both repositories before snapshotting the pushed objects, so a transient maintenance lock cannot change its verified file list (``test:unit:checkout-clones-only-verified-preserved-objects``).
 
 - The boxed first dispatch tells the worker to carry out the brief and report as it asks. Install `superloop-lane` with no launch in flight: the launcher, its container helper and the box's prompt client are that one program, so only a launch that crosses the install can pair builds that disagree on that exact prompt, and the prompt client then refuses with `round prompt does not name a mail delivery and step` before it reaches the helper (``proto:superlooplane:container-attempt-completion``).

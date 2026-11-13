@@ -953,7 +953,7 @@ pub(crate) fn preflight_round(
     Ok(json!({"state":"passed","step":step,"budget_seconds":budget,
         "checked":["retained mail custody and reservation binding",
             "helper plan, program, mounts, pins and image", "helper attempt argument vector",
-            "saved runtime environment and unoccupied round request"],
+            "saved runtime environment and unoccupied final round-request name"],
         "not_checked":["busy lease and scope admission before publication",
             "every step after the preparing reservation is published",
             "launch-time descriptor transfer and intervening changes"],
