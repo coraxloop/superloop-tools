@@ -1016,6 +1016,46 @@ pub(super) fn continuation_round(
     Ok(round)
 }
 
+/// Reconstruct the next round without publishing any reservation field.
+pub(crate) fn preflight_record(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    podman: &Path,
+    record: &Value,
+    step: &str,
+    budget: u64,
+) -> Result<Value, LaneError> {
+    let (plan, _) = super::pinned_plan_from_record(owner_home, loop_name, run, podman, record)?;
+    let request = LaunchRequest::parse(&[
+        loop_name.into(),
+        run.into(),
+        "--round".into(),
+        step.into(),
+        "--budget".into(),
+        budget.to_string(),
+    ])?;
+    let binding = record["mail"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["step"] == step))
+        .ok_or_else(|| LaneError::input("mail-delivery", "active mail binding absent"))?;
+    let directory = if threadless_continuation(record) {
+        super::planned_step_dir(&plan, step)?
+    } else {
+        prior_round_dir(record)?.to_path_buf()
+    };
+    let round = continuation_round(record, &request, &directory, binding)?;
+    let mut next = record.clone();
+    next["rounds"]
+        .as_array_mut()
+        .ok_or_else(|| LaneError::input("round-state", "rounds absent"))?
+        .push(round);
+    next["phase"] = json!("preparing");
+    next["active_round"] = json!(step);
+    next["letter_source"] = json!(super::steering::evidence(&plan, step));
+    Ok(next)
+}
+
 /// Preview or run the next round on the same worker, starting a thread after recovery if needed.
 ///
 /// # Errors
@@ -1303,6 +1343,14 @@ fn resume_with_program(
     }
     let thread = inspected["thread_id"].as_str();
     let (prior_dir, argv) = continuation_argv(&plan, &record, driver, request, &selection)?;
+    let helper_preflight = super::preflight_helper_round(
+        request,
+        &plan,
+        &environment,
+        (owner_home, &verified_home),
+        (&root, &verified_runs),
+        lane_bin,
+    )?;
     if request.dry_run {
         let saved_box = plan.document["runtime_argv"]
             .as_array()
@@ -1325,7 +1373,13 @@ fn resume_with_program(
             },
         )?;
         return Ok(
-            json!({"schema":1,"command":"launch","dry_run":true,"round":step,"budget_seconds":request.budget,"letter":letter_name,"letter_reconciliation_preview":letter_reconciliation,"proxy_service":proxy_service,"thread_id":thread,"home":plan.home,"worker_uid":worker,"invocation":{"program":entry_program,"argv":argv},"box_command":box_command,"changed":false,"wall_seconds":began.elapsed().as_secs_f64()}),
+            json!({"schema":1,"command":"launch","dry_run":true,"round":step,
+                "budget_seconds":request.budget,"letter":letter_name,
+                "letter_reconciliation_preview":letter_reconciliation,
+                "helper_preflight":helper_preflight,"proxy_service":proxy_service,
+                "thread_id":thread,"home":plan.home,"worker_uid":worker,
+                "invocation":{"program":entry_program,"argv":argv},"box_command":box_command,
+                "changed":false,"wall_seconds":began.elapsed().as_secs_f64()}),
         );
     }
     let _lease = lock_run_preparation(&root, &request.run, caller)?;

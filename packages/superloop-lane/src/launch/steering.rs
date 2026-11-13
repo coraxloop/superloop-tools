@@ -58,6 +58,53 @@ pub(super) fn evidence(plan: &Plan, step: &str) -> PathBuf {
     plan.driver_dir.join(format!("mail-{step}.txt"))
 }
 
+/// Read only the active round's retained, reservation-bound inbound mail.
+pub(super) fn retained_letter(plan: &Plan, record: &Value) -> Result<Vec<u8>, LaneError> {
+    let step = record["active_round"]
+        .as_str()
+        .ok_or_else(|| failure("active step absent"))?;
+    super::letters::valid_step(step)?;
+    if step == "dispatch" || record["letter_source"] != evidence(plan, step).display().to_string() {
+        return Err(failure("retained letter source differs from active step"));
+    }
+    let bindings = record["mail"]
+        .as_array()
+        .ok_or_else(|| failure("mail bindings absent"))?;
+    let mut matches = bindings.iter().filter(|binding| binding["step"] == step);
+    let binding = matches
+        .next()
+        .ok_or_else(|| failure("active mail binding absent"))?;
+    if matches.next().is_some() || binding["worker_uid"] != record["worker_uid"] {
+        return Err(failure(
+            "active mail binding is ambiguous or names another worker",
+        ));
+    }
+    let root = plan
+        .driver_dir
+        .parent()
+        .ok_or_else(|| failure("runs root absent"))?;
+    let loop_uid = super::recorded_loop_uid(record)?;
+    if loop_uid != crate::plan::loop_uid(&plan.document)? {
+        return Err(failure("recorded loop identity differs"));
+    }
+    let directory = binding_directory(root, &plan.driver_dir, loop_uid)?;
+    let file = evidence_file(&directory, step, BindingSelection::InboundVerify, loop_uid)?;
+    let mut bytes = Vec::new();
+    file.take(loop_home::mail::journal::MAX_LETTER_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(failure)?;
+    if bytes.len() as u64 > loop_home::mail::journal::MAX_LETTER_BYTES
+        || binding["bytes"].as_u64() != Some(bytes.len() as u64)
+        || binding["evidence_digest"] != build::sha256_bytes(&bytes, &plan.driver_dir)?
+    {
+        return Err(failure(
+            "retained evidence differs from active mail binding",
+        ));
+    }
+    declarations(&bytes, record)?;
+    Ok(bytes)
+}
+
 /// Verify and pin a delivered own-loop brief, then publish its reservation binding.
 ///
 /// # Errors
@@ -570,5 +617,139 @@ mod tests {
         let mut repeated = words.to_vec();
         repeated.extend(["--delivery".into(), words[5].clone()]);
         assert!(Request::parse(&repeated).is_err());
+    }
+}
+
+#[cfg(test)]
+mod retained_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn fixture() -> (tempfile::TempDir, Plan, Value) {
+        let root = tempfile::tempdir().expect("fixture root");
+        let run = root.path().join("R");
+        std::fs::create_dir(&run).expect("run");
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).expect("run mode");
+        let uid = Uid::effective().as_raw();
+        let home = root.path().join("worker");
+        let document = json!({"home":home,"driver_dir":run,"paths":[
+            {"path":home,"gid":uid}, {"path":run,"uid":uid,"gid":uid,"kind":"directory"}]});
+        let plan = Plan {
+            home,
+            driver_dir: run,
+            letter: PathBuf::new(),
+            document,
+        };
+        let bytes = b"Continue the synthetic work.\n";
+        let path = evidence(&plan, "review");
+        std::fs::write(&path, bytes).expect("letter");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("letter mode");
+        let record = json!({"plan":plan.document,"active_round":"review","letter_source":path,
+            "worker_uid":3000,"model_selection":{"model":"gpt-6-sol","effort":"high"},
+            "mail":[{"step":"review","worker_uid":3000,"bytes":bytes.len(),
+                "evidence_digest":build::sha256_bytes(bytes, root.path()).expect("digest")}]});
+        (root, plan, record)
+    }
+
+    /// ´test:unit:retained-round-mail-requires-exact-source-and-binding´
+    #[test]
+    fn retained_round_mail_requires_exact_source_and_binding() {
+        let (_root, plan, record) = fixture();
+        assert_eq!(
+            retained_letter(&plan, &record).expect("bound letter"),
+            b"Continue the synthetic work.\n"
+        );
+        for (field, value, expected) in [
+            (
+                "letter_source",
+                json!(plan.driver_dir.join("arbitrary.txt")),
+                "retained letter source differs from active step",
+            ),
+            (
+                "active_round",
+                json!("dispatch"),
+                "retained letter source differs from active step",
+            ),
+            ("mail", json!([]), "active mail binding absent"),
+            (
+                "mail",
+                json!([record["mail"][0], record["mail"][0]]),
+                "active mail binding is ambiguous or names another worker",
+            ),
+            (
+                "worker_uid",
+                json!(3001),
+                "active mail binding is ambiguous or names another worker",
+            ),
+        ] {
+            let mut changed = record.clone();
+            changed[field] = value;
+            let error = retained_letter(&plan, &changed).expect_err("selection refused");
+            assert_eq!(
+                (error.status, error.kind, error.detail.as_str()),
+                (2, "mail-delivery", expected)
+            );
+        }
+        for field in ["bytes", "evidence_digest"] {
+            let mut changed = record.clone();
+            changed["mail"][0][field] = json!("wrong");
+            let error = retained_letter(&plan, &changed).expect_err("content refused");
+            assert_eq!(
+                error.detail,
+                "retained evidence differs from active mail binding"
+            );
+        }
+    }
+
+    /// ´test:unit:retained-round-mail-keeps-leaf-custody´
+    #[test]
+    fn retained_round_mail_keeps_leaf_custody() {
+        let (root, plan, record) = fixture();
+        let path = evidence(&plan, "review");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("wider");
+        assert_eq!(
+            retained_letter(&plan, &record)
+                .expect_err("mode refused")
+                .detail,
+            "evidence custody differs"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("private");
+        let other = root.path().join("retained");
+        std::fs::hard_link(&path, &other).expect("hard link");
+        assert_eq!(
+            retained_letter(&plan, &record)
+                .expect_err("links refused")
+                .detail,
+            "evidence custody differs"
+        );
+        std::fs::remove_file(&path).expect("remove name");
+        std::os::unix::fs::symlink(&other, &path).expect("symlink");
+        assert_eq!(
+            retained_letter(&plan, &record)
+                .expect_err("symlink refused")
+                .kind,
+            "mail-delivery"
+        );
+        std::fs::remove_file(&path).expect("remove link");
+        std::fs::rename(other, &path).expect("restore name");
+        let uid = Uid::effective().as_raw() + 1;
+        let mut changed = record;
+        changed["plan"]["paths"][0]["gid"] = json!(uid);
+        changed["plan"]["paths"][1]["uid"] = json!(uid);
+        changed["plan"]["paths"][1]["gid"] = json!(uid);
+        let changed_plan = Plan {
+            home: plan.home,
+            driver_dir: plan.driver_dir,
+            letter: plan.letter,
+            document: changed["plan"].clone(),
+        };
+        let error = retained_letter(&changed_plan, &changed).expect_err("wrong directory owner");
+        assert_eq!(error.kind, "unsafe-path");
+        assert!(
+            error.detail.contains("loop directory uid"),
+            "{}",
+            error.line()
+        );
     }
 }

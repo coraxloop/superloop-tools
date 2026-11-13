@@ -5965,6 +5965,70 @@ fn helper_argv(
     ])
 }
 
+pub(super) fn preflight_helper_round(
+    request: &LaunchRequest,
+    plan: &Plan,
+    environment: &BTreeMap<String, String>,
+    (owner_home, verified_home): (&Path, &OwnedFd),
+    (runs_root, verified_runs): (&Path, &OwnedFd),
+    lane_bin: &Path,
+) -> Result<Value, LaneError> {
+    let bundle = crate::container_entry::pin(
+        &request.loop_name,
+        (owner_home, verified_home),
+        (runs_root, verified_runs),
+        lane_bin,
+        &request.podman_bin,
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+    )?;
+    let exe = crate::pinned::owner_executable_word(lane_bin, Uid::effective().as_raw())?;
+    let mut words = vec![crate::pinned::path_word(
+        &request.podman_bin,
+        "container-program",
+    )?];
+    words.extend(helper_argv(&exe, &plan.driver_dir, owner_home, runs_root)?);
+    words.extend([
+        "--anchor-manifest".into(),
+        bundle.manifest,
+        "--preflight-round".into(),
+        request
+            .round
+            .clone()
+            .ok_or_else(|| LaneError::input("round-step", "round absent"))?,
+        "--budget".into(),
+        request.budget.to_string(),
+    ]);
+    let (sender, input) = UnixStream::pair()
+        .map_err(|error| LaneError::operation("helper-preflight", error.to_string()))?;
+    loop_home::anchor::transport::send(&sender, &bundle.descriptors).map_err(|error| {
+        LaneError::input(
+            "container-anchor",
+            error.context("container-helper", "rights").to_string(),
+        )
+    })?;
+    let command = loop_home::CommandSpec {
+        label: "helper-preflight".into(),
+        argv: words,
+        io: loop_home::IoMode::Capture,
+        descriptors: loop_home::CommandDescriptors::default().with_input(input.into()),
+    };
+    let output =
+        build::run_checked_command(&command, environment, owner_home, 60, "helper-preflight")?;
+    let report: Value = serde_json::from_str(&output)
+        .map_err(|error| LaneError::input("helper-preflight", error.to_string()))?;
+    if report["state"] != "passed"
+        || report["step"].as_str() != request.round.as_deref()
+        || report["budget_seconds"] != request.budget
+        || report["changed"] != false
+    {
+        return Err(LaneError::input(
+            "helper-preflight",
+            "private preflight report differs",
+        ));
+    }
+    Ok(report)
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn start_helper_with_program(
     request: &LaunchRequest,
@@ -6761,7 +6825,12 @@ pub(crate) fn pinned_plan_from_record_admitted(
     let letter = record["letter_source"]
         .as_str()
         .ok_or_else(|| LaneError::input("letter-model", "recorded letter source is absent"))?;
-    let bytes = if let Some(expected) = record["rotation_source_sha256"].as_str() {
+    let bytes = if record["active_round"]
+        .as_str()
+        .is_some_and(|step| step != "dispatch")
+    {
+        steering::retained_letter(&plan, record)?
+    } else if let Some(expected) = record["rotation_source_sha256"].as_str() {
         let inbox = plan.home.join("brief.txt");
         let bytes = home::read_letter(&inbox, Uid::effective().as_raw())?;
         let actual = build::sha256_bytes(&bytes, owner_home)?;

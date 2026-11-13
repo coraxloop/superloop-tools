@@ -1,7 +1,7 @@
 //! Production helper service acceptance under the rootless namespace.
 
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -526,4 +526,349 @@ pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
         String::from_utf8_lossy(&cleanup.stderr)
     );
     writeln!(std::io::stdout().lock(), "HELPER-SERVICE-MEASURED").expect("service marker");
+}
+
+/// ´test:crate:built-helper-resume-retains-mail-custody´
+#[test]
+fn built_helper_resume_retains_mail_custody() {
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "tests::launch::proxy_refresh_preserves_live_helper_pins",
+            "--nocapture",
+        ])
+        .env("SUPERLOOP_ROUND_PROOF", "1")
+        .env("SUPERLOOP_REFRESH_PROOF", "1")
+        .env("_CONTAINERS_USERNS_CONFIGURED", "1")
+        .env(
+            "_CONTAINERS_ROOTLESS_UID",
+            nix::unistd::Uid::effective().as_raw().to_string(),
+        )
+        .output()
+        .expect("round fixture");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8_lossy(&output.stdout);
+    for marker in [
+        "FIRST-HELPER-READY",
+        "RESUMED-HELPER-READY",
+        "ROUND-PREFLIGHT-READONLY",
+    ] {
+        assert!(output.contains(marker), "{output}");
+    }
+}
+
+fn built_helper(home: &Path, runs: &Path, podman: &Path, preflight: bool) -> FixtureChild {
+    let binary = std::env::current_exe()
+        .expect("test image")
+        .ancestors()
+        .map(|path| path.join("superloop-lane"))
+        .find(|path| path.is_file())
+        .expect("build package binary before acceptance");
+    let own = fs::File::open(home).expect("home").into();
+    let storage = fs::File::open(runs).expect("runs").into();
+    let bundle = crate::container_entry::pin(
+        "alpha",
+        (home, &own),
+        (runs, &storage),
+        &binary,
+        podman,
+        crate::settings::BoxBackend::Codex,
+    )
+    .expect("held bundle");
+    let mut args = vec![
+        "_container-helper".to_owned(),
+        "--run-dir".into(),
+        runs.join("R").display().to_string(),
+        "--owner-home".into(),
+        home.display().to_string(),
+        "--verified-home-fd".into(),
+        "0".into(),
+        "--verified-runs-root".into(),
+        runs.display().to_string(),
+        "--verified-runs-root-fd".into(),
+        "1".into(),
+        "--anchor-manifest".into(),
+        bundle.manifest,
+    ];
+    if preflight {
+        args.extend([
+            "--preflight-round".into(),
+            "review".into(),
+            "--budget".into(),
+            "3600".into(),
+        ]);
+    }
+    let (sender, input) = UnixStream::pair().expect("rights");
+    let child = Command::new("/usr/bin/podman")
+        .env_remove("_CONTAINERS_USERNS_CONFIGURED")
+        .env_remove("_CONTAINERS_ROOTLESS_UID")
+        .arg("unshare")
+        .arg(binary)
+        .args(args)
+        .env("HOME", home)
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(input)))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("built helper");
+    let child = FixtureChild(Some(child));
+    loop_home::anchor::transport::send(&sender, &bundle.descriptors).expect("send held bundle");
+    child
+}
+
+fn ready_and_stop(mut child: FixtureChild, runs: &Path, marker: &str) {
+    let control = crate::container_helper::control_socket_path(&runs.join("R")).expect("control");
+    let socket = crate::container_helper::socket_path(&runs.join("R")).expect("client");
+    let start = Instant::now();
+    while !control.exists() || !socket.exists() {
+        if child
+            .0
+            .as_mut()
+            .expect("child")
+            .try_wait()
+            .expect("status")
+            .is_some()
+        {
+            let output = child.finish();
+            panic!(
+                "{marker}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(45),
+            "{marker}: readiness deadline"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut stream = UnixStream::connect(&control).expect("control connect");
+    stream.write_all(b"C").expect("cancel helper");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("ack bound");
+    let mut ack = [0];
+    stream.read_exact(&mut ack).expect("cancel acknowledgement");
+    assert_eq!(&ack, b"K");
+    drop(stream);
+    let output = child.finish();
+    assert!(
+        output.status.success(),
+        "{marker}: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !control.exists() && !socket.exists(),
+        "helper removed its sockets"
+    );
+    writeln!(std::io::stdout().lock(), "{marker}").expect("readiness marker");
+}
+
+struct RoundOwner<'a> {
+    home: &'a Path,
+    run: PathBuf,
+    identity: (u64, u64),
+}
+impl Drop for RoundOwner<'_> {
+    fn drop(&mut self) {
+        let input =
+            json!({"run":self.run,"device":self.identity.0,"inode":self.identity.1}).to_string();
+        let output = namespace_python(
+            self.home,
+            r"
+import os,json,sys
+v=json.loads(sys.argv[2]);fd=os.open(v['run'],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+s=os.fstat(fd)
+assert (s.st_dev,s.st_ino)==(v['device'],v['inode'])
+for name in ['mail-review.txt']:
+ try: os.chown(name,0,0,dir_fd=fd,follow_symlinks=False)
+ except FileNotFoundError: pass
+os.fchown(fd,0,0)
+",
+            &input,
+        )
+        .expect("restore mapped fixture owner");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// # Panics
+/// Panics if the built helper refuses the correctly provisioned synthetic rounds.
+pub(super) fn rounds_acceptance(home: &Path, runs: &Path, podman: &Path) {
+    let mut record = prepare(home, runs, podman);
+    let _worker = MappedWorker {
+        home: home.to_path_buf(),
+        worker: record["plan"]["home"].as_str().expect("worker").into(),
+    };
+    let run = runs.join("R");
+    let metadata = fs::metadata(&run).expect("run");
+    let _owner = RoundOwner {
+        home,
+        run: run.clone(),
+        identity: (metadata.dev(), metadata.ino()),
+    };
+    let uid = crate::plan::loop_uid(&record["plan"]).expect("loop uid");
+    let input = json!({"run":run,"uid":uid}).to_string();
+    let output = namespace_python(
+        home,
+        r"
+import os,json,sys
+v=json.loads(sys.argv[2]);os.chown(v['run'],v['uid'],v['uid']);os.chmod(v['run'],0o700)
+s=os.stat(v['run']);p=os.stat(os.path.dirname(v['run']))
+assert s.st_uid==v['uid'] and p.st_uid==0 and s.st_uid!=p.st_uid
+assert s.st_mode&0o7777==0o700 and p.st_mode&0o7777==0o711
+",
+        &input,
+    )
+    .expect("two uid layout");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ready_and_stop(
+        built_helper(home, runs, podman, false),
+        runs,
+        "FIRST-HELPER-READY",
+    );
+    record["phase"] = json!("settled");
+    record["thread_id"] = json!("fixture-thread");
+    record["rounds"][0]["phase"] = json!("settled");
+    record["rounds"][0]["driver_dir"] = json!(run.join("fixture-dispatch"));
+    let bytes = b"Continue the synthetic round.\n";
+    let path = run.join("mail-review.txt");
+    let input = json!({"run":run,"uid":uid,"text":String::from_utf8_lossy(bytes)}).to_string();
+    let output = namespace_python(
+        home,
+        r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);p=Path(v['run'])/'mail-review.txt'
+p.write_text(v['text']);p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
+",
+        &input,
+    )
+    .expect("retained mail");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    record["mail"] = json!([{"step":"review","worker_uid":record["worker_uid"],"bytes":bytes.len(),
+        "evidence_digest":crate::build::sha256_bytes(bytes,home).expect("digest")}]);
+    let reservation = runs.join(".reservation-R.json");
+    crate::launch::publish_reservation(&reservation, &record).expect("settled binding");
+    let settled = record.clone();
+    record["phase"] = json!("preparing");
+    record["active_round"] = json!("review");
+    record["letter_source"] = json!(path);
+    record["rounds"]
+        .as_array_mut()
+        .expect("rounds")
+        .push(json!({"step":"review","phase":"preparing"}));
+    crate::launch::publish_reservation(&reservation, &record).expect("resume input");
+    ready_and_stop(
+        built_helper(home, runs, podman, false),
+        runs,
+        "RESUMED-HELPER-READY",
+    );
+    check_round_previews(home, runs, podman, &settled, uid);
+}
+
+fn check_round_previews(home: &Path, runs: &Path, podman: &Path, record: &Value, uid: u32) {
+    let run = runs.join("R");
+    let reservation = runs.join(".reservation-R.json");
+    let bytes = b"Continue the synthetic round.\n";
+    crate::launch::publish_reservation(&reservation, record).expect("settled before preview");
+    let before = fs::read(&reservation).expect("before preview");
+    let credential = runs.join(".launch-R/credential-refresh.json");
+    let evidence = (
+        fs::metadata(&credential).expect("evidence inode").ino(),
+        fs::read(&credential).expect("evidence bytes"),
+    );
+    let output = built_helper(home, runs, podman, true).finish();
+    assert!(
+        output.status.success(),
+        "preview: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let preview: Value = serde_json::from_slice(&output.stdout).expect("preview JSON");
+    assert_eq!(preview["state"], "passed");
+    assert_eq!(fs::read(&reservation).expect("after preview"), before);
+    assert!(!run.join("round-launch-review.json").exists());
+    writeln!(std::io::stdout().lock(), "ROUND-PREFLIGHT-READONLY").expect("preview marker");
+    assert_eq!(
+        (
+            fs::metadata(&credential).expect("same inode").ino(),
+            fs::read(&credential).expect("same evidence")
+        ),
+        evidence
+    );
+    for (change, text) in [
+        (
+            "bytes",
+            "retained evidence differs from active mail binding",
+        ),
+        ("owner", "evidence custody differs"),
+        ("directory-owner", "loop directory uid"),
+    ] {
+        let input = json!({"run":run,"uid":uid,"change":change}).to_string();
+        let output = namespace_python(
+            home,
+            r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);p=Path(v['run'])/'mail-review.txt'
+if v['change']=='bytes': p.write_text('changed synthetic letter')
+elif v['change']=='directory-owner': os.chown(p.parent,3001,3001)
+else: os.chown(p,3001,3001)
+",
+            &input,
+        )
+        .expect("change retained source");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = built_helper(home, runs, podman, true).finish();
+        assert_eq!(output.status.code(), Some(2), "bad {change} preview passed");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(text),
+            "{change}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read(&reservation).expect("refused preview unchanged"),
+            before
+        );
+        let input = json!({"run":run,"uid":uid,"text":String::from_utf8_lossy(bytes)}).to_string();
+        let output = namespace_python(
+            home,
+            r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);p=Path(v['run'])/'mail-review.txt'
+p.write_text(v['text']);os.chown(p,v['uid'],v['uid']);os.chown(p.parent,v['uid'],v['uid'])
+",
+            &input,
+        )
+        .expect("restore retained source");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

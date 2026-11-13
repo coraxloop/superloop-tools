@@ -787,6 +787,23 @@ fn resume_plan(home: &Path, runtime: &Path) -> (PathBuf, Vec<u8>) {
     fs::write(&path, &bytes).expect("settled record");
     (path, bytes)
 }
+fn incomplete_resume_plan_refuses(
+    result: Result<serde_json::Value, superloop_lane::error::LaneError>,
+) {
+    // This mail fixture uses the synthetic birth name "worker", not the
+    // launcher's canonical reservation identity. Its private mail checks
+    // pass, but the real helper preflight must now reject that incomplete plan.
+    let error = result.expect_err("mail fixture reaches helper preflight");
+    assert_eq!((error.status, error.kind), (1, "helper-preflight"));
+    assert!(
+        error.detail.contains(
+            "helper-pin: mail-mount: mail binding cannot change within a worker lifetime"
+        ),
+        "{}",
+        error.line()
+    );
+}
+
 fn resume_route(home: &Path, entry: &Path, kind: &str) {
     let runtime = home.join("resume-runtime");
     let source = if kind == "inbound-resume-repair" {
@@ -859,9 +876,7 @@ fn resume_route(home: &Path, entry: &Path, kind: &str) {
         };
         assert!(error.line().contains(expected), "{kind}: {}", error.line());
     } else {
-        let report = result.expect("complete resume preview");
-        assert_eq!(report["changed"], false);
-        assert_eq!(report["dry_run"], true);
+        incomplete_resume_plan_refuses(result);
     }
     if dry {
         assert_eq!(evidence_snapshot(home), evidence_before);

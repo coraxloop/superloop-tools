@@ -2294,7 +2294,11 @@ fn proxy_refresh_preserves_live_helper_pins() {
         );
         return;
     }
-    let fixture = TempDir::new_in("/tmp").expect("fixture");
+    let fixture = if std::env::var_os("SUPERLOOP_ROUND_PROOF").is_some() {
+        tempfile::tempdir().expect("supplied temporary root")
+    } else {
+        tempfile::TempDir::new_in("/tmp").expect("fixture")
+    };
     fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
         .expect("host ancestor mode");
     let home_dir = fixture.path().join("home");
@@ -2647,6 +2651,10 @@ fn proxy_refresh_preserves_live_helper_pins() {
     }
     if std::env::var_os("SUPERLOOP_RUNTIME_PROOF").is_some() {
         super::runtime_preparation::exercise(home, &runs, &podman);
+        return;
+    }
+    if std::env::var_os("SUPERLOOP_ROUND_PROOF").is_some() {
+        super::helper_service::rounds_acceptance(home, &runs, &podman);
         return;
     }
     if std::env::var_os("SUPERLOOP_SERVICE_PROOF").is_some() {
@@ -3401,6 +3409,10 @@ home = pathlib.Path.cwd()
 f = json.loads((home / 'resume-window.json').read_text())
 if '_bind-mail' in sys.argv:
     print(json.dumps(f['binding']))
+elif '--preflight-round' in sys.argv:
+    print(json.dumps({'state':'passed',
+        'step':sys.argv[sys.argv.index('--preflight-round')+1],
+        'budget_seconds':int(sys.argv[sys.argv.index('--budget')+1]),'changed':False}))
 elif '_inspect-round' in sys.argv:
     if '--record' in sys.argv:
         if f['failure'].startswith('inspect'):

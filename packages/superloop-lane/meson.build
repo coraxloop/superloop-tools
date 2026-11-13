@@ -586,3 +586,8 @@ dependency_ledger += ['''
 dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lane/tests/door_sign_in_entry.rs:\"/usr/bin/python3\"#2","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"test-executable","contract":"Set owner-authorized ACLs beneath the supplied temporary root and drive the real private receiver dry-run entry against exact mail traversal and refusing shapes"}
 ''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-lane/src/tests/helper_service.rs:std :: env :: current_exe () . expect (\"test executable\")#2","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:superloop-lane:self","lookup":"test-executable","binding":"current_exe","contract":"Reexecute the mapped two-uid resumed helper fixture before driving the built private service and read-only preflight"}
+{"kind":"call","site":"packages/superloop-lane/src/tests/helper_service.rs:\"/usr/bin/podman\"#4","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Run the built helper receiver with host-held anchors on distinct runs-root and run-directory owners for first and resumed readiness and read-only preflight"}
+''']

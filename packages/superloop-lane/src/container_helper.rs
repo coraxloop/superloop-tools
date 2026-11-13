@@ -827,6 +827,17 @@ fn pinned_request_admitted(
             "reservation names another run",
         ));
     }
+    pinned_request_record(owner_home, loop_name, run, podman, record, admission)
+}
+
+fn pinned_request_record(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    podman: &Path,
+    record: Value,
+    admission: &RuntimeAdmission,
+) -> Result<PinnedRequest, LaneError> {
     let launcher = LauncherIdentity {
         pid: record["launcher_pid"]
             .as_u64()
@@ -879,6 +890,60 @@ fn pinned_request_admitted(
         record,
         launcher,
     })
+}
+
+/// Check a prospective resumed request without publishing or starting the service.
+pub(crate) fn preflight_round(run_dir: &Path, step: &str, budget: u64) -> Result<Value, LaneError> {
+    let (owner_home, loop_name, run, podman) = run_identity(run_dir)?;
+    crate::launch::letters::valid_step(step)?;
+    if !(1..=10_800).contains(&budget) {
+        return Err(LaneError::input(
+            "round-budget",
+            "budget must be 1 through 10800 seconds",
+        ));
+    }
+    crate::pinned::owner_executable(&podman, Uid::effective().as_raw())?;
+    let root = run_dir
+        .parent()
+        .ok_or_else(|| LaneError::input("helper-pin", "runs root absent"))?;
+    let mut record = read_reservation(&reservation_path(root, &run))?
+        .ok_or_else(|| LaneError::input("helper-pin", "reservation absent"))?;
+    if record["phase"] != "settled"
+        || record["rounds"]
+            .as_array()
+            .is_none_or(|rows| rows.iter().any(|round| round["step"] == step))
+    {
+        return Err(LaneError::input(
+            "round-state",
+            "preflight requires an unused settled round",
+        ));
+    }
+    record = crate::launch::rounds::preflight_record(
+        &owner_home,
+        &loop_name,
+        &run,
+        &podman,
+        &record,
+        step,
+        budget,
+    )?;
+    record["launcher_pid"] = json!(std::process::id());
+    record["launcher_start"] = json!(process_start(std::process::id())?);
+    let initial = pinned_request_record(
+        &owner_home,
+        &loop_name,
+        &run,
+        &podman,
+        record,
+        &RuntimeAdmission::Gate,
+    )?;
+    attempt_vector(&initial.argv, &initial.driver_dir, 1)?;
+    Ok(json!({"state":"passed","step":step,"budget_seconds":budget,
+        "checked":["retained mail custody and reservation binding",
+            "helper plan, program, mounts, pins and image", "helper attempt argument vector"],
+        "not_checked":["launch-time descriptor transfer", "socket bind",
+            "process spawn", "intervening changes"],
+        "helper_started":false,"credential_published":false,"changed":false}))
 }
 
 fn attempt_vector(

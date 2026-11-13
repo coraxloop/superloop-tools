@@ -2722,6 +2722,10 @@ elif args[0] == 'rm':
 elif args[0] == 'unshare':
     if '_bind-mail' in args:
         print((root / 'binding.json').read_text())
+    elif '--preflight-round' in args:
+        print(json.dumps({'state':'passed',
+        'step':args[args.index('--preflight-round')+1],
+        'budget_seconds':int(args[args.index('--budget')+1]),'changed':False}))
     elif '_inspect-round' in args:
         if '--record' in args:
             print('fixture-round-evidence-stop', file=sys.stderr)
@@ -3168,6 +3172,26 @@ else:
         assert_eq!(rounds.last().expect("new round")["fresh_thread"], true);
     }
 
+    fn threadless_runtime(request: &super::super::LaunchRequest) {
+        let preflight = json!({"state":"passed","step":request.round,
+            "budget_seconds":request.budget,"changed":false});
+        crate::fixture_exec::write_executable(
+            &request.podman_bin,
+            format!(
+                r#"#!/bin/sh
+for word do
+ if [ "$word" = _bind-mail ]; then cat "$HOME/binding.json"; exit 0; fi
+ if [ "$word" = --preflight-round ]; then printf '%s\n' '{preflight}'; exit 0; fi
+ if [ "$word" = --record ]; then echo fixture-round-evidence-stop >&2; exit 17; fi
+done
+printf '{{"thread_id":null}}\n'
+"#
+            )
+            .as_bytes(),
+        )
+        .expect("fake container entry");
+    }
+
     fn resume_threadless_dispatch_through_entry() {
         let (fixture, plan, mut request) = dead_resume_fixture("started");
         let _mail_standin = crate::build::mail_standin::register(&request.podman_bin);
@@ -3198,9 +3222,7 @@ else:
             "a recovered dispatch cannot authorize a later ordinary round"
         );
         super::super::publish_reservation(&path, &saved).expect("settled dispatch");
-        crate::fixture_exec::write_executable(&request.podman_bin,
-            b"#!/bin/sh\nfor word do\n if [ \"$word\" = _bind-mail ]; then cat \"$HOME/binding.json\"; exit 0; fi\n if [ \"$word\" = --record ]; then echo fixture-round-evidence-stop >&2; exit 17; fi\ndone\nprintf '{\"thread_id\":null}\\n'\n")
-            .expect("fake container entry");
+        threadless_runtime(&request);
         request.dry_run = false;
         let entry = h.join("entry");
         let entry_source = std::fs::read_to_string(&entry).expect("recorded entry fixture");
@@ -3977,6 +3999,14 @@ test "$1" = unshare
 shift
 entry=$1
 shift
+case " $* " in *" --preflight-round "*)
+previous=''
+for word in "$@"; do
+    case "$previous" in --preflight-round) step=$word;; --budget) budget=$word;; esac
+    previous=$word
+done
+printf '{"state":"passed","step":"%s","budget_seconds":%s,"changed":false}\n' "$step" "$budget"
+exit 0;; esac
 case "$1" in
 _bind-mail) cat "$HOME/binding.json";;
 _inspect-round) printf '{"thread_id":"thread-1"}\n';;

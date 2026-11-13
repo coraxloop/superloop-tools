@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io::Write as _;
 use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -850,6 +851,18 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
             "rootless namespace owner is required",
         ));
     }
+    let (args, preflight) = match args {
+        [body @ .., flag, step, budget_flag, seconds]
+            if flag == "--preflight-round" && budget_flag == "--budget" =>
+        {
+            crate::launch::letters::valid_step(step)?;
+            let budget = seconds.parse::<u64>().map_err(|_| {
+                refusal("anchor-declaration: operation=container-helper purpose=budget")
+            })?;
+            (body, Some((step.as_str(), budget)))
+        }
+        _ => (args, None),
+    };
     let [
         command,
         driver_flag,
@@ -917,6 +930,12 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
         crate::container_helper::run_identity(Path::new(run))?,
         podman,
     )?;
+    if let Some((step, budget)) = preflight {
+        let report = crate::container_helper::preflight_round(Path::new(run), step, budget)?;
+        writeln!(std::io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("helper-preflight", error.to_string()))?;
+        return Ok(0);
+    }
     crate::container_helper::serve(Path::new(run)).map(|()| 0)
 }
 
