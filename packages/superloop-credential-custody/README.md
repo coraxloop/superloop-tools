@@ -7,6 +7,7 @@
 ```text
 superloop-credential-custody length-observe --parameters FILE --case NAME --receipt NAME
 superloop-credential-custody length-observe --parameters FILE --case NAME --receipt NAME --discover RELATIVE
+superloop-credential-custody identity-check --parameters FILE --calibration FILE --receipt NAME
 ```
 
 The parameter record is reviewed metadata, not an untrusted command service. Probe argument vectors are explicit operator authority to execute their named programs; no shell expansion occurs. The caller must exclude deployment and file replacement throughout observation. Sealed inputs must be completed, regular, single-link, caller-owned and nonwritable, beneath the declared sealed root. Completion assertions bind each file digest to its case and invocation. This slice consumes those assertions; it does not observe a supervisor or establish generator success independently. Future completion observers must supply that evidence before these observations can witness a real campaign.
@@ -28,6 +29,8 @@ Schema 1 is strict JSON limited to 262144 bytes. Every object rejects unknown an
 The reviewed parser emits space-delimited metadata rows: `NAME LENGTH CONTENT file-bytes N wrap W final-lf F base64-chars N padding P decoded N offset N`, one `NAME constant N` per name, and one `ID same-constant-both-names True|False` per comparison. Complete rows, exact roster, numeric consistency, observed text sizes and the fixed form are mandatory. One decoded-minus-input constant must hold across all lengths and both contents of each name. The payload rejects whitespace normalization, wrong wrapping/newline form, alphabet or padding. Sealed digests are checked before and after execution; identity is checked on both sides. No decoded bytes are materialized by the observer.
 
 Discovery reports only `line_count`, `wrap_width` (null for irregular wrapping), `final_newline` and `alphabet_conformity`, with `discovery:true`. It cannot create a calibration or accept a length. Alphabet conformity is a representation observation, not a padding or length verdict. The operator must freeze a separately reviewed form before calibration.
+
+`identity-check` requires a complete immutable length-observation receipt with matching schema, case, config/code identities and row matrix. It compares every declared identity member against live probe output and file digests, refusing drift or absence even when constants match. It emits only `matches:true` and the compared receipt digest; it never edits or repairs calibration.
 
 ## Publication and output · `sec:credentialcustody:publication`
 

@@ -169,18 +169,35 @@ impl Fixture {
         )
         .unwrap();
     }
-    fn command(&self) -> Command {
+    fn command(&self, identity: bool) -> Command {
         self.save();
         let mut cmd = binary();
-        cmd.arg("length-observe")
-            .arg("--parameters")
-            .arg(self.dir.path().join("parameters.json"))
-            .args(["--receipt", "calibration", "--case", "campaign"]);
-
+        cmd.arg(if identity {
+            "identity-check"
+        } else {
+            "length-observe"
+        })
+        .arg("--parameters")
+        .arg(self.dir.path().join("parameters.json"))
+        .arg("--receipt")
+        .arg(if identity {
+            "comparison"
+        } else {
+            "calibration"
+        });
+        if identity {
+            cmd.arg("--calibration")
+                .arg(self.dir.path().join("evidence/calibration"));
+        } else {
+            cmd.args(["--case", "campaign"]);
+        }
         cmd
     }
     fn observe(&self) -> Output {
-        self.command().output().unwrap()
+        self.command(false).output().unwrap()
+    }
+    fn check(&self) -> Output {
+        self.command(true).output().unwrap()
     }
     fn malformed(&mut self, bytes: &[u8]) {
         let path = self.dir.path().join("sealed/alpha/3-a.sealed");
@@ -207,13 +224,14 @@ fn refuse(output: &Output) {
     assert_eq!(diagnostic["kind"], "diagnostic");
 }
 
-/// ´test:integration:known-lengths´
+/// ´test:integration:known-lengths-and-identity´
 #[test]
-fn known_lengths() {
+fn known_lengths_and_identity() {
     let f = Fixture::new();
     let report = pass(&f.observe());
     assert_eq!(report["evidence"]["rows"].as_array().unwrap().len(), 12);
     assert_eq!(report["evidence"]["constants"][0]["constant"], 0);
+    assert_eq!(pass(&f.check())["evidence"]["matches"], true);
 }
 
 /// ´test:integration:record-refusals-before-effects´
@@ -261,12 +279,12 @@ fn duplicate_and_excessive_records() {
         " ".repeat(262_145),
     ] {
         let f = Fixture::new();
-        let mut command = f.command();
+        let mut command = f.command(false);
         fs::write(f.dir.path().join("parameters.json"), content).unwrap();
         refuse(&command.output().unwrap());
     }
     let f = Fixture::new();
-    let mut command = f.command();
+    let mut command = f.command(false);
     let text = serde_json::to_string(&f.record)
         .unwrap()
         .replace("\"wrap\":0", "\"wrap\":0,\"wrap\":0");
@@ -355,7 +373,7 @@ fn discovery_never_accepts_length() {
     let mut f = Fixture::new();
     f.malformed(b"QU\nFB\n");
     let result = pass(
-        &f.command()
+        &f.command(false)
             .args(["--discover", "alpha/3-a.sealed"])
             .output()
             .unwrap(),
@@ -364,6 +382,7 @@ fn discovery_never_accepts_length() {
     assert_eq!(result["evidence"]["wrap_width"], 2);
     assert_eq!(result["evidence"]["alphabet_conformity"], true);
     assert!(result["evidence"].get("decoded").is_none());
+    refuse(&f.check());
 }
 
 /// ´test:integration:receipt-exclusivity-and-modes´
@@ -387,6 +406,57 @@ fn receipt_exclusivity_and_modes() {
     .unwrap();
     refuse(&f.observe());
     assert!(!f.dir.path().join("evidence/calibration").exists());
+}
+
+/// ´test:integration:every-identity-member-drift´
+#[test]
+fn every_identity_member_drift() {
+    for role in 0..7 {
+        let mut f = Fixture::new();
+        pass(&f.observe());
+        f.record["probes"][role]["argv"][1] = json!("synthetic-v2\n");
+        refuse(&f.check());
+    }
+    for member in ["sealer", "library", "parser"] {
+        let f = Fixture::new();
+        pass(&f.observe());
+        let path = f.record["identity"]["files"][member]["path"]
+            .as_str()
+            .unwrap();
+        fs::write(path, b"changed").unwrap();
+        refuse(&f.check());
+    }
+    for pointer in [
+        "/identity/files/interpreter/sha256",
+        "/identity/computation",
+        "/identity/measure",
+    ] {
+        let mut f = Fixture::new();
+        pass(&f.observe());
+        *f.record.pointer_mut(pointer).unwrap() = json!("changed");
+        refuse(&f.check());
+    }
+    let mut f = Fixture::new();
+    pass(&f.observe());
+    f.record["identity"]["form"]["final_lf"] = json!(false);
+    refuse(&f.check());
+}
+
+/// ´test:integration:missing-calibration-member´
+#[test]
+fn missing_calibration_member() {
+    let f = Fixture::new();
+    pass(&f.observe());
+    let path = f.dir.path().join("evidence/calibration");
+    let mut calibration: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    calibration["evidence"]["identity"]["files"]
+        .as_object_mut()
+        .unwrap()
+        .remove("interpreter");
+    mode(&path, 0o600);
+    fs::write(&path, serde_json::to_vec(&calibration).unwrap()).unwrap();
+    mode(&path, 0o400);
+    refuse(&f.check());
 }
 
 /// ´test:integration:bounded-child-failure-and-redaction´
@@ -418,6 +488,24 @@ fn control_plane_output() {
             Some(if arg.starts_with("--unknown") { 2 } else { 0 })
         );
     }
+}
+
+/// ´test:integration:interpreter-bytes-are-compared´
+#[test]
+fn interpreter_bytes_are_compared() {
+    let mut f = Fixture::new();
+    pass(&f.observe());
+    f.record["identity"]["files"]["interpreter"]["sha256"] = json!("0".repeat(64));
+    let path = f.dir.path().join("evidence/calibration");
+    let mut calibration: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    calibration["evidence"]["identity"] = f.record["identity"].clone();
+    mode(&path, 0o600);
+    fs::write(&path, serde_json::to_vec(&calibration).unwrap()).unwrap();
+    mode(&path, 0o400);
+    let result = f.check();
+    let diagnostic: Value = serde_json::from_slice(&result.stderr).unwrap();
+    assert_eq!(diagnostic["message"], "identity-drift");
+    refuse(&result);
 }
 
 /// ´test:integration:terminal-refusal-before-semantics´
@@ -453,7 +541,7 @@ fn output_write_failure_is_not_success() {
         .write(true)
         .open("/dev/full")
         .unwrap();
-    let output = f.command().stdout(full).output().unwrap();
+    let output = f.command(false).stdout(full).output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(diagnostic["message"], "output-write");

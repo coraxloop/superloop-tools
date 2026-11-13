@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Add `superloop-credential-custody` for strict parameter records and sealed-length observations. Meson installs it with the other public commands and its build record, and nothing calls it yet; a rehearsal needs the operator's separate root-owned installation with its reviewed parser and parameters (``guide:credentialcustody:observations``).
+- Add `superloop-credential-custody` for strict parameter records, sealed-length observations and calibration identity comparisons. Meson installs it with the other public commands and its build record, and nothing calls it yet; a rehearsal needs the operator's separate root-owned installation with its reviewed parser and parameters (``guide:credentialcustody:observations``).
 
 - Prepare an unselected node-executor library for exact commands in a reservation-declared workspace, with a retained cwd, explicit environment, one sequence deadline and node-measured outcomes. It provisions nothing and writes no request record; no installed command or door route selects it, so deployment needs no rewrite or restart. Later callers still require the workspace readers before publishing effects (``proto:superlooplane:workspace-node-executor``; ``prob:door:w2b-node-executor-runs-in-the-declared-workspace``).
 

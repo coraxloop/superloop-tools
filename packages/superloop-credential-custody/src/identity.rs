@@ -3,7 +3,10 @@ use crate::{
     process, receipt,
     record::{Identity, Parameters, Result},
 };
+use serde::Deserialize;
+use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use std::path::Path;
 use std::process::Command;
 
 pub fn hash(bytes: &[u8]) -> String {
@@ -48,4 +51,53 @@ pub fn live(record: &Parameters) -> Result<Identity> {
         return Err("identity-drift");
     }
     Ok(live)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Calibration {
+    schema: u32,
+    command: String,
+    case: String,
+    outcome: String,
+    #[serde(rename = "wall_us")]
+    _wall_us: u128,
+    evidence: CalibrationEvidence,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CalibrationEvidence {
+    identity: Identity,
+    config_digest: String,
+    code_digest: String,
+    rows: Vec<crate::observe::Row>,
+    constants: Vec<crate::observe::Constant>,
+    comparisons: Vec<crate::observe::Compared>,
+}
+
+pub fn run(record: &Parameters, path: &Path) -> Result<Value> {
+    let bytes = receipt::read(path, crate::record::RECORD_LIMIT as u64, true)?;
+    let calibration: Calibration =
+        serde_json::from_slice(&bytes).map_err(|_| "calibration-shape")?;
+    let evidence = &calibration.evidence;
+    if calibration.schema != 1
+        || calibration.command != "length-observe"
+        || calibration.case != record.case
+        || calibration.outcome != "ok"
+        || evidence.config_digest != record.config_digest
+        || evidence.code_digest != record.code_digest
+        || evidence.identity != record.identity
+    {
+        return Err("calibration-identity");
+    }
+    evidence.identity.validate()?;
+    crate::observe::validate(
+        record,
+        &evidence.rows,
+        &evidence.constants,
+        &evidence.comparisons,
+    )?;
+    live(record)?;
+    Ok(json!({"matches": true, "calibration_sha256": hash(&bytes)}))
 }

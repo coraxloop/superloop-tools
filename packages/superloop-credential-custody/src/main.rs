@@ -37,6 +37,15 @@ enum Command {
         #[arg(long)]
         discover: Option<PathBuf>,
     },
+    /// Compare the complete live identity without modifying calibration.
+    IdentityCheck {
+        #[arg(long)]
+        parameters: PathBuf,
+        #[arg(long)]
+        calibration: PathBuf,
+        #[arg(long)]
+        receipt: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -83,22 +92,37 @@ fn run() -> ExitCode {
 }
 
 fn execute(command: &Command, start: Instant) -> Result<()> {
-    let Command::LengthObserve {
-        parameters,
-        receipt: receipt_name,
-        case,
-        discover,
-    } = command;
+    let (parameters, receipt_name) = match command {
+        Command::LengthObserve {
+            parameters,
+            receipt,
+            ..
+        }
+        | Command::IdentityCheck {
+            parameters,
+            receipt,
+            ..
+        } => (parameters, receipt),
+    };
     if !record::name(receipt_name) {
         return Err("receipt-name");
     }
     let bytes = receipt::read(parameters, record::RECORD_LIMIT as u64, false)?;
     let record = record::parse(&bytes)?;
-    if case != &record.case {
-        return Err("case-identity");
-    }
-    let label = "length-observe";
-    let evidence = observe::run(&record, discover.as_deref())?;
+    let (label, evidence) = match command {
+        Command::LengthObserve { case, discover, .. } => {
+            if case != &record.case {
+                return Err("case-identity");
+            }
+            (
+                "length-observe",
+                observe::run(&record, discover.as_deref())?,
+            )
+        }
+        Command::IdentityCheck { calibration, .. } => {
+            ("identity-check", identity::run(&record, calibration)?)
+        }
+    };
     let envelope = Envelope {
         schema: 1,
         command: label,
