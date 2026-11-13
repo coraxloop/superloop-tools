@@ -56,6 +56,7 @@ Every workspace package declares the shared `tracing` dependency, including bina
 |`superloop-execwrap`|Tier 1; release group `superloop-execwrap`.|
 |`superloop-gate-submit`|Tier 2; release group `superloop-gate-submit`.|
 |`superloop-capture-admit`|Tier 2; release group `superloop-capture-admit`.|
+|`superloop-credential-custody`|Tier 2; release group `credential-custody`.|
 |`superloop-install`|Tier 2; release group `superloop-install`.|
 |`superloop-lane`|Tier 2; release group `lane`.|
 |`superloop-lint`|Tier 2; release group `superloop-lint`.|

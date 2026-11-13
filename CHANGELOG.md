@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Add `superloop-credential-custody` for strict parameter records and sealed-length observations. Meson installs it with the other public commands and its build record, and nothing calls it yet; a rehearsal needs the operator's separate root-owned installation with its reviewed parser and parameters (``guide:credentialcustody:observations``).
+
 - Prepare an unselected node-executor library for exact commands in a reservation-declared workspace, with a retained cwd, explicit environment, one sequence deadline and node-measured outcomes. It provisions nothing and writes no request record; no installed command or door route selects it, so deployment needs no rewrite or restart. Later callers still require the workspace readers before publishing effects (``proto:superlooplane:workspace-node-executor``; ``prob:door:w2b-node-executor-runs-in-the-declared-workspace``).
 
 - Add dedicated private door receivers that retain the entry and identity program and enter the registered loop with a minimal environment. No door caller or installed generation selects them yet: ordinary entry, running doors and direct triage keep their existing behavior. This preparation needs no hold, per-loop refresh or restart. A manually invoked private word requires its seven-role rights frame and refuses a missing socket or mismatched image before entering the loop (``claim:loophome:door-receiver-retains-entry-and-isolates-consumer``).

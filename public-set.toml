@@ -3505,3 +3505,33 @@ pattern = "packages/superloop-lane/src/workspace_executor.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/workspace_executor_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/record.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/receipt.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/process.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/observe.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/identity.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/meson.build"

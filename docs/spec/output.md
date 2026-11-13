@@ -289,6 +289,7 @@ This is the complete planned helper map. A row fixes one mode, native consumer, 
 |`superloop-gate-submit`|Agents and orchestrator|`agent-text`|Standard output|Shared statuses; legacy five-field report.|
 |`superloop-lane driver status`|Agents and orchestrator|`agent-text`|Standard output|Status 42 is `stalled`; the owning command must declare its nonlegacy report order.|
 |Server run wrapper|Agents and orchestrator|`agent-text`|Standard error|Shared statuses; legacy four-field report after relayed child evidence.|
+|`superloop-credential-custody`|Structured automation|`machine-json`|Standard output|Shared statuses; one schema-1 observation envelope, classed JSON diagnostics, no plaintext streams.|
 |`superloop-capture-admit`|Agents and orchestrator|`agent-text`|Standard output|Shared statuses; `RUN-REPORT exit=STATUS wall=SECONDS.FRACTIONs verdict=VERDICT`, with six fractional digits and `ok` exactly for zero, otherwise `failed`.|
 |`superloop-pack`|Agents and orchestrator|`agent-text`|Standard output|Shared statuses 0, 1 and 2, plus refusal statuses 3 through 10 as the package guide's exit-status table declares; terminal `RUN-REPORT exit=STATUS wall=SECONDS.MILLISs verdict=VERDICT` follows evidence.|
 |`superloop-install`|Agents and orchestrator|`agent-text`|Standard output|Shared statuses 0, 1 and 2, plus refusal statuses 3 through 10 as the package guide's exit-status table declares; terminal `RUN-REPORT exit=STATUS wall=SECONDS.MILLISs verdict=VERDICT` follows evidence.|

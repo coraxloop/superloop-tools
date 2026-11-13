@@ -948,3 +948,36 @@ allowances = []
 
 [SUPERLOOPCAPTUREADMIT."profile.tests-conform"]
 allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."labels.mints-well-formed"]
+allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."labels.mints-kind-conform"]
+allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."labels.mints-unique"]
+allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."labels.heads-conform"]
+allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."labels.citations-local-resolve"]
+allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."labels.citations-import-form"]
+allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."labels.citations-imported-resolve"]
+allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."labels.citations-layer-conform"]
+allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."labels.generated-regions-conform"]
+allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."labels.outlines-conform"]
+allowances = []
+
+[SUPERLOOPCREDENTIALCUSTODY."profile.tests-conform"]
+allowances = []
