@@ -30,8 +30,11 @@ impl Drop for Directory {
 
 fn fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
     // Small executable fixtures use protected ancestors, as pinned executables
-    // require. Builds and logs remain in the configured disk-backed TMPDIR.
-    let parent = PathBuf::from("/tmp");
+    // require. Resolve the account home independently of ambient HOME and TMPDIR.
+    let parent = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+        .map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::other("probe account home is unavailable"))?
+        .dir;
     let path = parent.join(format!(
         "door-agent-probe-{}-{}",
         std::process::id(),
@@ -79,6 +82,7 @@ fn fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
             entry,
             owner_home: path,
             loop_name: "fixture".into(),
+            loop_uid: Some(nix::unistd::Uid::effective().as_raw()),
             executable,
             model: "configured-fixture".into(),
             effort: "medium".into(),

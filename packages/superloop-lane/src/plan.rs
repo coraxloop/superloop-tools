@@ -424,7 +424,7 @@ pub(crate) fn door_pin(
             "door generation shape differs",
         ));
     }
-    let _agent = crate::door::config::runner(&record["agent"], owner_home, loop_name)?;
+    let _agent = crate::door::config::runner(&record["agent"], owner_home, loop_name, None)?;
     let recorded_group = record["host_door_gid"]
         .as_u64()
         .and_then(|value| u32::try_from(value).ok())

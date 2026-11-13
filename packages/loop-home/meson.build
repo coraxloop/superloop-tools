@@ -52,6 +52,7 @@ pkg_loop_home_rust = files(
   'src/registry.rs',
   'src/runner.rs',
   'src/runner/agent_runner.py',
+  'src/runner/program_policy.py',
   'src/runner/sign_in_policy.py',
   'src/runner/signals.rs',
   'src/tests/mod.rs',
@@ -104,8 +105,9 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"payload","path":"packages/loop-home/src/ancestor_owners.py","form":"python","sha256":"86432698c5cf7e3322fc262c97b3d77a545ab3e3f94c7c622260e786a66fdb20","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"host or namespace receiver","version_authority":"packages/loop-home/Cargo.toml","contract":"UID-map foundation with verified procfs reads; legacy caller migration is separate","calls":[]}
-{"kind":"payload","path":"packages/loop-home/src/runner/agent_runner.py","form":"python","sha256":"61c7f2413afe77949f3d331ecb22c59056070ea0abd596793c90f6e279cc12ea","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Run the configured Codex executable with tool-free exec arguments and record bounded result evidence","calls":[{"callee":"external:configured-codex-agent","selector":"program argument","anchor":"subprocess.Popen(argv","contract":"Pinned agent path receives tool-free Codex exec JSON arguments with bounded streams and process-group cleanup","lookup":"configured-external","execution_host":"entered loop"}]}
-{"kind":"payload","path":"packages/loop-home/src/runner/sign_in_policy.py","form":"python","sha256":"0cddefbb2a477d5934c27a1cf35bf30a37378323fbd49f5899b023314d4fc4bb","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Shared credential custody predicate embedded in metadata and agent programs","calls":[]}
+{"kind":"payload","path":"packages/loop-home/src/runner/agent_runner.py","form":"python","sha256":"d8f3321d370e215e3b1ea798ccbba638e554248df6ff031832223aafc1d70e75","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Run the configured Codex executable with tool-free exec arguments and record bounded result evidence","calls":[{"callee":"external:configured-codex-agent","selector":"program argument","anchor":"subprocess.Popen(argv","contract":"Pinned agent path receives tool-free Codex exec JSON arguments with bounded streams and process-group cleanup","lookup":"configured-external","execution_host":"entered loop"}]}
+{"kind":"payload","path":"packages/loop-home/src/runner/program_policy.py","form":"python","sha256":"6606a879ecba33ab3e4cc44ed8500fa8eabca01e72f3b252a91ed17a22630050","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Admit vendor executable ownership, mode and link-free ancestry under the loop identity","calls":[]}
+{"kind":"payload","path":"packages/loop-home/src/runner/sign_in_policy.py","form":"python","sha256":"dd9122bc5602a69311a34abc278db96d11e79e19dc8cf71b4ca05c657b09bfb6","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Shared credential custody predicate embedded in metadata and agent programs","calls":[]}
 ''']
 
 dependency_ledger += ['''

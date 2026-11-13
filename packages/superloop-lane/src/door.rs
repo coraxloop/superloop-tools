@@ -2138,7 +2138,7 @@ fn completed_door_group(generation: &Value, loop_name: &str) -> Result<u32, Lane
             "completed door generation shape differs",
         ));
     }
-    let _agent = config::runner(&generation["agent"], Path::new("/"), loop_name)?;
+    let _agent = config::runner(&generation["agent"], Path::new("/"), loop_name, None)?;
     generation["host_door_gid"]
         .as_u64()
         .and_then(|value| u32::try_from(value).ok())
@@ -2218,11 +2218,18 @@ fn run_service_with_snapshot(
     if let Err(error) = publish(&owner_home, loop_name) {
         Store::report_snapshot_failure(&error);
     }
+    settings.validate_grant(&owner_home, loop_name)?;
+    let row = crate::plan::registry(&settings, loop_name)?;
+    let loop_uid = row["uid"]
+        .as_u64()
+        .and_then(|uid| u32::try_from(uid).ok())
+        .ok_or_else(|| LaneError::input("door-registration", "row uid is absent"))?;
     let compute_deadlines = Arc::new(config::compute_deadlines(&generation["agent"])?);
     let agent_runner = Arc::new(config::runner(
         &generation["agent"],
         &owner_home,
         loop_name,
+        Some(loop_uid),
     )?);
     writeln!(
         io::stderr().lock(),
@@ -2235,8 +2242,6 @@ fn run_service_with_snapshot(
         )
     )
     .map_err(|error| LaneError::operation("door-agent-journal", error.to_string()))?;
-    settings.validate_grant(&owner_home, loop_name)?;
-    let row = crate::plan::registry(&settings, loop_name)?;
     let runs_root = Path::new(
         row["runs_root"]
             .as_str()

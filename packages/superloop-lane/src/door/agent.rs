@@ -346,6 +346,8 @@ pub struct CodexRunner {
     pub entry: PathBuf,
     pub owner_home: PathBuf,
     pub loop_name: String,
+    /// None validates configuration only and cannot execute an entry.
+    pub loop_uid: Option<u32>,
     pub executable: PathBuf,
     pub model: String,
     pub effort: String,
@@ -376,14 +378,13 @@ pub fn check_rubric(
             .arg(format!("{}{}", loop_home::runner::SIGN_IN_POLICY, concat!(
                 "\nimport json, sys\n",
                 "try:\n",
-                " text, digest = read_rubric(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]))\n",
+                " text, digest = read_rubric(sys.argv[1], int(sys.argv[2]))\n",
                 " print(json.dumps({'rubric_digest': digest, 'rubric_failure': None}))\n",
                 "except RubricFailure as error:\n",
                 " print(json.dumps({'rubric_digest': None, 'rubric_failure': error.evidence}))\n",
             )))
             .arg(rubric_path)
             .arg(loop_uid.to_string())
-            .arg(nix::unistd::Uid::effective().to_string())
             .env_clear()
             .env("HOME", owner_home)
             .env("PATH", "/usr/bin:/bin")
@@ -445,6 +446,9 @@ impl CodexRunner {
         if input.len() > 262_144 {
             return RunnerOutcome::referral("failure", "door-agent-input-limit", started);
         }
+        let Some(loop_uid) = self.loop_uid else {
+            return RunnerOutcome::referral("failure", "door-agent-loop-uid-unmeasured", started);
+        };
         // The entered CLI may rotate its private derivative. Hold the same owner
         // lock as placement and box publication until the CLI and cleanup finish.
         // Refuse contention immediately rather than spending the request budget waiting.
@@ -462,7 +466,7 @@ impl CodexRunner {
                 );
             }
         };
-        self.call(input, budget, started, now)
+        self.call(input, budget, started, now, loop_uid)
     }
 }
 
@@ -474,6 +478,7 @@ impl CodexRunner {
         budget: Duration,
         started: Instant,
         now: impl Fn() -> Instant,
+        loop_uid: u32,
     ) -> RunnerOutcome {
         use std::io::{Read as _, Write as _};
         use std::os::unix::process::CommandExt as _;
@@ -506,7 +511,7 @@ impl CodexRunner {
                 .to_string(),
             )
             .arg(&self.loop_name)
-            .arg(nix::unistd::Uid::effective().to_string())
+            .arg(loop_uid.to_string())
             .env_clear()
             .env("HOME", &self.owner_home)
             .env("PATH", "/usr/bin:/bin")
@@ -816,9 +821,8 @@ pub(super) mod tests {
 
     pub fn fixture(script: &str) -> (tempfile::TempDir, CodexRunner, DoorInput) {
         use std::os::unix::fs::PermissionsExt as _;
-        // Small executable fixtures need protected ancestors; node TMPDIR's
-        // workspace parents intentionally permit the shared staff group.
-        let root = tempfile::TempDir::new_in("/tmp").expect("runner fixture");
+        // Vendor admission requires non-writable ancestors, including the temporary root.
+        let root = tempfile::TempDir::new().expect("runner fixture");
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
             .expect("protected fixture root");
         let canonical = root.path().join(".config/loops/alpha/lanes/codex");
@@ -869,6 +873,7 @@ pub(super) mod tests {
             entry,
             owner_home: root.path().into(),
             loop_name: "alpha".into(),
+            loop_uid: Some(nix::unistd::Uid::effective().as_raw()),
             executable,
             model: "configured-not-observed".into(),
             effort: "high".into(),
@@ -1225,16 +1230,18 @@ sys.exit(7)
     fn agent_spawn_failure_records_errno() {
         use std::os::unix::fs::PermissionsExt as _;
         for missing in [true, false] {
-            let (_root, runner, input) = fixture("#!/bin/sh\nexit 0\n");
-            if missing {
-                std::fs::remove_file(&runner.executable).expect("remove program");
-            } else {
-                std::fs::set_permissions(
-                    &runner.executable,
-                    std::fs::Permissions::from_mode(0o600),
-                )
-                .expect("remove execute permission");
+            let (root, runner, input) = fixture("#!/bin/sh\nexit 0\n");
+            let interpreter = root.path().join("interpreter");
+            if !missing {
+                std::fs::write(&interpreter, b"not executable").expect("interpreter fixture");
+                std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o600))
+                    .expect("interpreter mode");
             }
+            crate::fixture_exec::write_executable(
+                &runner.executable,
+                format!("#!{}\n", interpreter.display()).as_bytes(),
+            )
+            .expect("admitted program with refused interpreter");
             let result = runner.judge(
                 &input.encode().expect("bounded fixture input"),
                 Duration::from_secs(5),
@@ -1341,7 +1348,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
     /// ´test:unit:agent-input-limit-and-refresh-link-replacement´
     #[test]
     fn agent_input_limit_and_refresh_link_replacement() {
-        let (_root, runner, mut input) = fixture(
+        let (_root, mut runner, mut input) = fixture(
             "#!/usr/bin/python3\nimport os\np = os.environ['CODEX_HOME'] + '/auth.json'\nos.unlink(p)\nwith open(p, 'w') as f: f.write('synthetic replacement')\n",
         );
         let result = runner.judge(
@@ -1360,6 +1367,9 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
         assert_eq!(result.reason, "door-agent-input-limit");
         assert_eq!(result.verdict, "refer");
         assert!(result.observations.is_null() || result.observations == json!({}));
+        runner.loop_uid = None;
+        let result = runner.judge(b"{}", Duration::from_secs(3));
+        assert_eq!(result.reason, "door-agent-loop-uid-unmeasured");
     }
 
     /// ´test:unit:agent-pre-link-failure-is-not-a-custody-observation´

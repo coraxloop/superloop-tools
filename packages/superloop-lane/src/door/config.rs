@@ -161,6 +161,7 @@ pub fn runner(
     value: &Value,
     owner_home: &Path,
     loop_name: &str,
+    loop_uid: Option<u32>,
 ) -> Result<super::agent::CodexRunner, LaneError> {
     const KEYS: [&str; 9] = [
         "source",
@@ -196,6 +197,7 @@ pub fn runner(
         entry: path("entry")?,
         owner_home: owner_home.into(),
         loop_name: loop_name.into(),
+        loop_uid,
         executable: path("executable")?,
         rubric_path: path("rubric_path")?,
         model: value["model"]
@@ -238,11 +240,13 @@ mod tests {
         value["source"] = json!("/fixture/door.toml");
         value["entry"] = json!("/fixture/entry");
         value["loop_home"] = json!("/fixture/loop");
-        runner(&value, Path::new("/fixture"), "fixture").expect("installed configuration");
+        runner(&value, Path::new("/fixture"), "fixture", Some(41001))
+            .expect("installed configuration");
         for bound in [1_800_001, 86_400_000] {
             let mut valid = value.clone();
             valid["compute_deadlines"][0]["deadline_ms"] = json!(bound);
-            runner(&valid, Path::new("/fixture"), "fixture").expect("inclusive registered range");
+            runner(&valid, Path::new("/fixture"), "fixture", Some(41001))
+                .expect("inclusive registered range");
         }
         let form = value["compute_deadlines"][0].clone();
         for invalid in [
@@ -256,8 +260,13 @@ mod tests {
         ] {
             let mut invalid_value = value.clone();
             invalid_value["compute_deadlines"] = invalid;
-            let error = runner(&invalid_value, Path::new("/fixture"), "fixture")
-                .expect_err("invalid policy");
+            let error = runner(
+                &invalid_value,
+                Path::new("/fixture"),
+                "fixture",
+                Some(41001),
+            )
+            .expect_err("invalid policy");
             assert_eq!(error.kind, "door-agent-configuration");
             assert!(error.detail.contains("compute_deadlines"));
         }
@@ -271,7 +280,7 @@ mod tests {
         ] {
             let mut invalid = value.clone();
             invalid["compute_deadlines"][0]["deadline_ms"] = bound;
-            assert!(runner(&invalid, Path::new("/fixture"), "fixture").is_err());
+            assert!(runner(&invalid, Path::new("/fixture"), "fixture", Some(41001)).is_err());
         }
         assert!(
             compute_deadlines(&parse(prefix.as_bytes()).expect("ordinary config"))
@@ -299,15 +308,15 @@ mod tests {
         assert_eq!(value["effort"], "medium");
         let mut invalid = value.clone();
         invalid["effort"] = json!("ultra");
-        assert!(runner(&invalid, &fixture.home, "alpha").is_err());
+        assert!(runner(&invalid, &fixture.home, "alpha", Some(41001)).is_err());
         invalid
             .as_object_mut()
             .expect("agent object")
             .remove("effort");
-        assert!(runner(&invalid, &fixture.home, "alpha").is_err());
+        assert!(runner(&invalid, &fixture.home, "alpha", Some(41001)).is_err());
         assert_eq!(value["rubric_path"], "/instance/permissions/door.md");
         assert_eq!(
-            runner(&value, &fixture.home, "alpha")
+            runner(&value, &fixture.home, "alpha", Some(41001))
                 .expect("runner")
                 .model,
             "configured-model"
@@ -316,7 +325,7 @@ mod tests {
         let mut stale = value.clone();
         stale["sign_in"] = json!({});
         assert!(
-            runner(&stale, &fixture.home, "alpha")
+            runner(&stale, &fixture.home, "alpha", Some(41001))
                 .expect_err("stale block")
                 .to_string()
                 .contains("run install-door")
@@ -337,7 +346,7 @@ mod tests {
             std::fs::write(&path, format!("{text}effort = '{effort}'\n")).expect("effort");
             let value = read(&fixture.home, "alpha", Some(&entry)).expect("closed effort set");
             assert_eq!(
-                runner(&value, &fixture.home, "alpha")
+                runner(&value, &fixture.home, "alpha", Some(41001))
                     .expect("installed effort")
                     .effort,
                 effort

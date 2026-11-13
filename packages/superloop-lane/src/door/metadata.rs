@@ -6,8 +6,9 @@ use std::process::{Command, Stdio};
 
 fn metadata_program() -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         loop_home::runner::SIGN_IN_POLICY,
+        loop_home::runner::PROGRAM_POLICY,
         include_str!("agent_metadata.py")
     )
 }
@@ -17,12 +18,26 @@ fn metadata_program() -> String {
 pub fn inspect(entry: &Path, owner_home: &Path, loop_name: &str, executable: &Path) -> Value {
     let measured = measure(entry, owner_home, loop_name, executable);
     measured.unwrap_or_else(|detail| {
-        let unknown = json!({"path":null,"exists":null,"owner_uid":null,"mode":null,
+        let mut unknown = json!({"path":null,"exists":null,"owner_uid":null,"mode":null,
             "loop_uid":null,"usable":null,"inspection_error":detail});
         let mut sign_in = unknown.clone();
         sign_in["remedy"] = Value::Null;
+        unknown["admitted"] = Value::Null;
+        unknown["refusal"] = Value::Null;
         json!({"sign_in":sign_in,"executable_status":unknown})
     })
+}
+
+/// Summarize admission separately from mode-bit usability in installer output.
+pub(crate) fn program_admission(metadata: &Value) -> Value {
+    let program = &metadata["executable_status"];
+    let status = match program["admitted"].as_bool() {
+        Some(true) => "admitted",
+        Some(false) => "refused",
+        None => "unmeasured",
+    };
+    json!({"status":status,"path":program["path"],"refusal":program["refusal"],
+        "inspection_error":program["inspection_error"]})
 }
 
 fn measure(
@@ -88,9 +103,15 @@ fn valid_metadata(value: &Value, sign_in: bool) -> bool {
         "inspection_error",
     ];
     value.as_object().is_some_and(|object| {
-        object.len() == KEYS.len() + usize::from(sign_in)
+        object.len() == KEYS.len() + if sign_in { 1 } else { 2 }
             && KEYS.iter().all(|key| object.contains_key(*key))
-            && (!sign_in || object.contains_key("remedy"))
+            && (if sign_in {
+                object.contains_key("remedy")
+            } else {
+                object.get("admitted").is_some_and(Value::is_boolean)
+                    && object.contains_key("refusal")
+                    && (value["refusal"].is_null() || value["refusal"].is_object())
+            })
             && ["path", "mode", "inspection_error"]
                 .iter()
                 .all(|key| value[key].is_null() || value[key].is_string())
@@ -187,6 +208,7 @@ mod tests {
             "alpha",
             Path::new("/missing-program"),
         );
+        assert_eq!(program_admission(&unknown)["status"], "unmeasured");
         assert!(unknown["sign_in"]["usable"].is_null());
         assert!(unknown["sign_in"]["remedy"].is_null());
         assert!(valid_metadata(&unknown["sign_in"], true));

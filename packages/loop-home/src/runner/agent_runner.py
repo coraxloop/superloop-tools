@@ -76,7 +76,8 @@ def main():
     if os.getppid() != parent:
         raise Cancelled()
     started = time.monotonic()
-    program, model, effort, budget, rubric_path, deadline, loop_name, service_uid = sys.argv[1:]
+    program, model, effort, budget, rubric_path, deadline, loop_name, expected_uid = sys.argv[1:]
+    expected_uid = int(expected_uid)
     remaining = min(int(budget) / 1000, float(deadline) - time.time())
     end = started + remaining - 2.0
     if remaining <= 2.0:
@@ -88,6 +89,8 @@ def main():
         return
     document = json.loads(prompt)
     try:
+        if os.geteuid() != expected_uid or os.getuid() != expected_uid:
+            raise RubricFailure("entry-uid", rubric_path)
         if rubric_path == "snapshot-input":
             # The direct adapter has pinned the owner snapshot and checked this
             # source digest. This argv-selected transport never reads request text.
@@ -96,7 +99,7 @@ def main():
                 raise RubricFailure("snapshot-input", rubric_path)
             rubric_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         else:
-            text, rubric_digest = read_rubric(rubric_path, os.getuid(), int(service_uid))
+            text, rubric_digest = read_rubric(rubric_path, expected_uid)
     except RubricFailure as error:
         EVIDENCE["rubric_failure"] = error.evidence
         emit({"service_status": "failure", "reason": "door-rubric-unavailable"})
@@ -127,6 +130,12 @@ def main():
         own_sign_in = False
     if not own_sign_in:
         emit({"service_status": "failure", "reason": "door-agent-sign-in-unavailable", "remedy": "superloop-lane door-sign-in " + loop_name, "rubric_digest": rubric_digest})
+        return
+    try:
+        admit_program(program, expected_uid)
+    except RubricFailure as error:
+        EVIDENCE["program_failure"] = error.evidence
+        emit({"service_status": "failure", "reason": "door-agent-program-custody"})
         return
     root = os.path.join(os.environ["TMPDIR"], "door-agent")
     call = None

@@ -34,6 +34,36 @@ fn file(path: &Path, bytes: &[u8], value: u32) {
     mode(path, value);
 }
 
+// Mirror the inbound fixture: keep data under the supplied temporary root,
+// overlay only an unsearchable ancestor inside each child's mount namespace.
+fn vendor_mount(root: &Path) -> String {
+    format!(
+        concat!(
+            "import ctypes,pathlib\n",
+            "libc=ctypes.CDLL(None,use_errno=True)\n",
+            "assert libc.unshare(0x20000)==0,ctypes.get_errno()\n",
+            "fd=os.open({root},os.O_RDONLY|os.O_DIRECTORY)\n",
+            "assert libc.mount(None,b'/',None,0x44000,None)==0,ctypes.get_errno()\n",
+            "parents=reversed(pathlib.Path({root}).parents)\n",
+            "blocked=next((str(p) for p in parents if os.stat(p).st_mode & 0o023 != 1),None)\n",
+            "if blocked is not None:\n",
+            " assert blocked!='/'\n",
+            " assert libc.mount(b'tmpfs',blocked.encode(),b'tmpfs',6,",
+            "b'mode=0755,size=1m')==0,ctypes.get_errno()\n",
+            " os.makedirs({root})\n",
+            " cursor=pathlib.Path({root})\n",
+            " while True:\n",
+            "  os.chown(cursor,0,0);os.chmod(cursor,0o755)\n",
+            "  if str(cursor)==blocked: break\n",
+            "  cursor=cursor.parent\n",
+            " source=('/proc/self/fd/'+str(fd)).encode()\n",
+            " assert libc.mount(source,{root}.encode(),None,4096,None)==0,ctypes.get_errno()\n",
+            "os.close(fd)\n",
+        ),
+        root = json!(root)
+    )
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     runner: CodexRunner,
@@ -54,7 +84,7 @@ impl Fixture {
         let process = FIXTURE_PROCESS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let root = tempfile::tempdir_in("/tmp").expect("small protected fixture");
+        let root = tempfile::tempdir().expect("parent-owned fixture under supplied temporary root");
         mode(root.path(), if mapped { 0o711 } else { 0o311 });
         fs::create_dir_all(root.path().join(".config/loops/alpha/lanes/codex"))
             .expect("canonical lock root");
@@ -97,17 +127,43 @@ impl Fixture {
         let rubric = publication.join("permissions/door.md");
         file(&rubric, b"Reviewed rubric.", 0o644);
         let entry = root.path().join("entry");
-        file(&entry, format!(
-            "#!/usr/bin/python3\nimport os,sys\nassert sys.argv[1:4] == ['enter','alpha','--']\n{identity}assert os.getuid() == {uid}\nos.environ['HOME'] = {home}\nos.environ['TMPDIR'] = {tmp}\ntry: os.listdir({publication})\nexcept PermissionError: pass\nelse: raise AssertionError('search-only ancestor was readable')\nos.execv(sys.argv[4],sys.argv[4:])\n",
-            identity=if mapped { format!("os.setgroups([])\nos.setgid({uid})\nos.setuid({uid})\n") } else { String::new() },
-            home=json!(home), tmp=json!(home.join("tmp")), publication=json!(root.path())
-        ).as_bytes(), 0o700);
+        file(
+            &entry,
+            format!(
+                concat!(
+                    "#!/usr/bin/python3\nimport os,sys\n{mount}",
+                    "assert sys.argv[1:4] == ['enter','alpha','--']\n",
+                    "{identity}assert os.getuid() == {uid}\n",
+                    "os.environ['HOME'] = {home}\nos.environ['TMPDIR'] = {tmp}\n",
+                    "try: os.listdir({publication})\nexcept PermissionError: pass\n",
+                    "else: raise AssertionError('search-only ancestor was readable')\n",
+                    "os.execv(sys.argv[4],sys.argv[4:])\n",
+                ),
+                uid = uid,
+                mount = if mapped {
+                    vendor_mount(root.path())
+                } else {
+                    String::new()
+                },
+                identity = if mapped {
+                    format!("os.setgroups([])\nos.setgid({uid})\nos.setuid({uid})\n")
+                } else {
+                    String::new()
+                },
+                home = json!(home),
+                tmp = json!(home.join("tmp")),
+                publication = json!(root.path())
+            )
+            .as_bytes(),
+            0o700,
+        );
         let executable = root.path().join("codex");
         file(&executable, b"#!/usr/bin/python3\nimport json,sys\ndocument=json.load(sys.stdin)\nassert document['reviewed_rubric'] == 'Reviewed rubric.'\nprint(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({'verdict':'refer','scope':'estate','reason':'fixture'})}}))\n", 0o755);
         let runner = CodexRunner {
             entry,
             owner_home: root.path().into(),
             loop_name: "alpha".into(),
+            loop_uid: Some(uid),
             executable,
             model: "fixture".into(),
             effort: "medium".into(),
@@ -208,91 +264,114 @@ fn rubric_entry_admits_service_custody_for_two_loop_uids() {
     }
 }
 
-/// ´test:integration:rubric-entry-admits-distinct-non-root-service-custody´
+// Preserve the caller's mount capability until its entry has overlaid the
+// temporary ancestors; drop every capability before the loop reads policy.
+fn non_root_entry(fixture: &Fixture) {
+    for path in [
+        fixture.root.path().to_path_buf(),
+        fixture.root.path().join("publication/permissions"),
+        fixture.ancestor(),
+        fixture.runner.rubric_path.clone(),
+        fixture.runner.executable.clone(),
+    ] {
+        chown(&path, Some(Uid::from_raw(0)), None).expect("trusted fixture custody");
+    }
+    let source = fs::read_to_string(&fixture.runner.entry).expect("entry source");
+    let identity = format!(
+        "os.setgroups([])\nos.setgid({0})\nos.setuid({0})\n",
+        fixture.uid
+    );
+    let (before, after) = source
+        .split_once(&identity)
+        .expect("entry identity boundary");
+    let tail = format!(
+        concat!(
+            "import os,sys\n",
+            "assert all(int(l.split()[1],16)==0 for l in open('/proc/self/status') ",
+            "if l.startswith(('CapEff:','CapInh:','CapAmb:')))\n{}"
+        ),
+        after
+    );
+    let entry = format!(
+        concat!(
+            "{}os.execv('/usr/bin/setpriv',['setpriv','--reuid={uid}','--regid={uid}',",
+            "'--clear-groups','--inh-caps=-all','--ambient-caps=-all',",
+            "'/usr/bin/python3','-I','-c',{}]+sys.argv[1:])\n"
+        ),
+        before,
+        json!(tail),
+        uid = fixture.uid
+    );
+    file(&fixture.runner.entry, entry.as_bytes(), 0o700);
+}
+
+/// ´test:integration:rubric-entry-refuses-host-numeric-subordinate-owner´
 #[test]
-#[ignore = "requires namespace root with UID/GID 0, service 41000, loops 41001/41002 and outsider 41003 mapped"]
-fn rubric_entry_admits_distinct_non_root_service_custody() {
+#[ignore = "requires namespace root and loop 41001 and subordinate 41000 mapped"]
+fn rubric_entry_refuses_host_numeric_subordinate_owner() {
     const CHILD: &str = "SUPERLOOP_RUBRIC_SERVICE_FIXTURE";
     if std::env::var_os(CHILD).is_none() {
         namespace();
-        let output = Command::new("/usr/bin/setpriv")
+        let output = Command::new("/usr/bin/timeout")
+            .args(["--kill-after=2", "30", "/usr/bin/setpriv"])
             .args([
                 "--reuid=41000",
                 "--regid=41000",
                 "--clear-groups",
-                "--inh-caps=+chown,+dac_override,+fowner,+setuid,+setgid",
-                "--ambient-caps=+chown,+dac_override,+fowner,+setuid,+setgid",
+                "--inh-caps=+chown,+dac_override,+fowner,+setuid,+setgid,+sys_admin",
+                "--ambient-caps=+chown,+dac_override,+fowner,+setuid,+setgid,+sys_admin",
             ])
             .arg(std::env::current_exe().expect("test binary"))
             .args([
                 "--exact",
-                "rubric_entry_admits_distinct_non_root_service_custody",
+                "rubric_entry_refuses_host_numeric_subordinate_owner",
                 "--ignored",
                 "--nocapture",
             ])
             .env(CHILD, "1")
             .output()
-            .expect("distinct service process");
+            .expect("bounded non-root caller");
+        assert!(output.status.success(), "{output:?}");
         assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+            "{output:?}"
         );
         return;
     }
     assert_eq!(Uid::effective().as_raw(), 41000);
     assert_eq!(Gid::effective().as_raw(), 41000);
-    for uid in [41001, 41002] {
-        let fixture = Fixture::new(uid);
-        // The service fixture retains only the capabilities needed to create
-        // real custody and enter a loop. The entered Python/agent gets none.
-        let entry = fs::read_to_string(&fixture.runner.entry).expect("entry source");
-        let entered = fixture.runner.entry.with_extension("entered");
-        let entered_source = entry.replace(&format!("os.setgroups([])\nos.setgid({uid})\nos.setuid({uid})\n"), "").replace("import os,sys\n", "import os,sys\nassert os.getgid() == os.getuid()\nassert all(int(line.split()[1],16) == 0 for line in open('/proc/self/status') if line.startswith(('CapEff:','CapInh:','CapAmb:')))\n");
-        file(&entered, entered_source.as_bytes(), 0o755);
-        file(&fixture.runner.entry, format!(
-            "#!/usr/bin/python3\nimport os,sys\nos.execv('/usr/bin/setpriv',['setpriv','--reuid={uid}','--regid={uid}','--clear-groups','--inh-caps=-all','--ambient-caps=-all','/usr/bin/python3',{}]+sys.argv[1:])\n", json!(entered)
-        ).as_bytes(), 0o700);
-        let admitted = fixture
-            .preflight()
-            .expect("non-root service rubric admitted");
-        let result = fixture.judge();
-        assert_eq!(result.status, "verdict", "{result:?}");
-        assert_eq!(json!(result.rubric_digest), admitted["rubric_digest"]);
-        assert_eq!(result.observations["loop_uid"], uid);
-        for custodian in [0, uid, 41000] {
-            chown(
-                &fixture.runner.rubric_path,
-                Some(Uid::from_raw(custodian)),
-                None,
-            )
-            .expect("accepted leaf custodian");
-            fixture.preflight().expect("root, loop or service leaf");
-        }
-        chown(
-            &fixture.runner.rubric_path,
-            Some(Uid::from_raw(41003)),
-            None,
-        )
-        .expect("foreign leaf");
-        fixture.refused("file-owner", &fixture.runner.rubric_path, Some(41003));
-        chown(
-            &fixture.runner.rubric_path,
-            Some(Uid::from_raw(41000)),
-            None,
-        )
-        .expect("restore leaf");
-        let ancestor = fixture.ancestor();
-        chown(&ancestor, Some(Uid::from_raw(41003)), None).expect("foreign ancestor");
-        fixture.refused("ancestor-owner", &ancestor, Some(41003));
-        chown(&ancestor, Some(Uid::from_raw(41000)), None).expect("restore ancestor");
-        mode(&ancestor, 0o733);
-        fixture.refused("ancestor-writable", &ancestor, Some(41000));
-        mode(&ancestor, 0o711);
-        install_refusals(&fixture);
-        drop(fixture);
-    }
+    let fixture = Fixture::new(41001);
+    non_root_entry(&fixture);
+    fixture.preflight().expect("host-owned rubric control");
+    assert_eq!(
+        fixture.judge().status,
+        "verdict",
+        "host-owned runtime control"
+    );
+    chown(
+        &fixture.runner.rubric_path,
+        Some(Uid::from_raw(41001)),
+        None,
+    )
+    .unwrap();
+    fixture.preflight().expect("loop-owned rubric control");
+    assert_eq!(
+        fixture.judge().status,
+        "verdict",
+        "loop-owned runtime control"
+    );
+    chown(
+        &fixture.runner.rubric_path,
+        Some(Uid::from_raw(41000)),
+        None,
+    )
+    .unwrap();
+    fixture.refused("file-owner", &fixture.runner.rubric_path, Some(41000));
+    chown(&fixture.runner.rubric_path, Some(Uid::from_raw(0)), None).unwrap();
+    let ancestor = fixture.ancestor();
+    chown(&ancestor, Some(Uid::from_raw(41000)), None).unwrap();
+    fixture.refused("ancestor-owner", &ancestor, Some(41000));
+    drop(fixture);
 }
 
 /// ´test:integration:rubric-runtime-refuses-effective-only-uid-change´
@@ -485,9 +564,9 @@ impl Drop for Fixture {
     }
 }
 
-/// ´test:integration:rubric-entry-compares-distinct-loop-uids-at-leaf´
+/// ´test:integration:rubric-entry-refuses-distinct-loop-uids´
 #[test]
-fn rubric_entry_compares_distinct_loop_uids_at_leaf() {
+fn rubric_entry_refuses_distinct_loop_uids() {
     let mut fixture = Fixture::unprivileged();
     let observed = fixture.uid;
     let admitted = fixture.preflight().expect("search-only prefixes admitted");
@@ -500,11 +579,11 @@ fn rubric_entry_compares_distinct_loop_uids_at_leaf() {
         let refusal = fixture.preflight().expect_err("different expected loop");
         let report: Value = serde_json::from_str(&refusal.detail).expect("refusal report");
         assert_eq!(report["expected_uid"], expected);
-        assert_eq!(
-            report["rubric_failure"],
-            json!({"check":"entry-uid",
-            "path":fixture.runner.rubric_path,"owner_uid":observed,"mode":"0644","errno":null})
-        );
+        let failure = &report["rubric_failure"];
+        assert_eq!(failure["check"], "ancestor-owner", "{report}");
+        assert_eq!(failure["owner_uid"], observed);
+        let refused = Path::new(failure["path"].as_str().expect("refused ancestor"));
+        assert!(fixture.runner.rubric_path.starts_with(refused), "{report}");
     }
     drop(fixture);
 }
@@ -518,10 +597,24 @@ fn rubric_entry_checks_unprivileged_ancestors() {
         // Invoke the production ancestor predicate through the entry with real stat data.
         let output = Command::new(&fixture.runner.entry)
             .args(["enter", "alpha", "--", "/usr/bin/python3", "-I", "-c"])
-            .arg(format!("{}{}", loop_home::runner::SIGN_IN_POLICY,
-                "\nimport json,sys\ntry:\n rubric_ancestor(os.stat(sys.argv[1]), sys.argv[1], int(sys.argv[2]), int(sys.argv[2]))\nexcept RubricFailure as error:\n print(json.dumps(error.evidence))\n"))
-            .arg(&ancestor).arg(expected.to_string()).output().expect("entry policy");
-        assert!(output.status.success());
+            .arg(format!(
+                "{}{}",
+                loop_home::runner::SIGN_IN_POLICY,
+                concat!(
+                    "\nimport json,sys\ntry:\n rubric_ancestor(os.stat(sys.argv[1]), ",
+                    "sys.argv[1], int(sys.argv[2]))\n",
+                    "except RubricFailure as error:\n print(json.dumps(error.evidence))\n",
+                )
+            ))
+            .arg(&ancestor)
+            .arg(expected.to_string())
+            .output()
+            .expect("entry policy");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let failure: Value = serde_json::from_slice(&output.stdout).expect("ancestor evidence");
         assert_eq!(
             failure,
@@ -701,4 +794,146 @@ fn assert_reader_observations(report: &Value, action: &str, result: &RunnerOutco
             result.observations
         ),
     }
+}
+
+/// ´test:integration:rubric-runtime-compares-registry-loop-uid´
+#[test]
+#[ignore = "requires namespace root and loop 41001 mapped"]
+fn rubric_runtime_compares_registry_loop_uid() {
+    namespace();
+    let mut fixture = Fixture::new(41001);
+    let control = fixture.judge();
+    assert_eq!(control.status, "verdict", "{control:?}");
+    fixture.runner.loop_uid = Some(41002);
+    let result = fixture.judge();
+    assert_eq!(result.reason, "door-rubric-unavailable", "{result:?}");
+    assert_eq!(result.observations["rubric_failure"]["check"], "entry-uid");
+    drop(fixture);
+}
+
+fn vendor_refused(fixture: &Fixture, check: &str, path: &Path) {
+    let result = fixture.judge();
+    assert_eq!(result.reason, "door-agent-program-custody", "{result:?}");
+    assert_eq!(
+        result.observations["program_failure"]["check"], check,
+        "{result:?}"
+    );
+    assert_eq!(result.observations["program_failure"]["path"], json!(path));
+}
+
+/// ´test:integration:door-agent-refuses-foreign-vendor-program´
+#[test]
+#[ignore = "requires namespace root and loop 41001 and outsider 41003 mapped"]
+fn door_agent_refuses_foreign_vendor_program() {
+    namespace();
+    let fixture = Fixture::new(41001);
+    let control = fixture.judge();
+    assert_eq!(control.status, "verdict", "{control:?}");
+    chown(&fixture.runner.executable, Some(Uid::from_raw(41003)), None).unwrap();
+    vendor_refused(&fixture, "program-owner", &fixture.runner.executable);
+    drop(fixture);
+}
+
+/// ´test:integration:door-agent-refuses-group-writable-vendor-ancestor´
+#[test]
+#[ignore = "requires namespace root and loop 41001 mapped"]
+fn door_agent_refuses_group_writable_vendor_ancestor() {
+    namespace();
+    let mut fixture = Fixture::new(41001);
+    let parent = fixture.root.path().join("vendor");
+    fs::create_dir(&parent).unwrap();
+    mode(&parent, 0o755);
+    let program = parent.join("codex");
+    fs::rename(&fixture.runner.executable, &program).unwrap();
+    fixture.runner.executable = program;
+    let control = fixture.judge();
+    assert_eq!(control.status, "verdict", "{control:?}");
+    mode(&parent, 0o775);
+    vendor_refused(&fixture, "program-writable", &parent);
+    drop(fixture);
+}
+
+/// ´test:integration:door-agent-refuses-linked-vendor-program´
+#[test]
+#[ignore = "requires namespace root and loop 41001 mapped"]
+fn door_agent_refuses_linked_vendor_program() {
+    namespace();
+    let fixture = Fixture::new(41001);
+    let control = fixture.judge();
+    assert_eq!(control.status, "verdict", "{control:?}");
+    let target = fixture.runner.executable.with_extension("real");
+    fs::rename(&fixture.runner.executable, &target).unwrap();
+    symlink(&target, &fixture.runner.executable).unwrap();
+    vendor_refused(&fixture, "program-link", &fixture.runner.executable);
+    drop(fixture);
+}
+
+/// ´test:integration:door-agent-admits-loop-owned-vendor-program´
+#[test]
+#[ignore = "requires namespace root and loop 41001 mapped"]
+fn door_agent_admits_loop_owned_vendor_program() {
+    namespace();
+    let fixture = Fixture::new(41001);
+    let control = fixture.judge();
+    assert_eq!(control.status, "verdict", "{control:?}");
+    chown(&fixture.runner.executable, Some(Uid::from_raw(41001)), None).unwrap();
+    mode(&fixture.runner.executable, 0o500);
+    let control = fixture.judge();
+    assert_eq!(control.status, "verdict", "{control:?}");
+    drop(fixture);
+}
+
+/// ´test:integration:door-agent-admits-host-owned-vendor-program´
+#[test]
+#[ignore = "requires namespace root and loop 41001 mapped"]
+fn door_agent_admits_host_owned_vendor_program() {
+    namespace();
+    let mut fixture = Fixture::new(41001);
+    let control = fixture.judge();
+    assert_eq!(control.status, "verdict", "{control:?}");
+    let root = fixture
+        .root
+        .path()
+        .join("runner-templates/codex/digest/bin");
+    fs::create_dir_all(&root).unwrap();
+    mode(&fixture.root.path().join("runner-templates"), 0o711);
+    mode(&fixture.root.path().join("runner-templates/codex"), 0o711);
+    for parent in [root.parent().unwrap(), &root] {
+        chown(parent, None, Some(Gid::from_raw(41001))).unwrap();
+        mode(parent, 0o550);
+    }
+    let program = root.join("codex");
+    fs::rename(&fixture.runner.executable, &program).unwrap();
+    chown(&program, None, Some(Gid::from_raw(41001))).unwrap();
+    mode(&program, 0o550);
+    fixture.runner.executable = program;
+    let control = fixture.judge();
+    assert_eq!(control.status, "verdict", "{control:?}");
+    drop(fixture);
+}
+
+/// ´test:integration:agent-metadata-reports-vendor-admission´
+#[test]
+#[ignore = "requires namespace root and loop 41001 and outsider 41003 mapped"]
+fn agent_metadata_reports_vendor_admission() {
+    namespace();
+    let fixture = Fixture::new(41001);
+    fixture.install_config();
+    let inspect = || {
+        superloop_lane::door::metadata::inspect(
+            &fixture.runner.entry,
+            fixture.root.path(),
+            "alpha",
+            &fixture.runner.executable,
+        )
+    };
+    assert_eq!(inspect()["executable_status"]["admitted"], true);
+    chown(&fixture.runner.executable, Some(Uid::from_raw(41003)), None).unwrap();
+    let value = inspect();
+    assert_eq!(value["executable_status"]["admitted"], false, "{value}");
+    assert_eq!(
+        value["executable_status"]["refusal"]["check"],
+        "program-owner"
+    );
+    drop(fixture);
 }

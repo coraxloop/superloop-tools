@@ -455,6 +455,9 @@ pattern = "packages/loop-home/src/runner.rs"
 pattern = "packages/loop-home/src/runner/agent_runner.py"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/runner/program_policy.py"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/runner/sign_in_policy.py"
 
 [[include.rows]]

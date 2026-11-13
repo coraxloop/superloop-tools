@@ -245,15 +245,27 @@ fn door_sign_in_retains_content_changed_after_publication() {
 #[test]
 fn door_sign_in_entry_previews_and_publishes_without_consuming_canonical_source() {
     let fixture = Fixture::new();
-    let metadata = || {
+    let metadata = |program: &std::path::Path| {
         superloop_lane::door::metadata::inspect(
             &fixture.root.path().join("entry"),
             fixture.root.path(),
             "alpha",
-            &fixture.root.path().join("entry"),
+            program,
         )
     };
-    let before = metadata();
+    let refused = metadata(&fixture.root.path().join("entry"));
+    assert_eq!(refused["executable_status"]["usable"], true);
+    assert_eq!(refused["executable_status"]["admitted"], false);
+    assert_eq!(
+        refused["executable_status"]["refusal"]["check"],
+        "program-writable"
+    );
+    let vendor_root = tempfile::tempdir().expect("vendor under supplied temporary root");
+    let vendor = vendor_root.path().join("vendor");
+    fs::write(&vendor, b"#!/bin/sh\nexit 1\n").expect("inert vendor");
+    fs::set_permissions(&vendor, fs::Permissions::from_mode(0o700)).expect("vendor mode");
+    let before = metadata(&vendor);
+    assert_eq!(before["executable_status"]["admitted"], true, "{before}");
     assert_eq!(before["sign_in"]["exists"], false, "{before}");
     let preview = report(&fixture.call("alpha", true));
     assert_eq!(preview["destination"]["exists"], false);
@@ -277,8 +289,10 @@ fn door_sign_in_entry_previews_and_publishes_without_consuming_canonical_source(
     );
     assert_eq!(changed["source_removed"], false);
     assert!(fixture.source.exists());
-    assert_eq!(metadata()["sign_in"]["usable"], true);
-    assert_eq!(metadata()["executable_status"]["usable"], true);
+    assert_eq!(metadata(&vendor)["sign_in"]["usable"], true);
+    assert_eq!(metadata(&vendor)["executable_status"]["usable"], true);
+    assert_eq!(metadata(&vendor)["executable_status"]["admitted"], true);
+    assert!(metadata(&vendor)["executable_status"]["refusal"].is_null());
     assert_eq!(
         fs::read(&fixture.destination).expect("synthetic destination"),
         b"synthetic credential fixture only"

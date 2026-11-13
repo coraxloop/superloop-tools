@@ -383,7 +383,14 @@ fn measure_into(
                 settings.entry_bin.as_deref(),
             )
         })
-        .and_then(|value| super::config::runner(&value, owner_home, &registration.loop_name));
+        .and_then(|value| {
+            super::config::runner(
+                &value,
+                owner_home,
+                &registration.loop_name,
+                Some(registration.loop_uid),
+            )
+        });
     let real_observation = match real {
         Ok(runner) => {
             *stage = "real-runner-call";
