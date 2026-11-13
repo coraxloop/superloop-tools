@@ -170,7 +170,7 @@ pub(crate) fn requested_thread(run_dir: &Path, prompt: &[u8]) -> Result<Option<S
     let prompt = std::str::from_utf8(prompt)
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
     let prompt = prompt.trim_end_matches('\n');
-    if prompt == "Read /home/worker/brief.txt." {
+    if prompt == crate::FIRST_DISPATCH_PROMPT {
         return Ok(None);
     }
     let (inbox_name, step) = prompt

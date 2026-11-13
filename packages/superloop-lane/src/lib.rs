@@ -41,6 +41,9 @@ use error::LaneError;
 use plan::Plan;
 use settings::Settings;
 
+pub(crate) const FIRST_DISPATCH_PROMPT: &str =
+    "Read /home/worker/brief.txt and carry out the work it describes, reporting as the brief asks.";
+
 /// Match the entry's portable run-name grammar.
 #[must_use]
 pub fn valid_run_name(run: &str) -> bool {

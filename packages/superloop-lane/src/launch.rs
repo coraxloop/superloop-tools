@@ -2068,7 +2068,7 @@ fn entry_argv_round(
     let (source, prompt) = if step == "dispatch" && mail.is_none() {
         (
             plan.home.join("brief.txt"),
-            "Read /home/worker/brief.txt.".to_owned(),
+            crate::FIRST_DISPATCH_PROMPT.to_owned(),
         )
     } else {
         let binding = mail.ok_or_else(|| {

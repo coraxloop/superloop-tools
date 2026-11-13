@@ -2152,7 +2152,9 @@ exit 2
             .as_array()
             .expect("entry words")
             .last(),
-        Some(&serde_json::json!("Read /home/worker/brief.txt."))
+        Some(&serde_json::json!(
+            "Read /home/worker/brief.txt and carry out the work it describes, reporting as the brief asks."
+        ))
     );
     assert_eq!(
         preview["selection"]["method"],
