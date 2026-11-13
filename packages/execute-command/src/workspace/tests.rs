@@ -176,7 +176,10 @@ fn workspace_shell_never_quick_and_blacklist_is_published() {
     let deny = Classification::Deny(denial);
     let key = learned_key("compute", &e, &g, &p.revision).unwrap();
     for mode in [DoorMode::Allow, DoorMode::Audit, DoorMode::Enforce] {
-        assert_eq!(disposition(mode, &deny, &key, Some(&key)), Disposition::Block);
+        assert_eq!(
+            disposition(mode, &deny, &key, Some(&key)),
+            Disposition::Block
+        );
     }
 }
 /// ´test:unit:workspace-path-operands-and-env-miss-without-blacklist´
