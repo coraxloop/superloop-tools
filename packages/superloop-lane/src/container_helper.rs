@@ -940,7 +940,8 @@ pub(crate) fn preflight_round(run_dir: &Path, step: &str, budget: u64) -> Result
     attempt_vector(&initial.argv, &initial.driver_dir, 1)?;
     Ok(json!({"state":"passed","step":step,"budget_seconds":budget,
         "checked":["retained mail custody and reservation binding",
-            "helper plan, program, mounts, pins and image", "helper attempt argument vector"],
+            "helper plan, program, mounts, pins and image", "helper attempt argument vector",
+            "saved runtime environment and unoccupied round request"],
         "not_checked":["launch-time descriptor transfer", "socket bind",
             "process spawn", "intervening changes"],
         "helper_started":false,"credential_published":false,"changed":false}))

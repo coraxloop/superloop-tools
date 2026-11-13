@@ -646,26 +646,38 @@ fn inspect_loaded_round(
         let loop_uid = crate::plan::loop_uid(&plan.document)?;
         let (runs_root, runtime_dir) =
             super::pin_runtime_dir(&plan.driver_dir, Uid::effective().as_raw(), loop_uid)?;
-        super::prepare_client_environment(
+        let request = prepare_round_request(plan, record, step, budget)?;
+        let bytes = super::client_environment_bytes(
             &plan.driver_dir,
             &runs_root,
             &runtime_dir,
             loop_uid,
             false,
         )?;
-        publish_round_request(plan, record, step, budget)?;
+        super::publish_client_environment(&runtime_dir, loop_uid, &bytes)?;
+        request.publish()?;
     }
     Ok(
         json!({"schema":1,"command":"inspect-round","thread_id":record["thread_id"],"home":plan.home,"worker_uid":record["worker_uid"]}),
     )
 }
 
+#[cfg(test)]
 pub(super) fn publish_round_request(
     plan: &Plan,
     record: &Value,
     step: &str,
     budget: u64,
 ) -> Result<(), LaneError> {
+    prepare_round_request(plan, record, step, budget)?.publish()
+}
+
+fn prepare_round_request(
+    plan: &Plan,
+    record: &Value,
+    step: &str,
+    budget: u64,
+) -> Result<PreparedRoundRequest, LaneError> {
     let directory = if home::private_is_active() {
         held_round_directory(&plan.driver_dir, crate::plan::loop_uid(&plan.document)?)?
     } else {
@@ -686,21 +698,6 @@ pub(super) fn publish_round_request(
     let name = format!("round-launch-{step}.json");
     let temporary = format!(".round-launch-{step}-{}.tmp", std::process::id());
     let path = plan.driver_dir.join(&temporary);
-    let mut file = nix::fcntl::openat(
-        &directory,
-        temporary.as_str(),
-        nix::fcntl::OFlag::O_WRONLY
-            | nix::fcntl::OFlag::O_CREAT
-            | nix::fcntl::OFlag::O_EXCL
-            | nix::fcntl::OFlag::O_NOFOLLOW
-            | nix::fcntl::OFlag::O_CLOEXEC,
-        nix::sys::stat::Mode::from_bits_truncate(0o600),
-    )
-    .map(std::fs::File::from)
-    .map_err(std::io::Error::from)
-    .map_err(|error| {
-        LaneError::operation("round-evidence", format!("{}: {error}", path.display()))
-    })?;
     let binding = record["mail"]
         .as_array()
         .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
@@ -708,29 +705,90 @@ pub(super) fn publish_round_request(
             LaneError::input("mail-delivery", "round request lacks its delivery binding")
         })?;
     let body = json!({"schema":1,"step":step,"budget_seconds":budget,"mail":binding,"thread_id":record["thread_id"],"home":plan.home,"worker_uid":record["worker_uid"]});
-    file.write_all(body.to_string().as_bytes())
-        .and_then(|()| file.write_all(b"\n"))
+    for leaf in [&name, &temporary] {
+        match nix::sys::stat::fstatat(
+            &directory,
+            leaf.as_str(),
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Err(nix::errno::Errno::ENOENT) => {}
+            Ok(_) => {
+                return Err(LaneError::input(
+                    "round-evidence",
+                    format!("{leaf} already exists"),
+                ));
+            }
+            Err(error) => return Err(LaneError::input("round-evidence", error.to_string())),
+        }
+    }
+    Ok(PreparedRoundRequest {
+        directory,
+        name,
+        temporary,
+        path,
+        parent,
+        bytes: body.to_string().into_bytes(),
+    })
+}
+
+struct PreparedRoundRequest {
+    directory: std::fs::File,
+    name: String,
+    temporary: String,
+    path: PathBuf,
+    parent: std::fs::Metadata,
+    bytes: Vec<u8>,
+}
+
+impl PreparedRoundRequest {
+    fn publish(self) -> Result<(), LaneError> {
+        let Self {
+            directory,
+            name,
+            temporary,
+            path,
+            parent,
+            bytes,
+        } = self;
+        let mut file = nix::fcntl::openat(
+            &directory,
+            temporary.as_str(),
+            nix::fcntl::OFlag::O_WRONLY
+                | nix::fcntl::OFlag::O_CREAT
+                | nix::fcntl::OFlag::O_EXCL
+                | nix::fcntl::OFlag::O_NOFOLLOW
+                | nix::fcntl::OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .map(std::fs::File::from)
+        .map_err(std::io::Error::from)
+        .map_err(|error| {
+            LaneError::operation("round-evidence", format!("{}: {error}", path.display()))
+        })?;
+        file.write_all(&bytes)
+            .and_then(|()| file.write_all(b"\n"))
+            .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+        fchown(
+            &file,
+            Some(Uid::from_raw(parent.uid())),
+            Some(Gid::from_raw(parent.gid())),
+        )
         .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    fchown(
-        &file,
-        Some(Uid::from_raw(parent.uid())),
-        Some(Gid::from_raw(parent.gid())),
-    )
-    .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    file.sync_all()
+        file.sync_all()
+            .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+        renameat2(
+            &directory,
+            temporary.as_str(),
+            &directory,
+            name.as_str(),
+            RenameFlags::RENAME_NOREPLACE,
+        )
         .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    renameat2(
-        &directory,
-        temporary.as_str(),
-        &directory,
-        name.as_str(),
-        RenameFlags::RENAME_NOREPLACE,
-    )
-    .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    directory
-        .sync_all()
-        .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    Ok(())
+        directory
+            .sync_all()
+            .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+        Ok(())
+    }
 }
 
 /// Record the reply and each acknowledged in-round letter after the child ends.
@@ -1053,6 +1111,13 @@ pub(crate) fn preflight_record(
     next["phase"] = json!("preparing");
     next["active_round"] = json!(step);
     next["letter_source"] = json!(super::steering::evidence(&plan, step));
+    let _letter = super::steering::retained_letter(&plan, &next)?;
+    let loop_uid = crate::plan::loop_uid(&plan.document)?;
+    let (runs, runtime) =
+        super::pin_runtime_dir(&plan.driver_dir, Uid::effective().as_raw(), loop_uid)?;
+    let _request = prepare_round_request(&plan, &next, step, budget)?;
+    let _environment =
+        super::client_environment_bytes(&plan.driver_dir, &runs, &runtime, loop_uid, false)?;
     Ok(next)
 }
 
@@ -1285,7 +1350,7 @@ fn resume_with_program(
         &record,
         step,
         delivery,
-        request.dry_run,
+        true,
         (host_root, root_uid, lane_bin),
     )?;
     if &verified != entry {
@@ -1736,6 +1801,77 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// ´test:unit:round-inspection-validates-before-publication´
+    #[test]
+    fn round_inspection_validates_before_publication() {
+        let (_fixture, plan) = client_environment_fixture();
+        let runtime = plan.driver_dir.join("launch/runtime.env");
+        let before = fs::read(&runtime).expect("environment");
+        let metadata = fs::metadata(&runtime).expect("environment inode");
+        let mut record = json!({"phase":"preparing","active_round":"review",
+            "thread_id":"thread","worker_uid":0,
+            "rounds":[{"step":"review","budget_seconds":900}],"mail":[]});
+        let names = || {
+            let mut names = fs::read_dir(&plan.driver_dir)
+                .expect("run entries")
+                .map(|entry| entry.expect("entry").file_name())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let original = names();
+        let error = inspect_loaded_round(&plan, &record, Some(("review", 900)))
+            .expect_err("missing binding before environment write");
+        assert_eq!(error.kind, "mail-delivery");
+        assert_eq!(fs::read(&runtime).expect("unchanged bytes"), before);
+        assert_eq!(
+            fs::metadata(&runtime).expect("unchanged inode").ino(),
+            metadata.ino()
+        );
+        assert_eq!(names(), original, "no round request temporary");
+        record["mail"] = json!([{"step":"review"}]);
+        let request = plan.driver_dir.join("round-launch-review.json");
+        fs::write(&request, b"retained request").expect("existing request");
+        let original = names();
+        let error = inspect_loaded_round(&plan, &record, Some(("review", 900)))
+            .expect_err("occupied request before environment write");
+        assert_eq!(error.kind, "round-evidence");
+        assert!(
+            error
+                .detail
+                .contains("round-launch-review.json already exists")
+        );
+        assert_eq!(
+            fs::read(&request).expect("retained request"),
+            b"retained request"
+        );
+        assert_eq!(fs::read(&runtime).expect("unchanged bytes"), before);
+        assert_eq!(
+            fs::metadata(&runtime).expect("unchanged inode").ino(),
+            metadata.ino()
+        );
+        assert_eq!(names(), original, "no temporary on occupied destination");
+        fs::remove_file(&request).expect("remove fixture destination");
+        let temporary = plan
+            .driver_dir
+            .join(format!(".round-launch-review-{}.tmp", std::process::id()));
+        fs::write(&temporary, b"retained temporary").expect("occupied exact temporary");
+        let original = names();
+        let error = inspect_loaded_round(&plan, &record, Some(("review", 900)))
+            .expect_err("occupied temporary before environment write");
+        assert_eq!(error.kind, "round-evidence");
+        assert!(error.detail.contains("already exists"));
+        assert_eq!(
+            fs::read(&temporary).expect("retained temporary"),
+            b"retained temporary"
+        );
+        assert_eq!(
+            fs::metadata(&runtime).expect("unchanged inode").ino(),
+            metadata.ino()
+        );
+        assert_eq!(names(), original, "only exact temporary considered");
     }
 
     /// # Panics

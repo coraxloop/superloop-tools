@@ -842,3 +842,31 @@ fn failed_driver_dispatch_refuses_present_process_and_container() {
         before
     );
 }
+
+/// ´test:integration:resumed-launch-validates-before-reconciliation´
+#[test]
+fn resumed_launch_validates_before_reconciliation() {
+    let fixture = fixture();
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&fixture.reservation).expect("reservation"))
+            .expect("record");
+    record["phase"] = json!("preparing");
+    record["run_scope"] = json!({"unit":"invalid-scope"});
+    fs::write(
+        &fixture.reservation,
+        serde_json::to_vec(&record).expect("record bytes"),
+    )
+    .expect("preparing record");
+    let before = fs::read(&fixture.reservation).expect("before refusal");
+    let output = fixture.invoke(&["launch", "alpha", "R", "--round", "review", "--budget", "0"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("round-budget: budget must be 1 through 10800 seconds"),
+        "{output:?}"
+    );
+    assert_eq!(
+        fs::read(&fixture.reservation).expect("after refusal"),
+        before
+    );
+}

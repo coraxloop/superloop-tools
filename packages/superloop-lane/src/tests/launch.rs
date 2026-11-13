@@ -3439,6 +3439,7 @@ import json, pathlib, sys
 home = pathlib.Path.cwd()
 f = json.loads((home / 'resume-window.json').read_text())
 if '_bind-mail' in sys.argv:
+    assert '--verify-only' in sys.argv, 'resume must not republish retained mail'
     print(json.dumps(f['binding']))
 elif '--preflight-round' in sys.argv:
     print(json.dumps({'state':'passed',

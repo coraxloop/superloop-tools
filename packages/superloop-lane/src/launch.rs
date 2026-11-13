@@ -6738,13 +6738,13 @@ fn refreshed_client_environment(
     Ok(refreshed)
 }
 
-fn prepare_client_environment(
+fn client_environment_bytes(
     driver_dir: &Path,
     runs_root: &OwnedFd,
     runtime_dir: &OwnedFd,
     loop_uid: u32,
     initial: bool,
-) -> Result<(), LaneError> {
+) -> Result<Vec<u8>, LaneError> {
     let owner = Uid::effective().as_raw();
     let stat =
         fstat(runs_root).map_err(|error| LaneError::input("runtime-client", error.to_string()))?;
@@ -6784,6 +6784,26 @@ fn prepare_client_environment(
             .map_err(|error| LaneError::input("runtime-client", error.to_string()))?;
         refreshed_client_environment(&bytes, stat.st_dev, stat.st_ino)?
     };
+    Ok(bytes)
+}
+
+fn prepare_client_environment(
+    driver_dir: &Path,
+    runs_root: &OwnedFd,
+    runtime_dir: &OwnedFd,
+    loop_uid: u32,
+    initial: bool,
+) -> Result<(), LaneError> {
+    let bytes = client_environment_bytes(driver_dir, runs_root, runtime_dir, loop_uid, initial)?;
+    publish_client_environment(runtime_dir, loop_uid, &bytes)
+}
+
+fn publish_client_environment(
+    runtime_dir: &OwnedFd,
+    loop_uid: u32,
+    bytes: &[u8],
+) -> Result<(), LaneError> {
+    let owner = Uid::effective().as_raw();
     let temporary = format!(
         ".runtime.env-{}-{}",
         std::process::id(),
@@ -6791,7 +6811,7 @@ fn prepare_client_environment(
     );
     let mut file = create_runtime_file(runtime_dir, &temporary, 0o440)?;
     let result = (|| {
-        file.write_all(&bytes)
+        file.write_all(bytes)
             .map_err(|error| LaneError::operation("runtime-client", error.to_string()))?;
         fchownat(
             &file,

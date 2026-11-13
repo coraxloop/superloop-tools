@@ -397,7 +397,7 @@ fn inbound_route(kind: &str) {
             pinned["mail"]
         );
         resume_route(home, &entry, "inbound-resume-dry");
-        resume_route(home, &entry, "inbound-resume-repair");
+        resume_route(home, &entry, "inbound-resume-apply");
         return;
     }
     let reservation = home.join("runs/.reservation-R.json");
@@ -552,7 +552,7 @@ fn legacy_pin_for_resume(home: &Path, entry: &Path) -> serde_json::Value {
     .expect("publish base entry result as the old caller does");
     // Verify the old evidence before any new bind can rewrite it.
     resume_route(home, entry, "inbound-resume-dry");
-    resume_route(home, entry, "inbound-resume-repair");
+    resume_route(home, entry, "inbound-resume-apply");
     binding
 }
 fn legacy_entry(home: &Path) -> ! {
@@ -806,7 +806,7 @@ fn incomplete_resume_plan_refuses(
 
 fn resume_route(home: &Path, entry: &Path, kind: &str) {
     let runtime = home.join("resume-runtime");
-    let source = if kind == "inbound-resume-repair" {
+    let source = if kind == "inbound-resume-apply" {
         concat!(
             "#!/bin/sh\nif [ \"$3\" = _inspect-round ]; then echo ",
             "'{\"thread_id\":\"different-thread\"}'; else exec ",
@@ -818,8 +818,8 @@ fn resume_route(home: &Path, entry: &Path, kind: &str) {
     fs::write(&runtime, source).expect("runtime routing fixture");
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).expect("runtime mode");
     let (path, before) = resume_plan(home, &runtime);
-    let changed = matches!(kind, "inbound-resume-changed" | "inbound-resume-repair");
-    let dry = kind != "inbound-resume-repair";
+    let changed = matches!(kind, "inbound-resume-changed" | "inbound-resume-apply");
+    let dry = kind != "inbound-resume-apply";
     if changed {
         let output = namespace(
             home,
@@ -869,20 +869,19 @@ fn resume_route(home: &Path, entry: &Path, kind: &str) {
         );
     } else if changed {
         let error = result.expect_err("selected resume boundary");
-        let expected = if dry {
-            "retained evidence differs from verified delivery"
-        } else {
-            "private thread differs from reservation"
-        };
-        assert!(error.line().contains(expected), "{kind}: {}", error.line());
+        assert!(
+            error
+                .line()
+                .contains("retained evidence differs from verified delivery"),
+            "{kind}: {}",
+            error.line()
+        );
     } else {
         incomplete_resume_plan_refuses(result);
     }
-    if dry {
-        assert_eq!(evidence_snapshot(home), evidence_before);
-    }
+    assert_eq!(evidence_snapshot(home), evidence_before);
     assert_eq!(fs::read(path).expect("unchanged reservation"), before);
-    let expected = if changed && dry {
+    let expected = if changed {
         "b'changed'"
     } else {
         "b'reply bytes\\x00\\xff\\n'"
@@ -1205,7 +1204,7 @@ fn main() -> std::process::ExitCode {
         "inbound-verify-absent",
         "inbound-resume-dry",
         "inbound-resume-changed",
-        "inbound-resume-repair",
+        "inbound-resume-apply",
         "inbound-forged-binding",
         "inbound-resume-forged",
         "inbound-override-empty",

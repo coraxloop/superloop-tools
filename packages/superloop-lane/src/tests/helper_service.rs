@@ -557,6 +557,8 @@ fn built_helper_resume_retains_mail_custody() {
         "FIRST-HELPER-READY",
         "RESUMED-HELPER-READY",
         "ROUND-PREFLIGHT-READONLY",
+        "PUBLICATION-PREFLIGHT-READONLY",
+        "INSPECTION-REFUSALS-READONLY",
     ] {
         assert!(output.contains(marker), "{output}");
     }
@@ -694,9 +696,17 @@ import os,json,sys
 v=json.loads(sys.argv[2]);fd=os.open(v['run'],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
 s=os.fstat(fd)
 assert (s.st_dev,s.st_ino)==(v['device'],v['inode'])
-for name in ['mail-review.txt']:
+for name in ['mail-review.txt','launch']:
  try: os.chown(name,0,0,dir_fd=fd,follow_symlinks=False)
  except FileNotFoundError: pass
+try:
+ child=os.open('fixture-dispatch',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+except FileNotFoundError: pass
+else:
+ for name in ['events.jsonl','.event-start']:
+  try: os.chown(name,0,0,dir_fd=child,follow_symlinks=False)
+  except FileNotFoundError: pass
+ os.fchown(child,0,0);os.close(child)
 os.fchown(fd,0,0)
 ",
             &input,
@@ -753,6 +763,11 @@ v=json.loads(sys.argv[2]);os.chown(v['run'],v['uid'],v['uid']);os.chmod(v['run']
 s=os.stat(v['run']);p=os.stat(os.path.dirname(v['run']))
 assert s.st_uid==v['uid'] and p.st_uid==0 and s.st_uid!=p.st_uid
 assert s.st_mode&0o7777==0o700 and p.st_mode&0o7777==0o711
+d=os.path.join(v['run'],'launch');os.makedirs(d,exist_ok=True)
+os.chmod(d,0o700);os.chown(d,v['uid'],v['uid'])
+f=os.path.join(d,'runtime.env')
+with open(f,'wb') as out: out.write(b'SUPERLOOP_CLIENT_ROOT_DEV=1\0SUPERLOOP_CLIENT_ROOT_INO=2\0')
+os.chown(f,0,v['uid']);os.chmod(f,0o440)
 ",
         &input,
     )
@@ -809,6 +824,8 @@ p.write_text(v['text']);p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
         "RESUMED-HELPER-READY",
     );
     check_round_previews(home, runs, podman, &settled, uid);
+    check_publication_previews(home, runs, podman, &settled, uid);
+    check_built_inspection(home, runs, &settled, uid);
 }
 
 fn check_round_previews(home: &Path, runs: &Path, podman: &Path, record: &Value, uid: u32) {
@@ -868,7 +885,13 @@ else: os.chown(p,3001,3001)
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let inventory = publication_inventory(home, runs);
         let output = built_helper(home, runs, podman, true).finish();
+        assert_eq!(
+            publication_inventory(home, runs),
+            inventory,
+            "bad {change}: no writes"
+        );
         assert_eq!(output.status.code(), Some(2), "bad {change} preview passed");
         assert!(
             String::from_utf8_lossy(&output.stderr).contains(text),
@@ -897,4 +920,189 @@ p.write_text(v['text']);os.chown(p,v['uid'],v['uid']);os.chown(p.parent,v['uid']
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+fn check_publication_previews(home: &Path, runs: &Path, podman: &Path, record: &Value, uid: u32) {
+    let reservation = runs.join(".reservation-R.json");
+    for (case, expected) in [
+        ("binding", "active mail binding absent"),
+        ("runtime", "saved client environment is invalid"),
+        (
+            "runtime-owner",
+            "saved client environment has foreign ownership",
+        ),
+        ("occupied", "round-launch-review.json already exists"),
+        ("state", "preflight requires an unused settled round"),
+    ] {
+        let mut input = record.clone();
+        if case == "binding" {
+            input["mail"] = json!([]);
+        }
+        if case == "state" {
+            input["phase"] = json!("failed");
+        }
+        crate::launch::publish_reservation(&reservation, &input).expect("case reservation");
+        let setup = json!({"run":runs.join("R"),"uid":uid,"case":case}).to_string();
+        let prepared = namespace_python(
+            home,
+            r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);d=Path(v['run']);p=d/'launch/runtime.env'
+p.write_bytes(b'SUPERLOOP_CLIENT_ROOT_DEV=1\0SUPERLOOP_CLIENT_ROOT_INO=2\0')
+os.chown(p,0,v['uid']);p.chmod(0o440)
+if v['case']=='runtime': p.write_bytes(b'invalid')
+if v['case']=='runtime-owner': os.chown(p,v['uid'],v['uid'])
+if v['case']=='occupied': (d/'round-launch-review.json').write_bytes(b'existing request')
+",
+            &setup,
+        )
+        .expect("prepare publication refusal");
+        assert!(prepared.status.success(), "{prepared:?}");
+        let before = publication_inventory(home, runs);
+        let output = built_helper(home, runs, podman, true).finish();
+        assert_eq!(output.status.code(), Some(2), "{case}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{case}: {output:?}"
+        );
+        assert_eq!(
+            publication_inventory(home, runs),
+            before,
+            "{case}: no publication on refusal"
+        );
+        if case == "occupied" {
+            let removed = namespace_python(
+                home,
+                r"
+import os,sys
+os.unlink(os.path.join(sys.argv[2],'R/round-launch-review.json'))
+",
+                runs.to_str().expect("runs"),
+            )
+            .expect("remove fixture request");
+            assert!(removed.status.success(), "{removed:?}");
+        }
+    }
+    crate::launch::publish_reservation(&reservation, record).expect("restore settled record");
+    writeln!(std::io::stdout().lock(), "PUBLICATION-PREFLIGHT-READONLY").expect("marker");
+}
+
+fn publication_inventory(home: &Path, runs: &Path) -> Vec<u8> {
+    let output = namespace_python(
+        home,
+        r"
+import os,sys,json,hashlib,stat
+from pathlib import Path
+root=Path(sys.argv[2]);rows=[]
+for directory,dirs,files in os.walk(root,followlinks=False):
+ for name in sorted(dirs+files):
+  p=Path(directory)/name;s=p.lstat();payload=None
+  if stat.S_ISREG(s.st_mode): payload=hashlib.sha256(p.read_bytes()).hexdigest()
+  elif stat.S_ISLNK(s.st_mode): payload=os.readlink(p)
+  rows.append((str(p.relative_to(root)),s.st_dev,s.st_ino,s.st_uid,s.st_gid,s.st_mode,payload))
+print(json.dumps(sorted(rows)))
+",
+        runs.to_str().expect("runs"),
+    )
+    .expect("whole run inventory");
+    assert!(output.status.success(), "{output:?}");
+    output.stdout
+}
+
+fn check_built_inspection(home: &Path, runs: &Path, seed: &Value, uid: u32) {
+    let setup = json!({"run":runs.join("R"),"uid":uid}).to_string();
+    let output = namespace_python(
+        home,
+        r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);r=Path(v['run']);d=r/'fixture-dispatch';d.mkdir()
+d.chmod(0o700);os.chown(d,v['uid'],v['uid'])
+p=d/'events.jsonl'
+p.write_text(json.dumps({'type':'thread.started','thread_id':'fixture-thread'})+'\n')
+p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
+p=d/'.event-start';p.write_bytes(b'0\n');p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
+p=r/'launch/runtime.env'
+p.write_bytes(b'SUPERLOOP_CLIENT_ROOT_DEV=1\0SUPERLOOP_CLIENT_ROOT_INO=2\0')
+os.chown(p,0,v['uid']);p.chmod(0o440)
+",
+        &setup,
+    )
+    .expect("inspection history");
+    assert!(output.status.success(), "{output:?}");
+    let reservation = runs.join(".reservation-R.json");
+    for (case, expected) in [
+        ("binding", "round request lacks its delivery binding"),
+        ("occupied", "round-launch-review.json already exists"),
+    ] {
+        let mut record = seed.clone();
+        record["phase"] = json!("preparing");
+        record["active_round"] = json!("review");
+        record["rounds"]
+            .as_array_mut()
+            .expect("rounds")
+            .push(json!({"step":"review","budget_seconds":3600}));
+        if case == "binding" {
+            record["mail"] = json!([]);
+        }
+        crate::launch::publish_reservation(&reservation, &record).expect("inspect record");
+        if case == "occupied" {
+            let output = namespace_python(
+                home,
+                r"
+import pathlib,sys
+(pathlib.Path(sys.argv[2])/'R/round-launch-review.json').write_bytes(b'retained request')
+",
+                runs.to_str().expect("runs"),
+            )
+            .expect("occupied request");
+            assert!(output.status.success(), "{output:?}");
+        }
+        let before = publication_inventory(home, runs);
+        let error = built_inspection(home, runs).expect_err("inspection refuses input");
+        assert!(error.detail.contains(expected), "{case}: {error:?}");
+        assert_eq!(
+            publication_inventory(home, runs),
+            before,
+            "{case}: built inspection must not publish before validation"
+        );
+    }
+    writeln!(std::io::stdout().lock(), "INSPECTION-REFUSALS-READONLY").expect("marker");
+}
+
+fn built_inspection(home: &Path, runs: &Path) -> Result<String, crate::error::LaneError> {
+    let binary = std::env::current_exe()
+        .expect("test image")
+        .ancestors()
+        .map(|path| path.join("superloop-lane"))
+        .find(|path| path.is_file())
+        .expect("built lane");
+    let own = fs::File::open(home).expect("home").into();
+    let storage = fs::File::open(runs).expect("runs").into();
+    let args = vec![
+        "unshare".into(),
+        binary.display().to_string(),
+        "_inspect-round".into(),
+        "alpha".into(),
+        "R".into(),
+        "--owner-home".into(),
+        home.display().to_string(),
+        "--record".into(),
+        "review".into(),
+        "--budget".into(),
+        "3600".into(),
+    ];
+    crate::build::run_checked_with_private_launch(
+        Path::new("/usr/bin/podman"),
+        args,
+        &crate::launch::launch_environment(home)?,
+        home,
+        60,
+        "inspect-round",
+        &own,
+        runs,
+        &storage,
+        None,
+    )
 }
