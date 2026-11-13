@@ -924,18 +924,26 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
     )?;
     EXECUTABLE.with(|active| *active.borrow_mut() = Some(support));
     let _executable = ExecutableGuard;
+    if let Some((step, budget)) = preflight {
+        let record = crate::container_helper::prospective_round(Path::new(run), step, budget)?;
+        bind_reserved_program(
+            Path::new(home),
+            &manifest.loop_name,
+            crate::container_helper::run_identity_record(Path::new(run), &record)?,
+            podman,
+        )?;
+        let report =
+            crate::container_helper::preflight_round(Path::new(run), record, step, budget)?;
+        writeln!(std::io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("helper-preflight", error.to_string()))?;
+        return Ok(0);
+    }
     bind_reserved_program(
         Path::new(home),
         &manifest.loop_name,
         crate::container_helper::run_identity(Path::new(run))?,
         podman,
     )?;
-    if let Some((step, budget)) = preflight {
-        let report = crate::container_helper::preflight_round(Path::new(run), step, budget)?;
-        writeln!(std::io::stdout().lock(), "{report}")
-            .map_err(|error| LaneError::operation("helper-preflight", error.to_string()))?;
-        return Ok(0);
-    }
     crate::container_helper::serve(Path::new(run)).map(|()| 0)
 }
 

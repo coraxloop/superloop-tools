@@ -558,6 +558,7 @@ fn built_helper_resume_retains_mail_custody() {
     for marker in [
         "FIRST-HELPER-READY",
         "RESUMED-HELPER-READY",
+        "PREVIOUS-SOURCES-NOT-READ",
         "ROUND-PREFLIGHT-READONLY",
         "PUBLICATION-PREFLIGHT-READONLY",
         "INSPECTION-REFUSALS-READONLY",
@@ -818,6 +819,7 @@ p.write_text(v['text']);p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
     let reservation = runs.join(".reservation-R.json");
     crate::launch::publish_reservation(&reservation, &record).expect("settled binding");
     let settled = record.clone();
+    check_previous_sources(home, runs, podman, &settled);
     record["phase"] = json!("preparing");
     record["active_round"] = json!("review");
     record["letter_source"] = json!(path);
@@ -836,6 +838,69 @@ p.write_text(v['text']);p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
     check_built_inspection(home, runs, &settled, uid);
 }
 
+fn check_previous_sources(home: &Path, runs: &Path, podman: &Path, settled: &Value) {
+    let dispatch = PathBuf::from(settled["letter_source"].as_str().expect("dispatch source"));
+    let original = fs::read(&dispatch).expect("fixture dispatch letter");
+    let reservation = runs.join(".reservation-R.json");
+    for case in ["dispatch-altered", "dispatch-removed", "rotation", "later"] {
+        let mut prior = settled.clone();
+        if case == "dispatch-altered" {
+            fs::write(&dispatch, b"Model: deliberately-invalid\nEffort: invalid\n")
+                .expect("alter fixture dispatch");
+        } else if case == "dispatch-removed" {
+            fs::remove_file(&dispatch).expect("remove fixture dispatch");
+        } else if case == "rotation" {
+            prior["rotation_source_sha256"] = json!("f".repeat(64));
+            let brief =
+                Path::new(prior["plan"]["home"].as_str().expect("worker home")).join("brief.txt");
+            assert!(!brief.exists(), "preceding rotation brief is absent");
+            prior["letter_source"] = json!(brief);
+        } else {
+            prior["active_round"] = json!("previous");
+            let mut previous = prior["rounds"][0].clone();
+            previous["step"] = json!("previous");
+            prior["rounds"]
+                .as_array_mut()
+                .expect("prior rounds")
+                .push(previous);
+            let mut previous_binding = prior["mail"][0].clone();
+            previous_binding["step"] = json!("previous");
+            prior["mail"]
+                .as_array_mut()
+                .expect("mail history")
+                .push(previous_binding);
+            prior["letter_source"] = json!(runs.join("R/mail-previous.txt"));
+        }
+        crate::launch::publish_reservation(&reservation, &prior).expect("prior reservation");
+        let before = publication_inventory(home, runs);
+        let output = built_helper(home, runs, podman, true).finish();
+        assert!(
+            output.status.success(),
+            "{case} preview: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).expect("real preflight report");
+        assert_eq!(report["state"], "passed", "{case}: {report}");
+        assert_eq!(
+            publication_inventory(home, runs),
+            before,
+            "{case}: read only"
+        );
+        let mut next =
+            crate::launch::rounds::preflight_record(&runs.join("R"), &prior, "review", 3600)
+                .expect("prospective record");
+        next["launcher_pid"] = settled["launcher_pid"].clone();
+        next["launcher_start"] = settled["launcher_start"].clone();
+        crate::launch::publish_reservation(&reservation, &next).expect("published next round");
+        ready_and_stop(built_helper(home, runs, podman, false), runs, case);
+    }
+    fs::write(&dispatch, original).expect("restore fixture dispatch");
+    crate::launch::publish_reservation(&reservation, settled).expect("restore settled fixture");
+    writeln!(std::io::stdout().lock(), "PREVIOUS-SOURCES-NOT-READ").expect("source marker");
+}
+
+#[allow(clippy::too_many_lines)]
 fn check_round_previews(home: &Path, runs: &Path, podman: &Path, record: &Value, uid: u32) {
     let run = runs.join("R");
     let reservation = runs.join(".reservation-R.json");
@@ -859,6 +924,15 @@ fn check_round_previews(home: &Path, runs: &Path, podman: &Path, record: &Value,
     assert!(
         record["plan"]["compute_workspace"].is_object(),
         "real declaration reaches helper preflight"
+    );
+    assert!(
+        preview["not_checked"]
+            .as_array()
+            .expect("unchecked window")
+            .contains(&json!(
+                "every step after the preparing reservation is published"
+            )),
+        "preflight names whole publication window: {preview}"
     );
     assert_eq!(fs::read(&reservation).expect("after preview"), before);
     assert!(!run.join("round-launch-review.json").exists());

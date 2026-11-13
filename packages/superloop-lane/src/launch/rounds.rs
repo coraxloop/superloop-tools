@@ -1076,18 +1076,14 @@ pub(super) fn continuation_round(
 
 /// Reconstruct the next round without publishing any reservation field.
 pub(crate) fn preflight_record(
-    owner_home: &Path,
-    loop_name: &str,
-    run: &str,
-    podman: &Path,
+    run_dir: &Path,
     record: &Value,
     step: &str,
     budget: u64,
 ) -> Result<Value, LaneError> {
-    let (plan, _) = super::pinned_plan_from_record(owner_home, loop_name, run, podman, record)?;
     let request = LaunchRequest::parse(&[
-        loop_name.into(),
-        run.into(),
+        record["loop"].as_str().unwrap_or_default().into(),
+        record["run"].as_str().unwrap_or_default().into(),
         "--round".into(),
         step.into(),
         "--budget".into(),
@@ -1098,7 +1094,7 @@ pub(crate) fn preflight_record(
         .and_then(|rows| rows.iter().find(|row| row["step"] == step))
         .ok_or_else(|| LaneError::input("mail-delivery", "active mail binding absent"))?;
     let directory = if threadless_continuation(record) {
-        super::planned_step_dir(&plan, step)?
+        super::planned_step_dir_at(run_dir, step)?
     } else {
         prior_round_dir(record)?.to_path_buf()
     };
@@ -1110,15 +1106,29 @@ pub(crate) fn preflight_record(
         .push(round);
     next["phase"] = json!("preparing");
     next["active_round"] = json!(step);
-    next["letter_source"] = json!(super::steering::evidence(&plan, step));
-    let _letter = super::steering::retained_letter(&plan, &next)?;
+    next["letter_source"] = json!(run_dir.join(format!("mail-{step}.txt")));
+    Ok(next)
+}
+
+/// Validate publication inputs against the prospective reservation only.
+pub(crate) fn validate_preflight_record(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    podman: &Path,
+    record: &Value,
+    step: &str,
+    budget: u64,
+) -> Result<(), LaneError> {
+    let (plan, _) = super::pinned_plan_from_record(owner_home, loop_name, run, podman, record)?;
+    let _letter = super::steering::retained_letter(&plan, record)?;
     let loop_uid = crate::plan::loop_uid(&plan.document)?;
     let (runs, runtime) =
         super::pin_runtime_dir(&plan.driver_dir, Uid::effective().as_raw(), loop_uid)?;
-    let _request = prepare_round_request(&plan, &next, step, budget)?;
+    let _request = prepare_round_request(&plan, record, step, budget)?;
     let _environment =
         super::client_environment_bytes(&plan.driver_dir, &runs, &runtime, loop_uid, false)?;
-    Ok(next)
+    Ok(())
 }
 
 /// Preview or run the next round on the same worker, starting a thread after recovery if needed.

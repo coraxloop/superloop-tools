@@ -893,8 +893,11 @@ fn pinned_request_record(
 }
 
 /// Check a prospective resumed request without publishing or starting the service.
-pub(crate) fn preflight_round(run_dir: &Path, step: &str, budget: u64) -> Result<Value, LaneError> {
-    let (owner_home, loop_name, run, podman) = run_identity(run_dir)?;
+pub(crate) fn prospective_round(
+    run_dir: &Path,
+    step: &str,
+    budget: u64,
+) -> Result<Value, LaneError> {
     crate::launch::letters::valid_step(step)?;
     if !(1..=10_800).contains(&budget) {
         return Err(LaneError::input(
@@ -902,11 +905,8 @@ pub(crate) fn preflight_round(run_dir: &Path, step: &str, budget: u64) -> Result
             "budget must be 1 through 10800 seconds",
         ));
     }
-    crate::pinned::owner_executable(&podman, Uid::effective().as_raw())?;
-    let root = run_dir
-        .parent()
-        .ok_or_else(|| LaneError::input("helper-pin", "runs root absent"))?;
-    let mut record = read_reservation(&reservation_path(root, &run))?
+    let (run, root, _protected_root) = run_location(run_dir, Uid::effective().as_raw())?;
+    let record = read_reservation(&reservation_path(root, &run))?
         .ok_or_else(|| LaneError::input("helper-pin", "reservation absent"))?;
     if record["phase"] != "settled"
         || record["rounds"]
@@ -918,7 +918,19 @@ pub(crate) fn preflight_round(run_dir: &Path, step: &str, budget: u64) -> Result
             "preflight requires an unused settled round",
         ));
     }
-    record = crate::launch::rounds::preflight_record(
+    crate::launch::rounds::preflight_record(run_dir, &record, step, budget)
+}
+
+/// Check the prospective record after its runtime program has received custody.
+pub(crate) fn preflight_round(
+    run_dir: &Path,
+    mut record: Value,
+    step: &str,
+    budget: u64,
+) -> Result<Value, LaneError> {
+    let (owner_home, loop_name, run, podman) = run_identity_record(run_dir, &record)?;
+    crate::pinned::owner_executable(&podman, Uid::effective().as_raw())?;
+    crate::launch::rounds::validate_preflight_record(
         &owner_home,
         &loop_name,
         &run,
@@ -942,8 +954,9 @@ pub(crate) fn preflight_round(run_dir: &Path, step: &str, budget: u64) -> Result
         "checked":["retained mail custody and reservation binding",
             "helper plan, program, mounts, pins and image", "helper attempt argument vector",
             "saved runtime environment and unoccupied round request"],
-        "not_checked":["launch-time descriptor transfer", "socket bind",
-            "process spawn", "intervening changes"],
+        "not_checked":["busy lease and scope admission before publication",
+            "every step after the preparing reservation is published",
+            "launch-time descriptor transfer and intervening changes"],
         "helper_started":false,"credential_published":false,"changed":false}))
 }
 
@@ -1794,6 +1807,16 @@ fn run_identity_at_admitted(
     namespace_owner: u32,
     admission: &RuntimeAdmission,
 ) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
+    let (run, runs, _protected_root) = run_location(run_dir, namespace_owner)?;
+    let record = read_reservation(&reservation_path(runs, &run))?
+        .ok_or_else(|| LaneError::input("helper-pin", "protected run reservation is absent"))?;
+    run_identity_record_at(owner_home, run_dir, namespace_owner, &record, admission)
+}
+
+fn run_location(
+    run_dir: &Path,
+    namespace_owner: u32,
+) -> Result<(String, &Path, std::os::fd::OwnedFd), LaneError> {
     let invalid = || {
         LaneError::input(
             "helper-pin",
@@ -1819,9 +1842,38 @@ fn run_identity_at_admitted(
     if !valid_run_name(&run) {
         return Err(invalid());
     }
-    let _protected_root = crate::home::pin_parent(runs, namespace_owner)?;
-    let record = read_reservation(&reservation_path(runs, &run))?
-        .ok_or_else(|| LaneError::input("helper-pin", "protected run reservation is absent"))?;
+    let protected_root = crate::home::pin_parent(runs, namespace_owner)?;
+    Ok((run, runs, protected_root))
+}
+
+/// Check identity against the prospective reservation without reading its predecessor.
+pub(crate) fn run_identity_record(
+    run_dir: &Path,
+    record: &Value,
+) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
+    run_identity_record_at(
+        &caller_home()?,
+        run_dir,
+        Uid::effective().as_raw(),
+        record,
+        &RuntimeAdmission::Gate,
+    )
+}
+
+fn run_identity_record_at(
+    owner_home: &Path,
+    run_dir: &Path,
+    namespace_owner: u32,
+    record: &Value,
+    admission: &RuntimeAdmission,
+) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
+    let (run, _, _protected_root) = run_location(run_dir, namespace_owner)?;
+    let invalid = || {
+        LaneError::input(
+            "helper-pin",
+            "run directory is outside the planned runs root",
+        )
+    };
     let loop_name = record["loop"].as_str().ok_or_else(invalid)?.to_owned();
     loop_home::validate_name(&loop_name)
         .map_err(|error| LaneError::input("helper-pin", error.message()))?;
@@ -1839,7 +1891,7 @@ fn run_identity_at_admitted(
         ));
     }
     let (plan, _settings) = crate::launch::pinned_plan_from_record_admitted(
-        owner_home, &loop_name, &run, &program, &record, admission,
+        owner_home, &loop_name, &run, &program, record, admission,
     )
     .map_err(|error| LaneError::input("helper-pin", error.line()))?;
     if plan.driver_dir != run_dir {

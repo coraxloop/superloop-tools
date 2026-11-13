@@ -2106,10 +2106,14 @@ fn entry_argv_round(
 }
 
 fn planned_step_dir(plan: &Plan, step: &str) -> Result<PathBuf, LaneError> {
+    planned_step_dir_at(&plan.driver_dir, step)
+}
+
+fn planned_step_dir_at(driver_dir: &Path, step: &str) -> Result<PathBuf, LaneError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| LaneError::operation("round-directory", error.to_string()))?;
-    Ok(plan.driver_dir.join(format!(
+    Ok(driver_dir.join(format!(
         "{}-{}-{}-{step}",
         now.as_secs(),
         now.subsec_nanos(),
