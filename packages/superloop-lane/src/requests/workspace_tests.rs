@@ -88,11 +88,8 @@ fn workspace_record_seven_is_strict_and_six_is_unchanged() {
     detail["tree_clean"] = json!(true);
     assert!(WorkspaceEffect::decode(detail, "compute", "alpha", "R").is_err());
 }
-/// ´test:unit:workspace-schema-seven-survives-rewrite-and-index-rebuild´
-#[test]
-fn workspace_schema_seven_survives_rewrite_and_index_rebuild() {
+fn prepared_fixture() -> Fixture {
     let fixture = Fixture::new();
-    let store = fixture.store();
     let socket = fixture.home.join("socket");
     let door = socket.join("door");
     for path in [&socket, &door] {
@@ -102,6 +99,13 @@ fn workspace_schema_seven_survives_rewrite_and_index_rebuild() {
     let settings = fixture.home.join(".config/loops/alpha/workers.toml");
     fs::write(&settings, format!("socket_dir = {}\n", json!(socket))).unwrap();
     fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).unwrap();
+    fixture
+}
+/// ´test:unit:workspace-schema-seven-survives-rewrite-and-index-rebuild´
+#[test]
+fn workspace_schema_seven_survives_rewrite_and_index_rebuild() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
     let row = record();
     store
         .file(RequestRecord::decode(row.clone()).unwrap())
@@ -128,33 +132,6 @@ fn workspace_schema_seven_survives_rewrite_and_index_rebuild() {
         index["groups"][json!(["compute", "compute", "compute:cargo test"]).to_string()].is_null()
     );
 }
-/// ´test:unit:workspace-plan-and-reservation-read-snapshot-before-writer´
-#[test]
-fn workspace_plan_and_reservation_read_snapshot_before_writer() {
-    let grant = Grant::decode(detail()["grant"].clone()).unwrap();
-    let mut plan = json!({"loop":"alpha","run":"R","compute_workspace":{"digest":grant.digest().unwrap(),"grant":grant}});
-    assert!(crate::plan::workspace_snapshot(&plan).unwrap().is_some());
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("reservation.json");
-    let mut reservation = json!({"schema":1,"phase":"preparing","worker_uid":3000,"loop":"alpha","run":"R","plan":plan});
-    fs::write(&path, serde_json::to_vec(&reservation).unwrap()).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    assert_eq!(
-        crate::launch::read_reservation(&path).unwrap().unwrap(),
-        reservation
-    );
-    plan["compute_workspace"]["grant"]["workspace"] = json!("/foreign");
-    assert_eq!(
-        crate::plan::workspace_snapshot(&plan).unwrap_err().kind,
-        "door-workspace-context-differs"
-    );
-    reservation["run"] = json!("S");
-    fs::write(&path, serde_json::to_vec(&reservation).unwrap()).unwrap();
-    assert_eq!(
-        crate::launch::read_reservation(&path).unwrap_err().kind,
-        "door-workspace-context-differs"
-    );
-}
 /// ´test:unit:workspace-cut-pins-legacy-node-payloads-until-w5´
 #[test]
 fn workspace_cut_pins_legacy_node_payloads_until_w5() {
@@ -175,4 +152,103 @@ fn workspace_cut_pins_legacy_node_payloads_until_w5() {
         hash(include_bytes!("../door/retire_node.py")),
         "94a7ac7fd5c6c82e086ccec13c0a410f16d32ebd86506a4e40da2f80309a99b5"
     );
+}
+
+fn preflight(check: &str, words: Value) -> Value {
+    let mut row = waiting("R", "1a", 3000, Mode::Audit).into_value();
+    row["class"] = json!("preflight");
+    row["operation"] = json!("preflight");
+    row["shape_key"] = json!(format!("preflight:{check}"));
+    row["state"] = json!("preflight-refused");
+    row["would_do"] = json!({"decision":"refuse","reason":check});
+    row["would_do_source"] = json!("fast-lane");
+    row["effect"] = json!({"state":"refused","reason":check,"exit_status":125,
+        "ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
+        "queue_wall_seconds":null,"mediation_wall_seconds":0.0,"compute_wall_seconds":0.0,
+        "preflight":{"check":check,"words":null}});
+    row["effect"]["preflight"]["words"] = words;
+    row
+}
+/// ´test:unit:workspace-preflight-reader-preserves-bounded-wire-evidence´
+#[test]
+fn workspace_preflight_reader_preserves_bounded_wire_evidence() {
+    let mut envelope = detail()["envelope"].clone();
+    envelope["execution"] = json!({"kind":"Argv","words":vec![vec![b'x';256];256]});
+    let wire = serde_json::to_vec(&envelope).unwrap();
+    assert_eq!(
+        Envelope::from_bytes(&wire).unwrap().execution,
+        execute_command::workspace::Execution::Argv {
+            words: vec![vec![b'x'; 256]; 256]
+        }
+    );
+    let words = json!({"schema":3,"wire_bytes":wire,"truncated":false});
+    for check in [
+        "door-workspace-unregistered",
+        "door-workspace-context-differs",
+        "door-workspace-protocol-refusal",
+        "door-caller-authority-refusal",
+    ] {
+        let row = preflight(check, words.clone());
+        assert_eq!(
+            RequestRecord::decode(row.clone()).unwrap().into_value(),
+            row,
+            "{check}"
+        );
+    }
+    // Malformed wire is evidence of a refusal, not input to a second decoder.
+    let malformed = json!({"schema":3,"wire_bytes":[255,0,123],"truncated":false});
+    let row = preflight("door-workspace-protocol-refusal", malformed);
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    store
+        .file(RequestRecord::decode(row.clone()).unwrap())
+        .unwrap();
+    let path = fixture.home.join("runs/.launch-R/door-requests.json");
+    let before = fs::read(&path).unwrap();
+    let preview = store.rewrite(None).unwrap();
+    assert_eq!(preview["changed"], 0);
+    store.rewrite(preview["preview_sha256"].as_str()).unwrap();
+    store.rebuild_index().unwrap();
+    assert_eq!(store.request("R:1a").unwrap().into_value(), row);
+    assert_eq!(fs::read(path).unwrap(), before);
+    for bad in [
+        json!([]),
+        json!({"schema":3,"wire_bytes":[256],"truncated":false}),
+        json!({"schema":3,"wire_bytes":[255],"truncated":true}),
+        json!({"schema":3,"wire_bytes":[],"truncated":false,"extra":0}),
+        json!({"schema":2,"wire_bytes":[],"truncated":false}),
+    ] {
+        let error =
+            RequestRecord::decode(preflight("door-workspace-protocol-refusal", bad)).unwrap_err();
+        assert_eq!(error.kind, "requests-record-refusal");
+        assert!(error.to_string().contains("preflight refusal differs"));
+    }
+    let legacy = preflight("door-compute-words-refusal", json!([b"cargo".to_vec()]));
+    assert!(RequestRecord::decode(legacy).is_ok());
+    assert!(
+        RequestRecord::decode(preflight(
+            "door-request-refusal",
+            json!({"schema":3,"bad":"legacy raw argv"})
+        ))
+        .is_ok()
+    );
+    assert!(
+        RequestRecord::decode(preflight(
+            "door-compute-words-refusal",
+            json!(vec![vec![120]; 256])
+        ))
+        .is_err()
+    );
+}
+/// ´test:unit:workspace-preflight-reader-bounds-truncated-evidence´
+#[test]
+fn workspace_preflight_reader_bounds_truncated_evidence() {
+    let maximum = execute_command::workspace::MAX_WIRE_BYTES;
+    let words = json!({"schema":3,"wire_bytes":vec![255;maximum],"truncated":true});
+    assert!(
+        RequestRecord::decode(preflight("door-workspace-protocol-refusal", words.clone())).is_ok()
+    );
+    assert!(RequestRecord::decode(preflight("door-workspace-unregistered", words)).is_err());
+    let too_long = json!({"schema":3,"wire_bytes":vec![255;maximum+1],"truncated":false});
+    assert!(RequestRecord::decode(preflight("door-workspace-protocol-refusal", too_long)).is_err());
 }

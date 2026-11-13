@@ -1696,3 +1696,47 @@ fn door_repin_history_requires_interrupted_evidence_shape() {
         }
     }
 }
+
+fn add_workspace(fixture: &Fixture) -> (Value, Vec<u8>) {
+    let mut record = read_reservation(&fixture.path)
+        .expect("read")
+        .expect("reservation");
+    record["plan"]["compute_workspace"] = crate::plan::fixture_workspace_snapshot();
+    publish_reservation(&fixture.path, &record).expect("W2a-shaped fixture");
+    (record, fs::read(&fixture.path).expect("original bytes"))
+}
+
+/// ´test:unit:workspace-reservation-survives-pinned-read-and-door-repin-preview´
+#[test]
+fn workspace_reservation_survives_pinned_read_and_door_repin_preview() {
+    let fixture = Fixture::new(3000);
+    let (record, bytes) = add_workspace(&fixture);
+    let (plan, _) = super::super::pinned_plan_from_record(
+        fixture.home.path(),
+        "alpha",
+        "R",
+        &fixture.runtime,
+        &record,
+    )
+    .expect("pinned reconstruction");
+    assert_eq!(
+        plan.document["compute_workspace"],
+        record["plan"]["compute_workspace"]
+    );
+    fixture.install_b();
+    run(fixture.home.path(), &Fixture::request(None)).expect("repin reconstruction");
+    assert_eq!(fs::read(&fixture.path).expect("read-only preview"), bytes);
+}
+
+/// ´test:unit:workspace-reservation-survives-round-resume-reconstruction´
+#[test]
+fn workspace_reservation_survives_round_resume_reconstruction() {
+    let fixture = interrupted_fixture(false, "dispatch", true);
+    let (record, bytes) = add_workspace(&fixture);
+    let preview = fixture.resume(true).expect("round resume reconstruction");
+    assert_eq!(
+        preview["plan"]["compute_workspace"],
+        record["plan"]["compute_workspace"]
+    );
+    assert_eq!(fs::read(&fixture.path).expect("read-only preview"), bytes);
+}

@@ -1263,6 +1263,8 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
     plan.select_launch_model(&selection).expect("model");
     plan.observe_vendor().expect("observing recovery");
     assert_eq!(plan.document["attempt_wall_seconds"], 12);
+    let workspace = crate::plan::fixture_workspace_snapshot();
+    plan.document["compute_workspace"] = workspace.clone();
     let path = plan
         .driver_dir
         .parent()
@@ -1332,6 +1334,7 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
         json!([container])
     );
     assert!(exited["interrupted_settlement"]["preview_sha256"].is_string());
+    assert_eq!(exited["plan"]["compute_workspace"], workspace);
     assert_eq!(
         crate::launch::read_reservation(&path)
             .expect("read")

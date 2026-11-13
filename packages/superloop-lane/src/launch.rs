@@ -3980,6 +3980,7 @@ fn run_with_program(
                 LaneError::input("launch-reservation", "started worker UID is invalid")
             })?;
         select_worker_identity(&mut plan, owner_home, &request.loop_name, selected_uid)?;
+        plan.retain_workspace(&saved["plan"])?;
         plan.retain_attempt_wall(&saved["plan"])?;
         let preview = interrupted_recovery_preview(
             &saved,
@@ -6792,9 +6793,7 @@ pub(crate) fn pinned_plan_from_record_admitted(
         ));
     }
     plan.select_launch_model(&record["model_selection"])?;
-    if crate::plan::workspace_snapshot(&record["plan"])?.is_some() {
-        plan.document["compute_workspace"] = record["plan"]["compute_workspace"].clone();
-    }
+    plan.retain_workspace(&record["plan"])?;
     plan.retain_attempt_wall(&record["plan"])?;
     compare_pinned_plan(&record["plan"], &plan.document)?;
     Ok((plan, settings))

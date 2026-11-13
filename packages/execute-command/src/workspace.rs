@@ -40,8 +40,22 @@ fn context(detail: impl Into<String>) -> Refusal {
 /// # Errors
 /// Refuses values that cannot be encoded as JSON.
 pub fn canonical_digest<T: Serialize>(value: &T) -> Result<String, Refusal> {
-    // Round trip through Value to sort all object keys independent of struct layout.
-    let value = serde_json::to_value(value).map_err(|e| protocol(e.to_string()))?;
+    // Explicit recursive ordering also holds when serde_json uses preserve_order.
+    fn sorted(value: Value) -> Value {
+        match value {
+            Value::Object(object) => Value::Object(
+                object
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
+                    .map(|(key, value)| (key, sorted(value)))
+                    .collect(),
+            ),
+            Value::Array(array) => Value::Array(array.into_iter().map(sorted).collect()),
+            other => other,
+        }
+    }
+    let value = sorted(serde_json::to_value(value).map_err(|e| protocol(e.to_string()))?);
     let bytes = serde_json::to_vec(&value).map_err(|e| protocol(e.to_string()))?;
     let mut hex = String::with_capacity(64);
     for byte in Sha256::digest(bytes) {
@@ -110,6 +124,9 @@ impl Execution {
     }
 }
 
+/// Maximum encoded workspace frame, also the bounded preflight evidence prefix.
+pub const MAX_WIRE_BYTES: usize = 1_048_576;
+
 /// Transport schema three. Decode checks structure; grant admission checks authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,7 +144,7 @@ impl Envelope {
     /// # Errors
     /// Refuses invalid JSON, duplicate/unknown fields, invalid UTF-8 and bounds.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Refusal> {
-        if bytes.len() > 1_048_576 {
+        if bytes.len() > MAX_WIRE_BYTES {
             return Err(protocol("transport exceeds 1048576 bytes"));
         }
         let envelope: Self = serde_json::from_slice(bytes).map_err(|e| protocol(e.to_string()))?;

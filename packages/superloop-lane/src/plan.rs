@@ -23,6 +23,27 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// Retain only the validated workspace declaration of the protected plan.
+    ///
+    /// # Errors
+    /// Refuses a malformed snapshot or one bound to another rebuilt loop/run.
+    pub(crate) fn retain_workspace(&mut self, protected: &Value) -> Result<(), LaneError> {
+        if let Some(snapshot) = workspace_snapshot(protected)? {
+            if self.document["loop"] != snapshot.grant.loop_name
+                || self.document["run"] != snapshot.grant.run
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "rebuilt plan and workspace identities differ",
+                ));
+            }
+            self.document["compute_workspace"] = protected["compute_workspace"].clone();
+        } else if let Some(document) = self.document.as_object_mut() {
+            document.remove("compute_workspace");
+        }
+        Ok(())
+    }
+
     /// Retain the protected plan's optional attempt wall when rebuilding runtime pins.
     ///
     /// # Errors
@@ -2259,15 +2280,78 @@ pub(crate) fn workspace_snapshot(
         .transpose()
 }
 
+/// Fictional owner declaration used only by reader/reconstruction regressions.
+/// # Panics
+/// Panics only if the static fixture violates the workspace grant contract.
+#[cfg(test)]
+pub(crate) fn fixture_workspace_snapshot() -> Value {
+    let grant = execute_command::workspace::Grant::decode(json!({"schema":1,"loop":"alpha","run":"R","node":"fixture-node","workspace":"/work/R","baseline_env":[["PATH","/usr/bin"]],"resources":{},"shells":["/bin/sh"],"quick_policy_digest":"a".repeat(64),"blacklist_digest":"b".repeat(64),"executor_protocol":1})).expect("fictional grant");
+    json!({"digest":grant.digest().expect("grant digest"),"grant":grant})
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// ´test:unit:workspace-retention-validates-before-changing-the-plan´
+    #[test]
+    fn workspace_retention_validates_before_changing_the_plan() {
+        let mut plan = super::Plan {
+            home: "/fixture".into(),
+            driver_dir: "/fixture/run".into(),
+            letter: "/fixture/letter".into(),
+            document: serde_json::json!({"loop":"alpha","run":"R"}),
+        };
+        let protected = serde_json::json!({"loop":"alpha","run":"R","compute_workspace":super::fixture_workspace_snapshot()});
+        plan.retain_workspace(&protected).expect("retained");
+        assert_eq!(plan.document, protected);
+        let mut bad = protected.clone();
+        bad["compute_workspace"]["grant"]["workspace"] = serde_json::json!("/other");
+        assert_eq!(
+            plan.retain_workspace(&bad).expect_err("changed grant").kind,
+            "door-workspace-context-differs"
+        );
+        assert_eq!(plan.document, protected);
+        plan.retain_workspace(&serde_json::json!({"loop":"alpha","run":"R"}))
+            .expect("absent declaration");
+        assert!(plan.document.get("compute_workspace").is_none());
+    }
+
+    use std::fs;
     use std::io;
     use std::os::unix::ffi::OsStringExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
 
     use serde_json::{Value, json};
 
     use super::Plan;
+
+    /// ´test:unit:workspace-plan-and-reservation-read-snapshot-before-writer´
+    #[test]
+    fn workspace_plan_and_reservation_read_snapshot_before_writer() {
+        let mut plan = json!({"loop":"alpha","run":"R","compute_workspace":super::fixture_workspace_snapshot()});
+        assert!(crate::plan::workspace_snapshot(&plan).unwrap().is_some());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("reservation.json");
+        let mut reservation = json!({"schema":1,"phase":"preparing","worker_uid":3000,"loop":"alpha","run":"R","plan":plan});
+        fs::write(&path, serde_json::to_vec(&reservation).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            crate::launch::read_reservation(&path).unwrap().unwrap(),
+            reservation
+        );
+        plan["compute_workspace"]["grant"]["workspace"] = json!("/foreign");
+        assert_eq!(
+            crate::plan::workspace_snapshot(&plan).unwrap_err().kind,
+            "door-workspace-context-differs"
+        );
+        reservation["run"] = json!("S");
+        fs::write(&path, serde_json::to_vec(&reservation).unwrap()).unwrap();
+        assert_eq!(
+            crate::launch::read_reservation(&path).unwrap_err().kind,
+            "door-workspace-context-differs"
+        );
+    }
 
     /// ´test:unit:registry-capture-names-reader-failure´
     #[test]

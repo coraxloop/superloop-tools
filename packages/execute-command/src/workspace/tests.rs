@@ -132,7 +132,7 @@ fn workspace_quick_misses_never_deny() {
     let (mut e, g, p, b) = fixture();
     assert!(matches!(
         classify(&e, &g, &p, &b).unwrap(),
-        Classification::QuickAllow { .. }
+        Classification::QuickAllow(_)
     ));
     for words in [
         &["unknown", "test"][..],
@@ -177,7 +177,7 @@ fn workspace_shell_never_quick_and_blacklist_is_published() {
     let key = learned_key("compute", &e, &g, &p.revision).unwrap();
     for mode in [DoorMode::Allow, DoorMode::Audit, DoorMode::Enforce] {
         assert_eq!(
-            disposition(mode, &deny, &key, Some(&key)),
+            disposition(mode, &deny, &e, &g, &p.revision, Some(&key)).unwrap(),
             Disposition::Block
         );
     }
@@ -199,7 +199,7 @@ fn workspace_path_operands_and_env_miss_without_blacklist() {
         assert_eq!(
             matches!(
                 classify(&e, &g, &p, &b).unwrap(),
-                Classification::QuickAllow { .. }
+                Classification::QuickAllow(_)
             ),
             allowed
         );
@@ -217,7 +217,7 @@ fn workspace_path_operands_and_env_miss_without_blacklist() {
     rebind(&mut e, &mut g, &p, &b);
     assert!(matches!(
         classify(&e, &g, &p, &b).unwrap(),
-        Classification::QuickAllow { .. }
+        Classification::QuickAllow(_)
     ));
     for path in ["", "bin", ".:/usr/bin"] {
         let (mut e, mut g, mut p, b) = fixture();
@@ -230,7 +230,7 @@ fn workspace_path_operands_and_env_miss_without_blacklist() {
         rebind(&mut e, &mut g, &p, &b);
         assert!(matches!(
             classify(&e, &g, &p, &b).unwrap(),
-            Classification::QuickAllow { .. }
+            Classification::QuickAllow(_)
         ));
     }
     let (mut repeated, grant, policy, blacklist) = fixture();
@@ -269,7 +269,7 @@ fn workspace_clean_then_build_is_an_exact_sequence() {
     rebind(&mut e, &mut g, &p, &b);
     assert!(matches!(
         classify(&e, &g, &p, &b).unwrap(),
-        Classification::QuickAllow { .. }
+        Classification::QuickAllow(_)
     ));
     for execution in [
         Execution::Sequence {
@@ -331,30 +331,34 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
     let old = json!(["compute", "compute", "compute:cargo test"]);
     for mode in [DoorMode::Allow, DoorMode::Audit, DoorMode::Enforce] {
         assert_eq!(
-            disposition(mode, &miss, &key, None),
+            disposition(mode, &miss, &e, &g, &p.revision, None).unwrap(),
             Disposition::WaitForJudgement
         );
         assert_eq!(
-            disposition(mode, &miss, &key, Some(&old)),
+            disposition(mode, &miss, &e, &g, &p.revision, Some(&old)).unwrap(),
             Disposition::WaitForJudgement
         );
     }
     assert_eq!(
-        disposition(DoorMode::Allow, &miss, &key, Some(&key)),
+        disposition(DoorMode::Allow, &miss, &e, &g, &p.revision, Some(&key)).unwrap(),
         Disposition::Immediate
     );
     assert_eq!(
         disposition(
             DoorMode::Allow,
             &classify(&e, &g, &p, &b).unwrap(),
-            &key,
+            &e,
+            &g,
+            &p.revision,
             None
-        ),
+        )
+        .unwrap(),
         Disposition::Immediate
     );
-    for slot in 0..5 {
+    for slot in 0..8 {
         let (mut e, mut g, _, _) = fixture();
         let mut revision = p.revision.clone();
+        let mut class = "compute";
         match slot {
             0 => e.cwd.push("more".into()),
             1 => e.execution = execution(&["cargo", "test"]),
@@ -363,10 +367,19 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
                 g.workspace = "/work/S".into();
                 e.grant_digest = g.digest().unwrap();
             }
-            _ => revision = "quick-2".into(),
+            4 => revision = "quick-2".into(),
+            5 => {
+                g.quick_policy_digest = "d".repeat(64);
+                e.grant_digest = g.digest().unwrap();
+            }
+            6 => {
+                g.blacklist_digest = "e".repeat(64);
+                e.grant_digest = g.digest().unwrap();
+            }
+            _ => class = "foreign",
         }
         assert_ne!(
-            learned_key("compute", &e, &g, &revision).unwrap(),
+            learned_key(class, &e, &g, &revision).unwrap(),
             key,
             "context component {slot}"
         );
@@ -507,5 +520,122 @@ fn workspace_wire_decoder_refuses_lossy_and_duplicate_fields() {
     assert_eq!(
         Envelope::from_bytes(&invalid).unwrap_err().kind,
         "door-workspace-protocol-refusal"
+    );
+}
+
+/// ´test:unit:workspace-sequence-timeout-retains-a-successful-prefix´
+#[test]
+fn workspace_sequence_timeout_retains_a_successful_prefix() {
+    let (mut e, g, p, _) = fixture();
+    e.execution = Execution::Sequence {
+        steps: vec![vec![b"one".to_vec()], vec![b"two".to_vec()]],
+    };
+    let success = Measurement {
+        outcome: Outcome::Exited { code: 0 },
+        wall_seconds: Some(0.1),
+        user_cpu_seconds: Some(0.0),
+        system_cpu_seconds: None,
+    };
+    let timed_out = Measurement {
+        outcome: Outcome::TimedOut,
+        wall_seconds: Some(0.2),
+        user_cpu_seconds: None,
+        system_cpu_seconds: None,
+    };
+    let mut effect = WorkspaceEffect {
+        execution_digest: canonical_digest(&e.execution).unwrap(),
+        context_digest: learned_key("compute", &e, &g, &p.revision).unwrap()[2]
+            .as_str()
+            .unwrap()
+            .into(),
+        envelope: e,
+        grant: g,
+        policy_revision: p.revision,
+        blacklist_revision: "black-1".into(),
+        result: timed_out,
+        admission_wall_seconds: Some(0.1),
+        steps: vec![],
+    };
+    for prefix in [vec![], vec![success.clone()]] {
+        effect.steps = prefix;
+        assert_eq!(
+            effect
+                .envelope
+                .next_step(&effect.steps, effect.envelope.deadline_ms),
+            None
+        );
+        assert_eq!(
+            WorkspaceEffect::decode(json!(effect), "compute", "example", "R").unwrap(),
+            effect
+        );
+    }
+    for mutation in 0..5 {
+        let mut bad = effect.clone();
+        match mutation {
+            0 => bad.steps.push(success.clone()),
+            1 => bad.steps[0].outcome = Outcome::Exited { code: 1 },
+            2 => bad.steps[0].outcome = Outcome::Unknown,
+            3 => bad.result.wall_seconds = None,
+            _ => {
+                bad.steps.clear();
+                bad.result.outcome = Outcome::Exited { code: 0 };
+            }
+        }
+        assert!(
+            WorkspaceEffect::decode(json!(bad), "compute", "example", "R").is_err(),
+            "mutation {mutation}"
+        );
+    }
+}
+
+/// ´test:unit:workspace-quick-evidence-cannot-be-replayed-for-another-context´
+#[test]
+fn workspace_quick_evidence_cannot_be_replayed_for_another_context() {
+    let (e, g, p, b) = fixture();
+    let allow = classify(&e, &g, &p, &b).unwrap();
+    let Classification::QuickAllow(evidence) = &allow else {
+        panic!("positive control");
+    };
+    assert_eq!(evidence.evidence()["rule"], p.rules[0].id);
+    assert_eq!(
+        disposition(DoorMode::Allow, &allow, &e, &g, &p.revision, None).unwrap(),
+        Disposition::Immediate
+    );
+    for mutation in 0..5 {
+        let mut changed = e.clone();
+        let mut grant = g.clone();
+        let mut revision = p.revision.clone();
+        match mutation {
+            0 => changed.cwd.push("other".into()),
+            1 => changed.env_additions.push(("X".into(), "1".into())),
+            2 => changed.execution = execution(&["other"]),
+            3 => {
+                grant.workspace = "/other".into();
+                changed.grant_digest = grant.digest().unwrap();
+            }
+            _ => revision.push_str("-next"),
+        }
+        assert_eq!(
+            disposition(DoorMode::Allow, &allow, &changed, &grant, &revision, None)
+                .unwrap_err()
+                .kind,
+            "door-workspace-context-differs",
+            "mutation {mutation}"
+        );
+    }
+}
+/// ´test:unit:workspace-canonical-digest-has-a-known-answer´
+#[test]
+fn workspace_canonical_digest_has_a_known_answer() {
+    // SHA-256 probe of compact UTF-8 {"a":[{"c":3,"d":4},2],"z":1}.
+    let value: Value = serde_json::from_str(r#"{"z":1,"a":[{"d":4,"c":3},2]}"#).unwrap();
+    assert_eq!(
+        canonical_digest(&value).unwrap(),
+        "c52fa640e0203480d46869c34fd45289aaae10b217ddf945cd6ff2217458801d"
+    );
+    let reordered: Value = serde_json::from_str(r#"{"a":[{"c":3,"d":4},2],"z":1}"#).unwrap();
+    assert_eq!(
+        canonical_digest(&value).unwrap(),
+        canonical_digest(&reordered).unwrap()
     );
 }

@@ -1138,6 +1138,7 @@ fn resume_with_program(
         plan.observe_vendor()?;
     }
     plan.select_launch_model(&before_reconciliation["model_selection"])?;
+    plan.retain_workspace(&before_reconciliation["plan"])?;
     plan.retain_attempt_wall(&before_reconciliation["plan"])?;
     super::compare_pinned_plan(&before_reconciliation["plan"], &plan.document)?;
     if recovering {

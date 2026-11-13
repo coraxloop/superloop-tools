@@ -173,15 +173,25 @@ impl WorkspaceEffect {
                         "sequence did not stop at its first unsuccessful step",
                     ));
                 }
-                if let Some(last) = effect.steps.last() {
-                    if effect.result.outcome != last.outcome
-                        || (last.outcome == (Outcome::Exited { code: 0 })
-                            && effect.steps.len() != steps.len())
-                    {
-                        return Err(protocol("sequence aggregate outcome differs"));
+                // A deadline may expire after a successful prefix, including before
+                // any completed step was observed. Do not invent a step outcome.
+                let between_steps_timeout = effect.result.outcome == Outcome::TimedOut
+                    && effect.steps.len() < steps.len()
+                    && effect
+                        .steps
+                        .iter()
+                        .all(|m| m.outcome == (Outcome::Exited { code: 0 }));
+                if !between_steps_timeout {
+                    if let Some(last) = effect.steps.last() {
+                        if effect.result.outcome != last.outcome
+                            || (last.outcome == (Outcome::Exited { code: 0 })
+                                && effect.steps.len() != steps.len())
+                        {
+                            return Err(protocol("sequence aggregate outcome differs"));
+                        }
+                    } else if effect.result.outcome != Outcome::Unknown {
+                        return Err(protocol("sequence steps are absent"));
                     }
-                } else if effect.result.outcome != Outcome::Unknown {
-                    return Err(protocol("sequence steps are absent"));
                 }
             }
             _ if !effect.steps.is_empty() => {

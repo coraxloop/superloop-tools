@@ -218,6 +218,76 @@ impl ModeSetting {
 #[derive(Clone, Debug)]
 pub struct RequestRecord(Value);
 
+// A schema-three refusal may precede JSON/UTF-8 decoding. Preserve the bounded
+// wire image, not a lossy rendering or a successfully decoded envelope.
+fn preflight_words(check: &str, value: &Value) -> bool {
+    if value.get("schema") == Some(&json!(3)) || check.starts_with("door-workspace-") {
+        let maximum = execute_command::workspace::MAX_WIRE_BYTES;
+        let workspace_wire = exact(value, &["schema", "wire_bytes", "truncated"])
+            && value["schema"] == 3
+            && value["wire_bytes"].as_array().is_some_and(|bytes| {
+                bytes.len() <= maximum
+                    && bytes
+                        .iter()
+                        .all(|byte| byte.as_u64().is_some_and(|byte| byte <= 255))
+                    && (value["truncated"] == false
+                        || (value["truncated"] == true
+                            && bytes.len() == maximum
+                            && check == "door-workspace-protocol-refusal"))
+            });
+        if workspace_wire {
+            return true;
+        }
+    }
+    if check.starts_with("door-workspace-") || value.to_string().len() > 65_536 {
+        return false;
+    }
+    // Legacy envelope/ref checks can precede argv decoding; retain their contract.
+    matches!(check, "door-request-refusal" | "door-changed-ref-refusal")
+        || value.as_array().is_some_and(|words| {
+            words.len() <= 128
+                && words.iter().all(|word| {
+                    word.as_array().is_some_and(|bytes| {
+                        bytes.len() <= 4096
+                            && bytes
+                                .iter()
+                                .all(|byte| byte.as_u64().is_some_and(|byte| byte <= 255))
+                    })
+                })
+        })
+}
+
+fn validate_workspace_effect(value: &Value) -> Result<(), LaneError> {
+    let detail = execute_command::workspace::WorkspaceEffect::decode(
+        value["effect"]["workspace"].clone(),
+        value["class"].as_str().unwrap_or_default(),
+        value["loop"].as_str().unwrap_or_default(),
+        value["run"].as_str().unwrap_or_default(),
+    )
+    .map_err(|e| refusal("requests-record-refusal", e.to_string()))?;
+    let exit = match &detail.result.outcome {
+        execute_command::workspace::Outcome::Exited { code } => json!(code),
+        _ => Value::Null,
+    };
+    if value["effect"]["exit_status"] != exit
+        || (value["effect"]["state"] == "pending"
+            && (detail.result.outcome != execute_command::workspace::Outcome::Unknown
+                || !detail.steps.is_empty()))
+    {
+        return Err(refusal(
+            "requests-record-refusal",
+            "workspace outcome differs",
+        ));
+    }
+    if value["class"] != "compute" || value["shape_key"] != detail.context_digest {
+        return Err(refusal(
+            "requests-record-refusal",
+            "workspace learning identity differs",
+        ));
+    }
+    Ok(())
+}
+
 impl RequestRecord {
     /// Decode the one record shape used by the door and request tools.
     ///
@@ -391,22 +461,8 @@ impl RequestRecord {
             effect_keys.push("preflight");
             let detail = &value["effect"]["preflight"];
             let check = detail["check"].as_str().unwrap_or_default();
-            // Envelope and changed-ref checks can precede argument decoding.
-            // Later checks retain exact byte arrays, including rejected bytes.
-            let wire_words = detail["words"].as_array().is_some_and(|words| {
-                words.len() <= 128
-                    && words.iter().all(|word| {
-                        word.as_array().is_some_and(|bytes| {
-                            bytes.len() <= 4096
-                                && bytes
-                                    .iter()
-                                    .all(|byte| byte.as_u64().is_some_and(|byte| byte <= 255))
-                        })
-                    })
-            });
             if !exact(detail, &["check", "words"])
-                || (!wire_words
-                    && !matches!(check, "door-request-refusal" | "door-changed-ref-refusal"))
+                || !preflight_words(check, &detail["words"])
                 || !matches!(
                     check,
                     "door-changed-ref-refusal"
@@ -421,8 +477,10 @@ impl RequestRecord {
                         | "door-compute-wrapper-refusal"
                         | "door-compute-command-refusal"
                         | "door-compute-locked-refusal"
+                        | "door-workspace-unregistered"
+                        | "door-workspace-context-differs"
+                        | "door-workspace-protocol-refusal"
                 )
-                || detail["words"].to_string().len() > 65_536
                 || value["class"] != "preflight"
                 || value["operation"] != "preflight"
                 || value["shape_key"] != format!("preflight:{check}")
@@ -503,33 +561,7 @@ impl RequestRecord {
         }
         if value["operation"] == "compute-workspace" {
             effect_keys.push("workspace");
-            let detail = execute_command::workspace::WorkspaceEffect::decode(
-                value["effect"]["workspace"].clone(),
-                value["class"].as_str().unwrap_or_default(),
-                value["loop"].as_str().unwrap_or_default(),
-                value["run"].as_str().unwrap_or_default(),
-            )
-            .map_err(|e| refusal("requests-record-refusal", e.to_string()))?;
-            let exit = match &detail.result.outcome {
-                execute_command::workspace::Outcome::Exited { code } => json!(code),
-                _ => Value::Null,
-            };
-            if value["effect"]["exit_status"] != exit
-                || (value["effect"]["state"] == "pending"
-                    && (detail.result.outcome != execute_command::workspace::Outcome::Unknown
-                        || !detail.steps.is_empty()))
-            {
-                return Err(refusal(
-                    "requests-record-refusal",
-                    "workspace outcome differs",
-                ));
-            }
-            if value["class"] != "compute" || value["shape_key"] != detail.context_digest {
-                return Err(refusal(
-                    "requests-record-refusal",
-                    "workspace learning identity differs",
-                ));
-            }
+            validate_workspace_effect(&value)?;
         }
         if value["operation"] == "compute" {
             effect_keys.push("compute");

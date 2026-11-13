@@ -51,17 +51,26 @@ impl BlacklistDenial {
         json!({"blacklist_rule":self.blacklist_rule,"revision":self.revision,"reason":self.reason})
     }
 }
-/// The quick table cannot manufacture blacklist evidence.
+/// Allow evidence can be constructed only by the positive-table matcher.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuickAllowance {
+    rule: String,
+    revision: String,
+    bindings: Value,
+    context_key: Value,
+}
+impl QuickAllowance {
+    /// Matched rule and exact bindings, for later judgement and record adapters.
+    #[must_use]
+    pub fn evidence(&self) -> Value {
+        json!({"rule":self.rule,"revision":self.revision,"bindings":self.bindings})
+    }
+}
+/// Neither caller nor quick table can manufacture the other's policy evidence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Classification {
-    QuickAllow {
-        rule: String,
-        revision: String,
-        bindings: Value,
-    },
-    Miss {
-        reasons: Vec<String>,
-    },
+    QuickAllow(QuickAllowance),
+    Miss { reasons: Vec<String> },
     Deny(BlacklistDenial),
 }
 fn miss(reason: &str) -> Classification {
@@ -233,11 +242,12 @@ pub fn classify(
                 "known operand is outside W or cannot be resolved lexically",
             ));
         }
-        return Ok(Classification::QuickAllow {
+        return Ok(Classification::QuickAllow(QuickAllowance {
+            context_key: learned_key("compute", envelope, grant, &policy.revision)?,
             rule: rule.id.clone(),
             revision: policy.revision.clone(),
             bindings: json!({"workspace":grant.workspace,"cwd":envelope.cwd,"PATH":rule.path,"programs":rule.programs,"env_additions":envelope.env_additions,"workspace_operands":rule.workspace_operands}),
-        });
+        }));
     }
     Ok(miss(
         "no exact quick rule binds execution, program resolution and every environment addition",
@@ -272,26 +282,40 @@ pub enum Disposition {
     WaitForJudgement,
     Block,
 }
-/// Decide timing without executing; learned allows must carry this exact new key.
-#[must_use]
+/// Decide timing from the admitted request context, never a caller-supplied expected key.
+///
+/// A learned key must come from authenticated decision custody; this function binds
+/// that evidence to this request but cannot establish its external provenance.
+/// # Errors
+/// Refuses invalid context or positive evidence replayed for another request.
 pub fn disposition(
     mode: crate::policy::DoorMode,
     classification: &Classification,
-    expected_key: &Value,
+    envelope: &Envelope,
+    grant: &Grant,
+    policy_revision: &str,
     learned_allow_key: Option<&Value>,
-) -> Disposition {
+) -> Result<Disposition, Refusal> {
+    let expected_key = learned_key("compute", envelope, grant, policy_revision)?;
     if matches!(classification, Classification::Deny(_)) {
-        return Disposition::Block;
+        return Ok(Disposition::Block);
     }
-    let new_key = expected_key.as_array().is_some_and(|k| {
-        k.len() == 3 && k[1] == "compute-workspace" && k[2].as_str().is_some_and(digest)
-    });
-    let learned = new_key && learned_allow_key == Some(expected_key);
-    if mode == crate::policy::DoorMode::Allow
-        && (matches!(classification, Classification::QuickAllow { .. }) || learned)
-    {
-        Disposition::Immediate
+    let quick = if let Classification::QuickAllow(allow) = classification {
+        if allow.context_key != expected_key {
+            return Err(context(
+                "quick allowance belongs to another workspace context",
+            ));
+        }
+        true
     } else {
-        Disposition::WaitForJudgement
-    }
+        false
+    };
+    let learned = learned_allow_key == Some(&expected_key);
+    Ok(
+        if mode == crate::policy::DoorMode::Allow && (quick || learned) {
+            Disposition::Immediate
+        } else {
+            Disposition::WaitForJudgement
+        },
+    )
 }

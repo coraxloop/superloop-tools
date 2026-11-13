@@ -582,6 +582,7 @@ fn run_with_observer(
         plan.observe_vendor()?;
     }
     plan.select_launch_model(&record["model_selection"])?;
+    plan.retain_workspace(&record["plan"])?;
     plan.retain_attempt_wall(&record["plan"])?;
     let mut transition = proposal(&record, &plan.document, &bytes, owner, |record| {
         super::driver_report::read(owner_home, record)
