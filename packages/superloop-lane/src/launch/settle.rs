@@ -3257,6 +3257,7 @@ printf '{{"thread_id":null}}\n'
         );
         crate::fixture_exec::write_executable(&entry, entry_source.as_bytes())
             .expect("restore matching entry");
+        let before = std::fs::read(&path).expect("settled bytes before resume");
         let error = super::super::run_with_host_root_and_proxy(h, &request, h, owner, |_| {
             Ok(("active".into(), "fixture-invocation".into()))
         })
@@ -3267,14 +3268,22 @@ printf '{{"thread_id":null}}\n'
             error.line()
         );
         let prepared = read_reservation(&path).expect("read").expect("prepared");
-        assert_eq!(prepared["phase"], "failed");
+        // The stand-in has no real cleanup receipt: retain the attempt, not a
+        // fabricated failed completion or a claim that rollback restored it.
+        assert!(error.detail.contains("; retained: "), "{error}");
+        assert_eq!(prepared["phase"], "preparing");
+        assert_eq!(
+            prepared["round_rollback"]["before"],
+            String::from_utf8(before).expect("JSON")
+        );
+        assert!(prepared.get("dispatch_intent").is_none());
         assert_eq!(prepared["rounds"][0], dispatch);
         assert_eq!(prepared["rounds"][1]["fresh_thread"], true);
-        assert_eq!(prepared["rounds"][1]["phase"], "failed");
-        assert_eq!(prepared["rounds"][1]["ended_by"], "failed-at-start");
+        assert_eq!(prepared["rounds"][1]["phase"], "running");
+        assert!(prepared["rounds"][1]["ended_by"].is_null());
         assert_eq!(prepared["helper_spawn_state"], "not-started");
-        assert_eq!(prepared["helper_end"]["state"], "not-started");
-        assert_eq!(prepared["driver_end"]["state"], "not-started");
+        assert!(prepared["helper_end"].is_null());
+        assert!(prepared["driver_end"].is_null());
         assert!(prepared.get("readback_end").is_none());
         for key in ["reply", "settle_attempts"] {
             assert!(prepared["rounds"][1][key].is_null(), "{key}");

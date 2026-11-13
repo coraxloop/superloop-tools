@@ -660,9 +660,44 @@ fn run_child_with_start(
     run_child_with_end(spec, input, failure_log, on_start, &mut ChildEnd::default())
 }
 
+/// A live launch receipt: absence is checked again after the runner has waited.
+#[derive(Default)]
+pub(crate) struct LiveChild {
+    pid: Option<u32>,
+    untracked: bool,
+}
+impl LiveChild {
+    pub(crate) const fn untracked() -> Self {
+        Self {
+            pid: None,
+            untracked: true,
+        }
+    }
+    pub(crate) const fn is_tracked(&self) -> bool {
+        !self.untracked
+    }
+    pub(crate) const fn started(&mut self, pid: u32) {
+        self.pid = Some(pid);
+    }
+    pub(crate) fn absent(&self) -> bool {
+        let Some(pid) = self.pid else {
+            return true;
+        };
+        let Ok(group) = i32::try_from(pid) else {
+            return false;
+        };
+        let absent = std::fs::symlink_metadata(format!("/proc/{pid}"))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        absent
+            && nix::sys::signal::kill(nix::unistd::Pid::from_raw(-group), None)
+                == Err(nix::errno::Errno::ESRCH)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ChildEnd {
     pub(crate) wall: Option<lane_lifecycle::AttemptWall>,
+    live: LiveChild,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -713,6 +748,7 @@ fn run_child_with_end(
     crate::container_entry::configure(&mut command, &spec.program, &spec.argv, &spec.environment)?;
     let mut child = crate::fixture_exec::spawn(&mut command)
         .map_err(|error| crate::container_entry::spawn_error(&spec.program, spec.name, &error))?;
+    end.live.started(child.id());
     if let Some(stream) = transfer {
         let home = spec.private_directory_stdin.as_ref().ok_or_else(|| {
             LaneError::input("verified-prefix", "private home descriptor is absent")
@@ -991,6 +1027,51 @@ pub(crate) fn run_checked_command(
     );
     spec.capabilities = Some(request.descriptors.clone());
     checked_output(&spec, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn inspect_with_receipt(
+    program: &Path,
+    argv: &[String],
+    environment: &BTreeMap<String, String>,
+    cwd: &Path,
+    home: &OwnedFd,
+    runs_root: &Path,
+    runs: &OwnedFd,
+    live: &mut LiveChild,
+) -> Result<String, LaneError> {
+    let request =
+        crate::launch::reader_entry::command(program, argv, cwd, home, runs_root, runs, None)?;
+    let (program, argv) = request
+        .argv
+        .split_first()
+        .ok_or_else(|| LaneError::input("round-evidence", "empty command"))?;
+    let mut spec = child(
+        Path::new(program),
+        argv.to_vec(),
+        environment,
+        cwd,
+        60,
+        "round-evidence",
+    );
+    spec.capabilities = Some(request.descriptors.clone());
+    let mut end = ChildEnd::default();
+    let output = run_child_with_end(&spec, None, None, |_| Ok(()), &mut end);
+    *live = end.live;
+    let output = output?;
+    if !output.status.success() {
+        return Err(LaneError::operation(
+            "round-evidence",
+            format!(
+                "{} exited {}: {}",
+                program,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim_end()
+            ),
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|_| LaneError::operation("round-evidence", "output is not UTF-8"))
 }
 
 #[allow(clippy::too_many_arguments)]

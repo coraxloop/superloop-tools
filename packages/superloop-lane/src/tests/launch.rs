@@ -3356,7 +3356,10 @@ else:
             );
         }
         if before_spawn {
-            saved = resume_pre_spawn_failure(home, &request, lane_bin, &path, &saved);
+            check_resumed_pre_spawn_retention(home, &request, lane_bin, &path, &saved);
+            // The retained resume is not a recovered first dispatch. Restore this
+            // fixture's original failed dispatch for its separate retirement check.
+            crate::launch::publish_reservation(&path, &saved).expect("first-dispatch fixture");
             // This fixture models private verification without provisioning a mailbox.
             // Its synthetic binding must not turn the unborn retirement case into
             // a namespace-root retirement rehearsal.
@@ -3384,13 +3387,13 @@ else:
 }
 
 #[allow(clippy::too_many_lines)]
-fn resume_pre_spawn_failure(
+fn check_resumed_pre_spawn_retention(
     home: &std::path::Path,
     request: &LaunchRequest,
     lane_bin: &std::path::Path,
     path: &std::path::Path,
     seed: &serde_json::Value,
-) -> serde_json::Value {
+) {
     let _mail_standin = crate::build::mail_standin::register(&request.podman_bin);
     let worker_home = std::path::Path::new(seed["plan"]["home"].as_str().expect("worker home"));
     let inbox = worker_home.join(".local/inbox");
@@ -3409,8 +3412,7 @@ fn resume_pre_spawn_failure(
     fs::write(inbox.join("next.md"), letter).expect("placed next letter");
     fs::set_permissions(inbox.join("next.md"), fs::Permissions::from_mode(0o600))
         .expect("private letter");
-    let mut final_record = seed.clone();
-    for failure in ["inspect-save", "inspect", "spawn"] {
+    for failure in ["inspect", "spawn"] {
         let mut saved = seed.clone();
         // Public previews enrich the plan; private reservations pin only the plan itself.
         for key in ["declared_sources", "reservation_census"] {
@@ -3476,9 +3478,7 @@ else:
             .map(String::from),
         )
         .expect("resume form");
-        if failure == "inspect-save" {
-            crate::launch::fixture_before_pre_driver_save(pad_pre_driver_save, None);
-        }
+        let before = fs::read(path).expect("settled bytes before resume");
         let error = crate::launch::fixture_run_with_program(home, &resumed, lane_bin)
             .expect_err("resumed round fails before spawn");
         fs::set_permissions(lane_bin, fs::Permissions::from_mode(0o700)).expect("restore lane");
@@ -3491,33 +3491,25 @@ else:
             },
             "{error:?}"
         );
-        final_record = crate::launch::read_reservation(path)
+        let retained = crate::launch::read_reservation(path)
             .expect("reader")
-            .expect("failed round");
-        if failure == "inspect-save" {
-            assert!(
-                error
-                    .detail
-                    .contains("failure record save: reservation-size:")
-            );
-            assert_eq!(final_record["phase"], "preparing");
-            assert_eq!(final_record["rounds"][0]["phase"], "settled");
-            assert_eq!(
-                fs::metadata(path).expect("retained reservation").len(),
-                crate::launch::MAX_RESERVATION_BYTES
-            );
-            continue;
-        }
-        assert_eq!(final_record["phase"], "failed");
-        assert_eq!(final_record["helper_spawn_state"], "not-started");
-        assert_eq!(final_record["helper_end"]["state"], "not-started");
-        assert_eq!(final_record["driver_end"]["state"], "not-started");
-        assert!(final_record["helper_parent_pid"].is_null());
-        assert!(final_record["helper_parent_start"].is_null());
-        assert_eq!(final_record["rounds"][1]["phase"], "failed");
-        assert_eq!(final_record["rounds"][0]["phase"], "settled");
+            .expect("retained round");
+        // This fixture models verification, not the namespace cleanup/absence proof.
+        assert!(error.detail.contains("; retained: "), "{error}");
+        assert_eq!(retained["phase"], "preparing");
+        assert_eq!(
+            retained["round_rollback"]["before"],
+            String::from_utf8(before).expect("JSON")
+        );
+        assert!(retained.get("dispatch_intent").is_none());
+        assert_eq!(retained["helper_spawn_state"], "not-started", "{error}");
+        assert!(retained["helper_end"].is_null());
+        assert!(retained["driver_end"].is_null());
+        assert!(retained["helper_parent_pid"].is_null());
+        assert!(retained["helper_parent_start"].is_null());
+        assert_eq!(retained["rounds"][1]["phase"], "running");
+        assert_eq!(retained["rounds"][0]["phase"], "settled");
     }
-    final_record
 }
 
 const GENERATION_CONTENTION_NOTE: &str = "preparing-or-starting names are candidates whose generation hold may already be released; a possible unnamed holder has an unpublished reservation or launcher identity, or is another install, refresh or repair, including a preview, holding the generation lock";

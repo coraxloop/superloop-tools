@@ -52,6 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A refused resumed launch before driver dispatch now restores its original settled reservation after its inspector and helper are confirmed gone and its own request and sockets are removed. The original refusal ends with `rollback: restored`, so the same round name can be retried, or `retained:` with the cleanup stage when safety cannot be established. Derived environment and credential refreshes are kept. Compatibility: preparing reservations gain bounded additive rollback evidence and a dispatch intent; older readers accept those members, but an already running launcher keeps its old behavior. Crashes and previously stranded runs are not recovered by this change (``test:unit:live-round-rollback-restores-exact-bytes-last``; ``test:unit:live-round-rollback-waits-for-process-absence``; ``test:unit:live-round-rollback-refuses-after-dispatch-intent``; ``test:crate:built-round-rollback-cleanup-retains-custody``).
+
 - Schedule mail from event-named outboxes and known unfinished senders, retaining delivery checks while avoiding unrelated outbox scans and repeated recovery-history reads (``proto:loophome:mail-change-wakeup``).
 
 - Gate unchanged refused mail by source identity, configuration changes and retry deadlines; report persistent notification fallback and release obsolete uncovered paths (``proto:loophome:mail-change-wakeup``).

@@ -1238,6 +1238,13 @@ pub(crate) fn read_reservation(path: &Path) -> Result<Option<Value>, LaneError> 
 }
 
 fn read_reservation_checked(path: &Path, check_node: bool) -> Result<Option<Value>, LaneError> {
+    Ok(read_reservation_raw(path, check_node)?.map(|(record, _)| record))
+}
+
+fn read_reservation_raw(
+    path: &Path,
+    check_node: bool,
+) -> Result<Option<(Value, Vec<u8>)>, LaneError> {
     let opened = if home::private_is_active() {
         let parent = path
             .parent()
@@ -1261,7 +1268,7 @@ fn read_reservation_checked(path: &Path, check_node: bool) -> Result<Option<Valu
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)
     };
-    read_reservation_file(opened, path, check_node)
+    read_reservation_file_raw(opened, path, check_node)
 }
 
 pub(crate) fn read_reservation_file(
@@ -1269,6 +1276,14 @@ pub(crate) fn read_reservation_file(
     path: &Path,
     check_node: bool,
 ) -> Result<Option<Value>, LaneError> {
+    Ok(read_reservation_file_raw(opened, path, check_node)?.map(|(record, _)| record))
+}
+
+fn read_reservation_file_raw(
+    opened: std::io::Result<File>,
+    path: &Path,
+    check_node: bool,
+) -> Result<Option<(Value, Vec<u8>)>, LaneError> {
     let file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1331,12 +1346,38 @@ pub(crate) fn read_reservation_file(
             "reservation and workspace identities differ",
         ));
     }
-    Ok(Some(record))
+    Ok(Some((record, bytes)))
 }
 
 pub(crate) fn publish_reservation(path: &Path, record: &Value) -> Result<(), LaneError> {
     let bytes = serde_json::to_vec(record)
         .map_err(|error| LaneError::operation("uid-table", error.to_string()))?;
+    let attempt = record
+        .get("round_rollback")
+        .map(|_| rounds::rollback::nonce(record))
+        .transpose()?;
+    publish_reservation_bytes_named(path, &bytes, attempt)
+}
+
+#[cfg(test)]
+fn publish_reservation_bytes(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {
+    publish_reservation_bytes_named(path, bytes, None)
+}
+
+fn publish_reservation_bytes_named(
+    path: &Path,
+    bytes: &[u8],
+    attempt: Option<&str>,
+) -> Result<(), LaneError> {
+    publish_reservation_bytes_at(path, bytes, attempt, None)
+}
+
+fn publish_reservation_bytes_at(
+    path: &Path,
+    bytes: &[u8],
+    attempt: Option<&str>,
+    held: Option<&OwnedFd>,
+) -> Result<(), LaneError> {
     let size = u64::try_from(bytes.len())
         .map_err(|error| LaneError::input("reservation-size", error.to_string()))?;
     if size > MAX_RESERVATION_BYTES {
@@ -1347,29 +1388,34 @@ pub(crate) fn publish_reservation(path: &Path, record: &Value) -> Result<(), Lan
             ),
         ));
     }
-    if !home::private_is_active() {
-        build::publish(path, &bytes)?;
-        return fs::File::open(
-            path.parent()
-                .ok_or_else(|| LaneError::operation("uid-table", "reservation has no parent"))?,
-        )
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            LaneError::operation("uid-table", format!("{}: {error}", path.display()))
-        });
-    }
     let parent_path = path
         .parent()
         .ok_or_else(|| LaneError::operation("uid-table", "reservation has no parent"))?;
-    let parent = home::pin_parent(parent_path, Uid::effective().as_raw())?;
+    let parent: OwnedFd = if let Some(directory) = held {
+        nix::unistd::dup(directory)
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?
+    } else if home::private_is_active() {
+        home::pin_parent(parent_path, Uid::effective().as_raw())?
+    } else {
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent_path)
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?
+            .into()
+    };
     let name = path
         .file_name()
         .ok_or_else(|| LaneError::operation("uid-table", "reservation has no name"))?;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| LaneError::operation("uid-table", error.to_string()))?
-        .as_nanos();
-    let temporary = format!(".reservation-{}-{nanos}.tmp", std::process::id());
+    let temporary = if let Some(nonce) = attempt {
+        format!(".reservation-{nonce}.tmp")
+    } else {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?
+            .as_nanos();
+        format!(".reservation-{}-{nanos}.tmp", std::process::id())
+    };
     let output = openat2(
         &parent,
         temporary.as_str(),
@@ -1380,20 +1426,36 @@ pub(crate) fn publish_reservation(path: &Path, record: &Value) -> Result<(), Lan
     )
     .map_err(|error| LaneError::operation("uid-table", format!("{}: {error}", path.display())))?;
     let mut file = fs::File::from(output);
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| {
-            LaneError::operation("uid-table", format!("{}: {error}", path.display()))
-        })?;
-    renameat(&parent, temporary.as_str(), &parent, name).map_err(|error| {
-        LaneError::operation("uid-table", format!("{}: {error}", path.display()))
-    })?;
-    fs::File::from(
-        nix::unistd::dup(&parent)
-            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?,
-    )
-    .sync_all()
-    .map_err(|error| LaneError::operation("uid-table", format!("{}: {error}", path.display())))
+    let result = (|| {
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?;
+        renameat(&parent, temporary.as_str(), &parent, name)
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?;
+        nix::unistd::fsync(&parent)
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))
+    })();
+    if result.is_err() {
+        let held = file.metadata();
+        let named = nix::sys::stat::fstatat(
+            &parent,
+            temporary.as_str(),
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        );
+        if held.as_ref().is_ok_and(|held| {
+            named
+                .as_ref()
+                .is_ok_and(|named| held.dev() == named.st_dev && held.ino() == named.st_ino)
+        }) {
+            let _removed = nix::unistd::unlinkat(
+                &parent,
+                temporary.as_str(),
+                nix::unistd::UnlinkatFlags::NoRemoveDir,
+            );
+            let _synced = nix::unistd::fsync(&parent);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -6094,6 +6156,33 @@ fn start_helper_with_program(
     runs_root: &Path,
     verified_runs: &OwnedFd,
     lane_bin: &Path,
+    record_parent: impl FnMut(u32, u64) -> Result<(), LaneError>,
+) -> Result<(Child, u64, JoinHandle<Vec<u8>>), LaneError> {
+    start_helper_observed(
+        request,
+        plan,
+        owner_home,
+        environment,
+        verified_home,
+        runs_root,
+        verified_runs,
+        lane_bin,
+        &mut build::LiveChild::untracked(),
+        record_parent,
+    )
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn start_helper_observed(
+    request: &LaunchRequest,
+    plan: &Plan,
+    owner_home: &Path,
+    environment: &BTreeMap<String, String>,
+    verified_home: &OwnedFd,
+    runs_root: &Path,
+    verified_runs: &OwnedFd,
+    lane_bin: &Path,
+    live: &mut build::LiveChild,
     mut record_parent: impl FnMut(u32, u64) -> Result<(), LaneError>,
 ) -> Result<(Child, u64, JoinHandle<Vec<u8>>), LaneError> {
     let reservation = reservation_path(runs_root, &request.run);
@@ -6115,6 +6204,21 @@ fn start_helper_with_program(
                 .ok_or_else(|| LaneError::input("socket-path", "control name absent"))?,
         )
         .map_err(|error| LaneError::input("socket-path", error.to_string()))?;
+        if live.is_tracked()
+            && (socket_slot
+                .metadata()
+                .map_err(|error| LaneError::input("helper-socket", error.to_string()))?
+                .is_some()
+                || control_slot
+                    .metadata()
+                    .map_err(|error| LaneError::input("helper-socket", error.to_string()))?
+                    .is_some())
+        {
+            return Err(LaneError::input(
+                "helper-socket",
+                "resumed helper socket already exists",
+            ));
+        }
         crate::pinned::owner_executable(&request.podman_bin, Uid::effective().as_raw())?;
         let (transfer, private_stdin) = UnixStream::pair()
             .map_err(|error| LaneError::operation("helper-start", error.to_string()))?;
@@ -6151,6 +6255,7 @@ fn start_helper_with_program(
             return Err(retain_startup_refusal(error, saved.map(|_| ())));
         }
     };
+    live.started(child.id());
     // Measure before any wait reaps the parent: even an exited child retains its tick.
     let parent_start = crate::container_helper::process_start(child.id());
     let startup = (|| {
@@ -6228,6 +6333,9 @@ fn start_helper_with_program(
     match startup {
         Ok((start, stderr)) => Ok((child, start, stderr)),
         Err(error) => {
+            if live.is_tracked() {
+                let _stop = stop_observer(&mut child);
+            }
             drop(child.kill());
             let saved = (|| {
                 let status = child.wait().map_err(|wait| {
@@ -6809,12 +6917,24 @@ fn publish_client_environment(
     loop_uid: u32,
     bytes: &[u8],
 ) -> Result<(), LaneError> {
+    publish_client_environment_named(runtime_dir, loop_uid, bytes, None)
+}
+
+fn publish_client_environment_named(
+    runtime_dir: &OwnedFd,
+    loop_uid: u32,
+    bytes: &[u8],
+    temporary: Option<String>,
+) -> Result<(), LaneError> {
     let owner = Uid::effective().as_raw();
-    let temporary = format!(
-        ".runtime.env-{}-{}",
-        std::process::id(),
-        letters::unix_ns()?
-    );
+    let temporary = match temporary {
+        Some(temporary) => temporary,
+        None => format!(
+            ".runtime.env-{}-{}",
+            std::process::id(),
+            letters::unix_ns()?
+        ),
+    };
     let mut file = create_runtime_file(runtime_dir, &temporary, 0o440)?;
     let result = (|| {
         file.write_all(bytes)

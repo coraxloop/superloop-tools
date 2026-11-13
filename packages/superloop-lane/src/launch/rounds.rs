@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use super::{
     LaunchRequest, admission, entry_argv_round, launch_environment, lock_mailbox,
     lock_run_preparation, persist_settlement_field, publish_reservation, read_reservation,
-    reservation_path, start_helper_with_program, stop_helper,
+    reservation_path, stop_helper,
 };
 use crate::error::LaneError;
 use crate::plan::Plan;
@@ -531,7 +531,7 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
     Ok(())
 }
 
-type InspectionSelection<'a> = (&'a Path, Option<(&'a str, u64)>);
+type InspectionSelection<'a> = (&'a Path, Option<(&'a str, u64)>, Option<&'a str>);
 
 /// Parse the operation body before receiving round inspection custody.
 /// # Errors
@@ -560,8 +560,23 @@ pub(super) fn parse_private_inspect(args: &[String]) -> Result<InspectionSelecti
             "private launch has duplicate or non-absolute owner home",
         ));
     }
+    let mut rollback_nonce = None;
     let evidence = match rest {
         [] => None,
+        [option, nonce] if option == "--rollback" => {
+            if nonce.len() != 64
+                || !nonce
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(LaneError::input(
+                    "round-private",
+                    "rollback nonce malformed",
+                ));
+            }
+            rollback_nonce = Some(nonce.as_str());
+            None
+        }
         [record_option, step, budget_option, seconds]
             if record_option == "--record" && budget_option == "--budget" =>
         {
@@ -580,7 +595,7 @@ pub(super) fn parse_private_inspect(args: &[String]) -> Result<InspectionSelecti
             ));
         }
     };
-    Ok((home, evidence))
+    Ok((home, evidence, rollback_nonce))
 }
 
 /// Check the driver thread from the namespace that owns the protected directory.
@@ -594,11 +609,24 @@ pub fn private_inspect(
     run: &str,
     evidence: Option<(&str, u64)>,
 ) -> Result<Value, LaneError> {
+    private_inspect_action(owner_home, loop_name, run, evidence, None)
+}
+
+pub(crate) fn private_inspect_action(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    evidence: Option<(&str, u64)>,
+    rollback_nonce: Option<&str>,
+) -> Result<Value, LaneError> {
     if !Uid::effective().is_root() {
         return Err(LaneError::input(
             "namespace-owner",
             "rootless namespace root is required",
         ));
+    }
+    if let Some(nonce) = rollback_nonce {
+        return rollback::private_cleanup(loop_name, run, nonce);
     }
     inspect_current_round(owner_home, loop_name, run, evidence)
 }
@@ -654,7 +682,12 @@ fn inspect_loaded_round(
             loop_uid,
             false,
         )?;
-        super::publish_client_environment(&runtime_dir, loop_uid, &bytes)?;
+        let temporary = record
+            .get("round_rollback")
+            .map(|_| rollback::nonce(record))
+            .transpose()?
+            .map(|nonce| format!(".runtime.env-{nonce}"));
+        super::publish_client_environment_named(&runtime_dir, loop_uid, &bytes, temporary)?;
         request.publish()?;
     }
     Ok(
@@ -670,6 +703,20 @@ pub(super) fn publish_round_request(
     budget: u64,
 ) -> Result<(), LaneError> {
     prepare_round_request(plan, record, step, budget)?.publish()
+}
+
+fn request_text(plan: &Plan, record: &Value, step: &str, budget: u64) -> Result<String, LaneError> {
+    let binding = record["mail"]
+        .as_array()
+        .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
+        .ok_or_else(|| {
+            LaneError::input("mail-delivery", "round request lacks its delivery binding")
+        })?;
+    Ok(json!({
+        "schema":1,"step":step,"budget_seconds":budget,"mail":binding,
+        "thread_id":record["thread_id"],"home":plan.home,"worker_uid":record["worker_uid"]
+    })
+    .to_string())
 }
 
 fn prepare_round_request(
@@ -696,15 +743,13 @@ fn prepare_round_request(
         .metadata()
         .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
     let name = format!("round-launch-{step}.json");
-    let temporary = format!(".round-launch-{step}-{}.tmp", std::process::id());
+    let temporary = if record.get("round_rollback").is_some() {
+        format!(".round-launch-{step}-{}.tmp", rollback::nonce(record)?)
+    } else {
+        format!(".round-launch-{step}-{}.tmp", std::process::id())
+    };
     let path = plan.driver_dir.join(&temporary);
-    let binding = record["mail"]
-        .as_array()
-        .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
-        .ok_or_else(|| {
-            LaneError::input("mail-delivery", "round request lacks its delivery binding")
-        })?;
-    let body = json!({"schema":1,"step":step,"budget_seconds":budget,"mail":binding,"thread_id":record["thread_id"],"home":plan.home,"worker_uid":record["worker_uid"]});
+    let body = request_text(plan, record, step, budget)?;
     for leaf in [&name, &temporary] {
         match nix::sys::stat::fstatat(
             &directory,
@@ -727,7 +772,7 @@ fn prepare_round_request(
         temporary,
         path,
         parent,
-        bytes: body.to_string().into_bytes(),
+        bytes: body.into_bytes(),
     })
 }
 
@@ -1489,9 +1534,9 @@ fn resume_with_program(
     if !cfg!(test) {
         super::reaping::ensure_scoped_new_launch()?;
     }
-    {
+    let (nonce, published) = {
         let _mailbox = lock_mailbox(&root, &request.run, caller)?;
-        let mut saved = read_reservation(&path)?
+        let (mut saved, before) = super::read_reservation_raw(&path, true)?
             .ok_or_else(|| LaneError::input("round-record", "reservation vanished"))?;
         ensure_not_rotated(&saved, &request.run)?;
         if saved != record {
@@ -1516,8 +1561,12 @@ fn resume_with_program(
         }
         clear_round_evidence(&mut saved)?;
         saved["helper_spawn_state"] = json!("not-started");
-        publish_reservation(&path, &saved)?;
-    }
+        let request_bytes = format!("{}\n", request_text(&plan, &saved, step, request.budget)?);
+        let nonce = rollback::prepare(&mut saved, &before, &request_bytes)?;
+        rollback::snapshot_sockets(&mut saved, &plan)?;
+        let published = publish_reservation(&path, &saved);
+        (nonce, published)
+    };
     let inspect_record = vec![
         "unshare".into(),
         exe_word.clone(),
@@ -1525,82 +1574,122 @@ fn resume_with_program(
         request.loop_name.clone(),
         request.run.clone(),
         "--owner-home".into(),
-        crate::pinned::path_word(owner_home, "owner-home")?,
+        owner_home.display().to_string(),
         "--record".into(),
         step.into(),
         "--budget".into(),
         request.budget.to_string(),
     ];
-    let recorded = build::run_checked_with_private_launch(
+    let host = rollback::Host {
+        path: &path,
+        nonce: &nonce,
+        program: &podman,
+        environment: &environment,
+        owner_home,
+        home: &verified_home,
+        root: &root,
+        runs: &verified_runs,
+        argv: vec![
+            "unshare".into(),
+            exe_word.clone(),
+            "_inspect-round".into(),
+            request.loop_name.clone(),
+            request.run.clone(),
+            "--owner-home".into(),
+            owner_home.display().to_string(),
+            "--rollback".into(),
+            nonce.clone(),
+        ],
+    };
+    let mut inspector = build::LiveChild::default();
+    let mut helper_receipt = build::LiveChild::default();
+    if let Err(error) = published {
+        return Err(host.refuse(error, (&inspector, &helper_receipt)));
+    }
+    let recorded = build::inspect_with_receipt(
         &podman,
-        inspect_record,
+        &inspect_record,
         &environment,
         owner_home,
-        60,
-        "round-evidence",
         &verified_home,
         &root,
         &verified_runs,
-        None,
+        &mut inspector,
     );
     if let Err(error) = recorded {
-        let saved = super::record_failed_pre_driver(&path, &mut None, &error, caller, false);
-        return Err(super::retain_startup_refusal(error, saved));
+        return Err(host.refuse(error, (&inspector, &helper_receipt)));
     }
-    persist_settlement_field(&path, "helper_spawn_state", json!("starting"))?;
-    let (mut helper, helper_start, helper_stderr) = start_helper_with_program(
-        request,
-        &plan,
-        owner_home,
-        &environment,
-        &verified_home,
-        &root,
-        &verified_runs,
-        lane_bin,
-        |pid, start| {
-            let mut saved = read_reservation(&path)?.ok_or_else(|| {
-                LaneError::input(
-                    "helper-start",
-                    "reservation vanished before parent identity",
-                )
-            })?;
-            saved["helper_parent_pid"] = json!(pid);
-            saved["helper_parent_start"] = json!(start);
-            saved["helper_spawn_state"] = json!("running");
-            publish_reservation(&path, &saved)
-        },
-    )
-    .map_err(|error| {
-        // Preserve a failed startup even when no driver directory was created.
-        let saved = super::record_failed_pre_driver(&path, &mut None, &error, caller, false);
-        super::retain_startup_refusal(error, saved)
-    })?;
-    let mut driver_started = false;
-    let mut child_end = build::ChildEnd::default();
-    let result = (|| {
-        let record = read_reservation(&path)?.ok_or_else(|| {
-            LaneError::input("helper-session", "protected run reservation is absent")
-        })?;
-        build::run_checked_with_pid(
-            entry_program,
-            argv,
-            &environment,
+    let started = (|| {
+        persist_settlement_field(&path, "helper_spawn_state", json!("starting"))?;
+        super::start_helper_observed(
+            request,
+            &plan,
             owner_home,
-            crate::container_helper::host_launch_bound(&record)?,
-            "driver-launch",
-            &mut child_end,
-            |pid| {
-                persist_settlement_field(&path, "driver_entry_pid", json!(pid))?;
-                persist_settlement_field(
-                    &path,
-                    "driver_entry_start",
-                    json!(crate::container_helper::process_start(pid)?),
-                )?;
-                driver_started = true;
-                Ok(())
+            &environment,
+            &verified_home,
+            &root,
+            &verified_runs,
+            lane_bin,
+            &mut helper_receipt,
+            |pid, start| {
+                let mut saved = read_reservation(&path)?.ok_or_else(|| {
+                    LaneError::input(
+                        "helper-start",
+                        "reservation vanished before parent identity",
+                    )
+                })?;
+                saved["helper_parent_pid"] = json!(pid);
+                saved["helper_parent_start"] = json!(start);
+                saved["helper_spawn_state"] = json!("running");
+                publish_reservation(&path, &saved)
             },
         )
     })();
+    let (mut helper, helper_start, helper_stderr) = match started {
+        Ok(started) => started,
+        Err(error) => return Err(host.refuse(error, (&inspector, &helper_receipt))),
+    };
+    let intent = (|| {
+        let record = read_reservation(&path)?.ok_or_else(|| {
+            LaneError::input("helper-session", "protected run reservation is absent")
+        })?;
+        let bound = crate::container_helper::host_launch_bound(&record)?;
+        rollback::intent(&path, &nonce)?;
+        Ok(bound)
+    })();
+    let launch_bound = match intent {
+        Ok(bound) => bound,
+        Err(error) => {
+            let _cancel = stop_helper(&mut helper, &plan, &verified_runs);
+            let _stop = super::stop_observer(&mut helper);
+            if helper_receipt.absent() {
+                let _stderr = helper_stderr.join();
+            }
+            return Err(host.refuse(error, (&inspector, &helper_receipt)));
+        }
+    };
+    let mut driver_started = false;
+    let mut child_end = build::ChildEnd::default();
+    let result = build::run_checked_with_pid(
+        entry_program,
+        argv,
+        &environment,
+        owner_home,
+        launch_bound,
+        "driver-launch",
+        &mut child_end,
+        |pid| {
+            persist_settlement_field(&path, "driver_entry_pid", json!(pid))?;
+            persist_settlement_field(
+                &path,
+                "driver_entry_start",
+                json!(crate::container_helper::process_start(pid)?),
+            )?;
+            driver_started = true;
+            rollback::dispatched(&path, &nonce)?;
+            Ok(())
+        },
+    );
     let step_directory = result.as_ref().map_or(Ok(()), |output| {
         record_step_directory(&plan, &request.run, step, output)
     });
@@ -1711,6 +1800,765 @@ fn resume_with_program(
         report,
         on_failure,
     )
+}
+
+/// Live-only rollback. Crash recovery deliberately does not consume this record yet.
+pub(crate) mod rollback {
+    use super::*;
+    use std::fmt::Write as _;
+    use std::os::fd::OwnedFd;
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn refusal(detail: impl ToString) -> LaneError {
+        LaneError::operation("round-rollback", detail.to_string())
+    }
+    pub fn nonce(record: &Value) -> Result<&str, LaneError> {
+        let value = record["round_rollback"]["nonce"]
+            .as_str()
+            .ok_or_else(|| refusal("attempt nonce absent"))?;
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(refusal("attempt nonce malformed"));
+        }
+        Ok(value)
+    }
+    /// The owner-protected raw bytes are authoritative. This is a consistency handle,
+    /// not authentication: sixteen leading SHA-256 hex digits, following the default
+    /// handle-size calculation in docs/spec/digests.md, for at most one million attempts.
+    fn before_handle(bytes: &[u8]) -> String {
+        execute_command::rubric::sha256_digest(bytes)[..16].to_owned()
+    }
+
+    pub(super) fn prepare(
+        saved: &mut Value,
+        before: &[u8],
+        request: &str,
+    ) -> Result<String, LaneError> {
+        let mut random = [0_u8; 32];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(&mut random))
+            .map_err(refusal)?;
+        let mut nonce = String::with_capacity(64);
+        for byte in random {
+            let _written = write!(nonce, "{byte:02x}");
+        }
+        let text = std::str::from_utf8(before).map_err(refusal)?;
+        saved["round_rollback"] = json!({"schema":1,"nonce":nonce,"before":text,
+            "before_bytes":before.len(),"before_sha256_prefix":before_handle(before),
+            "request":request,"sockets":[]});
+        saved
+            .as_object_mut()
+            .ok_or_else(|| refusal("reservation is not an object"))?
+            .remove("dispatch_intent");
+        // The existing publisher repeats this before its first temporary/write.
+        let size = serde_json::to_vec(saved).map_err(refusal)?.len();
+        if u64::try_from(size).map_err(refusal)? > super::super::MAX_RESERVATION_BYTES {
+            return Err(refusal(format!(
+                "preparing reservation is {size} bytes; limit is {} bytes",
+                super::super::MAX_RESERVATION_BYTES
+            )));
+        }
+        Ok(nonce)
+    }
+    fn before(record: &Value, expected: &str) -> Result<Vec<u8>, LaneError> {
+        if nonce(record)? != expected || record["round_rollback"]["schema"] != 1 {
+            return Err(refusal("attempt differs"));
+        }
+        if record.get("dispatch_intent").is_some() {
+            return Err(refusal("dispatch-intent"));
+        }
+        if record["phase"] != "preparing" {
+            return Err(refusal("reservation-state"));
+        }
+        let rollback = &record["round_rollback"];
+        let bytes = rollback["before"]
+            .as_str()
+            .ok_or_else(|| refusal("before-image absent"))?
+            .as_bytes();
+        if rollback["before_bytes"] != bytes.len()
+            || rollback["before_sha256_prefix"] != before_handle(bytes)
+            || u64::try_from(bytes.len()).map_err(refusal)? > super::super::MAX_RESERVATION_BYTES
+        {
+            return Err(refusal("before-image differs"));
+        }
+        let prior: Value = serde_json::from_slice(bytes).map_err(refusal)?;
+        if prior["phase"] != "settled"
+            || prior["loop"] != record["loop"]
+            || prior["run"] != record["run"]
+            || prior["worker_uid"] != record["worker_uid"]
+        {
+            return Err(refusal("before-image identity or phase differs"));
+        }
+        Ok(bytes.to_vec())
+    }
+    pub(super) fn intent(path: &Path, expected: &str) -> Result<(), LaneError> {
+        let root = path
+            .parent()
+            .ok_or_else(|| refusal("reservation parent absent"))?;
+        let record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        let run = record["run"]
+            .as_str()
+            .ok_or_else(|| refusal("run absent"))?;
+        let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
+        let mut record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        let _before = before(&record, expected)?;
+        record["dispatch_intent"] = json!({"nonce":expected});
+        publish_reservation(path, &record)
+    }
+    pub(super) fn dispatched(path: &Path, expected: &str) -> Result<(), LaneError> {
+        let record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        let root = path
+            .parent()
+            .ok_or_else(|| refusal("reservation parent absent"))?;
+        let run = record["run"]
+            .as_str()
+            .ok_or_else(|| refusal("run absent"))?;
+        let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
+        let mut record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        if record["dispatch_intent"]["nonce"] != expected
+            || record["driver_entry_pid"].as_u64().is_none()
+        {
+            return Err(refusal("dispatch receipt differs"));
+        }
+        record
+            .as_object_mut()
+            .ok_or_else(|| refusal("reservation malformed"))?
+            .remove("round_rollback");
+        publish_reservation(path, &record)
+    }
+    pub fn sockets(path: &Path, identities: Value) -> Result<(), LaneError> {
+        let record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        if record.get("round_rollback").is_none() {
+            return Ok(());
+        }
+        let root = path
+            .parent()
+            .ok_or_else(|| refusal("reservation parent absent"))?;
+        let run = record["run"]
+            .as_str()
+            .ok_or_else(|| refusal("run absent"))?;
+        let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
+        let mut record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        if record.get("round_rollback").is_none() || record.get("dispatch_intent").is_some() {
+            return Ok(());
+        }
+        let _before = before(&record, nonce(&record)?)?;
+        if record["helper_pid"] != std::process::id() {
+            return Err(refusal("helper identity differs"));
+        }
+        record["round_rollback"]["sockets"] = identities;
+        publish_reservation(path, &record)
+    }
+    #[cfg(test)]
+    fn finish(
+        primary: LaneError,
+        path: &Path,
+        expected: &str,
+        receipts: (&build::LiveChild, &build::LiveChild),
+        cleanup: impl FnOnce() -> Result<(), LaneError>,
+    ) -> LaneError {
+        let root = std::fs::File::open(path.parent().expect("root"))
+            .expect("held root")
+            .into();
+        finish_at(primary, path, expected, receipts, &root, cleanup)
+    }
+
+    fn finish_at(
+        mut primary: LaneError,
+        path: &Path,
+        expected: &str,
+        receipts: (&build::LiveChild, &build::LiveChild),
+        held: &OwnedFd,
+        cleanup: impl FnOnce() -> Result<(), LaneError>,
+    ) -> LaneError {
+        let result = restore(path, expected, receipts, &primary.line(), held, cleanup);
+        match result {
+            Ok(()) => {
+                let _written = write!(primary.detail, "; rollback: restored");
+            }
+            Err(error) => {
+                let _written = write!(primary.detail, "; retained: {}", error.line());
+            }
+        }
+        primary
+    }
+    fn restore(
+        path: &Path,
+        expected: &str,
+        receipts: (&build::LiveChild, &build::LiveChild),
+        reason: &str,
+        held: &OwnedFd,
+        cleanup: impl FnOnce() -> Result<(), LaneError>,
+    ) -> Result<(), LaneError> {
+        if !receipts.0.absent() || !receipts.1.absent() {
+            return Err(refusal("process-absence"));
+        }
+        let record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        let bytes = before(&record, expected)?;
+        let root = path
+            .parent()
+            .ok_or_else(|| refusal("reservation parent absent"))?;
+        let run = record["run"]
+            .as_str()
+            .ok_or_else(|| refusal("run absent"))?;
+        let evidence = root.join(format!(".round-refusal-{run}-{expected}.json"));
+        build::publish(
+            &evidence,
+            &serde_json::to_vec(&json!({"schema":1,"nonce":expected,
+            "step":record["active_round"],"state":"live-refusal","reason":reason}))
+            .map_err(refusal)?,
+        )?;
+        cleanup()?;
+        let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
+        let current = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        if before(&current, expected)? != bytes {
+            return Err(refusal("before-image changed"));
+        }
+        if !receipts.0.absent() || !receipts.1.absent() {
+            return Err(refusal("process-absence"));
+        }
+        super::super::publish_reservation_bytes_at(path, &bytes, None, Some(held))
+    }
+
+    pub(super) struct Host<'a> {
+        pub(super) path: &'a Path,
+        pub(super) nonce: &'a str,
+        pub(super) program: &'a Path,
+        pub(super) environment: &'a std::collections::BTreeMap<String, String>,
+        pub(super) owner_home: &'a Path,
+        pub(super) home: &'a OwnedFd,
+        pub(super) root: &'a Path,
+        pub(super) runs: &'a OwnedFd,
+        pub(super) argv: Vec<String>,
+    }
+    impl Host<'_> {
+        fn quiescent(&self) -> Result<(), LaneError> {
+            let record =
+                read_reservation(self.path)?.ok_or_else(|| refusal("reservation absent"))?;
+            let _before = before(&record, self.nonce)?;
+            let loop_name = record["loop"]
+                .as_str()
+                .ok_or_else(|| refusal("loop absent"))?;
+            let run = record["run"]
+                .as_str()
+                .ok_or_else(|| refusal("run absent"))?;
+            if !super::super::container_absent_for_run(
+                self.program,
+                self.owner_home,
+                loop_name,
+                run,
+            )? {
+                return Err(refusal("container-payload-present"));
+            }
+            let _scope = super::super::reaping::retirement_scope(&record)?;
+            Ok(())
+        }
+        pub(super) fn refuse(
+            &self,
+            error: LaneError,
+            receipts: (&build::LiveChild, &build::LiveChild),
+        ) -> LaneError {
+            let quiescent = self.quiescent();
+            finish_at(error, self.path, self.nonce, receipts, self.runs, || {
+                quiescent?;
+                let mut receipt = build::LiveChild::default();
+                let output = build::inspect_with_receipt(
+                    self.program,
+                    &self.argv,
+                    self.environment,
+                    self.owner_home,
+                    self.home,
+                    self.root,
+                    self.runs,
+                    &mut receipt,
+                )?;
+                if !receipt.absent() {
+                    return Err(refusal("cleanup-process-absence"));
+                }
+                let report: Value = serde_json::from_str(&output).map_err(refusal)?;
+                if report["state"] != "cleaned" || report["nonce"] != self.nonce {
+                    return Err(refusal("cleanup receipt differs"));
+                }
+                self.quiescent()
+            })
+        }
+    }
+    pub(super) fn snapshot_sockets(record: &mut Value, plan: &Plan) -> Result<(), LaneError> {
+        let mut rows = Vec::new();
+        for path in [
+            crate::container_helper::socket_path(&plan.driver_dir)?,
+            crate::container_helper::control_socket_path(&plan.driver_dir)?,
+        ] {
+            let slot = crate::SocketSlot::pinned(&path, Uid::effective().as_raw())?;
+            let identity = slot
+                .metadata()
+                .map_err(refusal)?
+                .map(|m| json!([m.st_dev, m.st_ino]));
+            rows.push(
+                json!({"name":path.file_name().and_then(|name| name.to_str()),"identity":identity}),
+            );
+        }
+        record["round_rollback"]["sockets_before"] = json!(rows);
+        Ok(())
+    }
+    fn check_unowned_sockets(record: &Value, root: &Path, driver: &Path) -> Result<(), LaneError> {
+        let original = record["round_rollback"]["sockets_before"]
+            .as_array()
+            .ok_or_else(|| refusal("original socket receipts absent"))?;
+        let owned = record["round_rollback"]["sockets"]
+            .as_array()
+            .ok_or_else(|| refusal("socket receipts absent"))?;
+        for path in [
+            crate::container_helper::socket_path(driver)?,
+            crate::container_helper::control_socket_path(driver)?,
+        ] {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| refusal("socket name absent"))?;
+            if owned.iter().any(|row| row["name"] == name) {
+                continue;
+            }
+            let prior = original
+                .iter()
+                .find(|row| row["name"] == name)
+                .ok_or_else(|| refusal("original socket receipt absent"))?;
+            let slot = crate::SocketSlot::pinned(&root.join(name), Uid::effective().as_raw())?;
+            let identity = slot
+                .metadata()
+                .map_err(refusal)?
+                .map(|m| json!([m.st_dev, m.st_ino]));
+            if prior["identity"] != json!(identity) {
+                return Err(refusal("unowned socket changed"));
+            }
+        }
+        Ok(())
+    }
+
+    struct Leaf {
+        directory: std::fs::File,
+        name: String,
+        identity: (u64, u64),
+    }
+    fn request_leaf(
+        directory: &std::fs::File,
+        name: String,
+        expected: &[u8],
+        owner: u32,
+    ) -> Result<Option<Leaf>, LaneError> {
+        let fd = match nix::fcntl::openat(
+            directory,
+            name.as_str(),
+            nix::fcntl::OFlag::O_RDONLY
+                | nix::fcntl::OFlag::O_NOFOLLOW
+                | nix::fcntl::OFlag::O_NONBLOCK,
+            nix::sys::stat::Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(nix::errno::Errno::ENOENT) => return Ok(None),
+            Err(error) => return Err(refusal(error)),
+        };
+        let mut file = std::fs::File::from(fd);
+        let meta = file.metadata().map_err(refusal)?;
+        if !meta.is_file()
+            || meta.uid() != owner
+            || meta.mode() & 0o7777 != 0o600
+            || meta.nlink() != 1
+            || meta.len() != u64::try_from(expected.len()).map_err(refusal)?
+        {
+            return Err(refusal(format!("request custody differs: {name}")));
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::by_ref(&mut file)
+            .take(super::super::MAX_RESERVATION_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(refusal)?;
+        if bytes != expected {
+            return Err(refusal(format!("request bytes differ: {name}")));
+        }
+        Ok(Some(Leaf {
+            directory: directory.try_clone().map_err(refusal)?,
+            name,
+            identity: (meta.dev(), meta.ino()),
+        }))
+    }
+    impl Leaf {
+        fn remove(self) -> Result<(), LaneError> {
+            let stat = nix::sys::stat::fstatat(
+                &self.directory,
+                self.name.as_str(),
+                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+            )
+            .map_err(refusal)?;
+            if (stat.st_dev, stat.st_ino) != self.identity {
+                return Err(refusal("replacement retained"));
+            }
+            nix::unistd::unlinkat(
+                &self.directory,
+                self.name.as_str(),
+                nix::unistd::UnlinkatFlags::NoRemoveDir,
+            )
+            .map_err(refusal)?;
+            self.directory.sync_all().map_err(refusal)
+        }
+    }
+    pub(super) fn private_cleanup(
+        loop_name: &str,
+        run: &str,
+        expected: &str,
+    ) -> Result<Value, LaneError> {
+        let root = home::private_runs_path().ok_or_else(|| refusal("runs custody absent"))?;
+        let _lock = lock_mailbox(&root, run, Uid::effective().as_raw())?;
+        let path = reservation_path(&root, run);
+        let record = read_reservation(&path)?.ok_or_else(|| refusal("reservation absent"))?;
+        let _before = before(&record, expected)?;
+        let root_directory = home::pin_parent(&root, Uid::effective().as_raw())?;
+        let temporary = format!(".reservation-{expected}.tmp");
+        match nix::sys::stat::fstatat(
+            &root_directory,
+            temporary.as_str(),
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Err(nix::errno::Errno::ENOENT) => {}
+            _ => return Err(refusal("reservation temporary retained")),
+        }
+        if record["loop"] != loop_name || record["run"] != run {
+            return Err(refusal("run identity differs"));
+        }
+        let driver = root.join(run);
+        if record["plan"]["driver_dir"] != driver.display().to_string() {
+            return Err(refusal("driver directory differs"));
+        }
+        let step = record["active_round"]
+            .as_str()
+            .ok_or_else(|| refusal("step absent"))?;
+        super::super::letters::valid_step(step)?;
+        let owner = crate::plan::loop_uid(&record["plan"])?;
+        let directory = held_round_directory(&driver, owner)?;
+        let request = record["round_rollback"]["request"]
+            .as_str()
+            .ok_or_else(|| refusal("request absent"))?;
+        let mut leaves = Vec::new();
+        for name in [
+            format!("round-launch-{step}.json"),
+            format!(".round-launch-{step}-{expected}.tmp"),
+        ] {
+            if let Some(leaf) = request_leaf(&directory, name, request.as_bytes(), owner)? {
+                leaves.push(leaf);
+            }
+        }
+        let (_, runtime) =
+            super::super::pin_runtime_dir(&driver, Uid::effective().as_raw(), owner)?;
+        let temporary = format!(".runtime.env-{expected}");
+        match nix::sys::stat::fstatat(
+            &runtime,
+            temporary.as_str(),
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Err(nix::errno::Errno::ENOENT) => {}
+            _ => return Err(refusal("environment temporary retained")),
+        }
+        check_unowned_sockets(&record, &root, &driver)?;
+        let mut sockets = Vec::new();
+        for row in record["round_rollback"]["sockets"]
+            .as_array()
+            .ok_or_else(|| refusal("socket receipts absent"))?
+        {
+            let name = row["name"]
+                .as_str()
+                .ok_or_else(|| refusal("socket name absent"))?;
+            let allowed = [
+                crate::container_helper::socket_path(&driver)?,
+                crate::container_helper::control_socket_path(&driver)?,
+            ];
+            if !allowed
+                .iter()
+                .any(|p| p.file_name().is_some_and(|n| n == name))
+            {
+                return Err(refusal("socket name differs"));
+            }
+            let slot = crate::SocketSlot::pinned(&root.join(name), Uid::effective().as_raw())?;
+            if let Some(meta) = slot.metadata().map_err(refusal)? {
+                if row["device"] != meta.st_dev
+                    || row["inode"] != meta.st_ino
+                    || meta.st_mode & libc::S_IFMT != libc::S_IFSOCK
+                {
+                    return Err(refusal("replacement socket retained"));
+                }
+                sockets.push((slot, (meta.st_dev, meta.st_ino)));
+            }
+        }
+        for leaf in leaves {
+            leaf.remove()?;
+        }
+        for (slot, identity) in sockets {
+            if slot
+                .metadata()
+                .map_err(refusal)?
+                .is_none_or(|m| (m.st_dev, m.st_ino) != identity)
+            {
+                return Err(refusal("replacement socket retained"));
+            }
+            slot.remove().map_err(refusal)?;
+        }
+        directory.sync_all().map_err(refusal)?;
+        nix::unistd::fsync(&runtime).map_err(refusal)?;
+        nix::unistd::fsync(&root_directory).map_err(refusal)?;
+        Ok(json!({"schema":1,"state":"cleaned","nonce":expected}))
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::process::CommandExt as _;
+
+        fn fixture() -> (tempfile::TempDir, PathBuf, Vec<u8>, String) {
+            let root = tempfile::tempdir().expect("caller temporary root");
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("root mode");
+            let path = reservation_path(root.path(), "R");
+            let record = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R",
+                "worker_uid":3000,"active_round":"dispatch","rounds":[]});
+            let bytes = format!(
+                "{}\n\n",
+                serde_json::to_string_pretty(&record).expect("pretty before")
+            )
+            .into_bytes();
+            super::super::super::publish_reservation_bytes(&path, &bytes).expect("before");
+            let mut next = record;
+            next["phase"] = json!("preparing");
+            next["active_round"] = json!("review");
+            next["rounds"] = json!([{"step":"review","phase":"running"}]);
+            let nonce = prepare(&mut next, &bytes, "expected\n").expect("before-image");
+            publish_reservation(&path, &next).expect("preparing");
+            (root, path, bytes, nonce)
+        }
+        fn primary() -> LaneError {
+            LaneError::input("injected-refusal", "original refusal")
+        }
+
+        /// ´test:unit:live-round-rollback-restores-exact-bytes-last´
+        #[test]
+        fn live_round_rollback_restores_exact_bytes_last() {
+            let (_root, path, bytes, nonce) = fixture();
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || {
+                assert_eq!(
+                    read_reservation(&path)?.expect("during cleanup")["phase"],
+                    "preparing",
+                    "reservation must remain preparing until cleanup completes"
+                );
+                Ok(())
+            });
+            assert_eq!(error.kind, "injected-refusal");
+            assert_eq!(error.status, 2, "original refusal status retained");
+            assert!(error.detail.starts_with("original refusal;"));
+            assert!(error.detail.ends_with("rollback: restored"), "{error}");
+            assert_eq!(
+                fs::read(&path).expect("restored"),
+                bytes,
+                "exact before-image restored"
+            );
+            let record = read_reservation(&path).expect("read").expect("present");
+            assert_eq!(record["rounds"], json!([]), "round name reusable");
+            assert!(record.get("round_rollback").is_none());
+        }
+
+        /// ´test:unit:live-round-rollback-waits-for-process-absence´
+        #[test]
+        fn live_round_rollback_waits_for_process_absence() {
+            let (_root, path, bytes, nonce) = fixture();
+            let preparing = fs::read(&path).expect("preparing");
+            let mut child = std::process::Command::new("/usr/bin/sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .expect("live attempt process");
+            let mut live = build::LiveChild::default();
+            live.started(child.id());
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&live, &absent), || {
+                Err(refusal("cleanup ran before process absence"))
+            });
+            child.kill().expect("stop fixture child");
+            child.wait().expect("wait fixture child");
+            assert!(
+                error
+                    .detail
+                    .contains("retained: round-rollback: process-absence"),
+                "{error}"
+            );
+            assert_eq!(
+                fs::read(&path).expect("retained"),
+                preparing,
+                "reservation remains preparing while process exists"
+            );
+            let error = finish(primary(), &path, &nonce, (&live, &absent), || Ok(()));
+            assert!(error.detail.ends_with("rollback: restored"), "{error}");
+            assert_eq!(fs::read(path).expect("retry after wait"), bytes);
+        }
+
+        /// ´test:unit:live-round-rollback-retains-replaced-request´
+        #[test]
+        fn live_round_rollback_retains_replaced_request() {
+            let (root, path, _, nonce) = fixture();
+            let preparing = fs::read(&path).expect("preparing");
+            let request = root.path().join("round-launch-review.json");
+            fs::write(&request, b"replaced\n").expect("replacement");
+            fs::set_permissions(&request, fs::Permissions::from_mode(0o600)).expect("request mode");
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || {
+                let directory = fs::File::open(root.path()).expect("held root");
+                if let Some(leaf) = request_leaf(
+                    &directory,
+                    "round-launch-review.json".into(),
+                    b"expected\n",
+                    Uid::effective().as_raw(),
+                )? {
+                    leaf.remove()?;
+                }
+                Ok(())
+            });
+            assert!(error.detail.contains("request bytes differ"), "{error}");
+            assert_eq!(
+                fs::read(&request).expect("replacement retained"),
+                b"replaced\n"
+            );
+            assert_eq!(fs::read(path).expect("reservation retained"), preparing);
+        }
+
+        /// ´test:unit:live-round-rollback-refuses-after-dispatch-intent´
+        #[test]
+        fn live_round_rollback_refuses_after_dispatch_intent() {
+            let (_root, path, _, nonce) = fixture();
+            intent(&path, &nonce).expect("intent before spawn");
+            let intended = fs::read(&path).expect("intent bytes");
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || Ok(()));
+            assert!(
+                error
+                    .detail
+                    .contains("retained: round-rollback: dispatch-intent"),
+                "{error}"
+            );
+            assert_eq!(
+                fs::read(path).expect("intent retained"),
+                intended,
+                "post-intent never restored"
+            );
+        }
+
+        /// ´test:unit:live-round-rollback-checks-scope-and-container-absence´
+        #[test]
+        fn live_round_rollback_checks_scope_and_container_absence() {
+            let (root, path, _, nonce) = fixture();
+            let mut record = read_reservation(&path).expect("record").expect("present");
+            let scope = super::super::super::reaping::RetirementScopeFixture::new(&mut record);
+            publish_reservation(&path, &record).expect("protected scope identity");
+            let home = fs::File::open(root.path()).expect("home").into();
+            let runs = fs::File::open(root.path()).expect("runs").into();
+            let environment = std::collections::BTreeMap::new();
+            // These programs model only the container inventory. Scope reads use the
+            // existing explicit test cgroup root, not a claim about kernel containment.
+            let mut host = Host {
+                path: &path,
+                nonce: &nonce,
+                program: Path::new("/usr/bin/true"),
+                environment: &environment,
+                owner_home: root.path(),
+                home: &home,
+                root: root.path(),
+                runs: &runs,
+                argv: Vec::new(),
+            };
+            host.quiescent().expect("empty inventory and scope");
+            fs::write(scope.path.join("cgroup.events"), "populated 1\n").expect("live scope");
+            let error = host.quiescent().expect_err("populated scope retained");
+            assert_eq!(error.kind, "retire-busy");
+            fs::write(scope.path.join("cgroup.events"), "populated 0\n").expect("empty scope");
+            host.program = Path::new("/usr/bin/printf");
+            let error = host.quiescent().expect_err("container inventory retained");
+            assert!(
+                error.detail.contains("container-payload-present"),
+                "{error}"
+            );
+            host.program = Path::new("/usr/bin/true");
+            record["run_scope"]["inode"] = json!(1);
+            publish_reservation(&path, &record).expect("changed scope identity");
+            let error = host.quiescent().expect_err("replacement scope retained");
+            assert_eq!(error.kind, "run-scope-record");
+        }
+
+        /// ´test:unit:live-round-reservation-failure-removes-own-temporary´
+        #[test]
+        fn live_round_reservation_failure_removes_own_temporary() {
+            let root = tempfile::tempdir().expect("supplied temporary root");
+            let path = root.path().join("occupied");
+            fs::create_dir(&path).expect("refuse rename into directory");
+            let error = super::super::super::publish_reservation_bytes_named(
+                &path,
+                b"{}",
+                Some(&"a".repeat(64)),
+            )
+            .expect_err("rename refusal");
+            assert_eq!(error.kind, "uid-table");
+            let entries: Vec<_> = fs::read_dir(root.path())
+                .expect("inventory")
+                .map(|entry| entry.expect("entry").file_name())
+                .collect();
+            assert_eq!(
+                entries,
+                [std::ffi::OsString::from("occupied")],
+                "failed reservation writer removes only its own temporary"
+            );
+        }
+
+        /// ´test:unit:live-round-restoration-keeps-the-held-root´
+        #[test]
+        fn live_round_restoration_keeps_the_held_root() {
+            let root = tempfile::tempdir().expect("caller temporary root");
+            let named = root.path().join("runs");
+            let moved = root.path().join("held-runs");
+            fs::create_dir(&named).expect("root");
+            let held = fs::File::open(&named).expect("hold root").into();
+            fs::rename(&named, &moved).expect("move own root");
+            fs::create_dir(&named).expect("replacement root");
+            let path = named.join(".reservation-R.json");
+            fs::write(&path, b"replacement sentinel").expect("replacement");
+            super::super::super::publish_reservation_bytes_at(
+                &path,
+                b"original bytes",
+                None,
+                Some(&held),
+            )
+            .expect("held restoration");
+            assert_eq!(
+                fs::read(&path).expect("replacement retained"),
+                b"replacement sentinel",
+                "restoration never reopens the runs pathname"
+            );
+            assert_eq!(
+                fs::read(moved.join(".reservation-R.json")).expect("held record"),
+                b"original bytes"
+            );
+        }
+
+        /// ´test:unit:live-round-before-image-keeps-reservation-bound´
+        #[test]
+        fn live_round_before_image_keeps_reservation_bound() {
+            let (_root, path, bytes, _) = fixture();
+            let unchanged = fs::read(&path).expect("before refusal");
+            let mut record: Value = serde_json::from_slice(&bytes).expect("prior");
+            record["padding"] = json!("x".repeat(3 * 1024 * 1024));
+            let before = serde_json::to_vec(&record).expect("bounded prior");
+            let error = prepare(&mut record, &before, "expected\n").expect_err("whole record cap");
+            assert!(error.detail.contains("limit is 4194304 bytes"), "{error}");
+            assert_eq!(fs::read(path).expect("no publication"), unchanged);
+        }
+    }
 }
 
 #[cfg(test)]

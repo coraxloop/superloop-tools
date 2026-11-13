@@ -531,6 +531,16 @@ pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
 /// ´test:crate:built-helper-resume-retains-mail-custody´
 #[test]
 fn built_helper_resume_retains_mail_custody() {
+    built_round_fixture(false);
+}
+
+/// ´test:crate:built-round-rollback-cleanup-retains-custody´
+#[test]
+fn built_round_rollback_cleanup_retains_custody() {
+    built_round_fixture(true);
+}
+
+fn built_round_fixture(rollback: bool) {
     let workspace = super::published_workspace();
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args([
@@ -539,6 +549,7 @@ fn built_helper_resume_retains_mail_custody() {
             "--nocapture",
         ])
         .env("SUPERLOOP_ROUND_PROOF", "1")
+        .env("SUPERLOOP_ROLLBACK_PROOF", if rollback { "1" } else { "0" })
         .env("SUPERLOOP_ROUND_WORKSPACE", workspace.to_string())
         .env(
             "SUPERLOOP_ROUND_PLACEMENT",
@@ -559,6 +570,9 @@ fn built_helper_resume_retains_mail_custody() {
         String::from_utf8_lossy(&output.stderr)
     );
     let output = String::from_utf8_lossy(&output.stdout);
+    if rollback {
+        assert!(output.contains("ROLLBACK-PRIVATE-CLEANUP"), "{output}");
+    }
     for marker in [
         "FIRST-HELPER-READY",
         "RESUMED-HELPER-READY",
@@ -844,6 +858,9 @@ p.write_text(v['text']);p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
     check_round_previews(home, runs, podman, &settled, uid);
     check_publication_previews(home, runs, podman, &settled, uid);
     check_built_inspection(home, runs, &settled, uid);
+    if std::env::var("SUPERLOOP_ROLLBACK_PROOF").as_deref() == Ok("1") {
+        check_rollback_cleanup(home, runs, podman, &settled, uid);
+    }
 }
 
 fn check_previous_sources(home: &Path, runs: &Path, podman: &Path, settled: &Value) {
@@ -936,6 +953,15 @@ fn check_preflight_report(bytes: &[u8], record: &Value) {
                 "every step after the preparing reservation is published"
             )),
         "preflight names whole publication window: {preview}"
+    );
+    assert!(
+        preview["not_checked"]
+            .as_array()
+            .expect("unchecked inputs")
+            .contains(&json!(
+                "busy lease, scope admission and preparing-record size before publication"
+            )),
+        "preflight leaves final preparing-record size to apply: {preview}"
     );
     assert!(
         record["plan"]["compute_workspace"].is_object(),
@@ -1186,6 +1212,14 @@ import pathlib,sys
 }
 
 fn built_inspection(home: &Path, runs: &Path) -> Result<String, crate::error::LaneError> {
+    built_inspection_action(home, runs, &["--record", "review", "--budget", "3600"])
+}
+
+fn built_inspection_action(
+    home: &Path,
+    runs: &Path,
+    action: &[&str],
+) -> Result<String, crate::error::LaneError> {
     let binary = std::env::current_exe()
         .expect("test image")
         .ancestors()
@@ -1194,7 +1228,7 @@ fn built_inspection(home: &Path, runs: &Path) -> Result<String, crate::error::La
         .expect("built lane");
     let own = fs::File::open(home).expect("home").into();
     let storage = fs::File::open(runs).expect("runs").into();
-    let args = vec![
+    let mut args = vec![
         "unshare".into(),
         binary.display().to_string(),
         "_inspect-round".into(),
@@ -1202,21 +1236,191 @@ fn built_inspection(home: &Path, runs: &Path) -> Result<String, crate::error::La
         "R".into(),
         "--owner-home".into(),
         home.display().to_string(),
-        "--record".into(),
-        "review".into(),
-        "--budget".into(),
-        "3600".into(),
     ];
-    crate::build::run_checked_with_private_launch(
+    args.extend(action.iter().map(|word| (*word).to_owned()));
+    let mut receipt = crate::build::LiveChild::default();
+    let result = crate::build::inspect_with_receipt(
         Path::new("/usr/bin/podman"),
-        args,
+        &args,
         &crate::launch::launch_environment(home)?,
         home,
-        60,
-        "inspect-round",
         &own,
         runs,
         &storage,
-        None,
+        &mut receipt,
+    );
+    assert!(
+        receipt.absent(),
+        "private inspector waited for its process group"
+    );
+    result
+}
+
+fn rollback_request(home: &Path, runs: &Path, uid: u32, text: &str) {
+    let input = json!({"run":runs.join("R"),"uid":uid,"text":text}).to_string();
+    let output = namespace_python(
+        home,
+        r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);p=Path(v['run'])/'round-launch-review.json'
+p.write_text(v['text']);p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
+",
+        &input,
     )
+    .expect("own mapped request");
+    assert!(output.status.success(), "{output:?}");
+}
+
+fn rollback_record(seed: &Value, runs: &Path, nonce: &str, request: &str) -> Value {
+    let before = serde_json::to_string_pretty(seed).expect("raw settled bytes");
+    let mut record = seed.clone();
+    record["phase"] = json!("preparing");
+    record["active_round"] = json!("review");
+    record["letter_source"] = json!(runs.join("R/mail-review.txt"));
+    record["rounds"]
+        .as_array_mut()
+        .expect("rounds")
+        .push(json!({"step":"review","phase":"preparing","budget_seconds":3600}));
+    let original: Vec<Value> = [
+        crate::container_helper::socket_path(&runs.join("R")).expect("socket"),
+        crate::container_helper::control_socket_path(&runs.join("R")).expect("control"),
+    ]
+    .iter()
+    .map(|path| json!({"name":path.file_name().and_then(|name| name.to_str()),"identity":null}))
+    .collect();
+    let handle = execute_command::rubric::sha256_digest(before.as_bytes());
+    record["round_rollback"] = json!({"schema":1,"nonce":nonce,"before":before,
+        "before_bytes":before.len(),"before_sha256_prefix":&handle[..16],
+        "request":request,"sockets":[],"sockets_before":original});
+    record
+}
+
+fn check_rollback_cleanup(home: &Path, runs: &Path, podman: &Path, seed: &Value, uid: u32) {
+    let nonce = "a".repeat(64);
+    let reservation = runs.join(".reservation-R.json");
+    let request = format!(
+        "{}\n",
+        json!({"schema":1,"step":"review","budget_seconds":3600,
+        "mail":seed["mail"][0],"thread_id":seed["thread_id"],"home":seed["plan"]["home"],
+        "worker_uid":seed["worker_uid"]})
+    );
+    let inventory = rollback_inventory(home, runs);
+    let mut record = rollback_record(seed, runs, &nonce, &request);
+    crate::launch::publish_reservation(&reservation, &record).expect("attempt");
+    rollback_request(home, runs, uid, &"x".repeat(request.len()));
+    let before = publication_inventory(home, runs);
+    let error = built_inspection_action(home, runs, &["--rollback", &nonce])
+        .expect_err("replacement is retained");
+    assert!(error.detail.contains("request bytes differ"), "{error:?}");
+    assert_eq!(
+        publication_inventory(home, runs),
+        before,
+        "refusal changes nothing"
+    );
+    rollback_request(home, runs, uid, &request);
+    record["dispatch_intent"] = json!({"nonce":nonce});
+    crate::launch::publish_reservation(&reservation, &record).expect("intent");
+    let before = publication_inventory(home, runs);
+    let error = built_inspection_action(home, runs, &["--rollback", &nonce])
+        .expect_err("intent cannot roll back");
+    assert!(error.detail.contains("dispatch-intent"), "{error:?}");
+    assert_eq!(
+        publication_inventory(home, runs),
+        before,
+        "intent preserved"
+    );
+    record
+        .as_object_mut()
+        .expect("record")
+        .remove("dispatch_intent");
+    check_rollback_socket(home, runs, &mut record, &nonce);
+    crate::launch::publish_reservation(&reservation, &record).expect("retry attempt");
+    let output = built_inspection_action(home, runs, &["--rollback", &nonce])
+        .expect("real received-custody cleanup");
+    let report: Value = serde_json::from_str(&output).expect("real cleanup report");
+    assert_eq!(report["state"], "cleaned");
+    assert_eq!(report["nonce"], nonce);
+    let cleaned = publication_inventory(home, runs);
+    assert!(!String::from_utf8_lossy(&cleaned).contains("round-launch-review.json"));
+    assert_eq!(
+        fs::read(&reservation).expect("preparing remains"),
+        serde_json::to_vec(&record).expect("unchanged preparing")
+    );
+    check_rollback_helper(home, runs, podman, &nonce);
+    assert_eq!(
+        rollback_inventory(home, runs),
+        inventory,
+        "no stray attempt files"
+    );
+    writeln!(std::io::stdout().lock(), "ROLLBACK-PRIVATE-CLEANUP").expect("marker");
+}
+
+fn check_rollback_socket(home: &Path, runs: &Path, record: &mut Value, nonce: &str) {
+    let socket = crate::container_helper::socket_path(&runs.join("R")).expect("socket");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("fixture socket");
+    let identity = fs::symlink_metadata(&socket).expect("socket identity");
+    record["round_rollback"]["sockets"] = json!([{
+        "name":socket.file_name().and_then(|name| name.to_str()),
+        "device":identity.dev(),"inode":identity.ino()+1}]);
+    let reservation = runs.join(".reservation-R.json");
+    crate::launch::publish_reservation(&reservation, record).expect("socket attempt");
+    let before = publication_inventory(home, runs);
+    let error = built_inspection_action(home, runs, &["--rollback", nonce])
+        .expect_err("replacement socket retained");
+    assert!(
+        error.detail.contains("replacement socket retained"),
+        "{error:?}"
+    );
+    assert_eq!(
+        publication_inventory(home, runs),
+        before,
+        "replacement untouched"
+    );
+    record["round_rollback"]["sockets"][0]["inode"] = json!(identity.ino());
+    drop(listener);
+}
+
+fn check_rollback_helper(home: &Path, runs: &Path, podman: &Path, nonce: &str) {
+    built_inspection(home, runs).expect("same private inspection can publish after cleanup");
+    ready_and_stop(
+        built_helper(home, runs, podman, false),
+        runs,
+        "ROLLBACK-HELPER-RETRY",
+    );
+    let reservation = runs.join(".reservation-R.json");
+    let record: Value =
+        serde_json::from_slice(&fs::read(&reservation).expect("registered sockets"))
+            .expect("record");
+    assert_eq!(record["round_rollback"]["nonce"], nonce);
+    assert_eq!(
+        record["round_rollback"]["sockets"]
+            .as_array()
+            .expect("receipts")
+            .len(),
+        2,
+        "real helper registered both held socket identities"
+    );
+    let output = built_inspection_action(home, runs, &["--rollback", nonce])
+        .expect("cleanup real published request after helper stop");
+    let report: Value = serde_json::from_str(&output).expect("cleanup receipt");
+    assert_eq!(report["state"], "cleaned");
+    let inventory = publication_inventory(home, runs);
+    assert!(!String::from_utf8_lossy(&inventory).contains("round-launch-review.json"));
+}
+
+fn rollback_inventory(home: &Path, runs: &Path) -> Value {
+    let bytes = publication_inventory(home, runs);
+    let mut inventory: Value = serde_json::from_slice(&bytes).expect("inventory rows");
+    inventory.as_array_mut().expect("rows").retain(|row| {
+        ![
+            ".reservation-R.json",
+            "R/round-launch-review.json",
+            "R/launch/runtime.env",
+            ".launch-R/credential-refresh.json",
+        ]
+        .iter()
+        .any(|name| row[0] == *name)
+    });
+    inventory
 }

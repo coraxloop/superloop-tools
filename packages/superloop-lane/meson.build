@@ -611,3 +611,7 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lane/src/tests/helper_service.rs:std :: env :: current_exe () . expect (\"test executable\")#2","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:superloop-lane:self","lookup":"test-executable","binding":"current_exe","contract":"Reexecute the mapped two-uid resumed helper fixture before driving the built private service and read-only preflight"}
 {"kind":"call","site":"packages/superloop-lane/src/tests/helper_service.rs:\"/usr/bin/podman\"#4","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Run the built helper receiver with host-held anchors on distinct runs-root and run-directory owners for first and resumed readiness and read-only preflight"}
 ''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-lane/src/launch/rounds.rs:\"/usr/bin/sleep\"#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/sleep\"","callee":"external:/usr/bin/sleep","lookup":"test-executable","contract":"Keep a real fixture process group alive to refuse rollback until it has been killed and reaped; no worker execution"}
+''']

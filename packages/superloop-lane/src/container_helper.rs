@@ -954,7 +954,8 @@ pub(crate) fn preflight_round(
         "checked":["retained mail custody and reservation binding",
             "helper plan, program, mounts, pins and image", "helper attempt argument vector",
             "saved runtime environment and unoccupied final round-request name"],
-        "not_checked":["busy lease and scope admission before publication",
+        "not_checked":[
+            "busy lease, scope admission and preparing-record size before publication",
             "every step after the preparing reservation is published",
             "launch-time descriptor transfer and intervening changes"],
         "helper_started":false,"credential_published":false,"changed":false}))
@@ -2393,6 +2394,8 @@ enum ServiceSetupFailure {
     ControllerSpawn,
 }
 
+type AuthorityStart = Result<JoinHandle<Result<(), LaneError>>, LaneError>;
+
 struct ServiceResources {
     socket: Option<ServiceSocket>,
     control: Option<ServiceSocket>,
@@ -2505,17 +2508,31 @@ impl ServiceResources {
         Ok(())
     }
 
+    #[cfg(test)]
     fn run(
         &mut self,
         slots: (crate::SocketSlot, crate::SocketSlot),
         owner: (u32, u32),
         group: u32,
-        authority: impl FnOnce(Arc<AtomicBool>) -> Result<JoinHandle<Result<(), LaneError>>, LaneError>,
+        authority: impl FnOnce(Arc<AtomicBool>) -> AuthorityStart,
+        body: impl FnOnce(&Self) -> Result<(), LaneError>,
+    ) -> Result<(), LaneError> {
+        self.run_registered(slots, owner, group, authority, |_| Ok(()), body)
+    }
+
+    fn run_registered(
+        &mut self,
+        slots: (crate::SocketSlot, crate::SocketSlot),
+        owner: (u32, u32),
+        group: u32,
+        authority: impl FnOnce(Arc<AtomicBool>) -> AuthorityStart,
+        register: impl FnOnce(&Self) -> Result<(), LaneError>,
         body: impl FnOnce(&Self) -> Result<(), LaneError>,
     ) -> Result<(), LaneError> {
         let result = (|| {
             self.bind(slots.0, slots.1, owner, group)?;
             self.start_controller(owner.0)?;
+            register(self)?;
             self.refresher = Some(authority(Arc::clone(&self.cancelled))?);
             body(self)
         })();
@@ -2599,6 +2616,7 @@ fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), La
     )?;
     let initial = pinned_request_admitted(&owner_home, &loop_name, &run, &podman, admission)?;
     attempt_vector(&initial.argv, &initial.driver_dir, 1)?;
+    let live_rollback = initial.record.get("round_rollback").is_some();
     let loop_uid = initial.loop_uid;
     let driver_dir = initial.driver_dir;
     let socket = socket_path(&driver_dir)?;
@@ -2629,7 +2647,7 @@ fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), La
     let reservation = reservation_path(root, &run);
     let backend = publish_helper_identity_admitted(&owner_home, &loop_name, &run, root, admission)?;
     let mut resources = ServiceResources::new();
-    resources.run(
+    resources.run_registered(
         (socket_slot, control_slot),
         (0, 0),
         loop_uid,
@@ -2642,6 +2660,22 @@ fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), La
                 backend,
                 cancelled,
                 admission,
+            )
+        },
+        |resources| {
+            if !live_rollback {
+                return Ok(());
+            }
+            let request = resources.socket.as_ref().expect("bound socket");
+            let control_socket = resources.control.as_ref().expect("bound control");
+            crate::launch::rounds::rollback::sockets(
+                &reservation,
+                json!([
+                    {"name":socket.file_name().and_then(|name| name.to_str()),
+                     "device":request.identity.0,"inode":request.identity.1},
+                    {"name":control.file_name().and_then(|name| name.to_str()),
+                     "device":control_socket.identity.0,"inode":control_socket.identity.1}
+                ]),
             )
         },
         |resources| {
