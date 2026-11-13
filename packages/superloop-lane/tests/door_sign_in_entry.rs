@@ -448,3 +448,70 @@ source_ancestor(SimpleNamespace(st_uid=0, st_mode=0o1777), owners)
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// ´test:integration:door-sign-in-receiver-admits-only-private-home-traversal-acl´
+#[test]
+fn door_sign_in_receiver_admits_only_private_home_traversal_acl() {
+    let root = tempfile::tempdir().expect("caller temporary root");
+    let script = r"
+import json, os, pathlib, stat, struct, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+receiver = sys.argv[2]
+undefined = 2**32 - 1
+service = os.geteuid() + 1
+base = [(1, 7, undefined), (2, 1, service), (4, 0, undefined),
+        (16, 1, undefined), (32, 0, undefined)]
+def acl(entries):
+    return struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in entries)
+cases = [('plain', None, 0o700, None, True),
+         ('mail', base, 0o710, None, True),
+         ('plain-group', None, 0o710, None, False),
+         ('wide-mask', base[:3] + [(16, 5, undefined)] + base[4:], 0o750, None, False),
+         ('read-entry', [base[0], (2, 4, service), base[2], (16, 4, undefined), base[4]],
+          0o740, None, False),
+         ('write-entry', [base[0], (2, 3, service), base[2], (16, 3, undefined), base[4]],
+          0o730, None, False),
+         ('second-entry', base[:2] + [(2, 1, service + 1)] + base[2:],
+          0o710, None, False),
+         ('default', base, 0o710, base, False),
+         ('plain-default', None, 0o700, base, False),
+         ('group-entry', base[:2] + [(4, 1, undefined)] + base[3:], 0o710, None, False),
+         ('special-mode', base, 0o1710, None, False),
+         ('other-access', base[:-1] + [(32, 1, undefined)], 0o711, None, False)]
+for name, entries, mode, default, allowed in cases:
+    home = root / name / 'private'
+    home.mkdir(parents=True, mode=0o700)
+    if entries is not None:
+        os.setxattr(home, 'system.posix_acl_access', acl(entries))
+    if default is not None:
+        os.setxattr(home, 'system.posix_acl_default', acl(default))
+    os.chmod(home, mode)
+    assert home.stat().st_uid == os.geteuid(), name
+    assert stat.S_IMODE(home.stat().st_mode) == mode, name
+    env = dict(os.environ, HOME=str(home))
+    result = subprocess.run([sys.executable, '-I', '-c', receiver, str(os.geteuid()),
+                             str(home), 'true', '{}'], env=env,
+                            capture_output=True, timeout=15)
+    if allowed:
+        assert result.returncode == 0, (name, result.stderr.decode())
+        report = json.loads(result.stdout)
+        assert report['published'] is False and report['exists'] is False, name
+    else:
+        assert result.returncode == 2, (name, 'unsafe home admitted', result.stdout.decode())
+        assert 'door-sign-in-private-home-owner-mode' in result.stderr.decode(), name
+    assert not (home / '.codex').exists(), (name, 'dry run wrote configuration')
+    print('ACL-CASE', name, 'accepted' if allowed else 'refused')
+";
+    let result = Command::new("/usr/bin/python3")
+        .args(["-I", "-c", script])
+        .arg(root.path())
+        .arg(include_str!("../src/door_sign_in_private.py"))
+        .output()
+        .expect("real receiver entry under fixture owner");
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

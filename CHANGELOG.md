@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- `superloop-lane door-sign-in` again accepts a private home carrying the mail system's search-only entry (mode 0710), which it refused with `door-sign-in-private-home-owner-mode` on every mail-provisioned loop; any other access ACL still refuses, and the dry run and placement are otherwise unchanged (``test:integration:door-sign-in-receiver-admits-only-private-home-traversal-acl``).
+
 - The release suite now exercises the workspace producer’s refusal of a Cargo configuration changed during compilation, which keeps the earlier published binaries and record, and its rebuild when a Cargo-home configuration is created (``test:integration:test-release-producer-dependencies``). The producer also depends on the checkout's ancestor directories and the Cargo home, so adding or removing an entry directly in one of them can rerun Cargo at a later build even when no source changed.
 
 - The release build’s compiler-input recorder now treats a string include as one path and records missing included configurations without adding a refusal of its own; Cargo still decides whether the build requires them (``test:integration:test-release-configuration-includes``).
