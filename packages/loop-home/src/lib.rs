@@ -5,6 +5,7 @@ pub mod ancestor;
 pub mod anchor;
 pub mod app;
 pub mod custody;
+pub mod door_entry;
 pub mod door_frame;
 mod driver_launch;
 pub mod ensure;

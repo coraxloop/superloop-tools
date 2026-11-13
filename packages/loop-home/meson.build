@@ -7,6 +7,9 @@ pkg_loop_home_rust = files(
   'src/ancestor_owners.py',
   'src/app.rs',
   'src/custody.rs',
+  'src/door_entry.rs',
+  'src/door_entry/identity.rs',
+  'src/door_entry/consumer.py',
   'src/door_frame.rs',
   'src/door_frame/tests.rs',
   'src/driver_launch.rs',
@@ -60,6 +63,7 @@ pkg_loop_home_rust = files(
   'src/tests/mod.rs',
   'src/verify.rs',
   'src/workers_settings.rs',
+  'tests/door_entry.rs',
   'tests/reply_custody.rs',
   'tests/support/bounded.rs',
 )
@@ -163,4 +167,11 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Install the principal mailbox fixture's exact named service ACL inside the test namespace"}
 {"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#2","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Bounded snapshot of all fixture lifetime repair surfaces before and after receiving refusals"}
 {"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#3","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Pipe-controlled namespace fault injector and admission lock holder, killed and reaped after the service identity drop"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/door_entry.rs:\"/usr/bin/setpriv\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/setpriv\"","callee":"external:/usr/bin/setpriv","lookup":"configured-external","contract":"Execute the held identity program with the registry uid, cleared groups and no new privileges"}
+{"kind":"call","site":"packages/loop-home/src/door_entry.rs:\"/usr/bin/python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:/usr/bin/python3","lookup":"configured-external","contract":"Trusted bootstrap consumes only the admitted sealed host invocation after the loop identity transition"}
+{"kind":"call","site":"packages/loop-home/tests/door_entry.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Bounded namespace fixture and removal of only the parent-created root with event-driven cancellation"}
+{"kind":"payload","path":"packages/loop-home/src/door_entry/consumer.py","form":"python","sha256":"7d0bbf45c93fbafe8b9b4f992676ed83876944e01f28f33114c9b775c55bb88f","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Execute the sealed host-authored door consumer with receiver-derived loop identity and separate request input","calls":[]}
 ''']

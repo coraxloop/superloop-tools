@@ -3,6 +3,9 @@
 //! Callers supply trusted requirements; a manifest is evidence, never authority.
 //! Legacy readers are not switched by this module.
 
+/// Read-only private invocation mode, shared by retention and receipt.
+pub const READONLY_PRIVATE_MODE: u32 = 0o400;
+
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::File;
@@ -497,7 +500,7 @@ impl HostVerifier {
             return Err(Error::new("anchor-mode", &self.operation, purpose)
                 .because("access-mode", "read-only descriptor required"));
         }
-        self.retain_file(file, purpose, slot, 0o400)
+        self.retain_file(file, purpose, slot, READONLY_PRIVATE_MODE)
     }
 
     fn retain_file(&self, file: &OwnedFd, purpose: &str, slot: u32, mode: u32) -> Result<HostPin> {

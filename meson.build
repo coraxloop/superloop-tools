@@ -968,7 +968,7 @@ dependency_ledger += ['''
 {"kind":"external-program","identity":"external:tar","selector":"tar","contract":"Create or read the explicitly named archive","callers":["superloop-claude-desktop"]}
 {"kind":"external-program","identity":"external:/usr/bin/date","selector":"/usr/bin/date","contract":"Format wall-clock time in the requested machine-readable form","callers":["superloop-lane"]}
 {"kind":"external-program","identity":"external:/usr/bin/curl","selector":"/usr/bin/curl","contract":"HTTP transfer with explicit arguments and response status","callers":["superloop-lane"]}
-{"kind":"external-program","identity":"external:/usr/bin/python3","selector":"/usr/bin/python3","contract":"Python 3 payload execution; the caller supplies the program and its bounded input/output contract","callers":["superloop-lane"]}
+{"kind":"external-program","identity":"external:/usr/bin/python3","selector":"/usr/bin/python3","contract":"Python 3 payload execution; the caller supplies the program and its bounded input/output contract","callers":["loop-home","superloop-lane"]}
 {"kind":"external-program","identity":"external:/usr/bin/cat","selector":"/usr/bin/cat","contract":"Copy the named file or standard input to standard output","callers":["superloop-lane"]}
 {"kind":"external-program","identity":"external:/usr/bin/sha256sum","selector":"/usr/bin/sha256sum","contract":"SHA-256 content digest in the requested checksum form","callers":["superloop-lane"]}
 {"kind":"external-program","identity":"external:/usr/bin/cc","selector":"/usr/bin/cc","contract":"C compilation and linking of the supplied source into the requested shared object, with the supplied flags, streams and exit status","callers":["superloop-lane"]}

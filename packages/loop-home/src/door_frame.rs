@@ -1,4 +1,4 @@
-//! Library-only contracts for the door's local identity entry; consumers: [].
+//! Contracts for the door's local identity entry; consumer: `door_entry`.
 //! The entered D0 rubric reader remains the only door rubric reader.
 use crate::anchor::{
     HostPin, HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Requirement, Transport,
@@ -150,7 +150,7 @@ impl Operation {
             Policy {
                 kind: Kind::File,
                 owner: Owner::Host,
-                mode: ModePolicy::Exact(0o400),
+                mode: ModePolicy::Exact(crate::anchor::READONLY_PRIVATE_MODE),
             },
         ];
         Ok(std::array::from_fn(|index| Requirement {
@@ -187,8 +187,11 @@ pub fn invocation(operation: Operation, bytes: &[u8]) -> Result<OwnedFd, LoopErr
     let mut file = File::from(fd);
     file.write_all(bytes)
         .map_err(|error| invocation_error(operation, "write", error))?;
-    fchmod(&file, Mode::from_bits_truncate(0o400))
-        .map_err(|error| invocation_error(operation, "mode", error))?;
+    fchmod(
+        &file,
+        Mode::from_bits_truncate(crate::anchor::READONLY_PRIVATE_MODE),
+    )
+    .map_err(|error| invocation_error(operation, "mode", error))?;
     fcntl(&file, FcntlArg::F_ADD_SEALS(seals()))
         .map_err(|error| invocation_error(operation, "seal", error))?;
     // This is the process's own held descriptor, not an authority-bearing pathname.
@@ -226,7 +229,7 @@ pub fn read_invocation(operation: Operation, fd: &impl AsFd) -> Result<Vec<u8>, 
         .map_err(|error| invocation_error(operation, "access", error))?;
     let info = fstat(fd).map_err(|error| invocation_error(operation, "stat", error))?;
     if info.st_mode & libc::S_IFMT != libc::S_IFREG
-        || info.st_mode & 0o7777 != 0o400
+        || info.st_mode & 0o7777 != crate::anchor::READONLY_PRIVATE_MODE
         || flags & OFlag::O_ACCMODE.bits() != OFlag::O_RDONLY.bits()
         || observed & seals().bits() != seals().bits()
     {

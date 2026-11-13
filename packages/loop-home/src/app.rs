@@ -1031,7 +1031,7 @@ pub fn lane_install_private_dispatch(
     Ok((lane_bin, forwarded))
 }
 
-/// Helper words intercepted before ordinary grammar; every other word is a command.
+/// Legacy helper words; the dedicated door receiver has its own fixed grammar.
 pub(crate) const INTERCEPTED_WORDS: [&str; 12] = [
     "_supervise-command",
     "bind-custody",
@@ -1065,6 +1065,14 @@ where
     E: io::Write,
 {
     let mut arguments: Vec<OsString> = arguments.into_iter().map(Into::into).collect();
+    if arguments.first().is_some_and(|word| {
+        matches!(
+            word.to_str(),
+            Some("_door-rubric" | "_door-agent" | "_door-metadata" | "_door-consumer")
+        )
+    }) {
+        return crate::door_entry::entry(&arguments, error);
+    }
     let intercepted = arguments.first().and_then(|word| {
         INTERCEPTED_WORDS
             .iter()
