@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Prepare the library contract for three door entry operations, with fixed capability roles and a sealed, bounded invocation. No production caller or installed command changes; no new operator preparation is required (``claim:loophome:door-frame-fixes-local-entry-custody``).
+
 - Mail binding’s release sentinel now follows the test-only admission hook itself, and acceptance pins override refusal before plan reads and refusal of a changed prior binding. Production command behavior and record formats are unchanged (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 - `bind-mail` and both `launch … --round` modes now retain received configuration, storage, identity-program, journal and run custody through binding or read-only verification. Install with neither command in flight, then rerun an identical binding and a settled run’s dry resume. The reply entry’s owner, mode, ACL and link requirements now apply to these commands too; provisioner-written homes and recorded bindings need no migration. Unset `ENTER_LOOP_REGISTRY`, even an empty or canonical value: `bind-mail` newly refuses it before plan reads, while resume refuses after its existing plan and reservation reads. A process crossing the install refuses `anchor-missing` with its selected operation or `verified-prefix` before publication or preparation; rerun it afterwards. Running containers are unchanged until their next resume (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``; ``claim:superlooplane:inbound-binding-retains-custody``).

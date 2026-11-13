@@ -3411,6 +3411,12 @@ pattern = "packages/loop-home/src/mail/migration_cutover.rs"
 pattern = "packages/superloop/tests/mail_migration.py"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/door_frame.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/door_frame/tests.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/anchor.rs"
 
 [[include.rows]]

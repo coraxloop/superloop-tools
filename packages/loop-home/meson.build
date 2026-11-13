@@ -7,6 +7,8 @@ pkg_loop_home_rust = files(
   'src/ancestor_owners.py',
   'src/app.rs',
   'src/custody.rs',
+  'src/door_frame.rs',
+  'src/door_frame/tests.rs',
   'src/driver_launch.rs',
   'src/ensure.rs',
   'src/error.rs',
@@ -142,6 +144,7 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:& path#2","caller":"loop-home","owner":"LOOPHOME","selector":"& path","callee":"external:anchor-fixture-executable","lookup":"configured-external","setting":"anchor_fixture_image","contract":"Refuse an unsupported script without invoking an unpinned interpreter by pathname"}
 {"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:& image#1","caller":"loop-home","owner":"LOOPHOME","selector":"& image","callee":"external:anchor-fixture-executable","lookup":"configured-external","setting":"anchor_fixture_image","contract":"Prepare held execution under descriptor exhaustion without spawning a child"}
 {"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:std :: env :: current_exe () . expect (\"test executable\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Isolate descriptor exhaustion and stdin replacement in the same test binary"}
+{"kind":"call","site":"packages/loop-home/src/door_frame/tests.rs:std :: env :: current_exe () . expect (\"door frame test executable\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"door frame test executable\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Bounded isolated override probes require a positive selected test count"}
 ''']
 
 dependency_ledger += ['''

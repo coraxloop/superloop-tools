@@ -11,7 +11,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::{Component, Path};
 use std::sync::Arc;
 
-use nix::fcntl::{OFlag, OpenHow, ResolveFlag, open, openat2};
+use nix::fcntl::{FcntlArg, OFlag, OpenHow, ResolveFlag, fcntl, open, openat2};
 use nix::sys::stat::{Mode, SFlag, fstat};
 use serde::{Deserialize, Serialize};
 
@@ -476,6 +476,31 @@ impl HostVerifier {
     /// # Errors
     /// Refuses a foreign file, unsafe mode, or failed descriptor duplication.
     pub fn retain_private_file(&self, file: &OwnedFd, purpose: &str, slot: u32) -> Result<HostPin> {
+        self.retain_file(file, purpose, slot, 0o600)
+    }
+
+    /// Retain a host-owned regular file under the 0400 policy with a read-only descriptor.
+    ///
+    /// This checks custody, not seals; the operation checks strict mode and seals at receipt.
+    /// # Errors
+    /// Refuses a foreign file, failed 0400 policy, writable descriptor or failed duplication.
+    pub fn retain_readonly_file(
+        &self,
+        file: &OwnedFd,
+        purpose: &str,
+        slot: u32,
+    ) -> Result<HostPin> {
+        let flags = fcntl(file, FcntlArg::F_GETFL).map_err(|cause| {
+            Error::new("anchor-io", &self.operation, purpose).because("access-mode", cause)
+        })?;
+        if flags & OFlag::O_ACCMODE.bits() != OFlag::O_RDONLY.bits() {
+            return Err(Error::new("anchor-mode", &self.operation, purpose)
+                .because("access-mode", "read-only descriptor required"));
+        }
+        self.retain_file(file, purpose, slot, 0o400)
+    }
+
+    fn retain_file(&self, file: &OwnedFd, purpose: &str, slot: u32, mode: u32) -> Result<HostPin> {
         let operation = self.operation.as_str();
         if !identifier(purpose) {
             return Err(Error::new("anchor-declaration", operation, "purpose"));
@@ -483,7 +508,7 @@ impl HostVerifier {
         let policy = Policy {
             kind: Kind::File,
             owner: Owner::Host,
-            mode: ModePolicy::Exact(0o600),
+            mode: ModePolicy::Exact(mode),
         };
         let stat = check_kind_mode(file, policy, operation, purpose)?;
         check_owner(

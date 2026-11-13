@@ -92,6 +92,39 @@ Every substituted value and command word is shell-quoted across both layers.
 
 Command words are forwarded byte for byte: words with unsafe bytes use single-quoted literals because backslash-newline is a line continuation in `sh`.
 
+## Door entry frame preparation · `sec:loophome:door-entry-frame`
+
+The library-only door frame (``claim:loophome:door-frame-fixes-local-entry-custody``) has production consumers `[]`. Its operation comes from the trusted private word: `_door-rubric`, `_door-agent` or `_door-metadata`, yielding `door-rubric`, `door-agent` or `door-metadata`. A declaration cannot select the operation. Each uses rights transport and exactly these seven ordered roles, with no aliases:
+
+|Slot|Purpose|Kind|Receiving owner policy|Mode|
+|----|-------|----|----------------------|----|
+|0|`configuration`|Directory|Host|0700|
+|1|`entry-executable`|File|Host or proven initial root|Executable|
+|2|`loop-storage`|Directory|Host|0711|
+|3|`private-storage`|Directory|Mapped uid from the received registry row|0700|
+|4|`identity-executable`|File|Proven initial root; setpriv|Executable|
+|5|`namespace-entry`|File|Host or proven initial root|Executable|
+|6|`invocation`|File|Host|0400, read-only descriptor, four seals|
+
+This reuses the mail worker and serve routes' `HostVerifier`, `Manifest`, `Requirement`, owner/map proofs and rights transport vocabulary. The new pieces are the three-operation frame contract and bounded immutable invocation. `RootFile` uses the anchor's UID-map proof, never a comparison that treats observed uid 65534 as root. The invocation is a memfd, set to 0400 before retention, sealed against writes, growth, shrinkage and further seal changes, then reopened read-only. Sender and receiver independently enforce the 262,144-byte bound; receipt also checks file kind, mode, access mode and all seals. The new read-only retention entry point shares the existing private-file owner checks; the existing 0600 entry point keeps its policy. No owner-home, remote-workspace, rubric-snapshot or Python capability is added. Python remains a trusted bootstrap utility; setpriv will be held as in mail. Named refusals identify the trusted operation, role and failed check; empty and canonical registry overrides both refuse before frame admission. These are library refusals only: no dispatcher recognizes the new words yet. Existing door rebuild and rollout requirements remain in force.
+
+The later relay's consumer contract is recorded here before any caller switch. `PRIVATE` means the received loop private directory and `TEMP` its existing `.run` directory, so temporary authority stays beneath the private-storage role. The runner continues to create a private call directory and passes only its five vendor variables.
+
+|Property|Door consumer contract for the later relay|Vendor observation through the current actual entry|
+|--------|------------------------------------------|---------------------------------------------------|
+|Identity|Real/effective uid and gid from the received registry row|41001 for all three|
+|Supplementary groups|Cleared, with no mail-group lookup|Empty without mail provisioning; group 2000 reaches both consumer and vendor when the fixture ledger grants it|
+|Privilege gain|Held setpriv with `--no-new-privs`|`NoNewPrivs=0`; enabling it is a deliberate tightening|
+|Account|Bind a loop passwd/group row with home `PRIVATE`|`getpwuid` returns alpha, uid/gid 41001, private home, shell `/bin/bash`|
+|Consumer environment|Only HOME=`PRIVATE`, TMPDIR=`TEMP`, PATH=`/usr/bin:/bin`, LANG=`C.UTF-8`|Vendor receives `HOME=call`, `CODEX_HOME=call/config`, `TMPDIR=call/tmp`, the fixed PATH and LANG|
+|Working directory|Consumer starts in `PRIVATE`; vendor in its empty 0700 call/cwd|Vendor cwd is call/cwd|
+|Umask|Set 0077 explicitly for the new consumer|022 inherited today; private call directories are already explicitly 0700|
+|Descriptors|Only stdin, stdout and stderr reach the consumer and vendor|Only 0, 1 and 2 at the vendor|
+
+The fixture has no custody tier or workers settings; their removal from the later door route is a code reading, not a configured measurement. The current-route measurement also captures the unwrapped consumer: ordinary entry supplies its documented USER, LOGNAME, SHELL, TERM and XDG variables and extended PATH, and preserves the launch cwd; the new door consumer deliberately drops those extras and starts in PRIVATE.
+
+The current-route measurement executes the built package entry and embedded runner with a stand-in vendor inside the existing namespace fixture's searchable bind-mounted tree. It does not use the generated entry stand-in. D2 must measure its own consumer against this table. Dropped from the door route only: the custody bind and forge check, `_mail-group`, the SSH configuration bind, workers-settings environment and `ensure-roots`. Ordinary entry retains all of them. The three rubric policies remain distinct: the entered D0 reader, the host policy-snapshot publisher and direct triage's reread against that published digest. Only the entered route will move in D2–D3; its D0 reader stays the sole entered reader. Direct triage still supplies its own expected uid to the shared runner. Registration retains its loop uid; exercise's fresh-config reading remains a separate open point. Rubric examples describing an automatically prepared remote checkout belong to the workspace redesign and are not changed by this local frame.
+
 ## Provisioning · `sec:loophome:provisioning`
 
 `provision NAME` runs the ensure step alone: one `podman unshare sh -c` whose script runs `ensure-roots UID NAME HOME REPORT` and nothing else, with no entry and no command run as the loop. It creates every missing standard root, corrects every differing mode, succeeds on a complete home with zero rows created, and refuses any home row the ensure rules reject. It is the form a registration or an owner-run chain uses to prepare a loop's roots before anything runs as the loop.
