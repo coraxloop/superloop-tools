@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Door request projection computes each record’s lookup key once instead of hashing it again for every candidate. The first matching row and the complete projected record stay unchanged; no lock, helper call or publication moves. This reduces record-transaction work and shortens holds as collections grow. Existing doors gain the improvement after their own refresh and restart; finish in-flight requests first. No record migration or operator configuration change is needed (``prob:door:door-parts-contend-for-the-request-lock-within-one-request``).
+
 - Door request writers now report one bounded `door-request-lock` release line with the operation, request identifier when known, acquisition wait, hold time and named transaction phases. This diagnoses queue stalls; lock scope, ordering and deadlines are unchanged. Commands that take the exclusive lock in their own process, such as the owner's changing `requests` commands and retirement, print the line on their own stderr as soon as the new binary is installed; existing door copies show the lines only after their per-loop refresh and restart; let in-flight requests finish first. Request contents and filesystem paths are not included (``prob:door:door-parts-contend-for-the-request-lock-within-one-request``).
 
 - Prepare the library contract for three door entry operations, with fixed capability roles and a sealed, bounded invocation. No production caller or installed command changes; no new operator preparation is required (``claim:loophome:door-frame-fixes-local-entry-custody``).

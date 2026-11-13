@@ -422,11 +422,8 @@ impl Store {
             return Ok(());
         };
         for record in rows {
-            if let Some(row) = collection
-                .requests
-                .iter()
-                .find(|row| row.id == common_id(&self.loop_name, record.id()))
-            {
+            let key = common_id(&self.loop_name, record.id());
+            if let Some(row) = collection.requests.iter().find(|row| row.id == key) {
                 *record = project(record, row, "unrecorded")?;
             }
         }
@@ -807,6 +804,84 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ´test:unit:channel-projection-hoist-preserves-records-and-first-match´
+    #[test]
+    fn channel_projection_hoist_preserves_records_and_first_match() {
+        use crate::requests::{Mode, tests::waiting};
+        let fixture = super::super::tests::Fixture::new();
+        let store = fixture.store();
+        for count in [0, 1, 17, super::super::MAX_RUNS] {
+            let mut records: Vec<_> = (0..count.max(1))
+                .map(|n| waiting(&format!("N{n}"), "1a", 3000, Mode::Audit))
+                .collect();
+            // Repeated inputs must each be projected, without a cache between them.
+            records.push(records[0].clone());
+            let mut collection = Collection::default();
+            for record in records.iter().take(count).rev() {
+                let mut row = imported(record, "alpha").expect("common record");
+                row.state = State::Marked;
+                collection.requests.push(row);
+            }
+            for selected in [None, Some(&collection)] {
+                assert_projection_equivalent(&store, &records, selected);
+            }
+            if count != 0 {
+                let mut actual = records.clone();
+                store
+                    .channel_project(&mut actual, Some(&collection))
+                    .unwrap();
+                assert_eq!(actual[0].value()["state"], "marked", "late match {count}");
+                // Duplicate common IDs cannot pass collection admission. At this
+                // internal seam, distinguish first-match from last-match lookup.
+                let duplicate = imported(&records[0], "alpha").unwrap();
+                collection.requests.push(duplicate);
+                assert_projection_equivalent(&store, &records, Some(&collection));
+                collection.requests.reverse();
+                assert_projection_equivalent(&store, &records, Some(&collection));
+                let mut reversed = records.clone();
+                store
+                    .channel_project(&mut reversed, Some(&collection))
+                    .unwrap();
+                assert_eq!(
+                    reversed[0].value(),
+                    records[0].value(),
+                    "first match {count}"
+                );
+            }
+        }
+    }
+
+    fn assert_projection_equivalent(
+        store: &Store,
+        records: &[RequestRecord],
+        collection: Option<&Collection>,
+    ) {
+        let mut before = records.to_vec();
+        if let Some(collection) = collection {
+            for record in &mut before {
+                if let Some(row) = collection
+                    .requests
+                    .iter()
+                    .find(|row| row.id == common_id(&store.loop_name, record.id()))
+                {
+                    *record = project(record, row, "unrecorded").expect("old projection");
+                }
+            }
+        }
+        let mut after = records.to_vec();
+        store
+            .channel_project(&mut after, collection)
+            .expect("new projection");
+        let bytes = |rows: &[RequestRecord]| {
+            serde_json::to_vec(&rows.iter().map(RequestRecord::value).collect::<Vec<_>>()).unwrap()
+        };
+        assert_eq!(
+            bytes(&before),
+            bytes(&after),
+            "complete projected record bytes"
+        );
+    }
 
     /// ´test:unit:base-agent-outcomes-decode-through-run-and-door-body´
     #[test]
