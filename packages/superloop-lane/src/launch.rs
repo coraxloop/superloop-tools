@@ -1306,6 +1306,15 @@ fn read_reservation_file(
     retire::absences::validate(&record)?;
     retire::rewrite::validate(&record)?;
     repin_door::validate(&record)?;
+    let workspace = crate::plan::workspace_snapshot(&record["plan"])?;
+    if workspace.as_ref().is_some_and(|snapshot| {
+        record["loop"] != snapshot.grant.loop_name || record["run"] != snapshot.grant.run
+    }) {
+        return Err(LaneError::input(
+            "door-workspace-context-differs",
+            "reservation and workspace identities differ",
+        ));
+    }
     Ok(Some(record))
 }
 
@@ -6783,6 +6792,9 @@ pub(crate) fn pinned_plan_from_record_admitted(
         ));
     }
     plan.select_launch_model(&record["model_selection"])?;
+    if crate::plan::workspace_snapshot(&record["plan"])?.is_some() {
+        plan.document["compute_workspace"] = record["plan"]["compute_workspace"].clone();
+    }
     plan.retain_attempt_wall(&record["plan"])?;
     compare_pinned_plan(&record["plan"], &plan.document)?;
     Ok((plan, settings))

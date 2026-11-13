@@ -2052,7 +2052,7 @@ impl Store {
         if index["schema"] != 1 || !index["groups"].is_object() {
             return Err(problem(
                 "requests-learned-index",
-                "index unavailable; requests rebuild-index LOOP rebuilds schema-six custody; older records need requests rewrite",
+                "index unavailable; requests rebuild-index LOOP rebuilds schema-six and schema-seven custody; older records need requests rewrite",
             ));
         }
         let key = json!([class, operation, shape]).to_string();
@@ -6270,3 +6270,7 @@ pub(crate) mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "workspace_tests.rs"]
+mod workspace_tests;

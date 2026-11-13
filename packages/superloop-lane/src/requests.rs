@@ -214,7 +214,7 @@ impl ModeSetting {
     }
 }
 
-/// One fully checked version-six door request.
+/// A checked legacy schema-six or workspace schema-seven door request.
 #[derive(Clone, Debug)]
 pub struct RequestRecord(Value);
 
@@ -246,8 +246,17 @@ impl RequestRecord {
                 keys.push(key);
             }
         }
-        if value["schema"] != 6 {
-            return Err(refusal("requests-record-refusal", "schema must equal 6"));
+        if !matches!(value["schema"].as_u64(), Some(6 | 7)) {
+            return Err(refusal(
+                "requests-record-refusal",
+                "schema must equal 6 or 7",
+            ));
+        }
+        if (value["schema"] == 7) != (value["operation"] == "compute-workspace") {
+            return Err(refusal(
+                "requests-record-refusal",
+                "workspace operation requires schema seven exclusively",
+            ));
         }
         if !exact(&value, &keys) {
             let missing = keys
@@ -489,6 +498,36 @@ impl RequestRecord {
                 return Err(refusal(
                     "requests-record-refusal",
                     "ref packet evidence differs",
+                ));
+            }
+        }
+        if value["operation"] == "compute-workspace" {
+            effect_keys.push("workspace");
+            let detail = execute_command::workspace::WorkspaceEffect::decode(
+                value["effect"]["workspace"].clone(),
+                value["class"].as_str().unwrap_or_default(),
+                value["loop"].as_str().unwrap_or_default(),
+                value["run"].as_str().unwrap_or_default(),
+            )
+            .map_err(|e| refusal("requests-record-refusal", e.to_string()))?;
+            let exit = match &detail.result.outcome {
+                execute_command::workspace::Outcome::Exited { code } => json!(code),
+                _ => Value::Null,
+            };
+            if value["effect"]["exit_status"] != exit
+                || (value["effect"]["state"] == "pending"
+                    && (detail.result.outcome != execute_command::workspace::Outcome::Unknown
+                        || !detail.steps.is_empty()))
+            {
+                return Err(refusal(
+                    "requests-record-refusal",
+                    "workspace outcome differs",
+                ));
+            }
+            if value["class"] != "compute" || value["shape_key"] != detail.context_digest {
+                return Err(refusal(
+                    "requests-record-refusal",
+                    "workspace learning identity differs",
                 ));
             }
         }
@@ -1063,7 +1102,7 @@ pub(crate) mod tests {
             .remove("ref_check");
         let refusal = RequestRecord::decode(old.clone()).expect_err("old schema");
         assert_eq!(refusal.kind, "requests-record-refusal");
-        assert_eq!(refusal.detail, "schema must equal 6");
+        assert_eq!(refusal.detail, "schema must equal 6 or 7");
         old["schema"] = json!(6);
         let refusal = RequestRecord::decode(old.clone()).expect_err("missing ref check");
         assert_eq!(refusal.kind, "requests-record-refusal");

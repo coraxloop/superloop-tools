@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- The lane tools now read an optional workspace grant in a protected run plan and schema-seven compute-workspace request records before any program writes either. Nothing writes them yet and the door selects no workspace operation, so existing runs, request records, door modes and node payloads behave as before. The request reader's refusal of an unsupported schema now reads `schema must equal 6 or 7`, and the learned-index status and rebuild messages name schema seven beside six; `requests rewrite` and `requests rebuild-index` leave schema-seven records unconverted. Deploy with no rewrite and no service step; once a later release writes its first workspace record, the loop cannot roll back below this release (``proto:superlooplane:workspace-readers``; ``proto:executecommand:compute-workspace``).
+
 - Inbound mail binding and verification can retain received custody through a selected library session, with distinct operations, unchanged pin records and read-only verification. The selected library session retains the existing pin record format (``prob:homes:ancestor-trust-resolves-the-namespace-uid-map``).
 
 ### Changed

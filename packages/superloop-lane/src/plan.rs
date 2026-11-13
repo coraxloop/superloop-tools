@@ -652,6 +652,7 @@ fn check_claude_command(document: &Value, words: &[&str]) -> Result<(), LaneErro
 /// Refuses a missing or expanded runtime confinement option or writable mount.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
+    let _workspace = workspace_snapshot(document)?;
     let backend = crate::settings::BoxBackend::from_plan(document)?;
     let argv = document["runtime_argv"]
         .as_array()
@@ -2239,6 +2240,23 @@ impl Plan {
         serde_json::to_string(&self.document)
             .map_err(|error| LaneError::operation("plan-json", error.to_string()))
     }
+}
+
+/// Validate the optional W1 snapshot without adding it to any existing plan writer.
+pub(crate) fn workspace_snapshot(
+    document: &Value,
+) -> Result<Option<execute_command::workspace::GrantSnapshot>, LaneError> {
+    document
+        .get("compute_workspace")
+        .map(|value| {
+            execute_command::workspace::GrantSnapshot::decode(
+                value.clone(),
+                document["loop"].as_str().unwrap_or_default(),
+                document["run"].as_str().unwrap_or_default(),
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))
+        })
+        .transpose()
 }
 
 #[cfg(test)]

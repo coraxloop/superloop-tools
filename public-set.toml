@@ -3463,3 +3463,18 @@ pattern = "packages/superloop-capture-admit/src/manifest.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-capture-admit/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/workspace.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/workspace/classification.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/workspace/evidence.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/workspace/tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/workspace_tests.rs"

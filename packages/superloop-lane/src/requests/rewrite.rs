@@ -149,7 +149,7 @@ impl Store {
         json!({"state":state,"reason":reason,"shapes":shapes,"limit":limit,
             "rebuild":if limit.is_null() {json!(format!("requests rebuild-index {}", self.loop_name))} else {Value::Null},
             "remedy":if limit.is_null() {Value::Null} else {json!("index capacity exhausted; rebuilding unchanged custody cannot reduce this limit")},
-            "precondition":"stop the door service before rebuilding; schema six only; older records require requests rewrite with the service stopped"})
+            "precondition":"stop the door service before rebuilding; schemas six and seven; older records require requests rewrite with the service stopped"})
     }
 
     /// Rebuild derived labels without migrating or changing request custody.
