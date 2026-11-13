@@ -283,14 +283,22 @@ fn workspace_preflight_reader_bounds_truncated_evidence() {
         "door-compute-locked-refusal",
         "door-compute-unregistered",
         "door-compute-root-refusal",
-        "door-changed-ref-refusal",
-        "door-request-refusal",
         "door-transport-pending",
         "door-requests-unregistered",
     ] {
         assert!(
             RequestRecord::decode(preflight(check, words.clone())).is_err(),
             "legacy check {check}"
+        );
+    }
+    for check in ["door-changed-ref-refusal", "door-request-refusal"] {
+        let row = preflight(
+            check,
+            json!({"schema":3,"wire_bytes":[1,2],"truncated":false}),
+        );
+        assert_eq!(
+            RequestRecord::decode(row.clone()).unwrap().into_value(),
+            row
         );
     }
     let too_long = json!({"schema":3,"wire_bytes":vec![255;maximum+1],"truncated":false});

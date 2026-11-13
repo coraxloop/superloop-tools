@@ -223,7 +223,8 @@ pub const MAX_WORKSPACE_PREFLIGHT_BYTES: usize = 65_536;
 
 // Evidence is a prefix, independently of the larger transport-frame bound.
 fn preflight_words(check: &str, value: &Value) -> bool {
-    if (value.get("schema") == Some(&json!(3))
+    if (!matches!(check, "door-request-refusal" | "door-changed-ref-refusal")
+        && value.get("schema") == Some(&json!(3))
         && (value.get("wire_bytes").is_some() || value.get("truncated").is_some()))
         || check.starts_with("door-workspace-")
     {
