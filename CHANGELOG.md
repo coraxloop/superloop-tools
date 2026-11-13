@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The `launch LOOP RUN --round STEP` usage now says its budget is per round, defaults to 3,600 seconds and is not inherited from dispatch. Pass `--budget SECONDS` on each resumed launch that needs a longer allowance; command behavior and existing runs are unchanged (``proto:superlooplane:resumed-letter-placement``).
+
 - The correspondence publication/deadline fixture's partial-failure poll now starts with fresh alpha content, so its round ends once both hosts have been polled, under a 120-second hang bound instead of the fixture's 400 ms round. Its slow transport gets a five-second feed deadline, below the stub's ten-second sleep, so it reaches and logs its call before the timeout. Both cases check the call log after the client exits. The partial-failure warning and cursor-isolation assertions remain; installed correspondence behavior is unchanged (``test:integration:failure-isolation-admin-publication-and-deadlines``).
 
 - A refused resumed-round request publication now removes the temporary it created and preserves an occupied destination; the preview’s `helper_preflight.checked` now reads `saved runtime environment and unoccupied final round-request name`, claiming nothing about the later inspector’s temporary. This does not yet roll back a published preparing reservation (``test:unit:round-request-failure-removes-only-its-temporary``).

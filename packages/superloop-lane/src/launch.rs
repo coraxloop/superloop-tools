@@ -258,7 +258,7 @@ impl LaunchRequest {
         let [loop_name, run, rest @ ..] = args else {
             return Err(LaneError::input(
                 "usage",
-                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--compute-workspace JSON] [--observe] [--proxy-bin FILE]",
+                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] (per round, default 3600 seconds, not inherited from dispatch) [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--compute-workspace JSON] [--observe] [--proxy-bin FILE]",
             ));
         };
         let mut letter = None;
