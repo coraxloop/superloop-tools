@@ -67,6 +67,77 @@ def emit(value):
     RESULT = value
 
 
+def stream_class(data, complete=True):
+    """Classify bounded bytes without retaining their contents as evidence."""
+    if not complete:
+        return "truncated"
+    if not data:
+        return "empty"
+    try:
+        events = [json.loads(line) for line in data.splitlines()]
+    except (ValueError, UnicodeError):
+        return "non-jsonl"
+    if any(not isinstance(event, dict) for event in events):
+        return "jsonl-non-object"
+    if any(event.get("type") == "item.completed"
+           and isinstance(event.get("item"), dict)
+           and event["item"].get("type") == "agent_message" for event in events):
+        return "jsonl-agent-message"
+    if any(set(event) == {"verdict", "scope", "reason"} for event in events):
+        return "verdict-object"
+    return "jsonl-object"
+
+
+def parse_answer(output, evidence):
+    """Read Codex exec --json events; diagnostics contain no vendor text."""
+    messages = []
+    observed_model = None
+    evidence["parse_class"] = "empty" if not output else "malformed-jsonl"
+    evidence["message_count"] = 0
+    for line in output.splitlines():
+        evidence["parse_class"] = "malformed-jsonl"
+        event = json.loads(line)
+        evidence["parse_class"] = "non-object-event"
+        if not isinstance(event, dict):
+            raise ValueError("event object required")
+        # A configured model is not an observation; ordinary CLI events may
+        # contain no response model, in which case it remains null.
+        if event.get("type") == "response.completed":
+            evidence["parse_class"] = "invalid-model-metadata"
+            response = event.get("response")
+            if not isinstance(response, dict):
+                raise ValueError("response metadata object required")
+            reported = response.get("model")
+            if reported is not None:
+                if (not isinstance(reported, str) or not reported.strip()
+                        or len(reported.encode("utf-8")) > 256):
+                    raise ValueError("invalid response model identifier")
+                if observed_model is not None and observed_model != reported:
+                    raise ValueError("conflicting response model identifiers")
+                observed_model = reported
+        evidence["parse_class"] = "invalid-item"
+        item = event.get("item", {})
+        if not isinstance(item, dict):
+            raise ValueError("item object required")
+        if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+            messages.append(item.get("text"))
+            evidence["message_count"] = len(messages)
+        evidence["parse_class"] = "unexpected-item"
+        if item and item.get("type") not in ("agent_message", "reasoning"):
+            raise ValueError("unexpected tool event")
+    evidence["parse_class"] = (
+        ("empty" if not output else "no-message") if not messages else "multiple-messages")
+    if len(messages) != 1:
+        raise ValueError("one final message required")
+    evidence["parse_class"] = "non-text-message"
+    if not isinstance(messages[0], str):
+        raise ValueError("text message required")
+    evidence["parse_class"] = "invalid-text-encoding"
+    evidence["message_bytes"] = len(messages[0].encode("utf-8"))
+    evidence["parse_class"] = "message"
+    return messages[0], observed_model
+
+
 def main():
     signal.signal(signal.SIGTERM, cancel)
     parent = os.getppid()
@@ -203,6 +274,7 @@ def main():
         selector.register(process.stdout, selectors.EVENT_READ)
         selector.register(process.stderr, selectors.EVENT_READ)
         output = bytearray()
+        EVIDENCE["answer"] = {"parse_class": "not-parsed"}
         offset = 0
         status = None
         while selector.get_map():
@@ -232,6 +304,8 @@ def main():
             if status:
                 break
         selector.close()
+        EVIDENCE["answer"]["stdout_bytes"] = len(output)
+        EVIDENCE["answer"]["stdout_class"] = stream_class(output, len(output) <= 65536)
         wait_remaining = max(0, end - time.monotonic())
         if status is None:
             try:
@@ -242,35 +316,8 @@ def main():
         if status:
             emit({"service_status": status, "reason": "door-agent-" + status, "rubric_digest": rubric_digest})
         else:
-            messages = []
-            observed_model = None
-            for line in output.splitlines():
-                event = json.loads(line)
-                if not isinstance(event, dict):
-                    raise ValueError("event object required")
-                # A CLI selection/header is not a measurement. Most CLI
-                # versions expose no response model at all: retain null then.
-                if event.get("type") == "response.completed":
-                    response = event.get("response")
-                    if not isinstance(response, dict):
-                        raise ValueError("response metadata object required")
-                    reported = response.get("model")
-                    if reported is not None:
-                        if not isinstance(reported, str) or not reported.strip() or len(reported.encode("utf-8")) > 256:
-                            raise ValueError("invalid response model identifier")
-                        if observed_model is not None and observed_model != reported:
-                            raise ValueError("conflicting response model identifiers")
-                        observed_model = reported
-                item = event.get("item", {})
-                if not isinstance(item, dict):
-                    raise ValueError("item object required")
-                if event.get("type") == "item.completed" and item.get("type") == "agent_message":
-                    messages.append(item.get("text"))
-                if item and item.get("type") not in ("agent_message", "reasoning"):
-                    raise ValueError("unexpected tool event")
-            if len(messages) != 1 or not isinstance(messages[0], str):
-                raise ValueError("one final message required")
-            emit({"text": messages[0], "model": observed_model, "rubric_digest": rubric_digest})
+            text, observed_model = parse_answer(output, EVIDENCE["answer"])
+            emit({"text": text, "model": observed_model, "rubric_digest": rubric_digest})
     except Cancelled:
         emit({"service_status": "timeout", "reason": "door-agent-cancelled", "rubric_digest": rubric_digest})
     except (ValueError, KeyError):
@@ -335,12 +382,19 @@ def main():
                 stderr_tail.append(chunk)
             else:
                 stderr_tail.append(b'\n[stderr end cut: cleanup deadline]\n')
+            if "answer" in EVIDENCE:
+                EVIDENCE["answer"]["stderr_bytes"] = stderr_tail.total
+                EVIDENCE["answer"]["stderr_class"] = stream_class(
+                    stderr_tail.data, stderr_tail.total == len(stderr_tail.data))
             code = process.returncode
             RESULT["agent_runner_exit"] = (
                 None if code is None else {"code": code} if code >= 0 else {"signal": -code})
             if RESULT.get("service_status") is not None:
-                RESULT["agent_runner_stderr_tail"] = stderr_tail.text()
-                RESULT["agent_runner_first_line"] = stderr_tail.first_line()
+                # Invalid output can be an answer sent to stderr. Record only
+                # lengths and classes, never that answer's contents.
+                invalid = RESULT.get("service_status") == "invalid-output"
+                RESULT["agent_runner_stderr_tail"] = "" if invalid else stderr_tail.text()
+                RESULT["agent_runner_first_line"] = "" if invalid else stderr_tail.first_line()
 
 
 if __name__ == "__main__":

@@ -889,6 +889,78 @@ pub(super) mod tests {
         (root, runner, input)
     }
 
+    /// The stub speaks the documented `codex exec --json` JSONL event grammar.
+    /// ´test:unit:agent-answer-diagnostics-distinguish-streams-without-content´
+    #[test]
+    fn agent_answer_diagnostics_distinguish_streams_without_content() {
+        let verdict = json!({"verdict":"refer","scope":"estate","reason":"private-answer"});
+        let message = json!({"type":"item.completed","item":{"type":"agent_message",
+            "text":verdict.to_string()}})
+        .to_string();
+        let events = format!(
+            "{{\"type\":\"thread.started\",\"thread_id\":\"fixture\"}}\n\
+            {message}\n\
+            {{\"type\":\"turn.completed\",\"usage\":{{}}}}\n"
+        );
+        let multiple = format!("{message}\n{message}\n");
+        let blank =
+            json!({"type":"item.completed","item":{"type":"agent_message","text":""}}).to_string();
+        for (stdout, stderr, class, status) in [
+            (events.as_str(), "", "message", "verdict"),
+            ("", "", "empty", "invalid-output"),
+            ("private-answer", "", "malformed-jsonl", "invalid-output"),
+            ("", events.as_str(), "empty", "invalid-output"),
+            (
+                "{\"type\":\"turn.completed\"}\n",
+                "",
+                "no-message",
+                "invalid-output",
+            ),
+            (multiple.as_str(), "", "multiple-messages", "invalid-output"),
+            (blank.as_str(), "", "message", "invalid-output"),
+            (
+                "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\"}}",
+                "",
+                "unexpected-item",
+                "invalid-output",
+            ),
+        ] {
+            let script = format!(
+                "#!/usr/bin/python3\n\
+                import json,sys\n\
+                assert sys.argv[1:3] == ['exec','--json']\n\
+                assert sys.argv[-1] == '-'\n\
+                json.load(sys.stdin)\n\
+                sys.stdout.write({})\n\
+                sys.stderr.write({})\n",
+                json!(stdout),
+                json!(stderr)
+            );
+            let (_root, mut runner, input) = fixture(&script);
+            runner.cap_ms = 120_000;
+            let outcome = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+            assert_eq!(
+                outcome.status, status,
+                "{class}: {:?}",
+                outcome.observations
+            );
+            let answer = &outcome.observations["answer"];
+            assert_eq!(answer["parse_class"], class, "{stdout:?} {stderr:?}");
+            assert_eq!(answer["stdout_bytes"], stdout.len());
+            assert_eq!(answer["stderr_bytes"], stderr.len());
+            assert_eq!(
+                outcome.runner_exit.as_ref().map(RunnerExit::value),
+                Some(json!({"code":0}))
+            );
+            assert!(!answer.to_string().contains("private-answer"));
+            if !stderr.is_empty() {
+                assert_eq!(answer["stderr_class"], "jsonl-agent-message");
+                assert_eq!(outcome.runner_stderr_tail.as_deref(), Some(""));
+                assert_eq!(outcome.runner_first_line, "");
+            }
+        }
+    }
+
     /// ´test:unit:door-runner-holds-refresh-lock-through-cli-and-refuses-contention´
     #[test]
     fn door_runner_holds_refresh_lock_through_cli_and_refuses_contention() {
