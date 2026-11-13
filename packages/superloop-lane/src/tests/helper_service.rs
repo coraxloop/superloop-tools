@@ -904,6 +904,10 @@ fn check_previous_sources(home: &Path, runs: &Path, podman: &Path, settled: &Val
         );
         next["launcher_pid"] = settled["launcher_pid"].clone();
         next["launcher_start"] = settled["launcher_start"].clone();
+        assert_eq!(
+            next["plan"]["compute_workspace"],
+            settled["plan"]["compute_workspace"]
+        );
         crate::launch::publish_reservation(&reservation, &next).expect("published next round");
         ready_and_stop(built_helper(home, runs, podman, false), runs, case);
     }

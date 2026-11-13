@@ -1104,8 +1104,14 @@ pub(crate) fn preflight_record(
     budget: u64,
 ) -> Result<Value, LaneError> {
     let request = LaunchRequest::parse(&[
-        record["loop"].as_str().unwrap_or_default().into(),
-        record["run"].as_str().unwrap_or_default().into(),
+        record["loop"]
+            .as_str()
+            .ok_or_else(|| LaneError::input("round-record", "loop is absent"))?
+            .into(),
+        record["run"]
+            .as_str()
+            .ok_or_else(|| LaneError::input("round-record", "run is absent"))?
+            .into(),
         "--round".into(),
         step.into(),
         "--budget".into(),
@@ -1128,7 +1134,7 @@ pub(crate) fn preflight_record(
         .push(round);
     next["phase"] = json!("preparing");
     next["active_round"] = json!(step);
-    next["letter_source"] = json!(run_dir.join(format!("mail-{step}.txt")));
+    next["letter_source"] = json!(super::steering::evidence_at(run_dir, step));
     Ok(next)
 }
 

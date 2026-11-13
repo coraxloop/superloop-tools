@@ -55,7 +55,11 @@ fn identity(record: &Value) -> Result<loop_home::mail::birth::Identity, LaneErro
     serde_json::from_value(record["mail_birth"].clone()).map_err(failure)
 }
 pub(super) fn evidence(plan: &Plan, step: &str) -> PathBuf {
-    plan.driver_dir.join(format!("mail-{step}.txt"))
+    evidence_at(&plan.driver_dir, step)
+}
+
+pub(super) fn evidence_at(run_dir: &Path, step: &str) -> PathBuf {
+    run_dir.join(format!("mail-{step}.txt"))
 }
 
 /// Read only the active round's retained, reservation-bound inbound mail.
