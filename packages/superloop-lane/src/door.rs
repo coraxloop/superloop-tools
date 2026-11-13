@@ -4026,16 +4026,18 @@ mod tests {
         let store = fixture.store();
         let filed = super::REQUEST_FILED.with(|slot| slot.borrow_mut().take());
         let ready = super::REQUEST_READY.with(|slot| slot.borrow_mut().take());
+        let writer_wait = crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.get();
         let server = thread::spawn(move || {
             super::REQUEST_FILED.with(|slot| *slot.borrow_mut() = filed);
             super::REQUEST_READY.with(|slot| *slot.borrow_mut() = ready);
+            crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(writer_wait);
             fixture_file_cap(cap);
             fixture_fault(fault);
             let (mut stream, _) = listener.accept()?;
             let started = Instant::now();
             let _socket_peer = peer_uid(&stream)?;
             let peer = 3000;
-            let request = frame_read_until(&mut stream, started + Duration::from_secs(2))?;
+            let request = frame_read_until(&mut stream, started + FIXTURE_HANG)?;
             let registration = Registration::from_row(
                 &json!({"name":"alpha","uid":41001}),
                 "alpha",
@@ -4245,7 +4247,7 @@ mod tests {
         frame_write_until(
             &mut client,
             &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":deadline_ms}),
-            Instant::now() + Duration::from_secs(2),
+            Instant::now() + FIXTURE_HANG,
         )
         .expect("fixture request");
         client.shutdown(Shutdown::Write).expect("request end");
@@ -4996,9 +4998,76 @@ mod tests {
         }
     }
 
+    // Common fixture hang bound, not a scheduling/performance assertion.
+    const FIXTURE_HANG: Duration = Duration::from_secs(120);
+
+    // Observe the credit without consuming it: the final-reader mutation must
+    // still encounter this very frame after the writer is released.
+    #[allow(unsafe_code)] // MSG_PEEK has no stable UnixStream wrapper.
+    fn fixture_peek_frame(client: &UnixStream, mut partial: impl FnMut()) -> Value {
+        let until = Instant::now() + FIXTURE_HANG;
+        let mut peek = |bytes: &mut [u8]| loop {
+            client
+                .set_read_timeout(Some(until.saturating_duration_since(Instant::now())))
+                .expect("fixture peek deadline");
+            // SAFETY: the live socket and writable slice remain borrowed for recv.
+            let received = unsafe {
+                libc::recv(
+                    client.as_raw_fd(),
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                    libc::MSG_PEEK | libc::MSG_WAITALL,
+                )
+            };
+            if received < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                panic!("fixture credit peek: {error}");
+            }
+            let received = usize::try_from(received).expect("received bytes");
+            assert!(received > 0, "fixture credit closed before its frame");
+            if received == bytes.len() {
+                break;
+            }
+            assert!(Instant::now() < until, "fixture partial credit deadline");
+            partial();
+            thread::yield_now();
+        };
+        let mut header = [0; 4];
+        peek(&mut header);
+        let length = usize::try_from(u32::from_be_bytes(header)).expect("frame length");
+        assert!(length <= super::FRAME_LIMIT);
+        let mut bytes = vec![0; 4 + length];
+        peek(&mut bytes);
+        serde_json::from_slice(&bytes[4..]).expect("fixture credit JSON")
+    }
+
+    fn fixture_fragmented_credit() {
+        let (client, mut writer) = UnixStream::pair().expect("fragmented frame pair");
+        let body = br#"{"type":"request-lock-wait","wait_ms":50}"#;
+        let (partial, observed) = std::sync::mpsc::sync_channel(1);
+        let server = thread::spawn(move || {
+            writer
+                .write_all(&u32::try_from(body.len()).expect("length").to_be_bytes())
+                .expect("frame header");
+            observed.recv_timeout(FIXTURE_HANG).expect("partial peek");
+            writer.write_all(body).expect("frame body");
+        });
+        let mut partial = Some(partial);
+        let frame = fixture_peek_frame(&client, || {
+            if let Some(partial) = partial.take() {
+                partial.send(()).expect("release fragmented body");
+            }
+        });
+        assert_eq!(frame["type"], "request-lock-wait");
+        server.join().expect("fragmented writer");
+    }
+
     // Keep one bounded read window across all request-lock credit frames.
     fn fixture_final_frame(client: &mut UnixStream) -> Value {
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = Instant::now() + FIXTURE_HANG;
         loop {
             let frame = frame_read_until(client, until).expect("reply or lock-wait credit");
             if frame["type"] != "request-lock-wait" {
@@ -5070,14 +5139,26 @@ mod tests {
     /// ´test:unit:door-allow-effect-precedes-waiting-and-label´
     #[test]
     fn door_allow_effect_precedes_waiting_and_label() {
+        fixture_fragmented_credit();
         let fixture = Fixture::new();
         fixture.set_floor("allow");
         let store = fixture.store();
         set_fixture_mode(&store, crate::requests::Mode::Allow);
         let (runner, calls, states) = counting_runner(&fixture);
-        let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 2000, None);
-        let mut client = send_probe(&socket, 2000);
-        let final_frame = frame_read(&mut client).expect("final frame");
+        crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(Some(FIXTURE_HANG));
+        let (socket, server) =
+            fixture_service(&fixture, runner, rubric(Some("allow")), 120_000, None);
+        crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(None);
+        let held = store
+            .fixture_exclusive_lock()
+            .expect("held admission writer");
+        let mut client = send_probe(&socket, 120_000);
+        let progress = fixture_peek_frame(&client, || {});
+        assert_eq!(progress["type"], "request-lock-wait");
+        assert!(progress["wait_ms"].as_u64().is_some_and(|wait| wait >= 50));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "effect before admission");
+        drop(held);
+        let final_frame = fixture_final_frame(&mut client);
         server.join().expect("service").expect("reply");
         assert_eq!(final_frame["queue_state"], "no-queue");
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
