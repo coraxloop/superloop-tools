@@ -88,18 +88,39 @@ def stream_class(data, complete=True):
     return "jsonl-object"
 
 
+def plain_stderr(data):
+    """A JSON object on any line may carry an answer, even in a mixed stream."""
+    for line in data.splitlines():
+        try:
+            value = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        if isinstance(value, dict):
+            return False
+    return True
+
+
 def parse_answer(output, evidence):
     """Read Codex exec --json events; diagnostics contain no vendor text."""
     messages = []
     observed_model = None
     evidence["parse_class"] = "empty" if not output else "malformed-jsonl"
     evidence["message_count"] = 0
+    evidence["completed_turns"] = 0
+    evidence["failed_turns"] = 0
+    evidence["error_events"] = 0
     for line in output.splitlines():
         evidence["parse_class"] = "malformed-jsonl"
         event = json.loads(line)
         evidence["parse_class"] = "non-object-event"
         if not isinstance(event, dict):
             raise ValueError("event object required")
+        if event.get("type") == "turn.completed":
+            evidence["completed_turns"] += 1
+        elif event.get("type") == "turn.failed":
+            evidence["failed_turns"] += 1
+        elif event.get("type") == "error":
+            evidence["error_events"] += 1
         # A configured model is not an observation; ordinary CLI events may
         # contain no response model, in which case it remains null.
         if event.get("type") == "response.completed":
@@ -372,6 +393,7 @@ def main():
             EVIDENCE["private_directory_removed"] = not os.path.exists(call)
         if process is not None:
             # Never wait for an escaped descendant retaining the pipe.
+            stderr_cleanup_cut = False
             while time.monotonic() < cleanup_end:
                 try:
                     chunk = os.read(process.stderr.fileno(), 8192)
@@ -381,20 +403,25 @@ def main():
                     break
                 stderr_tail.append(chunk)
             else:
+                stderr_cleanup_cut = True
+            stderr_stream = bytes(stderr_tail.data)
+            stderr_complete = stderr_tail.total == len(stderr_stream)
+            if stderr_cleanup_cut:
                 stderr_tail.append(b'\n[stderr end cut: cleanup deadline]\n')
             if "answer" in EVIDENCE:
                 EVIDENCE["answer"]["stderr_bytes"] = stderr_tail.total
                 EVIDENCE["answer"]["stderr_class"] = stream_class(
-                    stderr_tail.data, stderr_tail.total == len(stderr_tail.data))
+                    stderr_stream, stderr_complete)
             code = process.returncode
             RESULT["agent_runner_exit"] = (
                 None if code is None else {"code": code} if code >= 0 else {"signal": -code})
             if RESULT.get("service_status") is not None:
-                # Invalid output can be an answer sent to stderr. Record only
-                # lengths and classes, never that answer's contents.
-                invalid = RESULT.get("service_status") == "invalid-output"
-                RESULT["agent_runner_stderr_tail"] = "" if invalid else stderr_tail.text()
-                RESULT["agent_runner_first_line"] = "" if invalid else stderr_tail.first_line()
+                # Invalid output may carry an answer in any JSON object or cut stream.
+                suppress_stderr = (RESULT.get("service_status") == "invalid-output"
+                                   and (stderr_cleanup_cut or not stderr_complete
+                                        or not plain_stderr(stderr_stream)))
+                RESULT["agent_runner_stderr_tail"] = "" if suppress_stderr else stderr_tail.text()
+                RESULT["agent_runner_first_line"] = "" if suppress_stderr else stderr_tail.first_line()
 
 
 if __name__ == "__main__":

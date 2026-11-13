@@ -905,25 +905,49 @@ pub(super) mod tests {
         let multiple = format!("{message}\n{message}\n");
         let blank =
             json!({"type":"item.completed","item":{"type":"agent_message","text":""}}).to_string();
-        for (stdout, stderr, class, status) in [
-            (events.as_str(), "", "message", "verdict"),
-            ("", "", "empty", "invalid-output"),
-            ("private-answer", "", "malformed-jsonl", "invalid-output"),
-            ("", events.as_str(), "empty", "invalid-output"),
+        let failed = "{\"type\":\"turn.failed\",\"error\":{\"message\":\"private-answer\"}}\n\
+            {\"type\":\"error\",\"message\":\"private-answer\"}\n";
+        for (stdout, stderr, class, status, turns) in [
+            (events.as_str(), "", "message", "verdict", (1, 0, 0)),
+            ("", "", "empty", "invalid-output", (0, 0, 0)),
+            (
+                "private-answer",
+                "",
+                "malformed-jsonl",
+                "invalid-output",
+                (0, 0, 0),
+            ),
+            ("", events.as_str(), "empty", "invalid-output", (0, 0, 0)),
             (
                 "{\"type\":\"turn.completed\"}\n",
                 "",
                 "no-message",
                 "invalid-output",
+                (1, 0, 0),
             ),
-            (multiple.as_str(), "", "multiple-messages", "invalid-output"),
-            (blank.as_str(), "", "message", "invalid-output"),
+            (
+                multiple.as_str(),
+                "",
+                "multiple-messages",
+                "invalid-output",
+                (0, 0, 0),
+            ),
+            (blank.as_str(), "", "message", "invalid-output", (0, 0, 0)),
             (
                 "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\"}}",
                 "",
                 "unexpected-item",
                 "invalid-output",
+                (0, 0, 0),
             ),
+            (
+                "",
+                "usage limit reached\n",
+                "empty",
+                "invalid-output",
+                (0, 0, 0),
+            ),
+            (failed, "", "no-message", "invalid-output", (0, 1, 1)),
         ] {
             let script = format!(
                 "#!/usr/bin/python3\n\
@@ -948,15 +972,67 @@ pub(super) mod tests {
             assert_eq!(answer["parse_class"], class, "{stdout:?} {stderr:?}");
             assert_eq!(answer["stdout_bytes"], stdout.len());
             assert_eq!(answer["stderr_bytes"], stderr.len());
+            assert_eq!(answer["completed_turns"], turns.0);
+            assert_eq!(answer["failed_turns"], turns.1);
+            assert_eq!(answer["error_events"], turns.2);
             assert_eq!(
                 outcome.runner_exit.as_ref().map(RunnerExit::value),
                 Some(json!({"code":0}))
             );
             assert!(!answer.to_string().contains("private-answer"));
             if !stderr.is_empty() {
-                assert_eq!(answer["stderr_class"], "jsonl-agent-message");
-                assert_eq!(outcome.runner_stderr_tail.as_deref(), Some(""));
-                assert_eq!(outcome.runner_first_line, "");
+                if stderr == events {
+                    assert_eq!(answer["stderr_class"], "jsonl-agent-message");
+                    assert_eq!(outcome.runner_stderr_tail.as_deref(), Some(""));
+                    assert_eq!(outcome.runner_first_line, "");
+                } else {
+                    assert_eq!(answer["stderr_class"], "non-jsonl");
+                    assert_eq!(outcome.runner_stderr_tail.as_deref(), Some(stderr));
+                    assert_eq!(outcome.runner_first_line, "usage limit reached");
+                }
+            }
+        }
+    }
+
+    /// ´test:unit:agent-invalid-output-stderr-keeps-only-complete-plain-text´
+    #[test]
+    fn agent_invalid_output_stderr_keeps_only_complete_plain_text() {
+        let message = json!({"type":"item.completed","item":{"type":"agent_message",
+            "text":"private-answer"}})
+        .to_string();
+        let long = format!(
+            "{}\n{message}\n",
+            json!({"type":"reasoning","padding":"x".repeat(4200)})
+        );
+        let mixed = format!("warning from vendor\n{message}\n");
+        let other = "{\"type\":\"delta\",\"text\":\"private-answer\"}\n";
+        for (name, stderr, class, tail, first) in [
+            ("long-answer", long.as_str(), "truncated", "", ""),
+            ("mixed-answer", mixed.as_str(), "non-jsonl", "", ""),
+            ("other-json", other, "jsonl-object", "", ""),
+            (
+                "usage-limit",
+                "usage limit reached\n",
+                "non-jsonl",
+                "usage limit reached\n",
+                "usage limit reached",
+            ),
+        ] {
+            let script = format!(
+                "#!/usr/bin/python3\nimport json,sys\njson.load(sys.stdin)\nsys.stderr.write({})\n",
+                json!(stderr)
+            );
+            let (_root, mut runner, input) = fixture(&script);
+            runner.cap_ms = 120_000;
+            let outcome = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+            assert_eq!(outcome.status, "invalid-output", "{name}");
+            let answer = &outcome.observations["answer"];
+            assert_eq!(answer["stderr_class"], class, "{name}");
+            assert_eq!(answer["stderr_bytes"], stderr.len(), "{name}");
+            assert_eq!(outcome.runner_stderr_tail.as_deref(), Some(tail), "{name}");
+            assert_eq!(outcome.runner_first_line, first, "{name}");
+            if name != "usage-limit" {
+                assert!(!format!("{outcome:?}").contains("private-answer"), "{name}");
             }
         }
     }
