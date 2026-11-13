@@ -1,6 +1,7 @@
 //! Bounded, content-free accounting for an exclusive request-lock hold.
 use std::cell::RefCell;
 use std::fmt::Write as _;
+#[cfg(not(test))]
 use std::io::Write as _;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -212,7 +213,13 @@ impl Drop for Guard {
         // StoreLock's file field has already closed. Journal backpressure must
         // not extend the request flock; the bounded line was prepared under it.
         if let Some(line) = &self.line {
+            #[cfg(not(test))]
             let _logged = std::io::stderr().lock().write_all(&line.bytes[..line.len]);
+            #[cfg(test)]
+            #[allow(clippy::print_stderr)] // libtest captures the macro, not stderr().
+            {
+                eprint!("{}", String::from_utf8_lossy(&line.bytes[..line.len]));
+            }
         }
     }
 }

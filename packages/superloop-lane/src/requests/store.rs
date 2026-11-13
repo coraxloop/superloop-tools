@@ -3,6 +3,7 @@
 #[path = "channel.rs"]
 mod channel;
 pub(super) mod hold;
+mod queue;
 #[path = "rewrite.rs"]
 mod rewrite;
 mod snapshot;
@@ -54,6 +55,8 @@ const MAX_RUNS: usize = 512;
 const MAX_REQUESTS: usize = 16_384;
 pub(crate) const RUN_CAP_REMEDY: &str = "this run is at its own cap; once its round ends, retire LOOP RUN and continue the work in a new run";
 pub(crate) const LOOP_CAP_REMEDY: &str = "retire LOOP RUN for a finished run to free room";
+#[cfg(test)]
+type WriterPollHook = Box<dyn FnOnce(bool)>;
 static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 type RunSnapshot = (Option<Vec<u8>>, u64, Vec<RequestRecord>);
 
@@ -86,6 +89,7 @@ fn writer_lock_wait() -> Duration {
 // Diagnostic only: flock remains authoritative. Other processes and shared
 // readers have an unknown holder; never infer an identity from stale disk data.
 static LOCK_HOLDERS: Mutex<BTreeMap<(u64, u64), String>> = Mutex::new(BTreeMap::new());
+static WRITER_QUEUE: queue::Queue = queue::Queue::new();
 
 #[derive(Debug)]
 pub(crate) struct StoreLock {
@@ -300,6 +304,7 @@ thread_local! {
     static AFTER_READER_LOCK_CONTENTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_READER_LOCK_TIMEOUT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_READER_LOCK_ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_WRITER_POLL: std::cell::RefCell<Option<WriterPollHook>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_CONTENTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_TIMEOUT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -1130,6 +1135,7 @@ impl Store {
         changing: bool,
         deadline: Option<Instant>,
     ) -> Result<StoreLock, ReadFailure> {
+        let mut ticket = None;
         let started = Instant::now();
         let initial_credit = self.credited_wait();
         let deadline = deadline.map(|end| end + initial_credit);
@@ -1143,7 +1149,7 @@ impl Store {
         loop {
             let deadline =
                 base_deadline.map(|end| end + self.credited_wait().saturating_sub(initial_credit));
-            let result = self.lock_attempt(changing, deadline, true);
+            let result = self.lock_attempt(changing, deadline, true, &mut ticket);
             let deadline =
                 base_deadline.map(|end| end + self.credited_wait().saturating_sub(initial_credit));
             match result {
@@ -1189,6 +1195,7 @@ impl Store {
         changing: bool,
         caller_deadline: Option<Instant>,
         retry: bool,
+        ticket: &mut Option<queue::Ticket<'static>>,
     ) -> Result<StoreLock, ReadFailure> {
         #[cfg(test)]
         if !changing {
@@ -1273,6 +1280,17 @@ impl Store {
             )
             .into());
         }
+        let key = (stat.st_dev, stat.st_ino);
+        if changing {
+            if ticket.as_ref().is_some_and(|held| held.key() != key) {
+                return Err(problem(
+                    "requests-record-refusal",
+                    "request lock identity changed during retry",
+                )
+                .into());
+            }
+            ticket.get_or_insert_with(|| WRITER_QUEUE.join(key));
+        }
         let mut observation = changing.then(|| hold::Guard::prepare(self.request_id.as_deref()));
         let operation = if changing {
             libc::LOCK_EX
@@ -1286,7 +1304,6 @@ impl Store {
         let started = Instant::now();
         let mut contended = false;
         let mut holder = None;
-        let key = (stat.st_dev, stat.st_ino);
         let attempt_deadline = started + if changing { writer_wait } else { reader_wait };
         let initial_credit = self.credited_wait();
         loop {
@@ -1294,9 +1311,26 @@ impl Store {
                 .map(|end| end + self.credited_wait().saturating_sub(initial_credit));
             let deadline =
                 caller_deadline.map_or(attempt_deadline, |end| end.min(attempt_deadline));
+            let head = ticket.as_ref().is_none_or(queue::Ticket::is_head);
             // SAFETY: flock receives a live file descriptor and a fixed operation.
-            if unsafe { libc::flock(fd.as_raw_fd(), operation) } == 0 {
+            let status = if head {
+                unsafe { libc::flock(fd.as_raw_fd(), operation) }
+            } else {
+                -1
+            };
+            #[cfg(test)]
+            let poll_error = std::io::Error::last_os_error();
+            #[cfg(test)]
+            if changing {
+                AFTER_WRITER_POLL.with(|slot| {
+                    if let Some(hook) = slot.borrow_mut().take() {
+                        hook(status == 0);
+                    }
+                });
+            }
+            if status == 0 {
                 let acquired = Instant::now();
+                drop(ticket.take());
                 if contended {
                     self.log_lock_wait(changing, started, "acquired", holder.as_deref());
                 }
@@ -1330,7 +1364,18 @@ impl Store {
                 }
                 return Ok(guard);
             }
-            let error = std::io::Error::last_os_error();
+            let error = if head {
+                #[cfg(test)]
+                {
+                    poll_error
+                }
+                #[cfg(not(test))]
+                {
+                    std::io::Error::last_os_error()
+                }
+            } else {
+                std::io::Error::from_raw_os_error(libc::EAGAIN)
+            };
             if error.kind() == std::io::ErrorKind::WouldBlock {
                 contended = true;
                 holder = LOCK_HOLDERS
@@ -1363,10 +1408,13 @@ impl Store {
                     });
                 }
                 let sleep_started = Instant::now();
-                std::thread::sleep(
-                    Duration::from_millis(10)
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                );
+                let bound = Duration::from_millis(10)
+                    .min(deadline.saturating_duration_since(Instant::now()));
+                if !head && let Some(ticket) = ticket.as_ref() {
+                    ticket.wait_turn(bound);
+                } else {
+                    std::thread::sleep(bound);
+                }
                 if let Some(wait) = &self.wait_credit {
                     wait.credit(sleep_started.elapsed());
                 }
@@ -1406,7 +1454,7 @@ impl Store {
     }
 
     fn log_lock_wait(&self, changing: bool, started: Instant, outcome: &str, holder: Option<&str>) {
-        if self.request_id.is_none() {
+        if !changing && self.request_id.is_none() {
             return;
         }
         let _logged = writeln!(
@@ -1750,19 +1798,13 @@ impl Store {
         Ok(())
     }
 
-    fn commit_run(
+    fn updated_learned(
         &self,
         run: &str,
         old: Option<&[u8]>,
-        revision: u64,
         requests: &[RequestRecord],
-    ) -> Result<(), LaneError> {
-        let custody = self.custody(run)?;
-        let prior_runs = {
-            let _phase = hold::phase(hold::Phase::InventoryBefore);
-            self.all_runs(None)?
-        };
-        self.repair_shapes(&prior_runs)?;
+        prior_runs: &[(String, u64, Vec<RequestRecord>)],
+    ) -> Result<Value, LaneError> {
         let index = hold::phase(hold::Phase::Learned);
         let mut learned = self
             .read_learned()
@@ -1780,6 +1822,23 @@ impl Store {
             Self::index_judgement(&mut learned, row.value(), prior.map(RequestRecord::value));
         }
         drop(index);
+        Ok(learned)
+    }
+
+    fn commit_run(
+        &self,
+        run: &str,
+        old: Option<&[u8]>,
+        revision: u64,
+        requests: &[RequestRecord],
+    ) -> Result<(), LaneError> {
+        let custody = self.custody(run)?;
+        let prior_runs = {
+            let _phase = hold::phase(hold::Phase::InventoryBefore);
+            self.all_runs(None)?
+        };
+        self.repair_shapes(&prior_runs)?;
+        let learned = self.updated_learned(run, old, requests, &prior_runs)?;
         let prior_shapes = read_leaf(self.state_dir(), SHAPES_FILE, self.owner, MAX_SHAPES_BYTES)?;
         let next = encode_run(run, revision, requests)?;
         let runs = {
@@ -2223,7 +2282,7 @@ impl Store {
         let _lock = if retry {
             self.lock_retry(false, deadline)
         } else {
-            self.lock_attempt(false, deadline, false)
+            self.lock_attempt(false, deadline, false, &mut None)
         }
         .map_err(ReadFailure::into_error)?;
         self.read_run(run)?
