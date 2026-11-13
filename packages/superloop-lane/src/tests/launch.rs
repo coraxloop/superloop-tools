@@ -1509,6 +1509,7 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
         budget: 3600,
         dry_run: true,
         expect_digest: None,
+        compute_workspace: None,
         observe: false,
         podman_bin: podman,
         proxy_bin: Some(home.join("proxy-fixture")),
@@ -1720,6 +1721,26 @@ exit 2
     assert_eq!(preview["proxy_service"]["verdict"], "not-applicable");
     assert_eq!(preview["plan"]["door"]["stub_sha256"], stub_digest);
     assert_eq!(preview["selection"]["backend"], "codex");
+    let declared = json!({"grant":crate::plan::fixture_workspace_snapshot()["grant"],"baseline_environment_is_public":true}).to_string();
+    fs::write(&settings,format!("{source}workspace_policy = {{ quick_policy_digest = {:?}, blacklist_digest = {:?} }}\n", "a".repeat(64),"b".repeat(64))).expect("published policy identities");
+    request.compute_workspace = Some(declared);
+    let declared_preview = run(home, &request).expect("workspace preview");
+    assert_eq!(
+        declared_preview["plan"]["compute_workspace"],
+        crate::plan::fixture_workspace_snapshot()
+    );
+    assert!(
+        !runs.join(".reservation-R.json").exists(),
+        "preview publishes no grant"
+    );
+    assert_eq!(
+        fs::read(&allocations).unwrap(),
+        allocation_before,
+        "preview allocates no identity"
+    );
+    request.compute_workspace = None;
+    fs::write(&settings, &source).expect("restore legacy configuration");
+
     request.backend = Some(BoxBackend::Codex);
     let explicit = run(home, &request).expect("explicit Codex preview");
     assert_eq!(explicit["plan"], preview["plan"]);
@@ -2139,7 +2160,7 @@ exit 2
     );
     assert_eq!(
         fs::read_to_string(home.join("container-calls")).expect("named image probes"),
-        "called\n".repeat(23)
+        "called\n".repeat(24)
     );
     let build_report = custody.join("image-build.json");
     let original_report = fs::read(&build_report).expect("pinned build report");
@@ -2506,6 +2527,7 @@ fn proxy_refresh_preserves_live_helper_pins() {
         budget: 3600,
         dry_run: true,
         expect_digest: None,
+        compute_workspace: None,
         observe: true,
         podman_bin: podman.clone(),
         proxy_bin: Some(home.join("proxy-fixture")),
@@ -2645,7 +2667,9 @@ fn proxy_refresh_preserves_live_helper_pins() {
         super::reader_custody::exercise(home, &runs, &podman);
         return;
     }
-    if std::env::var_os("SUPERLOOP_CREATION_PROOF").is_some() {
+    if std::env::var_os("SUPERLOOP_CREATION_PROOF").is_some()
+        || std::env::var_os("SUPERLOOP_WORKSPACE_CREATION_PROOF").is_some()
+    {
         super::runtime_preparation::exercise_creation(home, &runs, &podman);
         return;
     }
@@ -3518,6 +3542,7 @@ fn refresh_during_changing_launch(
         budget: launch.budget,
         dry_run: true,
         expect_digest: None,
+        compute_workspace: None,
         observe: false,
         podman_bin: launch.podman_bin.clone(),
         proxy_bin: launch.proxy_bin.clone(),

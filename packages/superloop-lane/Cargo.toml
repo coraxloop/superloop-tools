@@ -21,6 +21,7 @@ lane-lifecycle.workspace = true
 loop-home.workspace = true
 request-core.workspace = true
 nix.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 toml.workspace = true

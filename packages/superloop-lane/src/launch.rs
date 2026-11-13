@@ -58,6 +58,7 @@ pub mod rounds;
 pub(crate) mod seed;
 pub mod settle;
 pub mod steering;
+mod workspace;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeclaredSource {
@@ -145,6 +146,7 @@ pub struct LaunchRequest {
     pub budget: u64,
     pub dry_run: bool,
     pub expect_digest: Option<String>,
+    pub compute_workspace: Option<String>,
     pub observe: bool,
     pub podman_bin: PathBuf,
     pub proxy_bin: Option<PathBuf>,
@@ -256,7 +258,7 @@ impl LaunchRequest {
         let [loop_name, run, rest @ ..] = args else {
             return Err(LaneError::input(
                 "usage",
-                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]",
+                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--compute-workspace JSON] [--observe] [--proxy-bin FILE]",
             ));
         };
         let mut letter = None;
@@ -271,13 +273,23 @@ impl LaunchRequest {
         let mut effort = None;
         let mut door_scope = None;
         let mut expect_digest = None;
+        let mut compute_workspace = None;
         let mut index = 0;
         while index < rest.len() {
             match rest[index].as_str() {
                 "--dry-run" if !dry_run => dry_run = true,
                 "--observe" if !observe => observe = true,
-                "--letter" | "--round" | "--budget" | "--podman-bin" | "--proxy-bin"
-                | "--model" | "--effort" | "--door-scope" | "--expect-digest" | "--backend" => {
+                "--letter"
+                | "--round"
+                | "--budget"
+                | "--podman-bin"
+                | "--proxy-bin"
+                | "--model"
+                | "--effort"
+                | "--door-scope"
+                | "--expect-digest"
+                | "--backend"
+                | "--compute-workspace" => {
                     let option = rest[index].as_str();
                     let value = rest.get(index + 1).ok_or_else(|| {
                         LaneError::input("usage", format!("{option} needs a value"))
@@ -292,6 +304,7 @@ impl LaunchRequest {
                         "--backend" => &mut backend,
                         "--door-scope" => &mut door_scope,
                         "--expect-digest" => &mut expect_digest,
+                        "--compute-workspace" => &mut compute_workspace,
                         _ => &mut effort,
                     };
                     if slot.replace(value.clone()).is_some() {
@@ -330,6 +343,7 @@ impl LaunchRequest {
                 || observe
                 || door_scope.is_some()
                 || backend.is_some()
+                || compute_workspace.is_some()
             {
                 return Err(LaneError::input(
                     "round-selection",
@@ -358,6 +372,7 @@ impl LaunchRequest {
             budget,
             dry_run,
             expect_digest,
+            compute_workspace,
             observe,
             podman_bin: podman_bin.map_or_else(|| PathBuf::from("/usr/bin/podman"), PathBuf::from),
             proxy_bin: proxy_bin.map(PathBuf::from),
@@ -1933,6 +1948,24 @@ fn private_argv(
         "--backend".into(),
         backend.name().into(),
     ];
+    if let Some(declaration) = &request.compute_workspace {
+        let digest = match request.expect_digest.as_ref() {
+            Some(digest) => digest.clone(),
+            None if request.dry_run => workspace::declaration(declaration)?.digest,
+            None => {
+                return Err(LaneError::input(
+                    "workspace-digest",
+                    "private preparation requires the reviewed grant digest",
+                ));
+            }
+        };
+        argv.extend([
+            "--compute-workspace".into(),
+            declaration.clone(),
+            "--workspace-digest".into(),
+            digest,
+        ]);
+    }
     if let Some(source) = &request.rotation_source {
         argv.extend(["--rotation-sha256".into(), source.digest.clone()]);
     }
@@ -3809,6 +3842,20 @@ fn run_with_program(
         (0, 0),
         request.backend,
     )?;
+    let prior_workspace = read_reservation(&reservation_path(
+        plan.driver_dir
+            .parent()
+            .ok_or_else(|| LaneError::input("runs-root", "run has no parent"))?,
+        &request.run,
+    ))?;
+    workspace::retain_or_declare(
+        &mut plan,
+        &settings,
+        request.compute_workspace.as_deref(),
+        request.expect_digest.as_deref(),
+        request.dry_run,
+        prior_workspace.as_ref(),
+    )?;
     let selected_backend = crate::settings::BoxBackend::from_plan(&plan.document)?;
     let entry = settings
         .entry_bin
@@ -4010,7 +4057,7 @@ fn run_with_program(
             |record| reaping::reap_interrupted_scope(record, owner_home),
         );
     }
-    if request.expect_digest.is_some() {
+    if request.expect_digest.is_some() && request.compute_workspace.is_none() {
         return Err(LaneError::input(
             "settlement-digest",
             "--expect-digest applies only to interrupted recovery",
@@ -6426,6 +6473,7 @@ pub fn private_make(
     door_scope: crate::door::Scope,
     custody: &crate::runtime_entry::Custody,
     backend: crate::settings::BoxBackend,
+    workspace_declaration: Option<(&str, &str)>,
 ) -> Result<Value, LaneError> {
     let (mut plan, settings) =
         crate::load_launch_plan(owner_home, loop_name, run, (0, 0), Some(backend))?;
@@ -6436,6 +6484,16 @@ pub fn private_make(
         .ok_or_else(|| LaneError::input("runs-root", "run has no parent"))?
         .to_path_buf();
     let _lock = lock_runs_root(&root, true, 0)?;
+    let prior_workspace = read_reservation(&reservation_path(&root, run))?;
+    workspace::retain_or_declare(
+        &mut plan,
+        &settings,
+        workspace_declaration.map(|(text, _)| text),
+        workspace_declaration.map(|(_, digest)| digest),
+        false,
+        prior_workspace.as_ref(),
+    )?;
+
     let (base, count) = worker_range(owner_home, loop_name)?;
     exercise_resources::verify_worker_block(base, count)?;
     let reserved = custody.reserved_uids(owner_home, loop_name)?;
@@ -6514,9 +6572,12 @@ pub fn private_make(
             "reserved worker identity differs",
         ));
     }
-    custody
-        .create_birth(owner_home, loop_name, &birth, "reserve")
-        .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
+    let workspace_declared = plan.document.get("compute_workspace").is_some();
+    if !workspace_declared {
+        custody
+            .create_birth(owner_home, loop_name, &birth, "reserve")
+            .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
+    }
     let mut next = initial_reservation(
         &plan,
         loop_name,
@@ -6548,6 +6609,11 @@ pub fn private_make(
         publish_reservation(&reservation, &next)?;
         Vec::new()
     };
+    if workspace_declared {
+        custody
+            .create_birth(owner_home, loop_name, &birth, "reserve")
+            .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
+    }
     let mut result =
         match home::make_home_in_namespace(&plan, &settings, &bytes, owner_home, loop_name) {
             Ok(report) => report,

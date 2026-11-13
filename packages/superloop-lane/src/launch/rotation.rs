@@ -2615,6 +2615,7 @@ fn execute_rotation_at(
             budget: 3600,
             dry_run: false,
             expect_digest: None,
+            compute_workspace: None,
             observe: false,
             podman_bin: podman,
             proxy_bin: None,

@@ -176,6 +176,7 @@ mod tests {
             budget: 3600,
             dry_run: true,
             expect_digest: None,
+            compute_workspace: None,
             observe: true,
             podman_bin: "/usr/bin/true".into(),
             proxy_bin: None,

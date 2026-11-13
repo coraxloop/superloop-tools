@@ -307,6 +307,14 @@ fn invoke(
             "private home form is incomplete",
         ));
     };
+    let (workspace_declaration, rest) = match rest {
+        [option, declaration, digest_option, digest, tail @ ..]
+            if option == "--compute-workspace" && digest_option == "--workspace-digest" =>
+        {
+            (Some((declaration.as_str(), digest.as_str())), tail)
+        }
+        _ => (None, rest),
+    };
     let (rotation_digest, observe) = match rest {
         [] => (None, false),
         [option] if option == "--observe" => (None, true),
@@ -361,6 +369,7 @@ fn invoke(
         },
         custody,
         BoxBackend::parse(backend)?,
+        workspace_declaration,
     )?;
     Ok(report)
 }

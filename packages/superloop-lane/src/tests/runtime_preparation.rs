@@ -2,6 +2,7 @@
 use super::helper_service;
 use loop_home::CommandSpec;
 use serde_json::Value;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -227,6 +228,17 @@ fn native_creation_completes_reserve_and_finish() {
 }
 
 /// # Panics
+/// Panics if the real private writer loses the reviewed workspace binding.
+/// ´test:crate:workspace-native-creation-publishes-the-reviewed-grant´
+#[test]
+fn workspace_native_creation_publishes_the_reviewed_grant() {
+    proof(
+        "SUPERLOOP_WORKSPACE_CREATION_PROOF",
+        "NATIVE-CREATION-MEASURED",
+    );
+}
+
+/// # Panics
 /// Panics if a production creation receipt, binding or placed home disagrees with its reservation.
 pub(super) fn exercise_creation(home: &Path, runs: &Path, program: &Path) {
     let record = helper_service::prepare(home, runs, program);
@@ -258,7 +270,7 @@ shutil.rmtree(sys.argv[2])
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mut request = creation_request(home, runs, program);
+    let (mut request, expected_workspace) = workspace_creation_request(home, runs, program, worker);
     request.argv[0] = "/usr/bin/podman".into();
     let output = run(&request);
     assert!(
@@ -290,6 +302,8 @@ worker=Path(sys.argv[2]);assert (worker/'brief.txt').read_bytes()==(home/'scratc
 auth=json.loads((worker/'.codex/auth.json').read_text());assert auth['tokens']['refresh_token']==''
 assert (root/'workers'/identity['name']/'mail').is_dir()
 print('NATIVE-CREATION-MEASURED')
+assert json.loads((Path(record['plan']['driver_dir'])/'plan.json').read_text()) == record['plan']
+print(json.dumps(record['plan'].get('compute_workspace')))
 ",
         worker,
     )
@@ -300,13 +314,81 @@ print('NATIVE-CREATION-MEASURED')
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let measured: Value = serde_json::from_str(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .expect("measured plan"),
+    )
+    .expect("grant observation");
+    assert_eq!(
+        measured, expected_workspace,
+        "native writer retains exactly the reviewed grant"
+    );
     std::io::Write::write_all(&mut std::io::stdout().lock(), &output.stdout)
         .expect("measurement marker");
 }
 
 /// # Panics
+/// Panics if the stale private apply publishes an identity or the fixture cannot prepare policy.
+fn workspace_creation_request(
+    home: &Path,
+    runs: &Path,
+    program: &Path,
+    worker: &str,
+) -> (CommandSpec, Value) {
+    let expected_workspace = if std::env::var_os("SUPERLOOP_WORKSPACE_CREATION_PROOF").is_some() {
+        let settings = home.join(".config/loops/alpha/workers.toml");
+        let mut source = fs::read_to_string(&settings).expect("existing settings");
+        write!(
+            source,
+            "\nworkspace_policy = {{ quick_policy_digest = {:?}, blacklist_digest = {:?} }}\n",
+            "a".repeat(64),
+            "b".repeat(64)
+        )
+        .expect("policy text");
+        fs::write(settings, source).expect("owner policy identities");
+        crate::plan::fixture_workspace_snapshot()
+    } else {
+        Value::Null
+    };
+    let declaration = (!expected_workspace.is_null()).then(|| serde_json::json!({"grant":expected_workspace["grant"],"baseline_environment_is_public":true}).to_string());
+    if let Some(declaration) = declaration.as_deref() {
+        let mut stale = creation_request(home, runs, program, Some((declaration, &"0".repeat(64))));
+        stale.argv[0] = "/usr/bin/podman".into();
+        let refused = run(&stale);
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("workspace-digest"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        let unchanged = helper_service::namespace_python(home,"import sys\nfrom pathlib import Path\nh=Path(sys.argv[1]);assert not (h/'.var/loops/alpha/runs/.reservation-R.json').exists();assert not Path(sys.argv[2]).exists();assert not list((h/'.var/loops/alpha/.mail-births').glob('*.toml'))",worker).expect("stale act leaves no identity");
+        assert!(
+            unchanged.status.success(),
+            "{}",
+            String::from_utf8_lossy(&unchanged.stderr)
+        );
+    }
+    let request = creation_request(
+        home,
+        runs,
+        program,
+        declaration
+            .as_deref()
+            .map(|text| (text, expected_workspace["digest"].as_str().unwrap())),
+    );
+    (request, expected_workspace)
+}
+
+/// # Panics
 /// Panics if the production creation bundle cannot pin the fixture inputs.
-fn creation_request(home: &Path, runs: &Path, program: &Path) -> CommandSpec {
+fn creation_request(
+    home: &Path,
+    runs: &Path,
+    program: &Path,
+    workspace: Option<(&str, &str)>,
+) -> CommandSpec {
     let image = binary();
     let letter = home.join("scratchpad/first-letter");
     let held_home = fs::File::open(home).expect("home descriptor").into();
@@ -315,7 +397,7 @@ fn creation_request(home: &Path, runs: &Path, program: &Path) -> CommandSpec {
     let held_letter = fs::File::open(letter_dir)
         .expect("letter descriptor")
         .into();
-    let argv = vec![
+    let mut argv = vec![
         "unshare".into(),
         image.display().to_string(),
         "_make-home".into(),
@@ -343,6 +425,17 @@ fn creation_request(home: &Path, runs: &Path, program: &Path) -> CommandSpec {
         "codex".into(),
         "--observe".into(),
     ];
+    if let Some((declaration, digest)) = workspace {
+        argv.splice(
+            argv.len() - 1..argv.len() - 1,
+            [
+                "--compute-workspace".into(),
+                declaration.into(),
+                "--workspace-digest".into(),
+                digest.into(),
+            ],
+        );
+    }
     crate::creation_entry::command(
         program,
         &argv,
