@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The door attribution fixture tolerates scheduling stalls while waiting for its four probe connections and gives real fixture operations a generous hang bound. A controlled delay pins the accept bound without sleeping; the separate deadline test still checks production budgets, and installed programs are unchanged (``prob:gates:load-sensitive-tests-made-deterministic``).
+
 - The door-agent budget fixture drives deadline selection with a controlled clock and checks real descendant cleanup after an observed readiness event. CPU stalls no longer consume its deliberately short logical timeout. Live exercise and door-call deadlines are unchanged, and installed programs behave as before (``prob:gates:load-sensitive-tests-made-deterministic``; ``test:unit:agent-probes-separate-semantic-and-timeout-budgets``).
 
 - The door effect-order fixture now forces a store-lock progress frame before reading the final reply, with a generous hang bound. Its effect, queue and label assertions no longer depend on the first frame being final; production behavior is unchanged (``prob:gates:load-sensitive-tests-made-deterministic``).
