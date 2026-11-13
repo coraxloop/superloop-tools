@@ -3496,3 +3496,9 @@ pattern = "packages/execute-command/src/workspace/tests.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/requests/workspace_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/workspace_executor.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/workspace_executor_tests.rs"
