@@ -20,7 +20,7 @@ fn runtime_preparation_executes_received_podman() {
 
 /// # Panics
 /// Panics if the production namespace fixture fails or omits its measured marker.
-pub(super) fn proof(flag: &str, marker: &str) {
+pub(super) fn proof(flag: &str, marker: &str) -> String {
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
@@ -45,6 +45,28 @@ pub(super) fn proof(flag: &str, marker: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(stdout.contains(marker), "{stdout}");
+    stdout.into_owned()
+}
+
+/// Read the grant measured from production native creation, not a fixture member.
+///
+/// # Panics
+/// Panics if the writer or its read-back does not produce the exact declaration.
+pub fn published_workspace() -> Value {
+    static SNAPSHOT: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    SNAPSHOT
+        .get_or_init(|| {
+            let output = proof(
+                "SUPERLOOP_WORKSPACE_CREATION_PROOF",
+                "WORKSPACE-DECLARATION ",
+            );
+            let row = output
+                .lines()
+                .find_map(|line| line.strip_prefix("WORKSPACE-DECLARATION "))
+                .expect("production grant marker");
+            serde_json::from_str(row).expect("production grant")
+        })
+        .clone()
 }
 
 pub(super) struct MappedStorage(pub(super) PathBuf, pub(super) String);
@@ -325,6 +347,8 @@ print(json.dumps(record['plan'].get('compute_workspace')))
         measured, expected_workspace,
         "native writer retains exactly the reviewed grant"
     );
+    writeln!(std::io::stdout().lock(), "WORKSPACE-DECLARATION {measured}")
+        .expect("production grant marker");
     std::io::Write::write_all(&mut std::io::stdout().lock(), &output.stdout)
         .expect("measurement marker");
 }

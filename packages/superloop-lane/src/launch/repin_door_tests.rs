@@ -1711,8 +1711,9 @@ fn add_workspace(fixture: &Fixture) -> (Value, Vec<u8>) {
     let mut record = read_reservation(&fixture.path)
         .expect("read")
         .expect("reservation");
-    record["plan"]["compute_workspace"] = crate::plan::fixture_workspace_snapshot();
-    publish_reservation(&fixture.path, &record).expect("W2a-shaped fixture");
+    record["plan"]["compute_workspace"] = crate::tests::published_workspace();
+    publish_reservation(&fixture.path, &record)
+        .expect("production-written declaration in lifecycle fixture");
     (record, fs::read(&fixture.path).expect("original bytes"))
 }
 

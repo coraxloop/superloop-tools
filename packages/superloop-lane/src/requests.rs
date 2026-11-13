@@ -218,12 +218,24 @@ impl ModeSetting {
 #[derive(Clone, Debug)]
 pub struct RequestRecord(Value);
 
-// A schema-three refusal may precede JSON/UTF-8 decoding. Preserve the bounded
-// wire image, not a lossy rendering or a successfully decoded envelope.
+/// Maximum raw frame prefix retained by a workspace preflight refusal.
+pub const MAX_WORKSPACE_PREFLIGHT_BYTES: usize = 65_536;
+
+// Evidence is a prefix, independently of the larger transport-frame bound.
 fn preflight_words(check: &str, value: &Value) -> bool {
-    if value.get("schema") == Some(&json!(3)) || check.starts_with("door-workspace-") {
-        let maximum = execute_command::workspace::MAX_WIRE_BYTES;
-        let workspace_wire = exact(value, &["schema", "wire_bytes", "truncated"])
+    if (value.get("schema") == Some(&json!(3))
+        && (value.get("wire_bytes").is_some() || value.get("truncated").is_some()))
+        || check.starts_with("door-workspace-")
+    {
+        let maximum = MAX_WORKSPACE_PREFLIGHT_BYTES;
+        return matches!(
+            check,
+            "door-workspace-unregistered"
+                | "door-workspace-context-differs"
+                | "door-workspace-protocol-refusal"
+                | "door-caller-authority-refusal"
+                | "door-review-compute-refusal"
+        ) && exact(value, &["schema", "wire_bytes", "truncated"])
             && value["schema"] == 3
             && value["wire_bytes"].as_array().is_some_and(|bytes| {
                 bytes.len() <= maximum
@@ -231,15 +243,10 @@ fn preflight_words(check: &str, value: &Value) -> bool {
                         .iter()
                         .all(|byte| byte.as_u64().is_some_and(|byte| byte <= 255))
                     && (value["truncated"] == false
-                        || (value["truncated"] == true
-                            && bytes.len() == maximum
-                            && check == "door-workspace-protocol-refusal"))
+                        || (value["truncated"] == true && bytes.len() == maximum))
             });
-        if workspace_wire {
-            return true;
-        }
     }
-    if check.starts_with("door-workspace-") || value.to_string().len() > 65_536 {
+    if value.to_string().len() > 65_536 {
         return false;
     }
     // Legacy envelope/ref checks can precede argv decoding; retain their contract.

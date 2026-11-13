@@ -531,6 +531,7 @@ pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
 /// ´test:crate:built-helper-resume-retains-mail-custody´
 #[test]
 fn built_helper_resume_retains_mail_custody() {
+    let workspace = super::published_workspace();
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
@@ -538,6 +539,7 @@ fn built_helper_resume_retains_mail_custody() {
             "--nocapture",
         ])
         .env("SUPERLOOP_ROUND_PROOF", "1")
+        .env("SUPERLOOP_ROUND_WORKSPACE", workspace.to_string())
         .env("SUPERLOOP_REFRESH_PROOF", "1")
         .env("_CONTAINERS_USERNS_CONFIGURED", "1")
         .env(
@@ -741,6 +743,12 @@ fn template_directories(home: &Path) -> [fs::File; 3] {
 /// Panics if the built helper refuses the correctly provisioned synthetic rounds.
 pub(super) fn rounds_acceptance(home: &Path, runs: &Path, podman: &Path) {
     let mut record = prepare(home, runs, podman);
+    record["plan"]["compute_workspace"] = serde_json::from_str(
+        &std::env::var("SUPERLOOP_ROUND_WORKSPACE").expect("production declaration supplied"),
+    )
+    .expect("grant");
+    crate::launch::publish_reservation(&runs.join(".reservation-R.json"), &record)
+        .expect("declaration retained for helper");
     let _worker = MappedWorker {
         home: home.to_path_buf(),
         worker: record["plan"]["home"].as_str().expect("worker").into(),
@@ -848,6 +856,10 @@ fn check_round_previews(home: &Path, runs: &Path, podman: &Path, record: &Value,
     );
     let preview: Value = serde_json::from_slice(&output.stdout).expect("preview JSON");
     assert_eq!(preview["state"], "passed");
+    assert!(
+        record["plan"]["compute_workspace"].is_object(),
+        "real declaration reaches helper preflight"
+    );
     assert_eq!(fs::read(&reservation).expect("after preview"), before);
     assert!(!run.join("round-launch-review.json").exists());
     writeln!(std::io::stdout().lock(), "ROUND-PREFLIGHT-READONLY").expect("preview marker");

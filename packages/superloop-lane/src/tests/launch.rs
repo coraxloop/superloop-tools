@@ -1263,7 +1263,7 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
     plan.select_launch_model(&selection).expect("model");
     plan.observe_vendor().expect("observing recovery");
     assert_eq!(plan.document["attempt_wall_seconds"], 12);
-    let workspace = crate::plan::fixture_workspace_snapshot();
+    let workspace = super::published_workspace();
     plan.document["compute_workspace"] = workspace.clone();
     let path = plan
         .driver_dir

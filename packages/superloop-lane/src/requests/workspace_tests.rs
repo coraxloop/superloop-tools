@@ -181,12 +181,13 @@ fn workspace_preflight_reader_preserves_bounded_wire_evidence() {
             words: vec![vec![b'x'; 256]; 256]
         }
     );
-    let words = json!({"schema":3,"wire_bytes":wire,"truncated":false});
+    let words = json!({"schema":3,"wire_bytes":&wire[..super::super::MAX_WORKSPACE_PREFLIGHT_BYTES],"truncated":true});
     for check in [
         "door-workspace-unregistered",
         "door-workspace-context-differs",
         "door-workspace-protocol-refusal",
         "door-caller-authority-refusal",
+        "door-review-compute-refusal",
     ] {
         let row = preflight(check, words.clone());
         assert_eq!(
@@ -243,12 +244,55 @@ fn workspace_preflight_reader_preserves_bounded_wire_evidence() {
 /// ´test:unit:workspace-preflight-reader-bounds-truncated-evidence´
 #[test]
 fn workspace_preflight_reader_bounds_truncated_evidence() {
-    let maximum = execute_command::workspace::MAX_WIRE_BYTES;
+    let maximum = super::super::MAX_WORKSPACE_PREFLIGHT_BYTES;
     let words = json!({"schema":3,"wire_bytes":vec![255;maximum],"truncated":true});
     assert!(
         RequestRecord::decode(preflight("door-workspace-protocol-refusal", words.clone())).is_ok()
     );
-    assert!(RequestRecord::decode(preflight("door-workspace-unregistered", words)).is_err());
+    for check in [
+        "door-workspace-unregistered",
+        "door-workspace-context-differs",
+        "door-workspace-protocol-refusal",
+        "door-caller-authority-refusal",
+        "door-review-compute-refusal",
+    ] {
+        assert!(
+            RequestRecord::decode(preflight(check, words.clone())).is_ok(),
+            "{check}"
+        );
+        let mut short = words.clone();
+        short["wire_bytes"].as_array_mut().unwrap().pop();
+        assert!(
+            RequestRecord::decode(preflight(check, short)).is_err(),
+            "short truncated {check}"
+        );
+    }
+    let mut complete = words.clone();
+    complete["truncated"] = json!(false);
+    assert!(RequestRecord::decode(preflight("door-workspace-unregistered", complete)).is_ok());
+    assert!(
+        serde_json::to_vec(&preflight("door-workspace-unregistered", words.clone()))
+            .unwrap()
+            .len()
+            < 270_000
+    );
+    for check in [
+        "door-compute-words-refusal",
+        "door-compute-command-refusal",
+        "door-compute-wrapper-refusal",
+        "door-compute-locked-refusal",
+        "door-compute-unregistered",
+        "door-compute-root-refusal",
+        "door-changed-ref-refusal",
+        "door-request-refusal",
+        "door-transport-pending",
+        "door-requests-unregistered",
+    ] {
+        assert!(
+            RequestRecord::decode(preflight(check, words.clone())).is_err(),
+            "legacy check {check}"
+        );
+    }
     let too_long = json!({"schema":3,"wire_bytes":vec![255;maximum+1],"truncated":false});
     assert!(RequestRecord::decode(preflight("door-workspace-protocol-refusal", too_long)).is_err());
 }
