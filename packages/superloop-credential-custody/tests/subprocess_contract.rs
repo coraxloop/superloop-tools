@@ -231,7 +231,10 @@ fn known_lengths_and_identity() {
     let report = pass(&f.observe());
     assert_eq!(report["evidence"]["rows"].as_array().unwrap().len(), 12);
     assert_eq!(report["evidence"]["constants"][0]["constant"], 0);
+    let calibration = f.dir.path().join("evidence/calibration");
+    let before = fs::read(&calibration).unwrap();
     assert_eq!(pass(&f.check())["evidence"]["matches"], true);
+    assert_eq!(fs::read(calibration).unwrap(), before);
 }
 
 /// ´test:integration:record-refusals-before-effects´
@@ -592,4 +595,48 @@ fn sealed_digest_custody_and_limits() {
     let f = Fixture::new();
     mode(&f.dir.path().join("evidence"), 0o755);
     refuse(&f.observe());
+}
+
+/// ´test:integration:inconsistent-invocation-refuses´
+#[test]
+fn inconsistent_invocation_refuses() {
+    let mut f = Fixture::new();
+    f.record["samples"][1]["completion"]["invocation"] =
+        f.record["samples"][0]["completion"]["invocation"].clone();
+    let output = f.observe();
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(diagnostic["message"], "record-invocation-identity");
+    refuse(&output);
+}
+
+/// ´test:integration:identity-file-symlinks-refuse´
+#[test]
+fn identity_file_symlinks_refuse() {
+    let f = Fixture::new();
+    pass(&f.observe());
+    let path = f.dir.path().join("sealer");
+    fs::rename(&path, f.dir.path().join("other-sealer")).unwrap();
+    std::os::unix::fs::symlink("other-sealer", &path).unwrap();
+    refuse(&f.check());
+}
+
+/// ´test:integration:complete-partial-file-is-not-calibration´
+#[test]
+fn complete_partial_file_is_not_calibration() {
+    let f = Fixture::new();
+    pass(&f.observe());
+    let partial = f.dir.path().join("evidence/.calibration.partial");
+    fs::rename(f.dir.path().join("evidence/calibration"), &partial).unwrap();
+    let output = binary()
+        .arg("identity-check")
+        .arg("--parameters")
+        .arg(f.dir.path().join("parameters.json"))
+        .arg("--calibration")
+        .arg(partial)
+        .args(["--receipt", "comparison"])
+        .output()
+        .unwrap();
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(diagnostic["message"], "calibration-path");
+    refuse(&output);
 }

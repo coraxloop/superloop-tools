@@ -31,7 +31,11 @@ pub fn live(record: &Parameters) -> Result<Identity> {
     ] {
         // The fixed interpreter entry is commonly a vendor symlink. Resolve it,
         // then read the resolved regular file without following further links.
-        let resolved = std::fs::canonicalize(&file.path).map_err(|_| "identity-path")?;
+        let resolved = if file.path == std::path::Path::new("/usr/bin/python3") {
+            std::fs::canonicalize(&file.path).map_err(|_| "identity-path")?
+        } else {
+            file.path.clone()
+        };
         file.sha256 = hash(&receipt::read(&resolved, 268_435_456, false)?);
     }
     for expected in &mut live.probes {
@@ -77,6 +81,16 @@ struct CalibrationEvidence {
 }
 
 pub fn run(record: &Parameters, path: &Path) -> Result<Value> {
+    if path.parent() != Some(record.evidence_root.as_path())
+        || path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_none_or(|name| {
+                !crate::record::name(name) || name.starts_with('.') || name.ends_with(".partial")
+            })
+    {
+        return Err("calibration-path");
+    }
     let bytes = receipt::read(path, crate::record::RECORD_LIMIT as u64, true)?;
     let calibration: Calibration =
         serde_json::from_slice(&bytes).map_err(|_| "calibration-shape")?;

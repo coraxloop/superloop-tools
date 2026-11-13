@@ -1,6 +1,6 @@
 //! Strict, bounded metadata records. No field carries a plaintext stream.
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, &'static str>;
@@ -262,8 +262,20 @@ impl Parameters {
         if self.comparisons.len() > 16 || self.samples.len() != names.len() * lengths.len() * 2 {
             return Err("record-samples");
         }
+        self.validate_samples(&names, &lengths)
+    }
+
+    fn validate_samples(&self, names: &BTreeSet<&String>, lengths: &BTreeSet<&u64>) -> Result<()> {
         let mut matrix = BTreeSet::new();
+        let mut invocations = BTreeMap::new();
         for sample in &self.samples {
+            let input = (sample.input_length, &sample.content);
+            if invocations
+                .insert(&sample.completion.invocation, input)
+                .is_some_and(|old| old != input)
+            {
+                return Err("record-invocation-identity");
+            }
             if !names.contains(&sample.name)
                 || !lengths.contains(&sample.input_length)
                 || !self.contents.contains(&sample.content)

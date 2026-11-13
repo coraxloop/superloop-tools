@@ -104,7 +104,10 @@ fn execute(command: &Command, start: Instant) -> Result<()> {
             ..
         } => (parameters, receipt),
     };
-    if !record::name(receipt_name) {
+    if !record::name(receipt_name)
+        || receipt_name.starts_with('.')
+        || receipt_name.ends_with(".partial")
+    {
         return Err("receipt-name");
     }
     let bytes = receipt::read(parameters, record::RECORD_LIMIT as u64, false)?;

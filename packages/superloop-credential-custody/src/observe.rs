@@ -180,6 +180,7 @@ fn payload(record: &Parameters) -> Result<Vec<u8>> {
     let mut command = Command::new("/usr/bin/git");
     command
         .arg("--no-pager")
+        .arg("--no-replace-objects")
         .arg("-C")
         .arg(&record.payload.repository)
         .arg("show")
