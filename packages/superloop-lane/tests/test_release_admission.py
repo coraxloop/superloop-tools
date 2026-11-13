@@ -67,12 +67,18 @@ def carries_test_configuration(value, source="config"):
                for index, token in enumerate(tokens))
 
 
-def environment_has_test(values):
+def environment_has_test(values, config_path=None):
     for name, value in values.items():
         if isinstance(value, dict) and "value" in value:
             value = value["value"]
         if name in OVERRIDES:
-            require(value is None, "compiler override in release record: " + name)
+            if config_path is None:
+                message = f"compiler override in build environment: {name}; unset {name}"
+            else:
+                message = (f"compiler override in Cargo config [env]: {config_path}: {name}; "
+                           "remove the [env] entry")
+            require(value is None, message +
+                    "; then remove the build directory's workspace-build.json and rebuild")
         elif name == "CARGO_TARGET_*_RUSTFLAGS":
             if any(carries_test_configuration(flags, target)
                    for target, flags in value.items()):
@@ -84,14 +90,16 @@ def environment_has_test(values):
     return False
 
 
-def configuration_has_test(settings):
+def configuration_has_test(settings, path="<configuration>"):
     build = settings.get("build", {})
     for name in ["rustc", "rustc-wrapper", "rustc-workspace-wrapper"]:
-        require(build.get(name) is None, "compiler override in release config: " + name)
+        require(build.get(name) is None,
+                f"compiler override in Cargo config: {path}: build.{name}; remove the key; "
+                "then remove the build directory's workspace-build.json and rebuild")
     return (carries_test_configuration(build.get("rustflags"))
             or any(carries_test_configuration(target.get("rustflags"))
                    for target in settings.get("target", {}).values())
-            or environment_has_test(settings.get("env", {})))
+            or environment_has_test(settings.get("env", {}), path))
 
 
 def build_record(build, artifacts):
@@ -116,7 +124,7 @@ def build_record(build, artifacts):
     for config in configurations:
         require(set(config) == {"path", "present", "selected", "settings"},
                 "incomplete Cargo configuration record")
-        require(not configuration_has_test(config["settings"]),
+        require(not configuration_has_test(config["settings"], config["path"]),
                 "test configuration in Cargo config: " + config["path"])
     saved = record.get("artifacts", {})
     require(set(saved) == {path.name for path in artifacts}, "stale build artifact inventory")
@@ -134,6 +142,32 @@ def refused(action, expected):
         require(expected in str(error), f"wrong record refusal: {error}")
     else:
         raise SystemExit("record control unexpectedly passed: " + expected)
+
+
+def test_release_override_remedies():
+    """Name each override's origin and how to regenerate its retained record.
+
+    ´test:integration:test-release-override-remedies´
+    """
+    remedy = "; then remove the build directory's workspace-build.json and rebuild"
+    cases = [
+        (lambda: environment_has_test({"RUSTC_WRAPPER": ""}),
+         "compiler override in build environment: RUSTC_WRAPPER; unset RUSTC_WRAPPER"),
+        (lambda: configuration_has_test({"build": {"rustc": "fixture"}},
+                                       "/fixture/config.toml"),
+         "compiler override in Cargo config: /fixture/config.toml: build.rustc; remove the key"),
+        (lambda: configuration_has_test({"env": {"RUSTC": {"value": "fixture"}}},
+                                       "/fixture/config.toml"),
+         "compiler override in Cargo config [env]: /fixture/config.toml: RUSTC; "
+         "remove the [env] entry"),
+    ]
+    for action, expected in cases:
+        try:
+            action()
+        except SystemExit as error:
+            require(str(error) == expected + remedy, f"override remedy differs: {error}")
+        else:
+            raise SystemExit("override unexpectedly accepted")
 
 
 def test_release_flag_sources():
@@ -305,7 +339,7 @@ def test_release_build_record(source):
         require("synthetic-not-recorded" not in json.dumps(inputs),
                 "unrelated configuration value recorded")
         require(any(config["path"].endswith("flags.toml")
-                    and configuration_has_test(config["settings"])
+                    and configuration_has_test(config["settings"], config["path"])
                     for config in inputs["configurations"]), "included flags not recorded")
         test_release_configuration_includes(builder, root, cargo)
         (cargo / "config").write_text('[build]\nrustflags = []\n')
@@ -398,6 +432,7 @@ def main():
     args = parser.parse_args()
     require(args.artifacts, "release artifact set is empty")
     test_release_flag_sources()
+    test_release_override_remedies()
     test_release_build_record(args.root)
     build_record(args.build, [args.build / name for name in args.artifacts])
     command = [args.cargo, "test", "--locked", "--profile", "gate", "-p",
