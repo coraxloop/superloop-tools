@@ -665,6 +665,15 @@ fn control_loop(
     cancelled: &AtomicBool,
     owner_uid: u32,
 ) -> Result<(), LaneError> {
+    control_loop_observed(listener, cancelled, owner_uid, || {})
+}
+
+fn control_loop_observed(
+    listener: &UnixListener,
+    cancelled: &AtomicBool,
+    owner_uid: u32,
+    mut accepted: impl FnMut(),
+) -> Result<(), LaneError> {
     listener
         .set_nonblocking(true)
         .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
@@ -677,6 +686,7 @@ fn control_loop(
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
+                accepted();
                 let mut word = [0_u8];
                 stream
                     .read_exact(&mut word)
@@ -2195,6 +2205,258 @@ fn publish_helper_identity_admitted(
     Ok(backend)
 }
 
+// The listener's descriptor is not the pathname inode on Linux. Retain the
+// held-directory slot's identity after bind; never unlink a replacement slot.
+struct ServiceSocket {
+    slot: crate::SocketSlot,
+    listener: UnixListener,
+    identity: (u64, u64),
+    kind: &'static str,
+}
+
+impl ServiceSocket {
+    fn bind(
+        slot: crate::SocketSlot,
+        kind: &'static str,
+        observe: impl FnOnce(&crate::SocketSlot) -> std::io::Result<Option<nix::sys::stat::FileStat>>,
+    ) -> Result<Self, LaneError> {
+        let listener = UnixListener::bind(slot.address())
+            .map_err(|error| LaneError::operation(kind, error.to_string()))?;
+        let metadata = observe(&slot)
+            .map_err(|error| {
+                LaneError::operation(
+                    kind,
+                    format!("bound socket identity unavailable; retain its slot: {error}"),
+                )
+            })?
+            .ok_or_else(|| LaneError::operation(kind, "bound socket disappeared"))?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+            return Err(LaneError::operation(
+                kind,
+                "bound socket replaced before custody; retain its slot",
+            ));
+        }
+        Ok(Self {
+            slot,
+            listener,
+            identity: (metadata.st_dev, metadata.st_ino),
+            kind,
+        })
+    }
+
+    fn remove(self) -> Result<(), LaneError> {
+        let current = self
+            .slot
+            .metadata()
+            .map_err(|error| LaneError::operation(self.kind, error.to_string()))?;
+        if let Some(current) = current {
+            if (current.st_dev, current.st_ino) != self.identity {
+                return Err(LaneError::operation(
+                    self.kind,
+                    "replacement socket retained",
+                ));
+            }
+            self.slot
+                .remove()
+                .map_err(|error| LaneError::operation(self.kind, error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServiceSetupFailure {
+    RequestMode,
+    ControlBind,
+    ControlMode,
+    Nonblocking,
+    ControllerClone,
+    ControllerSpawn,
+}
+
+struct ServiceResources {
+    socket: Option<ServiceSocket>,
+    control: Option<ServiceSocket>,
+    controller: Option<JoinHandle<Result<(), LaneError>>>,
+    refresher: Option<JoinHandle<Result<(), LaneError>>>,
+    cancelled: Arc<AtomicBool>,
+    #[cfg(test)]
+    failure: Option<ServiceSetupFailure>,
+    #[cfg(test)]
+    control_accepted: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl ServiceResources {
+    fn new() -> Self {
+        Self {
+            socket: None,
+            control: None,
+            controller: None,
+            refresher: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            failure: None,
+            #[cfg(test)]
+            control_accepted: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn fail_at(&self, point: ServiceSetupFailure) -> Result<(), LaneError> {
+        if self.failure == Some(point) {
+            return Err(LaneError::operation("injected-setup", format!("{point:?}")));
+        }
+        Ok(())
+    }
+
+    fn bind(
+        &mut self,
+        socket: crate::SocketSlot,
+        control: crate::SocketSlot,
+        owner: (u32, u32),
+        group: u32,
+    ) -> Result<(), LaneError> {
+        self.socket = Some(ServiceSocket::bind(
+            socket,
+            "helper-socket",
+            crate::SocketSlot::metadata,
+        )?);
+        #[cfg(test)]
+        self.fail_at(ServiceSetupFailure::RequestMode)?;
+        self.socket
+            .as_ref()
+            .expect("bound socket")
+            .slot
+            .set_owner_mode(owner.0, group, 0o660)
+            .map_err(|error| LaneError::operation("helper-socket", error.to_string()))?;
+        #[cfg(test)]
+        self.fail_at(ServiceSetupFailure::ControlBind)?;
+        self.control = Some(ServiceSocket::bind(
+            control,
+            "helper-control",
+            crate::SocketSlot::metadata,
+        )?);
+        #[cfg(test)]
+        self.fail_at(ServiceSetupFailure::ControlMode)?;
+        self.control
+            .as_ref()
+            .expect("bound control")
+            .slot
+            .set_owner_mode(owner.0, owner.1, 0o600)
+            .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
+        #[cfg(test)]
+        self.fail_at(ServiceSetupFailure::Nonblocking)?;
+        self.socket
+            .as_ref()
+            .expect("bound socket")
+            .listener
+            .set_nonblocking(true)
+            .map_err(|error| LaneError::operation("helper-channel", error.to_string()))
+    }
+
+    fn start_controller(&mut self, owner: u32) -> Result<(), LaneError> {
+        #[cfg(test)]
+        self.fail_at(ServiceSetupFailure::ControllerClone)?;
+        let listener = self
+            .control
+            .as_ref()
+            .expect("bound control")
+            .listener
+            .try_clone()
+            .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
+        let cancelled = Arc::clone(&self.cancelled);
+        #[cfg(test)]
+        self.fail_at(ServiceSetupFailure::ControllerSpawn)?;
+        #[cfg(test)]
+        let accepted = self.control_accepted.take();
+        self.controller = Some(
+            std::thread::Builder::new()
+                .name("helper-control".into())
+                .spawn(move || {
+                    #[cfg(test)]
+                    if let Some(accepted) = accepted {
+                        return control_loop_observed(&listener, &cancelled, owner, || {
+                            let _sent = accepted.send(());
+                        });
+                    }
+                    control_loop(&listener, &cancelled, owner)
+                })
+                .map_err(|error| LaneError::operation("helper-control", error.to_string()))?,
+        );
+        Ok(())
+    }
+
+    fn run(
+        &mut self,
+        slots: (crate::SocketSlot, crate::SocketSlot),
+        owner: (u32, u32),
+        group: u32,
+        authority: impl FnOnce(Arc<AtomicBool>) -> Result<JoinHandle<Result<(), LaneError>>, LaneError>,
+        body: impl FnOnce(&Self) -> Result<(), LaneError>,
+    ) -> Result<(), LaneError> {
+        let result = (|| {
+            self.bind(slots.0, slots.1, owner, group)?;
+            self.start_controller(owner.0)?;
+            self.refresher = Some(authority(Arc::clone(&self.cancelled))?);
+            body(self)
+        })();
+        self.finish(result)
+    }
+
+    fn join(
+        thread: Option<JoinHandle<Result<(), LaneError>>>,
+        kind: &'static str,
+        panic: &str,
+    ) -> Result<(), LaneError> {
+        match thread {
+            Some(thread) => thread
+                .join()
+                .map_err(|_| LaneError::operation(kind, panic))?,
+            None => Ok(()),
+        }
+    }
+
+    fn finish(&mut self, primary: Result<(), LaneError>) -> Result<(), LaneError> {
+        self.cancelled.store(true, Ordering::Release);
+        // Cancellation stops accept polling; an already accepted control read has
+        // its existing five-second timeout. Join it, never detach it on a timer.
+        let control = Self::join(
+            self.controller.take(),
+            "helper-control",
+            "control thread panicked",
+        );
+        let refresh = Self::join(
+            self.refresher.take(),
+            "credential-thread",
+            "authority thread panicked",
+        );
+        let socket = self.socket.take().map_or(Ok(()), ServiceSocket::remove);
+        let control_remove = self.control.take().map_or(Ok(()), ServiceSocket::remove);
+        let mut result = primary;
+        for secondary in [refresh, control, socket, control_remove] {
+            if let Err(error) = secondary {
+                match &mut result {
+                    Ok(()) => result = Err(error),
+                    Err(primary) => {
+                        use std::fmt::Write as _;
+                        let _written = write!(primary.detail, "; cleanup {error}");
+                    }
+                }
+            }
+        }
+        result
+    }
+}
+
+impl Drop for ServiceResources {
+    fn drop(&mut self) {
+        // Explicit finish reports errors. Unwind cleanup consumes every resource
+        // too; join converts child panics to errors instead of panicking again.
+        let _cleanup = self.finish(Ok(()));
+    }
+}
+
 /// Serve one run's fixed container request as the namespace owner.
 ///
 /// # Errors
@@ -2204,7 +2466,6 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
     serve_admitted(run_dir, &RuntimeAdmission::Gate)
 }
 
-#[allow(clippy::too_many_lines)]
 fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), LaneError> {
     if !Uid::effective().is_root() {
         return Err(LaneError::input(
@@ -2249,120 +2510,112 @@ fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), La
         .ok_or_else(|| LaneError::input("helper-pin", "runs root absent"))?;
     let reservation = reservation_path(root, &run);
     let backend = publish_helper_identity_admitted(&owner_home, &loop_name, &run, root, admission)?;
-    let listener = UnixListener::bind(socket_slot.address())
-        .map_err(|error| LaneError::operation("helper-socket", error.to_string()))?;
-    socket_slot
-        .set_owner_mode(0, loop_uid, 0o660)
-        .map_err(|error| LaneError::operation("helper-socket", error.to_string()))?;
-    let control_listener = UnixListener::bind(control_slot.address())
-        .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
-    control_slot
-        .set_owner_mode(0, 0, 0o600)
-        .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| LaneError::operation("helper-channel", error.to_string()))?;
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let control_cancelled = Arc::clone(&cancelled);
-    let controller =
-        std::thread::spawn(move || control_loop(&control_listener, &control_cancelled, 0));
-    let refresher = spawn_credential_authority_admitted(
-        owner_home.clone(),
-        loop_name.clone(),
-        root.to_path_buf(),
-        driver_dir.clone(),
-        backend,
-        Arc::clone(&cancelled),
-        admission,
-    )?;
-    let result = (|| {
-        let mut previous_capacity = false;
-        let mut retry_thread = None;
-        for attempt in 1..=MAX_ATTEMPTS {
-            if attempt > 1 && !previous_capacity {
-                break;
-            }
-            let Some(mut stream) = next_client(&listener, &cancelled, initial.launcher)? else {
-                break;
-            };
-            stream
-                .set_nonblocking(false)
-                .map_err(|error| LaneError::operation("helper-channel", error.to_string()))?;
-            authorize_peer(&stream, loop_uid, &reservation)?;
-            let socket_meta = socket_slot
-                .metadata()
-                .map_err(|error| LaneError::input("helper-socket", error.to_string()))?
-                .ok_or_else(|| LaneError::input("helper-socket", "the socket is absent"))?;
-            if socket_meta.st_mode & libc::S_IFMT != libc::S_IFSOCK
-                || socket_meta.st_mode & 0o7777 != 0o660
-            {
-                return Err(LaneError::input(
-                    "helper-socket",
-                    "the loop-group socket changed during the run",
-                ));
-            }
-            let request =
-                pinned_request_admitted(&owner_home, &loop_name, &run, &podman, admission)?;
-            if request.loop_uid != loop_uid || request.driver_dir != driver_dir {
-                return Err(LaneError::input(
-                    "helper-pin",
-                    "run identity changed after helper readiness",
-                ));
-            }
-            if request.record["driver_entry_pid"]
-                .as_u64()
-                .and_then(|pid| u32::try_from(pid).ok())
-                .is_none()
-                || request.record["driver_entry_start"].as_u64().is_none()
-            {
-                return Err(LaneError::input(
-                    "helper-session",
-                    "driver identity disappeared after peer authorization",
-                ));
-            }
-            if attempt > 1 && retry_thread.is_none() {
-                return Err(LaneError::input(
-                    "round-thread",
-                    "capacity attempt has no captured thread",
-                ));
-            }
-            let vector = attempt_vector(&request.argv, &driver_dir, attempt)?;
-            let outcome = run_attempt(
-                &mut stream,
-                &vector,
-                &request.environment,
-                &owner_home,
-                &reservation,
-                &request.record,
-                &driver_dir,
-                attempt,
-                &cancelled,
-                request.launcher,
-                retry_thread.as_deref(),
-            )?;
-            previous_capacity = retry_after(&outcome);
-            retry_thread = outcome.thread.or(retry_thread);
+    let mut resources = ServiceResources::new();
+    resources.run(
+        (socket_slot, control_slot),
+        (0, 0),
+        loop_uid,
+        |cancelled| {
+            spawn_credential_authority_admitted(
+                owner_home.clone(),
+                loop_name.clone(),
+                root.to_path_buf(),
+                driver_dir.clone(),
+                backend,
+                cancelled,
+                admission,
+            )
+        },
+        |resources| {
+            serve_attempts(
+                resources,
+                (&owner_home, &loop_name, &run, &podman),
+                (&driver_dir, &reservation, loop_uid, initial.launcher),
+                admission,
+            )
+        },
+    )
+}
+
+fn serve_attempts(
+    resources: &ServiceResources,
+    identity: (&Path, &str, &str, &Path),
+    run_state: (&Path, &Path, u32, LauncherIdentity),
+    admission: &RuntimeAdmission,
+) -> Result<(), LaneError> {
+    let (owner_home, loop_name, run, podman) = identity;
+    let (driver_dir, reservation, loop_uid, launcher) = run_state;
+    let socket = resources.socket.as_ref().expect("bound request socket");
+    let listener = &socket.listener;
+    let socket_slot = &socket.slot;
+    let cancelled = &resources.cancelled;
+    let mut previous_capacity = false;
+    let mut retry_thread = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        if attempt > 1 && !previous_capacity {
+            break;
         }
-        Ok(())
-    })();
-    cancelled.store(true, Ordering::Release);
-    let refresh_result = refresher
-        .join()
-        .map_err(|_| LaneError::operation("credential-thread", "authority thread panicked"))?;
-    let control_result = controller
-        .join()
-        .map_err(|_| LaneError::operation("helper-control", "control thread panicked"))?;
-    let socket_result = socket_slot
-        .remove()
-        .map_err(|error| LaneError::operation("helper-socket", error.to_string()));
-    let control_remove = control_slot
-        .remove()
-        .map_err(|error| LaneError::operation("helper-control", error.to_string()));
-    refresh_result?;
-    result?;
-    control_result?;
-    socket_result?;
-    control_remove
+        let Some(mut stream) = next_client(listener, cancelled, launcher)? else {
+            break;
+        };
+        stream
+            .set_nonblocking(false)
+            .map_err(|error| LaneError::operation("helper-channel", error.to_string()))?;
+        authorize_peer(&stream, loop_uid, reservation)?;
+        let socket_meta = socket_slot
+            .metadata()
+            .map_err(|error| LaneError::input("helper-socket", error.to_string()))?
+            .ok_or_else(|| LaneError::input("helper-socket", "the socket is absent"))?;
+        if socket_meta.st_mode & libc::S_IFMT != libc::S_IFSOCK
+            || socket_meta.st_mode & 0o7777 != 0o660
+        {
+            return Err(LaneError::input(
+                "helper-socket",
+                "the loop-group socket changed during the run",
+            ));
+        }
+        let request = pinned_request_admitted(owner_home, loop_name, run, podman, admission)?;
+        if request.loop_uid != loop_uid || request.driver_dir != driver_dir {
+            return Err(LaneError::input(
+                "helper-pin",
+                "run identity changed after helper readiness",
+            ));
+        }
+        if request.record["driver_entry_pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .is_none()
+            || request.record["driver_entry_start"].as_u64().is_none()
+        {
+            return Err(LaneError::input(
+                "helper-session",
+                "driver identity disappeared after peer authorization",
+            ));
+        }
+        if attempt > 1 && retry_thread.is_none() {
+            return Err(LaneError::input(
+                "round-thread",
+                "capacity attempt has no captured thread",
+            ));
+        }
+        let vector = attempt_vector(&request.argv, driver_dir, attempt)?;
+        let outcome = run_attempt(
+            &mut stream,
+            &vector,
+            &request.environment,
+            owner_home,
+            reservation,
+            &request.record,
+            driver_dir,
+            attempt,
+            cancelled,
+            request.launcher,
+            retry_thread.as_deref(),
+        )?;
+        previous_capacity = retry_after(&outcome);
+        retry_thread = outcome.thread.or(retry_thread);
+    }
+    Ok(())
 }
 
 /// Forward one prompt and bounded result through the fixed run socket as the loop identity.
@@ -2479,6 +2732,430 @@ mod tests {
         remove_container, retry_after, run_attempt, run_attempt_with, run_identity_at,
         start_after_reservation, stop_container, verify_vector,
     };
+
+    fn cleanup_slots(root: &std::path::Path) -> (crate::SocketSlot, crate::SocketSlot) {
+        use std::os::fd::OwnedFd;
+        let directory: OwnedFd = std::fs::File::open(root).expect("fixture directory").into();
+        (
+            crate::SocketSlot::beneath(&directory, std::ffi::OsStr::new("request.sock"))
+                .expect("request slot"),
+            crate::SocketSlot::beneath(&directory, std::ffi::OsStr::new("control.sock"))
+                .expect("control slot"),
+        )
+    }
+
+    fn cleanup_authority(
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<std::thread::JoinHandle<Result<(), crate::error::LaneError>>, crate::error::LaneError>
+    {
+        std::thread::Builder::new()
+            .spawn(move || {
+                while !cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::park_timeout(std::time::Duration::from_millis(1));
+                }
+                Ok(())
+            })
+            .map_err(|error| {
+                crate::error::LaneError::operation("fixture-thread", error.to_string())
+            })
+    }
+
+    fn assert_service_removed(root: &std::path::Path, resources: &super::ServiceResources) {
+        assert!(
+            resources
+                .cancelled
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(resources.controller.is_none() && resources.refresher.is_none());
+        assert!(!root.join("request.sock").exists());
+        assert!(!root.join("control.sock").exists());
+    }
+
+    /// ´test:unit:helper-service-setup-failures-clean-owned-sockets´
+    #[test]
+    fn helper_service_setup_failures_clean_owned_sockets() {
+        use super::ServiceSetupFailure as Failure;
+        for failure in [
+            Failure::RequestMode,
+            Failure::ControlBind,
+            Failure::ControlMode,
+            Failure::Nonblocking,
+            Failure::ControllerClone,
+            Failure::ControllerSpawn,
+        ] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let mut resources = super::ServiceResources::new();
+            resources.failure = Some(failure);
+            let uid = nix::unistd::Uid::effective().as_raw();
+            let result = resources
+                .run(
+                    cleanup_slots(root.path()),
+                    (uid, nix::unistd::Gid::effective().as_raw()),
+                    nix::unistd::Gid::effective().as_raw(),
+                    |_| panic!("authority after setup refusal"),
+                    |_| panic!("body after setup refusal"),
+                )
+                .expect_err("injected setup failure");
+            assert_eq!(result.kind, "injected-setup");
+            assert_eq!(result.detail, format!("{failure:?}"));
+            assert_service_removed(root.path(), &resources);
+        }
+    }
+
+    /// ´test:unit:helper-service-bind-failure-retains-unowned-socket´
+    #[test]
+    fn helper_service_bind_failure_retains_unowned_socket() {
+        for name in ["request.sock", "control.sock"] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let foreign = std::os::unix::net::UnixListener::bind(root.path().join(name))
+                .expect("preexisting socket");
+            let mut resources = super::ServiceResources::new();
+            let uid = nix::unistd::Uid::effective().as_raw();
+            resources
+                .run(
+                    cleanup_slots(root.path()),
+                    (uid, nix::unistd::Gid::effective().as_raw()),
+                    nix::unistd::Gid::effective().as_raw(),
+                    |_| panic!("authority after bind refusal"),
+                    |_| panic!("body after bind refusal"),
+                )
+                .expect_err("bind refusal");
+            assert!(root.path().join(name).exists(), "unowned socket retained");
+            let other = if name == "request.sock" {
+                "control.sock"
+            } else {
+                "request.sock"
+            };
+            assert!(!root.path().join(other).exists(), "owned socket removed");
+            drop(foreign);
+        }
+    }
+
+    /// ´test:unit:helper-service-authority-failures-join-controller´
+    #[test]
+    fn helper_service_authority_failures_join_controller() {
+        for phase in [
+            "capture-or-spawn",
+            "thread-error",
+            "thread-panic",
+            "body-error",
+            "normal",
+        ] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let mut resources = super::ServiceResources::new();
+            let uid = nix::unistd::Uid::effective().as_raw();
+            let result = resources.run(
+                cleanup_slots(root.path()),
+                (uid, nix::unistd::Gid::effective().as_raw()),
+                nix::unistd::Gid::effective().as_raw(),
+                |_| {
+                    if phase == "capture-or-spawn" {
+                        return Err(crate::error::LaneError::operation(
+                            "credential-thread",
+                            phase,
+                        ));
+                    }
+                    Ok(std::thread::spawn(move || {
+                        assert_ne!(phase, "thread-panic", "fixture authority panic");
+                        if phase == "thread-error" || phase == "body-error" {
+                            return Err(crate::error::LaneError::operation(
+                                "credential-thread",
+                                phase,
+                            ));
+                        }
+                        Ok(())
+                    }))
+                },
+                |_| {
+                    if phase == "body-error" {
+                        return Err(crate::error::LaneError::input(
+                            "primary-request",
+                            "primary text",
+                        ));
+                    }
+                    Ok(())
+                },
+            );
+            assert_service_removed(root.path(), &resources);
+            if phase == "normal" {
+                result.expect("normal cleanup");
+            } else {
+                let error = result.expect_err("failure preserved");
+                assert_eq!(
+                    error.kind,
+                    if phase == "body-error" {
+                        "primary-request"
+                    } else {
+                        "credential-thread"
+                    }
+                );
+                if phase == "body-error" {
+                    assert_eq!(error.status, 2);
+                    assert_eq!(
+                        error.detail,
+                        "primary text; cleanup credential-thread: body-error"
+                    );
+                } else if phase == "thread-panic" {
+                    assert_eq!(error.detail, "authority thread panicked");
+                } else {
+                    assert_eq!(error.detail, phase);
+                }
+            }
+        }
+    }
+
+    /// ´test:unit:helper-service-cleanup-retains-replacement-sockets´
+    #[test]
+    fn helper_service_cleanup_retains_replacement_sockets() {
+        use std::os::unix::fs::MetadataExt as _;
+        for name in ["request.sock", "control.sock"] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let path = root.path().join(name);
+            let mut replacement = None;
+            let mut replacement_inode = 0;
+            let mut resources = super::ServiceResources::new();
+            let uid = nix::unistd::Uid::effective().as_raw();
+            let error = resources
+                .run(
+                    cleanup_slots(root.path()),
+                    (uid, nix::unistd::Gid::effective().as_raw()),
+                    nix::unistd::Gid::effective().as_raw(),
+                    cleanup_authority,
+                    |_| {
+                        std::fs::remove_file(&path).expect("remove original name");
+                        replacement = Some(
+                            std::os::unix::net::UnixListener::bind(&path)
+                                .expect("replacement socket"),
+                        );
+                        replacement_inode = std::fs::symlink_metadata(&path)
+                            .expect("replacement identity")
+                            .ino();
+                        Ok(())
+                    },
+                )
+                .expect_err("replacement reported");
+            assert_eq!(error.detail, "replacement socket retained");
+            let inode = std::fs::symlink_metadata(&path)
+                .expect("replacement retained")
+                .ino();
+            assert_eq!(inode, replacement_inode);
+            assert!(replacement.is_some());
+            assert!(resources.controller.is_none() && resources.refresher.is_none());
+            let other = if name == "request.sock" {
+                "control.sock"
+            } else {
+                "request.sock"
+            };
+            assert!(!root.path().join(other).exists());
+        }
+    }
+
+    /// ´test:unit:helper-service-cleanup-joins-an-accepted-control-read´
+    #[test]
+    fn helper_service_cleanup_joins_an_accepted_control_read() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let root = tempfile::tempdir().expect("fixture root");
+        let path = root.path().to_path_buf();
+        let (peer_send, peer_receive) = mpsc::channel();
+        let (done_send, done_receive) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut resources = super::ServiceResources::new();
+            let (accepted_send, accepted_receive) = mpsc::channel();
+            resources.control_accepted = Some(accepted_send);
+            let uid = nix::unistd::Uid::effective().as_raw();
+            let result = resources.run(
+                cleanup_slots(&path),
+                (uid, nix::unistd::Gid::effective().as_raw()),
+                nix::unistd::Gid::effective().as_raw(),
+                cleanup_authority,
+                |_| {
+                    let peer = std::os::unix::net::UnixStream::connect(path.join("control.sock"))
+                        .expect("control client");
+                    peer_send
+                        .send(peer)
+                        .expect("retain silent peer outside worker");
+                    accepted_receive
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("controller accepted event");
+                    Err(crate::error::LaneError::input(
+                        "primary-request",
+                        "request ended",
+                    ))
+                },
+            );
+            assert_service_removed(&path, &resources);
+            done_send.send(result).expect("cleanup completed event");
+        });
+        let peer = peer_receive
+            .recv_timeout(Duration::from_secs(10))
+            .expect("connected event");
+        let result = done_receive.recv_timeout(Duration::from_secs(30));
+        drop(peer); // Also unblocks the reader if the timeout guard itself fails.
+        worker.join().expect("cleanup worker joined");
+        let error = result
+            .expect("cleanup completion within control-read bound")
+            .expect_err("primary request refusal");
+        assert_eq!(error.kind, "primary-request");
+        assert_eq!(error.status, 2);
+        assert!(
+            error
+                .detail
+                .starts_with("request ended; cleanup helper-control:")
+        );
+    }
+
+    /// ´test:unit:helper-service-controller-failure-still-cleans-resources´
+    #[test]
+    fn helper_service_controller_failure_still_cleans_resources() {
+        for panic in [false, true] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let mut resources = super::ServiceResources::new();
+            let uid = nix::unistd::Uid::effective().as_raw();
+            let gid = nix::unistd::Gid::effective().as_raw();
+            let slots = cleanup_slots(root.path());
+            resources
+                .bind(slots.0, slots.1, (uid, gid), gid)
+                .expect("bound sockets");
+            resources.controller = Some(std::thread::spawn(move || {
+                assert!(!panic, "fixture controller panic");
+                Err(crate::error::LaneError::operation(
+                    "helper-control",
+                    "controller error",
+                ))
+            }));
+            resources.refresher = Some(
+                cleanup_authority(std::sync::Arc::clone(&resources.cancelled))
+                    .expect("authority started"),
+            );
+            let error = resources.finish(Ok(())).expect_err("controller failure");
+            assert_eq!(error.kind, "helper-control");
+            assert_eq!(
+                error.detail,
+                if panic {
+                    "control thread panicked"
+                } else {
+                    "controller error"
+                }
+            );
+            assert_service_removed(root.path(), &resources);
+        }
+    }
+
+    /// ´test:unit:helper-service-body-refusals-retain-primary-error´
+    #[test]
+    fn helper_service_body_refusals_retain_primary_error() {
+        // These are cleanup-boundary injections, not admitted protocol acceptance.
+        for (point, kind) in [
+            ("accept", "helper-channel"),
+            ("blocking-mode", "helper-channel"),
+            ("peer-authorization", "helper-peer"),
+            ("socket-metadata", "helper-socket"),
+            ("socket-absent", "helper-socket"),
+            ("socket-mode", "helper-socket"),
+            ("request-repin", "helper-pin"),
+            ("request-identity", "helper-pin"),
+            ("driver-session", "helper-session"),
+            ("retry-thread", "round-thread"),
+            ("attempt-vector", "helper-request"),
+            ("attempt-result", "helper-runtime"),
+        ] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let mut resources = super::ServiceResources::new();
+            let uid = nix::unistd::Uid::effective().as_raw();
+            let gid = nix::unistd::Gid::effective().as_raw();
+            let error = resources
+                .run(
+                    cleanup_slots(root.path()),
+                    (uid, gid),
+                    gid,
+                    cleanup_authority,
+                    |_| Err(crate::error::LaneError::input(kind, point)),
+                )
+                .expect_err("body refusal");
+            assert_eq!(
+                (error.status, error.kind, error.detail.as_str()),
+                (2, kind, point)
+            );
+            assert_service_removed(root.path(), &resources);
+        }
+    }
+
+    /// ´test:unit:helper-service-unwind-cleans-resources´
+    #[test]
+    fn helper_service_unwind_cleans_resources() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let root = tempfile::tempdir().expect("fixture root");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut resources = super::ServiceResources::new();
+            resources.cancelled = Arc::clone(&cancelled);
+            let uid = nix::unistd::Uid::effective().as_raw();
+            let _result = resources.run(
+                cleanup_slots(root.path()),
+                (uid, nix::unistd::Gid::effective().as_raw()),
+                nix::unistd::Gid::effective().as_raw(),
+                cleanup_authority,
+                |_| panic!("fixture service body panic"),
+            );
+        }));
+        let observed = cancelled.load(Ordering::Acquire);
+        cancelled.store(true, Ordering::Release); // Bound even the suppressed-drop control.
+        let panic = outcome.expect_err("body panic retained");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"fixture service body panic")
+        );
+        assert!(observed, "unwind cancels before returning");
+        assert!(!root.path().join("request.sock").exists());
+        assert!(!root.path().join("control.sock").exists());
+    }
+
+    /// ´test:unit:helper-service-unconfirmed-socket-custody-is-retained´
+    #[test]
+    fn helper_service_unconfirmed_socket_custody_is_retained() {
+        for phase in ["metadata-error", "missing", "replacement"] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let (slot, _control) = cleanup_slots(root.path());
+            let result = super::ServiceSocket::bind(slot, "helper-socket", |slot| match phase {
+                "replacement" => {
+                    std::fs::remove_file(slot.address()).expect("remove name");
+                    std::fs::write(slot.address(), b"replacement").expect("replacement file");
+                    slot.metadata()
+                }
+                "missing" => {
+                    std::fs::remove_file(slot.address()).expect("remove name");
+                    slot.metadata()
+                }
+                _ => Err(std::io::Error::other("injected metadata failure")),
+            });
+            let Err(error) = result else {
+                panic!("unconfirmed custody admitted");
+            };
+            assert_eq!(error.kind, "helper-socket");
+            let expected = match phase {
+                "missing" => "bound socket disappeared",
+                "replacement" => "bound socket replaced before custody; retain its slot",
+                _ => {
+                    "bound socket identity unavailable; retain its slot: injected metadata failure"
+                }
+            };
+            assert_eq!(error.detail, expected);
+            assert_eq!(
+                root.path().join("request.sock").exists(),
+                phase != "missing"
+            );
+            if phase == "replacement" {
+                assert_eq!(
+                    std::fs::read(root.path().join("request.sock")).expect("retained"),
+                    b"replacement"
+                );
+            }
+        }
+    }
 
     /// ´test:unit:boxed-claude-helper-resumes-saved-session-without-quota-retry´
     #[test]
