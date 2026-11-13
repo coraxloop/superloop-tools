@@ -103,11 +103,22 @@ pub(super) fn measure(registration: &Registration, rows: &mut Vec<Value>) -> Res
         .map_err(|error| LaneError::operation("exercise-door-agent", error.to_string()))
 }
 
-#[allow(clippy::too_many_lines)]
 fn measure_inner(
     registration: &Registration,
     rows: &mut Vec<Value>,
     fixture: impl Fn(&str) -> io::Result<(Directory, CodexRunner, DoorInput)>,
+) -> io::Result<()> {
+    measure_with_judge(registration, rows, fixture, |runner, input, remaining| {
+        runner.judge(input, remaining)
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn measure_with_judge(
+    registration: &Registration,
+    rows: &mut Vec<Value>,
+    fixture: impl Fn(&str) -> io::Result<(Directory, CodexRunner, DoorInput)>,
+    judge: impl Fn(&CodexRunner, &[u8], Duration) -> agent::RunnerOutcome,
 ) -> io::Result<()> {
     use sha2::{Digest as _, Sha256};
     let valid = ["allow", "refuse", "refer"].into_iter().all(|verdict| {
@@ -159,7 +170,8 @@ print(json.dumps({'type':'item.completed','model':'configured-fixture','item':{'
 print(json.dumps({'type':'response.completed','response':{'model':'observed-fixture'}}))
 ";
     let (_root, runner, input) = fixture(script)?;
-    let result = runner.judge(
+    let result = judge(
+        &runner,
         &input.encode().map_err(io::Error::other)?,
         Duration::from_millis(SEMANTIC_BUDGET_MS),
     );
@@ -180,10 +192,15 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-fixt
     rows.push(json!({"observation":"isolated-runner-reviewed-rubric","status":if isolated {"pass"} else {"fail"},
         "rubric_digest":result.rubric_digest,"expected_digest":digest,"configured_model":runner.model,"observed_model":result.model,
         "agent_status":result.status,"reason":result.reason,"evidence":result.observations}));
-    let limited = runner.judge(&vec![0; 262_145], Duration::from_millis(SEMANTIC_BUDGET_MS));
+    let limited = judge(
+        &runner,
+        &vec![0; 262_145],
+        Duration::from_millis(SEMANTIC_BUDGET_MS),
+    );
     rows.push(json!({"observation":"door-agent-input-limit","status":if limited.reason == "door-agent-input-limit" && limited.verdict == "refer" {"pass"} else {"fail"},"reason":limited.reason}));
     fs::remove_file(&runner.rubric_path)?;
-    let absent = runner.judge(
+    let absent = judge(
+        &runner,
         &input.encode().map_err(io::Error::other)?,
         Duration::from_millis(SEMANTIC_BUDGET_MS),
     );
@@ -203,7 +220,8 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-fixt
         } else {
             SEMANTIC_BUDGET_MS
         };
-        let result = runner.judge(
+        let result = judge(
+            &runner,
             &input.encode().map_err(io::Error::other)?,
             Duration::from_millis(remaining_ms),
         );
@@ -242,6 +260,230 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-fixt
 mod tests {
     use super::*;
 
+    const HANG_BOUND: Duration = Duration::from_secs(120);
+
+    fn ready_program(runner: &CodexRunner, script: &str, timeout: bool) -> io::Result<()> {
+        let ready = runner.owner_home.join("descendant-ready");
+        if timeout {
+            let source = format!(
+                r"#!/usr/bin/python3
+import os, time, json
+from pathlib import Path
+runner = os.getppid()
+vendor = os.getpid()
+vendor_start = Path(f'/proc/{{vendor}}/stat').read_text().rsplit(') ', 1)[1].split()[19]
+if os.fork() == 0:
+ os.setsid()
+ pid = os.getpid()
+ start = Path(f'/proc/{{pid}}/stat').read_text().rsplit(') ', 1)[1].split()[19]
+ Path({}).write_text(json.dumps([runner, vendor, vendor_start, pid, start]))
+time.sleep(180)
+",
+                json!(ready)
+            );
+            crate::fixture_exec::write_executable(&runner.executable, source.as_bytes())?;
+        } else {
+            let gate = format!(
+                r"import signal, time
+from pathlib import Path
+signal.alarm(180)
+Path({}).write_text('ready')
+while not Path({}).exists(): time.sleep(0.005)
+",
+                json!(runner.owner_home.join("program-ready")),
+                json!(runner.owner_home.join("program-release"))
+            );
+            let source = script.replacen('\n', &format!("\n{gate}"), 1);
+            crate::fixture_exec::write_executable(&runner.executable, source.as_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn controlled_fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
+        let (root, runner, input) = fixture(script)?;
+        let timeout = script.contains("os.fork()");
+        ready_program(&runner, script, timeout)?;
+        let ready = root.0.join(if timeout {
+            "descendant-ready"
+        } else {
+            "program-ready"
+        });
+        let elapsed = root.0.join("logical-ms");
+        // Drive the real embedded runner's timeout branch, after its real
+        // escaped descendant exists. Both vendor processes also expire after
+        // 180 real seconds if the test process is killed. Freeze during cleanup
+        // so scheduling cannot consume the logical cleanup reserve. Rust supplies a real hang
+        // bound independently. No selector reaches production's entry route.
+        let prefix = format!(
+            r"import time, sys
+from pathlib import Path
+_clock_ready = Path({})
+_clock_elapsed = Path({})
+_clock_cancel = Path({})
+_clock_wall = time.time()
+_clock_origin = time.monotonic()
+_clock_ticks = 0
+_clock_timeout = {}
+_clock_release = Path({})
+def _clock_now():
+ global _clock_ticks
+ if _clock_ready.exists() and not _clock_cancel.exists():
+  _clock_ticks = _clock_ticks + 1 if _clock_timeout else 24
+ milliseconds = min(_clock_ticks * 50, 650) if _clock_timeout else _clock_ticks * 50
+ if not _clock_timeout and milliseconds == 1200: _clock_release.write_text('release')
+ _clock_elapsed.write_text(str(milliseconds))
+ return _clock_origin + milliseconds / 1000
+time.time = lambda: _clock_wall
+time.monotonic = _clock_now
+sys.argv[6] = str(_clock_wall + int(sys.argv[4]) / 1000)
+",
+            json!(ready),
+            json!(elapsed),
+            json!(root.0.join("cancel")),
+            if timeout { "True" } else { "False" },
+            json!(root.0.join("program-release"))
+        );
+        let source = format!(
+            r"#!/usr/bin/python3
+import os, sys
+os.environ['HOME'] = {}
+os.environ['TMPDIR'] = {}
+sys.argv[7] = {} + sys.argv[7]
+os.execv(sys.argv[4], sys.argv[4:])
+",
+            json!(root.0.join("loop")),
+            json!(root.0.join("tmp")),
+            json!(prefix)
+        );
+        crate::fixture_exec::write_executable(&runner.entry, source.as_bytes())?;
+        Ok((root, runner, input))
+    }
+
+    struct DescendantGuard(PathBuf);
+
+    fn ready_descendant(path: &std::path::Path) -> Option<(i32, i32, String, i32, String)> {
+        serde_json::from_slice(&fs::read(path).ok()?).ok()
+    }
+
+    fn same_process(pid: i32, start: &str) -> bool {
+        pid > 1
+            && fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|text| text.rsplit_once(") ").map(|(_, rest)| rest.to_owned()))
+                .and_then(|rest| rest.split_whitespace().nth(19).map(str::to_owned))
+                .as_deref()
+                == Some(start)
+    }
+
+    impl Drop for DescendantGuard {
+        fn drop(&mut self) {
+            if let Some((_, vendor, vendor_start, child, child_start)) = ready_descendant(&self.0) {
+                for (pid, start) in [(vendor, vendor_start), (child, child_start)] {
+                    if same_process(pid, &start) {
+                        let _killed = nix::sys::signal::kill(
+                            nix::unistd::Pid::from_raw(pid),
+                            nix::sys::signal::Signal::SIGKILL,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn controlled_judge(
+        runner: &CodexRunner,
+        input: &[u8],
+        remaining: Duration,
+    ) -> agent::RunnerOutcome {
+        let timeout = fs::read_to_string(&runner.executable)
+            .expect("fixture program")
+            .contains("os.fork()");
+        assert_eq!(remaining.as_millis(), if timeout { 2600 } else { 10_000 });
+        assert_eq!(runner.cap_ms, if timeout { 3000 } else { 10_000 });
+        let _descendant = DescendantGuard(runner.owner_home.join("descendant-ready"));
+        let started = Instant::now();
+        let mut result = runner.judge_with_clock(input, remaining, || {
+            if started.elapsed() < HANG_BOUND {
+                started
+            } else {
+                started + remaining + Duration::from_secs(1)
+            }
+        });
+        assert!(started.elapsed() < HANG_BOUND, "runner hang: {result:?}");
+        // The measurement under test receives logical wall time; the actual
+        // subprocess wall is bounded separately, never compared with 2.6 s.
+        result.wall_ms = fs::read_to_string(runner.owner_home.join("logical-ms"))
+            .map_or(0, |text| text.parse().expect("logical milliseconds"));
+        if !timeout && result.status == "verdict" {
+            assert_eq!(
+                result.wall_ms, 1200,
+                "semantic execution must consume logical time"
+            );
+        }
+        if timeout {
+            assert_eq!(result.reason, "door-agent-timeout", "{result:?}");
+            assert!(
+                result.wall_ms >= 600,
+                "timeout branch must see its deadline"
+            );
+        }
+        result
+    }
+
+    fn cancellation_reaps_ready_descendant() {
+        let (root, mut runner, input) =
+            controlled_fixture("#!/usr/bin/python3\n# os.fork()\n").expect("cancellation fixture");
+        fs::write(root.0.join("cancel"), b"freeze logical clock").expect("freeze");
+        runner.cap_ms = 120_000;
+        let ready = root.0.join("descendant-ready");
+        let _descendant = DescendantGuard(ready.clone());
+        let cancelled = std::cell::Cell::new(false);
+        let started = Instant::now();
+        let result = runner.judge_with_clock(&input.encode().expect("input"), HANG_BOUND, || {
+            if !cancelled.get()
+                && let Some((pid, _, _, child, start)) = ready_descendant(&ready)
+                && pid > 1
+                && same_process(child, &start)
+            {
+                // The unreaped runner is still alive in this callback.
+                // Cancel only after the escaped descendant is observable.
+                cancelled.set(
+                    nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(pid),
+                        nix::sys::signal::Signal::SIGTERM,
+                    )
+                    .is_ok(),
+                );
+            }
+            if started.elapsed() < HANG_BOUND {
+                started
+            } else {
+                started + HANG_BOUND + Duration::from_secs(1)
+            }
+        });
+        assert!(
+            cancelled.get(),
+            "descendant readiness never observed: {result:?}"
+        );
+        assert!(started.elapsed() < HANG_BOUND, "cleanup hung: {result:?}");
+        assert_eq!(result.reason, "door-agent-cancelled", "{result:?}");
+        assert_eq!(result.observations["children_reaped"], true, "{result:?}");
+        assert_eq!(
+            result.observations["private_directory_removed"], true,
+            "{result:?}"
+        );
+        let (_, vendor, vendor_start, child, start) =
+            ready_descendant(&ready).expect("descendant identity");
+        assert!(
+            !same_process(child, &start),
+            "escaped descendant survived cleanup"
+        );
+        assert!(
+            !same_process(vendor, &vendor_start),
+            "vendor survived cleanup"
+        );
+    }
+
     /// ´test:unit:agent-probes-retain-observations-on-fixture-failure´
     #[test]
     fn agent_probes_retain_observations_on_fixture_failure() {
@@ -265,7 +507,7 @@ mod tests {
     }
 
     /// # Panics
-    /// Panics if startup latency turns a semantic probe into a deadline probe.
+    /// Panics if logical deadlines or cancellation fail their production decisions.
     /// ´claim:superlooplane:agent-probes-separate-semantic-and-timeout-budgets´
     /// ´test:unit:agent-probes-separate-semantic-and-timeout-budgets´
     #[test]
@@ -278,22 +520,14 @@ mod tests {
             Scope::Work,
         )
         .expect("registration");
-        let calls = std::cell::Cell::new(0);
         let mut rows = Vec::new();
-        measure_inner(&registration, &mut rows, |script| {
-            let index = calls.get();
-            calls.set(index + 1);
-            // Delay the verdict, exit-failure and invalid-output fixtures. The
-            // fourth fixture must still fork before its short timeout fires.
-            if index < 3 {
-                let delayed = script.replacen('\n', "\nimport time; time.sleep(1.2)\n", 1);
-                fixture(&delayed)
-            } else {
-                fixture(script)
-            }
-        })
+        measure_with_judge(
+            &registration,
+            &mut rows,
+            controlled_fixture,
+            controlled_judge,
+        )
         .expect("measured probes");
-        assert_eq!(calls.get(), 4);
         assert_eq!(rows.len(), 8);
         assert!(rows.iter().all(|row| row["status"] == "pass"), "{rows:?}");
         let timeout = rows
@@ -305,5 +539,6 @@ mod tests {
         assert!(timeout["wall_ms"].as_u64().expect("measured wall") < 2600);
         assert_eq!(timeout["evidence"]["children_reaped"], true);
         assert_eq!(timeout["evidence"]["private_directory_removed"], true);
+        cancellation_reaps_ready_descendant();
     }
 }

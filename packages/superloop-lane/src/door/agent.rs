@@ -429,7 +429,7 @@ impl AgentRunner for CodexRunner {
 }
 
 impl CodexRunner {
-    fn judge_with_clock(
+    pub(super) fn judge_with_clock(
         &self,
         input: &[u8],
         remaining: Duration,
