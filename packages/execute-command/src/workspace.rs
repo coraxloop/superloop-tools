@@ -124,7 +124,7 @@ impl Execution {
     }
 }
 
-/// Maximum encoded workspace frame, also the bounded preflight evidence prefix.
+/// Maximum encoded workspace frame; custody evidence has an independent smaller bound.
 pub const MAX_WIRE_BYTES: usize = 1_048_576;
 
 /// Transport schema three. Decode checks structure; grant admission checks authority.
@@ -195,6 +195,7 @@ pub struct Grant {
     pub node: String,
     pub workspace: String,
     pub baseline_env: Vec<(String, String)>,
+    #[serde(deserialize_with = "unique_resources")]
     pub resources: BTreeMap<String, String>,
     pub shells: Vec<String>,
     /// Owner-published rule bytes versus a substituted positive table; full binding.
@@ -203,6 +204,31 @@ pub struct Grant {
     pub blacklist_digest: String,
     pub executor_protocol: u8,
 }
+fn unique_resources<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error> {
+    struct Resources;
+    impl<'de> serde::de::Visitor<'de> for Resources {
+        type Value = BTreeMap<String, String>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("unique resource names")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> Result<Self::Value, M::Error> {
+            let mut resources = BTreeMap::new();
+            while let Some((name, value)) = map.next_entry::<String, String>()? {
+                if resources.insert(name, value).is_some() {
+                    return Err(serde::de::Error::custom("duplicate resource name"));
+                }
+            }
+            Ok(resources)
+        }
+    }
+    deserializer.deserialize_map(Resources)
+}
+
 impl Grant {
     /// Decode the grant body. Its snapshot binds the digest separately.
     /// # Errors

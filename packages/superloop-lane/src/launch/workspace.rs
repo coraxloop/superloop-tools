@@ -147,6 +147,15 @@ pub(super) fn retain_or_declare(
     bind(plan, settings, declaration_text, expected, preview)
 }
 
+/// A visible preparing reservation must already name a reserved mail birth.
+pub(super) fn reserve_before_publish<T>(
+    reserve: impl FnOnce() -> Result<(), LaneError>,
+    publish: impl FnOnce() -> Result<T, LaneError>,
+) -> Result<T, LaneError> {
+    reserve()?;
+    publish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{LaunchRequest, initial_reservation, publish_reservation, read_reservation};
@@ -409,6 +418,68 @@ mod tests {
         assert_eq!(
             LaunchRequest::parse(&words).unwrap_err().kind,
             "round-selection"
+        );
+    }
+    /// ´test:unit:workspace-publication-cut-keeps-retirable-mail-birth´
+    #[test]
+    fn workspace_publication_cut_keeps_retirable_mail_birth() {
+        use loop_home::mail::{birth, configuration_store::ConfigurationStore};
+        use std::os::unix::fs::PermissionsExt as _;
+        for after_reservation in [false, true] {
+            let root = tempfile::tempdir().expect("fixture");
+            let private = root.path().join("private");
+            std::fs::create_dir(&private).unwrap();
+            std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let service = nix::unistd::Uid::effective().as_raw() + 1;
+            let identity = birth::Identity::for_reservation(3000, "superloop-lane:R".into());
+            let path = root.path().join(".reservation-R.json");
+            let mut plan = plan();
+            plan.document["compute_workspace"] = crate::tests::published_workspace();
+            let mut record = record(&plan);
+            record["mail_birth"] = json!(identity);
+            let result: Result<(), LaneError> = reserve_before_publish(
+                || {
+                    let mut store = ConfigurationStore::open(&private, service).unwrap();
+                    birth::reserve(&mut store, &identity).unwrap();
+                    Ok(())
+                },
+                || {
+                    if after_reservation {
+                        publish_reservation(&path, &record)?;
+                    }
+                    Err(LaneError::input("fixture-cut", "publication interrupted"))
+                },
+            );
+            assert_eq!(result.unwrap_err().kind, "fixture-cut");
+            assert_eq!(path.exists(), after_reservation);
+            if after_reservation {
+                assert_eq!(
+                    read_reservation(&path).unwrap().unwrap()["mail_birth"],
+                    json!(identity)
+                );
+            }
+            let mut store = ConfigurationStore::open(&private, service).unwrap();
+            birth::retire(&mut store, &identity).expect("cut publication remains retirable");
+            birth::verify_retired(&store, &identity).expect("terminal binding retained");
+        }
+    }
+
+    /// ´test:unit:workspace-declaration-refuses-duplicate-resources´
+    #[test]
+    fn workspace_declaration_refuses_duplicate_resources() {
+        let text = input();
+        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        value["grant"]["resources"] = json!({"target":"/work/R/target"});
+        let text = value.to_string();
+        assert!(declaration(&text).is_ok());
+        let duplicate = text.replace(
+            "\"resources\":{",
+            "\"resources\":{\"target\":\"/elsewhere\",",
+        );
+        assert_ne!(duplicate, text);
+        assert_eq!(
+            declaration(&duplicate).unwrap_err().kind,
+            "workspace-declaration"
         );
     }
 }

@@ -6576,12 +6576,6 @@ pub fn private_make(
             "reserved worker identity differs",
         ));
     }
-    let workspace_declared = plan.document.get("compute_workspace").is_some();
-    if !workspace_declared {
-        custody
-            .create_birth(owner_home, loop_name, &birth, "reserve")
-            .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
-    }
     let mut next = initial_reservation(
         &plan,
         loop_name,
@@ -6597,27 +6591,31 @@ pub fn private_make(
     next["mail_birth"] = serde_json::to_value(&birth)
         .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
     let prior = prior_birth;
-    let retired = if let Some(record) = prior {
-        replace_preparation_with(
-            &record,
-            &mut next,
-            &reservation,
-            &root,
-            &plan.driver_dir,
-            &plan.home,
-            &observation_path(&plan, run)?,
-            run,
-            crate::container_helper::process_presence,
-        )?
-    } else {
-        publish_reservation(&reservation, &next)?;
-        Vec::new()
-    };
-    if workspace_declared {
-        custody
-            .create_birth(owner_home, loop_name, &birth, "reserve")
-            .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
-    }
+    let retired = workspace::reserve_before_publish(
+        || {
+            custody
+                .create_birth(owner_home, loop_name, &birth, "reserve")
+                .map_err(|error| LaneError::input("mail-birth", error.to_string()))
+        },
+        || {
+            if let Some(record) = prior {
+                replace_preparation_with(
+                    &record,
+                    &mut next,
+                    &reservation,
+                    &root,
+                    &plan.driver_dir,
+                    &plan.home,
+                    &observation_path(&plan, run)?,
+                    run,
+                    crate::container_helper::process_presence,
+                )
+            } else {
+                publish_reservation(&reservation, &next)?;
+                Ok(Vec::new())
+            }
+        },
+    )?;
     let mut result =
         match home::make_home_in_namespace(&plan, &settings, &bytes, owner_home, loop_name) {
             Ok(report) => report,
