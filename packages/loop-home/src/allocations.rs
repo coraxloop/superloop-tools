@@ -38,7 +38,7 @@ impl Allocations {
     ///
     /// # Errors
     ///
-    /// Refuses malformed TOML, unknown keys, invalid ranges, and overlapping ranges.
+    /// Refuses malformed TOML, unknown keys, invalid or overlapping ranges, and reserved uid 65534.
     pub fn parse(source: &str) -> Result<Self, LoopError> {
         if source.is_empty() {
             return Ok(Self::default());
@@ -97,21 +97,18 @@ impl Allocations {
                     .and_then(|n| u32::try_from(n).ok())
                     .ok_or_else(|| LoopError::refusal(format!("malformed uids for loop: {name}")))
             };
-            let base = number("base")?;
-            let count = number("count")?;
-            if count == 0 || base < 1000 || u64::from(base) + u64::from(count) - 1 > 65_535 {
-                return Err(LoopError::refusal(format!(
-                    "uids out of range for loop: {name}"
-                )));
-            }
-            let block = WorkerBlock { base, count };
+            let block = WorkerBlock {
+                base: number("base")?,
+                count: number("count")?,
+            };
+            validate_worker_block(&name, block)?;
             if let Some((other, _)) = blocks.iter().find(|(_, other)| block.overlaps(**other)) {
                 return Err(LoopError::refusal(format!(
                     "worker uids overlap for loops {other} and {name}"
                 )));
             }
             if let Some(value) = table.get("mail_gids") {
-                let groups = parse_mail_groups(value, count)?;
+                let groups = parse_mail_groups(value, block.count)?;
                 mail_groups.insert(name.clone(), groups);
             }
             blocks.insert(name, block);
@@ -406,15 +403,17 @@ impl Allocations {
             .map(|(name, block)| (name.as_str(), *block))
     }
 
-    /// Select the lowest free run of 64 UIDs at or above 3000.
+    /// Select the lowest free run of 64 UIDs at or above 3000, excluding 65534.
     #[must_use]
     pub fn next_block(&self) -> Option<WorkerBlock> {
         (3000..=65_472)
             .map(|base| WorkerBlock { base, count: 64 })
             .find(|candidate| {
-                self.blocks
-                    .values()
-                    .all(|block| !candidate.overlaps(*block))
+                !candidate.contains(65_534)
+                    && self
+                        .blocks
+                        .values()
+                        .all(|block| !candidate.overlaps(*block))
                     && self
                         .registry_uids
                         .values()
@@ -432,17 +431,10 @@ impl Allocations {
     ///
     /// # Errors
     ///
-    /// Refuses duplicate names or overlapping blocks.
+    /// Refuses invalid ranges, reserved uid 65534, duplicate names or overlapping blocks.
     pub fn insert(&mut self, name: &str, block: WorkerBlock) -> Result<(), LoopError> {
         validate_name(name)?;
-        if block.count == 0
-            || block.base < 1000
-            || u64::from(block.base) + u64::from(block.count) - 1 > 65_535
-        {
-            return Err(LoopError::refusal(format!(
-                "uids out of range for loop: {name}"
-            )));
-        }
+        validate_worker_block(name, block)?;
         if self.blocks.contains_key(name)
             || self.blocks.values().any(|other| block.overlaps(*other))
             || self.registry_uids.values().any(|uid| block.contains(*uid))
@@ -490,6 +482,23 @@ impl Allocations {
         }
         result
     }
+}
+
+fn validate_worker_block(name: &str, block: WorkerBlock) -> Result<(), LoopError> {
+    if block.count == 0
+        || block.base < 1000
+        || u64::from(block.base) + u64::from(block.count) - 1 > 65_535
+    {
+        return Err(LoopError::refusal(format!(
+            "uids out of range for loop: {name}"
+        )));
+    }
+    if block.contains(65_534) {
+        return Err(LoopError::refusal(format!(
+            "worker uids include reserved uid 65534 for loop: {name}"
+        )));
+    }
+    Ok(())
 }
 
 fn read_source(path: &Path, absent_ok: bool) -> Result<String, LoopError> {

@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Worker allocation blocks can no longer contain namespace uid 65534. Before upgrading, inspect the worker ranges in the allocation ledger: a containing block now refuses with `worker uids include reserved uid 65534 for loop: NAME` when a command reads the whole ledger, including driver launch and mail provisioning. Automatic allocation skips that identity. Nothing is renumbered or rewritten in place; retain affected records and coordinate their identity migration or retirement before correcting the ledger. Homes whose blocks exclude 65534 need no action (``prob:homes:worker-blocks-exclude-the-overflow-uid``).
+
 - Door installation now exposes `agent_program_admission` at the top level of preview and apply output, separating `admitted`, `refused` and `unmeasured` from the legacy execute-bit observation. No metadata field authorizes runtime execution, and no installed generation changes shape. Validation-only runner configuration cannot execute without a registry loop uid; the ordinary configured door route is unchanged (``reg:superlooplane:door-agent-metadata``).
 
 - Door executable metadata keeps its existing `usable` permission observation separate from the new `admitted` custody verdict. The door-agent exercise creates its protected probe programs beneath the effective account's home, independently of caller-controlled `HOME` and `TMPDIR` (``reg:superlooplane:door-agent-metadata``; ``test:unit:door-agent-case-uses-production-handler-and-names-unmeasured-vendor``).

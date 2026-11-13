@@ -1402,6 +1402,91 @@ fn allocations_validate_all_ranges_and_overlaps() {
     }
 }
 
+/// ´claim:loophome:worker-block-parser-refuses-overflow-uid´
+/// ´test:crate:worker-block-parser-refuses-overflow-uid´
+#[test]
+fn worker_block_parser_refuses_overflow_uid() {
+    use crate::allocations::Allocations;
+    for (base, count) in [(65_534, 1), (65_533, 2), (65_472, 64), (1000, 64_536)] {
+        let source = format!("[alpha]\nuids = {{ base = {base}, count = {count} }}\n");
+        let error = Allocations::parse(&source).expect_err("reserved worker identity");
+        assert_eq!(error.status(), 2);
+        assert_eq!(
+            error.message(),
+            "worker uids include reserved uid 65534 for loop: alpha"
+        );
+    }
+    let source = "[lower]\nuids={base=65533,count=1}\n[upper]\nuids={base=65535,count=1}\n";
+    let allocations = Allocations::parse(source).expect("adjacent identities remain available");
+    assert_eq!(allocations.require("lower").unwrap().base, 65_533);
+    assert_eq!(allocations.require("upper").unwrap().base, 65_535);
+    assert_eq!(
+        Allocations::parse(&allocations.to_toml()).unwrap(),
+        allocations
+    );
+}
+
+/// ´claim:loophome:worker-block-insertion-refuses-overflow-uid´
+/// ´test:crate:worker-block-insertion-refuses-overflow-uid´
+#[test]
+fn worker_block_insertion_refuses_overflow_uid() {
+    use crate::allocations::Allocations;
+    use crate::registry::WorkerBlock;
+    let mut allocations = Allocations::default();
+    allocations
+        .insert(
+            "lower",
+            WorkerBlock {
+                base: 65_533,
+                count: 1,
+            },
+        )
+        .unwrap();
+    allocations
+        .insert(
+            "upper",
+            WorkerBlock {
+                base: 65_535,
+                count: 1,
+            },
+        )
+        .unwrap();
+    let before = allocations.to_toml();
+    for (base, count) in [(65_534, 1), (65_533, 2), (65_472, 64)] {
+        let error = allocations
+            .insert("alpha", WorkerBlock { base, count })
+            .expect_err("reserved worker identity");
+        assert_eq!(error.status(), 2);
+        assert_eq!(
+            error.message(),
+            "worker uids include reserved uid 65534 for loop: alpha"
+        );
+        assert_eq!(
+            allocations.to_toml(),
+            before,
+            "refusal preserves the ledger"
+        );
+    }
+}
+
+/// ´claim:loophome:worker-block-selection-reserves-overflow-uid´
+/// ´test:crate:worker-block-selection-reserves-overflow-uid´
+#[test]
+fn worker_block_selection_reserves_overflow_uid() {
+    use crate::allocations::Allocations;
+    let available = Allocations::parse("[occupied]\nuids={base=3000,count=62470}\n").unwrap();
+    let block = available.next_block().expect("last complete safe block");
+    assert_eq!((block.base, block.count, block.top()), (65_470, 64, 65_533));
+    let exhausted = Allocations::parse("[occupied]\nuids={base=3000,count=62471}\n").unwrap();
+    let before = exhausted.to_toml();
+    assert_eq!(
+        exhausted.next_block(),
+        None,
+        "only overflow-containing blocks remain"
+    );
+    assert_eq!(exhausted.to_toml(), before);
+}
+
 /// The reader pins and bounds its private file before parsing.
 /// ´claim:entry:allocations-reader-refuses-unsafe-file-shapes´
 /// ´test:crate:allocations-reader-refuses-unsafe-file-shapes´
