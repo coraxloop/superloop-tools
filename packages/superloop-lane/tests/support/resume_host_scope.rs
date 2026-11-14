@@ -119,6 +119,10 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
             inode.parse().expect("inode"),
         ),
     );
+    if let Some((fault, history)) = case.split_once(':') {
+        crate::refusals::run(&fixture, fault, history == "failed");
+        return std::process::ExitCode::SUCCESS;
+    }
     assert_eq!(case, "success");
     let report = fixture
         .launch(false)
@@ -146,4 +150,29 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
     )
     .expect("scope result");
     std::process::ExitCode::SUCCESS
+}
+
+pub(super) fn assert_work_empty() {
+    let current = std::fs::read_to_string("/proc/self/cgroup").expect("real launcher cgroup");
+    let service = current
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .expect("unified cgroup");
+    let unit = std::env::var("SUPERLOOP_RUN_SCOPE_UNIT").expect("scope unit");
+    assert_eq!(
+        std::path::Path::new(service)
+            .file_name()
+            .and_then(|s| s.to_str()),
+        Some(unit.as_str())
+    );
+    let events = std::fs::read_to_string(
+        std::path::Path::new("/sys/fs/cgroup")
+            .join(service.trim_start_matches('/'))
+            .join("work/cgroup.events"),
+    )
+    .expect("real work cgroup events");
+    assert!(
+        events.lines().any(|line| line == "populated 0"),
+        "restored refusal leaves no work process: {events}"
+    );
 }

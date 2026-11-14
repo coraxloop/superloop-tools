@@ -120,12 +120,22 @@ print(json.dumps(sorted(rows)))
         output.stdout
     }
     pub(super) fn launch(&self, dry: bool) -> Result<Value, superloop_lane::error::LaneError> {
+        self.launch_choice(dry, false)
+    }
+    pub(super) fn launch_choice(
+        &self,
+        dry: bool,
+        resume: bool,
+    ) -> Result<Value, superloop_lane::error::LaneError> {
         let mut words = vec![
             "alpha".into(),
             "R".into(),
             "--round".into(),
             "review".into(),
         ];
+        if resume {
+            words.push("--resume-thread".into());
+        }
         if dry {
             words.push("--dry-run".into());
         }

@@ -32,8 +32,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Exercise a complete resumed host launch in a real work scope with a declared driver/vendor stand-in, actual helper peer checks and settlement, and confirmed scope teardown on both success and refusal. Tests only; the five rollback refusals are not claimed by this foundation (``test:integration:public-resumed-launch-uses-real-work-scope``).
-- Exercise a positive resumed-launch preview with canonical mail provisioning and the real built helper preflight, preserving the reservation and run files. This changes tests only; the five live rollback refusals remain a separate acceptance (``test:integration:public-resumed-preview-uses-canonical-custody``).
+- Exercise five real public resumed-launch refusals with exact rollback and an identical retry: inspector, helper pin, stale socket, credential thread start and readiness. The fixture checks both reply and failed histories, preserves the explicit thread choice, and confirms scope teardown; vendor execution remains synthetic. Tests only (`public_resumed_inspector_refusal_restores_and_retries`).
+- Exercise a complete resumed host launch in a real work scope with a declared driver/vendor stand-in, actual helper peer checks and settlement, and confirmed scope teardown on both success and refusal. Tests only; the five rollback refusals are not claimed by this foundation (`public_resumed_launch_uses_real_work_scope`).
+- Exercise a positive resumed-launch preview with canonical mail provisioning and the real built helper preflight, preserving the reservation and run files. This changes tests only; the five live rollback refusals remain a separate acceptance (`public_resumed_preview_uses_canonical_custody`).
 
 - Pin live rollback and failed-round choice preservation over a production-published workspace grant and placement, including the exact settled reservation bytes (``test:unit:live-round-rollback-restores-placed-reservation``; ``test:unit:failed-round-choice-survives-live-rollback``).
 

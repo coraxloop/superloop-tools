@@ -7,13 +7,14 @@ pub mod fixture;
 pub mod host;
 #[path = "support/resume_host_install.rs"]
 pub mod install;
+#[path = "support/resume_host_refusals.rs"]
+pub mod refusals;
 #[path = "support/resume_host_scope.rs"]
 pub mod scope;
 use std::io::Write as _;
 
 const PREVIEW: &str = "public_resumed_preview_uses_canonical_custody";
 
-/// ´test:integration:public-resumed-preview-uses-canonical-custody´
 fn public_resumed_preview_uses_canonical_custody() {
     let fixture = host::Host::new();
     let before = fixture.reservation();
@@ -38,9 +39,38 @@ fn public_resumed_preview_uses_canonical_custody() {
     assert_eq!(fixture.inventory(), inventory, "preview publishes nothing");
 }
 
-/// ´test:integration:public-resumed-launch-uses-real-work-scope´
 fn public_resumed_launch_uses_real_work_scope() {
     scope::run("success");
+}
+
+fn public_resumed_inspector_refusal_restores_and_retries() {
+    for history in ["reply", "failed"] {
+        scope::run(&format!("inspector:{history}"));
+    }
+}
+
+fn public_resumed_helper_pin_refusal_restores_and_retries() {
+    for history in ["reply", "failed"] {
+        scope::run(&format!("helper-pin:{history}"));
+    }
+}
+
+fn public_resumed_stale_socket_refusal_restores_and_retries() {
+    for history in ["reply", "failed"] {
+        scope::run(&format!("stale-socket:{history}"));
+    }
+}
+
+fn public_resumed_credential_thread_start_refusal_restores_and_retries() {
+    for history in ["reply", "failed"] {
+        scope::run(&format!("credential:{history}"));
+    }
+}
+
+fn public_resumed_helper_readiness_refusal_restores_and_retries() {
+    for history in ["reply", "failed"] {
+        scope::run(&format!("readiness:{history}"));
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -58,7 +88,27 @@ fn main() -> std::process::ExitCode {
     }
     let selection = fixture::TestArguments::parse(&std::env::args_os().skip(1).collect::<Vec<_>>())
         .expect("supported test selection");
-    let tests: [(&str, fn()); 2] = [
+    let tests: [(&str, fn()); 7] = [
+        (
+            "public_resumed_inspector_refusal_restores_and_retries",
+            public_resumed_inspector_refusal_restores_and_retries,
+        ),
+        (
+            "public_resumed_helper_pin_refusal_restores_and_retries",
+            public_resumed_helper_pin_refusal_restores_and_retries,
+        ),
+        (
+            "public_resumed_stale_socket_refusal_restores_and_retries",
+            public_resumed_stale_socket_refusal_restores_and_retries,
+        ),
+        (
+            "public_resumed_credential_thread_start_refusal_restores_and_retries",
+            public_resumed_credential_thread_start_refusal_restores_and_retries,
+        ),
+        (
+            "public_resumed_helper_readiness_refusal_restores_and_retries",
+            public_resumed_helper_readiness_refusal_restores_and_retries,
+        ),
         (PREVIEW, public_resumed_preview_uses_canonical_custody),
         (
             "public_resumed_launch_uses_real_work_scope",
@@ -66,25 +116,42 @@ fn main() -> std::process::ExitCode {
         ),
     ];
     let mut passed = 0;
+    let mut failed = 0;
     for (name, test) in tests {
         if !selection.selected_for(name) {
             continue;
         }
+        let began = std::time::Instant::now();
         if selection.list {
             writeln!(std::io::stdout().lock(), "{name}: test").expect("list");
-        } else {
-            test();
+        } else if std::panic::catch_unwind(test).is_ok() {
             passed += 1;
             writeln!(std::io::stdout().lock(), "test {name} ... ok").expect("result");
+        } else {
+            failed += 1;
+            writeln!(std::io::stdout().lock(), "test {name} ... FAILED").expect("result");
+        }
+        if !selection.list {
+            writeln!(
+                std::io::stdout().lock(),
+                "CASE-WALL {name} wall_seconds={:.3}",
+                began.elapsed().as_secs_f64()
+            )
+            .expect("case timing");
         }
     }
     if !selection.list {
         writeln!(
             std::io::stdout().lock(),
-            "test result: ok. {passed} passed; 0 failed; 0 ignored; {} filtered out",
-            2 - passed
+            "test result: {}. {passed} passed; {failed} failed; 0 ignored; {} filtered out",
+            if failed == 0 { "ok" } else { "FAILED" },
+            7 - passed - failed
         )
         .expect("summary");
     }
-    std::process::ExitCode::SUCCESS
+    if failed == 0 {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    }
 }
