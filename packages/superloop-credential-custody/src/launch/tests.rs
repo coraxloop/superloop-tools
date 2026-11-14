@@ -596,7 +596,7 @@ fn launch_cleanup_is_manifest_bound_and_failure_only() {
         fs::Permissions::from_mode(0o400),
     )
     .unwrap();
-    store.advance(Phase::Failed).unwrap();
+    store.fail("synthetic-failure").unwrap();
     store.cleanup_outputs().unwrap();
     assert!(
         !partial
@@ -624,7 +624,7 @@ fn launch_cleanup_is_manifest_bound_and_failure_only() {
     let mut s = Store::reserve(&a, 0).unwrap();
     let dir = f.dir.path().join("sealed/sample");
     fs::write(dir.join("unrelated"), b"retained").unwrap();
-    s.advance(Phase::Failed).unwrap();
+    s.fail("synthetic-failure").unwrap();
     s.cleanup_outputs().unwrap();
     assert!(!dir.join("left.sealed").exists());
     assert_eq!(fs::read(dir.join("unrelated")).unwrap(), b"retained");
@@ -632,7 +632,7 @@ fn launch_cleanup_is_manifest_bound_and_failure_only() {
     let f = Fixture::new();
     let a = f.admit();
     let mut s = Store::reserve(&a, 0).unwrap();
-    s.advance(Phase::Failed).unwrap();
+    s.fail("synthetic-failure").unwrap();
     let dir = f.dir.path().join("sealed/sample");
     fs::rename(dir.join("right.sealed"), dir.join("original")).unwrap();
     fs::write(dir.join("right.sealed"), b"foreign").unwrap();
@@ -773,4 +773,134 @@ fn output_custody_drift() {
             "launch-output-binding",
         );
     }
+}
+
+/// ´test:unit:launch-binding-loss-latches-and-publishes-uncertainty´
+#[test]
+fn launch_binding_loss_latches_and_publishes_uncertainty() {
+    for at_sync in [false, true] {
+        let f = Fixture::new();
+        let admission = f.admit();
+        let mut store = Store::reserve(&admission, 0).unwrap();
+        for phase in FLOW {
+            if phase == Phase::EofAndSealersComplete && !at_sync {
+                break;
+            }
+            if phase == Phase::Captured {
+                store
+                    .capture(
+                        Invocation {
+                            id: "b".repeat(32),
+                            unit: "synthetic-sample.service".into(),
+                            pid: 123,
+                            birth: 1,
+                            uid: 1234,
+                            image: admission.fixture_image(),
+                        },
+                        &serde_json::to_vec(&Role::Fixture.properties()).unwrap(),
+                    )
+                    .unwrap();
+            } else {
+                store.advance(phase).unwrap();
+            }
+        }
+        let root = f.dir.path().join("sealed/sample");
+        let output = root.join("left.sealed");
+        let original = root.join("original");
+        fs::rename(&output, &original).unwrap();
+        fs::write(&output, b"foreign").unwrap();
+        let result = if at_sync {
+            store.sync_outputs()
+        } else {
+            store.advance(Phase::EofAndSealersComplete)
+        };
+        err(result, "launch-output-binding");
+        assert_eq!(store.phase(), Phase::Uncertain);
+        err(store.fail("generator-failed"), "launch-terminal-state");
+        err(store.cleanup_outputs(), "launch-output-binding");
+        assert_eq!(fs::read(&output).unwrap(), b"foreign");
+        fs::remove_file(&output).unwrap();
+        fs::rename(&original, &output).unwrap();
+        err(
+            store.advance(Phase::EofAndSealersComplete),
+            "launch-terminal-state",
+        );
+        err(store.sync_outputs(), "launch-sync-order");
+        err(store.advance(Phase::Complete), "launch-terminal-state");
+        let receipts: Vec<Value> = fs::read_dir(f.dir.path().join("evidence/sample"))
+            .unwrap()
+            .map(|e| serde_json::from_slice(&fs::read(e.unwrap().path()).unwrap()).unwrap())
+            .collect();
+        let terminal: Vec<_> = receipts
+            .iter()
+            .filter(|r| r["phase"] == "uncertain")
+            .collect();
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0]["refusal_class"], "launch-output-binding");
+        assert!(receipts.iter().all(|r| r["phase"] != "complete"));
+        store.cleanup_outputs().unwrap();
+        assert!(!output.exists());
+    }
+}
+/// ´test:unit:launch-terminal-receipts-name-the-refusal-class´
+#[test]
+fn launch_terminal_receipts_name_the_refusal_class() {
+    for uncertain in [false, true] {
+        let f = Fixture::new();
+        let admission = f.admit();
+        let mut store = Store::reserve(&admission, 0).unwrap();
+        err(
+            store.advance(Phase::Failed),
+            "launch-failure-class-required",
+        );
+        err(
+            store.advance(Phase::Uncertain),
+            "launch-failure-class-required",
+        );
+        if uncertain {
+            store.uncertain("keeper-lost").unwrap();
+        } else {
+            store.fail("generator-failed").unwrap();
+        }
+        let receipt: Value = serde_json::from_slice(
+            &fs::read(f.dir.path().join("evidence/sample/state-01.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt["refusal_class"],
+            if uncertain {
+                "keeper-lost"
+            } else {
+                "generator-failed"
+            }
+        );
+        assert_eq!(
+            receipt["phase"],
+            if uncertain { "uncertain" } else { "failed" }
+        );
+    }
+}
+
+/// ´test:unit:launch-failure-publication-cannot-reopen-success´
+#[test]
+fn launch_failure_publication_cannot_reopen_success() {
+    let f = Fixture::new();
+    let admission = f.admit();
+    let mut store = Store::reserve(&admission, 0).unwrap();
+    let evidence = f.dir.path().join("evidence/sample");
+    fs::write(evidence.join("state-01.json"), b"occupied").unwrap();
+    err(store.fail("generator-failed"), "receipt-no-replace");
+    assert_eq!(store.phase(), Phase::Uncertain);
+    assert_eq!(
+        fs::read(evidence.join("state-01.json")).unwrap(),
+        b"occupied"
+    );
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(evidence.join("state-02.json")).unwrap()).unwrap();
+    assert_eq!(receipt["phase"], "uncertain");
+    assert_eq!(receipt["refusal_class"], "receipt-no-replace");
+    err(
+        store.advance(Phase::SealersStarted),
+        "launch-terminal-state",
+    );
 }

@@ -470,7 +470,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/src/identity.rs:8,15,57,71,98,99,124,125,138``|D246; hashing live files and retained calibration bytes.|
 |``packages/superloop-credential-custody/src/launch/measure.rs:34,51,55,56,65,66,68,69,116,125,126,145,146,162,163,185,186,192,211,213,223``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/launch/policy.rs:67,133,293,333``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
-|``packages/superloop-credential-custody/src/launch/store.rs:95,96,97,110,111,112,137,138,139,199,200,201``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
+|``packages/superloop-credential-custody/src/launch/store.rs:96,97,98,111,112,113,139,140,141,203,204,205``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/launch/tests.rs:39,65,92,93,230,344,347,366,394,422,426,427,494,495,711,722``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/observe.rs:180,181,202,216,241,323,328``|D246–D247; source-payload selection and completed sealed-file comparisons.|
 |``packages/superloop-credential-custody/src/process.rs:165``|D246; the held interpreter identity is compared before execution; no independent digest producer.|

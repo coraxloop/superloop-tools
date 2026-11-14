@@ -92,6 +92,7 @@ struct Snapshot<'a> {
     unit: &'a str,
     sequence: u32,
     phase: Phase,
+    refusal_class: Option<&'static str>,
     policy_sha256: &'a str,
     code_sha256: &'a str,
     case_sha256: &'a str,
@@ -113,6 +114,7 @@ pub(super) struct Store {
     state: State,
     expected_image: ObjectIdentity,
     sealed_limit: u64,
+    refusal_class: Option<&'static str>,
     invocation: Option<Invocation>,
     configuration: Option<ConfigurationMeasurement>,
 }
@@ -142,6 +144,7 @@ impl Store {
             invocation: None,
             configuration: None,
             sealed_limit: admission.policy().limits.sealed_bytes,
+            refusal_class: None,
         };
         for stream in &case.streams {
             store
@@ -196,6 +199,7 @@ impl Store {
             unit: &self.unit,
             sequence,
             phase,
+            refusal_class: self.refusal_class,
             policy_sha256: &self.policy_sha256,
             code_sha256: &self.code_sha256,
             case_sha256: &self.case_sha256,
@@ -246,23 +250,60 @@ impl Store {
     pub fn advance(&mut self, phase: Phase) -> Result<()> {
         require(phase != Phase::SealedSynced, "launch-sync-order")?;
         require(
+            !matches!(phase, Phase::Failed | Phase::Uncertain),
+            "launch-failure-class-required",
+        )?;
+        require(
             phase != Phase::Captured || self.invocation.is_some(),
             "launch-capture-required",
         )?;
         self.persist(phase)
     }
+    // Failure classes are internal static metadata, never child diagnostic bytes.
+    pub fn fail(&mut self, class: &'static str) -> Result<()> {
+        self.state.next(Phase::Failed)?;
+        self.check_outputs(None)?;
+        self.terminal(Phase::Failed, class)
+    }
+    pub fn uncertain(&mut self, class: &'static str) -> Result<()> {
+        self.terminal(Phase::Uncertain, class)
+    }
+    fn terminal(&mut self, phase: Phase, class: &'static str) -> Result<()> {
+        let sequence = self.state.next(phase)?;
+        self.refusal_class = Some(class);
+        // Latch before publication: even publication failure cannot reopen success.
+        self.state.commit(phase)?;
+        if let Err(publication) = self.write_snapshot(sequence, phase) {
+            self.state.publication_failed();
+            self.refusal_class = Some(publication);
+            let _publication = self.write_snapshot(sequence + 1, Phase::Uncertain);
+            return Err(publication);
+        }
+        Ok(())
+    }
+    fn check_outputs(&mut self, mode: Option<u32>) -> Result<()> {
+        if let Err(class) = self.verify_outputs(mode) {
+            // Output custody is not a prerequisite for recording its loss. The
+            // evidence directory must still be valid; otherwise memory stays
+            // uncertain and the publication error cannot become acceptance.
+            let _publication = self.uncertain(class);
+            return Err(class);
+        }
+        Ok(())
+    }
     fn persist(&mut self, phase: Phase) -> Result<()> {
         let sequence = self.state.next(phase)?;
-        if matches!(phase, Phase::Failed | Phase::Uncertain) {
-            self.verify_outputs(None)?;
-        } else if matches!(self.state.phase(), Phase::SealedSynced) || phase == Phase::SealedSynced
-        {
-            self.verify_outputs(Some(0o400))?;
+        if matches!(self.state.phase(), Phase::SealedSynced) || phase == Phase::SealedSynced {
+            self.check_outputs(Some(0o400))?;
         } else {
-            self.verify_outputs(Some(0o600))?;
+            self.check_outputs(Some(0o600))?;
         }
         if let Err(class) = self.write_snapshot(sequence, phase) {
+            // The failed slot may already be occupied. Never replace it. Latch
+            // uncertainty and attempt its separate next-sequence receipt.
             self.state.publication_failed();
+            self.refusal_class = Some(class);
+            let _publication = self.write_snapshot(sequence + 1, Phase::Uncertain);
             return Err(class);
         }
         self.state.commit(phase)
@@ -272,7 +313,7 @@ impl Store {
             self.state.phase() == Phase::EofAndSealersComplete,
             "launch-sync-order",
         )?;
-        self.verify_outputs(Some(0o600))?;
+        self.check_outputs(Some(0o600))?;
         for output in &self.outputs {
             let length = output.file.metadata().map_err(|_| "file-metadata")?.len();
             require(
