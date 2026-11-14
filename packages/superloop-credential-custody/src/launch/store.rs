@@ -159,6 +159,38 @@ impl Store {
         store.write_snapshot(0, Phase::Reserved)?;
         Ok(store)
     }
+    // C2 receives only the two manifest-owned exclusive output capabilities.
+    pub fn sealer_outputs(&mut self, admission: &Admission, index: usize) -> Result<[File; 2]> {
+        let case = admission
+            .policy()
+            .cases
+            .get(index)
+            .ok_or("launch-case-binding")?;
+        require(
+            self.state.phase() == Phase::Reserved
+                && self.case == case.id
+                && self.policy_sha256 == admission.policy_sha256()
+                && self.code_sha256 == admission.code_sha256(),
+            "sealer-store-binding",
+        )?;
+        self.check_outputs(Some(0o600))?;
+        require(
+            self.outputs
+                .iter()
+                .all(|o| o.file.metadata().is_ok_and(|m| m.len() == 0)),
+            "sealer-output-not-empty",
+        )?;
+        Ok([
+            self.outputs[0]
+                .file
+                .try_clone()
+                .map_err(|_| "sealer-output-duplicate")?,
+            self.outputs[1]
+                .file
+                .try_clone()
+                .map_err(|_| "sealer-output-duplicate")?,
+        ])
+    }
     pub const fn phase(&self) -> Phase {
         self.state.phase()
     }
@@ -281,7 +313,7 @@ impl Store {
         }
         Ok(())
     }
-    fn check_outputs(&mut self, mode: Option<u32>) -> Result<()> {
+    pub(super) fn check_outputs(&mut self, mode: Option<u32>) -> Result<()> {
         if let Err(class) = self.verify_outputs(mode) {
             // Output custody is not a prerequisite for recording its loss. The
             // evidence directory must still be valid; otherwise memory stays

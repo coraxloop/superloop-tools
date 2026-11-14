@@ -35,3 +35,9 @@ path = "src/main.rs"
 [[bin]]
 name = "credential-fixture"
 path = "src/fixture_main.rs"
+
+# Native subprocess peer used only by private-core tests; never staged or installed.
+[[example]]
+name = "custody-sealer-test"
+path = "tests/support/sealer_native.rs"
+test = false

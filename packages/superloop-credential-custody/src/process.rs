@@ -61,7 +61,7 @@ pub fn pin_program(
     pin_matching(command, environment, None)
 }
 
-fn pin_matching(
+pub fn pin_matching(
     command: &mut Command,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
     expected: Option<&std::fs::File>,
@@ -248,11 +248,16 @@ fn capture_inner(
             std::thread::sleep(Duration::from_millis(2));
         }
     })();
+    let _status = cancel(&mut child);
+    result
+}
+
+/// Retain the leader until its process group has been cancelled.
+pub fn cancel(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
     if let Ok(pid) = i32::try_from(child.id()) {
         let _ignored = killpg(Pid::from_raw(pid), Signal::SIGKILL);
     }
-    let _ignored = child.wait();
-    result
+    child.wait().ok()
 }
 
 #[cfg(test)]

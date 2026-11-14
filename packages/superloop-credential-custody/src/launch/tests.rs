@@ -11,12 +11,12 @@ use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-struct Fixture {
-    dir: tempfile::TempDir,
-    value: Value,
+pub(super) struct Fixture {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) value: Value,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         for name in ["runtime", "sealed", "evidence"] {
@@ -70,7 +70,7 @@ impl Fixture {
     fn bytes(&self) -> Vec<u8> {
         serde_json::to_vec(&self.value).unwrap()
     }
-    fn admit(&self) -> measure::Admission {
+    pub(super) fn admit(&self) -> measure::Admission {
         measure::admit_for_owner(&self.bytes(), nix::unistd::geteuid().as_raw()).unwrap()
     }
     fn refusal(&self, class: &str) {

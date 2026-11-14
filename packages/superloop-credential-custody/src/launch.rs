@@ -1,6 +1,8 @@
 //! Unselected launcher cores. No entrypoint, manager adapter or plaintext reader.
+mod channel;
 mod measure;
 mod policy;
+mod sealer;
 mod state;
 mod store;
 
@@ -15,3 +17,6 @@ const fn require(condition: bool, class: &'static str) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod sealer_tests;
