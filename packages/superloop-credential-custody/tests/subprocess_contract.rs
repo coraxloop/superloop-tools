@@ -403,17 +403,82 @@ fn payload_complete_row_contract() {
 fn discovery_never_accepts_length() {
     let mut f = Fixture::new();
     f.malformed(b"QU\nFB\n");
-    let result = pass(
-        &f.command(false)
-            .args(["--discover", "alpha/3-a.sealed"])
-            .output()
-            .unwrap(),
-    );
+    // No complete campaign, payload or probes exist for this discovery case.
+    fs::remove_dir_all(f.dir.path().join("sealed/beta")).unwrap();
+    fs::remove_file(f.dir.path().join("parser.py")).unwrap();
+    let record = discovery_record(&f);
+    let result = pass(&discovery_command(&f, &record).output().unwrap());
+    assert_eq!(result["command"], "format-discover");
+    assert_eq!(result["case"], "representation-case");
+    assert_eq!(result["outcome"], "observed");
     assert_eq!(result["evidence"]["line_count"], 2);
     assert_eq!(result["evidence"]["wrap_width"], 2);
     assert_eq!(result["evidence"]["alphabet_conformity"], true);
     assert!(result["evidence"].get("decoded").is_none());
-    refuse(&f.check());
+    refused(&f.check(), "calibration-shape");
+}
+
+fn discovery_record(f: &Fixture) -> Value {
+    json!({"schema":1,"command":"format-discover","case":"representation-case",
+        "input":f.dir.path().join("sealed/alpha/3-a.sealed"),
+        "evidence_root":f.dir.path().join("evidence"),"file_bytes":1024})
+}
+
+fn discovery_command(f: &Fixture, record: &Value) -> Command {
+    let path = f.dir.path().join("discovery.json");
+    parameter_bytes(&path, &serde_json::to_vec(record).unwrap());
+    let mut command = binary();
+    command
+        .arg("format-discover")
+        .arg("--parameters")
+        .arg(path)
+        .args(["--case", "representation-case", "--receipt", "calibration"]);
+    command
+}
+
+/// ´test:integration:discovery-record-is-separate-and-strict´
+#[test]
+fn discovery_record_is_separate_and_strict() {
+    for (key, value, class) in [
+        ("schema", json!(2), "discovery-record-schema"),
+        ("command", json!("length-observe"), "discovery-record-shape"),
+        (
+            "command",
+            json!({"format-discover":null}),
+            "discovery-record-shape",
+        ),
+        ("samples", json!([]), "discovery-record-shape"),
+        ("file_bytes", json!(0), "discovery-record-limit"),
+        ("case", json!(""), "discovery-record-case"),
+        ("input", json!("relative"), "discovery-record-path"),
+    ] {
+        let f = Fixture::new();
+        let mut record = discovery_record(&f);
+        record[key] = value;
+        refused(&discovery_command(&f, &record).output().unwrap(), class);
+    }
+    let f = Fixture::new();
+    refused(
+        &discovery_command(&f, &f.record).output().unwrap(),
+        "discovery-record-shape",
+    );
+    let record = discovery_record(&f);
+    let mut command = discovery_command(&f, &record);
+    let bytes = serde_json::to_string(&record)
+        .unwrap()
+        .replace("\"schema\":1", "\"schema\":1,\"schema\":1");
+    parameter_bytes(&f.dir.path().join("discovery.json"), bytes.as_bytes());
+    refused(&command.output().unwrap(), "discovery-record-shape");
+    let mut command = f.command(false);
+    assert_eq!(
+        command
+            .args(["--discover", "alpha/3-a.sealed"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
+    );
 }
 
 /// ´test:integration:receipt-exclusivity-and-modes´

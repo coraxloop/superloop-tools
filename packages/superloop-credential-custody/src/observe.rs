@@ -1,12 +1,11 @@
 //! Metadata row validation; the reviewed payload owns the length computation.
 use crate::{
     identity, process, receipt,
-    record::{Parameters, Result},
+    record::{Discovery, Parameters, Result},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use std::process::Command;
 
 #[derive(Deserialize, Serialize)]
@@ -248,7 +247,36 @@ fn sample_bytes(record: &Parameters) -> Result<BTreeMap<(String, u64, String), u
     Ok(sizes)
 }
 
-pub fn run(record: &Parameters, discover: Option<&Path>) -> Result<Value> {
+pub fn discover(record: &Discovery) -> Result<Value> {
+    let parent = record.input.parent().ok_or("discovery-path")?;
+    let _directory = receipt::sealed_directory(parent)?;
+    let bytes = receipt::read(&record.input, record.file_bytes, true)?;
+    let final_lf = bytes.ends_with(b"\n");
+    let body = if final_lf {
+        &bytes[..bytes.len() - 1]
+    } else {
+        &bytes
+    };
+    let widths: Vec<_> = body.split(|b| *b == b'\n').map(<[u8]>::len).collect();
+    let alphabet = body
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || b"+/=\n".contains(b));
+    let wrap = if widths.len() == 1 {
+        Some(0)
+    } else {
+        let first = widths[0];
+        (first > 0
+            && widths[..widths.len() - 1].iter().all(|n| *n == first)
+            && widths.last().is_some_and(|n| *n > 0 && *n <= first))
+        .then_some(first)
+    };
+    Ok(
+        json!({"discovery": true, "line_count": widths.len(), "wrap_width": wrap,
+            "final_newline": final_lf, "alphabet_conformity": alphabet}),
+    )
+}
+
+pub fn run(record: &Parameters) -> Result<Value> {
     // Other accounts cannot replace any directory component while the reviewed
     // payload rereads these paths. Concurrent mutation by the effective user is
     // still excluded by the caller's observation protocol.
@@ -258,39 +286,6 @@ pub fn run(record: &Parameters, discover: Option<&Path>) -> Result<Value> {
         .iter()
         .map(|name| receipt::sealed_directory(&record.sealed_root.join(name)))
         .collect::<Result<_>>()?;
-    if let Some(relative) = discover {
-        if !crate::record::path(relative, false) {
-            return Err("discovery-path");
-        }
-        let bytes = receipt::read(
-            &record.sealed_root.join(relative),
-            record.limits.file_bytes,
-            true,
-        )?;
-        let final_lf = bytes.ends_with(b"\n");
-        let body = if final_lf {
-            &bytes[..bytes.len() - 1]
-        } else {
-            &bytes
-        };
-        let widths: Vec<_> = body.split(|b| *b == b'\n').map(<[u8]>::len).collect();
-        let alphabet = body
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || b"+/=\n".contains(b));
-        let wrap = if widths.len() == 1 {
-            Some(0)
-        } else {
-            let first = widths[0];
-            (first > 0
-                && widths[..widths.len() - 1].iter().all(|n| *n == first)
-                && widths.last().is_some_and(|n| *n > 0 && *n <= first))
-            .then_some(first)
-        };
-        return Ok(
-            json!({"discovery": true, "line_count": widths.len(), "wrap_width": wrap,
-            "final_newline": final_lf, "alphabet_conformity": alphabet}),
-        );
-    }
     let source = payload(record)?;
     let live = identity::live(record)?;
     let sizes = sample_bytes(record)?;

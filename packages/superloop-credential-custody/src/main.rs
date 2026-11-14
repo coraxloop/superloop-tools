@@ -33,9 +33,15 @@ enum Command {
         case: String,
         #[arg(long)]
         receipt: String,
-        /// Report representation only; never accept a length.
+    },
+    /// Observe one file's representation in a separate non-calibration case.
+    FormatDiscover {
         #[arg(long)]
-        discover: Option<PathBuf>,
+        parameters: PathBuf,
+        #[arg(long)]
+        case: String,
+        #[arg(long)]
+        receipt: String,
     },
     /// Compare the complete live identity without modifying calibration.
     IdentityCheck {
@@ -98,6 +104,11 @@ fn execute(command: &Command, start: Instant) -> Result<()> {
             receipt,
             ..
         }
+        | Command::FormatDiscover {
+            parameters,
+            receipt,
+            ..
+        }
         | Command::IdentityCheck {
             parameters,
             receipt,
@@ -111,31 +122,71 @@ fn execute(command: &Command, start: Instant) -> Result<()> {
         return Err("receipt-name");
     }
     let bytes = receipt::parameters(parameters)?;
-    let record = record::parse(&bytes)?;
-    let (label, evidence) = match command {
-        Command::LengthObserve { case, discover, .. } => {
+    match command {
+        Command::FormatDiscover { case, .. } => {
+            let record = record::parse_discovery(&bytes)?;
             if case != &record.case {
                 return Err("case-identity");
             }
-            (
+            publish(
+                "format-discover",
+                "observed",
+                &record.case,
+                &record.evidence_root,
+                receipt_name,
+                observe::discover(&record)?,
+                start,
+            )
+        }
+        Command::LengthObserve { case, .. } => {
+            let record = record::parse(&bytes)?;
+            if case != &record.case {
+                return Err("case-identity");
+            }
+            publish(
                 "length-observe",
-                observe::run(&record, discover.as_deref())?,
+                "ok",
+                &record.case,
+                &record.evidence_root,
+                receipt_name,
+                observe::run(&record)?,
+                start,
             )
         }
         Command::IdentityCheck { calibration, .. } => {
-            ("identity-check", identity::run(&record, calibration)?)
+            let record = record::parse(&bytes)?;
+            publish(
+                "identity-check",
+                "ok",
+                &record.case,
+                &record.evidence_root,
+                receipt_name,
+                identity::run(&record, calibration)?,
+                start,
+            )
         }
-    };
+    }
+}
+
+fn publish(
+    label: &'static str,
+    outcome: &'static str,
+    case: &str,
+    root: &std::path::Path,
+    receipt_name: &str,
+    evidence: serde_json::Value,
+    start: Instant,
+) -> Result<()> {
     let envelope = Envelope {
         schema: 1,
         command: label,
-        case: record.case.clone(),
-        outcome: "ok",
+        case: case.into(),
+        outcome,
         wall_us: start.elapsed().as_micros(),
         evidence,
     };
     let mut bytes = serde_json::to_vec(&envelope).map_err(|_| "result-encoding")?;
     bytes.push(b'\n');
-    receipt::publish(&record.evidence_root, receipt_name, &bytes)?;
+    receipt::publish(root, receipt_name, &bytes)?;
     superloop_cli_common::emit(&envelope).map_err(|_| "output-write")
 }

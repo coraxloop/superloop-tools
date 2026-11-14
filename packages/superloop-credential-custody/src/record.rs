@@ -6,6 +6,40 @@ use std::path::{Component, Path, PathBuf};
 pub type Result<T> = std::result::Result<T, &'static str>;
 pub const RECORD_LIMIT: usize = 262_144;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Discovery {
+    pub schema: u32,
+    command: String,
+    pub case: String,
+    pub input: PathBuf,
+    pub evidence_root: PathBuf,
+    pub file_bytes: u64,
+}
+
+pub fn parse_discovery(bytes: &[u8]) -> Result<Discovery> {
+    if bytes.len() > RECORD_LIMIT {
+        return Err("record-too-large");
+    }
+    let record: Discovery = serde_json::from_slice(bytes).map_err(|_| "discovery-record-shape")?;
+    if record.command != "format-discover" {
+        return Err("discovery-record-shape");
+    }
+    if record.schema != 1 {
+        return Err("discovery-record-schema");
+    }
+    if !name(&record.case) {
+        return Err("discovery-record-case");
+    }
+    if !path(&record.input, true) || !path(&record.evidence_root, true) {
+        return Err("discovery-record-path");
+    }
+    if !(1..=16_777_216).contains(&record.file_bytes) {
+        return Err("discovery-record-limit");
+    }
+    Ok(record)
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Parameters {
