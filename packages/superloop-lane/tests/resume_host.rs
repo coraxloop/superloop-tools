@@ -9,6 +9,8 @@ pub mod host;
 pub mod install;
 #[path = "support/resume_host_refusals.rs"]
 pub mod refusals;
+#[path = "support/resume_host_retained.rs"]
+pub mod retained;
 #[path = "support/resume_host_scope.rs"]
 pub mod scope;
 use std::io::Write as _;
@@ -73,6 +75,18 @@ fn public_resumed_helper_readiness_refusal_restores_and_retries() {
     }
 }
 
+fn public_resumed_rollback_retains_live_work_process() {
+    scope::run("retained-live-process");
+}
+
+fn public_resumed_rollback_retains_changed_request() {
+    scope::run("retained-changed-request");
+}
+
+fn public_resumed_rollback_retains_dispatch_intent() {
+    scope::run("retained-intent");
+}
+
 fn main() -> std::process::ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|s| s == "--fixture-scope") {
@@ -88,33 +102,7 @@ fn main() -> std::process::ExitCode {
     }
     let selection = fixture::TestArguments::parse(&std::env::args_os().skip(1).collect::<Vec<_>>())
         .expect("supported test selection");
-    let tests: [(&str, fn()); 7] = [
-        (
-            "public_resumed_inspector_refusal_restores_and_retries",
-            public_resumed_inspector_refusal_restores_and_retries,
-        ),
-        (
-            "public_resumed_helper_pin_refusal_restores_and_retries",
-            public_resumed_helper_pin_refusal_restores_and_retries,
-        ),
-        (
-            "public_resumed_stale_socket_refusal_restores_and_retries",
-            public_resumed_stale_socket_refusal_restores_and_retries,
-        ),
-        (
-            "public_resumed_credential_thread_start_refusal_restores_and_retries",
-            public_resumed_credential_thread_start_refusal_restores_and_retries,
-        ),
-        (
-            "public_resumed_helper_readiness_refusal_restores_and_retries",
-            public_resumed_helper_readiness_refusal_restores_and_retries,
-        ),
-        (PREVIEW, public_resumed_preview_uses_canonical_custody),
-        (
-            "public_resumed_launch_uses_real_work_scope",
-            public_resumed_launch_uses_real_work_scope,
-        ),
-    ];
+    let tests = cases();
     let mut passed = 0;
     let mut failed = 0;
     for (name, test) in tests {
@@ -145,7 +133,7 @@ fn main() -> std::process::ExitCode {
             std::io::stdout().lock(),
             "test result: {}. {passed} passed; {failed} failed; 0 ignored; {} filtered out",
             if failed == 0 { "ok" } else { "FAILED" },
-            7 - passed - failed
+            10 - passed - failed
         )
         .expect("summary");
     }
@@ -154,4 +142,46 @@ fn main() -> std::process::ExitCode {
     } else {
         std::process::ExitCode::FAILURE
     }
+}
+
+fn cases() -> [(&'static str, fn()); 10] {
+    [
+        (
+            "public_resumed_inspector_refusal_restores_and_retries",
+            public_resumed_inspector_refusal_restores_and_retries,
+        ),
+        (
+            "public_resumed_helper_pin_refusal_restores_and_retries",
+            public_resumed_helper_pin_refusal_restores_and_retries,
+        ),
+        (
+            "public_resumed_stale_socket_refusal_restores_and_retries",
+            public_resumed_stale_socket_refusal_restores_and_retries,
+        ),
+        (
+            "public_resumed_credential_thread_start_refusal_restores_and_retries",
+            public_resumed_credential_thread_start_refusal_restores_and_retries,
+        ),
+        (
+            "public_resumed_helper_readiness_refusal_restores_and_retries",
+            public_resumed_helper_readiness_refusal_restores_and_retries,
+        ),
+        (
+            "public_resumed_rollback_retains_live_work_process",
+            public_resumed_rollback_retains_live_work_process,
+        ),
+        (
+            "public_resumed_rollback_retains_changed_request",
+            public_resumed_rollback_retains_changed_request,
+        ),
+        (
+            "public_resumed_rollback_retains_dispatch_intent",
+            public_resumed_rollback_retains_dispatch_intent,
+        ),
+        (PREVIEW, public_resumed_preview_uses_canonical_custody),
+        (
+            "public_resumed_launch_uses_real_work_scope",
+            public_resumed_launch_uses_real_work_scope,
+        ),
+    ]
 }

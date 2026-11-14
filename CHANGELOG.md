@@ -32,6 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Pin the public rollback retention boundaries with a live work process, an in-place changed request and a durable dispatch intent. These test-only controls distinguish unsafe restoration and deletion from the supported live retry; they add no recovery command (`public_resumed_rollback_retains_dispatch_intent`).
 - Exercise five real public resumed-launch refusals with exact rollback and an identical retry: inspector, helper pin, stale socket, credential thread start and readiness. The fixture checks both reply and failed histories, preserves the explicit thread choice, and confirms scope teardown; vendor execution remains synthetic. Tests only (`public_resumed_inspector_refusal_restores_and_retries`).
 - Exercise a complete resumed host launch in a real work scope with a declared driver/vendor stand-in, actual helper peer checks and settlement, and confirmed scope teardown on both success and refusal. Tests only; the five rollback refusals are not claimed by this foundation (`public_resumed_launch_uses_real_work_scope`).
 - Exercise a positive resumed-launch preview with canonical mail provisioning and the real built helper preflight, preserving the reservation and run files. This changes tests only; the five live rollback refusals remain a separate acceptance (`public_resumed_preview_uses_canonical_custody`).

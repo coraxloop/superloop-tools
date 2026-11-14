@@ -119,6 +119,10 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
             inode.parse().expect("inode"),
         ),
     );
+    if let Some(control) = case.strip_prefix("retained-") {
+        crate::retained::run(&fixture, control);
+        return std::process::ExitCode::SUCCESS;
+    }
     if let Some((fault, history)) = case.split_once(':') {
         crate::refusals::run(&fixture, fault, history == "failed");
         return std::process::ExitCode::SUCCESS;

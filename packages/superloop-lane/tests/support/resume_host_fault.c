@@ -78,3 +78,24 @@ int pthread_create(pthread_t *thread,const pthread_attr_t *attr,
     }
     return next(thread,attr,start,argument);
 }
+
+/* Return an injected error only after the real intent directory fsync succeeds. */
+int fsync(int fd) {
+    int (*next)(int)=dlsym(RTLD_NEXT,"fsync");
+    int result=next(fd);
+    static int fired=0;
+    const char *home=getenv("RESUME_FIXTURE_INTENT_HOME");
+    if(result || fired || !home)return result;
+    char link[64],actual[8192],wanted[8192],record[8192];
+    snprintf(link,sizeof link,"/proc/self/fd/%d",fd);
+    ssize_t n=readlink(link,actual,sizeof actual-1);if(n<0)return result;actual[n]=0;
+    if(snprintf(wanted,sizeof wanted,"%s/runs",home)>=(int)sizeof wanted || strcmp(actual,wanted))return result;
+    if(snprintf(record,sizeof record,"%s/.reservation-R.json",wanted)>=(int)sizeof record)return result;
+    int input=open(record,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(input<0)return result;
+    size_t bound=4*1024*1024;char *data=malloc(bound+1);if(!data){close(input);return result;}
+    n=read(input,data,bound);close(input);
+    int intent=0;if(n>0){data[n]=0;intent=strstr(data,"\"dispatch_intent\":")!=NULL;}
+    free(data);
+    if(intent){fired=1;hit("persisted intent fsync");errno=EIO;return -1;}
+    return result;
+}

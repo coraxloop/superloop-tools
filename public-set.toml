@@ -2699,6 +2699,9 @@ pattern = "packages/superloop-lane/tests/support/resume_host_install.rs"
 pattern = "packages/superloop-lane/tests/support/resume_host_refusals.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/tests/support/resume_host_retained.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/tests/support/resume_host_scope.rs"
 
 [[include.rows]]

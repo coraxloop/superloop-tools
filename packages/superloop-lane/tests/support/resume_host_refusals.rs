@@ -167,7 +167,7 @@ fn hit(fixture: &host::Host, case: &str) {
     };
     assert!(hit.lines().any(|s| s == expected), "{case}: {hit}");
 }
-fn install(fixture: &host::Host, case: &str) {
+pub(super) fn install(fixture: &host::Host, case: &str) {
     let home = fixture.home();
     host::write(
         home.join("resume-fault.c"),
@@ -237,12 +237,34 @@ if test -f fixture-fault; then
     *' _inspect-round '*' --record '*) test "$selection" = inspector && fault=$selection ;;
     *' _container-helper '*)
       case " $* " in *' --preflight-round '*) ;; *)
-        case "$selection" in helper-pin|credential|readiness) fault=$selection;; esac
+        case "$selection" in helper-pin|credential|readiness) fault=$selection;; live-process|changed-request) fault=helper-pin;; esac
       esac ;;
   esac
 fi
 if test -z "$fault"; then exec /usr/bin/podman unshare "$@"; fi
 identity=$(/usr/bin/python3 -I -c 'import json;r=json.load(open("runs/.reservation-R.json"));print(r["launcher_pid"],r["launcher_start"])')
+if test "$selection" = live-process; then
+ /usr/bin/python3 -I - <<'PYLIVE'
+import os,subprocess,json
+from pathlib import Path
+with open(os.devnull,'r+b') as sink:
+ child=subprocess.Popen(['/usr/bin/sleep','600'],stdin=sink,stdout=sink,stderr=sink,close_fds=True,start_new_session=True)
+p=Path('/proc')/str(child.pid);fields=p.joinpath('stat').read_text().rsplit(')',1)[1].split()
+value={'pid':child.pid,'start':int(fields[19]),'cgroup':p.joinpath('cgroup').read_text()}
+assert value['cgroup'].strip().endswith('/work')
+f=Path('linger.json');f.write_text(json.dumps(value));f.chmod(0o600)
+PYLIVE
+elif test "$selection" = changed-request; then
+ /usr/bin/podman unshare /usr/bin/python3 -I - "$PWD" <<'PYCHANGE'
+import os,sys,stat
+from pathlib import Path
+p=Path(sys.argv[1])/'runs/R/round-launch-review.json'
+s=p.lstat();assert stat.S_ISREG(s.st_mode) and s.st_uid==64000 and s.st_mode&0o7777==0o600
+with p.open('r+b') as f:
+ data=f.read();assert data.endswith(b'\n');f.seek(-1,os.SEEK_END);f.write(b' ');f.flush();os.fsync(f.fileno())
+assert (p.stat().st_dev,p.stat().st_ino,p.stat().st_size)==(s.st_dev,s.st_ino,s.st_size)
+PYCHANGE
+fi
 launcher=${identity% *}
 launcher_start=${identity#* }
 resume_launcher() {
