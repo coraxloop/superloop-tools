@@ -944,3 +944,28 @@ fn mail_retry_batches_keep_sender_and_slug_order() {
         "deadline order must not replace sender rounds or put recipient before slug"
     );
 }
+
+/// ´claim:loophome:mail-retry-clock-holds-only-refusals-a-watched-change-cannot-repair´
+/// ´test:unit:mail-retry-clock-holds-only-refusals-a-watched-change-cannot-repair´
+#[test]
+fn mail_retry_clock_holds_only_refusals_a_watched_change_cannot_repair() {
+    for reason in [
+        "invalid-name: outgoing filename",
+        "invalid-file: single-link regular submission required",
+        "oversize: bounded metadata",
+        "unknown-recipient: loop is not registered",
+        "not-whitelisted: worker edge",
+        "unsafe-storage: submitted source owner",
+    ] {
+        assert!(!timed_retry(&MailError::Invalid(reason)), "{reason}");
+    }
+    for error in [
+        MailError::Capacity,
+        MailError::Invalid("changed-source: snapshot differs from inspected submission"),
+        MailError::Invalid("invalid-directory: mail configuration is absent or unreadable"),
+        MailError::Invalid("fixture interruption"),
+        MailError::Io(std::io::Error::from_raw_os_error(libc::ENOSPC)),
+    ] {
+        assert!(timed_retry(&error), "{error}");
+    }
+}

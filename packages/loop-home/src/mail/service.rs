@@ -579,9 +579,9 @@ impl Service {
     }
     fn candidate(&mut self, sender_address: &Address, name: &OsStr) -> Result<()> {
         let result = self.try_candidate(sender_address, name);
-        if result.is_err() {
+        if result.as_ref().is_err_and(timed_retry) {
             self.retry_later(sender_address, name, retry::Work::Source);
-        } else {
+        } else if result.is_ok() {
             self.retries
                 .remove(&(sender_address.clone(), name.to_owned()));
         }
@@ -725,6 +725,22 @@ impl Service {
         let record = prepared.accept(&mut self.journal, now, decision.registry_digest, configs)?;
         self.finish(inventory, &record)
     }
+}
+/// Whether a failed attempt can clear without a watched change and so joins the retry clock.
+/// The listed refusals clear only by the sender's own edit or a watched authorization change,
+/// either of which wakes the scan that retries the letter; a timer would repeat the refusal.
+fn timed_retry(error: &MailError) -> bool {
+    !matches!(
+        refusal::code(error),
+        "invalid-name"
+            | "invalid-file"
+            | "oversize"
+            | "unknown-recipient"
+            | "retired-worker"
+            | "outside-estate"
+            | "not-whitelisted"
+            | "unsafe-storage"
+    )
 }
 const FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
 const SCAN_GAP: Duration = Duration::from_millis(250);
