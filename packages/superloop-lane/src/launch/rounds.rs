@@ -1858,18 +1858,7 @@ fn resume_with_program(
             &verified_runs,
             lane_bin,
             &mut helper_receipt,
-            |pid, start| {
-                let mut saved = read_reservation(&path)?.ok_or_else(|| {
-                    LaneError::input(
-                        "helper-start",
-                        "reservation vanished before parent identity",
-                    )
-                })?;
-                saved["helper_parent_pid"] = json!(pid);
-                saved["helper_parent_start"] = json!(start);
-                saved["helper_spawn_state"] = json!("running");
-                publish_reservation(&path, &saved)
-            },
+            |pid, start| record_helper_parent(&path, pid, start),
         )
     })();
     let (mut helper, helper_start, helper_stderr) = match started {
@@ -2029,6 +2018,29 @@ fn resume_with_program(
     )
 }
 
+fn record_helper_parent(path: &Path, pid: u32, start: u64) -> Result<(), LaneError> {
+    let root = path
+        .parent()
+        .ok_or_else(|| LaneError::input("helper-start", "root absent"))?;
+    let run = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix(".reservation-"))
+        .and_then(|s| s.strip_suffix(".json"))
+        .ok_or_else(|| LaneError::input("helper-start", "reservation name differs"))?;
+    let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
+    let mut saved = read_reservation(path)?.ok_or_else(|| {
+        LaneError::input(
+            "helper-start",
+            "reservation vanished before parent identity",
+        )
+    })?;
+    saved["helper_parent_pid"] = json!(pid);
+    saved["helper_parent_start"] = json!(start);
+    saved["helper_spawn_state"] = json!("running");
+    publish_reservation(path, &saved)
+}
+
 /// Live-only rollback. Crash recovery deliberately does not consume this record yet.
 pub(crate) mod rollback {
     use super::*;
@@ -2111,7 +2123,7 @@ pub(crate) mod rollback {
         {
             return Err(refusal("before-image differs"));
         }
-        let prior: Value = serde_json::from_slice(bytes).map_err(refusal)?;
+        let prior = crate::placement::reservation_bytes(bytes, refusal)?;
         if prior["phase"] != "settled"
             || prior["loop"] != record["loop"]
             || prior["run"] != record["run"]
@@ -2150,10 +2162,11 @@ pub(crate) mod rollback {
         {
             return Err(refusal("dispatch receipt differs"));
         }
-        record
+        let fields = record
             .as_object_mut()
-            .ok_or_else(|| refusal("reservation malformed"))?
-            .remove("round_rollback");
+            .ok_or_else(|| refusal("reservation malformed"))?;
+        fields.remove("round_rollback");
+        fields.remove("dispatch_intent");
         publish_reservation(path, &record)
     }
     pub fn sockets(path: &Path, identities: Value) -> Result<(), LaneError> {
@@ -2212,6 +2225,26 @@ pub(crate) mod rollback {
         }
         primary
     }
+    fn refusal_evidence(
+        path: &Path,
+        expected: &str,
+        reason: &str,
+        held: &OwnedFd,
+    ) -> Result<(), LaneError> {
+        let run = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_prefix(".reservation-"))
+            .and_then(|s| s.strip_suffix(".json"))
+            .ok_or_else(|| refusal("reservation name differs"))?;
+        nonce(&json!({"round_rollback":{"nonce":expected}}))?;
+        let evidence = path.with_file_name(format!(".round-refusal-{run}-{expected}.json"));
+        let bytes = serde_json::to_vec(&json!({"schema":1,"nonce":expected,
+            "state":"live-refusal","reason":reason}))
+        .map_err(refusal)?;
+        super::super::publish_reservation_bytes_at(&evidence, &bytes, None, Some(held))
+    }
+
     fn restore(
         path: &Path,
         expected: &str,
@@ -2220,6 +2253,8 @@ pub(crate) mod rollback {
         held: &OwnedFd,
         cleanup: impl FnOnce() -> Result<(), LaneError>,
     ) -> Result<(), LaneError> {
+        // Record the primary refusal even when absence or the embedded record refuses.
+        refusal_evidence(path, expected, reason, held)?;
         if !receipts.0.absent() || !receipts.1.absent() {
             return Err(refusal("process-absence"));
         }
@@ -2231,13 +2266,6 @@ pub(crate) mod rollback {
         let run = record["run"]
             .as_str()
             .ok_or_else(|| refusal("run absent"))?;
-        let evidence = root.join(format!(".round-refusal-{run}-{expected}.json"));
-        build::publish(
-            &evidence,
-            &serde_json::to_vec(&json!({"schema":1,"nonce":expected,
-            "step":record["active_round"],"state":"live-refusal","reason":reason}))
-            .map_err(refusal)?,
-        )?;
         cleanup()?;
         let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
         let current = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
@@ -2288,9 +2316,8 @@ pub(crate) mod rollback {
             error: LaneError,
             receipts: (&build::LiveChild, &build::LiveChild),
         ) -> LaneError {
-            let quiescent = self.quiescent();
             finish_at(error, self.path, self.nonce, receipts, self.runs, || {
-                quiescent?;
+                self.quiescent()?;
                 let mut receipt = build::LiveChild::default();
                 let output = build::inspect_with_receipt(
                     self.program,
@@ -2590,7 +2617,28 @@ pub(crate) mod rollback {
                     Some(choice),
                 )
                 .expect("chosen prospective record");
-                let nonce = prepare(&mut next, &bytes, "request\n").expect("prepare");
+                let plan = Plan {
+                    home: root.path().join("home"),
+                    driver_dir: root.path().join("R"),
+                    letter: PathBuf::new(),
+                    document: json!({"backend":"codex"}),
+                };
+                let expected = format!(
+                    "{}\n",
+                    super::super::request_text(&plan, &next, "review", 3600).expect("request")
+                );
+                let nonce = prepare(&mut next, &bytes, &expected).expect("prepare");
+                assert_eq!(next["round_rollback"]["request"], expected);
+                assert!(
+                    !super::super::failed_continuation(&next),
+                    "preparing belongs to recovery"
+                );
+                let emitted = format!(
+                    "{}\n",
+                    super::super::request_text(&plan, &next, "review", 3600)
+                        .expect("private request")
+                );
+                assert_eq!(emitted, expected, "preflight and cleanup request agree");
                 publish_reservation(&path, &next).expect("preparing");
                 let absent = build::LiveChild::default();
                 let error = finish(primary(), &path, &nonce, (&absent, &absent), || Ok(()));
@@ -2604,6 +2652,113 @@ pub(crate) mod rollback {
                     "round-choice"
                 );
             }
+        }
+
+        /// Raw resume reads keep legacy bytes but refuse placement-path duplicates.
+        /// ´test:unit:live-round-raw-reader-preserves-placement-floor´
+        #[test]
+        fn live_round_raw_reader_preserves_placement_floor() {
+            let (_root, path, _, _) = fixture();
+            let legacy =
+                br#"{"schema":1,"phase":"settled","worker_uid":3000,"legacy":1,"legacy":2}"#;
+            super::super::super::publish_reservation_bytes(&path, legacy).expect("legacy");
+            let (record, raw) = super::super::super::read_reservation_raw(&path, true)
+                .expect("legacy read")
+                .expect("present");
+            assert_eq!(raw, legacy);
+            assert_eq!(
+                record,
+                serde_json::from_slice::<Value>(legacy).expect("legacy parser")
+            );
+            let duplicate = concat!(
+                r#"{"schema":1,"phase":"settled","worker_uid":3000,"#,
+                r#""plan":{"compute_placement":null},"plan":{}}"#
+            )
+            .as_bytes();
+            super::super::super::publish_reservation_bytes(&path, duplicate)
+                .expect("duplicate bytes");
+            let error = super::super::super::read_reservation_raw(&path, true)
+                .expect_err("raw reader preserves placement floor");
+            assert!(
+                error.detail.contains("duplicate key on placement path"),
+                "{error}"
+            );
+        }
+
+        /// The embedded raw before-image has the same placement reader floor.
+        /// ´test:unit:live-round-before-image-preserves-placement-floor´
+        #[test]
+        fn live_round_before_image_preserves_placement_floor() {
+            let (_root, path, bytes, nonce) = fixture();
+            let mut record = read_reservation(&path).expect("read").expect("record");
+            assert_eq!(before(&record, &nonce).expect("legacy before-image"), bytes);
+            let duplicate = concat!(
+                r#"{"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"#,
+                r#""plan":{"compute_placement":null,"compute_placement":null}}"#
+            )
+            .as_bytes();
+            let nonce = prepare(&mut record, duplicate, "expected\n").expect("duplicate embedded");
+            publish_reservation(&path, &record).expect("outer reservation accepts opaque before");
+            let error =
+                before(&record, &nonce).expect_err("embedded reader preserves placement floor");
+            assert!(
+                error.detail.contains("duplicate key on placement path"),
+                "{error}"
+            );
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || {
+                panic!("no cleanup")
+            });
+            assert!(error.detail.contains("retained:"));
+            let evidence = path.with_file_name(format!(".round-refusal-R-{nonce}.json"));
+            assert!(
+                fs::read_to_string(evidence)
+                    .expect("before-image refusal is durable")
+                    .contains("original refusal")
+            );
+        }
+
+        /// A parent callback waits for the helper publisher and preserves its identity.
+        /// ´test:unit:live-round-parent-publication-takes-mailbox-lock´
+        #[test]
+        fn live_round_parent_publication_takes_mailbox_lock() {
+            use std::sync::mpsc;
+            use std::time::Duration;
+            let (root, path, _, nonce) = fixture();
+            let lock =
+                lock_mailbox(root.path(), "R", Uid::effective().as_raw()).expect("helper lock");
+            let temporary = root.path().join(format!(".reservation-{nonce}.tmp"));
+            fs::write(&temporary, b"helper publication in progress").expect("occupied temporary");
+            let (entered, observed) = mpsc::channel();
+            let (done, completion) = mpsc::channel();
+            let callback_path = path.clone();
+            let callback = std::thread::spawn(move || {
+                entered.send(()).expect("entered");
+                let result = super::super::record_helper_parent(&callback_path, 91, 92);
+                done.send(result).expect("completion");
+            });
+            observed
+                .recv_timeout(Duration::from_secs(30))
+                .expect("callback entry event");
+            let blocked = completion.recv_timeout(Duration::from_millis(100));
+            fs::remove_file(temporary).expect("helper completed temporary");
+            let mut record = read_reservation(&path).expect("read").expect("record");
+            record["helper_pid"] = json!(93);
+            publish_reservation(&path, &record).expect("helper identity publication");
+            drop(lock);
+            callback.join().expect("callback joined");
+            assert!(
+                matches!(blocked, Err(mpsc::RecvTimeoutError::Timeout)),
+                "callback must wait for mailbox owner, got {blocked:?}"
+            );
+            completion
+                .recv_timeout(Duration::from_secs(30))
+                .expect("callback complete event")
+                .expect("callback publishes after helper");
+            let record = read_reservation(&path).expect("read").expect("record");
+            assert_eq!(record["helper_pid"], 93, "helper update kept");
+            assert_eq!(record["helper_parent_pid"], 91);
+            assert_eq!(record["helper_parent_start"], 92);
         }
 
         fn primary() -> LaneError {
@@ -2655,6 +2810,17 @@ pub(crate) mod rollback {
             });
             child.kill().expect("stop fixture child");
             child.wait().expect("wait fixture child");
+            let evidence = path.with_file_name(format!(".round-refusal-R-{nonce}.json"));
+            let evidence: Value = serde_json::from_slice(
+                &fs::read(evidence).expect("durable refusal before absence"),
+            )
+            .expect("evidence");
+            assert!(
+                evidence["reason"]
+                    .as_str()
+                    .expect("reason")
+                    .contains("original refusal")
+            );
             assert!(
                 error
                     .detail
@@ -2715,10 +2881,20 @@ pub(crate) mod rollback {
                 "{error}"
             );
             assert_eq!(
-                fs::read(path).expect("intent retained"),
+                fs::read(&path).expect("intent retained"),
                 intended,
                 "post-intent never restored"
             );
+            let mut record = read_reservation(&path).expect("read").expect("record");
+            record["driver_entry_pid"] = json!(42);
+            publish_reservation(&path, &record).expect("driver receipt");
+            dispatched(&path, &nonce).expect("receipt consumes rollback boundary");
+            let record = read_reservation(&path).expect("read").expect("record");
+            assert!(
+                record.get("dispatch_intent").is_none(),
+                "intent removed after receipt"
+            );
+            assert!(record.get("round_rollback").is_none());
         }
 
         /// ´test:unit:live-round-rollback-checks-scope-and-container-absence´
@@ -4427,6 +4603,29 @@ mod choice_tests {
             );
         }
         assert!(!require_thread_choice(&saved, None).expect("ordinary resume"));
+    }
+
+    /// Choice admission consults only finalized settled rounds, not retained attempts.
+    /// ´test:unit:failed-round-choice-ignores-attempt-evidence´
+    #[test]
+    fn failed_round_choice_ignores_attempt_evidence() {
+        let mut saved = record();
+        saved["dispatch_intent"] = json!({"nonce":"old"});
+        assert!(
+            require_thread_choice(&saved, None).is_err(),
+            "settled failure still owes choice"
+        );
+        saved["phase"] = json!("preparing");
+        assert!(
+            !failed_continuation(&saved),
+            "retained attempt is not finalized"
+        );
+        assert!(!require_thread_choice(&saved, None).expect("no choice for interrupted recovery"));
+        assert!(require_thread_choice(&saved, Some(ThreadChoice::Fresh)).is_err());
+        saved["phase"] = json!("settled");
+        saved["rounds"][0]["phase"] = json!("settled");
+        saved["rounds"][0]["reply"] = json!({"bytes":1});
+        assert!(!require_thread_choice(&saved, None).expect("intent cannot create failed choice"));
     }
 
     /// A fresh request retains the old reservation identity until its own event is read.
