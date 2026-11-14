@@ -1,6 +1,7 @@
 //! Prepare a clean owner-controlled checkout from one complete preserved checkpoint.
 
 use super::*;
+use nix::sys::memfd::{MFdFlags, memfd_create};
 use std::io::{Seek as _, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::path::Component;
@@ -879,9 +880,11 @@ fn pack_transfer_cause(absent: Option<&str>, copied: &std::io::Result<u64>) -> S
 }
 
 fn transfer_pack(mut pack: Command, mut index: Command) -> Result<(), LaneError> {
-    let source_stderr = tempfile::tempfile()
+    let source_stderr = memfd_create("checkout-pack-stderr", MFdFlags::MFD_CLOEXEC)
+        .map(File::from)
         .map_err(|error| LaneError::operation("checkout-git", format!("pack stderr: {error}")))?;
-    let receiver_stderr = tempfile::tempfile()
+    let receiver_stderr = memfd_create("checkout-index-stderr", MFdFlags::MFD_CLOEXEC)
+        .map(File::from)
         .map_err(|error| LaneError::operation("checkout-git", format!("index stderr: {error}")))?;
     pack.stderr(Stdio::from(source_stderr.try_clone().map_err(|error| {
         LaneError::operation("checkout-git", format!("pack stderr: {error}"))
