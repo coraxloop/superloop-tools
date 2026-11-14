@@ -175,6 +175,11 @@ fn invoke(case: &Case, convention: &str, raw: Option<&[u8]>, mode: u32, drain: b
             } else if nix::libc::dup2(if alias { raw_a } else { raw_b }, 4) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
+            // Only stdio and the two convention streams cross exec. Mark rather
+            // than close so Rust's spawn-error pipe still reports exec failures.
+            if nix::libc::syscall(nix::libc::SYS_close_range, 5_u32, u32::MAX, 4_u32) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             let mut pid = if wrong_pid {
                 1
             } else {
@@ -306,7 +311,23 @@ fn refuse(observed: &Observed, class: &str) {
 }
 /// ´test:integration:fixture-patterns-and-barrier´
 #[test]
+#[allow(unsafe_code)]
 fn fixture_patterns_and_barrier() {
+    let input = fs::File::open("/dev/null").unwrap();
+    let raw = fcntl(&input, FcntlArg::F_DUPFD(5)).unwrap();
+    // SAFETY: F_DUPFD returns a fresh owned descriptor without CLOEXEC. Keep
+    // this parent descriptor alive while the normal invocation crosses exec.
+    let inherited = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) };
+    assert_eq!(fcntl(&inherited, FcntlArg::F_GETFD).unwrap(), 0);
+    let observed = invoke(&Case::new(), "normal", None, 0o400, true);
+    assert!(observed.output.status.success(), "{:?}", observed.output);
+    assert!(observed.stopped);
+    assert!(!observed.extra);
+    assert_eq!(
+        observed.streams,
+        [vec![0, 1, 2, 3, 4], vec![255, 254, 253, 252, 251]]
+    );
+    drop(inherited);
     for length in [1_u64, 3, 4, 5, 4096, 65537] {
         let mut case = Case::new();
         for stream in case.value["streams"].as_array_mut().unwrap() {
