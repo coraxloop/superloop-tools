@@ -561,4 +561,50 @@ os.execv(sys.argv[4], sys.argv[4:])
         assert_eq!(timeout["evidence"]["private_directory_removed"], true);
         cancellation_reaps_ready_descendant();
     }
+
+    /// ´test:unit:agent-probes-expired-logical-wall-fails-stage´
+    #[test]
+    fn agent_probes_expired_logical_wall_fails_stage() {
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":2000}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("registration");
+        let mut rows = Vec::new();
+        measure_with_judge(
+            &registration,
+            &mut rows,
+            controlled_fixture,
+            |runner, input, budget| {
+                let slow = fs::read_to_string(&runner.executable)
+                    .expect("fixture program")
+                    .contains("raise SystemExit(7)");
+                let mut result = controlled_judge(runner, input, budget);
+                if slow {
+                    result.wall_ms = u64::try_from(budget.as_millis()).expect("bounded budget");
+                }
+                result
+            },
+        )
+        .expect("measured probes");
+        let slow = rows
+            .iter()
+            .find(|row| row["observation"] == "failure")
+            .expect("slow failure row");
+        assert_eq!(slow["wall_ms"], SEMANTIC_BUDGET_MS);
+        assert_eq!(slow["status"], "fail");
+        let mut report = json!({});
+        super::agent_exercise::finish_runner_report(
+            &mut report,
+            &[],
+            &rows,
+            json!({"status":"unmeasured"}),
+            "real-runner-call",
+        );
+        assert_eq!(report["failed_stage"], "runner-probes");
+        assert_eq!(report["verdict"], "fail");
+    }
 }

@@ -428,9 +428,26 @@ fn measure_into(
             json!({"status":if absent {"unmeasured"} else {"fail"},"reason":error.line(),"agent_model":null,"agent_effort":null})
         }
     };
+    finish_runner_report(
+        report,
+        &observations,
+        &runner_fixtures,
+        real_observation,
+        stage,
+    );
+    Ok(())
+}
+
+pub(super) fn finish_runner_report(
+    report: &mut Value,
+    observations: &[Value],
+    runner_fixtures: &[Value],
+    real_observation: Value,
+    stage: &str,
+) {
     let failed = observations
         .iter()
-        .chain(&runner_fixtures)
+        .chain(runner_fixtures)
         .any(|row| row["status"] == "fail")
         || real_observation["status"] == "fail";
     let missing = observations.iter().any(|row| row["status"] == "unmeasured")
@@ -441,7 +458,7 @@ fn measure_into(
         } else if runner_fixtures.iter().any(|row| row["status"] == "fail") {
             "runner-probes"
         } else {
-            *stage
+            stage
         });
     }
     report["real_runner"] = real_observation;
@@ -452,7 +469,6 @@ fn measure_into(
     } else {
         "pass"
     });
-    Ok(())
 }
 
 fn real_result(result: &RunnerOutcome, cap_ms: u64, expected_digest: Option<&str>) -> Value {

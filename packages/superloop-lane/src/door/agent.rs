@@ -1492,14 +1492,14 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
 
     fn recorded_runner(script: &str, outer: bool) -> [Value; 2] {
         let (_root, mut runner, input) = fixture(script);
-        runner.cap_ms = 10000;
+        runner.cap_ms = FIXTURE_HANG_MS;
         if outer {
             crate::fixture_exec::write_executable(&runner.entry, script.as_bytes())
                 .expect("outer runner fixture");
         }
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(10),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         let mut record =
             crate::requests::tests::waiting("R", "1a", 3000, crate::requests::Mode::Audit)
@@ -1508,7 +1508,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         let record = crate::requests::RequestRecord::decode(record)
             .expect("recorded runner result")
             .into_value();
-        [record, result.exercise_observation(10000, None)]
+        [record, result.exercise_observation(FIXTURE_HANG_MS, None)]
     }
 
     /// The PATH-alias warning is derived from the recorded hrestore probe of
@@ -1534,11 +1534,11 @@ else:
 sys.exit(7)
 ";
         let (root, mut runner, input) = fixture(script);
-        runner.cap_ms = 10000;
+        runner.cap_ms = FIXTURE_HANG_MS;
         for _ in 0..2 {
             let result = runner.judge(
                 &input.encode().expect("bounded fixture input"),
-                Duration::from_secs(10),
+                Duration::from_millis(FIXTURE_HANG_MS),
             );
             assert_eq!(result.status, "failure", "{result:?}");
             assert!(matches!(result.runner_exit, Some(RunnerExit::Code(7))));
@@ -1836,12 +1836,24 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
             .expect("descendant fixture");
         runner.cap_ms = 30_000;
         let started = Instant::now();
-        let result = runner.judge(
+        let result = runner.judge_with_clock(
             &input.encode().expect("bounded fixture input"),
             Duration::from_millis(2600),
+            || {
+                if started.elapsed() < Duration::from_secs(120) {
+                    started
+                } else {
+                    started + Duration::from_secs(121)
+                }
+            },
         );
         assert_eq!(result.status, "timeout", "{result:?}");
-        assert!(started.elapsed() < Duration::from_millis(2600));
+        assert!(started.elapsed() < Duration::from_secs(120), "runner hang");
+        let logical: f64 = std::fs::read_to_string(root.path().join("logical-elapsed"))
+            .expect("observed logical time")
+            .parse()
+            .expect("seconds");
+        assert!(logical < 2.6, "logical elapsed {logical}: {result:?}");
         assert_eq!(result.observations["children_reaped"], true);
         assert_eq!(result.observations["private_directory_removed"], true);
         let pid = std::fs::read_to_string(marker).expect("descendant started");
