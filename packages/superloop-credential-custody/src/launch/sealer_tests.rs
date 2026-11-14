@@ -20,7 +20,13 @@ pub(super) fn make_fixture(mode: &str) -> Fixture {
     let executable = current
         .ancestors()
         .take(8)
-        .map(|p| p.join("examples/custody-sealer-test"))
+        .map(|p| {
+            p.join(if mode == "confinement" {
+                "examples/custody-confinement-probe"
+            } else {
+                "examples/custody-sealer-test"
+            })
+        })
         .find(|p| p.is_file())
         .expect("Cargo's profile contains its built native example");
     let bytes = fs::read(executable).expect("Cargo's test-only native example must be built");
@@ -43,6 +49,23 @@ pub(super) fn make_fixture(mode: &str) -> Fixture {
     fs::write(&public_path, &bytes).unwrap();
     fs::set_permissions(&public_path, fs::Permissions::from_mode(0o444)).unwrap();
     fixture.value["cases"][0]["expected_case_sha256"] = hash(&bytes).into();
+    let key = fixture.dir.path().join("key");
+    fs::create_dir(&key).unwrap();
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(key.join("synthetic-key"), b"public synthetic control").unwrap();
+    fixture.value["host_key"] = key.join("synthetic-key").to_str().unwrap().into();
+    // The native peer uses the same loader and standard libraries as this test
+    // binary. These are measured file allowances, never a directory-wide grant.
+    let paths: std::collections::BTreeSet<_> = fs::read_to_string("/proc/self/maps")
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(5))
+        .filter(|path| path.starts_with('/') && path.contains(".so"))
+        .map(|path| fs::canonicalize(path).unwrap())
+        .collect();
+    for (index, path) in paths.into_iter().enumerate() {
+        fixture.value["artifacts"].as_array_mut().unwrap().push(serde_json::json!({"id":format!("system-library-{index}"),"role":"library","path":path,"expected_sha256":hash(&fs::read(&path).unwrap())}));
+    }
     fixture
 }
 fn pipes() -> ([OwnedFd; 2], [File; 2]) {
@@ -486,4 +509,68 @@ fn sealer_native_exec_failure_retains_a_typed_failure() {
     )
     .unwrap();
     assert_eq!(receipt["refusal_class"], "sealer-start");
+}
+
+/// ´test:unit:sealer-confinement-denies-new-authority-and-keeps-held-output´
+#[test]
+fn sealer_confinement_denies_new_authority_and_keeps_held_output() {
+    let fixture = make_fixture("confinement");
+    fs::write(fixture.dir.path().join("outside-canary"), b"public").unwrap();
+    fs::write(fixture.dir.path().join("evidence/canary"), b"public").unwrap();
+    let admission = fixture.admit();
+    let mut store = Store::reserve(&admission, 0).unwrap();
+    let (readers, writers) = pipes();
+    feed(writers, b"synthetic");
+    let mut session = Session::start(&admission, 0, &mut store, readers).unwrap();
+    assert_eq!(
+        session.wait_until(hang_guard()).unwrap().sealed_bytes,
+        [10, 10]
+    );
+    drop(session);
+    for name in ["left.sealed", "right.sealed"] {
+        assert_eq!(
+            fs::read(fixture.dir.path().join("sealed/sample").join(name)).unwrap(),
+            b"1111111111"
+        );
+    }
+    assert!(!fixture.dir.path().join("key/forbidden").exists());
+}
+
+/// ´test:unit:sealer-confinement-refuses-unprotected-key-and-missing-loader´
+#[test]
+fn sealer_confinement_refuses_unprotected_key_and_missing_loader() {
+    for missing_loader in [false, true] {
+        let mut fixture = make_fixture("normal");
+        if missing_loader {
+            fixture.value["artifacts"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|a| !a["id"].as_str().unwrap().starts_with("system-library-"));
+        } else {
+            fs::set_permissions(
+                fixture.dir.path().join("key"),
+                fs::Permissions::from_mode(0o777),
+            )
+            .unwrap();
+        }
+        let admission = fixture.admit();
+        let mut store = Store::reserve(&admission, 0).unwrap();
+        let (readers, _writers) = pipes();
+        assert_eq!(
+            Session::start(&admission, 0, &mut store, readers).err(),
+            Some(if missing_loader {
+                "sealer-start"
+            } else {
+                "sealer-key-directory"
+            })
+        );
+        assert_eq!(
+            store.phase(),
+            if missing_loader {
+                Phase::Failed
+            } else {
+                Phase::Reserved
+            }
+        );
+    }
 }

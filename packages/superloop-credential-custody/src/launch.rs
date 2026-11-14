@@ -1,5 +1,6 @@
 //! Unselected launcher cores. No entrypoint, manager adapter or plaintext reader.
 mod channel;
+mod confinement;
 mod measure;
 mod policy;
 mod sealer;

@@ -18,29 +18,7 @@ fn run() -> Result<(), i32> {
         return Err(90);
     }
     let mode = args[2].strip_prefix("--name=").ok_or(91)?;
-    // Enumeration is confined to this synthetic observer, never the production probe.
-    let mut extras = std::fs::read_dir("/proc/self/fd")
-        .map_err(|_| 92)?
-        .filter_map(Result::ok)
-        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|fd| *fd >= 3)
-        .collect::<Vec<_>>();
-    extras.sort_unstable();
-    // read_dir itself holds the sole descriptor above stderr while enumerating.
-    if extras.len() != 1 {
-        return Err(93);
-    }
-    let status = std::fs::read_to_string("/proc/self/status").map_err(|_| 94)?;
-    for key in ["CapInh:", "CapPrm:", "CapEff:", "CapAmb:"] {
-        if status
-            .lines()
-            .find(|l| l.starts_with(key))
-            .is_none_or(|l| l.split_whitespace().nth(1) != Some("0000000000000000"))
-        {
-            return Err(95);
-        }
-    }
-    if !status.lines().any(|l| l == "NoNewPrivs:\t1") {
+    if !self_check() {
         return Err(96);
     }
     if mode == "early" {
@@ -102,4 +80,60 @@ fn run() -> Result<(), i32> {
         nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM).map_err(|_| 103)?;
     }
     Ok(())
+}
+
+#[allow(unsafe_code)]
+fn self_check() -> bool {
+    #[repr(C)]
+    struct Header {
+        version: u32,
+        pid: u32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Caps {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    let header = Header {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let mut caps = [Caps {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    // SAFETY: fixed kernel ABI stack buffers and scalar metadata queries only.
+    unsafe {
+        if nix::libc::syscall(nix::libc::SYS_capget, &raw const header, caps.as_mut_ptr()) != 0
+            || caps
+                .iter()
+                .any(|c| c.effective != 0 || c.permitted != 0 || c.inheritable != 0)
+            || nix::libc::prctl(nix::libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1
+        {
+            return false;
+        }
+        for capability in 0..64 {
+            if nix::libc::prctl(
+                nix::libc::PR_CAP_AMBIENT,
+                nix::libc::PR_CAP_AMBIENT_IS_SET,
+                capability,
+                0,
+                0,
+            ) == 1
+            {
+                return false;
+            }
+        }
+        // Bounded synthetic control includes the harness's inherited slot >=1000.
+        // No /proc filesystem allowance is granted just to support this check.
+        for fd in 3..2048 {
+            if nix::libc::fcntl(fd, nix::libc::F_GETFD) >= 0 {
+                return false;
+            }
+        }
+    }
+    true
 }

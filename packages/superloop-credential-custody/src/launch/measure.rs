@@ -174,7 +174,7 @@ fn measure_artifact(
     let m = file.metadata().map_err(|_| "file-metadata")?;
     require(
         m.is_file()
-            && m.uid() == owner
+            && (m.uid() == owner || (expected.role == ArtifactRole::Library && m.uid() == 0))
             && m.nlink() > 0
             && m.mode() & 0o7022 == 0
             && m.len() <= limit,

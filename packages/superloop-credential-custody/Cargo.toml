@@ -41,3 +41,8 @@ path = "src/fixture_main.rs"
 name = "custody-sealer-test"
 path = "tests/support/sealer_native.rs"
 test = false
+
+[[example]]
+name = "custody-confinement-probe"
+path = "tests/support/confinement_probe.rs"
+test = false

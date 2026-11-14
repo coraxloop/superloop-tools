@@ -2,6 +2,7 @@
 use super::{
     Result,
     channel::{self, EofProbe, Input, PipeState},
+    confinement::Confinement,
     measure::{Admission, HeldArtifact},
     policy::ArtifactRole,
     require,
@@ -159,6 +160,7 @@ fn command(
     input: OwnedFd,
     output: &File,
     limit: u64,
+    confinement: &Confinement,
 ) -> Result<Command> {
     require((1..=16 * 1024 * 1024).contains(&limit), "sealer-size-limit")?;
     artifact.unchanged()?;
@@ -181,6 +183,7 @@ fn command(
         .configure(&mut command)
         .map_err(|_| "sealer-descriptors")?;
     child_limits(&mut command, limit);
+    confinement.configure(&mut command)?;
     // Install exec LAST: the existing held executor never returns on success.
     crate::process::pin_matching(&mut command, &[], Some(&artifact.file))
         .map_err(|_| "sealer-execution-identity")?;
@@ -271,6 +274,7 @@ impl<'a> Session<'a> {
         mut spawn: impl FnMut(Command, EofProbe, File) -> Result<Running>,
     ) -> Result<Self> {
         let deadline = Instant::now() + Duration::from_millis(admission.policy().limits.case_ms);
+        let confinement = Confinement::prepare(admission)?;
         let inputs = Input::pair(readers)?;
         let outputs = store.sealer_outputs(admission, index)?;
         let case = admission
@@ -302,6 +306,7 @@ impl<'a> Session<'a> {
                     reader,
                     &output,
                     sealed_limit,
+                    &confinement,
                 )?,
                 probe,
                 output,
@@ -463,7 +468,8 @@ mod tests {
                 "normal",
                 reader,
                 &tempfile::tempfile().unwrap(),
-                4096
+                4096,
+                &Confinement::prepare(&admission).unwrap()
             )
             .err(),
             Some("sealer-execution-identity")
