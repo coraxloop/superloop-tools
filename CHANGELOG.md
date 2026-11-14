@@ -66,6 +66,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Mail event scheduling resolves only selected senders, and transport resolves its sender and recipient through the existing custody verifier; global staging, retention and identity admission remain explicit accounting costs. Repeated fallback scans no longer postpone hourly refusal reconsideration (``proto:loophome:mail-change-wakeup``).
+
 - Notice in-place repairs of refused mail, reconsider missed changes hourly, and leave not-yet-due refused senders out of unrelated wakes (``proto:loophome:mail-change-wakeup``).
 
 - Make the door admission final-interval test use a controlled clock, so a stalled test cannot skip its release event. Production keeps the same real-clock budget and polling order (`prob:gates:load-sensitive-tests-made-deterministic`).

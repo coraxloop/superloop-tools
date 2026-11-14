@@ -380,7 +380,11 @@ impl Service {
     ) -> Result<Vec<String>> {
         self.start_scan();
         self.last_full_scan = self.last_scan;
-        self.last_maintenance = Some(self.clock.monotonic());
+        // Fallback and invalidation scans must not postpone hourly reconsideration.
+        if self.maintenance_due() {
+            self.refused.clear();
+            self.last_maintenance = Some(self.clock.monotonic());
+        }
         notifications.begin_scan();
         self.directory.watch_roots(notifications)?;
         let mut inventory = self.directory.inventory()?;
@@ -428,7 +432,7 @@ impl Service {
         });
         inventory.failures.extend(failures);
     }
-    /// Event selection does not replace the fresh authorization inventory required by admission.
+    /// Resolve only selected senders; admission retains its separate global accounting census.
     pub fn scan_selected(
         &mut self,
         notifications: &mut super::notify::Notifications,
@@ -436,15 +440,22 @@ impl Service {
     ) -> Result<Vec<String>> {
         self.start_scan();
         selected.extend(self.retries.due_senders(self.clock.monotonic()));
-        let mut inventory = self.directory.inventory()?;
-        if self.maintenance_due() {
-            selected.extend(self.maintain_inventory(notifications, &inventory)?);
-        } else if self.prune_due() {
-            self.prune(&inventory)?;
-        }
+        let maintenance_failures = if self.maintenance_due() || self.prune_due() {
+            let accounting = self.directory.inventory()?;
+            if self.maintenance_due() {
+                selected.extend(self.maintain_inventory(notifications, &accounting)?);
+            } else {
+                self.prune(&accounting)?;
+            }
+            accounting.failures
+        } else {
+            Vec::new()
+        };
+        let mut inventory = self.directory.resolve(&selected)?;
         self.watch_inventory(notifications, &mut inventory, Some(&selected));
         self.configuration_changed(notifications);
         let mut failures = inventory.failures.clone();
+        failures.extend(maintenance_failures);
         let queues = self.candidates(&inventory, Some(&selected))?;
         for (sender, name) in schedule(queues) {
             if let Err(error) = self.candidate(&sender, &name) {
@@ -891,13 +902,22 @@ impl Service {
             .and_then(|name| Outgoing::parse(name).ok())
             .map(|outgoing| outgoing.recipient.to_string());
         let _span = tracing::info_span!("mail.delivery", sender = %sender_address, recipient = recipient.as_deref(), letter = %name.to_string_lossy()).entered();
-        let inventory = self.directory.inventory()?;
-        if self.prune_due() {
-            self.prune(&inventory)?;
+        let mut targets = BTreeSet::from([sender_address.clone()]);
+        if let Some(recipient) = &recipient {
+            targets.insert(
+                Address::parse(recipient)
+                    .map_err(|_| MailError::Invalid("invalid-name: recipient"))?,
+            );
         }
-        let sender = actor(&inventory, sender_address)?;
+        // The current staging/retention contract still requires the global census.
+        // It also retains cross-mailbox UID collision admission, before any source read.
+        let (inventory, accounting) = self.directory.resolve_for_admission(&targets)?;
+        if self.prune_due() {
+            self.prune(&accounting)?;
+        }
+        let sender = admitted_actor(&inventory, &accounting, sender_address)?;
         let observation = observe(sender, name).ok();
-        match self.deliver(&inventory, sender_address, name) {
+        match self.deliver(&inventory, &accounting, sender_address, name) {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.refuse_candidate(&inventory, sender_address, name, observation, error)
@@ -975,6 +995,7 @@ impl Service {
     fn deliver(
         &mut self,
         inventory: &Inventory,
+        accounting: &Inventory,
         sender_address: &Address,
         name: &OsStr,
     ) -> Result<()> {
@@ -987,10 +1008,10 @@ impl Service {
             .directory
             .decision(sender_address, &outgoing.recipient)?;
         let sender = actor(inventory, sender_address)?;
-        let recipient = actor(inventory, &outgoing.recipient)?;
-        self.prune(inventory)?;
+        let recipient = admitted_actor(inventory, accounting, &outgoing.recipient)?;
+        self.prune(accounting)?;
         self.journal.capacity(publication::staging_bytes(
-            &inventory
+            &accounting
                 .actors
                 .values()
                 .map(|actor| &actor.endpoint)
@@ -1060,6 +1081,37 @@ fn scan_delay(last: Option<Monotonic>, now: Monotonic) -> Duration {
     last.map_or(Duration::ZERO, |last| {
         SCAN_GAP.saturating_sub(now.saturating_duration_since(last))
     })
+}
+
+// Target resolution must not bypass the global census's collision/exclusion checks.
+fn admitted_actor<'a>(
+    targets: &'a Inventory,
+    accounting: &Inventory,
+    address: &Address,
+) -> Result<&'a Actor> {
+    let target = actor(targets, address)?;
+    let admitted = actor(accounting, address)?;
+    if (target.uid, target.group, target.active) != (admitted.uid, admitted.group, admitted.active)
+    {
+        return Err(MailError::Invalid(
+            "changed-source: endpoint admission changed",
+        ));
+    }
+    for (held, current) in [
+        (&target.outbox, &admitted.outbox),
+        (&target.inbox, &admitted.inbox),
+        (&target.staging, &admitted.staging),
+    ] {
+        let held = held.metadata()?;
+        let current = current.metadata()?;
+        if (held.dev(), held.ino()) != (current.dev(), current.ino()) {
+            return Err(MailError::Invalid(
+                "changed-source: endpoint replaced during admission",
+            ));
+        }
+    }
+    target.endpoint.fresh()?;
+    Ok(target)
 }
 
 fn actor<'a>(inventory: &'a Inventory, address: &Address) -> Result<&'a Actor> {

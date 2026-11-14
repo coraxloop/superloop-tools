@@ -1039,6 +1039,57 @@ impl Drop for Repairer {
         let _status = self.child.wait();
     }
 }
+fn worker_collision(home: &Path) {
+    let base = home.join(".var/loops/beta");
+    fs::create_dir(base.join("workers")).expect("workers");
+    owned(&base.join("workers"), 0, 0, 0o755);
+    let worker = base.join("workers/collision");
+    fs::create_dir(&worker).expect("worker home");
+    owned(&worker, 0, 0, 0o711);
+    let descriptor = File::open(&worker).expect("worker descriptor");
+    provision::tree(&descriptor, "mail", 1000, SERVICE, 2011).expect("colliding worker mailbox");
+    provision::directory(&descriptor, ".mail-staging", SERVICE, SERVICE, 0o700)
+        .expect("worker staging");
+    let source = worker.join("mail/outbox/beta.collision.letter");
+    fs::write(&source, BODY).expect("worker letter");
+    owned(&source, 1000, 1000, 0o600);
+    crate::mail::acl::install(&File::open(&source).expect("source"), SERVICE, false)
+        .expect("read grant");
+    for component in ["private", "private/.config", "private/.config/mail"] {
+        let path = base.join(component);
+        fs::create_dir(&path).expect("configuration ancestor");
+        owned(&path, 1001, 1001, 0o700);
+        crate::mail::acl::install(&File::open(&path).expect("ancestor"), SERVICE, true)
+            .expect("search grant");
+    }
+    let config = base.join("private/.config/mail/loop.toml");
+    fs::write(
+        &config,
+        "workers=[{name='collision',state='active'}]\n[mail]\nversion=1\nallow=[]\n",
+    )
+    .expect("worker registration");
+    owned(&config, 1001, 1001, 0o600);
+    crate::mail::acl::install(&File::open(&config).expect("configuration"), SERVICE, false)
+        .expect("configuration grant");
+    let allocations = home.join(".config/loops/allocations.toml");
+    let text = fs::read_to_string(&allocations)
+        .expect("allocations")
+        .replace("base=3010", "base=1000");
+    fs::write(allocations, text).expect("colliding actor reservation");
+}
+fn replace_outbox(home: &Path) {
+    let mailbox = home.join(".var/loops/alpha/mail");
+    fs::rename(mailbox.join("outbox"), home.join("held-outbox")).expect("retain old inode");
+    let (outbox, _) = provision::directory(
+        &File::open(&mailbox).expect("mailbox"),
+        "outbox",
+        1000,
+        1000,
+        0o700,
+    )
+    .expect("replacement");
+    crate::mail::acl::grant_outbox(&outbox, SERVICE).expect("replacement ACL");
+}
 fn repair_loop(home: &Path) {
     use std::io::BufRead as _;
     assert_eq!(nix::unistd::geteuid().as_raw(), 0);
@@ -1049,6 +1100,24 @@ fn repair_loop(home: &Path) {
     output.flush().expect("flush");
     for action in std::io::stdin().lock().lines() {
         match action.expect("action").as_str() {
+            "worker-collision" => worker_collision(home),
+            "reassign-beta" => {
+                let mailbox = home.join(".var/loops/beta/mail");
+                for name in ["draft", "read", "outbox"] {
+                    owned(&mailbox.join(name), 1002, 1002, 0o700);
+                }
+                crate::mail::acl::grant_outbox(
+                    &File::open(mailbox.join("outbox")).expect("outbox"),
+                    SERVICE,
+                )
+                .expect("service grant");
+                let registry = home.join(".config/loops/registry.toml");
+                let text = fs::read_to_string(&registry)
+                    .expect("registry")
+                    .replace("name='beta',uid=1001", "name='beta',uid=1002");
+                fs::write(registry, text).expect("new beta identity");
+            }
+            "replace-outbox" => replace_outbox(home),
             "reset" => {
                 fs::remove_file(&path).expect("old source");
                 fs::write(&path, BODY).expect("plain source");
@@ -1220,4 +1289,237 @@ fn mail_refusal_observes_mtime_seconds() {
 #[test]
 fn mail_refusal_observes_same_batch_resubmission() {
     repaired_source("mail_refusal_observes_same_batch_resubmission", "withdraw");
+}
+
+/// ´claim:loophome:mail-targeted-resolution-does-not-discover-unrelated-mailboxes´
+/// ´test:unit:mail-targeted-resolution-does-not-discover-unrelated-mailboxes´
+#[test]
+fn mail_targeted_resolution_does_not_discover_unrelated_mailboxes() {
+    fixture(
+        "mail_targeted_resolution_does_not_discover_unrelated_mailboxes",
+        |service, _home| {
+            let alpha = Address::parse("alpha").expect("sender");
+            io::NAME_SCANS.with(|count| count.set(0));
+            let empty = service
+                .directory
+                .resolve(&BTreeSet::new())
+                .expect("empty selection");
+            assert!(empty.actors.is_empty());
+            assert_eq!(io::NAME_SCANS.with(std::cell::Cell::get), 0);
+            let selected = service
+                .directory
+                .resolve(&BTreeSet::from([alpha.clone()]))
+                .expect("one target");
+            assert_eq!(selected.actors.keys().collect::<Vec<_>>(), vec![&alpha]);
+            // Exactly the selected mailbox's five fixed folder names, no workers or letter folders.
+            assert_eq!(io::NAME_SCANS.with(std::cell::Cell::get), 1);
+            let accounting = service
+                .directory
+                .inventory()
+                .expect("global accounting remains separate");
+            assert_eq!(accounting.actors.len(), 2);
+            admitted_actor(&selected, &accounting, &alpha).expect("same pinned endpoint");
+        },
+    );
+}
+
+/// ´claim:loophome:mail-targeted-admission-retains-global-identity-exclusions´
+/// ´test:unit:mail-targeted-admission-retains-global-identity-exclusions´
+#[test]
+fn mail_targeted_admission_retains_global_identity_exclusions() {
+    fixture_prepared(
+        "mail_targeted_admission_retains_global_identity_exclusions",
+        |home| {
+            Repairer::new(
+                "mail_targeted_admission_retains_global_identity_exclusions",
+                home,
+            )
+        },
+        |service, home, mut root| {
+            root.change("worker-collision");
+            io::NAME_SCANS.with(|count| count.set(0));
+            let principal = service
+                .directory
+                .resolve(&BTreeSet::from(
+                    [Address::parse("beta").expect("principal")],
+                ))
+                .expect("principal only");
+            assert_eq!(
+                principal.actors.len(),
+                1,
+                "sibling workers are not resolved"
+            );
+            assert_eq!(
+                io::NAME_SCANS.with(std::cell::Cell::get),
+                1,
+                "no workers-directory census for a principal"
+            );
+
+            let sender = Address::parse("beta+collision").expect("worker");
+            let local = service
+                .directory
+                .resolve(&BTreeSet::from([sender.clone()]))
+                .expect("target custody");
+            assert!(
+                local.actors.contains_key(&sender),
+                "local custody alone cannot establish global uniqueness"
+            );
+            let accounting = service
+                .directory
+                .inventory()
+                .expect("global identity admission");
+            assert!(!accounting.actors.contains_key(&sender));
+            let error = service
+                .candidate(&sender, OsStr::new("beta.collision.letter"))
+                .expect_err("collision must refuse before reading or claiming source");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unavailable endpoint beta+collision"),
+                "{error}"
+            );
+            assert!(
+                home.join(".var/loops/beta/workers/collision/mail/outbox/beta.collision.letter")
+                    .is_file()
+            );
+            assert!(
+                !home
+                    .join(".var/loops/beta/workers/collision/.mail-staging/beta.collision.letter")
+                    .exists()
+            );
+            assert_eq!(service.journal.records().expect("no acceptance").len(), 0);
+        },
+    );
+}
+
+/// ´claim:loophome:mail-targeted-admission-detects-replacement-between-views´
+/// ´test:unit:mail-targeted-admission-detects-replacement-between-views´
+#[test]
+fn mail_targeted_admission_detects_replacement_between_views() {
+    fixture_prepared(
+        "mail_targeted_admission_detects_replacement_between_views",
+        |home| {
+            Repairer::new(
+                "mail_targeted_admission_detects_replacement_between_views",
+                home,
+            )
+        },
+        |service, _home, mut root| {
+            let address = Address::parse("alpha").expect("sender");
+            let targets = service
+                .directory
+                .resolve(&BTreeSet::from([address.clone()]))
+                .expect("held target");
+            root.change("replace-outbox");
+            let accounting = service.directory.inventory().expect("fresh census");
+            let error = admitted_actor(&targets, &accounting, &address)
+                .err()
+                .expect("replacement refuses");
+            assert!(
+                error
+                    .to_string()
+                    .contains("changed-source: endpoint replaced during admission"),
+                "{error}"
+            );
+        },
+    );
+}
+
+/// ´claim:loophome:mail-targeted-admission-rechecks-actor-policy´
+/// ´test:unit:mail-targeted-admission-rechecks-actor-policy´
+#[test]
+fn mail_targeted_admission_rechecks_actor_policy() {
+    fixture_prepared(
+        "mail_targeted_admission_rechecks_actor_policy",
+        |home| Repairer::new("mail_targeted_admission_rechecks_actor_policy", home),
+        |service, _home, mut root| {
+            let address = Address::parse("beta").expect("sender");
+            let targets = service
+                .directory
+                .resolve(&BTreeSet::from([address.clone()]))
+                .expect("held target");
+            root.change("reassign-beta");
+            let accounting = service
+                .directory
+                .inventory()
+                .expect("fresh custody after identity change");
+            let held = targets.actors[&address]
+                .outbox
+                .metadata()
+                .expect("held outbox");
+            let current = accounting.actors[&address]
+                .outbox
+                .metadata()
+                .expect("current outbox");
+            assert_eq!(
+                (held.dev(), held.ino()),
+                (current.dev(), current.ino()),
+                "the inode did not change"
+            );
+            let error = admitted_actor(&targets, &accounting, &address)
+                .err()
+                .expect("actor change refuses");
+            assert!(
+                error
+                    .to_string()
+                    .contains("changed-source: endpoint admission changed"),
+                "{error}"
+            );
+        },
+    );
+}
+
+/// ´claim:loophome:mail-full-scans-do-not-postpone-refusal-reconsideration´
+/// ´test:unit:mail-full-scans-do-not-postpone-refusal-reconsideration´
+#[test]
+fn mail_full_scans_do_not_postpone_refusal_reconsideration() {
+    fixture_prepared(
+        "mail_full_scans_do_not_postpone_refusal_reconsideration",
+        |home| {
+            Repairer::new(
+                "mail_full_scans_do_not_postpone_refusal_reconsideration",
+                home,
+            )
+        },
+        |service, home, mut root| {
+            let seconds = std::sync::Arc::new(AtomicU64::new(0));
+            service.clock = Box::new(ControlledClock {
+                base: Monotonic::now(),
+                seconds: seconds.clone(),
+            });
+            fs::remove_file(home.join(".var/loops/beta/mail/outbox/beta.self.letter"))
+                .expect("only tested source");
+            root.change("reset");
+            let mut notifications = notify::Notifications::new();
+            service
+                .scan_watching(&mut notifications)
+                .expect("initial refusal");
+            assert_eq!(service.attempts, 1);
+            root.change("withdraw");
+            for second in [
+                300, 600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000, 3300, 3599,
+            ] {
+                seconds.store(second, Ordering::Relaxed);
+                service
+                    .scan_watching(&mut notifications)
+                    .expect("full fallback or invalidation scan");
+                assert_eq!(
+                    service.attempts, 1,
+                    "a full scan before the deadline does not retry unchanged refusals"
+                );
+            }
+            seconds.store(3600, Ordering::Relaxed);
+            service
+                .scan_watching(&mut notifications)
+                .expect("full scan at the hourly deadline");
+            assert_eq!(
+                service.attempts, 2,
+                "full scans cannot keep postponing an invisible resubmission"
+            );
+            service
+                .scan_watching(&mut notifications)
+                .expect("same clock after the sweep");
+            assert_eq!(service.attempts, 2, "one reconsideration per interval");
+        },
+    );
 }

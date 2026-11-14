@@ -321,7 +321,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |Source and matching lines|Classification context|
 |-------------------------|----------------------|
 |``.linter/imports/orchestration.toml:87``|Prose/schema convention or imported label declaration: binding only with the named independent reference; otherwise handle, with current widths and follow-ups in the package’s definition rows. Imported policy changes require its owner.|
-|``CHANGELOG.md:17,29,143,167,179,245,283,293,365,367,369,391,395,431,529,735,737``|Change and work records repeat the named producer or reader contracts; these mentions introduce no independent digest authority or representation.|
+|``CHANGELOG.md:17,29,145,169,181,247,285,295,367,369,371,393,397,433,531,737,739``|Change and work records repeat the named producer or reader contracts; these mentions introduce no independent digest authority or representation.|
 |``docs/backlog.md:19,21,89,113,181,185,225,227,279,327,329,331,357,361,373,401,413,561,563,569,609,801,837,847,849,889,903,937,941,945,979,997,999,1119,1125,1129,1131,1133,1135,1143,1145,1153,1159,1207,1209,1213,1247,1257,1265,1267,1271,1275,1285,1287,1301,1305,1307,1311,1319,1335,1339,1341,1351,1353,1357,1379,1651,2084,2090,2100,2110,2118,2172,2178,2216,2300,2304,2364,2368,2380,2384,2500,2538,2540,2544,2656,2658,2660,2662,2664,2666,2668,2670,2672,2674,2688,2690,2806,2844``|Change and work records repeat the named producer or reader contracts; these mentions introduce no independent digest authority or representation.|
 |``docs/spec/build-contracts.md:11,17,21,23,83``|D174, D237; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``docs/spec/collection-journal.md:249``|D074; proposed policy snapshot references inherit the existing publication identity purpose; no new digest format is defined.|
@@ -380,7 +380,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/loop-home/README.md:126,240,311``|README mentions describe the policy snapshot, protected mail journal and fixture ledger; their digest contracts remain defined at the respective producers.|
 |``packages/loop-home/meson.build:116,117,118,119,133,180``|D210; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/loop-home/src/allocations.rs:180``|D016; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
-|``packages/loop-home/src/mail/service.rs:4,644,693,936,1036,1037,1098``|Mail source and configuration digests are checked against the protected journal and freshly admitted configuration; retry scheduling changes neither their authority nor their representation.|
+|``packages/loop-home/src/mail/service.rs:4,655,704,956,1057,1058,1150``|Mail source and configuration digests are checked against the protected journal and freshly admitted configuration; retry scheduling changes neither their authority nor their representation.|
 |``packages/loop-home/src/mail/steering.rs:846``|Existing delivery verification compares the complete payload digest with the protected journal record; the actor supplies candidate mailbox bytes, not that reference. No representation change.|
 |``packages/loop-home/src/runner/agent_runner.py:268,272,274,280,304,424,427,429,431,436,470,482``|D017; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/loop-home/src/runner/sign_in_policy.py:79``|D018; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
@@ -669,6 +669,9 @@ This index locates every matching line in the tracked corpus outside this docume
 |``tests/loop-codex-home-run.sh:553,563,564,637,638,639,641,642,644,647,654,684,690,691,693,699,700,704,709,716,717,718,740,741,742,752,769,770,771,785,786,832,833,861,939,942,967,968,969,978``|Controlled fixture/oracle/reference evidence for this package’s inventoried uses; no independent production authority. Preserve algorithm vectors and reader-shape fixtures until the associated migration.|
 |``tests/version-smoke.py:27``|D149; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/superloop/tests/mail_scan.py:67,68,69``|Synthetic terminal-history digests and descriptor-pinned fixture initialization exercise the production journal reader; fixture values introduce no authority for live mail.|
+|``packages/loop-home/src/mail/directory.rs:2,37,94,110,117,224,235,237,248,251,340``|Mail scheduling and regression checks retain the protected journal, source and configuration digest contracts; they introduce no new representation or authority.|
+|``packages/loop-home/src/mail/configuration_tests.rs:314,416``|Mail scheduling and regression checks retain the protected journal, source and configuration digest contracts; they introduce no new representation or authority.|
+|``packages/loop-home/src/mail/service_tests.rs:74,268,304,425,426,859``|Mail scheduling and regression checks retain the protected journal, source and configuration digest contracts; they introduce no new representation or authority.|
 
 **Rule (Inventory maintenance)** · `rule:digests:inventory-maintenance`
 

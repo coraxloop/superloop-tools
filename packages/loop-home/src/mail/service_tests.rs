@@ -559,7 +559,7 @@ fn mail_service_records_anchor_refusal_code() {
     fs::set_permissions(&config, fs::Permissions::from_mode(0o750))
         .expect("change before decision");
     let error = service
-        .deliver(&inventory, &address, name)
+        .deliver(&inventory, &inventory, &address, name)
         .expect_err("live decision refusal");
     assert!(
         matches!(error, MailError::Entry(ref reason) if reason.starts_with("anchor-mode:")),

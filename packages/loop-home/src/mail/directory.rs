@@ -407,7 +407,33 @@ impl Directory {
         let _span = tracing::debug_span!("mail.inventory", home = %self.home.display()).entered();
         let (registry, _, _) = self.registry()?;
         let allocations = self.allocations()?;
-        self.inventory_with(&registry, &allocations, None)
+        self.inventory_with(&registry, &allocations, None, None)
+    }
+    /// Resolve named transport endpoints with the same per-actor custody verifier.
+    /// The global capacity census separately retains cross-mailbox identity admission.
+    pub fn resolve(&self, selected: &BTreeSet<Address>) -> Result<Inventory> {
+        if selected.is_empty() {
+            return Ok(Inventory {
+                loops: BTreeSet::new(),
+                actors: BTreeMap::new(),
+                failures: Vec::new(),
+                retired: BTreeSet::new(),
+            });
+        }
+        let (registry, _, _) = self.registry()?;
+        let allocations = self.allocations()?;
+        self.inventory_with(&registry, &allocations, None, Some(selected))
+    }
+    /// Share fresh authorization files between transport resolution and accounting.
+    pub fn resolve_for_admission(
+        &self,
+        selected: &BTreeSet<Address>,
+    ) -> Result<(Inventory, Inventory)> {
+        let (registry, _, _) = self.registry()?;
+        let allocations = self.allocations()?;
+        let targets = self.inventory_with(&registry, &allocations, None, Some(selected))?;
+        let accounting = self.inventory_with(&registry, &allocations, None, None)?;
+        Ok((targets, accounting))
     }
     pub(super) fn inventory_beneath(
         &self,
@@ -420,6 +446,7 @@ impl Directory {
             &configuration.registry,
             &configuration.allocations,
             Some(custody),
+            None,
         )
     }
     fn inventory_with(
@@ -427,6 +454,7 @@ impl Directory {
         registry: &Registry,
         allocations: &Allocations,
         custody: Option<&LoopCustody>,
+        selected: Option<&BTreeSet<Address>>,
     ) -> Result<Inventory> {
         let mut rows = registry.rows(&self.home);
         self.verify_credentials(&rows, allocations)?;
@@ -434,6 +462,10 @@ impl Directory {
             rows.retain(|row| row.name == custody.row.name);
         }
         let loops: BTreeSet<_> = rows.iter().map(|row| row.name.clone()).collect();
+        if let Some(selected) = selected {
+            let wanted: BTreeSet<_> = selected.iter().map(Address::loop_name).collect();
+            rows.retain(|row| wanted.contains(row.name.as_str()));
+        }
         let mut actors = BTreeMap::new();
         let mut identities = BTreeSet::from([self.service, self.owner]);
         let mut failures = Vec::new();
@@ -443,54 +475,45 @@ impl Directory {
                 tracing::debug_span!("mail.inventory.loop", loop_name = %row.name).entered();
             let address = Address::parse(&row.name)
                 .map_err(|_| MailError::Invalid("invalid-name: registered loop"))?;
-            let label = address.to_string();
-            let added = allocations
-                .mail_group(&row.name, None)
-                .map_err(|_| {
-                    MailError::Invalid("unsafe-storage: loop mailbox group is not reserved")
-                })
-                .and_then(|group| {
-                    self.add_actor(
-                        &mut actors,
-                        &mut identities,
-                        address,
-                        (row.uid, group),
-                        true,
-                        custody,
-                    )
-                });
-            observe_admission(&added, &row.name, &label, "loop");
-            if let Err(error) = added {
-                inventory_failure(error, &label, &mut failures)?;
+            if selected.is_none_or(|selected| selected.contains(&address)) {
+                let label = address.to_string();
+                let added = allocations
+                    .mail_group(&row.name, None)
+                    .map_err(|_| {
+                        MailError::Invalid("unsafe-storage: loop mailbox group is not reserved")
+                    })
+                    .and_then(|group| {
+                        self.add_actor(
+                            &mut actors,
+                            &mut identities,
+                            address,
+                            (row.uid, group),
+                            true,
+                            custody,
+                        )
+                    });
+                observe_admission(&added, &row.name, &label, "loop");
+                if let Err(error) = added {
+                    inventory_failure(error, &label, &mut failures)?;
+                }
             }
-            let config =
-                Snapshot::open_with(&row, self.service, custody.map(|c| Arc::clone(&c.private)));
-            match config {
-                Ok(snapshot) => collect_retired(&row.name, &snapshot, &mut retired)?,
-                Err(error) if custody.is_some() => return Err(error),
-                Err(_) => {}
+            if selected.is_none_or(|selected| {
+                selected
+                    .iter()
+                    .any(|address| address.loop_name() == row.name && address.worker().is_some())
+            }) {
+                let config = Snapshot::open_with(
+                    &row,
+                    self.service,
+                    custody.map(|c| Arc::clone(&c.private)),
+                );
+                match config {
+                    Ok(snapshot) => collect_retired(&row.name, &snapshot, &mut retired)?,
+                    Err(error) if custody.is_some() => return Err(error),
+                    Err(_) => {}
+                }
             }
-            let workers = match storage_file(&row.home.join("workers"), custody, false) {
-                Ok(workers) => workers,
-                Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::trace!(loop_name = %row.name, "no worker directory");
-                    continue;
-                }
-                Err(error) => {
-                    let action = admission_action(&error);
-                    tracing::warn!(loop_name = %row.name, reason = %error, "workers {action}");
-                    inventory_failure(error, &row.name, &mut failures)?;
-                    continue;
-                }
-            };
-            let names = match io::names(&workers) {
-                Ok(names) => names,
-                Err(error) => {
-                    tracing::warn!(loop_name = %row.name, reason = %error, "workers skipped");
-                    failures.push(format!("{}: {error}", row.name));
-                    continue;
-                }
-            };
+            let names = Self::worker_names(&row, custody, selected, &mut failures)?;
             for name in names {
                 let label = format!("{}+{}", row.name, name.to_string_lossy());
                 let _span =
@@ -526,6 +549,41 @@ impl Directory {
             failures,
             retired,
         })
+    }
+    fn worker_names(
+        row: &LoopRecord,
+        custody: Option<&LoopCustody>,
+        selected: Option<&BTreeSet<Address>>,
+        failures: &mut Vec<String>,
+    ) -> Result<Vec<std::ffi::OsString>> {
+        if let Some(selected) = selected {
+            return Ok(selected
+                .iter()
+                .filter(|address| address.loop_name() == row.name)
+                .filter_map(|address| address.worker().map(std::ffi::OsString::from))
+                .collect());
+        }
+        let workers = match storage_file(&row.home.join("workers"), custody, false) {
+            Ok(workers) => workers,
+            Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                tracing::trace!(loop_name = %row.name, "no worker directory");
+                return Ok(Vec::new());
+            }
+            Err(error) => {
+                let action = admission_action(&error);
+                tracing::warn!(loop_name = %row.name, reason = %error, "workers {action}");
+                inventory_failure(error, &row.name, failures)?;
+                return Ok(Vec::new());
+            }
+        };
+        match io::names(&workers) {
+            Ok(names) => Ok(names),
+            Err(error) => {
+                tracing::warn!(loop_name = %row.name, reason = %error, "workers skipped");
+                failures.push(format!("{}: {error}", row.name));
+                Ok(Vec::new())
+            }
+        }
     }
     fn worker_identity(
         &self,

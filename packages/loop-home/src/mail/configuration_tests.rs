@@ -817,6 +817,7 @@ fn inventory_anchor_refusal(
             storage,
             private,
         }),
+        None,
     );
     if case == "scan-private-acl" {
         assert!(
