@@ -54,7 +54,10 @@ fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, limit: u64) -> Result<bool> 
 }
 
 /// Retain the executable through the existing descriptor-execution owner.
-fn pin_program(command: &mut Command) -> Result<()> {
+pub fn pin_program(
+    command: &mut Command,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Result<()> {
     use loop_home::anchor::{
         HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement, Transport,
     };
@@ -124,12 +127,12 @@ fn pin_program(command: &mut Command) -> Result<()> {
         .chain(command.get_args().map(std::ffi::OsStr::to_owned))
         .collect();
     anchors[0]
-        .configure_exec(command, &argv, &[])
+        .configure_exec(command, &argv, environment)
         .map_err(|_| "program-exec")
 }
 
 pub fn capture(mut command: Command, input: &[u8], limits: &Limits) -> Result<Vec<u8>> {
-    pin_program(&mut command)?;
+    pin_program(&mut command, &[])?;
     command
         .env_clear()
         .current_dir("/")

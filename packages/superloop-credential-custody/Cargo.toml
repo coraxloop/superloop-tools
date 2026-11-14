@@ -27,3 +27,11 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[bin]]
+name = "superloop-credential-custody"
+path = "src/main.rs"
+
+[[bin]]
+name = "credential-fixture"
+path = "src/fixture_main.rs"
