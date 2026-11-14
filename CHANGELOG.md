@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The public resumed-launch fixture waits for reservation publication events instead of polling against a ten-second deadline; its 180-second hang bound does not select a launch outcome (`public_resumed_launch_uses_real_work_scope`).
+
 - Pin the public rollback retention boundaries with a live work process, an in-place changed request and a durable dispatch intent. These test-only controls distinguish unsafe restoration and deletion from the supported live retry; they add no recovery command (`public_resumed_rollback_retains_dispatch_intent`).
 
 - Exercise five real public resumed-launch refusals with exact rollback and an identical retry: inspector, helper pin, stale socket, credential thread start and readiness. The fixture checks both reply and failed histories, preserves the explicit thread choice, and confirms scope teardown; vendor execution remains synthetic. Tests only (`public_resumed_inspector_refusal_restores_and_retries`).

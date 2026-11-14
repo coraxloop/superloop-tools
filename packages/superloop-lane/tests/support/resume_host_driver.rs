@@ -1,5 +1,5 @@
 //! Declared driver stand-in: real mapped loop identity, event/report files and mail publication.
-use crate::host;
+use crate::{fixture::bounded::CommandOutput as _, host};
 use std::io::Write as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
@@ -11,21 +11,19 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
     let meta = std::fs::symlink_metadata(&home).expect("fixture root");
     let fixture = host::Host::borrowed(home.clone(), (meta.dev(), meta.ino()));
     let publication_started = Instant::now();
-    let deadline = publication_started + Duration::from_secs(10);
-    loop {
-        let record: serde_json::Value =
-            serde_json::from_slice(&fixture.reservation()).expect("record");
-        if record["driver_entry_pid"] == std::process::id()
-            && record.get("round_rollback").is_none()
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "driver PID and intent-consumption publication"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let published = std::process::Command::new("/usr/bin/python3")
+        .args(["-I", "-c", PUBLICATION])
+        .arg(&home)
+        .arg(std::process::id().to_string())
+        .fixture_output(
+            "driver reservation publication event",
+            Duration::from_secs(180),
+        )
+        .expect("publication event wait");
+    assert!(
+        published.status.success(),
+        "publication event: {published:?}"
+    );
     let publication_seconds = publication_started.elapsed().as_secs_f64();
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").expect("driver cgroup");
     assert!(
@@ -119,4 +117,22 @@ with events.open('ab') as target:target.write(out)
 identity={'pid':os.getpid(),'proc_self':int(os.readlink('/proc/self')),'uid':os.geteuid(),'gid':os.getegid(),'helper_pid':pid,'helper_uid':uid,'cgroup':Path('/proc/self/cgroup').read_text()}
 Path('fixture-driver-identity.json').write_text(json.dumps(identity));os.chmod('fixture-driver-identity.json',0o600)
 print('REAL-HELPER-ATTEMPT '+json.dumps(identity))
+";
+
+// Install the watch before reading: replacement before or during the read cannot
+// be lost. Unrelated directory events cause a recheck, never a successful verdict.
+const PUBLICATION: &str = r"
+import ctypes,json,os,select,sys
+from pathlib import Path
+runs=Path(sys.argv[1])/'runs';expected=int(sys.argv[2])
+libc=ctypes.CDLL(None,use_errno=True)
+fd=libc.inotify_init1(os.O_CLOEXEC);assert fd>=0,ctypes.get_errno()
+try:
+ assert libc.inotify_add_watch(fd,os.fsencode(runs),0x80|0x100|0x8)>=0,ctypes.get_errno()
+ while True:
+  record=json.loads((runs/'.reservation-R.json').read_bytes())
+  if record.get('driver_entry_pid')==expected and 'round_rollback' not in record:break
+  assert select.select([fd],[],[],180)[0],'driver publication event hang bound'
+  assert os.read(fd,65536),'directory watch ended'
+finally:os.close(fd)
 ";
