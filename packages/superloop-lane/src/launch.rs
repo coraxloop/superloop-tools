@@ -1264,7 +1264,7 @@ fn read_reservation_checked(path: &Path, check_node: bool) -> Result<Option<Valu
     read_reservation_file(opened, path, check_node)
 }
 
-fn read_reservation_file(
+pub(crate) fn read_reservation_file(
     opened: std::io::Result<File>,
     path: &Path,
     check_node: bool,
@@ -1296,8 +1296,9 @@ fn read_reservation_file(
     file.take(MAX_RESERVATION_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| LaneError::input("uid-table", format!("{}: {error}", path.display())))?;
-    let record: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| LaneError::input("uid-table", format!("{}: {error}", path.display())))?;
+    let record = crate::placement::reservation_bytes(&bytes, |error| {
+        LaneError::input("uid-table", format!("{}: {error}", path.display()))
+    })?;
     if record["schema"] != 1
         || ![
             "preparing",

@@ -3535,3 +3535,12 @@ pattern = "packages/superloop-credential-custody/README.md"
 
 [[include.rows]]
 pattern = "packages/superloop-credential-custody/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/placement.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/placement/reader.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/placement/tests.rs"

@@ -420,6 +420,7 @@ mod tests {
             "round-selection"
         );
     }
+    /// A rename of the pinned production names requires updating the pin.
     /// ´test:unit:workspace-private-make-uses-birth-publication-boundary´
     #[test]
     fn workspace_private_make_uses_birth_publication_boundary() {

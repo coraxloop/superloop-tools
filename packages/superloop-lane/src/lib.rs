@@ -22,6 +22,7 @@ pub mod install_door;
 pub mod install_private;
 pub mod launch;
 mod pinned;
+pub mod placement;
 pub mod plan;
 pub mod prepare;
 pub mod repair;

@@ -552,8 +552,9 @@ fn run_with_observer(
         usize::try_from(super::MAX_RESERVATION_BYTES)
             .map_err(|error| LaneError::input("repin-door-record", error.to_string()))?,
     )?;
-    let exact: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| LaneError::input("repin-door-record", error.to_string()))?;
+    let exact = crate::placement::reservation_bytes(&bytes, |error| {
+        LaneError::input("repin-door-record", error.to_string())
+    })?;
     if exact != record || record["loop"] != request.loop_name || record["run"] != request.run {
         return Err(LaneError::input(
             "repin-door-record",

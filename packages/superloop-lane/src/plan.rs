@@ -23,7 +23,7 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// Retain only the validated workspace declaration of the protected plan.
+    /// Retain the validated workspace declaration and optional placement facts.
     ///
     /// # Errors
     /// Refuses a malformed snapshot or one bound to another rebuilt loop/run.
@@ -38,8 +38,14 @@ impl Plan {
                 ));
             }
             self.document["compute_workspace"] = protected["compute_workspace"].clone();
+            if let Some(placement) = protected.get("compute_placement") {
+                self.document["compute_placement"] = placement.clone();
+            } else if let Some(document) = self.document.as_object_mut() {
+                document.remove("compute_placement");
+            }
         } else if let Some(document) = self.document.as_object_mut() {
             document.remove("compute_workspace");
+            document.remove("compute_placement");
         }
         Ok(())
     }
@@ -2267,7 +2273,7 @@ impl Plan {
 pub(crate) fn workspace_snapshot(
     document: &Value,
 ) -> Result<Option<execute_command::workspace::GrantSnapshot>, LaneError> {
-    document
+    let grant = document
         .get("compute_workspace")
         .map(|value| {
             execute_command::workspace::GrantSnapshot::decode(
@@ -2277,7 +2283,9 @@ pub(crate) fn workspace_snapshot(
             )
             .map_err(|error| LaneError::input(error.kind, error.detail))
         })
-        .transpose()
+        .transpose()?;
+    let _placement = crate::placement::snapshot(document, grant.as_ref())?;
+    Ok(grant)
 }
 
 /// Fictional owner declaration used only by reader/reconstruction regressions.

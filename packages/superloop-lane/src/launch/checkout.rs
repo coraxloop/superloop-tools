@@ -293,8 +293,9 @@ pub(super) fn read_record_bound(
         .take(MAX_RESERVATION_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| LaneError::input("checkout-record", error.to_string()))?;
-    let record: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| LaneError::input("checkout-record", error.to_string()))?;
+    let record = crate::placement::reservation_bytes(&bytes, |error| {
+        LaneError::input("checkout-record", error.to_string())
+    })?;
     if record["schema"] != 1 || record["worker_uid"].as_u64().is_none() {
         return Err(LaneError::input(
             "checkout-record",
