@@ -6,11 +6,21 @@ This staged design makes a request-lock hold cost the rows it touches rather tha
 
 The source census is anchored at tools commit 803d6bdf. Source locators below refer to that baseline unless a later implementation is explicitly named. Measurements dated 2026-11-14 use a synthetic approximately 21 MB one-line snapshot and a live journal of 21,114,757 bytes. The live population contains 6,977 after-effect rows and seven before-effect rows, with no permission or gateway rows; all three non-audit classes are in use. A synthetic acceptance also includes permission rows and legacy lines, because those exercise authority, preservation and legacy-merge paths absent from that population.
 
-A policy publication reads the collection to evaluate effective modes; it does not rewrite the collection journal. Owner commits rewrite the journal. With three non-audit classes, the baseline filing performs eleven owner reads: the run read, mode check, capacity inventory, before and after inventories, and two publications with three class inventories each. Effects perform ten reads, waiting publication nine and explicit policy publication three. A one-class fixture understates this multiplier.
+A policy publication reads the collection to evaluate effective modes; it does not rewrite the collection journal. Owner commits rewrite the journal. With three non-audit classes, the baseline filing performs eleven owner reads: the run read, mode check, capacity inventory, before and after inventories, and two publications with three class inventories each. Effects perform ten reads, waiting publication nine and explicit policy publication three. A one-class fixture understates this multiplier. Triage makes six whole reads: the lane's owner read (``channel.rs:488``), the ``channel_doors`` inventory (``:435``), the helper's preview read and, in the commit, the snapshot read, ``Transaction::open`` and ``replace`` (``permission-triage/src/journal/owner.rs:297-402``).
 
-The baseline contains linear searches inside loops in lane triage, helper owner merge, publication validation, gateway authority, permission authority, disposition append and legacy merge. Validated collections refuse duplicate identifiers, so per-call indexes can replace these searches while retaining row order, results and exact errors. A matched-byte comparison with different row counts is load-confounded and cannot establish a scaling coefficient.
+The baseline contains seven linear searches inside loops over rows, two of them over permission rows, which the one-class fixture lacks:
 
-The 2026-11-14 field readings put helper parsing near 1.9 s per whole read and lane inventory work near 2.2 s per call. Filing holds were 42–49 s, effects 38–43 s, waiting publication 34–36 s and explicit policy publication 10.7 s. These are workload observations, not latency guarantees; filesystem, cache state, row mix and load differ between fixture and field. The estimates below use those baseline observations. Exact read counts are the deterministic acceptance.
+- lane triage, per changed door row (``channel.rs:504-510``);
+- helper owner merge, per filed record (``owner.rs:70``);
+- publication validation, per door row (``owner.rs:213-217``);
+- gateway authority, per proposal row (``owner.rs:245``);
+- permission authority, per permission row, in every preview and commit (``owner.rs:349``);
+- the disposition append's ``saved`` scan, per decided permission row (``owner.rs:374-377``);
+- the collection reader's legacy merge, per legacy source line, on every owner read when legacy lines exist (``journal/requests.rs:98``).
+
+Validated collections refuse duplicate identifiers, so per-call indexes can replace these searches while retaining row order, results and exact errors. A matched-byte comparison with different row counts is load-confounded and cannot establish a scaling coefficient.
+
+The 2026-11-14 field readings put helper parsing near 1.9 s per whole read and lane inventory work near 2.2 s per call. Filing holds were 42–49 s, effects 38–43 s, waiting publication 34–36 s and explicit policy publication 10.7 s. The field costs about 1.6 times the fixture per call (a helper read of 1.85–2.0 s against the fixture's 1.2 s at 21 MB), a factor whose cause neither data set establishes; the remaining factor of about 2.6 between fixture and field holds is the class multiplier. These are workload observations, not latency guarantees; filesystem, cache state, row mix and load differ between fixture and field. The estimates below use those baseline observations. Exact read counts are the deterministic acceptance.
 
 ## Slice A: publish once, inventory once per publication, index by identity · `sec:collectionjournal:slice-a`
 
@@ -62,6 +72,8 @@ A one-class fixture predicts only the second-publication saving and must not be 
 
 **Estimate:** three to four hours with the bar. The deploy is the tools install and each door's refresh and restart, after in-flight requests finish.
 
+**Measured result (2026-11-14, field).** A refreshed door's first twenty minutes with one lane live, 46 lock-release lines and no timeout, read helper reads, other inventories and publications per line as filing 6/3/1 at 21.4–25.5 s, effect record 5/1/1 at 18.5–23.6 s, waiting publication 4/1/1 at 14.3–18.1 s, agent record 4/1/1 at 14.9–17.0 s and first mode check 1/1/0 at 3.5–4.4 s, each count constant across every occurrence, with no publication retried.
+
 ## Slice B: one owner read per hold · `sec:collectionjournal:slice-b`
 
 Implementation status and remaining work: (`prob:door:door-parts-contend-for-the-request-lock-within-one-request`).
@@ -104,11 +116,13 @@ The hold's own owner commits replace that view with the collection the commit re
 
 **Deploy:** the tools install and door refreshes; no floor change. **Estimate:** a working day with the bar.
 
+**Measured result (2026-11-14, provisioned fixture).** On an approximately 21 MB journal with three non-audit classes and 34 live run records, three release rounds a tree with node load recorded, the median holds against slice A were 10.53 → 2.48 s for a filing, 6.91 → 2.14 s for an agent record, 8.82 → 2.59 s for an effect record and 8.20 → 2.50 s for a waiting publication, each with one owner read; explicit snapshot publication kept its one read (2.01 and 2.28 s), and triage went from 17.40 to 16.32 s with one owner read beside its live preview and commit.
+
 ## Target and later stages · `sec:collectionjournal:target`
 
 Implementation status and remaining work: (`prob:door:door-parts-contend-for-the-request-lock-within-one-request`).
 
-The target: a hold costs what its own request costs, whatever the history. Today every question the hold asks is answered by reading the population. The table names each population-proportional cost and the stage that removes it.
+The target: a hold costs what its own request costs, whatever the history. At the measurement baseline every question the hold asks is answered by reading the population. The table names each population-proportional cost and the stage that removes it.
 
 |Population-proportional cost (803d6bdf)|Removed by|
 |---------------------------------------|----------|
@@ -116,7 +130,7 @@ The target: a hold costs what its own request costs, whatever the history. Today
 |One inventory per non-audit class per publication (``snapshot.rs:208-215``)|A|
 |Whole-journal rewrite per owner commit (``owner.rs:368-399``)|3|
 |Review history unbounded per row, revalidated on every read (``model.rs:69``, ``:137-138``, ``:326-327``)|3, 4|
-|Linear searches in loops (§1 list)|A|
+|Linear searches in loops (measurement basis list)|A|
 |Hook approval check and disposition read the whole journal (``journal.rs:354-362``, ``:405-411``)|3|
 |Door inventories decode every live run on every check (``store.rs:1530`` onward)|5|
 |Run file, shapes file, learned index and policy snapshot rewritten whole per commit (``store.rs:1838-1918``, ``snapshot.rs:257-280``)|5, 6|
@@ -231,7 +245,7 @@ Implementation status and remaining work: (`prob:door:door-keeps-a-store-of-its-
 
 Implementation status and remaining work: (`prob:door:door-parts-contend-for-the-request-lock-within-one-request`).
 
-- ``wait_answer`` and any waiter on an answer watch that request's row file with inotify instead of polling on a clock. Acceptance measures wake-up latency with one watch per directory and verifies that idle polling is absent.
+- ``wait_answer`` and any waiter on an answer watch that request's row file with inotify instead of polling on a clock. A probe of 2026-11-14 measured a sub-millisecond wake-up with one watch per directory and no idle cost; acceptance repeats that measurement and verifies that idle polling is absent.
 - The policy snapshot stops embedding the learned index whole. At the measurement baseline it rewrites the learned index twice per commit, which is small in the baseline but grows with groups. It is published by parts or referenced by digest. That is a consumer-floor change for execute-command.
 
 **Cut order and what each stage alone saves:**
