@@ -299,3 +299,39 @@ fn placement_declaration_digest_covers_both_members() {
     malformed["compute_placement"]["grant_digest"] = json!("0".repeat(64));
     assert!(crate::launch::workspace::declaration_digest(&malformed.to_string()).is_err());
 }
+
+/// ´test:unit:placement-census-uses-registry-without-workers-override´
+#[test]
+fn placement_census_uses_registry_without_workers_override() {
+    let home = private_temp();
+    let parent = private_temp();
+    let runs = home.path().join("runs");
+    fs::create_dir(&runs).unwrap();
+    fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).unwrap();
+    let config = home.path().join(".config/loops/alpha");
+    fs::create_dir_all(&config).unwrap();
+    for path in [
+        home.path().join(".config"),
+        home.path().join(".config/loops"),
+        config.clone(),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let registry = home.path().join(".config/loops/registry.toml");
+    fs::write(&registry, format!("namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{name=\"alpha\", uid=41001, launch=\"src\", runs_root={runs:?}}}]\n")).unwrap();
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o600)).unwrap();
+    let settings = config.join("workers.toml");
+    let source = "backend_argv = { codex = [\"/usr/bin/true\"] }\n";
+    fs::write(&settings, source).unwrap();
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).unwrap();
+    placed(parent.path());
+    let input = inventory(parent.path()).unwrap().to_string();
+    let report = census_at_home(parent.path(), input.as_bytes(), "alpha", home.path()).unwrap();
+    assert_eq!(report["entries"][0]["state"], "orphan-candidate");
+    assert_eq!(fs::read_to_string(&settings).unwrap(), source);
+    assert_eq!(fs::read_dir(&runs).unwrap().count(), 0);
+    fs::write(&settings, format!("{source}runs_root = \"/different\"\n")).unwrap();
+    let error = census_at_home(parent.path(), input.as_bytes(), "alpha", home.path()).unwrap_err();
+    assert_eq!(error.kind, "settings-grant");
+    assert!(error.detail.contains("runs_root"));
+}

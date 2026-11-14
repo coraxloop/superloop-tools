@@ -312,16 +312,25 @@ fn census_owner(path: &Path, source: &Path, loop_name: &str) -> Result<Value, La
         .read_to_end(&mut bytes)
         .map_err(|e| refusal(e.to_string()))?;
     let home = crate::caller_home()?;
+    census_at_home(path, &bytes, loop_name, &home)
+}
+
+fn census_at_home(
+    path: &Path,
+    bytes: &[u8],
+    loop_name: &str,
+    home: &Path,
+) -> Result<Value, LaneError> {
     let config = home.join(".config/loops").join(loop_name);
     let _configuration = crate::install::lock_loop_config(&config, true)?;
-    let settings = crate::settings::Settings::read_beneath(&config.join("workers.toml"), &home)?;
-    settings.validate_grant(&home, loop_name)?;
-    let runs = settings
-        .runs_root
-        .as_deref()
-        .ok_or_else(|| refusal("placement census requires the loop's runs_root"))?;
+    let settings = crate::settings::Settings::read_beneath(&config.join("workers.toml"), home)?;
+    settings.validate_grant(home, loop_name)?;
+    let registry = crate::read_plan_registry(home)?;
+    let runs = registry
+        .runs_root(loop_name)
+        .ok_or_else(|| refusal("placement census requires the registry runs_root"))?;
     let _runs = crate::launch::lock_runs_root(runs, false, nix::unistd::Uid::effective().as_raw())?;
-    census(path, &bytes, loop_name, runs)
+    census(path, bytes, loop_name, runs)
 }
 
 /// Owner CLI, with explicit node inventory transport; no SSH or door dispatch.
