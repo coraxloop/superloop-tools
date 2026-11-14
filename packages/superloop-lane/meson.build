@@ -643,3 +643,7 @@ dependency_ledger += ['''
 dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lane/tests/support/resume_host_retained.rs:std :: env :: current_exe () . expect (\"real entry image\")#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"std :: env :: current_exe () . expect (\"real entry image\")","callee":"fixture:superloop-lane:self","lookup":"test-executable","binding":"current_exe","contract":"Reexecute the actual scoped public host fixture with a one-shot post-intent fsync error, preserving its process and scope identity"}
 ''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-lane/tests/support/resume_host_driver.rs:\"/usr/bin/python3\"#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/python3\"","callee":"external:/usr/bin/python3","lookup":"test-executable","contract":"Watch the fixture runs directory before reading the reservation and await replacement events with a 180-second hang bound; no worker execution"}
+''']
