@@ -2590,6 +2590,58 @@ pub(crate) mod rollback {
             publish_reservation(&path, &next).expect("preparing");
             (root, path, bytes, nonce)
         }
+        /// A live refusal preserves the published placement and exact settled bytes.
+        ///
+        /// # Panics
+        /// Panics if preparation or restoration changes the placed plan.
+        /// ´test:unit:live-round-rollback-restores-placed-reservation´
+        #[test]
+        fn live_round_rollback_restores_placed_reservation() {
+            let (_root, path, _, _) = fixture();
+            let placed = json!({"loop":"alpha","run":"R",
+                "compute_workspace":crate::tests::published_workspace(),
+                "compute_placement":crate::tests::published_placement()});
+            let record = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R",
+                "worker_uid":3000,"active_round":"dispatch","rounds":[],"plan":placed});
+            let bytes = format!(
+                "{}\n\n",
+                serde_json::to_string_pretty(&record).expect("pretty placed before")
+            )
+            .into_bytes();
+            super::super::super::publish_reservation_bytes(&path, &bytes).expect("placed before");
+            let (mut next, raw) = super::super::super::read_reservation_raw(&path, true)
+                .expect("placed raw read")
+                .expect("placed record");
+            assert_eq!(raw, bytes, "raw placed reservation preserved");
+            next["phase"] = json!("preparing");
+            next["active_round"] = json!("review");
+            next["rounds"] = json!([{"step":"review","phase":"running"}]);
+            let nonce = prepare(&mut next, &raw, "expected\n").expect("placed prepare");
+            publish_reservation(&path, &next).expect("placed preparing");
+            assert_eq!(
+                read_reservation(&path)
+                    .expect("preparing read")
+                    .expect("record")["plan"],
+                placed,
+                "preparing retains placed plan"
+            );
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || Ok(()));
+            assert!(error.detail.ends_with("rollback: restored"), "{error}");
+            assert_eq!(
+                fs::read(&path).expect("restored bytes"),
+                bytes,
+                "placed before-image exact"
+            );
+            assert_eq!(
+                read_reservation(&path)
+                    .expect("restored read")
+                    .expect("record")["plan"],
+                placed,
+                "restoration retains placed plan"
+            );
+        }
+
         /// A live refusal restores the choice along with the exact settled bytes.
         ///
         /// # Panics
@@ -2604,6 +2656,9 @@ pub(crate) mod rollback {
                 let (root, path, _, _) = fixture();
                 let mut before = super::super::choice_tests::record();
                 before["rounds"][0]["driver_dir"] = json!(root.path().join("R/prior-dispatch"));
+                before["plan"] = json!({"loop":"alpha","run":"R",
+                    "compute_workspace":crate::tests::published_workspace(),
+                    "compute_placement":crate::tests::published_placement()});
                 let bytes = format!(
                     "{}\n\n",
                     serde_json::to_string_pretty(&before).expect("before")
@@ -2617,6 +2672,10 @@ pub(crate) mod rollback {
                     Some(choice),
                 )
                 .expect("chosen prospective record");
+                assert_eq!(
+                    next["plan"], before["plan"],
+                    "chosen preflight retains placed plan"
+                );
                 let plan = Plan {
                     home: root.path().join("home"),
                     driver_dir: root.path().join("R"),
@@ -2645,6 +2704,10 @@ pub(crate) mod rollback {
                 assert!(error.detail.ends_with("rollback: restored"), "{error}");
                 assert_eq!(fs::read(&path).expect("restored"), bytes);
                 let saved = read_reservation(&path).expect("read").expect("saved");
+                assert_eq!(
+                    saved["plan"], before["plan"],
+                    "chosen rollback retains placed plan"
+                );
                 assert_eq!(
                     super::super::require_thread_choice(&saved, None)
                         .expect_err("choice remains owed")
