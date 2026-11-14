@@ -732,4 +732,8 @@ The library returns existing measurement and outcome types without writing custo
 
 **Problem (The launch command's usage states that a round's budget defaults to 3,600 s and is not inherited)** · `prob:lanes:launch-usage-states-the-round-budget-default`
 
-**CLOSED (2026-11-14).** The launch usage, in the parse refusal and the top-level usage text, and this README say that `--budget SECONDS` is per round, defaults to 3,600 seconds and is not inherited from dispatch, landed as 4fab3b70 and installed by the deploy of 2026-11-14; a resumed launch that needs a longer round passes its budget explicitly. The launch command's workspace argument, still absent from the top-level usage text, is an item of its own in the backlog.
+**CLOSED (2026-11-14).** The launch usage, in the parse refusal and the top-level usage text, and this README say that `--budget SECONDS` is per round, defaults to 3,600 seconds and is not inherited from dispatch, landed as 4fab3b70 and installed by the deploy of 2026-11-14; a resumed launch that needs a longer round passes its budget explicitly. The launch command's workspace argument joined the top-level usage text later, closing its own item below.
+
+**Problem (The top-level usage lists the launch command's workspace argument)** · `prob:lanes:top-level-usage-lists-the-compute-workspace-argument`
+
+**CLOSED (2026-11-14).** The program's top-level usage text lists `[--compute-workspace JSON]` in the position the launch command's parse refusal gives it, and the assertion that pins the launch clause is updated with it, landed as ad37b642; argument parsing and existing runs are unchanged.
