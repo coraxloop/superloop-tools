@@ -2803,6 +2803,10 @@ pub(crate) mod rollback {
             observed
                 .recv_timeout(Duration::from_secs(30))
                 .expect("callback entry event");
+            // The entry event precedes flock, not its kernel wait: flock exposes
+            // no notification that this thread has queued. This negative window
+            // is supplemental; the final result and preserved helper update also
+            // check overlap. It cannot guarantee mutant sensitivity under stall.
             let blocked = completion.recv_timeout(Duration::from_millis(100));
             fs::remove_file(temporary).expect("helper completed temporary");
             let mut record = read_reservation(&path).expect("read").expect("record");
