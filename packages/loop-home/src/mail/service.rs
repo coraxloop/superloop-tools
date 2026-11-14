@@ -46,6 +46,20 @@ pub(super) enum Wake {
     Retry,
 }
 
+/// Source changes that a restoring rename does not alter (ctime deliberately excluded).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SourceObservation {
+    device: u64,
+    inode: u64,
+    size: u64,
+    links: u64,
+    owner: u32,
+    group: u32,
+    mode: u32,
+    modified: i64,
+    modified_ns: i64,
+}
+
 pub(super) struct Service {
     pub directory: Directory,
     pub journal: Journal,
@@ -55,7 +69,7 @@ pub(super) struct Service {
     last_full_scan: Option<Monotonic>,
     last_maintenance: Option<Monotonic>,
     retries: retry::Queue,
-    refused: BTreeMap<retry::Key, (u64, u64, u64)>,
+    refused: BTreeMap<retry::Key, SourceObservation>,
     configuration: u64,
     #[cfg(test)]
     attempts: usize,
@@ -110,23 +124,29 @@ impl Service {
     fn prune(&mut self, inventory: &Inventory) -> Result<()> {
         self.journal
             .prune_projected(&Instant::now()?, |records| Self::pins(inventory, records))?;
-        self.last_prune = Some(Monotonic::now());
+        self.last_prune = Some(self.clock.monotonic());
         Ok(())
     }
     fn prune_due(&self) -> bool {
-        self.last_prune
-            .is_none_or(|last| last.elapsed() >= Duration::from_secs(PRUNE_INTERVAL_SECONDS))
+        self.last_prune.is_none_or(|last| {
+            self.clock.monotonic().saturating_duration_since(last)
+                >= Duration::from_secs(PRUNE_INTERVAL_SECONDS)
+        })
     }
     fn maintenance_due(&self) -> bool {
-        self.last_maintenance
-            .is_none_or(|last| last.elapsed() >= Duration::from_secs(PRUNE_INTERVAL_SECONDS))
+        self.last_maintenance.is_none_or(|last| {
+            self.clock.monotonic().saturating_duration_since(last)
+                >= Duration::from_secs(PRUNE_INTERVAL_SECONDS)
+        })
     }
     fn maintenance_wait(&self, notifications: &super::notify::Notifications) -> Duration {
         let retention = self.last_prune.map_or(Duration::ZERO, |last| {
-            Duration::from_secs(PRUNE_INTERVAL_SECONDS).saturating_sub(last.elapsed())
+            Duration::from_secs(PRUNE_INTERVAL_SECONDS)
+                .saturating_sub(self.clock.monotonic().saturating_duration_since(last))
         });
         let retention = retention.min(self.last_maintenance.map_or(Duration::ZERO, |last| {
-            Duration::from_secs(PRUNE_INTERVAL_SECONDS).saturating_sub(last.elapsed())
+            Duration::from_secs(PRUNE_INTERVAL_SECONDS)
+                .saturating_sub(self.clock.monotonic().saturating_duration_since(last))
         }));
         if notifications.degraded() {
             retention.min(self.last_full_scan.map_or(Duration::ZERO, |last| {
@@ -206,7 +226,7 @@ impl Service {
             self.configuration = notifications.configuration();
         }
     }
-    fn source_identity(&self, sender: &Address, name: &OsStr) -> Result<(u64, u64, u64)> {
+    fn source_identity(&self, sender: &Address, name: &OsStr) -> Result<SourceObservation> {
         let path = self
             .directory
             .home
@@ -216,12 +236,18 @@ impl Service {
         let outbox = io::absolute(&path, true)?;
         let info =
             nix::sys::stat::fstatat(&outbox, name, nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW)?;
-        Ok((
-            info.st_dev,
-            info.st_ino,
-            u64::try_from(info.st_size)
+        Ok(SourceObservation {
+            device: info.st_dev,
+            inode: info.st_ino,
+            size: u64::try_from(info.st_size)
                 .map_err(|_| MailError::Invalid("invalid-file: negative source size"))?,
-        ))
+            links: info.st_nlink,
+            owner: info.st_uid,
+            group: info.st_gid,
+            mode: info.st_mode,
+            modified: info.st_mtime,
+            modified_ns: info.st_mtime_nsec,
+        })
     }
     fn source_ready(&mut self, sender: &Address, name: &OsStr, now: Monotonic) -> bool {
         let key = (sender.clone(), name.to_owned());
@@ -354,7 +380,7 @@ impl Service {
     ) -> Result<Vec<String>> {
         self.start_scan();
         self.last_full_scan = self.last_scan;
-        self.last_maintenance = self.last_scan;
+        self.last_maintenance = Some(self.clock.monotonic());
         notifications.begin_scan();
         self.directory.watch_roots(notifications)?;
         let mut inventory = self.directory.inventory()?;
@@ -409,11 +435,10 @@ impl Service {
         mut selected: BTreeSet<Address>,
     ) -> Result<Vec<String>> {
         self.start_scan();
-        selected.extend(self.refused.keys().map(|(sender, _)| sender.clone()));
-        selected.extend(self.retries.senders());
+        selected.extend(self.retries.due_senders(self.clock.monotonic()));
         let mut inventory = self.directory.inventory()?;
         if self.maintenance_due() {
-            self.maintain_inventory(notifications, &inventory)?;
+            selected.extend(self.maintain_inventory(notifications, &inventory)?);
         } else if self.prune_due() {
             self.prune(&inventory)?;
         }
@@ -437,14 +462,23 @@ impl Service {
         notifications: &mut super::notify::Notifications,
     ) -> Result<Vec<String>> {
         let inventory = self.directory.inventory()?;
-        self.maintain_inventory(notifications, &inventory)?;
-        Ok(inventory.failures)
+        let selected = self.maintain_inventory(notifications, &inventory)?;
+        let mut failures = inventory.failures.clone();
+        if !selected.is_empty() {
+            self.start_scan();
+            for (sender, name) in schedule(self.candidates(&inventory, Some(&selected))?) {
+                if let Err(error) = self.candidate(&sender, &name) {
+                    failures.push(format!("{sender}: {error}"));
+                }
+            }
+        }
+        Ok(failures)
     }
     fn maintain_inventory(
         &mut self,
         notifications: &mut super::notify::Notifications,
         inventory: &Inventory,
-    ) -> Result<()> {
+    ) -> Result<BTreeSet<Address>> {
         self.directory.watch_configuration(notifications)?;
         if notifications.configuration() != self.configuration {
             notifications.reconcile();
@@ -460,8 +494,14 @@ impl Service {
             }
         }
         self.prune(inventory)?;
-        self.last_maintenance = Some(Monotonic::now());
-        Ok(())
+        let reconsider = self
+            .refused
+            .keys()
+            .map(|(sender, _)| sender.clone())
+            .collect();
+        self.refused.clear();
+        self.last_maintenance = Some(self.clock.monotonic());
+        Ok(reconsider)
     }
     fn tick(&mut self) -> Result<Instant> {
         let mut waiting = None;

@@ -179,3 +179,7 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/tests/door_entry.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Bounded namespace fixture and removal of only the parent-created root with event-driven cancellation"}
 {"kind":"payload","path":"packages/loop-home/src/door_entry/consumer.py","form":"python","sha256":"7d0bbf45c93fbafe8b9b4f992676ed83876944e01f28f33114c9b775c55bb88f","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Execute the sealed host-authored door consumer with receiver-derived loop identity and separate request input","calls":[]}
 ''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/mail/service_runtime_tests.rs:std :: env :: current_exe () . expect (\"test image\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"test image\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Pipe-controlled namespace-root helper repairs only its marked source while the service fixture uses its separate reserved identity; EOF ends and reaps the helper"}
+''']

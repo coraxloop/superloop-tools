@@ -46,8 +46,12 @@ impl Queue {
         self.deadlines.remove(&(entry.when, key.clone()));
         Some(entry)
     }
-    pub fn senders(&self) -> BTreeSet<Address> {
-        self.keys.keys().map(|(sender, _)| sender.clone()).collect()
+    pub fn due_senders(&self, now: Monotonic) -> BTreeSet<Address> {
+        self.deadlines
+            .iter()
+            .take_while(|(when, _)| *when <= now)
+            .map(|(_, (sender, _))| sender.clone())
+            .collect()
     }
     pub fn ready(&self, key: &Key, now: Monotonic) -> bool {
         self.keys.get(key).is_some_and(|entry| entry.when <= now)

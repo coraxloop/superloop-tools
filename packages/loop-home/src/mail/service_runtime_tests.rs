@@ -144,6 +144,13 @@ fn entered(home: &Path) -> Service {
     )
 }
 fn fixture(case: &str, exercise: fn(&mut Service, &Path)) {
+    fixture_prepared(case, |_| (), |service, home, ()| exercise(service, home));
+}
+fn fixture_prepared<T>(
+    case: &str,
+    prepare: impl Fn(&Path) -> T,
+    exercise: impl Fn(&mut Service, &Path, T),
+) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     if let Some(phase) = std::env::var_os("LOOP_HOME_SERVICE_TEST_PHASE") {
         let home =
@@ -155,14 +162,19 @@ fn fixture(case: &str, exercise: fn(&mut Service, &Path)) {
                     .is_some_and(|name| name.to_string_lossy().starts_with("mail-service-test-"))
                 && home.join("fixture-marker").is_file()
         );
-        if phase == "cleanup" {
+        if phase == "repair" {
+            repair_loop(&home);
+        } else if phase == "cleanup" {
             fs::remove_dir_all(home).expect("fixture cleanup");
         } else {
             let subscriber = tracing_subscriber::fmt()
                 .with_test_writer()
                 .with_max_level(tracing::Level::DEBUG)
                 .finish();
-            tracing::subscriber::with_default(subscriber, || exercise(&mut entered(&home), &home));
+            let prepared = prepare(&home);
+            tracing::subscriber::with_default(subscriber, || {
+                exercise(&mut entered(&home), &home, prepared);
+            });
         }
         return;
     }
@@ -621,13 +633,19 @@ fn mail_selected_scan_leaves_unrelated_outboxes_queued() {
                 home.join(".var/loops/beta/mail/outbox/beta.self.letter")
                     .exists()
             );
+            let seconds = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let now = Monotonic::now();
+            service.clock = Box::new(ControlledClock {
+                base: now,
+                seconds: seconds.clone(),
+            });
             service.retries.schedule(
                 (
                     Address::parse("beta").expect("pending sender"),
                     "beta.self.letter".into(),
                 ),
                 retry::Work::Source,
-                Monotonic::now(),
+                now,
             );
             assert_eq!(
                 service
@@ -638,6 +656,11 @@ fn mail_selected_scan_leaves_unrelated_outboxes_queued() {
                     .expect("known retry sender"),
                 Vec::<String>::new()
             );
+            delivered(home, "beta", 0);
+            seconds.store(1, Ordering::Relaxed);
+            service
+                .scan_selected(&mut notifications, BTreeSet::new())
+                .expect("due sender");
             delivered(home, "beta", 1);
         },
     );
@@ -678,6 +701,28 @@ fn mail_selected_scan_includes_known_work_in_round_robin_order() {
                 )
                 .expect("second slug");
             }
+            let now = Monotonic::now();
+            let seconds = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            service.clock = Box::new(ControlledClock {
+                base: now,
+                seconds: seconds.clone(),
+            });
+            service
+                .scan_selected(&mut notifications, BTreeSet::new())
+                .expect("no due work");
+            assert_eq!(
+                service.attempts, before,
+                "a permanent refusal does not select its sender"
+            );
+            service.retries.schedule(
+                (
+                    Address::parse("beta").expect("sender"),
+                    "beta.01.letter".into(),
+                ),
+                retry::Work::Source,
+                now,
+            );
+            seconds.store(1, Ordering::Relaxed);
             assert_eq!(
                 service
                     .scan_selected(
@@ -940,4 +985,239 @@ fn mail_claimed_retry_survives_unavailable_refusal_history() {
             );
         },
     );
+}
+
+struct Repairer {
+    child: std::process::Child,
+    output: std::io::BufReader<std::process::ChildStdout>,
+}
+impl Repairer {
+    fn new(case: &str, home: &Path) -> Self {
+        let mut child = Command::new(std::env::current_exe().expect("test image"))
+            .args([
+                format!("mail::service::runtime_tests::{case}"),
+                "--exact".into(),
+                "--nocapture".into(),
+            ])
+            .env("LOOP_HOME_SERVICE_TEST_PHASE", "repair")
+            .env("LOOP_HOME_SERVICE_TEST_HOME", home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("namespace-root fixture repairer");
+        let output = std::io::BufReader::new(child.stdout.take().expect("repair replies"));
+        let mut result = Self { child, output };
+        result.reply("REPAIR-READY");
+        result
+    }
+    fn reply(&mut self, expected: &str) {
+        use std::io::BufRead as _;
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                self.output.read_line(&mut line).expect("repair reply"),
+                0,
+                "repairer exited"
+            );
+            if line.trim() == expected {
+                break;
+            }
+        }
+    }
+    fn change(&mut self, action: &str) {
+        writeln!(
+            self.child.stdin.as_mut().expect("repair channel"),
+            "{action}"
+        )
+        .expect("repair request");
+        self.reply("REPAIR-DONE");
+    }
+}
+impl Drop for Repairer {
+    fn drop(&mut self) {
+        drop(self.child.stdin.take());
+        let _status = self.child.wait();
+    }
+}
+fn repair_loop(home: &Path) {
+    use std::io::BufRead as _;
+    assert_eq!(nix::unistd::geteuid().as_raw(), 0);
+    let path = home.join(".var/loops/alpha/mail/outbox/alpha.self.letter");
+    let alias = home.join("repair-alias");
+    let mut output = std::io::stdout().lock();
+    writeln!(output, "REPAIR-READY").expect("ready");
+    output.flush().expect("flush");
+    for action in std::io::stdin().lock().lines() {
+        match action.expect("action").as_str() {
+            "reset" => {
+                fs::remove_file(&path).expect("old source");
+                fs::write(&path, BODY).expect("plain source");
+                owned(&path, 1001, 2000, 0o640);
+                File::open(&path)
+                    .expect("source")
+                    .set_times(
+                        std::fs::FileTimes::new()
+                            .set_modified(std::time::UNIX_EPOCH + Duration::new(100, 42)),
+                    )
+                    .expect("fixed timestamp");
+            }
+            "owner" => nix::unistd::chown(&path, Some(nix::unistd::Uid::from_raw(1000)), None)
+                .expect("owner repair"),
+            "alias" => fs::hard_link(&path, &alias).expect("alias"),
+            "unlink" => fs::remove_file(&alias).expect("alias removal"),
+            "bad-group" => nix::unistd::chown(&path, None, Some(nix::unistd::Gid::from_raw(0)))
+                .expect("wrong group"),
+            "group" => nix::unistd::chown(&path, None, Some(nix::unistd::Gid::from_raw(2000)))
+                .expect("group repair"),
+            "bad-mode" => {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o0)).expect("unreadable");
+            }
+            "mode" => {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("mode repair");
+            }
+            "rewrite" => {
+                fs::write(&path, vec![b'x'; BODY.len()]).expect("same-size rewrite");
+                File::open(&path)
+                    .expect("source")
+                    .set_times(
+                        std::fs::FileTimes::new()
+                            .set_modified(std::time::UNIX_EPOCH + Duration::new(100, 43)),
+                    )
+                    .expect("nanoseconds only");
+            }
+            "seconds" => File::open(&path)
+                .expect("source")
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(std::time::UNIX_EPOCH + Duration::new(101, 42)),
+                )
+                .expect("seconds only"),
+            "withdraw" => {
+                fs::rename(&path, &alias).expect("withdraw");
+                fs::rename(&alias, &path).expect("resubmit same inode and name");
+            }
+            other => panic!("unknown fixture action: {other}"),
+        }
+        writeln!(output, "REPAIR-DONE").expect("done");
+        output.flush().expect("flush");
+    }
+}
+fn repaired_source(case: &str, repair: &str) {
+    fixture_prepared(
+        case,
+        |home| Repairer::new(case, home),
+        |service, home, mut root| {
+            let seconds = std::sync::Arc::new(AtomicU64::new(0));
+            let base = Monotonic::now();
+            service.clock = Box::new(ControlledClock {
+                base,
+                seconds: seconds.clone(),
+            });
+            service.last_maintenance = Some(base);
+            fs::remove_file(home.join(".var/loops/beta/mail/outbox/beta.self.letter"))
+                .expect("only tested source");
+            root.change("reset");
+            if matches!(repair, "unlink" | "group" | "mode") {
+                root.change("owner");
+            }
+            match repair {
+                "unlink" => root.change("alias"),
+                "group" => root.change("bad-group"),
+                "mode" => root.change("bad-mode"),
+                _ => {}
+            }
+            assert_eq!(service.scan().expect("initial refusal").len(), 1);
+            assert_eq!(service.attempts, 1);
+            service.scan().expect("unchanged refusal");
+            assert_eq!(service.attempts, 1);
+            let sender = Address::parse("alpha").expect("sender");
+            let name = OsStr::new("alpha.self.letter");
+            let before = service
+                .source_identity(&sender, name)
+                .expect("observed source");
+            root.change(repair);
+            let after = service
+                .source_identity(&sender, name)
+                .expect("repaired source");
+            assert_eq!(
+                (before.device, before.inode, before.size),
+                (after.device, after.inode, after.size)
+            );
+            if repair == "withdraw" {
+                assert_eq!(
+                    before, after,
+                    "rename alone leaves the observation unchanged"
+                );
+                seconds.store(3599, Ordering::Relaxed);
+                service.scan().expect("before hourly sweep");
+                assert_eq!(service.attempts, 1);
+                assert!(!service.maintenance_due());
+                seconds.store(3600, Ordering::Relaxed);
+                assert!(service.maintenance_due());
+                service
+                    .maintain(&mut notify::Notifications::new())
+                    .expect("hourly reconsideration");
+            } else {
+                service.scan().expect("repair without elapsed clock");
+            }
+            assert_eq!(
+                service.attempts, 2,
+                "repair or hourly reconsideration admits exactly one attempt"
+            );
+            service.scan().expect("no repeated attempt");
+            assert_eq!(service.attempts, 2);
+            if matches!(repair, "unlink" | "owner" | "group" | "mode") {
+                delivered(home, "alpha", 1);
+            }
+        },
+    );
+}
+
+/// ´claim:loophome:mail-refusal-observes-alias-removal´
+/// ´test:unit:mail-refusal-observes-alias-removal´
+#[test]
+fn mail_refusal_observes_alias_removal() {
+    repaired_source("mail_refusal_observes_alias_removal", "unlink");
+}
+
+/// ´claim:loophome:mail-refusal-observes-owner-repair´
+/// ´test:unit:mail-refusal-observes-owner-repair´
+#[test]
+fn mail_refusal_observes_owner_repair() {
+    repaired_source("mail_refusal_observes_owner_repair", "owner");
+}
+
+/// ´claim:loophome:mail-refusal-observes-group-repair´
+/// ´test:unit:mail-refusal-observes-group-repair´
+#[test]
+fn mail_refusal_observes_group_repair() {
+    repaired_source("mail_refusal_observes_group_repair", "group");
+}
+
+/// ´claim:loophome:mail-refusal-observes-mode-repair´
+/// ´test:unit:mail-refusal-observes-mode-repair´
+#[test]
+fn mail_refusal_observes_mode_repair() {
+    repaired_source("mail_refusal_observes_mode_repair", "mode");
+}
+
+/// ´claim:loophome:mail-refusal-observes-same-size-rewrite´
+/// ´test:unit:mail-refusal-observes-same-size-rewrite´
+#[test]
+fn mail_refusal_observes_same_size_rewrite() {
+    repaired_source("mail_refusal_observes_same_size_rewrite", "rewrite");
+}
+
+/// ´claim:loophome:mail-refusal-observes-mtime-seconds´
+/// ´test:unit:mail-refusal-observes-mtime-seconds´
+#[test]
+fn mail_refusal_observes_mtime_seconds() {
+    repaired_source("mail_refusal_observes_mtime_seconds", "seconds");
+}
+
+/// ´claim:loophome:mail-refusal-observes-same-batch-resubmission´
+/// ´test:unit:mail-refusal-observes-same-batch-resubmission´
+#[test]
+fn mail_refusal_observes_same_batch_resubmission() {
+    repaired_source("mail_refusal_observes_same_batch_resubmission", "withdraw");
 }

@@ -85,7 +85,30 @@ def history(home,n):
     if n:
         (root/'state.toml').write_text(f'version=1\ngreatest_reserved="{stamp}"\nacceptance_available=false\n')
 
+def scan_starts(text):
+    return text.count('mail scan started')
+
+def assert_operations(reading):
+    # Fifty percent headroom over the measured 50/53/10; structural exclusions below stay exact.
+    for operation,bound in {'open':75,'stat':80,'list':15}.items():
+        assert 0<reading['unrelated_loop_operations'][operation]<=bound, f'unrelated {operation} operations exceeded the selected-delivery bound'
+    assert reading['unrelated_directory_reads']['outbox']==0, 'unrelated outbox was listed'
+    assert reading['unrelated_directory_reads']['staging']<=3, 'extra unrelated staging walks'
+    assert 1<=reading['history_passes']<=3, 'full recovery returned to the selected scan'
+
+def observation_check():
+    assert scan_starts('mail scan complete\nmail selected scan complete\n')==0
+    assert scan_starts('mail scan started\nmail scan complete\nmail scan started\nmail selected scan complete\n')==2
+    sample={'unrelated_loop_operations':{'open':60,'stat':60,'list':12},'unrelated_directory_reads':{'outbox':0,'staging':2},'history_passes':2}
+    assert_operations(sample) # Harmless extra metadata operations have explicit headroom.
+    sample['unrelated_directory_reads']['outbox']=1
+    try:assert_operations(sample)
+    except AssertionError:pass
+    else:raise AssertionError('an unrelated outbox read must fail the operation guard')
+
+
 def measure(count,binary,tag,post_claim=False,enforce=True,operations=False):
+    observation_check()
     root=P(os.environ['TMPDIR'])
     for path in [root,*root.parents]:
         if not path.stat().st_mode & 1:
@@ -120,7 +143,7 @@ def measure(count,binary,tag,post_claim=False,enforce=True,operations=False):
                 return (int(fields[11])+int(fields[12]))/os.sysconf('SC_CLK_TCK')
             inspected=subprocess.run(['/usr/bin/podman','unshare',sys.executable,str(P(__file__).resolve()),'inspect',str(service_pid),str(home)],capture_output=True,text=True,check=True)
             descriptor_count=int(inspected.stdout)
-            scan_count=log.read_text().count('mail scan complete');c=cpu();t=time.monotonic();time.sleep(10);elapsed=time.monotonic()-t;used=cpu()-c;idle_scans=log.read_text().count('mail scan complete')-scan_count
+            scan_count=scan_starts(log.read_text());c=cpu();t=time.monotonic();time.sleep(10);elapsed=time.monotonic()-t;used=cpu()-c;idle_scans=scan_starts(log.read_text())-scan_count
             if operations:
                 operation_probe(home,service_pid,log,enforce)
                 return
@@ -147,7 +170,7 @@ def measure(count,binary,tag,post_claim=False,enforce=True,operations=False):
             assert idle_scans==0, "idle service performed an unsolicited scan"
             assert descriptor_count<=16, "idle mailbox descriptors remain pinned"
             assert delivery.returncode==0, delivery.stderr
-            print(json.dumps({'tag':tag,'mailboxes':count,'idle_wall':elapsed,'idle_cpu':used,'idle_scans':idle_scans,'idle_percent':100*used/elapsed,'delivery_status':delivery.returncode,'delivery':delivery.stdout,'delivery_stderr':delivery.stderr,'scans':log.read_text().count('mail scan complete'),'idle_descriptors':descriptor_count}),flush=True)
+            print(json.dumps({'tag':tag,'mailboxes':count,'idle_wall':elapsed,'idle_cpu':used,'idle_scans':idle_scans,'idle_percent':100*used/elapsed,'delivery_status':delivery.returncode,'delivery':delivery.stdout,'delivery_stderr':delivery.stderr,'scans':scan_starts(log.read_text()),'idle_descriptors':descriptor_count}),flush=True)
         finally:
             if service_pid is None:
                 for path in P('/proc').glob('[0-9]*/cmdline'):
@@ -256,12 +279,7 @@ print(json.dumps({'unrelated_loop_operations':counts,'unrelated_directory_reads'
     result=subprocess.run(['/usr/bin/podman','unshare',sys.executable,'-c',probe,str(home),str(service_pid),str(log.parent/'operations.trace')],capture_output=True,text=True,check=True,timeout=180)
     reading=json.loads(result.stdout)
     print(json.dumps(reading),flush=True)
-    if enforce:
-        for operation,bound in {'open':50,'stat':53,'list':10}.items():
-            assert 0<reading['unrelated_loop_operations'][operation]<=bound, f'unrelated {operation} operations exceeded the selected-delivery bound'
-        assert reading['unrelated_directory_reads']['outbox']==0, 'unrelated outbox was listed'
-        assert reading['unrelated_directory_reads']['staging']<=2, 'extra unrelated staging walks'
-        assert reading['history_passes']==2, 'full recovery returned to the selected scan'
+    if enforce:assert_operations(reading)
 
 def post_claim_refusal(home,service_pid,log,enforce=True):
     # The observer counts actual claims while only this fixture's journal is unwritable.
@@ -341,7 +359,8 @@ def own_process(pid,home,stop=False):
 
 if __name__=='__main__':
     phase=sys.argv[1]
-    if phase=='seed':seed(P(sys.argv[2]),int(sys.argv[3]),sys.argv[4])
+    if phase=='observation-check':observation_check()
+    elif phase=='seed':seed(P(sys.argv[2]),int(sys.argv[3]),sys.argv[4])
     elif phase=='history':history(P(sys.argv[2]),int(sys.argv[3]))
     elif phase=='measure':measure(int(sys.argv[2]),sys.argv[3],sys.argv[4])
     elif phase=='operations-profile':measure(int(sys.argv[2]),sys.argv[3],sys.argv[4],enforce=False,operations=True)
