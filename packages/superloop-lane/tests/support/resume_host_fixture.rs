@@ -11,7 +11,8 @@ use std::process::Command;
 use std::time::Duration;
 
 pub(super) struct Host {
-    root: fixture::Fixture,
+    _root: Option<fixture::Fixture>,
+    home: PathBuf,
     lane: PathBuf,
     runtime: PathBuf,
 }
@@ -28,7 +29,8 @@ impl Host {
         seed(home);
         let runtime = super::install::configure(home);
         let host = Self {
-            root,
+            home: root.0.clone(),
+            _root: Some(root),
             lane,
             runtime,
         };
@@ -36,19 +38,74 @@ impl Host {
         host.bind();
         host
     }
+    pub(super) fn home(&self) -> &Path {
+        &self.home
+    }
+    pub(super) fn borrowed(home: PathBuf, expected: (u64, u64)) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = fs::symlink_metadata(&home).expect("fixture root");
+        assert!(
+            meta.is_dir() && !meta.file_type().is_symlink(),
+            "plain fixture root"
+        );
+        assert_eq!(
+            (meta.dev(), meta.ino()),
+            expected,
+            "retained parent fixture identity"
+        );
+        assert_eq!(
+            fs::read(home.join(".reply-fixture")).expect("marker"),
+            b"owned by reply fixture parent\n"
+        );
+        let lane = std::env::current_exe()
+            .expect("image")
+            .ancestors()
+            .map(|p| p.join("superloop-lane"))
+            .find(|p| p.is_file())
+            .expect("built lane");
+        Self {
+            _root: None,
+            runtime: home.join("container-fixture"),
+            home,
+            lane,
+        }
+    }
+    pub(super) fn reply(&self) {
+        delivery(&self.home, "package-canonical-reply");
+        let request = superloop_lane::launch::steering::Request::parse(&[
+            "alpha".into(),
+            "R".into(),
+            "--step".into(),
+            "review".into(),
+            "--delivery".into(),
+            "2026-01-01T00:00:00.002Z".into(),
+        ])
+        .expect("reply selection");
+        superloop_lane::launch::steering::run_from(
+            &self.home,
+            &request,
+            true,
+            (
+                &self.home,
+                nix::unistd::Uid::effective().as_raw(),
+                Some(&self.lane),
+            ),
+        )
+        .expect("production reply binding");
+    }
     pub(super) fn helper_preflights(&self) -> usize {
-        fs::read_to_string(self.root.0.join("entry-calls"))
+        fs::read_to_string(self.home.join("entry-calls"))
             .expect("real private entry trace")
             .lines()
             .filter(|line| *line == "_container-helper")
             .count()
     }
     pub(super) fn reservation(&self) -> Vec<u8> {
-        fs::read(self.root.0.join("runs/.reservation-R.json")).expect("raw reservation")
+        fs::read(self.home.join("runs/.reservation-R.json")).expect("raw reservation")
     }
     pub(super) fn inventory(&self) -> Vec<u8> {
         let output = mapped(
-            &self.root.0,
+            &self.home,
             r"
 import os,sys,json,stat
 root=sys.argv[1];rows=[]
@@ -75,12 +132,12 @@ print(json.dumps(sorted(rows)))
         let mut request = superloop_lane::launch::LaunchRequest::parse(&words)?;
         request.podman_bin.clone_from(&self.runtime);
         superloop_lane::launch::rounds::resume_with_host_root(
-            &self.root.0,
+            &self.home,
             &request,
-            &self.root.0,
+            &self.home,
             nix::unistd::Uid::effective().as_raw(),
             |_| panic!("observing fixture needs no proxy reply"),
-            &mut |_| panic!("preview starts no driver"),
+            &mut |_| assert!(!dry, "preview starts no driver"),
             &self.lane,
         )
     }
@@ -95,11 +152,11 @@ print(json.dumps(sorted(rows)))
         ])
         .expect("mail selection");
         let report = superloop_lane::launch::steering::run_from(
-            &self.root.0,
+            &self.home,
             &request,
             false,
             (
-                &self.root.0,
+                &self.home,
                 nix::unistd::Uid::effective().as_raw(),
                 Some(&self.lane),
             ),
@@ -113,7 +170,7 @@ print(json.dumps(sorted(rows)))
         );
     }
     fn record(&self) {
-        let home = &self.root.0;
+        let home = &self.home;
         let (mut plan, _) =
             superloop_lane::load_plan(home, "alpha", "R", (0, 0)).expect("host plan");
         plan.select_worker_uid(64010).expect("worker");
@@ -155,6 +212,7 @@ pub(super) fn directory(path: PathBuf, mode: u32) {
 }
 pub(super) fn mapped(home: &Path, source: &str) -> std::process::Output {
     let output = Command::new("/usr/bin/podman")
+        .env("TMPDIR", home.parent().expect("owned temporary root"))
         .env_remove("_CONTAINERS_USERNS_CONFIGURED")
         .env_remove("_CONTAINERS_ROOTLESS_UID")
         .args(["unshare", "/usr/bin/python3", "-I", "-c", source])
@@ -170,6 +228,9 @@ fn seed(home: &Path) {
         .fixture_output("host seed", Duration::from_secs(60))
         .expect("seed");
     assert!(result.status.success(), "{result:?}");
+    delivery(home, "package-canonical-inbound-seed");
+}
+fn delivery(home: &Path, phase: &str) {
     let owner = File::open(home).expect("owner").into();
     let runs = File::open(home.join("runs")).expect("runs").into();
     let image = std::env::current_exe().expect("seed image");
@@ -196,7 +257,8 @@ fn seed(home: &Path) {
             .collect::<Vec<_>>(),
     )
     .expect("seed handoff");
-    let result = fixture::child_command(home, "package-canonical-inbound-seed")
+    let result = fixture::child_command(home, phase)
+        .env("TMPDIR", home.parent().expect("owned temporary root"))
         .env(
             "LOOP_HOME_REPLY_MANIFEST",
             serde_json::to_string(&manifest).expect("manifest"),
@@ -220,6 +282,8 @@ home=Path(sys.argv[1])
 for p in [home,home/'runs',home/'.var',home/'.var/loops',home/'.var/loops/alpha']:
  os.chmod(p,0o711)
 p=home/'runs/.launch-R';p.mkdir(mode=0o700,exist_ok=True)
+# Completed dispatch evidence is seeded history; this fixture does not run first dispatch.
+f=p/'launch-evidence.json';f.write_text(json.dumps({'bound_source_matrix':{'git_worktree':{'add_remove':True}}}));os.chmod(f,0o600)
 for name,data in [('passwd','worker:x:64010:64010::/home/worker:/bin/sh\n'),('group','worker:x:64010:\nloop:x:64000:worker\n')]:
  f=p/name;f.write_text(data);os.chmod(f,0o440);os.chown(f,0,64000)
 os.chown(home/'.var/loops/alpha/runner-templates/codex'/('a'*64)/'libexec/ssh',0,64000)

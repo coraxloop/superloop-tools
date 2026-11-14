@@ -93,7 +93,7 @@ fn runtime(home: &Path) -> PathBuf {
     fs::copy("/bin/sh", &runtime).expect("native runtime stand-in");
     write(
         home.join("unshare"),
-        "printf '%s\\n' \"$2\" >> entry-calls\nexec /usr/bin/podman unshare \"$@\"\n",
+        "export TMPDIR=${PWD%/*}\nprintf '%s\\n' \"$2\" >> entry-calls\nexec /usr/bin/podman unshare \"$@\"\n",
         0o600,
     );
     write(
@@ -104,12 +104,24 @@ fn runtime(home: &Path) -> PathBuf {
     for name in ["ps", "container", "stop", "wait", "rm"] {
         write(home.join(name), "exit 0\n", 0o600);
     }
-    write(home.join("run"), "exit 23\n", 0o600);
+    write(
+        home.join("run"),
+        "cat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"fixture-thread\"}'\n",
+        0o600,
+    );
+    let image = std::env::current_exe().expect("driver stand-in image");
     write(
         home.join("entry-fixture"),
         format!(
-            "#!/bin/sh\nprintf '%s\\n' 'superloop-driver-entry {} 1'\n",
-            env!("CARGO_PKG_VERSION")
+            "#!/bin/sh\nif [ \"$1 $2\" = 'driver-launch --interface-version' ]; then printf '%s\\n' 'superloop-driver-entry {} 1'; exit 0; fi\nexec '{}' --fixture-driver '{}' \"$@\"\n",
+            env!("CARGO_PKG_VERSION"),
+            image
+                .to_str()
+                .expect("UTF-8 fixture image")
+                .replace('\'', "'\\''"),
+            home.to_str()
+                .expect("UTF-8 fixture root")
+                .replace('\'', "'\\''")
         ),
         0o700,
     );

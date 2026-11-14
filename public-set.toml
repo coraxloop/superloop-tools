@@ -2684,10 +2684,16 @@ pattern = "packages/superloop-lane/tests/support/entry.rs"
 pattern = "packages/superloop-lane/tests/support/registry_entry.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/tests/support/resume_host_driver.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/tests/support/resume_host_fixture.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/support/resume_host_install.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/resume_host_scope.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/support/report_custody.c"

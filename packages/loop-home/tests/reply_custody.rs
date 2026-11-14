@@ -388,6 +388,7 @@ fn fixture_anchors(
     home: &Path,
     manifest: &Manifest,
     fds: Vec<std::os::fd::OwnedFd>,
+    root_mode: u32,
 ) -> (anchor::Configuration, Vec<Anchor>) {
     let receiver = Receiver::current().expect("receiver");
     let configuration = receiver
@@ -403,6 +404,10 @@ fn fixture_anchors(
             false,
         )
         .expect("configuration");
+    let mut policies = requirements();
+    for policy in &mut policies[..2] {
+        policy.policy.mode = ModePolicy::Exact(root_mode);
+    }
     let anchors = receiver
         .validate(
             manifest,
@@ -410,7 +415,7 @@ fn fixture_anchors(
             &manifest.operation,
             "alpha",
             Transport::Rights,
-            &requirements(),
+            &policies,
         )
         .expect("capabilities");
     (configuration, anchors)
@@ -434,7 +439,8 @@ fn package_seed(
     } else {
         BODY
     };
-    let (_writer, instant) = delivery_for_name(storage, journal, &row, reply, &identity.name, body);
+    let (_writer, instant) =
+        delivery_for_name(storage, journal, &row, reply, &identity.name, body, false);
     writeln!(std::io::stdout().lock(), "PACKAGE-DELIVERY {instant}").expect("seed result");
 }
 
@@ -459,21 +465,8 @@ fn complete_birth(
     }
 }
 
-fn child(home: &Path, case: &str) {
-    let (manifest, fds) = receive();
-    let receiver = Receiver::current().expect("receiver");
-    if case == "declarations" {
-        declaration_refusals(home, &manifest, &fds, &receiver);
-        return;
-    }
-    let custody = ReplyCustody::receive(&receiver, &manifest, duplicate(&fds), "alpha");
-    let (configuration, mut anchors) = fixture_anchors(home, &manifest, fds);
-    let journal = Arc::new(anchors.pop().expect("journal"));
-    let executor = anchors.pop().expect("executor");
-    let private = Arc::new(anchors.pop().expect("private"));
-    let storage = Arc::new(anchors.pop().expect("storage"));
-    let _config = anchors.pop().expect("config");
-    let identity = if case == "package-canonical-inbound-seed" {
+fn fixture_identity(case: &str) -> Identity {
+    if case.starts_with("package-canonical-") {
         Identity::for_reservation(64010, "superloop-lane:R".into())
     } else {
         Identity {
@@ -481,7 +474,49 @@ fn child(home: &Path, case: &str) {
             name: "worker".into(),
             reservation: "reply-fixture".into(),
         }
-    };
+    }
+}
+fn package_reply_child(home: &Path) {
+    let (manifest, fds) = receive();
+    let receiver = Receiver::current().expect("receiver");
+    let custody = ReplyCustody::receive(&receiver, &manifest, duplicate(&fds), "alpha")
+        .expect("reply custody");
+    let (configuration, mut anchors) = fixture_anchors(home, &manifest, fds, 0o711);
+    let journal = Arc::new(anchors.pop().expect("journal"));
+    let storage = Arc::new(anchors.remove(4));
+    let identity = fixture_identity("package-canonical-reply");
+    let row = configuration.registry.row("alpha", home).expect("row");
+    let _session = custody.enter(&identity, false).expect("service");
+    let (_journal, instant) = delivery_for_name(
+        &storage,
+        &journal,
+        &row,
+        true,
+        &identity.name,
+        b"Synthetic completed reply.\n",
+        true,
+    );
+    writeln!(std::io::stdout().lock(), "PACKAGE-DELIVERY {instant}").expect("reply result");
+}
+fn child(home: &Path, case: &str) {
+    if case == "package-canonical-reply" {
+        package_reply_child(home);
+        return;
+    }
+    let (manifest, fds) = receive();
+    let receiver = Receiver::current().expect("receiver");
+    if case == "declarations" {
+        declaration_refusals(home, &manifest, &fds, &receiver);
+        return;
+    }
+    let custody = ReplyCustody::receive(&receiver, &manifest, duplicate(&fds), "alpha");
+    let (configuration, mut anchors) = fixture_anchors(home, &manifest, fds, 0o700);
+    let journal = Arc::new(anchors.pop().expect("journal"));
+    let executor = anchors.pop().expect("executor");
+    let private = Arc::new(anchors.pop().expect("private"));
+    let storage = Arc::new(anchors.pop().expect("storage"));
+    let _config = anchors.pop().expect("config");
+    let identity = fixture_identity(case);
     if case.starts_with("override-") {
         lifetime_override(
             home,
@@ -686,7 +721,7 @@ fn delivery_for(
     row: &loop_home::LoopRecord,
     reply: bool,
 ) -> (journal::Journal, Instant) {
-    delivery_for_name(storage, journal_anchor, row, reply, "worker", BODY)
+    delivery_for_name(storage, journal_anchor, row, reply, "worker", BODY, false)
 }
 fn delivery_for_name(
     storage: &Arc<Anchor>,
@@ -695,10 +730,14 @@ fn delivery_for_name(
     reply: bool,
     worker: &str,
     body: &[u8],
+    append: bool,
 ) -> (journal::Journal, Instant) {
     let address = format!("alpha+{worker}");
-    let mut journal =
-        journal::Journal::create(beneath(journal_anchor, ".")).expect("journal create");
+    let mut journal = if append {
+        journal::Journal::open(beneath(journal_anchor, ".")).expect("retained journal")
+    } else {
+        journal::Journal::create(beneath(journal_anchor, ".")).expect("journal create")
+    };
     let durable = Durability {
         crash_consistent_rename: true,
         durable_sync: true,
@@ -745,7 +784,12 @@ fn delivery_for_name(
     )
     .expect("fixture source");
     File::from(fd).write_all(body).expect("source bytes");
-    let now = Instant::parse("2026-01-01T00:00:00.001Z").expect("instant");
+    let now = Instant::parse(if append {
+        "2026-01-01T00:00:00.002Z"
+    } else {
+        "2026-01-01T00:00:00.001Z"
+    })
+    .expect("instant");
     let record = publication::prepare(&journal, &sender, &recipient, outgoing)
         .expect("prepare")
         .accept(
@@ -877,7 +921,8 @@ fn reply_session_retains_custody() {
                     "admission-acl",
                     "package-seed",
                     "package-inbound-seed",
-                    "package-canonical-inbound-seed"
+                    "package-canonical-inbound-seed",
+                    "package-canonical-reply"
                 ]
                 .contains(&phase.as_str()),
                 "unsupported fixture phase {phase}"
@@ -1770,7 +1815,7 @@ fn inbound_seed(
     custody: BindingCustody,
     identity: &Identity,
 ) {
-    let (configuration, mut anchors) = fixture_anchors(home, manifest, fds);
+    let (configuration, mut anchors) = fixture_anchors(home, manifest, fds, 0o700);
     let journal = Arc::new(anchors.pop().expect("journal"));
     let executor = anchors.pop().expect("executor");
     let private = anchors.pop().expect("private");
