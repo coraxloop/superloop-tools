@@ -456,11 +456,12 @@ impl AgentRunner for CodexRunner {
             false,
         );
         for alarm in alarms {
+            let excess = alarm.kind.is_excess();
             usage::journal(
                 identity,
-                "excess",
+                if excess { "excess" } else { "cleared" },
                 &json!({"settings":settings,"alarm":usage::alarm_value(&alarm, &usage)}),
-                true,
+                excess,
             );
         }
         result

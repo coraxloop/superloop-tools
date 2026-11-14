@@ -125,12 +125,14 @@ struct Bucket {
 struct Window {
     buckets: Vec<Bucket>,
     alarms: u64,
+    hour_excess: bool,
 }
 impl Window {
     fn new() -> Self {
         Self {
             buckets: vec![Bucket::default(); 3601],
             alarms: 0,
+            hour_excess: false,
         }
     }
     fn add(&mut self, second: u64, score: Option<u128>) -> (u128, u64) {
@@ -165,6 +167,12 @@ impl Window {
 pub enum AlarmKind {
     CallExcess,
     HourExcess,
+    HourCleared,
+}
+impl AlarmKind {
+    pub(super) const fn is_excess(self) -> bool {
+        !matches!(self, Self::HourCleared)
+    }
 }
 
 #[derive(Debug)]
@@ -190,7 +198,10 @@ impl Monitor {
         }
     }
     pub fn observe(&self, usage: &Usage) -> (Value, Vec<Alarm>) {
-        let second = self.started.elapsed().as_secs();
+        self.observe_at(self.started.elapsed().as_secs(), usage)
+    }
+
+    fn observe_at(&self, second: u64, usage: &Usage) -> (Value, Vec<Alarm>) {
         let mut window = self
             .window
             .lock()
@@ -214,16 +225,25 @@ impl Monitor {
                 threshold8: per_call,
             });
         }
-        if hour > u128::from(hourly) {
+        // One line when a call first finds the rolling hour above its threshold and
+        // one when a later call finds it back at or under; calls between add none.
+        let over = hour > u128::from(hourly);
+        if over != window.hour_excess {
+            window.hour_excess = over;
             alarms.push(Alarm {
-                kind: AlarmKind::HourExcess,
+                kind: if over {
+                    AlarmKind::HourExcess
+                } else {
+                    AlarmKind::HourCleared
+                },
                 score8: hour,
                 threshold8: hourly,
             });
         }
+        let excess = alarms.iter().filter(|alarm| alarm.kind.is_excess());
         window.alarms = window
             .alarms
-            .saturating_add(u64::try_from(alarms.len()).unwrap_or(u64::MAX));
+            .saturating_add(u64::try_from(excess.count()).unwrap_or(u64::MAX));
         (
             json!({"score8":score.map(bounded), "score_saturated":score.is_some_and(saturated),
             "hour_score8":bounded(hour), "hour_score_saturated":saturated(hour),
@@ -350,5 +370,27 @@ mod tests {
             Status::NotStarted
         );
         assert_eq!(Usage::read(&Value::Null).status, Status::Unknown);
+    }
+
+    fn kinds(monitor: &Monitor, second: u64, output: u64) -> Vec<AlarmKind> {
+        let (_, alarms) = monitor.observe_at(second, &measured(0, 0, output));
+        alarms.iter().map(|alarm| alarm.kind).collect()
+    }
+
+    /// ´test:unit:agent-usage-hour-alarm-marks-crossing-and-return´
+    #[test]
+    fn agent_usage_hour_alarm_marks_crossing_and_return() {
+        let monitor = Monitor::new(1);
+        for _ in 0..8 {
+            assert!(kinds(&monitor, 10, 1).is_empty());
+        }
+        assert_eq!(kinds(&monitor, 10, 1), [AlarmKind::HourExcess]);
+        assert!(kinds(&monitor, 11, 1).is_empty());
+        assert_eq!(kinds(&monitor, 3611, 0), [AlarmKind::HourCleared]);
+        assert!(kinds(&monitor, 3612, 0).is_empty());
+        let (value, alarms) = monitor.observe_at(3612, &measured(0, 0, 9));
+        let last: Vec<_> = alarms.iter().map(|alarm| alarm.kind).collect();
+        assert_eq!(last, [AlarmKind::CallExcess, AlarmKind::HourExcess]);
+        assert_eq!(value["alarm_count"], 3);
     }
 }
