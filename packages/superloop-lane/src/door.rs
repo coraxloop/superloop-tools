@@ -3148,15 +3148,26 @@ fn fixture_mode_call(
 
 const EXERCISE_ADMISSION_REFUSAL: &str = "exercise-door-admission-unmeasured";
 
-#[cfg(test)]
-const EXERCISE_RETRY_HANG: Duration = Duration::from_secs(120);
-#[cfg(not(test))]
-const EXERCISE_RETRY_HANG: Duration = Duration::from_secs(2);
+// The exercise retries a refused fixture admission for two seconds.
+const EXERCISE_RETRY_WINDOW: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 thread_local! {
     static EXERCISE_RETRY_OBSERVED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    // A test that releases admission on the observed refusal widens its own window to a
+    // hang bound; a test that holds admission throughout keeps the deployed window, so
+    // its refusal arrives after one refused attempt.
+    static EXERCISE_RETRY_HANG: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn exercise_retry_window() -> Duration {
+    #[cfg(test)]
+    if let Some(hang) = EXERCISE_RETRY_HANG.with(std::cell::Cell::get) {
+        return hang;
+    }
+    EXERCISE_RETRY_WINDOW
 }
 
 pub(crate) fn exercise_admission_unmeasured(kind: &str) -> bool {
@@ -3173,7 +3184,7 @@ fn fixture_agent_call(
     runner_override: Option<Arc<dyn transport::Runner>>,
     agent: Option<Arc<dyn agent::AgentRunner>>,
 ) -> Result<Value, LaneError> {
-    let deadline = Instant::now() + EXERCISE_RETRY_HANG;
+    let deadline = Instant::now() + exercise_retry_window();
     loop {
         let result = fixture_agent_call_once(
             owner_home,

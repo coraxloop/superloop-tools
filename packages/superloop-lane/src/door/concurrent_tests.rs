@@ -511,6 +511,8 @@ fn door_exercise_retries_concurrent_admission() {
             drop(guard);
         }));
     });
+    // The release follows the observed refusal, so the retry window is only a hang bound.
+    super::EXERCISE_RETRY_HANG.with(|slot| slot.set(Some(Duration::from_secs(120))));
     let report = super::fixture_agent_call(
         &fixture.home,
         &registration,
