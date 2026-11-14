@@ -1712,6 +1712,7 @@ fn add_workspace(fixture: &Fixture) -> (Value, Vec<u8>) {
         .expect("read")
         .expect("reservation");
     record["plan"]["compute_workspace"] = crate::tests::published_workspace();
+    record["plan"]["compute_placement"] = crate::tests::published_placement();
     publish_reservation(&fixture.path, &record)
         .expect("production-written declaration in lifecycle fixture");
     (record, fs::read(&fixture.path).expect("original bytes"))
@@ -1731,6 +1732,10 @@ fn workspace_reservation_survives_pinned_read_and_door_repin_preview() {
     )
     .expect("pinned reconstruction");
     assert_eq!(
+        plan.document["compute_placement"],
+        record["plan"]["compute_placement"]
+    );
+    assert_eq!(
         plan.document["compute_workspace"],
         record["plan"]["compute_workspace"]
     );
@@ -1745,6 +1750,10 @@ fn workspace_reservation_survives_round_resume_reconstruction() {
     let fixture = interrupted_fixture(false, "dispatch", true);
     let (record, bytes) = add_workspace(&fixture);
     let preview = fixture.resume(true).expect("round resume reconstruction");
+    assert_eq!(
+        preview["plan"]["compute_placement"],
+        record["plan"]["compute_placement"]
+    );
     assert_eq!(
         preview["plan"]["compute_workspace"],
         record["plan"]["compute_workspace"]

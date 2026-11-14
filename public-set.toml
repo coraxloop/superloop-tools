@@ -3574,3 +3574,12 @@ pattern = "packages/superloop-credential-custody/src/observation_cli.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-credential-custody/src/fixture_cli.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/placement/commands.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/placement/commands_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/placement_entry.rs"

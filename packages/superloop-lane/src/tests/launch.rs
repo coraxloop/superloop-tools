@@ -1265,6 +1265,7 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
     assert_eq!(plan.document["attempt_wall_seconds"], 12);
     let workspace = super::published_workspace();
     plan.document["compute_workspace"] = workspace.clone();
+    plan.document["compute_placement"] = super::published_placement();
     let path = plan
         .driver_dir
         .parent()
@@ -1295,6 +1296,10 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
         .expect("socket mode");
     }
     let preview = run(home, request).expect("dead dispatch retains pinned wall");
+    assert_eq!(
+        preview["plan"]["compute_placement"],
+        record["plan"]["compute_placement"]
+    );
     assert_eq!(preview["plan"]["attempt_wall_seconds"], 12);
     assert_eq!(
         preview["interrupted_settlement"]["state"],

@@ -11,6 +11,7 @@ use std::path::Path;
 struct Fixture {
     root: tempfile::TempDir,
     grant: Grant,
+    identity: crate::placement::RootIdentity,
 }
 impl Fixture {
     fn new() -> Self {
@@ -23,7 +24,12 @@ impl Fixture {
         grant.workspace = workspace.to_str().unwrap().into();
         grant.baseline_env = vec![("PATH".into(), "/usr/bin".into())];
         grant.shells = vec!["/bin/sh".into()];
-        Self { root, grant }
+        let identity = crate::placement::read_identity(&File::open(&workspace).unwrap()).unwrap();
+        Self {
+            root,
+            grant,
+            identity,
+        }
     }
     fn envelope(&self, execution: Execution) -> Envelope {
         Envelope {
@@ -38,7 +44,10 @@ impl Fixture {
     fn record(&self) -> Value {
         json!({"loop":self.grant.loop_name,"run":self.grant.run,"plan":{
             "loop":self.grant.loop_name,"run":self.grant.run,
-            "compute_workspace":{"grant":self.grant,"digest":self.grant.digest().unwrap()}}})
+            "compute_workspace":{"grant":self.grant,"digest":self.grant.digest().unwrap()},
+            "compute_placement":{"schema":1,"placement":"1".repeat(32),"loop":self.grant.loop_name,
+            "run":self.grant.run,"node":self.grant.node,"grant_digest":self.grant.digest().unwrap(),
+            "mode":"own-path","root":self.grant.workspace,"root_identity":self.identity,"seed":null}}})
     }
     fn prepare(&self, envelope: &Envelope) -> PreparedExecution {
         PreparedExecution::from_reservation(&self.record(), &self.grant.node, envelope).unwrap()
@@ -230,7 +239,18 @@ fn workspace_executor_refuses_stale_or_foreign_context() {
     let error = PreparedExecution::from_reservation(&record, &f.grant.node, &envelope)
         .err()
         .unwrap();
-    assert_eq!(error.kind, "door-workspace-unregistered");
+    assert_eq!(error.kind, "door-workspace-context-differs");
+    record["plan"]
+        .as_object_mut()
+        .unwrap()
+        .remove("compute_placement");
+    assert_eq!(
+        PreparedExecution::from_reservation(&record, &f.grant.node, &envelope)
+            .err()
+            .unwrap()
+            .kind,
+        "door-workspace-unregistered"
+    );
     let mut record = f.record();
     record["plan"]["compute_workspace"]["grant"]["workspace"] = json!("/other");
     assert_eq!(
@@ -453,4 +473,31 @@ fn workspace_executor_caller_cancellation_revokes_budget() {
         assert!(!Path::new(&f.grant.workspace).join("sub/forbidden").exists());
         f.reader(&envelope, &measured);
     });
+}
+
+/// ´test:unit:workspace-executor-binds-placement-before-cwd-or-spawn´
+#[test]
+fn workspace_executor_binds_placement_before_cwd_or_spawn() {
+    let f = Fixture::new();
+    let envelope = f.envelope(shell("touch forbidden"));
+    let record = f.record();
+    PreparedExecution::from_reservation(&record, &f.grant.node, &envelope).unwrap();
+    let mut missing = record.clone();
+    missing["plan"]
+        .as_object_mut()
+        .unwrap()
+        .remove("compute_placement");
+    fs::remove_dir(Path::new(&f.grant.workspace).join("sub")).unwrap();
+    let error = PreparedExecution::from_reservation(&missing, &f.grant.node, &envelope)
+        .err()
+        .unwrap();
+    assert_eq!(error.kind, "door-workspace-context-differs");
+    assert_eq!(error.detail, "workspace placement is required");
+    fs::remove_dir(&f.grant.workspace).unwrap();
+    fs::create_dir(&f.grant.workspace).unwrap();
+    let error = PreparedExecution::from_reservation(&record, &f.grant.node, &envelope)
+        .err()
+        .unwrap();
+    assert_eq!(error.detail, "placement root identity differs");
+    assert!(!Path::new(&f.grant.workspace).join("forbidden").exists());
 }

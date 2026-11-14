@@ -58,7 +58,7 @@ pub mod rounds;
 pub(crate) mod seed;
 pub mod settle;
 pub mod steering;
-mod workspace;
+pub(crate) mod workspace;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeclaredSource {
@@ -1952,7 +1952,7 @@ fn private_argv(
     if let Some(declaration) = &request.compute_workspace {
         let digest = match request.expect_digest.as_ref() {
             Some(digest) => digest.clone(),
-            None if request.dry_run => workspace::declaration(declaration)?.digest,
+            None if request.dry_run => workspace::declaration_digest(declaration)?,
             None => {
                 return Err(LaneError::input(
                     "workspace-digest",
@@ -4173,9 +4173,12 @@ fn run_with_program(
             None,
         )?;
         let helper_preview = json!({"program":request.podman_bin,"argv":helper_argv(&exe_word, &plan.driver_dir, owner_home, &root)?,"anchor_manifest":{"state":"bound-on-launch","transport":"rights","purposes":crate::container_entry::helper_purposes(selected_backend)}});
-        return Ok(
-            json!({"schema":1,"command":"launch","dry_run":true,"observe":request.observe,"enforcing":!request.observe,"plan":preview_plan,"proxy_service":proxy_service,"box_gate":box_gate,"box_probe":box_probe,"bound_source_matrix":bound_source_matrix,"bound_source_probe_identity":"launcher host identity runs rootless Podman with --userns=host; worker and fixed sibling UIDs are selected inside separate probe containers","dead_preparation":dry_recovery,"checks_performed":checks,"checks_on_launch":checks_on_launch,"driver_sha256":driver_sha256,"driver_contract":driver_contract,"entry_interface":entry_version,"selection":{"backend":selected_backend.name(),"worker_uid":worker_uid,"model":selection.record(),"method":"in-process read-only runs-root snapshot under shared lock"},"children_executed":[build::image_inspect_preview(&request.podman_bin, image, owner_home)?],"hash_checks_executed":hash_checks,"prepare_argv":prepare_preview,"setup_argv":setup_preview,"helper_argv":helper_preview,"invocation":{"program":entry,"argv":launch_argv},"environment":environment,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()}),
-        );
+        let mut report = json!({"schema":1,"command":"launch","dry_run":true,"observe":request.observe,"enforcing":!request.observe,"plan":preview_plan,"proxy_service":proxy_service,"box_gate":box_gate,"box_probe":box_probe,"bound_source_matrix":bound_source_matrix,"bound_source_probe_identity":"launcher host identity runs rootless Podman with --userns=host; worker and fixed sibling UIDs are selected inside separate probe containers","dead_preparation":dry_recovery,"checks_performed":checks,"checks_on_launch":checks_on_launch,"driver_sha256":driver_sha256,"driver_contract":driver_contract,"entry_interface":entry_version,"selection":{"backend":selected_backend.name(),"worker_uid":worker_uid,"model":selection.record(),"method":"in-process read-only runs-root snapshot under shared lock"},"children_executed":[build::image_inspect_preview(&request.podman_bin, image, owner_home)?],"hash_checks_executed":hash_checks,"prepare_argv":prepare_preview,"setup_argv":setup_preview,"helper_argv":helper_preview,"invocation":{"program":entry,"argv":launch_argv},"environment":environment,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()});
+        if let Some(declaration) = &request.compute_workspace {
+            report["workspace_declaration_digest"] =
+                json!(workspace::declaration_digest(declaration)?);
+        }
+        return Ok(report);
     }
     let _preparation_lease = lock_run_preparation(&root, &request.run, caller.0)?;
     if let Some(mut old) = read_reservation(&reservation)? {

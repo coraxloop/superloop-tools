@@ -293,7 +293,26 @@ fn placement_root_handle_survives_rename_not_recreation() {
     let original = temp.path().join("root");
     std::fs::create_dir(&original).unwrap();
     let first = File::open(&original).unwrap();
-    let identity = read_identity(&first).unwrap();
+    let identity = match read_identity(&first) {
+        Ok(identity) => identity,
+        Err(error)
+            if error
+                .detail
+                .starts_with("filesystem UUID: No such file or directory")
+                || error.detail.contains("Operation not supported")
+                || error.detail.contains("Function not implemented") =>
+        {
+            use std::io::Write as _;
+            writeln!(
+                std::io::stderr().lock(),
+                "placement identity interface unavailable: {}",
+                error.detail
+            )
+            .unwrap();
+            return;
+        }
+        Err(error) => panic!("unexpected identity refusal: {error}"),
+    };
     let mut placement = member(&plan());
     placement.root_identity = identity;
     let renamed = temp.path().join("renamed");

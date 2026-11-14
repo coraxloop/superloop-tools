@@ -52,7 +52,7 @@ pub(super) fn proof(flag: &str, marker: &str) -> String {
 ///
 /// # Panics
 /// Panics if the writer or its read-back does not produce the exact declaration.
-pub fn published_workspace() -> Value {
+pub fn published_plan() -> Value {
     static SNAPSHOT: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
     SNAPSHOT
         .get_or_init(|| {
@@ -67,6 +67,17 @@ pub fn published_workspace() -> Value {
             serde_json::from_str(row).expect("production grant")
         })
         .clone()
+}
+
+/// Measured grant from the production creation fixture.
+#[must_use]
+pub fn published_workspace() -> Value {
+    published_plan()["compute_workspace"].clone()
+}
+/// Measured placement from the same production publication.
+#[must_use]
+pub fn published_placement() -> Value {
+    published_plan()["compute_placement"].clone()
 }
 
 pub(super) struct MappedStorage(pub(super) PathBuf, pub(super) String);
@@ -325,7 +336,7 @@ auth=json.loads((worker/'.codex/auth.json').read_text());assert auth['tokens']['
 assert (root/'workers'/identity['name']/'mail').is_dir()
 print('NATIVE-CREATION-MEASURED')
 assert json.loads((Path(record['plan']['driver_dir'])/'plan.json').read_text()) == record['plan']
-print(json.dumps(record['plan'].get('compute_workspace')))
+print(json.dumps({k:record['plan'].get(k) for k in ['compute_workspace','compute_placement']}))
 ",
         worker,
     )
@@ -344,8 +355,12 @@ print(json.dumps(record['plan'].get('compute_workspace')))
     )
     .expect("grant observation");
     assert_eq!(
-        measured, expected_workspace,
+        measured["compute_workspace"], expected_workspace["compute_workspace"],
         "native writer retains exactly the reviewed grant"
+    );
+    assert_eq!(
+        measured["compute_placement"],
+        expected_workspace["compute_placement"]
     );
     writeln!(std::io::stdout().lock(), "WORKSPACE-DECLARATION {measured}")
         .expect("production grant marker");
@@ -362,21 +377,12 @@ fn workspace_creation_request(
     worker: &str,
 ) -> (CommandSpec, Value) {
     let expected_workspace = if std::env::var_os("SUPERLOOP_WORKSPACE_CREATION_PROOF").is_some() {
-        let settings = home.join(".config/loops/alpha/workers.toml");
-        let mut source = fs::read_to_string(&settings).expect("existing settings");
-        write!(
-            source,
-            "\nworkspace_policy = {{ quick_policy_digest = {:?}, blacklist_digest = {:?} }}\n",
-            "a".repeat(64),
-            "b".repeat(64)
-        )
-        .expect("policy text");
-        fs::write(settings, source).expect("owner policy identities");
-        crate::plan::fixture_workspace_snapshot()
+        creation_declaration(home)
     } else {
         Value::Null
     };
-    let declaration = (!expected_workspace.is_null()).then(|| serde_json::json!({"grant":expected_workspace["grant"],"baseline_environment_is_public":true}).to_string());
+    let declaration =
+        (!expected_workspace.is_null()).then(|| expected_workspace["declaration"].to_string());
     if let Some(declaration) = declaration.as_deref() {
         let mut stale = creation_request(home, runs, program, Some((declaration, &"0".repeat(64))));
         stale.argv[0] = "/usr/bin/podman".into();
@@ -403,6 +409,51 @@ fn workspace_creation_request(
             .map(|text| (text, expected_workspace["digest"].as_str().unwrap())),
     );
     (request, expected_workspace)
+}
+
+/// # Panics
+/// Panics if the owner's real placement writer cannot prepare the fixture declaration.
+fn creation_declaration(home: &Path) -> Value {
+    let settings = home.join(".config/loops/alpha/workers.toml");
+    let mut source = fs::read_to_string(&settings).expect("existing settings");
+    write!(
+        source,
+        "\nworkspace_policy = {{ quick_policy_digest = {:?}, blacklist_digest = {:?} }}\n",
+        "a".repeat(64),
+        "b".repeat(64)
+    )
+    .expect("policy text");
+    fs::write(settings, source).expect("owner policy identities");
+    let parent = home.join("placement-parent");
+    fs::create_dir(&parent).expect("placement parent");
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).expect("private parent");
+    let mut grant = crate::plan::fixture_workspace_snapshot()["grant"].clone();
+    grant["workspace"] = serde_json::json!(parent.join("R"));
+    for (key, child) in [
+        ("CARGO_TARGET_DIR", "target"),
+        ("CARGO_HOME", "cargo"),
+        ("TMPDIR", "tmp"),
+    ] {
+        grant["baseline_env"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!([key, parent.join("R").join(child)]));
+    }
+    let input =
+        serde_json::json!({"grant":grant,"baseline_environment_is_public":true}).to_string();
+    let preview = crate::placement::commands::prepare(&parent, &input, None, true)
+        .expect("placement preview");
+    let result = crate::placement::commands::prepare(
+        &parent,
+        &input,
+        preview["preview_sha256"].as_str(),
+        false,
+    )
+    .expect("owner placement writer");
+    let declaration = result["declaration"].clone();
+    let snapshot =
+        crate::launch::workspace::declaration(&declaration.to_string()).expect("declared grant");
+    serde_json::json!({"compute_workspace":snapshot,"compute_placement":declaration["compute_placement"],"declaration":declaration,"digest":result["workspace_declaration_digest"]})
 }
 
 /// # Panics

@@ -18,7 +18,7 @@ mod launch;
 mod prepare;
 mod reader_custody;
 mod runtime_preparation;
-pub use runtime_preparation::published_workspace;
+pub use runtime_preparation::{published_placement, published_workspace};
 
 fn gate_fixture() -> serde_json::Value {
     Plan::build(

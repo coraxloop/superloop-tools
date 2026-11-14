@@ -1,4 +1,4 @@
-//! Opt-in launch declarations; no workspace placement or execution.
+//! Opt-in launch declarations and immutable placement publication; no execution.
 use super::{LaneError, Plan, Settings};
 use execute_command::workspace::{Grant, GrantSnapshot};
 use serde::Deserialize;
@@ -12,6 +12,8 @@ const MAX_DECLARATION: usize = 65_536;
 struct Declaration {
     grant: Grant,
     baseline_environment_is_public: bool,
+    #[serde(default)]
+    compute_placement: Option<crate::placement::Placement>,
 }
 
 fn refusal(detail: &str) -> LaneError {
@@ -19,12 +21,12 @@ fn refusal(detail: &str) -> LaneError {
 }
 
 /// Parse public owner input without echoing environment values in a refusal.
-pub(super) fn declaration(text: &str) -> Result<GrantSnapshot, LaneError> {
+pub fn declaration(text: &str) -> Result<GrantSnapshot, LaneError> {
     if text.len() > MAX_DECLARATION {
         return Err(refusal("declaration exceeds 65536 bytes"));
     }
     let declared: Declaration = serde_json::from_str(text).map_err(|_| {
-        refusal("declaration requires exactly grant and baseline_environment_is_public")
+        refusal("declaration requires grant, baseline_environment_is_public and optional compute_placement")
     })?;
     if !declared.baseline_environment_is_public {
         return Err(refusal(
@@ -48,6 +50,31 @@ pub(super) fn declaration(text: &str) -> Result<GrantSnapshot, LaneError> {
     }
     let digest = grant.digest().map_err(|_| refusal("grant digest failed"))?;
     Ok(GrantSnapshot { grant, digest })
+}
+
+/// Validate placement fields from the same duplicate-refusing declaration reader.
+pub fn placement(
+    text: &str,
+    snapshot: &GrantSnapshot,
+) -> Result<Option<crate::placement::Placement>, LaneError> {
+    let input: Declaration =
+        serde_json::from_str(text).map_err(|_| refusal("declaration fields differ"))?;
+    input
+        .compute_placement
+        .map(|placement| crate::placement::Placement::decode(json!(placement), snapshot))
+        .transpose()
+}
+
+/// Bind preview/apply to both members without changing the grant's own digest.
+pub fn declaration_digest(text: &str) -> Result<String, LaneError> {
+    let snapshot = declaration(text)?;
+    match placement(text, &snapshot)? {
+        None => Ok(snapshot.digest),
+        Some(placement) => execute_command::workspace::canonical_digest(
+            &json!({"compute_workspace":snapshot,"compute_placement":placement}),
+        )
+        .map_err(|_| refusal("placement declaration digest failed")),
+    }
 }
 
 fn secret(name: &str, value: &str) -> bool {
@@ -117,13 +144,18 @@ pub(super) fn bind(
             ));
         }
     }
-    if !preview && expected != Some(snapshot.digest.as_str()) {
+    let placement = placement(text, &snapshot)?;
+    let digest = declaration_digest(text)?;
+    if !preview && expected != Some(digest.as_str()) {
         return Err(LaneError::input(
             "workspace-digest",
-            "apply requires the matching compute_workspace.digest from launch --dry-run; repeat preview after any declaration change",
+            "apply requires the matching workspace_declaration_digest from launch --dry-run (grant-only uses compute_workspace.digest); repeat preview after any declaration change",
         ));
     }
     plan.document["compute_workspace"] = json!(snapshot);
+    if let Some(placement) = placement {
+        plan.document["compute_placement"] = json!(placement);
+    }
     Ok(())
 }
 
@@ -160,6 +192,7 @@ pub(super) fn reserve_before_publish<T>(
 mod tests {
     use super::super::{LaunchRequest, initial_reservation, publish_reservation, read_reservation};
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
     fn input() -> String {
@@ -251,6 +284,68 @@ mod tests {
         );
     }
 
+    /// ´test:unit:workspace-placement-publication-is-atomic´
+    #[test]
+    fn workspace_placement_publication_is_atomic() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("placements");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut declaration: serde_json::Value = serde_json::from_str(&input()).unwrap();
+        declaration["grant"]["workspace"] = json!(parent.join("R"));
+        for (key, child) in [
+            ("CARGO_TARGET_DIR", "target"),
+            ("CARGO_HOME", "cargo"),
+            ("TMPDIR", "tmp"),
+        ] {
+            declaration["grant"]["baseline_env"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!([key, parent.join("R").join(child)]));
+        }
+        let text = declaration.to_string();
+        let preview = crate::placement::commands::prepare(&parent, &text, None, true).unwrap();
+        let placed = crate::placement::commands::prepare(
+            &parent,
+            &text,
+            preview["preview_sha256"].as_str(),
+            false,
+        )
+        .unwrap();
+        let text = placed["declaration"].to_string();
+        let digest = placed["workspace_declaration_digest"].as_str().unwrap();
+        let mut preview = plan();
+        bind(&mut preview, &settings(), Some(&text), None, true).unwrap();
+        assert!(preview.document["compute_workspace"].is_object());
+        assert!(preview.document["compute_placement"].is_object());
+        let mut altered = placed["declaration"].clone();
+        altered["compute_placement"]["placement"] = json!("e".repeat(32));
+        let mut apply = plan();
+        assert_eq!(
+            bind(
+                &mut apply,
+                &settings(),
+                Some(&altered.to_string()),
+                Some(digest),
+                false
+            )
+            .unwrap_err()
+            .kind,
+            "workspace-digest"
+        );
+        assert!(apply.document.get("compute_workspace").is_none());
+        assert!(apply.document.get("compute_placement").is_none());
+        bind(&mut apply, &settings(), Some(&text), Some(digest), false).unwrap();
+        let path = root.path().join(".reservation-R.json");
+        publish_reservation(&path, &record(&apply)).unwrap();
+        let saved = read_reservation(&path).unwrap().unwrap();
+        assert_eq!(saved["plan"], preview.document);
+        assert_eq!(
+            saved["plan"]["compute_placement"],
+            placed["declaration"]["compute_placement"]
+        );
+    }
+
     /// ´test:unit:workspace-undeclared-launch-keeps-written-bytes´
     #[test]
     fn workspace_undeclared_launch_keeps_written_bytes() {
@@ -314,10 +409,14 @@ mod tests {
     /// ´test:unit:workspace-preparation-retry-retains-immutable-grant´
     #[test]
     fn workspace_preparation_retry_retains_immutable_grant() {
-        let prior = json!({"plan":{"loop":"alpha","run":"R","compute_workspace":crate::plan::fixture_workspace_snapshot()}});
+        let prior = json!({"plan":{"loop":"alpha","run":"R","compute_workspace":crate::tests::published_workspace(),"compute_placement":crate::tests::published_placement()}});
         let mut rebuilt = plan();
         retain_or_declare(&mut rebuilt, &settings(), None, None, false, Some(&prior))
             .expect("retry retains binding");
+        assert_eq!(
+            rebuilt.document["compute_placement"],
+            prior["plan"]["compute_placement"]
+        );
         assert_eq!(
             rebuilt.document["compute_workspace"],
             prior["plan"]["compute_workspace"]
@@ -452,7 +551,6 @@ mod tests {
     #[test]
     fn workspace_publication_cut_keeps_retirable_mail_birth() {
         use loop_home::mail::{birth, configuration_store::ConfigurationStore};
-        use std::os::unix::fs::PermissionsExt as _;
         for after_reservation in [false, true] {
             let root = tempfile::tempdir().expect("fixture");
             let private = root.path().join("private");
@@ -463,6 +561,7 @@ mod tests {
             let path = root.path().join(".reservation-R.json");
             let mut plan = plan();
             plan.document["compute_workspace"] = crate::tests::published_workspace();
+            plan.document["compute_placement"] = crate::tests::published_placement();
             let mut record = record(&plan);
             record["mail_birth"] = json!(identity);
             let result: Result<(), LaneError> = reserve_before_publish(

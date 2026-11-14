@@ -67,6 +67,8 @@ impl PreparedExecution {
         )
         .map_err(protocol)?;
         let grant = grant.ok_or_else(|| context("admitted grant absent"))?;
+        let placement = crate::placement::snapshot(&reservation["plan"], snapshot.as_ref())?
+            .ok_or_else(|| context("workspace placement is required"))?;
         let root = File::open("/").map_err(context)?;
         let flags = OpenHow::new()
             .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW)
@@ -79,6 +81,7 @@ impl PreparedExecution {
         )
         .map(File::from)
         .map_err(context)?;
+        placement.bind(crate::placement::read_identity(&workspace))?;
         let relative = envelope.cwd.join("/");
         let cwd = openat2(
             &workspace,

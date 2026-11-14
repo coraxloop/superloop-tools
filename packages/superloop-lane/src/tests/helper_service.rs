@@ -540,6 +540,10 @@ fn built_helper_resume_retains_mail_custody() {
         ])
         .env("SUPERLOOP_ROUND_PROOF", "1")
         .env("SUPERLOOP_ROUND_WORKSPACE", workspace.to_string())
+        .env(
+            "SUPERLOOP_ROUND_PLACEMENT",
+            super::published_placement().to_string(),
+        )
         .env("SUPERLOOP_REFRESH_PROOF", "1")
         .env("_CONTAINERS_USERNS_CONFIGURED", "1")
         .env(
@@ -748,6 +752,10 @@ pub(super) fn rounds_acceptance(home: &Path, runs: &Path, podman: &Path) {
         &std::env::var("SUPERLOOP_ROUND_WORKSPACE").expect("production declaration supplied"),
     )
     .expect("grant");
+    record["plan"]["compute_placement"] = serde_json::from_str(
+        &std::env::var("SUPERLOOP_ROUND_PLACEMENT").expect("placement supplied"),
+    )
+    .unwrap();
     crate::launch::publish_reservation(&runs.join(".reservation-R.json"), &record)
         .expect("declaration retained for helper");
     let _worker = MappedWorker {
@@ -890,6 +898,10 @@ fn check_previous_sources(home: &Path, runs: &Path, podman: &Path, settled: &Val
         let mut next =
             crate::launch::rounds::preflight_record(&runs.join("R"), &prior, "review", 3600)
                 .expect("prospective record");
+        assert_eq!(
+            next["plan"]["compute_placement"],
+            settled["plan"]["compute_placement"]
+        );
         next["launcher_pid"] = settled["launcher_pid"].clone();
         next["launcher_start"] = settled["launcher_start"].clone();
         crate::launch::publish_reservation(&reservation, &next).expect("published next round");

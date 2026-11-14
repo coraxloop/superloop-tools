@@ -1,4 +1,4 @@
-//! Reader-only own-path placement facts and descriptor identity.
+//! Own-path placement facts, descriptor identity and explicit owner commands.
 
 use std::fs::File;
 use std::io;
@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::error::LaneError;
 
+pub mod commands;
 mod reader;
 #[cfg(test)]
 mod tests;
@@ -50,7 +51,7 @@ impl RootIdentity {
     }
 }
 
-/// Immutable own-path facts. No placement writer or execution caller is selected.
+/// Immutable own-path facts. No door execution caller is selected.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Placement {
@@ -66,7 +67,12 @@ pub struct Placement {
     pub mode: String,
     pub root: String,
     pub root_identity: RootIdentity,
+    #[serde(deserialize_with = "required_seed")]
     pub seed: Option<String>,
+}
+
+fn required_seed<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(decoder)
 }
 
 impl Placement {
@@ -145,6 +151,21 @@ fn encode(bytes: &[u8]) -> String {
     result
 }
 
+// The generic Linux ioctl encoding is shared by these supported targets.
+// Refuse other ABIs rather than issuing an architecture-dependent request.
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64"
+))]
+const FS_IOC_GETFSUUID: libc::c_ulong = 0x8011_1500;
+#[cfg(not(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64"
+)))]
+const FS_IOC_GETFSUUID: libc::c_ulong = 0;
+
 #[repr(C)]
 struct KernelHandle {
     length: u32,
@@ -184,7 +205,6 @@ fn uuid_from_links(device: u64) -> io::Result<String> {
 /// Read a root identity from the caller's held directory, never from its path.
 /// # Errors
 /// Refuses a non-directory, unsupported handle, unavailable UUID or syscall failure.
-#[allow(unsafe_code)]
 pub fn read_identity(root: &File) -> Result<RootIdentity, LaneError> {
     let metadata = root.metadata().map_err(|e| refusal(e.to_string()))?;
     if !metadata.is_dir() {
@@ -197,36 +217,36 @@ pub fn read_identity(root: &File) -> Result<RootIdentity, LaneError> {
         bytes: [0; 128],
     };
     let mut mount_id = 0_i32;
-    // SAFETY: root retains a live descriptor for both calls. The empty C string
-    // is NUL terminated. UUID has the kernel fsuuid2 layout (one length byte and
-    // sixteen bytes); KernelHandle is C-aligned with a 128-byte writable tail.
-    // The advertised capacity equals that tail. mount_id is writable i32 storage.
-    // No pointer escapes these synchronous calls; outputs are used only on success.
-    let (uuid_result, handle_result) = unsafe {
-        let u = libc::ioctl(
-            root.as_raw_fd(),
-            libc::c_ulong::from(0x8011_1500_u32),
-            uuid.as_mut_ptr(),
-        );
-        let u = if u == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        };
-        let h = libc::syscall(
+    if FS_IOC_GETFSUUID == 0 {
+        return Err(refusal("filesystem UUID ioctl ABI is unsupported"));
+    }
+    // SAFETY: root holds the live fd; uuid is writable fsuuid2 storage (length
+    // byte plus sixteen bytes). The synchronous ioctl retains no pointer.
+    #[allow(unsafe_code)]
+    let uuid_code = unsafe { libc::ioctl(root.as_raw_fd(), FS_IOC_GETFSUUID, uuid.as_mut_ptr()) };
+    let uuid_result = if uuid_code == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    };
+    // SAFETY: root is live, the C string is empty and terminated, KernelHandle
+    // has the C layout and a writable 128-byte tail matching its advertised
+    // capacity. mount_id is writable i32 storage. No pointer escapes the call.
+    #[allow(unsafe_code)]
+    let handle_code = unsafe {
+        libc::syscall(
             libc::SYS_name_to_handle_at,
             root.as_raw_fd(),
             c"".as_ptr(),
             &raw mut handle,
             &raw mut mount_id,
             libc::AT_EMPTY_PATH,
-        );
-        let h = if h == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        };
-        (u, h)
+        )
+    };
+    let handle_result = if handle_code == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     };
     handle_result.map_err(|e| refusal(format!("root file handle: {e}")))?;
     let length = usize::try_from(handle.length).map_err(|e| refusal(e.to_string()))?;
