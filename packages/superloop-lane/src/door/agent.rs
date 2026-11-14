@@ -1229,25 +1229,26 @@ print({})
     fn drain_seam_case(expired: bool) {
         let script = format!(
             r#"#!/usr/bin/python3
-import json, os, sys
+import json, os, sys, types
 json.load(sys.stdin)
 ns = {{"__name__": "drain_fixture"}}
 exec({}, ns)
+ns["time"] = types.SimpleNamespace(monotonic=lambda: 10.0)
 r, w = os.pipe()
 os.set_blocking(r, False)
 tail = ns["StderrTail"]()
 if {}:
     os.write(w, b"private-answer")
-    deadline = ns["time"].monotonic() - 1
+    deadline = 9.0
 else:
     tail.append(b"partial vendor line")
-    deadline = ns["time"].monotonic() + 60
+    deadline = 11.0
 eof, cut = ns["drain_stderr"](r, tail, deadline)
 assert not eof
 assert cut == {}
 assert ns["refusal_stderr"]("invalid-output", tail, eof, cut) == ("", "")
 os.close(w)
-eof, cut = ns["drain_stderr"](r, tail, ns["time"].monotonic() + 60)
+eof, cut = ns["drain_stderr"](r, tail, 11.0)
 assert eof and not cut
 assert ns["refusal_stderr"]("invalid-output", tail, eof, cut) == (tail.text(), tail.first_line())
 os.close(r)
@@ -1260,7 +1261,8 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
             if expired { "True" } else { "False" },
             if expired { "True" } else { "False" },
         );
-        let (_root, runner, input) = fixture(&script);
+        let (_root, mut runner, input) = fixture(&script);
+        runner.cap_ms = 120_000;
         let result = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
         assert_eq!(result.status, "verdict", "{result:?}");
         assert_eq!(result.reason, "drain checked");
