@@ -1155,7 +1155,8 @@ print({})
                 if tamper { "True" } else { "False" },
                 json!(USAGE_TURN)
             );
-            let (_root, runner, input) = fixture(&script);
+            let (_root, mut runner, input) = fixture(&script);
+            runner.cap_ms = 120_000;
             let result = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
             assert_eq!(
                 result.status,
