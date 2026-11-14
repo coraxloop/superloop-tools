@@ -542,13 +542,74 @@ fn admission_final(client: &mut UnixStream) -> serde_json::Value {
     }
 }
 
+#[derive(Default)]
+struct ControlledAdmissionClock {
+    now: std::cell::Cell<Option<Instant>>,
+    sleeps: std::cell::Cell<u32>,
+}
+
+impl super::AdmissionClock for ControlledAdmissionClock {
+    fn now(&self) -> Instant {
+        let now = self.now.get().unwrap_or_else(Instant::now);
+        self.now.set(Some(now));
+        now
+    }
+
+    fn sleep(&self, duration: Duration) {
+        self.now.set(Some(self.now() + duration));
+        self.sleeps.set(self.sleeps.get() + 1);
+    }
+}
+
+/// # Panics
+/// Panics if the admission loop changes its budget or acquisition-before-expiry order.
+/// ´test:unit:door-admission-controlled-clock-expires´
+#[test]
+fn door_admission_controlled_clock_expires() {
+    use super::AdmissionClock as _;
+    let fixture = Fixture::new();
+    let registration = concurrent_registration(3000);
+    let held = super::RequestGuard::acquire(&fixture.home, &registration)
+        .expect("holder")
+        .expect("uncontended");
+    let clock = ControlledAdmissionClock::default();
+    let started = clock.now();
+    let request = json!({"deadline_ms":3000});
+    let (guard, waited) = super::RequestGuard::acquire_wait_with_clock(
+        &fixture.home, &registration, &request, None, started, &clock,
+    ).expect("controlled admission");
+    assert!(guard.is_none(), "held admission must expire");
+    assert_eq!(waited, Duration::from_secs(1), "reply margin fixes the budget");
+    assert_eq!(clock.sleeps.get(), 10, "each poll advances only the admission clock");
+    drop(held);
+    let (guard, waited) = super::RequestGuard::acquire_wait_with_clock(
+        &fixture.home, &registration, &request, None, started, &clock,
+    ).expect("released admission");
+    assert!(guard.is_some(), "acquisition still precedes the exhausted-budget check");
+    assert_eq!(waited, Duration::ZERO);
+    assert_eq!(clock.sleeps.get(), 10, "uncontended acquisition does not sleep");
+}
+
+fn assert_admission_ticks(clock: &ControlledAdmissionClock, last_interval: bool) {
+    let expected = if last_interval {
+        super::ADMISSION_WAIT.as_millis() / super::ADMISSION_POLL.as_millis()
+    } else {
+        1
+    };
+    assert_eq!(u128::from(clock.sleeps.get()), expected, "controlled admission interval");
+}
+
 fn admission_release_hook(
     last_interval: bool,
     contended: std::sync::mpsc::Sender<()>,
     released: std::sync::mpsc::Receiver<()>,
     store: Store,
     holder: std::sync::mpsc::Sender<thread::JoinHandle<()>>,
-) {
+) -> std::rc::Rc<ControlledAdmissionClock> {
+    let clock = std::rc::Rc::new(ControlledAdmissionClock::default());
+    super::ADMISSION_CLOCK.with(|slot| {
+        *slot.borrow_mut() = Some(clock.clone());
+    });
     let hook = if last_interval {
         &super::ADMISSION_LAST_POLL
     } else {
@@ -558,13 +619,14 @@ fn admission_release_hook(
         *slot.borrow_mut() = Some(Box::new(move || {
             contended.send(()).expect("overlap contended");
             released
-                .recv_timeout(Duration::from_secs(5))
+                .recv_timeout(Duration::from_secs(120))
                 .expect("first guard released");
             holder
                 .send(referral_contender(&store, true).expect("competing writer"))
                 .expect("holder thread retained");
         }));
     });
+    clock
 }
 
 /// # Panics
@@ -577,8 +639,8 @@ fn door_concurrent_request_admits_after_release() {
         let fixture = Fixture::new();
         let store = fixture.store();
         let (runner, first_calls, _) = counting_runner(&fixture);
-        let (socket, first) = fixture_service(&fixture, runner, rubric(Some("allow")), 15000, None);
-        let mut client = send_probe(&socket, 15000);
+        let (socket, first) = fixture_service(&fixture, runner, rubric(Some("allow")), 120_000, None);
+        let mut client = send_probe(&socket, 120_000);
         let first_id = wait_filed(&store);
         let (runner, second_calls, _) = counting_runner(&fixture);
         let route = route_for(&fixture.home);
@@ -593,7 +655,7 @@ fn door_concurrent_request_admits_after_release() {
         let (holder_tx, holder_rx) = std::sync::mpsc::channel();
         let holder_store = fixture.store();
         let second = thread::spawn(move || {
-            admission_release_hook(
+            let clock = admission_release_hook(
                 last_interval,
                 contended_tx,
                 released_rx,
@@ -604,23 +666,24 @@ fn door_concurrent_request_admits_after_release() {
                 &mut second_server,
                 &concurrent_registration(3000),
                 3000,
-                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":5000}),
+                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
                 Some(&route),
                 Some(&runner),
                 Some(&home),
                 Some(&rubric(Some("allow"))),
                 Some(&second_store),
-                Instant::now(),
+                super::AdmissionClock::now(clock.as_ref()),
             );
+            assert_admission_ticks(&clock, last_interval);
             holder_rx
-                .recv_timeout(Duration::from_secs(5))
+                .recv_timeout(Duration::from_secs(120))
                 .expect("holder thread")
                 .join()
                 .expect("holder released after progress");
             result
         });
         contended_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(120))
             .expect("overlap waiting");
         assert_eq!(store.list_run("R").expect("before release").len(), 1);
         label(&store, &first_id, "allow");
@@ -628,7 +691,7 @@ fn door_concurrent_request_admits_after_release() {
         assert_eq!(first_reply["reason"], "door-complete");
         first.join().expect("first handler").expect("first served");
         released_tx.send(()).expect("resume admission poll");
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(120);
         let second_id = loop {
             if let Some(record) = store
                 .list_run("R")

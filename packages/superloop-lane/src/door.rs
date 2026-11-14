@@ -203,6 +203,23 @@ impl RequestWait {
     }
 }
 
+trait AdmissionClock {
+    fn now(&self) -> Instant;
+    fn sleep(&self, duration: Duration);
+}
+
+struct RealAdmissionClock;
+
+impl AdmissionClock for RealAdmissionClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
 // The service and host exercises share this inode; never unlink a lock on release.
 struct RequestGuard {
     _held: Vec<nix::fcntl::Flock<File>>,
@@ -216,14 +233,43 @@ impl RequestGuard {
         operation: Option<transport::Operation>,
         started: Instant,
     ) -> io::Result<(Option<Self>, Duration)> {
-        let began = Instant::now();
+        #[cfg(test)]
+        if let Some(clock) = ADMISSION_CLOCK.with(|slot| slot.borrow().clone()) {
+            return Self::acquire_wait_with_clock(
+                home,
+                registration,
+                request,
+                operation,
+                started,
+                clock.as_ref(),
+            );
+        }
+        Self::acquire_wait_with_clock(
+            home,
+            registration,
+            request,
+            operation,
+            started,
+            &RealAdmissionClock,
+        )
+    }
+
+    fn acquire_wait_with_clock(
+        home: &Path,
+        registration: &Registration,
+        request: &Value,
+        operation: Option<transport::Operation>,
+        started: Instant,
+        clock: &dyn AdmissionClock,
+    ) -> io::Result<(Option<Self>, Duration)> {
+        let began = clock.now();
         let remaining = Duration::from_millis(request["deadline_ms"].as_u64().unwrap_or(0))
-            .saturating_sub(started.elapsed())
+            .saturating_sub(clock.now().saturating_duration_since(started))
             .saturating_sub(ADMISSION_REPLY_MARGIN);
         let budget = remaining.min(ADMISSION_WAIT);
         loop {
             if let Some(guard) = Self::acquire_operation(home, registration, operation)? {
-                return Ok((Some(guard), began.elapsed()));
+                return Ok((Some(guard), clock.now().saturating_duration_since(began)));
             }
             #[cfg(test)]
             ADMISSION_CONTENDED.with(|slot| {
@@ -231,9 +277,9 @@ impl RequestGuard {
                     action();
                 }
             });
-            let remaining = budget.saturating_sub(began.elapsed());
+            let remaining = budget.saturating_sub(clock.now().saturating_duration_since(began));
             if remaining.is_zero() {
-                return Ok((None, began.elapsed()));
+                return Ok((None, clock.now().saturating_duration_since(began)));
             }
             #[cfg(test)]
             if remaining <= ADMISSION_POLL {
@@ -243,7 +289,7 @@ impl RequestGuard {
                     }
                 });
             }
-            thread::sleep(remaining.min(ADMISSION_POLL));
+            clock.sleep(remaining.min(ADMISSION_POLL));
         }
     }
 
@@ -331,6 +377,7 @@ impl RequestGuard {
 
 #[cfg(test)]
 thread_local! {
+    static ADMISSION_CLOCK: std::cell::RefCell<Option<std::rc::Rc<dyn AdmissionClock>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_LAST_POLL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
