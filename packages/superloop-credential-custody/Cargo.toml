@@ -46,3 +46,8 @@ test = false
 name = "custody-confinement-probe"
 path = "tests/support/confinement_probe.rs"
 test = false
+
+[[example]]
+name = "custody-manager-test"
+path = "tests/support/manager_native.rs"
+test = false

@@ -3666,6 +3666,15 @@ pattern = "packages/superloop-credential-custody/src/launch/confinement.rs"
 pattern = "packages/superloop-credential-custody/src/launch/fifo.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/manager.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/manager_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/tests/support/manager_native.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-credential-custody/tests/support/confinement_probe.rs"
 
 [[include.rows]]

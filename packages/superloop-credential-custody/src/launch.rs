@@ -2,6 +2,7 @@
 mod channel;
 mod confinement;
 mod fifo;
+mod manager;
 mod measure;
 mod policy;
 mod sealer;
