@@ -206,6 +206,7 @@ fn records(home: &Path, custody: &Path, template: &Path, sockets: &Path, runtime
  "model":"fixture",
  "effort":"medium",
  "cap_ms":30000,
+ "agent_expected_tokens":16384,
  "entry":"/fixture/entry",
  "loop_home":"/fixture/home"},
  "phase":"complete",
