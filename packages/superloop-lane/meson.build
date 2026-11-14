@@ -628,6 +628,7 @@ dependency_ledger += ['''
 dependency_ledger += ['''
 {"kind":"source-import","source":"superloop-lane","target":"loop-home","path":"packages/superloop-lane/tests/resume_host.rs","included":"packages/loop-home/tests/reply_custody.rs","contract":"Reuse production mail birth, provisioning and bounded namespace custody for the public resumed launch acceptance"}
 {"kind":"call","site":"packages/superloop-lane/tests/support/resume_host_fixture.rs:\"/usr/bin/podman\"#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Provision and inspect the two-uid canonical host fixture under its real rootless namespace"}
+{"kind":"delegated-call","identity":"resume-host-recovery-observer","caller":"superloop-lane","callee":"libexec/vendor-proxy","selector":"CARGO_BIN_EXE_superloop-lane-vendor-proxy","lookup":"test-executable","execution_host":"fixture rootless user namespace","path":"packages/superloop-lane/tests/support/resume_host_fixture.rs","anchor":"child=subprocess.Popen([proxy,","contract":"Start the Cargo-built observer via the mapped Python fixture with held directory descriptors; retain its actual identity and production-written observation evidence"}
 ''']
 
 dependency_ledger += ['''

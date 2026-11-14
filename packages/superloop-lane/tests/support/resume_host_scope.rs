@@ -158,6 +158,7 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
     if case == "stop-race" {
+        fixture.observer();
         let error = fixture.launch(false).expect_err("real helper stop refuses");
         assert_eq!(error.kind, "helper-stop", "{error}");
         writeln!(std::io::stdout().lock(), "STOP-RACE {error}").expect("refusal");
@@ -224,7 +225,7 @@ pub(super) fn assert_work_empty() {
 }
 
 /// Rehearse recovery only after the launcher's complete work scope is gone.
-pub(super) fn recover_stop_race(reply: bool) {
+fn stopped_race(reply: bool) -> Scope {
     let mut scope = Scope::new();
     let fixture = scope.fixture.as_ref().expect("root");
     crate::refusals::install(fixture, "stop-race");
@@ -241,6 +242,12 @@ pub(super) fn recover_stop_race(reply: bool) {
             .any(|s| s == "control unlinked before helper exit"),
         "{hit}"
     );
+    scope
+}
+
+pub(super) fn recover_stop_race(reply: bool) {
+    let scope = stopped_race(reply);
+    let fixture = scope.fixture.as_ref().expect("retained fixture");
     let record: serde_json::Value =
         serde_json::from_slice(&fixture.reservation()).expect("race record");
     let mut request = superloop_lane::launch::LaunchRequest::parse(&[
@@ -289,4 +296,66 @@ pub(super) fn recover_stop_race(reply: bool) {
         record["phase"], record["rounds"][1]["phase"], record["driver_end"],
         record["helper_end"], record["letter_source"],
     ).expect("recovery finding");
+}
+
+pub(super) fn complete_stop_race(reply: bool) {
+    let scope = stopped_race(reply);
+    let fixture = scope.fixture.as_ref().expect("retained fixture");
+    let before = fixture.reservation();
+    let preview = fixture
+        .recover(None)
+        .expect("public interrupted round preview");
+    assert_eq!(
+        fixture.reservation(),
+        before,
+        "recovery preview writes nothing"
+    );
+    let digest = preview["interrupted_settlement"]["preview_sha256"]
+        .as_str()
+        .expect("digest");
+    let report = fixture
+        .recover(Some(digest))
+        .expect("digest-bound recovery apply");
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fixture.reservation()).expect("recovered");
+    assert_eq!(
+        saved["phase"],
+        if reply { "settled" } else { "failed" },
+        "{report}"
+    );
+    if !reply {
+        let preview = fixture
+            .settle(None)
+            .expect("failed recovery settlement preview");
+        let digest = preview["preview_sha256"].as_str().expect("settle digest");
+        let settled = fixture
+            .settle(Some(digest))
+            .expect("failed recovery settlement apply");
+        writeln!(std::io::stdout().lock(), "FAILED-SETTLED {settled}").expect("report");
+    }
+    let before = fixture.reservation();
+    let preview = fixture.next_preview(false);
+    if reply {
+        let preview = preview.expect("reply resumes without a choice");
+        assert_eq!(preview["helper_preflight"]["state"], "passed", "{preview}");
+        assert_eq!(preview["thread_id"], "fixture-thread");
+        assert_eq!(saved["rounds"][1]["phase"], "settled");
+    } else {
+        let error = preview.expect_err("failed round still owes a choice");
+        assert_eq!(error.kind, "round-choice", "{error}");
+        assert!(
+            error.detail.contains("--fresh-thread or --resume-thread"),
+            "{error}"
+        );
+        let choice = fixture.next_preview(true).expect("chosen next preview");
+        assert_eq!(choice["helper_preflight"]["state"], "passed", "{choice}");
+        assert_eq!(choice["thread_id"], "fixture-thread");
+    }
+    // Binding the next letter is separate from launch and may add its binding;
+    // neither preview may consume the next round or publish a preparing record.
+    let after: serde_json::Value = serde_json::from_slice(&fixture.reservation()).expect("after");
+    let before: serde_json::Value = serde_json::from_slice(&before).expect("before");
+    assert_eq!(after["phase"], "settled");
+    assert_eq!(after["rounds"], before["rounds"]);
+    writeln!(std::io::stdout().lock(), "RECOVERY-COMPLETE reply={reply}").expect("report");
 }

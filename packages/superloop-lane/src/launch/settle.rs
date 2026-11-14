@@ -105,6 +105,24 @@ pub fn run_with_failure_report(
     request: &SettleRequest,
     on_failure: &mut dyn FnMut(&Value),
 ) -> Result<Value, LaneError> {
+    let exe = std::env::current_exe()
+        .map_err(|error| LaneError::operation("settle-program", error.to_string()))?;
+    run_with_host_root(owner_home, request, Path::new("/"), 0, &exe, on_failure)
+}
+
+/// Run public settlement with an explicit host custody root and built receiver.
+///
+/// # Errors
+/// Refuses changed evidence, live processes, invalid custody or report publication.
+#[doc(hidden)]
+pub fn run_with_host_root(
+    owner_home: &Path,
+    request: &SettleRequest,
+    host_root: &Path,
+    root_uid: u32,
+    exe: &Path,
+    on_failure: &mut dyn FnMut(&Value),
+) -> Result<Value, LaneError> {
     let started = Instant::now();
     let (plan, settings) =
         crate::load_plan_for_record(owner_home, &request.loop_name, &request.run, (0, 0))?;
@@ -137,22 +155,21 @@ pub fn run_with_failure_report(
             "labelled container is still present",
         ));
     }
-    let exe = std::env::current_exe()
-        .map_err(|error| LaneError::operation("settle-program", error.to_string()))?;
-    crate::pinned::owner_executable(&exe, owner)?;
+    crate::pinned::owner_executable(exe, owner)?;
     #[cfg(not(test))]
-    let verified_home = home::verify_host_prefix_from(Path::new("/"), owner_home, owner, 0)?;
+    let verified_home = home::verify_host_prefix_from(host_root, owner_home, owner, root_uid)?;
     #[cfg(test)]
     let verified_home = if fixture_program.is_some() {
         // A temporary fixture cannot supply the root-owned ancestors of a real host home.
         home::verify_host_prefix_from(owner_home, owner_home, owner, owner)?
     } else {
-        home::verify_host_prefix_from(Path::new("/"), owner_home, owner, 0)?
+        home::verify_host_prefix_from(host_root, owner_home, owner, root_uid)?
     };
-    let verified_runs = home::verify_host_launch_root(Path::new("/"), owner_home, root, owner, 0)?;
+    let verified_runs =
+        home::verify_host_launch_root(host_root, owner_home, root, owner, root_uid)?;
     let mut argv = vec![
         "unshare".into(),
-        crate::pinned::path_word(&exe, "settle-program")?,
+        crate::pinned::path_word(exe, "settle-program")?,
     ];
     argv.extend(private_words(request, owner_home)?);
     let output = build::run_checked_with_private_launch(
@@ -246,7 +263,8 @@ fn recovery_basis(
         &record["observer_end"],
         record["observer_state"].as_str().unwrap_or_default(),
         record["settlement_uncertain"] != false,
-    ) {
+    ) && !super::recovered_observer_ready(record)
+    {
         return Err(LaneError::input(
             "settle-state-refusal",
             "observer disposition is not settled",

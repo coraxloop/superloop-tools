@@ -3399,11 +3399,11 @@ fn interrupted_settlement_success(current: &Value, evidence: &Value) -> bool {
         && current["helper_end"]["successful"] != false
         && current["readback_end"] == "completed"
         && current["observation_end"] == "completed"
-        && ["stopped", "not-started"].contains(
+        && (["stopped", "not-started"].contains(
             &current["observer_end"]["state"]
                 .as_str()
                 .unwrap_or_default(),
-        )
+        ) || recovered_observer_ready(current))
         && ["removed", "absent", "not-applicable"].contains(&socket)
 }
 
@@ -4901,6 +4901,18 @@ pub(super) fn verify_settlement_driver_dir(root: &Path, loop_uid: u32) -> Result
         ));
     }
     Ok(())
+}
+
+// Absence is not an exit status: retain its provenance and require the full
+// identity-bound collected-scope proof before accepting it for settlement.
+pub(super) fn recovered_observer_ready(record: &Value) -> bool {
+    reaping::recovery_verdict(record).is_ok()
+        && record["observer_end"]["state"] == "absent-on-recovery"
+        && ["removed", "absent", "not-applicable"].contains(
+            &record["observer_end"]["socket"]["state"]
+                .as_str()
+                .unwrap_or_default(),
+        )
 }
 
 pub(super) fn settlement_observer_ready(
@@ -8357,6 +8369,46 @@ mod tests {
             record[end]["successful"] = json!(true);
             assert!(super::interrupted_settlement_success(&record, &evidence));
         }
+    }
+
+    /// ´test:unit:recovered-observer-needs-collected-identity-proof´
+    #[test]
+    fn recovered_observer_needs_collected_identity_proof() {
+        let scope = json!({"unit":"superloop-lane-run-proof.service",
+            "cgroup":"/user.slice/superloop-lane-run-proof.service/work",
+            "device":1,"inode":2,"proxy_unit":"proxy.service","proxy_invocation":"fixture"});
+        let mut record = json!({"launcher_pid":321,"launcher_start":88,
+            "driver_entry_pid":322,"driver_entry_start":89,"helper_pid":323,"helper_start":90,
+            "helper_parent_pid":325,"helper_parent_start":92,"observer_pid":324,"observer_start":91,
+            "run_scope":scope,"observer_state":"running",
+            "observer_end":{"state":"absent-on-recovery","socket":{"state":"removed"}},
+            "reaping_recovery":{"state":"collected","scope":scope,
+                "cgroup":scope["cgroup"],"presence":"all-absent",
+                "container_payload":{"state":"absent","by":"loop-and-run-label"},
+                "identities":{"launcher":[321,88],"driver":[322,89],"helper":[323,90],
+                    "helper_parent":[325,92],"observer":[324,91]}}});
+        assert!(
+            super::recovered_observer_ready(&record),
+            "full measured proof"
+        );
+        for (pointer, replacement) in [
+            ("/reaping_recovery/presence", json!("unknown")),
+            ("/reaping_recovery/identities/observer", json!([324, 92])),
+            ("/observer_end/socket/state", json!("pending")),
+            ("/observer_end/state", json!("stopped")),
+        ] {
+            let mut changed = record.clone();
+            *changed.pointer_mut(pointer).expect("field") = replacement;
+            assert!(
+                !super::recovered_observer_ready(&changed),
+                "{pointer}: {changed}"
+            );
+        }
+        record["reaping_recovery"] = Value::Null;
+        assert!(
+            !super::recovered_observer_ready(&record),
+            "absence alone is not proof"
+        );
     }
 
     /// ´test:unit:retired-observer-missing-socket-is-absent-not-removed´

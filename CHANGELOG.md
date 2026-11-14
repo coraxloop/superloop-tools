@@ -74,6 +74,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A resumed round left awaiting settlement after a helper-stop error can now be recovered with its original `launch --round STEP --dry-run`, then the preview's digest. Admission requires a completed driver end and the existing process-absence and evidence checks. A recovered reply settles normally; without a reply, complete `settle` and explicitly choose the next thread. Compatibility: install the matching launcher and private settlement entry before recovery; a running launcher keeps its old code (``test:integration:public-helper-stop-recovers-resumed-reply``; ``test:integration:public-helper-stop-recovers-resumed-no-reply``).
+
 - A default door test now checks that two pending agent judgements release the request writer lock, using entry and release events instead of the on-demand six-second credit fixture. Deployed lock and agent behavior is unchanged (``test:unit:door-pending-judgements-release-request-writer-lock``).
 
 - The driver-follow bounded-wait test now runs through its child-owning 120-second hang guard, so a hung command is stopped and reaped rather than leaving an unreachable elapsed-time check after `.output()`. Its one-second minimum and document assertions remain (``test:integration:bounded-wait-emits-state-only-and-keeps-offset``).

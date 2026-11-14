@@ -1441,7 +1441,11 @@ pub(super) fn interrupted_round(record: &Value, step: &str) -> bool {
         && record["rounds"].as_array().is_some_and(|rounds| {
             rounds.len() > 1
                 && rounds.last().is_some_and(|round| {
-                    round["step"] == step && round["phase"] == "running" && step != "dispatch"
+                    round["step"] == step
+                        && step != "dispatch"
+                        && (round["phase"] == "running"
+                            || (round["phase"] == "awaiting-settlement"
+                                && record["driver_end"]["state"] == "completed"))
                 })
         })
 }
@@ -3160,6 +3164,38 @@ mod tests {
     use std::io::Write as _;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::path::{Path, PathBuf};
+
+    /// ´test:unit:awaiting-round-recovery-requires-completed-driver´
+    #[test]
+    fn awaiting_round_recovery_requires_completed_driver() {
+        let good = json!({"phase":"started","active_round":"review",
+            "driver_end":{"state":"completed","successful":true},
+            "rounds":[{"step":"dispatch","phase":"settled"},
+                {"step":"review","phase":"awaiting-settlement"}]});
+        assert!(super::interrupted_round(&good, "review"));
+        for end in [
+            serde_json::Value::Null,
+            json!({"state":"running"}),
+            json!({"state":"not-started"}),
+        ] {
+            let mut record = good.clone();
+            record["driver_end"] = end;
+            assert!(!super::interrupted_round(&record, "review"), "{record}");
+        }
+        let mut record = good.clone();
+        record["driver_end"]["successful"] = json!(false);
+        assert!(super::interrupted_round(&record, "review"));
+        assert!(!super::interrupted_round(&good, "other"));
+        record["phase"] = json!("settled");
+        assert!(!super::interrupted_round(&record, "review"));
+        record = good;
+        record["active_round"] = json!("dispatch");
+        record["rounds"] = json!([{"step":"dispatch","phase":"awaiting-settlement"}]);
+        assert!(
+            !super::interrupted_round(&record, "dispatch"),
+            "first dispatch uses its own recovery"
+        );
+    }
 
     fn client_environment_fixture() -> (tempfile::TempDir, Plan) {
         let fixture = tempfile::tempdir().expect("fixture");

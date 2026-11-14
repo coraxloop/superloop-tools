@@ -70,6 +70,17 @@ impl Host {
             lane,
         }
     }
+    pub(super) fn observer(&self) {
+        let program = PathBuf::from(env!("CARGO_BIN_EXE_superloop-lane-vendor-proxy"));
+        mapped(
+            &self.home,
+            &format!(
+                "proxy={}\n{}",
+                serde_json::to_string(&program).expect("proxy path"),
+                OBSERVER
+            ),
+        );
+    }
     pub(super) fn reply(&self) {
         delivery(&self.home, "package-canonical-reply");
         let request = superloop_lane::launch::steering::Request::parse(&[
@@ -173,13 +184,100 @@ print(json.dumps(sorted(rows)))
         }
         let mut request = superloop_lane::launch::LaunchRequest::parse(&words)?;
         request.podman_bin.clone_from(&self.runtime);
-        superloop_lane::launch::rounds::resume_with_host_root(
+        self.round_request(&request)
+    }
+    pub(super) fn recover(
+        &self,
+        digest: Option<&str>,
+    ) -> Result<Value, superloop_lane::error::LaneError> {
+        let mut words = vec![
+            "alpha".into(),
+            "R".into(),
+            "--round".into(),
+            "review".into(),
+        ];
+        if let Some(digest) = digest {
+            words.extend(["--expect-digest".into(), digest.into()]);
+        } else {
+            words.push("--dry-run".into());
+        }
+        let mut request = superloop_lane::launch::LaunchRequest::parse(&words)?;
+        request.podman_bin.clone_from(&self.runtime);
+        self.round_request(&request)
+    }
+    pub(super) fn settle(
+        &self,
+        digest: Option<&str>,
+    ) -> Result<Value, superloop_lane::error::LaneError> {
+        let mut words = vec![
+            "alpha".into(),
+            "R".into(),
+            "--round".into(),
+            "review".into(),
+        ];
+        if let Some(digest) = digest {
+            words.extend(["--expect-digest".into(), digest.into()]);
+        } else {
+            words.push("--dry-run".into());
+        }
+        let request = superloop_lane::launch::settle::SettleRequest::parse(&words)?;
+        superloop_lane::launch::settle::run_with_host_root(
             &self.home,
             &request,
             &self.home,
             nix::unistd::Uid::effective().as_raw(),
+            &self.lane,
+            &mut |_| {},
+        )
+    }
+    pub(super) fn next_preview(
+        &self,
+        choose: bool,
+    ) -> Result<Value, superloop_lane::error::LaneError> {
+        let binding = superloop_lane::launch::steering::Request::parse(&[
+            "alpha".into(),
+            "R".into(),
+            "--step".into(),
+            "after".into(),
+            "--delivery".into(),
+            "2026-01-01T00:00:00.001Z".into(),
+        ])
+        .expect("next delivery binding");
+        superloop_lane::launch::steering::run_from(
+            &self.home,
+            &binding,
+            false,
+            (
+                &self.home,
+                nix::unistd::Uid::effective().as_raw(),
+                Some(&self.lane),
+            ),
+        )?;
+        let mut words = vec![
+            "alpha".into(),
+            "R".into(),
+            "--round".into(),
+            "after".into(),
+            "--dry-run".into(),
+        ];
+        if choose {
+            words.push("--resume-thread".into());
+        }
+        let mut request = superloop_lane::launch::LaunchRequest::parse(&words)?;
+        request.podman_bin.clone_from(&self.runtime);
+        self.round_request(&request)
+    }
+    fn round_request(
+        &self,
+        request: &superloop_lane::launch::LaunchRequest,
+    ) -> Result<Value, superloop_lane::error::LaneError> {
+        superloop_lane::launch::rounds::resume_with_host_root(
+            &self.home,
+            request,
+            &self.home,
+            nix::unistd::Uid::effective().as_raw(),
             |_| panic!("observing fixture needs no proxy reply"),
-            &mut |_| assert!(!dry, "preview starts no driver"),
+            &mut |_| assert!(!request.dry_run, "preview starts no driver"),
             &self.lane,
         )
     }
@@ -343,4 +441,25 @@ payload=base64.urlsafe_b64encode(json.dumps({'exp':int(time.time())+86400}).enco
 token='header.'+payload+'.signature'
 source={'auth_mode':'chatgpt','OPENAI_API_KEY':None,'tokens':{'id_token':token,'access_token':token,'refresh_token':'fixture-refresh','account_id':'fixture-account'},'last_refresh':datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
 p=home/'.config/loops/alpha/lanes/codex/auth.json';p.write_text(json.dumps(source));os.chmod(p,0o600)
+";
+
+const OBSERVER: &str = r"
+import os,sys,json,subprocess
+from pathlib import Path
+home=Path(sys.argv[1]);file=home/'runs/.reservation-R.json';record=json.loads(file.read_text())
+socket_dir=next(Path(m['source']) for m in record['plan']['mounts'] if m['target']=='/home/worker/.local/vendor')
+socket_path=socket_dir/record['plan']['vendor_socket']
+runs=os.open(home/'runs',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+sockets=os.open(socket_dir,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+with open(os.devnull,'r+b') as null:
+ child=subprocess.Popen([proxy,'--socket',str(socket_path),'--group','64000','--observe','R',
+  '--observed-file',str(home/'runs/.observed-R.txt'),'--verified-runs-root-fd',str(runs),
+  '--verified-socket-dir-fd',str(sockets),'--owner-home',str(home)],
+  stdin=null,stdout=null,stderr=subprocess.PIPE,pass_fds=(runs,sockets))
+ line=child.stderr.readline();assert b'proxy-ready' in line,line
+ start=int(Path('/proc',str(child.pid),'stat').read_text().rsplit(')',1)[1].split()[19])
+ record['observer_pid']=child.pid;record['observer_start']=start
+ file.write_text(json.dumps(record));os.chmod(file,0o600)
+ print('REAL-OBSERVER '+line.decode().strip())
+os.close(runs);os.close(sockets)
 ";

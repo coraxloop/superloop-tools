@@ -94,6 +94,13 @@ fn public_helper_stop_recovery_refuses_retained_letter_without_reply() {
     scope::recover_stop_race(false);
 }
 
+fn public_helper_stop_recovers_resumed_reply() {
+    scope::complete_stop_race(true);
+}
+fn public_helper_stop_recovers_resumed_no_reply() {
+    scope::complete_stop_race(false);
+}
+
 fn main() -> std::process::ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|s| s == "--fixture-scope") {
@@ -140,7 +147,7 @@ fn main() -> std::process::ExitCode {
             std::io::stdout().lock(),
             "test result: {}. {passed} passed; {failed} failed; 0 ignored; {} filtered out",
             if failed == 0 { "ok" } else { "FAILED" },
-            12 - passed - failed
+            14 - passed - failed
         )
         .expect("summary");
     }
@@ -151,8 +158,16 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn cases() -> [(&'static str, fn()); 12] {
+fn cases() -> [(&'static str, fn()); 14] {
     [
+        (
+            "public_helper_stop_recovers_resumed_reply",
+            public_helper_stop_recovers_resumed_reply,
+        ),
+        (
+            "public_helper_stop_recovers_resumed_no_reply",
+            public_helper_stop_recovers_resumed_no_reply,
+        ),
         (
             "public_helper_stop_recovery_refuses_retained_letter_with_reply",
             public_helper_stop_recovery_refuses_retained_letter_with_reply,
