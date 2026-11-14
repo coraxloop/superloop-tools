@@ -257,7 +257,7 @@ if test "$selection" = live-process; then
 import os,subprocess,json
 from pathlib import Path
 with open(os.devnull,'r+b') as sink:
- child=subprocess.Popen(['/usr/bin/sleep','600'],stdin=sink,stdout=sink,stderr=sink,close_fds=True,start_new_session=True)
+ child=subprocess.Popen(['/usr/bin/sleep','infinity'],stdin=sink,stdout=sink,stderr=sink,close_fds=True,start_new_session=True)
 p=Path('/proc')/str(child.pid);fields=p.joinpath('stat').read_text().rsplit(')',1)[1].split()
 value={'pid':child.pid,'start':int(fields[19]),'cgroup':p.joinpath('cgroup').read_text()}
 assert value['cgroup'].strip().endswith('/work')

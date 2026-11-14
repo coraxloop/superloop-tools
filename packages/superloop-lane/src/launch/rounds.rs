@@ -2861,7 +2861,7 @@ pub(crate) mod rollback {
             let (_root, path, bytes, nonce) = fixture();
             let preparing = fs::read(&path).expect("preparing");
             let mut child = std::process::Command::new("/usr/bin/sleep")
-                .arg("30")
+                .arg("infinity")
                 .process_group(0)
                 .spawn()
                 .expect("live attempt process");
