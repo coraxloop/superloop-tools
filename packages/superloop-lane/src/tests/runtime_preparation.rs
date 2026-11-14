@@ -91,14 +91,12 @@ impl Drop for MappedStorage {
     }
 }
 
+const BUILD_BINARY: &str = "cargo build --locked -p superloop-lane --bin superloop-lane";
+
 /// # Panics
-/// Panics if the package binary built beside Cargo's unit test executable is absent.
+/// Panics if the package binary built beside Cargo's unit test executable is absent, or if a
+/// source Cargo recorded for it is missing or changed after it was built.
 pub(super) fn binary() -> PathBuf {
-    std::io::Write::write_all(
-        &mut std::io::stderr().lock(),
-        b"focused library proof: build the package binary first with `cargo build --locked -p superloop-lane --bin superloop-lane`\n",
-    )
-    .expect("focused build warning");
     let image = std::env::current_exe().expect("test executable");
     // The nearest ancestor holding the binary is its profile directory, the gate's custom one too.
     let binary = image
@@ -110,37 +108,75 @@ pub(super) fn binary() -> PathBuf {
         binary.is_file(),
         "unmeasured runtime entry: build the package binary before the focused library test"
     );
+    if let Err(stale) = current_binary(&binary) {
+        panic!(
+            "stale runtime entry {}: {stale}; run `{BUILD_BINARY}` in this profile first",
+            binary.display()
+        );
+    }
     binary
 }
 
-/// ´test:crate:focused-library-binary-names-build-precondition´
-#[test]
-fn focused_library_binary_names_build_precondition() {
-    const CHILD: &str = "SUPERLOOP_FOCUSED_BINARY_WARNING_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        drop(binary());
-        return;
+/// Refuse a binary older than any source in the record Cargo writes beside it, since a focused
+/// library run rebuilds only the test executable and leaves the binary it launches as it was.
+fn current_binary(binary: &Path) -> Result<(), String> {
+    let record = binary.with_extension("d");
+    let text = fs::read_to_string(&record)
+        .map_err(|error| format!("no Cargo source record {}: {error}", record.display()))?;
+    let built = fs::metadata(binary)
+        .and_then(|meta| meta.modified())
+        .map_err(|error| format!("unreadable build time: {error}"))?;
+    for line in text.lines() {
+        let Some((_, sources)) = line.split_once(": ") else {
+            continue;
+        };
+        // Cargo escapes a space inside a recorded path with a backslash.
+        let escaped = sources.replace("\\ ", "\0");
+        for source in escaped.split(' ').filter(|name| !name.is_empty()) {
+            let source = PathBuf::from(source.replace('\0', " "));
+            let changed = fs::metadata(&source).and_then(|meta| meta.modified());
+            match changed {
+                Ok(changed) if changed <= built => {}
+                Ok(_) => return Err(format!("{} changed after it was built", source.display())),
+                Err(error) => return Err(format!("recorded source {}: {error}", source.display())),
+            }
+        }
     }
-    let output = Command::new(std::env::current_exe().expect("test executable"))
-        .args([
-            "--exact",
-            "tests::runtime_preparation::focused_library_binary_names_build_precondition",
-            "--nocapture",
-        ])
-        .env(CHILD, "1")
-        .output()
-        .expect("focused child");
-    assert!(output.status.success(), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains(
-            "build the package binary first with `cargo build --locked -p superloop-lane --bin superloop-lane`"
-        ),
-        "missing build warning: {output:?}"
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
-        "focused child did not run: {output:?}"
-    );
+    Ok(())
+}
+
+/// # Panics
+/// Panics if the runtime entry check accepts a binary older than a recorded source, or refuses
+/// one built after all of them.
+/// ´test:crate:focused-library-binary-refuses-stale-sources´
+#[test]
+fn focused_library_binary_refuses_stale_sources() {
+    let scratch = tempfile::tempdir().expect("scratch directory");
+    let binary = scratch.path().join("superloop-lane");
+    let folder = scratch.path().join("lane src");
+    fs::create_dir(&folder).expect("source folder");
+    let source = folder.join("checkout.rs");
+    let at = |path: &Path, seconds: u64| {
+        let file = fs::File::create(path).expect("fixture file");
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        file.set_modified(time).expect("fixture time");
+    };
+    at(&binary, 2_000);
+    let refusal = current_binary(&binary).expect_err("no record");
+    assert!(refusal.contains("no Cargo source record"), "{refusal}");
+    let escaped = source.display().to_string().replace(' ', "\\ ");
+    let record = format!("{}: {escaped}\n", binary.display());
+    let record_path = binary.with_extension("d");
+    fs::write(&record_path, record).expect("source record");
+    at(&source, 1_000);
+    current_binary(&binary).expect("binary built after its sources");
+    at(&source, 3_000);
+    let refusal = current_binary(&binary).expect_err("stale binary");
+    let expected = format!("{} changed after it was built", source.display());
+    assert!(refusal.contains(&expected), "{refusal}");
+    fs::remove_file(&source).expect("remove source");
+    let refusal = current_binary(&binary).expect_err("missing source");
+    assert!(refusal.contains("recorded source"), "{refusal}");
 }
 
 /// # Panics

@@ -584,7 +584,6 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lane/src/tests/runtime_preparation.rs:std :: env :: current_exe () . expect (\"test executable\")#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:superloop-lane:self","lookup":"test-executable","contract":"Reexecute the installed-plan fixture for production runtime preparation, native creation and private exercise readers","binding":"current_exe"}
-{"kind":"call","site":"packages/superloop-lane/src/tests/runtime_preparation.rs:std :: env :: current_exe () . expect (\"test executable\")#2","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:superloop-lane:self","lookup":"test-executable","contract":"Reexecute the exact focused library proof to verify that the separately built binary precondition is printed and its child test runs","binding":"current_exe"}
 {"kind":"call","site":"packages/superloop-lane/src/tests/runtime_preparation.rs:& request . argv [0]#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"& request . argv [0]","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Enter real rootless worker, runtime, creation and private reader production vectors with their descriptor frames"}
 ''']
 
