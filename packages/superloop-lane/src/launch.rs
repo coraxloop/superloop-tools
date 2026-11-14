@@ -6455,6 +6455,11 @@ fn stop_helper(child: &mut Child, plan: &Plan, verified_runs: &OwnedFd) -> Resul
             ))
         };
     }
+    let handshake = helper_stop_handshake(plan, verified_runs);
+    wait_helper_after_stop(child, handshake, Instant::now() + Duration::from_secs(90))
+}
+
+fn helper_stop_handshake(plan: &Plan, verified_runs: &OwnedFd) -> Result<(), LaneError> {
     let control = crate::container_helper::control_socket_path(&plan.driver_dir)?;
     let slot = crate::SocketSlot::beneath(
         verified_runs,
@@ -6482,7 +6487,27 @@ fn stop_helper(child: &mut Child, plan: &Plan, verified_runs: &OwnedFd) -> Resul
             "helper did not acknowledge cancellation",
         ));
     }
-    let deadline = Instant::now() + Duration::from_secs(90);
+    Ok(())
+}
+
+fn wait_helper_after_stop(
+    child: &mut Child,
+    handshake: Result<(), LaneError>,
+    deadline: Instant,
+) -> Result<(), LaneError> {
+    let waited = wait_helper_exit(child, deadline);
+    match (handshake, waited) {
+        (_, Ok(())) => Ok(()),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(mut handshake), Err(wait)) => {
+            handshake.detail.push_str("; helper exit: ");
+            handshake.detail.push_str(&wait.line());
+            Err(handshake)
+        }
+    }
+}
+
+fn wait_helper_exit(child: &mut Child, deadline: Instant) -> Result<(), LaneError> {
     loop {
         if let Some(status) = child
             .try_wait()
@@ -8409,6 +8434,94 @@ mod tests {
             !super::recovered_observer_ready(&record),
             "absence alone is not proof"
         );
+    }
+
+    /// ´test:unit:helper-stop-waits-for-exit-after-handshake-failure´
+    #[test]
+    fn helper_stop_waits_for_exit_after_handshake_failure() {
+        use std::io::Read as _;
+        use std::time::{Duration, Instant};
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                drop(self.0.kill());
+                drop(self.0.wait());
+            }
+        }
+        for (handshake_ok, exit) in [
+            (true, Some(0)),
+            (false, Some(0)),
+            (false, Some(7)),
+            (false, None),
+        ] {
+            let mut child = OwnedChild(
+                std::process::Command::new("/bin/sh")
+                    .args(["-c", "printf R; read code; exit \"$code\""])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("exact helper child"),
+            );
+            let mut ready = [0];
+            child
+                .0
+                .stdout
+                .take()
+                .expect("ready pipe")
+                .read_exact(&mut ready)
+                .expect("child ready");
+            assert_eq!(ready, *b"R");
+            if let Some(code) = exit {
+                writeln!(child.0.stdin.as_mut().expect("release pipe"), "{code}").expect("release");
+            }
+            let handshake = if handshake_ok {
+                Ok(())
+            } else {
+                Err(crate::error::LaneError::operation(
+                    "helper-stop",
+                    "injected connection reset",
+                ))
+            };
+            let deadline = if exit.is_some() {
+                Instant::now() + Duration::from_secs(180)
+            } else {
+                Instant::now()
+            };
+            let result = super::wait_helper_after_stop(&mut child.0, handshake, deadline);
+            match exit {
+                Some(0) => {
+                    result.expect("successful exact exit overrides failed handshake");
+                    assert!(
+                        child
+                            .0
+                            .try_wait()
+                            .expect("waited")
+                            .expect("reaped")
+                            .success()
+                    );
+                }
+                Some(_) => {
+                    let error = result.expect_err("nonzero exit refuses");
+                    assert!(
+                        error.detail.contains("injected connection reset"),
+                        "{error}"
+                    );
+                    assert!(
+                        error.detail.contains("helper exited exit status: 7"),
+                        "{error}"
+                    );
+                }
+                None => {
+                    let error = result.expect_err("live child is not success");
+                    assert!(
+                        error.detail.contains("injected connection reset"),
+                        "{error}"
+                    );
+                    assert!(error.detail.contains("within 90 seconds"), "{error}");
+                    assert!(child.0.try_wait().expect("still live").is_none());
+                }
+            }
+        }
     }
 
     /// ´test:unit:retired-observer-missing-socket-is-absent-not-removed´

@@ -74,6 +74,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A launcher now waits for its exact helper child after a failed stop handshake and proceeds to settlement only after a successful exit. Non-zero exits and the existing 90-second timeout retain both the handshake and exit errors. Compatibility: new launchers tolerate the close race in an older helper; a launcher already running retains its old stop behavior (``test:unit:helper-stop-waits-for-exit-after-handshake-failure``).
+
 - A resumed round left awaiting settlement after a helper-stop error can now be recovered with its original `launch --round STEP --dry-run`, then the preview's digest. Admission requires a completed driver end and the existing process-absence and evidence checks. A recovered reply settles normally; without a reply, complete `settle` and explicitly choose the next thread. Compatibility: install the matching launcher and private settlement entry before recovery; a running launcher keeps its old code (``test:integration:public-helper-stop-recovers-resumed-reply``; ``test:integration:public-helper-stop-recovers-resumed-no-reply``).
 
 - A default door test now checks that two pending agent judgements release the request writer lock, using entry and release events instead of the on-demand six-second credit fixture. Deployed lock and agent behavior is unchanged (``test:unit:door-pending-judgements-release-request-writer-lock``).
