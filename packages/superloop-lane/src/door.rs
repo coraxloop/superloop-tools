@@ -3148,6 +3148,17 @@ fn fixture_mode_call(
 
 const EXERCISE_ADMISSION_REFUSAL: &str = "exercise-door-admission-unmeasured";
 
+#[cfg(test)]
+const EXERCISE_RETRY_HANG: Duration = Duration::from_secs(120);
+#[cfg(not(test))]
+const EXERCISE_RETRY_HANG: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
+thread_local! {
+    static EXERCISE_RETRY_OBSERVED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 pub(crate) fn exercise_admission_unmeasured(kind: &str) -> bool {
     matches!(kind, EXERCISE_ADMISSION_REFUSAL | "door-mode-floor-refusal")
 }
@@ -3162,7 +3173,7 @@ fn fixture_agent_call(
     runner_override: Option<Arc<dyn transport::Runner>>,
     agent: Option<Arc<dyn agent::AgentRunner>>,
 ) -> Result<Value, LaneError> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + EXERCISE_RETRY_HANG;
     loop {
         let result = fixture_agent_call_once(
             owner_home,
@@ -3175,6 +3186,12 @@ fn fixture_agent_call(
         );
         match result {
             Err(error) if error.kind == EXERCISE_ADMISSION_REFUSAL && Instant::now() < deadline => {
+                #[cfg(test)]
+                EXERCISE_RETRY_OBSERVED.with(|slot| {
+                    if let Some(observed) = slot.borrow_mut().take() {
+                        observed();
+                    }
+                });
                 thread::sleep(
                     Duration::from_millis(50)
                         .min(deadline.saturating_duration_since(Instant::now())),

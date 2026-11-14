@@ -502,9 +502,14 @@ fn door_exercise_retries_concurrent_admission() {
     let guard = super::RequestGuard::acquire(&fixture.home, &registration)
         .expect("lock")
         .expect("admitted");
-    let release = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(200));
-        drop(guard);
+    let retried = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = std::rc::Rc::clone(&retried);
+    super::EXERCISE_RETRY_OBSERVED.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            observed.set(true);
+            // Release only after the first admission refusal, proving a retry occurred.
+            drop(guard);
+        }));
     });
     let report = super::fixture_agent_call(
         &fixture.home,
@@ -516,7 +521,7 @@ fn door_exercise_retries_concurrent_admission() {
         None,
     )
     .expect("retried fixture");
-    release.join().expect("release thread");
+    assert!(retried.get(), "first admission refusal was not observed");
     assert_eq!(report["final"]["reason"], "door-complete", "{report}");
     assert_eq!(
         fixture
