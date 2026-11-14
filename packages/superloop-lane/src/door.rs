@@ -7,7 +7,7 @@ use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -125,6 +125,7 @@ pub(crate) struct RequestWait {
     micros: AtomicU64,
     cap_ms: u64,
     announced: std::sync::Mutex<u64>,
+    final_sent: AtomicBool,
 }
 
 impl RequestWait {
@@ -139,6 +140,7 @@ impl RequestWait {
             micros: AtomicU64::new(0),
             cap_ms,
             announced: std::sync::Mutex::new(0),
+            final_sent: AtomicBool::new(false),
         })
     }
 
@@ -172,11 +174,19 @@ impl RequestWait {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if total.saturating_sub(*announced) >= 50 {
             let frame = json!({"schema":2,"type":"request-lock-wait","wait_ms":total});
-            let _sent = transport::write_frame_locked(
-                &self.writer,
-                &frame,
-                Instant::now() + Duration::from_secs(2),
-            );
+            #[cfg(test)]
+            BEFORE_CREDIT_WRITE.with(|slot| {
+                if let Some(action) = slot.borrow_mut().take() {
+                    action();
+                }
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let _sent = transport::with_writer(&self.writer, deadline, |stream| {
+                if self.final_sent.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                frame_write_until(stream, &frame, deadline)
+            });
             *announced = total;
             // A fixture may release its holder only after the progress frame.
             #[cfg(test)]
@@ -189,6 +199,15 @@ impl RequestWait {
                 });
             }
         }
+    }
+
+    fn write_final(&self, reply: &Value, deadline: Instant) -> io::Result<()> {
+        transport::with_writer(&self.writer, deadline, |stream| {
+            frame_write_until(stream, reply, deadline)?;
+            // credit checks this flag under this same writer lock.
+            self.final_sent.store(true, Ordering::Relaxed);
+            Ok(())
+        })
     }
 
     fn report(&self, reply: &mut Value) {
@@ -377,12 +396,25 @@ impl RequestGuard {
 
 #[cfg(test)]
 thread_local! {
+    static BEFORE_CREDIT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_CLOCK: std::cell::RefCell<Option<std::rc::Rc<dyn AdmissionClock>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_LAST_POLL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 const RETRY_AFTER_SECONDS: u64 = 30;
+fn post_reply_failure(store: &Store, run: &str, id: &str, phase: &str, kind: &str) {
+    post_reply_event(id, phase, kind);
+    if let Err(error) = store.record_incomplete(run, id, kind) {
+        post_reply_event(id, "incomplete-marker", error.kind);
+    }
+}
+
+fn post_reply_event(id: &str, phase: &str, kind: &str) {
+    let event = json!({"request_id":id,"phase":phase,"kind":kind});
+    let _logged = writeln!(io::stderr().lock(), "door-post-reply-failure {event}");
+}
+
 fn admission_window() -> String {
     format!(
         "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after {RETRY_AFTER_SECONDS} seconds"
@@ -1717,23 +1749,54 @@ fn serve_request_with_agent(
                     Some(&complete),
                     Some(&wait),
                 );
-                let judgement = agent_task
-                    .join()
-                    .map_err(|_| io::Error::other("door-agent-task-panicked"))?;
-                if let Err(error) = judgement {
-                    let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
-                    return Err(io::Error::other(error));
+                let judgement = agent_task.join();
+                match outcome {
+                    Ok(reply) => {
+                        match judgement {
+                            Err(_) => post_reply_failure(
+                                &store,
+                                &registration.run,
+                                &id,
+                                "agent-join",
+                                "door-agent-task-panicked",
+                            ),
+                            Ok(Err(error)) => post_reply_failure(
+                                &store,
+                                &registration.run,
+                                &id,
+                                "agent-record",
+                                error.kind,
+                            ),
+                            Ok(Ok(_)) => {
+                                if let Err(error) = store.publish_waiting(&id) {
+                                    post_reply_failure(
+                                        &store,
+                                        &registration.run,
+                                        &id,
+                                        "waiting-publication",
+                                        error.kind,
+                                    );
+                                }
+                            }
+                        }
+                        Ok((reply, Vec::new()))
+                    }
+                    Err(error) => {
+                        let judgement =
+                            judgement.map_err(|_| io::Error::other("door-agent-task-panicked"))?;
+                        if let Err(error) = judgement {
+                            let _recorded =
+                                store.record_incomplete(&registration.run, &id, error.kind);
+                            return Err(io::Error::other(error));
+                        }
+                        let _recorded = store.record_incomplete(
+                            &registration.run,
+                            &id,
+                            "allow transport incomplete",
+                        );
+                        Err(error)
+                    }
                 }
-                if outcome.is_ok() {
-                    store.publish_waiting(&id).map_err(io::Error::other)?;
-                } else {
-                    let _recorded = store.record_incomplete(
-                        &registration.run,
-                        &id,
-                        "allow transport incomplete",
-                    );
-                }
-                outcome.map(|reply| (reply, Vec::new()))
             });
         }
         let complete = |reply: &Value| {

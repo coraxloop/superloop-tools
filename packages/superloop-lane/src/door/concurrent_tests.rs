@@ -965,3 +965,177 @@ fn door_two_requesters_credit_contention_before_unlocked_triage() {
         assert_eq!(rows[0].value()["would_do"]["reason"], format!("fixture independent judgement {run}"));
     }
 }
+
+/// # Panics
+/// Panics if a late credit writes a frame or stops accounting after final sealing.
+/// ´test:unit:door-final-seal-suppresses-late-credit´
+#[test]
+fn door_final_seal_suppresses_late_credit() {
+    let (server, mut peer) = UnixStream::pair().expect("pair");
+    let wait = Arc::new(super::RequestWait::new(&server).expect("request wait"));
+    drop(server);
+    wait.credit(Duration::from_millis(50));
+    assert_eq!(frame_read(&mut peer).expect("early credit")["type"], "request-lock-wait");
+    let (ready, entered) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let other = Arc::clone(&wait);
+    let writer = thread::spawn(move || {
+        super::BEFORE_CREDIT_WRITE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                ready.send(()).expect("credit reached writer boundary");
+                released.recv_timeout(FIXTURE_HANG).expect("final written");
+            }));
+        });
+        other.credit(Duration::from_millis(50));
+    });
+    entered.recv_timeout(FIXTURE_HANG).expect("credit writer exists");
+    let reply = json!({"schema":2,"status":0,"reason":"fixture-final"});
+    wait.write_final(&reply, Instant::now() + FIXTURE_HANG).expect("final");
+    assert_eq!(frame_read(&mut peer).expect("final frame"), reply);
+    release.send(()).expect("late credit");
+    writer.join().expect("credit writer");
+    assert_eq!(wait.elapsed(), Duration::from_millis(100), "agent credit remains active");
+    drop(wait);
+    let mut tail = Vec::new();
+    std::io::Read::read_to_end(&mut peer, &mut tail).expect("writer closed");
+    assert!(tail.is_empty(), "frame after final: {tail:?}");
+}
+
+struct PostReplyAgent {
+    entered: std::sync::mpsc::Sender<()>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    failure_phase: &'static str,
+}
+
+impl super::agent::AgentRunner for PostReplyAgent {
+    fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+        self.entered.send(()).expect("agent entered");
+        self.release.lock().expect("release channel")
+            .recv_timeout(FIXTURE_HANG).expect("release after final");
+        let mut result = super::agent::RunnerOutcome::referral(
+            "failure", "fixture judgement", Instant::now(),
+        );
+        assert_ne!(self.failure_phase, "agent-join", "fixture agent panic after final");
+        if self.failure_phase == "agent-record" {
+            result.rubric_digest = Some("invalid digest".into());
+        }
+        result
+    }
+}
+
+fn post_reply_failure_case(phase: &'static str) {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let store = fixture.store();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let agent = PostReplyAgent {
+        entered: entered_tx, release: Mutex::new(release_rx), failure_phase: phase,
+    };
+    let route = route_for(&fixture.home);
+    let (runner, calls, _) = counting_runner(&fixture);
+    let (mut client, mut server) = UnixStream::pair().expect("allow pair");
+    client.shutdown(Shutdown::Write).expect("EOF");
+    let home = fixture.home.clone();
+    let server_store = fixture.store();
+    let handler = thread::spawn(move || {
+        if phase == "waiting-publication" {
+            fixture_fault(Some(FixtureFault::WaitingWrite));
+        }
+        let result = super::serve_request_with_agent(
+            &mut server, &concurrent_registration(3000), 3000,
+            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+            Some(&route), Some(&runner), Some(&home), Some(&rubric(None)),
+            Some(&server_store), Some(&agent), None, Instant::now(),
+        );
+        fixture_fault(None);
+        result
+    });
+    entered_rx.recv_timeout(FIXTURE_HANG).expect("agent held");
+    let reply = fixture_final_frame(&mut client);
+    assert_eq!(reply["reason"], "door-complete", "{phase}");
+    let id = store.list_run("R").expect("durable effect")[0].id().to_owned();
+    release_tx.send(()).expect("release agent after final");
+    let result = handler.join().expect("handler");
+    assert_eq!(result.expect("no late error reaches second-refusal writer").0, reply);
+    let mut tail = Vec::new();
+    std::io::Read::read_to_end(&mut client, &mut tail).expect("closed handler");
+    assert!(tail.is_empty(), "{phase}: post-final bytes {tail:?}");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_incomplete(&fixture, &id);
+    fs::remove_file(fixture.home.join(".config/loops/alpha/door-requests-attempt.json"))
+        .expect("visibility does not depend on the latest marker");
+    assert_unpublished_visible(&fixture, &store, &id);
+}
+
+fn assert_unpublished_visible(fixture: &Fixture, store: &Store, id: &str) {
+    let status = fixture.command(&["status", "alpha"], b"").expect("owner status");
+    assert_eq!(status["unpublished_effects"].as_array().expect("listing").len(), 1);
+    assert_eq!(status["unpublished_effects"][0]["id"], id);
+    let runs = File::open(fixture.home.join("runs")).expect("runs");
+    let error = store.retirement_guard("R", &runs, true).expect_err("unpublished blocks retire");
+    assert_eq!(error.kind, "retire-requests-pending");
+    assert!(error.detail.contains(&format!("unpublished effect ids: {id}")));
+    store.publish_waiting(id).expect("fixture completes publication");
+    let status = fixture.command(&["status", "alpha"], b"").expect("published status");
+    assert_eq!(status["unpublished_effects"], json!([]));
+}
+
+/// # Panics
+/// Panics if a late transaction error changes the final reply or escapes owner visibility.
+/// ´test:unit:door-post-reply-failure-is-visible-and-silent´
+#[test]
+fn door_post_reply_failure_is_visible_and_silent() {
+    if !post_reply_journal_child(&["agent-join", "agent-record", "waiting-publication"]) {
+        return;
+    }
+    for phase in ["agent-join", "agent-record", "waiting-publication"] {
+        post_reply_failure_case(phase);
+    }
+}
+
+/// # Panics
+/// Panics if losing the incomplete marker also loses the service-journal event.
+/// ´test:unit:door-post-reply-marker-failure-keeps-journal-event´
+#[test]
+fn door_post_reply_marker_failure_keeps_journal_event() {
+    if !post_reply_journal_child(&["waiting-publication", "incomplete-marker"]) {
+        return;
+    }
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    let marker = fixture.home.join(".config/loops/alpha/door-requests-attempt.json");
+    fs::write(&marker, b"not a private record").expect("invalid marker");
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o666)).expect("marker refused");
+    super::post_reply_failure(&store, "R", "R:1a", "waiting-publication", "fixture-failure");
+}
+
+fn post_reply_journal_child(phases: &[&str]) -> bool {
+    let name = thread::current().name().expect("test name").to_owned();
+    if std::env::var("SUPERLOOP_POST_REPLY_PROOF").as_deref() == Ok(name.as_str()) {
+        return true;
+    }
+    let mut environment: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    environment.insert("SUPERLOOP_POST_REPLY_PROOF".into(), name.clone());
+    let spec = crate::build::child(
+        &std::env::current_exe().expect("test image"),
+        vec!["--exact".into(), name, "--nocapture".into()],
+        &environment, &std::env::current_dir().expect("cwd"), 180, "post-reply fixture",
+    );
+    let output = crate::build::run_child(&spec, None).expect("bounded fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.contains("test result: ok. 1 passed;"), "{stdout}");
+    let events: Vec<Value> = stderr.lines()
+        .filter_map(|line| line.strip_prefix("door-post-reply-failure "))
+        .map(|line| serde_json::from_str(line).expect("journal JSON")).collect();
+    assert_eq!(events.len(), phases.len(), "service journal: {stderr}");
+    for (event, phase) in events.iter().zip(phases) {
+        assert_eq!(event["phase"], *phase);
+        assert!(event["request_id"].as_str().is_some_and(|id| id.starts_with("R:")));
+        assert!(event["kind"].as_str().is_some_and(|kind| !kind.is_empty()));
+        assert_eq!(event.as_object().expect("event").len(), 3);
+    }
+    false
+}

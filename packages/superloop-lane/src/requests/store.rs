@@ -731,22 +731,28 @@ impl Store {
         let ledger = self.read_modes()?;
         let mut waiting = Vec::new();
         let mut corrections = Vec::new();
+        let mut unpublished = Vec::new();
         for request in &rows {
             let value = request.value();
             if matches!(value["state"].as_str(), Some("waiting" | "marked")) {
                 waiting.push(request.id());
             }
+            if request.publication_pending() {
+                unpublished.push(request.id());
+            }
             if correction_pending(request, &ledger)? {
                 corrections.push(request.id());
             }
         }
-        if !waiting.is_empty() || !corrections.is_empty() {
+        if !waiting.is_empty() || !corrections.is_empty() || !unpublished.is_empty() {
             return Err(problem(
                 "retire-requests-pending",
                 format!(
-                    "waiting request ids: {}; pending correction ids: {}; use requests triage {} {} or requests adjudicate for waiting ids, and requests correct-mode {} for corrections before retire",
+                    "waiting request ids: {}; pending correction ids: {}; unpublished effect ids: {}; inspect requests status {} for unfinished publication; use requests triage {} {} or requests adjudicate for waiting ids, and requests correct-mode {} for corrections before retire",
                     waiting.join(", "),
                     corrections.join(", "),
+                    unpublished.join(", "),
+                    self.loop_name,
                     self.loop_name,
                     run,
                     self.loop_name

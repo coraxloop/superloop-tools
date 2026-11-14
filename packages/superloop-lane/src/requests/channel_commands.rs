@@ -131,6 +131,13 @@ fn read(store: &Store, action: &str, loop_name: &str, pending: bool) -> Result<V
             .collect::<Vec<_>>()
     );
     if action == "status" {
+        result["unpublished_effects"] = json!(
+            records
+                .iter()
+                .filter(|row| row.publication_pending())
+                .map(crate::requests::RequestRecord::value)
+                .collect::<Vec<_>>()
+        );
         result["door_floor"] = json!(store.floor().as_str());
         result["shape_path"] = json!(store.shape_path());
         result["shapes"] = shapes;

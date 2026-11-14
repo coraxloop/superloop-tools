@@ -78,6 +78,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Agent fixture tests now use one distant hang bound for runner cap and semantic judge budgets, including recorded-runner and temporary-home checks, so node load cannot turn their verdicts into fixture timeouts. The immediately refused 10 ms request is decided before execution; the shortened reaping claim uses a controlled clock. Running doors keep their production budget (``test:unit:runner-isolates-loop-sign-in-and-rubric``; ``test:unit:agent-input-limit-and-refresh-link-replacement``; ``test:unit:real-agent-absent-sign-in-is-unmeasured-from-runner``).
 
+- Doors send no request-lock progress or second refusal after a successful final reply. Late agent and publication failures name the request and phase in the service journal; `requests status` and retirement expose recorded effects awaiting publication, including work still running. Refresh and restart a door to update its own copy; installed status and retirement commands gain the listing immediately. Admission still remains held through publication (``rule:superlooplane:door-request-admission``).
+
 - The slow 206 MiB route transfer check now uses the gate build profile and reports transfer time as a measurement, without treating node load as a failed upload. Its integrity and 512 MiB output-bound checks remain; the door's 120-second production command deadline is unchanged.
 
 - Keep running journal byte accounting under writer and reservation exclusion, and prune at the hourly deadline or capacity pressure instead of before every mail delivery (``proto:loophome:mail-journal-byte-accounting``).

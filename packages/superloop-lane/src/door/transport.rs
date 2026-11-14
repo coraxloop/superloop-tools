@@ -914,9 +914,31 @@ pub(super) fn write_frame_locked(
     value: &Value,
     deadline: Instant,
 ) -> io::Result<()> {
+    with_writer(stream, deadline, |locked| {
+        frame_write_until(locked, value, deadline)
+    })
+}
+
+fn write_final(
+    writer: &Arc<Mutex<UnixStream>>,
+    wait: Option<&super::RequestWait>,
+    reply: &Value,
+    deadline: Instant,
+) -> io::Result<()> {
+    wait.map_or_else(
+        || write_frame_locked(writer, reply, deadline),
+        |wait| wait.write_final(reply, deadline),
+    )
+}
+
+pub(super) fn with_writer<T>(
+    stream: &Arc<Mutex<UnixStream>>,
+    deadline: Instant,
+    action: impl FnOnce(&mut UnixStream) -> io::Result<T>,
+) -> io::Result<T> {
     loop {
         match stream.try_lock() {
-            Ok(mut locked) => return frame_write_until(&mut locked, value, deadline),
+            Ok(mut locked) => return action(&mut locked),
             Err(TryLockError::Poisoned(_)) => {
                 return Err(io::Error::other("door writer lock poisoned"));
             }
@@ -1240,7 +1262,7 @@ pub(super) fn serve_compute(
     };
     if registration.scope != Scope::Work {
         let reply = refusal(registration, peer, "door-review-compute-refusal", started);
-        write_frame_locked(&writer, &reply, deadline)?;
+        write_final(&writer, wait, &reply, deadline)?;
         return Ok(reply);
     }
     let compute_started = Instant::now();
@@ -1277,7 +1299,12 @@ pub(super) fn serve_compute(
         if let Some(wait) = wait {
             wait.report(&mut reply);
         }
-        write_frame_locked(&writer, &reply, Instant::now() + Duration::from_secs(2))?;
+        write_final(
+            &writer,
+            wait,
+            &reply,
+            Instant::now() + Duration::from_secs(2),
+        )?;
         return Ok(reply);
     }
     if upload {
@@ -1456,7 +1483,12 @@ pub(super) fn serve_compute(
     if let Some(wait) = wait {
         wait.report(&mut reply);
     }
-    write_frame_locked(&writer, &reply, Instant::now() + Duration::from_secs(2))?;
+    write_final(
+        &writer,
+        wait,
+        &reply,
+        Instant::now() + Duration::from_secs(2),
+    )?;
     Ok(reply)
 }
 

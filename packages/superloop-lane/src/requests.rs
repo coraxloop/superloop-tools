@@ -731,6 +731,12 @@ impl RequestRecord {
         Ok(())
     }
 
+    /// Whether an effect is recorded but its owner-facing state is not published yet.
+    #[must_use]
+    pub fn publication_pending(&self) -> bool {
+        self.0["state"].is_null() && self.0["effect"]["state"] != "pending"
+    }
+
     /// Publish a recorded immediate effect for later judgement.
     ///
     /// # Errors
@@ -1151,5 +1157,33 @@ pub(crate) mod tests {
         let refusal = RequestRecord::decode(old).expect_err("unknown ref check");
         assert_eq!(refusal.kind, "requests-record-refusal");
         assert_eq!(refusal.detail, "effect shape differs");
+    }
+    /// # Panics
+    /// Panics if publication visibility includes unfinished or already-published records.
+    /// ´test:unit:request-publication-pending-matches-effect-boundary´
+    #[test]
+    fn request_publication_pending_matches_effect_boundary() {
+        let mut raw = waiting("R", "1a", 3000, Mode::Audit).into_value();
+        raw["state"] = Value::Null;
+        let mut request = RequestRecord::decode(raw).expect("intent");
+        assert!(
+            !request.publication_pending(),
+            "unfinished effect is not post-reply work"
+        );
+        let mut effect = request.value()["effect"].clone();
+        effect["state"] = json!("completed");
+        effect["reason"] = json!("door-complete");
+        effect["exit_status"] = json!(0);
+        effect["ref_check"] = json!("not-applicable");
+        request.record_effect(effect).expect("recorded effect");
+        assert!(
+            request.publication_pending(),
+            "recorded effect must be visible"
+        );
+        request.publish_waiting().expect("publication");
+        assert!(
+            !request.publication_pending(),
+            "published work is no longer in this listing"
+        );
     }
 }
