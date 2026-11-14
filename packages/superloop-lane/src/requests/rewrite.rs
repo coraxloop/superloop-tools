@@ -241,7 +241,7 @@ impl Store {
                 .filter(|run| crate::valid_run_name(run))
                 .ok_or_else(|| problem("requests-learned-index", "invalid custody run"))?;
             let (_, mut rows) = decode_run(Some(&bytes), run)?;
-            self.channel_project(&mut rows, collection.as_ref())?;
+            self.channel_project(&mut rows, collection.as_deref())?;
             for row in rows {
                 if row.value()["loop"] != self.loop_name
                     || row.value()["worker_uid"] == self.owner

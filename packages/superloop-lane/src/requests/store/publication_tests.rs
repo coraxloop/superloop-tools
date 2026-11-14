@@ -71,7 +71,7 @@ pub(super) fn learned_write() -> Result<(), LaneError> {
     })
 }
 
-fn in_namespace() -> bool {
+pub(super) fn in_namespace() -> bool {
     let name = std::thread::current().name().expect("test name").to_owned();
     if std::env::var("SUPERLOOP_PUBLICATION_PROOF").as_deref() == Ok(name.as_str()) {
         assert_eq!(nix::unistd::Uid::effective().as_raw(), 0);
@@ -122,9 +122,27 @@ fn in_namespace() -> bool {
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .rfind(|line| line["path"] == "file" && line["outcome"] == "released")
             .expect("filing release line");
-        assert_eq!(last["phases"]["helper_read"]["calls"], 6, "{last}");
+        assert_eq!(last["phases"]["helper_read"]["calls"], 1, "{last}");
         assert_eq!(last["phases"]["inventory_other"]["calls"], 3, "{last}");
         assert_eq!(last["phases"]["policy"]["calls"], 1, "{last}");
+    }
+    if name.ends_with("collection_view_provisioned_paths_read_once") {
+        let lines = String::from_utf8_lossy(&output.stderr);
+        for path in [
+            "file",
+            "record_agent",
+            "record_effect",
+            "publish_waiting",
+            "publish_snapshot",
+        ] {
+            let last = lines
+                .lines()
+                .filter_map(|line| line.strip_prefix("door-request-lock "))
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .rfind(|line| line["path"] == path && line["outcome"] == "released")
+                .unwrap_or_else(|| panic!("missing {path} release: {lines}"));
+            assert_eq!(last["phases"]["helper_read"]["calls"], 1, "{last}");
+        }
     }
     false
 }
@@ -265,7 +283,7 @@ fn publication_once_learned_write_failure_keeps_retry() {
     );
 }
 
-fn provision(fixture: &super::tests::Fixture) -> Store {
+pub(super) fn provision(fixture: &super::tests::Fixture) -> Store {
     use nix::unistd::{Gid, Uid, chown};
     let store = fixture.snapshot_store();
     for name in ["shared", "private", "direct"] {

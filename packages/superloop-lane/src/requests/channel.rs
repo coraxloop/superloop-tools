@@ -9,6 +9,11 @@ use serde_json::{Value, json};
 
 use super::{LaneError, RequestRecord, Store, problem, read_leaf, replace_leaf};
 use client::Client;
+use std::sync::Arc;
+
+#[cfg(test)]
+#[path = "view_tests.rs"]
+mod view_tests;
 
 #[cfg(test)]
 pub(super) fn with_test_client<T>(
@@ -366,10 +371,14 @@ impl Store {
         if client.call("--owner-read", "", &self.loop_name, None)? == plan["after"] {
             return Ok(());
         }
+        if let Some(key) = self.channel_view_key() {
+            super::view::replace(key, None);
+        }
         let result = client.call_bytes("--owner-commit", "rewrite-door", &self.loop_name, input)?;
         if result["collection"] != plan["after"] {
             return Err(core("rewrite channel publication differs"));
         }
+        self.channel_committed(decode(result["collection"].clone())?);
         Ok(())
     }
 
@@ -437,9 +446,50 @@ impl Store {
             .transpose()
     }
 
-    pub(super) fn channel_read(&self) -> Result<Option<Collection>, LaneError> {
+    fn channel_view_key(&self) -> Option<(u64, u64)> {
+        let stat = nix::sys::stat::fstatat(
+            self.state_dir(),
+            super::LOCK_FILE,
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .ok()?;
+        Some((stat.st_dev, stat.st_ino))
+    }
+
+    // Only door-row questions may use this view. Permission and gateway answers
+    // and every publication preimage still come from the helper's live evaluation.
+    fn channel_owner_read(&self, client: &Client) -> Result<Arc<Collection>, LaneError> {
+        let key = self.channel_view_key();
+        if let Some(collection) = key.and_then(super::view::get) {
+            return Ok(collection);
+        }
+        let collection = Arc::new(decode(client.call(
+            "--owner-read",
+            "",
+            &self.loop_name,
+            None,
+        )?)?);
+        if let Some(key) = key {
+            super::view::replace(key, Some(collection.clone()));
+        }
+        #[cfg(test)]
+        view_tests::after_read(client);
+        Ok(collection)
+    }
+
+    fn channel_committed(&self, collection: Collection) -> Arc<Collection> {
+        let collection = Arc::new(collection);
+        if let Some(key) = self.channel_view_key() {
+            super::view::replace(key, Some(collection.clone()));
+            #[cfg(test)]
+            view_tests::after_commit(self);
+        }
+        collection
+    }
+
+    pub(super) fn channel_read(&self) -> Result<Option<Arc<Collection>>, LaneError> {
         self.bound_client()?
-            .map(|client| decode(client.call("--owner-read", "", &self.loop_name, None)?))
+            .map(|client| self.channel_owner_read(&client))
             .transpose()
     }
 
@@ -515,7 +565,7 @@ impl Store {
             super::hold::request(id);
         }
         let client = self.bound_client()?.map_or_else(Client::configured, Ok)?;
-        let collection = decode(client.call("--owner-read", "", &self.loop_name, None)?)?;
+        let collection = self.channel_owner_read(&client)?;
         let doors = if guard.is_some() {
             self.channel_doors(&collection)?
         } else {
@@ -555,12 +605,16 @@ impl Store {
         }
         input["expected"] = serde_json::to_value(&before).map_err(core)?;
         input["publication"] = serde_json::to_value(&next).map_err(core)?;
+        if let Some(key) = self.channel_view_key() {
+            super::view::replace(key, None);
+        }
         let committed = client.call("--owner-commit", action, &self.loop_name, Some(&input))?;
         if decode(committed["collection"].clone())? != next {
             return Err(core(
                 "committed helper reply differs; inspect durable state before retry",
             ));
         }
+        let next = self.channel_committed(next);
         self.channel_mirror_report(&next);
         if !changed.is_empty() {
             self.channel_maintenance(&changed, prior_index, &before);
@@ -718,10 +772,14 @@ impl Store {
         next.validate(&kinds()).map_err(core)?;
         input["expected"] = preview["before"].clone();
         input["publication"] = serde_json::to_value(&next).map_err(core)?;
+        if let Some(key) = self.channel_view_key() {
+            super::view::replace(key, None);
+        }
         let committed = client.call("--owner-commit", action, &self.loop_name, Some(&input))?;
         if decode(committed["collection"].clone())? != next {
             return Err(core("service publication reply differs"));
         }
+        let next = self.channel_committed(next);
         self.channel_mirror_report(&next);
         Ok(committed["result"].clone())
     }
@@ -736,7 +794,7 @@ impl Store {
         let Some(client) = self.bound_client()? else {
             return Ok(true);
         };
-        let collection = decode(client.call("--owner-read", "", &self.loop_name, None)?)?;
+        let collection = self.channel_owner_read(&client)?;
         let id = common_id(&self.loop_name, source_id);
         if !collection.requests.iter().any(|row| row.id == id) {
             return Ok(true);
@@ -760,7 +818,7 @@ impl Store {
         let Some(client) = self.bound_client()? else {
             return Ok(None);
         };
-        let collection = decode(client.call("--owner-read", "", &self.loop_name, None)?)?;
+        let collection = self.channel_owner_read(&client)?;
         let id = common_id(&self.loop_name, source_id);
         let Some(row) = collection.requests.iter().find(|row| row.id == id) else {
             return Ok(None);

@@ -2060,6 +2060,9 @@ pattern = "packages/superloop-lane/src/requests.rs"
 pattern = "packages/superloop-lane/src/requests/channel.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/requests/view_tests.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/requests/channel_client.rs"
 
 [[include.rows]]
@@ -2091,6 +2094,9 @@ pattern = "packages/superloop-lane/src/requests/store/hold.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/requests/store/queue.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/store/view.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/requests/store/snapshot.rs"

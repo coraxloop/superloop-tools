@@ -12,6 +12,7 @@ mod snapshot;
 #[cfg(test)]
 #[path = "test_helper.rs"]
 pub(super) mod test_helper;
+mod view;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
@@ -98,10 +99,12 @@ pub(crate) struct StoreLock {
     _file: File,
     holder: Option<(u64, u64)>,
     observation: Option<hold::Guard>,
+    view: Option<view::Guard>,
 }
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
+        drop(self.view.take());
         if let Some(observation) = &mut self.observation {
             observation.releasing();
         }
@@ -721,7 +724,7 @@ impl Store {
             Err(error) => return Err(problem("requests-record-refusal", error.to_string())),
             Ok(custody) => {
                 let collection = self.channel_read()?;
-                self.read_run_from_custody(run, &custody, collection.as_ref())?
+                self.read_run_from_custody(run, &custody, collection.as_deref())?
                     .2
             }
         };
@@ -1369,6 +1372,7 @@ impl Store {
                     _file: File::from(fd),
                     holder: holder_key,
                     observation,
+                    view: Some(view::Guard::acquired(key)),
                 };
                 #[cfg(test)]
                 if changing {
@@ -1514,7 +1518,7 @@ impl Store {
 
     fn read_run(&self, run: &str) -> Result<RunSnapshot, LaneError> {
         let collection = self.channel_read()?;
-        self.read_run_with_channel(run, collection.as_ref())
+        self.read_run_with_channel(run, collection.as_deref())
     }
 
     fn read_run_with_channel(
@@ -1577,7 +1581,7 @@ impl Store {
                     "custody name is invalid",
                 ));
             }
-            let (_, revision, requests) = self.read_run_with_channel(run, collection.as_ref())?;
+            let (_, revision, requests) = self.read_run_with_channel(run, collection.as_deref())?;
             if let Some((wanted, next_revision, next_requests)) = candidate
                 && run == wanted
             {
@@ -4083,7 +4087,7 @@ pub(crate) mod tests {
         let custody = store.custody("R").expect("probed custody");
         let collection = store.channel_read().expect("channel");
         let before = store
-            .read_run_from_custody("R", &custody, collection.as_ref())
+            .read_run_from_custody("R", &custody, collection.as_deref())
             .expect("initial");
         fs::rename(
             fixture.runs.join(".launch-R"),
@@ -4097,7 +4101,7 @@ pub(crate) mod tests {
         )
         .expect("private replacement");
         let after = store
-            .read_run_from_custody("R", &custody, collection.as_ref())
+            .read_run_from_custody("R", &custody, collection.as_deref())
             .expect("held custody");
         assert_eq!(before.0, after.0);
         assert_eq!(after.2[0].id(), "R:1a");
