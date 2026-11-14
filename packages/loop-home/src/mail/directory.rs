@@ -264,6 +264,37 @@ fn configuration_file(path: &Path, anchor: Option<&crate::anchor::Anchor>) -> Re
 }
 
 impl Directory {
+    pub(super) fn watch_configuration(
+        &self,
+        notifications: &mut super::notify::Notifications,
+    ) -> Result<()> {
+        for name in ["registry.toml", "allocations.toml"] {
+            let path = self.home.join(".config/loops").join(name);
+            let file = configuration_file(&path, self.configuration.as_deref())?;
+            notifications.add(&path, &file, None)?;
+            let current = configuration_file(&path, self.configuration.as_deref())?;
+            let before = file.metadata()?;
+            let after = current.metadata()?;
+            if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+                notifications.reconcile();
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn watch_roots(
+        &self,
+        notifications: &mut super::notify::Notifications,
+    ) -> Result<()> {
+        self.watch_configuration(notifications)?;
+        notifications.path(&self.home.join(".var/loops"), true)?;
+        let (registry, _, _) = self.registry()?;
+        for row in registry.rows(&self.home) {
+            notifications.path(&row.home, true)?;
+            notifications.path(&row.home.join("workers"), true)?;
+            notifications.path(&row.home.join("private/.config/mail/loop.toml"), false)?;
+        }
+        Ok(())
+    }
     fn registry(&self) -> Result<(Registry, Vec<u8>, File)> {
         let path = self.home.join(".config/loops/registry.toml");
         let file = configuration_file(&path, self.configuration.as_deref())?;

@@ -42,6 +42,7 @@ pkg_loop_home_rust = files(
   'src/mail/directory.rs',
   'src/mail/refusal.rs',
   'src/mail/service.rs',
+  'src/mail/notify.rs',
   'src/mail/service_tests.rs',
   'src/mail/command.rs',
   'src/mail/entry_anchors.rs',

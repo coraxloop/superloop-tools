@@ -17,6 +17,7 @@ pub mod configuration;
 mod directory;
 mod entry_anchors;
 mod io;
+mod notify;
 mod refusal;
 mod service;
 

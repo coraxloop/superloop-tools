@@ -13,7 +13,6 @@ use std::ffi::OsString;
 use std::os::unix::{fs::MetadataExt as _, process::CommandExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -264,11 +263,12 @@ fn anchored_serve(arguments: &[OsString], report: &mut dyn std::io::Write) -> Re
         &entered.configuration.registry,
         Some(entered.anchor),
     )?;
+    let mut notifications = super::notify::Notifications::new()?;
     loop {
-        for failure in service.scan()? {
+        for failure in service.scan_watching(&mut notifications)? {
             writeln!(report, "{failure}")?;
         }
-        std::thread::sleep(Duration::from_millis(250));
+        service.wait_for_change(&mut notifications)?;
     }
 }
 

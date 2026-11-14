@@ -230,9 +230,20 @@ pub(super) fn maintain(
     let pending = journal
         .records()?
         .into_iter()
-        .filter(|record| record.sender == sender && record.completed.is_none())
-        .map(|record| record.outgoing)
-        .collect::<std::collections::BTreeSet<_>>();
+        .filter(|record| record.completed.is_none())
+        .map(|record| (record.sender, record.outgoing))
+        .collect();
+    maintain_pending(journal, outbox, staging, sender, &pending)
+}
+
+/// Reuse recovery's validated pending set; journal history is independent of the outbox.
+pub(super) fn maintain_pending(
+    journal: &Journal,
+    outbox: &File,
+    staging: &File,
+    sender: &str,
+    pending: &std::collections::BTreeSet<(String, String)>,
+) -> Result<()> {
     let mut temporaries = std::collections::BTreeSet::new();
     for key in store::names(journal.publication_root())?
         .into_iter()
@@ -261,7 +272,11 @@ pub(super) fn maintain(
                     .as_ref()
                     .is_some_and(|prior| *prior != digest(&bytes))
             });
-        if !name.to_str().is_some_and(|name| pending.contains(name)) && (absent || changed) {
+        if !name
+            .to_str()
+            .is_some_and(|name| pending.contains(&(sender.to_owned(), name.to_owned())))
+            && (absent || changed)
+        {
             clear(journal, outbox, staging, sender, &name)?;
         } else {
             temporaries.insert(temporary(&key));

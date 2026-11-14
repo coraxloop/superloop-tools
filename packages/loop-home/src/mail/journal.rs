@@ -789,6 +789,8 @@ impl Journal {
     /// # Errors
     /// Refuses unknown entries or corrupt records rather than silently skipping them.
     pub fn records(&self) -> Result<Vec<Record>> {
+        #[cfg(test)]
+        RECORD_SCANS.with(|count| count.set(count.get() + 1));
         store::names(&self.records)?
             .into_iter()
             .filter(|name| {
@@ -1309,3 +1311,6 @@ impl From<crate::anchor::Error> for MailError {
         Self::Entry(error.to_string())
     }
 }
+
+#[cfg(test)]
+thread_local! { pub(super) static RECORD_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }

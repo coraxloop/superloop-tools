@@ -744,3 +744,153 @@ fn anchored_service(fixture: &Fixture) -> (Service, std::path::PathBuf) {
     );
     (service, config)
 }
+
+/// Recovery reads retained history a fixed number of times, not once per mailbox.
+/// ´claim:loophome:mail-recovery-history-reads-do-not-multiply-by-mailboxes´
+/// ´test:unit:mail-recovery-history-reads-do-not-multiply-by-mailboxes´
+#[test]
+fn mail_recovery_history_reads_do_not_multiply_by_mailboxes() {
+    let fixture = Fixture::new();
+    let (mut service, _) = anchored_service(&fixture);
+    for population in [1, 14, 40] {
+        let inventory = Inventory {
+            loops: BTreeSet::from(["alpha".into()]),
+            actors: (0..population)
+                .map(|index| {
+                    (
+                        Address::parse(&format!("alpha+w{index}")).expect("address"),
+                        copy_actor(&fixture),
+                    )
+                })
+                .collect(),
+            failures: Vec::new(),
+            retired: BTreeSet::new(),
+        };
+        super::super::journal::RECORD_SCANS.with(|count| count.set(0));
+        assert_eq!(
+            service.recover(&inventory).expect("recovery"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+            2
+        );
+    }
+    fs::write(
+        fixture.root.join("journal/deliveries/corrupt.toml"),
+        b"invalid",
+    )
+    .expect("corrupt history");
+    let inventory = Inventory {
+        loops: BTreeSet::new(),
+        actors: BTreeMap::new(),
+        failures: Vec::new(),
+        retired: BTreeSet::new(),
+    };
+    assert!(
+        service.recover(&inventory).is_err(),
+        "history validation still refuses corruption"
+    );
+}
+
+/// ´claim:loophome:mail-scan-prunes-at-startup-and-deadline-not-every-wakeup´
+/// ´test:unit:mail-scan-prunes-at-startup-and-deadline-not-every-wakeup´
+#[test]
+fn mail_scan_prunes_at_startup_and_deadline_not_every_wakeup() {
+    let fixture = Fixture::new();
+    let (mut service, config) = anchored_service(&fixture);
+    for (name, source) in [
+        (
+            "registry.toml",
+            "namespace='org.superloop-tools.loophome.registry'\nversion=[1,0,0]\nloops=[]\n"
+                .to_owned(),
+        ),
+        (
+            "allocations.toml",
+            format!("mail_uid={}\n", service.directory.service),
+        ),
+    ] {
+        let path = config.join(name);
+        fs::write(&path, source).expect("configuration");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private file");
+    }
+    for expected in [3, 2] {
+        super::super::journal::RECORD_SCANS.with(|count| count.set(0));
+        assert_eq!(service.scan().expect("scan"), Vec::<String>::new());
+        assert_eq!(
+            super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+            expected
+        );
+    }
+    service.last_prune = Some(
+        Monotonic::now()
+            .checked_sub(Duration::from_secs(PRUNE_INTERVAL_SECONDS))
+            .expect("elapsed retention interval"),
+    );
+    super::super::journal::RECORD_SCANS.with(|count| count.set(0));
+    service.scan().expect("due retention");
+    assert_eq!(
+        super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+        3
+    );
+}
+
+/// ´claim:loophome:mail-retention-probes-recorded-names-without-listing-inboxes´
+/// ´test:unit:mail-retention-probes-recorded-names-without-listing-inboxes´
+#[test]
+fn mail_retention_probes_recorded_names_without_listing_inboxes() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.journal();
+    fs::write(
+        fixture.root.join("alpha/.mail-staging/alpha.01.letter"),
+        b"opaque",
+    )
+    .expect("source");
+    let record = publication::prepare(
+        &journal,
+        &fixture.actor.endpoint,
+        &fixture.actor.endpoint,
+        "alpha.01.letter",
+    )
+    .expect("prepare")
+    .accept(
+        &mut journal,
+        Instant::parse("2026-01-01T00:00:00.001Z").expect("instant"),
+        digest(b"registry"),
+        vec![],
+    )
+    .expect("accept");
+    publication::publish(
+        &mut journal,
+        &fixture.actor.endpoint,
+        &fixture.actor.endpoint,
+        &record.delivery,
+    )
+    .expect("publish");
+    let inbox = fixture.root.join("alpha/mail/inbox");
+    fs::write(inbox.join("unrelated-history"), b"unrelated").expect("unrelated entry");
+    let inventory = Inventory {
+        loops: BTreeSet::from(["alpha".into()]),
+        actors: BTreeMap::from([(
+            Address::parse("alpha").expect("address"),
+            copy_actor(&fixture),
+        )]),
+        failures: Vec::new(),
+        retired: BTreeSet::new(),
+    };
+    io::NAME_SCANS.with(|count| count.set(0));
+    assert!(
+        Service::pins(&inventory, std::slice::from_ref(&record))
+            .expect("pins")
+            .active_inboxes
+            .contains(&record.delivery)
+    );
+    fs::remove_file(inbox.join(&record.inbox_name)).expect("ordinary extraction");
+    assert!(
+        !Service::pins(&inventory, std::slice::from_ref(&record))
+            .expect("pins")
+            .active_inboxes
+            .contains(&record.delivery)
+    );
+    assert_eq!(io::NAME_SCANS.with(std::cell::Cell::get), 0);
+}

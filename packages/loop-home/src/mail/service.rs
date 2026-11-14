@@ -34,7 +34,7 @@ impl Clock for HostClock {
 pub(super) struct Service {
     pub directory: Directory,
     pub journal: Journal,
-    last_prune: Monotonic,
+    last_prune: Option<Monotonic>,
     clock: Box<dyn Clock>,
 }
 impl Service {
@@ -42,52 +42,36 @@ impl Service {
         Self {
             directory,
             journal,
-            last_prune: Monotonic::now(),
+            last_prune: None,
             clock: Box::new(HostClock),
         }
     }
     fn pins(inventory: &Inventory, records: &[Record]) -> Result<Pins> {
         let mut pins = Pins::default();
-        let by_delivery = records
-            .iter()
-            .map(|record| (&record.delivery, record))
-            .collect::<BTreeMap<_, _>>();
-        // Unavailability is not evidence that an active inbox is empty. Only
-        // explicit retirement or absence from the fresh registry releases that pin.
+        // Probe only journalled names. Unrelated inbox history cannot affect retention.
         for record in records {
             let recipient = Address::parse(&record.recipient)
                 .map_err(|_| MailError::Invalid("invalid-directory: journal recipient"))?;
-            if record.phase == Phase::Complete
+            if let Some(actor) = inventory.actors.get(&recipient) {
+                if actor.active {
+                    match nix::sys::stat::fstatat(
+                        &actor.inbox,
+                        record.inbox_name.as_str(),
+                        nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+                    ) {
+                        Ok(_) => {
+                            pins.active_inboxes.insert(record.delivery.clone());
+                        }
+                        Err(nix::errno::Errno::ENOENT) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            } else if record.phase == Phase::Complete
                 && inventory.loops.contains(recipient.loop_name())
-                && !inventory.actors.contains_key(&recipient)
                 && !inventory.retired.contains(&recipient)
             {
+                // Unavailability does not establish that an active inbox is empty.
                 pins.active_inboxes.insert(record.delivery.clone());
-            }
-        }
-        for (address, actor) in &inventory.actors {
-            if !actor.active {
-                continue;
-            }
-            for name in io::names(&actor.inbox)? {
-                let Some(name) = name.to_str() else {
-                    continue;
-                };
-                let Some((_, tail)) = name.split_once('.') else {
-                    continue;
-                };
-                let Some(time) = tail
-                    .strip_suffix(".letter")
-                    .and_then(|value| Instant::parse(value).ok())
-                else {
-                    continue;
-                };
-                if let Some(record) = by_delivery.get(&time)
-                    && record.recipient == address.to_string()
-                    && record.inbox_name == name
-                {
-                    pins.active_inboxes.insert(time);
-                }
             }
         }
         Ok(pins)
@@ -95,8 +79,69 @@ impl Service {
     fn prune(&mut self, inventory: &Inventory) -> Result<()> {
         self.journal
             .prune_projected(&Instant::now()?, |records| Self::pins(inventory, records))?;
-        self.last_prune = Monotonic::now();
+        self.last_prune = Some(Monotonic::now());
         Ok(())
+    }
+    fn prune_due(&self) -> bool {
+        self.last_prune
+            .is_none_or(|last| last.elapsed() >= Duration::from_secs(PRUNE_INTERVAL_SECONDS))
+    }
+    fn maintenance_wait(&self) -> Duration {
+        self.last_prune.map_or(Duration::ZERO, |last| {
+            Duration::from_secs(PRUNE_INTERVAL_SECONDS).saturating_sub(last.elapsed())
+        })
+    }
+    pub fn wait_for_change(&self, notifications: &mut super::notify::Notifications) -> Result<()> {
+        loop {
+            for change in notifications.wait(self.maintenance_wait())? {
+                match change {
+                    super::notify::Change::Reconcile => return Ok(()),
+                    super::notify::Change::Outbox(path, sender, name) => {
+                        // Ignore only an exact, protected service sidecar. A suffix grants nothing.
+                        let recognized = io::absolute(&path, true).and_then(|outbox| {
+                            refusal::recognized(&self.journal, &outbox, &sender.to_string(), &name)
+                        });
+                        if !matches!(recognized, Ok(true)) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pub fn scan_watching(
+        &mut self,
+        notifications: &mut super::notify::Notifications,
+    ) -> Result<Vec<String>> {
+        self.directory.watch_roots(notifications)?;
+        let inventory = self.directory.inventory()?;
+        self.directory.watch_configuration(notifications)?;
+        let root = self.directory.home.join(".var/loops");
+        notifications.path(&root, true)?;
+        for name in &inventory.loops {
+            let home = root.join(name);
+            notifications.path(&home, true)?;
+            notifications.path(&home.join("workers"), true)?;
+            notifications.path(&home.join("private/.config/mail/loop.toml"), false)?;
+        }
+        for (address, actor) in &inventory.actors {
+            let mailbox = root.join(address.relative_mailbox());
+            notifications.path(&mailbox, true)?;
+            notifications.add(
+                &mailbox.join("outbox"),
+                &actor.outbox,
+                Some(address.clone()),
+            )?;
+            notifications.add(&mailbox.join("inbox"), &actor.inbox, None)?;
+            notifications.current(&mailbox.join("outbox"), &actor.outbox, true)?;
+            notifications.current(&mailbox.join("inbox"), &actor.inbox, true)?;
+        }
+        // Arming precedes candidate enumeration, including the first scan after restart.
+        let count = inventory.actors.len();
+        let result = self.scan_inventory(&inventory);
+        drop(inventory);
+        tracing::debug!(mailboxes = count, "mail scan complete");
+        result
     }
     fn tick(&mut self) -> Result<Instant> {
         let mut waiting = None;
@@ -119,7 +164,7 @@ impl Service {
                             MailError::ClockWait
                         )?;
                     }
-                    if self.last_prune.elapsed() >= Duration::from_secs(PRUNE_INTERVAL_SECONDS) {
+                    if self.last_prune.is_some() && self.prune_due() {
                         let inventory = self.directory.inventory()?;
                         self.prune(&inventory)?;
                     }
@@ -196,11 +241,12 @@ impl Service {
             .map(|record| (record.sender, record.outgoing))
             .collect::<BTreeSet<_>>();
         for (sender, actor) in &inventory.actors {
-            if let Err(error) = refusal::maintain(
+            if let Err(error) = refusal::maintain_pending(
                 &self.journal,
                 &actor.outbox,
                 &actor.staging,
                 &sender.to_string(),
+                &pending,
             ) {
                 tracing::warn!(%sender, reason = %error, "refusal maintenance failed");
                 failures.push(error.to_string());
@@ -369,10 +415,15 @@ impl Service {
     pub fn scan(&mut self) -> Result<Vec<String>> {
         let _span = tracing::trace_span!("mail.scan").entered();
         let inventory = self.directory.inventory()?;
+        self.scan_inventory(&inventory)
+    }
+    fn scan_inventory(&mut self, inventory: &Inventory) -> Result<Vec<String>> {
         let mut failures = inventory.failures.clone();
-        failures.extend(self.recover(&inventory)?);
-        self.prune(&inventory)?;
-        let queues = self.candidates(&inventory)?;
+        failures.extend(self.recover(inventory)?);
+        if self.prune_due() {
+            self.prune(inventory)?;
+        }
+        let queues = self.candidates(inventory)?;
         for (sender, name) in schedule(queues) {
             if let Err(error) = self.candidate(&sender, &name) {
                 failures.push(format!("{sender}: {error}"));
@@ -387,7 +438,7 @@ impl Service {
             .map(|outgoing| outgoing.recipient.to_string());
         let _span = tracing::info_span!("mail.delivery", sender = %sender_address, recipient = recipient.as_deref(), letter = %name.to_string_lossy()).entered();
         let inventory = self.directory.inventory()?;
-        if self.last_prune.elapsed() >= Duration::from_secs(PRUNE_INTERVAL_SECONDS) {
+        if self.prune_due() {
             self.prune(&inventory)?;
         }
         let sender = actor(&inventory, sender_address)?;

@@ -3342,6 +3342,9 @@ pattern = "packages/loop-home/src/mail/directory.rs"
 pattern = "packages/loop-home/src/mail/refusal.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/mail/notify.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/mail/service.rs"
 
 [[include.rows]]
@@ -3358,6 +3361,9 @@ pattern = "packages/loop-home/src/mail/service_tests.rs"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/mail/configuration_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/mail_scan.py"
 
 [[include.rows]]
 pattern = "packages/superloop/tests/mail_custody.py"

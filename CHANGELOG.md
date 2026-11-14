@@ -50,6 +50,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Make the mail service wait for kernel notifications between scans, eliminating continuous idle polling and repeated history reads per mailbox; preserve delivery checks and reduce ordinary arrival latency, while large-population active scans remain a documented limitation (``proto:loophome:mail-change-wakeup``).
+
 - Door agent invalid-output refusals retain stderr only after end of stream: an open empty pipe, a cleanup deadline, and JSON strings or arrays cannot expose an answer. Complete plain vendor errors remain readable. Refresh and restart each installed door to receive it; direct triage receives it with the global tools install.
 
 - The top-level `superloop-lane` launch usage now lists `--compute-workspace JSON` with its existing arguments, matching the launch refusal's usage; parsing and existing runs are unchanged (``prob:lanes:top-level-usage-lists-the-compute-workspace-argument``).
