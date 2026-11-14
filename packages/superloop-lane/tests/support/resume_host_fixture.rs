@@ -93,6 +93,38 @@ impl Host {
         )
         .expect("production reply binding");
     }
+    pub(super) fn place(&self) {
+        let parent = self.home.join("placement-parent");
+        directory(parent.clone(), 0o700);
+        let root = parent.join("R");
+        let input = json!({"grant":{"schema":1,"loop":"alpha","run":"R",
+            "node":"fixture-node","workspace":root,
+            "baseline_env":[["PATH","/usr/bin"],["CARGO_TARGET_DIR",root.join("target")],
+                ["CARGO_HOME",root.join("cargo")],["TMPDIR",root.join("tmp")]],
+            "resources":{},"shells":["/bin/sh"],"quick_policy_digest":"a".repeat(64),
+            "blacklist_digest":"b".repeat(64),"executor_protocol":1},
+            "baseline_environment_is_public":true})
+        .to_string();
+        let preview = superloop_lane::placement::commands::prepare(&parent, &input, None, true)
+            .expect("owner placement preview");
+        let placed = superloop_lane::placement::commands::prepare(
+            &parent,
+            &input,
+            preview["preview_sha256"].as_str(),
+            false,
+        )
+        .expect("owner placement publication");
+        let mut record: Value = serde_json::from_slice(&self.reservation()).expect("record");
+        record["plan"]["compute_workspace"] = preview["compute_workspace"].clone();
+        record["plan"]["compute_placement"] = placed["declaration"]["compute_placement"].clone();
+        assert_eq!(record["plan"]["compute_placement"]["root"], json!(root));
+        assert_eq!(record["plan"]["compute_placement"]["run"], "R");
+        write(
+            self.home.join("runs/.reservation-R.json"),
+            serde_json::to_vec(&record).expect("placed record"),
+            0o600,
+        );
+    }
     pub(super) fn helper_preflights(&self) -> usize {
         fs::read_to_string(self.home.join("entry-calls"))
             .expect("real private entry trace")

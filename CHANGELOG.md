@@ -40,7 +40,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Exercise a positive resumed-launch preview with canonical mail provisioning and the real built helper preflight, preserving the reservation and run files. This changes tests only; the five live rollback refusals remain a separate acceptance (`public_resumed_preview_uses_canonical_custody`).
 
-- Pin live rollback and failed-round choice preservation over a production-published workspace grant and placement, including the exact settled reservation bytes (``test:unit:live-round-rollback-restores-placed-reservation``; ``test:unit:failed-round-choice-survives-live-rollback``).
+- Pin live rollback and failed-round choice preservation over a production-published workspace grant and placement, including the exact settled reservation bytes; the public inspector-refusal case also restores and retries a placed `alpha/R` (``test:unit:live-round-rollback-restores-placed-reservation``; ``test:unit:failed-round-choice-survives-live-rollback``).
 
 - After a failed boxed round, `launch LOOP RUN --round STEP` now refuses until the launching loop chooses `--fresh-thread` or `--resume-thread`. Settlement keeps the observed or requested thread, or explicitly records its absence; with no recorded thread only an explicit fresh choice is available. The dry run shows the choice and whether session files exist, without promising vendor acceptance. Reply-settled rounds and host-lane choices are unchanged (``test:unit:failed-round-choice-is-explicit``; ``test:unit:failed-round-settlement-keeps-thread-provenance``).
 

@@ -9,6 +9,9 @@ use std::process::Command;
 use std::time::Duration;
 
 pub(super) fn run(fixture: &host::Host, case: &str, failed: bool) {
+    if case == "inspector" {
+        fixture.place();
+    }
     if failed {
         failed_history(fixture);
     }
@@ -71,6 +74,12 @@ pub(super) fn run(fixture: &host::Host, case: &str, failed: bool) {
     assert_eq!(retry["thread_id"], "fixture-thread");
     let settled: Value = serde_json::from_slice(&fixture.reservation()).expect("settled retry");
     assert_eq!(settled["phase"], "settled");
+    for member in ["compute_workspace", "compute_placement"] {
+        assert_eq!(
+            settled["plan"][member], prior["plan"][member],
+            "retry retains {member}"
+        );
+    }
     assert_eq!(settled["rounds"].as_array().expect("rounds").len(), 2);
     assert_eq!(settled["rounds"][1]["step"], "review");
     assert_eq!(settled["rounds"][1]["phase"], "settled");

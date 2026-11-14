@@ -10,7 +10,8 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
     assert_eq!(args.get(1).map(String::as_str), Some("driver-launch"));
     let meta = std::fs::symlink_metadata(&home).expect("fixture root");
     let fixture = host::Host::borrowed(home.clone(), (meta.dev(), meta.ino()));
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let publication_started = Instant::now();
+    let deadline = publication_started + Duration::from_secs(10);
     loop {
         let record: serde_json::Value =
             serde_json::from_slice(&fixture.reservation()).expect("record");
@@ -25,12 +26,21 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+    let publication_seconds = publication_started.elapsed().as_secs_f64();
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").expect("driver cgroup");
     assert!(
         cgroup.trim_end().ends_with("/work"),
         "driver in real work scope: {cgroup}"
     );
+    let helper_started = Instant::now();
     let _attempt = host::mapped(&home, CLIENT);
+    host::write(
+        home.join("wait-measurements.json"),
+        serde_json::json!({"driver_publication":publication_seconds,
+            "mapped_helper":helper_started.elapsed().as_secs_f64()})
+        .to_string(),
+        0o600,
+    );
     fixture.reply();
     let output = host::mapped(&home, DRIVER);
     std::io::stdout()

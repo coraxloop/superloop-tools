@@ -3,7 +3,7 @@ use crate::{fixture::bounded::CommandOutput as _, host};
 use std::io::Write as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 struct Scope {
     unit: String,
@@ -28,6 +28,7 @@ impl Scope {
         if self.stopped {
             return Ok(());
         }
+        let began = Instant::now();
         let _stop = Command::new("/usr/bin/systemctl")
             .args(["--user", "stop", &self.unit])
             .fixture_output("scope stop", Duration::from_secs(30))?;
@@ -52,6 +53,12 @@ impl Scope {
         }
         self.stopped = true;
         writeln!(
+            std::io::stderr().lock(),
+            "SCOPE-CLEANUP-WALL seconds={:.6}",
+            began.elapsed().as_secs_f64()
+        )
+        .map_err(|e| e.to_string())?;
+        writeln!(
             std::io::stdout().lock(),
             "SCOPE-GONE {} {}",
             self.unit,
@@ -63,7 +70,8 @@ impl Scope {
     fn execute(&self, case: &str) -> Result<std::process::Output, String> {
         let fixture = self.fixture.as_ref().expect("owned root");
         let meta = std::fs::symlink_metadata(fixture.home()).expect("held fixture identity");
-        Command::new("/usr/bin/systemd-run")
+        let began = Instant::now();
+        let output = Command::new("/usr/bin/systemd-run")
             .args(["--user", "--quiet", "--wait", "--pipe", "--collect"])
             .arg(format!("--unit={}", self.unit))
             .args([
@@ -82,7 +90,14 @@ impl Scope {
             .arg(fixture.home())
             .arg(meta.dev().to_string())
             .arg(meta.ino().to_string())
-            .fixture_output("complete public host launch", Duration::from_secs(180))
+            .fixture_output("complete public host launch", Duration::from_secs(180));
+        writeln!(
+            std::io::stderr().lock(),
+            "SCOPE-WALL {case} seconds={:.6}",
+            began.elapsed().as_secs_f64()
+        )
+        .expect("scope wall measurement");
+        output
     }
 }
 impl Drop for Scope {
@@ -100,12 +115,27 @@ pub(super) fn run(case: &str) {
     let result = scope.execute(case);
     let stopped = scope.stop();
     assert!(stopped.is_ok(), "{stopped:?}");
+    if let Ok(metrics) = std::fs::read_to_string(
+        scope
+            .fixture
+            .as_ref()
+            .expect("owned root")
+            .home()
+            .join("wait-measurements.json"),
+    ) {
+        writeln!(std::io::stderr().lock(), "WAIT-MEASURE {case} {metrics}")
+            .expect("wait measurements");
+    }
     let output = result.expect("bounded scoped command");
     assert!(output.status.success(), "{output:?}");
     std::io::stdout()
         .lock()
         .write_all(&output.stdout)
         .expect("scope evidence");
+    std::io::stderr()
+        .lock()
+        .write_all(&output.stderr)
+        .expect("scope diagnostics");
 }
 
 pub(super) fn child(args: &[String]) -> std::process::ExitCode {
