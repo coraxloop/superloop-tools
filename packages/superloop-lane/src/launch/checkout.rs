@@ -1465,6 +1465,46 @@ mod tests {
         assert!(!error.detail.bytes().any(|byte| byte.is_ascii_control()));
     }
 
+    /// ´test:unit:checkout-pack-transfer-needs-no-temporary-directory´
+    #[test]
+    fn checkout_pack_transfer_needs_no_temporary_directory() {
+        const CHILD: &str = "SUPERLOOP_CHECKOUT_MEMFD_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            synthetic_transfer(
+                "import sys; sys.stdout.buffer.write(b'pack')",
+                "import sys; sys.stdin.buffer.read()",
+            )
+            .expect("successful transfer without temporary directory");
+            let error = synthetic_transfer(
+                "import sys; print('pack failure', file=sys.stderr); sys.exit(41)",
+                "import sys; sys.stdin.buffer.read()",
+            )
+            .expect_err("failing transfer without temporary directory");
+            assert!(error.detail.contains("pack-objects exit status: 41"));
+            assert!(error.detail.contains("pack-objects stderr: pack failure"));
+            return;
+        }
+        let scratch = tempfile::tempdir().expect("scratch directory");
+        let absent = scratch.path().join("absent");
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "launch::checkout::tests::checkout_pack_transfer_needs_no_temporary_directory",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("TMPDIR", &absent)
+            .output()
+            .expect("isolated transfer fixture");
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// # Panics
     /// Panics if the fixture Git config cannot be read or updated.
     fn disable_auto_maintenance(config: &Path) {
