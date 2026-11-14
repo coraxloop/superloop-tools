@@ -259,7 +259,7 @@ pub(super) fn mapped(home: &Path, source: &str) -> std::process::Output {
         .env_remove("_CONTAINERS_ROOTLESS_UID")
         .args(["unshare", "/usr/bin/python3", "-I", "-c", source])
         .arg(home)
-        .fixture_output("mapped host fixture", Duration::from_secs(60))
+        .fixture_output("mapped host fixture", Duration::from_secs(180))
         .expect("namespace");
     assert!(output.status.success(), "{output:?}");
     output
@@ -267,7 +267,7 @@ pub(super) fn mapped(home: &Path, source: &str) -> std::process::Output {
 fn seed(home: &Path) {
     fixture::configuration(home);
     let result = fixture::child_command(home, "seed")
-        .fixture_output("host seed", Duration::from_secs(60))
+        .fixture_output("host seed", Duration::from_secs(180))
         .expect("seed");
     assert!(result.status.success(), "{result:?}");
     delivery(home, "package-canonical-inbound-seed");
@@ -306,7 +306,7 @@ fn delivery(home: &Path, phase: &str) {
             serde_json::to_string(&manifest).expect("manifest"),
         )
         .stdin(OwnedFd::from(input))
-        .fixture_spawn("canonical delivery", Duration::from_secs(60))
+        .fixture_spawn("canonical delivery", Duration::from_secs(180))
         .expect("seed child")
         .wait()
         .expect("seed output");

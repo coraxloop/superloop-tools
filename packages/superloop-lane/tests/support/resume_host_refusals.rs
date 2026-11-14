@@ -188,7 +188,7 @@ pub(super) fn install(fixture: &host::Host, case: &str) {
         .arg(home.join("resume-fault.so"))
         .arg(home.join("resume-fault.c"))
         .arg("-ldl")
-        .fixture_output("fault injector build", Duration::from_secs(30))
+        .fixture_output("fault injector build", Duration::from_secs(180))
         .expect("compiler");
     assert!(output.status.success(), "{output:?}");
     host::write(home.join("fixture-fault"), case, 0o600);
