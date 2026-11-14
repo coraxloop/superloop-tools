@@ -52,6 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A failed external checkout pack transfer now names each Git command's exit status and a bounded, printable tail of its own error stream in the `checkout-git` refusal. Successful checkouts and their output are unchanged; no run or record migration is needed.
+
 - Bound mail scan wakes after restored refusals, keep delivery available through notification-limit fallback, and retry known unfinished letters on a capped backoff without waiting for unrelated changes (``proto:loophome:mail-change-wakeup``).
 
 - Make the mail service wait for kernel notifications between scans, eliminating continuous idle polling and repeated history reads per mailbox; preserve delivery checks and reduce ordinary arrival latency, while large-population active scans remain a documented limitation (``proto:loophome:mail-change-wakeup``).
