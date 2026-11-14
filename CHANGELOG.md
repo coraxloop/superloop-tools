@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Test-build fixture executables now retry transient text-file-busy spawn errors under a distant hang bound; the held-writer test drives expiry with an already exhausted budget and proves release by the retry event. Deployed spawning is unchanged (``test:unit:fixture-spawn-retries-only-text-file-busy``; ``test:unit:fixture-exec-fork-during-write-is-bounded``).
+
 - Door agent exercise tests now run their semantic and timeout probes through the existing controlled judge, so a loaded node cannot make a real-clock 2,600 ms probe appear to fail. The deployed exercise still measures real time and keeps its production budgets (``test:unit:door-agent-case-uses-production-handler-and-names-unmeasured-vendor``; ``test:unit:door-agent-audit-loop-measures-all-modes-without-prior-labels``).
 
 - The door exercise admission fixture now waits for its first observed refusal before releasing the held admission, and its test-only retry uses a distant hang bound. A loaded node can no longer exhaust a two-second test retry before that release; the deployed exercise keeps its two-second retry (``test:unit:door-exercise-retries-concurrent-admission``).
