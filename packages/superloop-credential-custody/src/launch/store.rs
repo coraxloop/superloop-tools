@@ -15,14 +15,17 @@ use std::fs::{File, Permissions};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 
-struct Directory {
+pub(super) struct Directory {
     parent: File,
     file: File,
     name: String,
     object: ObjectIdentity,
 }
 impl Directory {
-    fn create(root: &Path, name: &str) -> Result<Self> {
+    pub const fn file(&self) -> &File {
+        &self.file
+    }
+    pub fn create(root: &Path, name: &str) -> Result<Self> {
         let parent = receipt::sealed_directory(root)?;
         mkdirat(&parent, name, Mode::from_bits_truncate(0o700))
             .map_err(|_| "launch-exclusive-directory")?;
@@ -46,7 +49,7 @@ impl Directory {
             object,
         })
     }
-    fn verify(&self) -> Result<()> {
+    pub fn verify(&self) -> Result<()> {
         let current = File::from(
             openat(
                 &self.parent,
