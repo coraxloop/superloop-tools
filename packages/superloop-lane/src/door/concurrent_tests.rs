@@ -51,7 +51,7 @@ fn door_concurrent_request_refuses_before_record() {
         assert_eq!(reply["reason"], "door-request-concurrent");
         assert_eq!(
             reply["admission_window"],
-            "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds"
+            "the door waited for admission held through the durable effect and final reply; allow-mode agent publication may finish after admission is released; retry after 30 seconds"
         );
         let waited = reply["waited_seconds"].as_f64().expect("measured wait");
         assert!((0.9..1.5).contains(&waited), "waited={waited}");
@@ -359,98 +359,95 @@ fn bounded_box_request(home: &std::path::Path, store: &Store, uid: u32) -> Value
     reply
 }
 
-struct HeldAdmissionAgent {
-    entered: std::sync::mpsc::Sender<()>,
+struct CapturedAdmissionAgent {
+    input: std::sync::mpsc::Sender<Value>,
     release: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
-impl super::agent::AgentRunner for HeldAdmissionAgent {
-    fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
-        self.entered.send(()).expect("agent entered");
-        self.release
-            .lock()
-            .expect("agent release lock")
-            .recv_timeout(Duration::from_secs(10))
-            .expect("release agent");
-        super::agent::RunnerOutcome::referral("failure", "fixture bounded agent", Instant::now())
+impl super::agent::AgentRunner for CapturedAdmissionAgent {
+    fn judge(&self, input: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+        self.input.send(serde_json::from_slice(input).expect("agent input"))
+            .expect("captured prompt");
+        self.release.lock().expect("agent release")
+            .recv_timeout(FIXTURE_HANG).expect("release agent");
+        let mut result = super::agent::RunnerOutcome::referral("verdict", "fixture advice", Instant::now());
+        result.verdict = "refuse".into();
+        result.scope = "loop".into();
+        result
     }
 }
 
+struct HistoryCall {
+    client: UnixStream,
+    input: std::sync::mpsc::Receiver<Value>,
+    slot_released: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+    handler: thread::JoinHandle<io::Result<(Value, Vec<u8>)>>,
+}
+
+fn history_call(fixture: &Fixture) -> HistoryCall {
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    let (slot_tx, slot_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let agent = CapturedAdmissionAgent { input: input_tx, release: Mutex::new(release_rx) };
+    let route = route_for(&fixture.home);
+    let (runner, _, _) = counting_runner(fixture);
+    let (client, mut server) = UnixStream::pair().expect("history pair");
+    client.shutdown(Shutdown::Write).expect("EOF");
+    let home = fixture.home.clone();
+    let store = fixture.store();
+    let handler = thread::spawn(move || {
+        super::AFTER_ALLOW_ADMISSION_RELEASE.with(|slot| *slot.borrow_mut() = Some(slot_tx));
+        super::serve_request_with_agent(
+            &mut server, &concurrent_registration(3000), 3000,
+            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+            Some(&route), Some(&runner), Some(&home), None,
+            Some(&store), Some(&agent), None, Instant::now(),
+        )
+    });
+    HistoryCall { client, input: input_rx, slot_released: slot_rx, release: release_tx, handler }
+}
+
+fn history_entry(input: &Value, id: &str) -> Value {
+    input["shape_record"].as_array().expect("history").iter()
+        .find(|row| row["id"] == id).expect("earlier filed entry").clone()
+}
+
 /// # Panics
-/// Panics only if allow-mode publication releases admission before agent completion.
+/// Panics if a final reply retains admission or agent advice gains label authority.
 /// ´test:unit:door-concurrent-allow-agent-publication-window´
 #[test]
 fn door_concurrent_allow_agent_publication_window() {
     let fixture = Fixture::new();
     fixture.set_floor("allow");
     let store = fixture.store();
-    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let agent = HeldAdmissionAgent {
-        entered: entered_tx,
-        release: Mutex::new(release_rx),
-    };
-    let route = route_for(&fixture.home);
-    let (runner, _, _) = counting_runner(&fixture);
-    let (mut client, mut server) = UnixStream::pair().expect("allow pair");
-    let home = fixture.home.clone();
-    let server_store = fixture.store();
-    let handler = thread::spawn(move || {
-        super::serve_request_with_agent(
-            &mut server,
-            &concurrent_registration(3000),
-            3000,
-            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":15000}),
-            Some(&route),
-            Some(&runner),
-            Some(&home),
-            Some(&rubric(None)),
-            Some(&server_store),
-            Some(&agent),
-            None,
-            Instant::now(),
-        )
-    });
-    client.shutdown(Shutdown::Write).expect("EOF");
-    entered_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("agent active");
-    let reply = frame_read(&mut client).expect("early allow final");
-    assert_eq!(reply["reason"], "door-complete");
-    let id = wait_filed(&store);
-    assert_eq!(
-        store.request(&id).expect("effect").value()["effect"]["state"],
-        "completed"
-    );
-    let overlap = concurrent_process_request(&fixture, 3000, false);
-    assert_eq!(overlap["reason"], "door-request-concurrent");
-    assert_eq!(
-        overlap["admission_window"],
-        "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds"
-    );
-    assert_eq!(overlap["status"], 125);
-    assert_eq!(overlap["retry_after_seconds"], 30);
-    assert!(
-        (0.9..1.5).contains(
-            &overlap["waited_seconds"]
-                .as_f64()
-                .expect("publication wait")
-        )
-    );
-    assert_eq!(store.list_run("R").expect("one record").len(), 1);
-    release_tx.send(()).expect("release publication");
-    handler
-        .join()
-        .expect("allow thread")
-        .expect("publication finished");
-    assert_eq!(
-        store.request(&id).expect("published").value()["state"],
-        "waiting"
-    );
-    assert_eq!(
-        concurrent_process_request(&fixture, 3000, false)["reason"],
-        "door-request-refusal"
-    );
+    let mut first = history_call(&fixture);
+    first.input.recv_timeout(FIXTURE_HANG).expect("first agent held");
+    assert_eq!(fixture_final_frame(&mut first.client)["reason"], "door-complete");
+    first.slot_released.recv_timeout(FIXTURE_HANG).expect("slot released while agent held");
+    let id = store.list_run("R").expect("first filed")[0].id().to_owned();
+    assert_eq!(store.request(&id).expect("effect").value()["effect"]["state"], "completed");
+    let began = Instant::now();
+    let mut second = history_call(&fixture);
+    let input = second.input.recv_timeout(FIXTURE_HANG).expect("same-worker second agent overlaps");
+    let _measured = writeln!(io::stderr().lock(), "admission-history second_agent_wait_ms={}", began.elapsed().as_millis());
+    assert_eq!(store.list_run("R").expect("both filed").len(), 2);
+    assert_eq!(history_entry(&input, &id)["would_do"]["decision"], "undecided");
+    assert_eq!(fixture_final_frame(&mut second.client)["reason"], "door-complete");
+    second.slot_released.recv_timeout(FIXTURE_HANG).expect("second slot released");
+    first.release.send(()).expect("first advice released");
+    first.handler.join().expect("first handler").expect("first publication");
+    assert_eq!(store.request(&id).expect("advice recorded").value()["would_do"]["decision"], "refuse");
+    let mut third = history_call(&fixture);
+    let input = third.input.recv_timeout(FIXTURE_HANG).expect("unlabelled advice remains a miss");
+    assert_eq!(history_entry(&input, &id)["would_do"]["decision"], "refuse");
+    assert!(history_entry(&input, &id)["label"].is_null());
+    assert_eq!(fixture_final_frame(&mut third.client)["reason"], "door-complete");
+    for call in [second, third] {
+        call.release.send(()).expect("release remaining agent");
+        call.handler.join().expect("handler").expect("publication");
+    }
+    assert_eq!(store.list_run("R").expect("three agent requests").len(), 3);
 }
 
 /// # Panics

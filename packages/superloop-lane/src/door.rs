@@ -129,7 +129,7 @@ pub(crate) struct RequestWait {
 }
 
 impl RequestWait {
-    fn new(stream: &UnixStream) -> io::Result<Self> {
+    pub(crate) fn new(stream: &UnixStream) -> io::Result<Self> {
         let cap_ms = MAX_LOCK_WAIT_CREDIT_MS;
         #[cfg(test)]
         let cap_ms = WAIT_CREDIT_CAP
@@ -397,6 +397,7 @@ impl RequestGuard {
 #[cfg(test)]
 thread_local! {
     static BEFORE_CREDIT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_ALLOW_ADMISSION_RELEASE: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_CLOCK: std::cell::RefCell<Option<std::rc::Rc<dyn AdmissionClock>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_LAST_POLL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -417,7 +418,7 @@ fn post_reply_event(id: &str, phase: &str, kind: &str) {
 
 fn admission_window() -> String {
     format!(
-        "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after {RETRY_AFTER_SECONDS} seconds"
+        "the door waited for admission held through the durable effect and final reply; allow-mode agent publication may finish after admission is released; retry after {RETRY_AFTER_SECONDS} seconds"
     )
 }
 
@@ -1372,8 +1373,8 @@ fn serve_request_with_agent(
         transport::argument_bytes(request).and_then(|args| route.allowed(&args, registration))
     });
     // Claim the authenticated box before any preflight or intent record write,
-    // and retain it through the final effect publication and reply.
-    let (_request_guard, admission_error) = if let Some(home) =
+    // and retain it through the durable effect and sent final reply.
+    let (mut request_guard, admission_error) = if let Some(home) =
         owner_home.filter(|_| peer == registration.worker_uid)
     {
         match RequestGuard::acquire_wait(home, registration, request, admission_operation, started)
@@ -1749,6 +1750,15 @@ fn serve_request_with_agent(
                     Some(&complete),
                     Some(&wait),
                 );
+                if outcome.is_ok() {
+                    drop(request_guard.take());
+                    #[cfg(test)]
+                    AFTER_ALLOW_ADMISSION_RELEASE.with(|slot| {
+                        if let Some(sender) = slot.borrow_mut().take() {
+                            let _sent = sender.send(());
+                        }
+                    });
+                }
                 let judgement = agent_task.join();
                 match outcome {
                     Ok(reply) => {
@@ -1768,7 +1778,7 @@ fn serve_request_with_agent(
                                 error.kind,
                             ),
                             Ok(Ok(_)) => {
-                                if let Err(error) = store.publish_waiting(&id) {
+                                if let Err(error) = store.publish_after_reply(&id) {
                                     post_reply_failure(
                                         &store,
                                         &registration.run,
@@ -4769,7 +4779,7 @@ mod tests {
             "waited_seconds":1.001,"retry_after_seconds":30});
         assert_eq!(
             super::final_line(&["fixture".into(), "git status --short".into()], &reply),
-            Some("door-request-concurrent: waited=1.001s retry_after=30s; the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds".to_owned())
+            Some("door-request-concurrent: waited=1.001s retry_after=30s; the door waited for admission held through the durable effect and final reply; allow-mode agent publication may finish after admission is released; retry after 30 seconds".to_owned())
         );
     }
 

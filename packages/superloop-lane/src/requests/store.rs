@@ -524,6 +524,7 @@ pub struct Store {
     reader_deadline: Option<Instant>,
     reader_budget: Option<Duration>,
     writer_deadline: Option<Instant>,
+    strict_writer_deadline: bool,
     request_id: Option<String>,
     wait_credit: Option<std::sync::Arc<crate::door::RequestWait>>,
 }
@@ -550,9 +551,23 @@ impl Store {
             reader_deadline: Some(deadline),
             reader_budget: None,
             writer_deadline: Some(deadline),
+            strict_writer_deadline: false,
             request_id: None,
             wait_credit: None,
         })
+    }
+
+    /// Publish after the reply under a fresh, uncredited lock-admission bound.
+    pub(crate) fn publish_after_reply(&self, id: &str) -> Result<RequestRecord, LaneError> {
+        self.publication_view(Instant::now() + Duration::from_secs(15))?
+            .with_request_id(id)
+            .publish_waiting(id)
+    }
+
+    fn publication_view(&self, deadline: Instant) -> Result<Self, LaneError> {
+        let mut view = self.for_request(deadline)?;
+        view.strict_writer_deadline = true;
+        Ok(view)
     }
 
     pub(crate) fn with_wait_credit(
@@ -659,6 +674,7 @@ impl Store {
             reader_deadline: None,
             reader_budget: None,
             writer_deadline: None,
+            strict_writer_deadline: false,
             request_id: None,
             wait_credit: None,
             runs,
@@ -1170,7 +1186,7 @@ impl Store {
         let deadline = deadline.map(|end| end + initial_credit);
         // A late effect, deadline outcome or agent publication still gets the
         // base writer allowance. Fix this bound once, never at each retry.
-        let base_deadline = if changing {
+        let base_deadline = if changing && !self.strict_writer_deadline {
             deadline.map(|end| end.max(started + writer_lock_wait()))
         } else {
             deadline
@@ -2988,6 +3004,75 @@ pub(crate) mod tests {
             holder.request("R:1a").expect("durable effect").value()["effect"],
             effect
         );
+    }
+
+    /// # Panics
+    /// Panics if post-reply admission renews an expired bound or inherits credit.
+    /// ´test:unit:post-reply-publication-keeps-absolute-uncredited-admission´
+    #[test]
+    fn post_reply_publication_keeps_absolute_uncredited_admission() {
+        use std::time::{Duration, Instant};
+        let fixture = Fixture::new();
+        let store = fixture.store().with_request_id("R:1a");
+        let (server, _peer) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let credit = std::sync::Arc::new(crate::door::RequestWait::new(&server).expect("wait"));
+        credit.credit(Duration::from_secs(30));
+        let store = store.with_wait_credit(credit);
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("past");
+        let view = store.publication_view(expired).expect("publication view");
+        assert!(
+            view.wait_credit.is_none(),
+            "post-reply admission inherits no credit"
+        );
+        let held = store.fixture_exclusive_lock().expect("holder");
+        super::AFTER_WRITER_LOCK_CONTENTION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || drop(held)));
+        });
+        let error = view
+            .write_lock("publication-bound")
+            .expect_err("expired bound stays expired");
+        assert!(super::is_lock_contention(&error));
+        drop(
+            view.write_lock("publication-released")
+                .expect("uncontended acquisition remains first"),
+        );
+    }
+
+    /// # Panics
+    /// Panics if an allow-mode agent's opposing advice creates a mode correction.
+    /// ´test:unit:allow-agent-advice-keeps-owner-label-authority´
+    #[test]
+    fn allow_agent_advice_keeps_owner_label_authority() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        store.ensure_first_mode("fixture").expect("mode");
+        let before = store.effective_mode("fixture").expect("before");
+        let request = fixture_request_with_mode(&store, "R", "1a", 3000, Mode::Allow, "undecided");
+        assert_eq!(request.value()["mode"], "allow");
+        store.file(request).expect("file");
+        let mut advice = crate::door::agent::RunnerOutcome::referral(
+            "verdict",
+            "fixture refusal",
+            std::time::Instant::now(),
+        );
+        advice.verdict = "refuse".into();
+        advice.scope = "loop".into();
+        store
+            .record_agent("R:1a", &advice, None, None)
+            .expect("advice");
+        assert!(store.request("R:1a").expect("unlabelled").value()["label"].is_null());
+        store.triage("R", &[json!({"id":"R:1a","action":"adjudicate","treatment":"allow","reason":"owner decision"})], "owner", "2").expect("opposing owner label");
+        let request = store.request("R:1a").expect("labelled");
+        assert_eq!(request.value()["label"]["would_do"]["decision"], "refuse");
+        assert!(
+            !super::correction_pending(&request, &store.read_modes().expect("ledger"))
+                .expect("correction")
+        );
+        assert_eq!(store.effective_mode("fixture").expect("after"), before);
+        // Owner-label learning itself is pinned by learned_rubric_keeps_retired_conflicts_and_citations.
     }
 
     /// ´test:unit:rewrite-upgrades-helper-copies-and-resumes-after-custody-publication´

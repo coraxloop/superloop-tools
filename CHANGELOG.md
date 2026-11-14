@@ -34,6 +34,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Keep ordinary mail preparation off the retained delivery history with a writer-owned lookup rebuilt at restart and updated after durable transitions. Delivery checks and record formats stay unchanged; the service still reads history for retention and exceptional recovery, and still counts staging across mailboxes. Install the binary and restart the mail service; loops need no mailbox rewrite or resubmission (``proto:loophome:mail-preparation-index``).
 
+- An allow-mode door releases its admission slot after the durable effect and sent final reply, before joining its advisory agent. Later calls from that worker can overlap agent work and see judgement history before the earlier verdict is recorded; learning and correction authority do not change. The waiting publication gets a fresh, uncredited 15-second lock-admission bound, with failures visible in the journal and status. Refresh and restart each door between requests; no record migration is needed (``rule:superlooplane:door-request-admission``).
+
 - The public resumed-launch fixture waits for reservation publication events instead of polling against a ten-second deadline; its 180-second hang bound does not select a launch outcome (`public_resumed_launch_uses_real_work_scope`).
 
 - Pin the public rollback retention boundaries with a live work process, an in-place changed request and a durable dispatch intent. These test-only controls distinguish unsafe restoration and deletion from the supported live retry; they add no recovery command (`public_resumed_rollback_retains_dispatch_intent`).
@@ -78,7 +80,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Agent fixture tests now use one distant hang bound for runner cap and semantic judge budgets, including recorded-runner and temporary-home checks, so node load cannot turn their verdicts into fixture timeouts. The immediately refused 10 ms request is decided before execution; the shortened reaping claim uses a controlled clock. Running doors keep their production budget (``test:unit:runner-isolates-loop-sign-in-and-rubric``; ``test:unit:agent-input-limit-and-refresh-link-replacement``; ``test:unit:real-agent-absent-sign-in-is-unmeasured-from-runner``).
 
-- Doors send no request-lock progress or second refusal after a successful final reply. Late agent and publication failures name the request and phase in the service journal; `requests status` and retirement expose recorded effects awaiting publication, including work still running. Refresh and restart a door to update its own copy; installed status and retirement commands gain the listing immediately. Admission still remains held through publication (``rule:superlooplane:door-request-admission``).
+- Doors send no request-lock progress or second refusal after a successful final reply. Late agent and publication failures name the request and phase in the service journal; `requests status` and retirement expose recorded effects awaiting publication, including work still running. Refresh and restart a door to update its own copy; installed status and retirement commands gain the listing immediately. (``rule:superlooplane:door-request-admission``).
 
 - The slow 206 MiB route transfer check now uses the gate build profile and reports transfer time as a measurement, without treating node load as a failed upload. Its integrity and 512 MiB output-bound checks remain; the door's 120-second production command deadline is unchanged.
 
