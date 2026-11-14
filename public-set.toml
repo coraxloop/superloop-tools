@@ -3351,6 +3351,9 @@ pattern = "packages/loop-home/src/mail/journal_tests.rs"
 pattern = "packages/loop-home/src/mail/store.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/mail/preparation_index.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/mail/publication.rs"
 
 [[include.rows]]

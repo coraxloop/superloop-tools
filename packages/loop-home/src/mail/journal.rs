@@ -353,6 +353,7 @@ pub struct Journal {
     root: File,
     records: File,
     usage: store::Usage,
+    preparations: std::cell::RefCell<Option<super::preparation_index::Index>>,
     _lock: Flock<File>,
     state: State,
     checkpoint: Checkpoint,
@@ -441,8 +442,10 @@ impl Journal {
             checkpoint,
             uncommitted: BTreeMap::new(),
             usage: store::Usage::default(),
+            preparations: std::cell::RefCell::new(None),
         };
         journal.remeasure()?;
+        *journal.preparations.borrow_mut() = Some(super::preparation_index::Index::default());
         Ok(journal)
     }
 
@@ -503,6 +506,7 @@ impl Journal {
             checkpoint,
             uncommitted: BTreeMap::new(),
             usage: store::Usage::default(),
+            preparations: std::cell::RefCell::new(None),
         };
         {
             let _admission = journal.usage.admit(&journal.root)?;
@@ -688,6 +692,7 @@ impl Journal {
         if record.outgoing != outgoing || record.bytes != bytes || record.digest != payload_digest {
             return Err(MailError::Invalid("source reconciliation mismatch"));
         }
+        self.preparations.borrow_mut().take();
         self.remove_private(&self.records, &format!(".{instant}.toml.replace"))?;
         self.uncommitted.remove(instant);
         Ok(())
@@ -793,12 +798,7 @@ impl Journal {
         consumed.acceptance_available = false;
         self.write_private(&self.root, "state.toml", &consumed, true)?;
         self.state = consumed;
-        self.write_private(
-            &self.records,
-            &format!("{}.toml", record.delivery),
-            record,
-            false,
-        )
+        self.write_record(record, false)
     }
 
     /// Read one exact protected delivery record.
@@ -822,7 +822,8 @@ impl Journal {
     pub fn records(&self) -> Result<Vec<Record>> {
         #[cfg(test)]
         RECORD_SCANS.with(|count| count.set(count.get() + 1));
-        store::names(&self.records)?
+        self.preparations.borrow_mut().take();
+        let records = store::names(&self.records)?
             .into_iter()
             .filter(|name| {
                 !self
@@ -837,17 +838,61 @@ impl Journal {
                 )?;
                 self.record(&instant)
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        let mut index = super::preparation_index::Index::default();
+        for record in &records {
+            index.record(record, true);
+        }
+        for record in self.uncommitted.values() {
+            index.reserve_paths(record);
+        }
+        *self.preparations.borrow_mut() = Some(index);
+        Ok(records)
     }
 
     fn replace(&self, record: &Record) -> Result<()> {
         record.validate()?;
-        self.write_private(
+        self.write_record(record, true)
+    }
+
+    fn write_record(&self, record: &Record, replace: bool) -> Result<()> {
+        let result = self.write_private(
             &self.records,
             &format!("{}.toml", record.delivery),
             record,
-            true,
+            replace,
+        );
+        if result.is_ok() {
+            if let Some(index) = self.preparations.borrow_mut().as_mut() {
+                index.record(record, !replace);
+            }
+        } else {
+            self.preparations.borrow_mut().take();
+        }
+        result
+    }
+    fn preparation_view<T>(
+        &self,
+        query: impl FnOnce(&mut super::preparation_index::Index) -> Result<T>,
+    ) -> Result<T> {
+        if self.preparations.borrow().is_none() {
+            self.records()?;
+        }
+        query(
+            self.preparations
+                .borrow_mut()
+                .as_mut()
+                .ok_or(MailError::Invalid("preparation index unavailable"))?,
         )
+    }
+    pub(super) fn preparation_pending(&self, sender: &str, outgoing: &str) -> Result<bool> {
+        self.preparation_view(|index| Ok(index.pending(sender, outgoing)))
+    }
+    pub(super) fn temporary_reserved(&self, path: &std::path::Path) -> Result<bool> {
+        self.preparation_view(|index| index.reserved(path))
+    }
+    pub(super) fn preparation_serial(&self) -> Result<u128> {
+        self.preparation_view(super::preparation_index::Index::next_serial)
     }
 
     /// Measure terminal age from the latest known instant, including on rollback.
@@ -1017,7 +1062,16 @@ impl Journal {
                     if digest(&bytes) != removal.digest {
                         return Err(MailError::Invalid("compaction record changed"));
                     }
-                    self.remove_private(&self.records, &name)?;
+                    let record = self.record(&removal.delivery)?;
+                    let result = self.remove_private(&self.records, &name);
+                    if result.is_ok() {
+                        if let Some(index) = self.preparations.borrow_mut().as_mut() {
+                            index.remove(&record);
+                        }
+                    } else {
+                        self.preparations.borrow_mut().take();
+                    }
+                    result?;
                 }
                 Err(MailError::Io(error)) if error.kind() == io::ErrorKind::NotFound => (),
                 Err(error) => return Err(error),

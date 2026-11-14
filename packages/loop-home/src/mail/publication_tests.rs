@@ -563,6 +563,8 @@ fn mail_retained_witness_names_are_not_reused_by_later_submissions() {
     journal
         .advance(&first.delivery, Phase::Complete, &Witness::Absent, now())
         .expect("complete");
+    drop(journal);
+    let journal = fixture.reopen();
     source(&endpoint, &endpoint, b"second");
     let prepared = prepare(&journal, &endpoint, &endpoint, &outgoing).expect("new snapshot");
     assert_ne!(
@@ -975,4 +977,24 @@ fn endpoint_admission_refusals(row: &crate::registry::LoopRecord, root: &Path, n
             "{case}: {error}"
         );
     }
+}
+
+/// ´claim:loophome:mail-preparation-index-refuses-duplicate-without-history´
+/// ´test:unit:mail-preparation-index-refuses-duplicate-without-history´
+#[test]
+fn mail_preparation_index_refuses_duplicate_without_history() {
+    let fixture = Fixture::new();
+    let endpoint = fixture.endpoint("alpha", group());
+    let mut journal = fixture.journal();
+    let outgoing = source(&endpoint, &endpoint, b"pending");
+    accepted(&mut journal, &endpoint, &endpoint, &outgoing);
+    super::super::journal::RECORD_SCANS.with(|count| count.set(0));
+    assert!(matches!(
+        prepare(&journal, &endpoint, &endpoint, &outgoing),
+        Err(MailError::Invalid("source preparation requires recovery"))
+    ));
+    assert_eq!(
+        super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+        0
+    );
 }

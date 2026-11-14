@@ -603,23 +603,13 @@ pub fn prepare(
     if !unchanged(&before, &source.metadata()?) {
         return Err(MailError::Invalid("changed-source"));
     }
-    let records = journal.records()?;
-    if records.iter().any(|record| {
-        record.sender == sender.address.to_string()
-            && record.outgoing == outgoing
-            && record.completed.is_none()
-    }) || preparation_names(journal, sender, recipient, outgoing)?.is_some()
+    if journal.preparation_pending(&sender.address.to_string(), outgoing)?
+        || preparation_names(journal, sender, recipient, outgoing)?.is_some()
     {
         return Err(MailError::Invalid("source preparation requires recovery"));
     }
-    let preparation = allocate_preparation(
-        journal,
-        sender,
-        recipient,
-        outgoing,
-        &identity(&before),
-        &records,
-    )?;
+    let preparation =
+        allocate_preparation(journal, sender, recipient, outgoing, &identity(&before))?;
     let (snapshot_name, copy_name) = preparation_names(journal, sender, recipient, outgoing)?
         .ok_or(MailError::Invalid("missing preparation intent"))?;
     let receiver = recipient.temporary(&snapshot_name, &bytes)?;
@@ -1040,21 +1030,8 @@ fn allocate_preparation(
     recipient: &Endpoint,
     outgoing: &str,
     source_identity: &Identity,
-    records: &[Record],
 ) -> Result<String> {
-    let uncommitted = journal.uncommitted();
-    let mut used: BTreeSet<String> = records
-        .iter()
-        .chain(uncommitted.iter())
-        .flat_map(|record| {
-            std::iter::once(record.recipient_temporary.path.clone()).chain(
-                record
-                    .sender_temporary
-                    .iter()
-                    .map(|temporary| temporary.path.clone()),
-            )
-        })
-        .collect();
+    let mut used = BTreeSet::new();
     for preparation in preparations(journal)? {
         used.insert(preparation.snapshot_path);
         used.extend(preparation.copy_path);
@@ -1070,18 +1047,20 @@ fn allocate_preparation(
             );
         }
     }
-    let (snapshot, copy) = (0..=u64::MAX)
-        .map(|serial| {
-            (
-                recipient.staging_path.join(format!("payload-{serial}")),
-                sender.staging_path.join(format!("copy-{serial}")),
-            )
-        })
-        .find(|(snapshot, copy)| {
-            !used.contains(snapshot.to_string_lossy().as_ref())
-                && !used.contains(copy.to_string_lossy().as_ref())
-        })
-        .ok_or(MailError::Capacity)?;
+    // The cursor starts beyond retained serials; lookup preserves every path exclusion
+    // without probing one old name per retained record on the first new delivery.
+    let (snapshot, copy) = loop {
+        let serial = journal.preparation_serial()?;
+        let snapshot = recipient.staging_path.join(format!("payload-{serial}"));
+        let copy = sender.staging_path.join(format!("copy-{serial}"));
+        if !used.contains(snapshot.to_string_lossy().as_ref())
+            && !used.contains(copy.to_string_lossy().as_ref())
+            && !journal.temporary_reserved(&snapshot)?
+            && !journal.temporary_reserved(&copy)?
+        {
+            break (snapshot, copy);
+        }
+    };
     let shared = sender.group == recipient.group
         && sender.staging.metadata()?.dev() == recipient.staging.metadata()?.dev();
     let intent = Preparation {

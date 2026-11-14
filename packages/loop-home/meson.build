@@ -54,6 +54,7 @@ pkg_loop_home_rust = files(
   'src/mail/journal.rs',
   'src/mail/journal_tests.rs',
   'src/mail/store.rs',
+  'src/mail/preparation_index.rs',
   'src/mail/publication.rs',
   'src/mail/publication_tests.rs',
   'src/mail/names.rs',

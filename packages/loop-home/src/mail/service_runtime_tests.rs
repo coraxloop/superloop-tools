@@ -637,8 +637,8 @@ fn mail_selected_scan_leaves_unrelated_outboxes_queued() {
             );
             assert_eq!(
                 super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
-                1,
-                "only the deferred preparation check reads history"
+                0,
+                "ordinary delivery does not read retained history"
             );
             delivered(home, "alpha", 1);
             delivered(home, "beta", 0);

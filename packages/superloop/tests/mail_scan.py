@@ -95,13 +95,20 @@ def assert_operations(reading):
         assert 0<=reading['unrelated_loop_operations'][operation]<=bound, f'unrelated {operation} operations exceeded the selected-delivery bound'
     assert reading['unrelated_directory_reads']['outbox']==0, 'unrelated outbox was listed'
     assert reading['unrelated_directory_reads']['staging']<=3, 'extra unrelated staging walks'
-    assert 1<=reading['history_passes']<=3, 'full recovery returned to the selected scan'
+    assert reading['history_passes']==0, 'ordinary delivery read retained history'
+    assert reading['history_record_opens']==0, 'ordinary delivery opened a retained record'
 
 def observation_check():
     assert scan_starts('mail scan complete\nmail selected scan complete\n')==0
     assert scan_starts('mail scan started\nmail scan complete\nmail scan started\nmail selected scan complete\n')==2
-    sample={'phases':{'wake':{'open':0,'stat':0,'list':0,'history_reads':0}},'unrelated_loop_operations':{'open':35,'stat':40,'list':8},'unrelated_directory_reads':{'outbox':0,'staging':2},'history_passes':2}
+    sample={'phases':{'wake':{'open':0,'stat':0,'list':0,'history_reads':0}},'unrelated_loop_operations':{'open':35,'stat':40,'list':8},'unrelated_directory_reads':{'outbox':0,'staging':2},'history_passes':0,'history_record_opens':0}
     assert_operations(sample) # Harmless extra metadata operations have explicit headroom.
+    for key in ['history_passes','history_record_opens']:
+        sample[key]=1
+        try:assert_operations(sample)
+        except AssertionError:pass
+        else:raise AssertionError(f'{key} must fail the retained-history guard')
+        sample[key]=0
     sample['unrelated_directory_reads']['outbox']=1
     try:assert_operations(sample)
     except AssertionError:pass

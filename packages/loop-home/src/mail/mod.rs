@@ -6,6 +6,7 @@
 pub mod instant;
 pub mod journal;
 mod names;
+mod preparation_index;
 pub mod publication;
 mod store;
 

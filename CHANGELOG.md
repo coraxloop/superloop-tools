@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Keep ordinary mail preparation off the retained delivery history with a writer-owned lookup rebuilt at restart and updated after durable transitions. Delivery checks and record formats stay unchanged; the service still reads history for retention and exceptional recovery, and still counts staging across mailboxes. Install the binary and restart the mail service; loops need no mailbox rewrite or resubmission (``proto:loophome:mail-preparation-index``).
+
 - The public resumed-launch fixture waits for reservation publication events instead of polling against a ten-second deadline; its 180-second hang bound does not select a launch outcome (`public_resumed_launch_uses_real_work_scope`).
 
 - Pin the public rollback retention boundaries with a live work process, an in-place changed request and a durable dispatch intent. These test-only controls distinguish unsafe restoration and deletion from the supported live retry; they add no recovery command (`public_resumed_rollback_retains_dispatch_intent`).
