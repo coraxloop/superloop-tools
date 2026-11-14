@@ -94,6 +94,11 @@ impl Drop for MappedStorage {
 /// # Panics
 /// Panics if the package binary built beside Cargo's unit test executable is absent.
 pub(super) fn binary() -> PathBuf {
+    std::io::Write::write_all(
+        &mut std::io::stderr().lock(),
+        b"focused library proof: build the package binary first with `cargo build --locked -p superloop-lane --bin superloop-lane`\n",
+    )
+    .expect("focused build warning");
     let image = std::env::current_exe().expect("test executable");
     // The nearest ancestor holding the binary is its profile directory, the gate's custom one too.
     let binary = image
@@ -106,6 +111,36 @@ pub(super) fn binary() -> PathBuf {
         "unmeasured runtime entry: build the package binary before the focused library test"
     );
     binary
+}
+
+/// ´test:crate:focused-library-binary-names-build-precondition´
+#[test]
+fn focused_library_binary_names_build_precondition() {
+    const CHILD: &str = "SUPERLOOP_FOCUSED_BINARY_WARNING_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        drop(binary());
+        return;
+    }
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "tests::runtime_preparation::focused_library_binary_names_build_precondition",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .expect("focused child");
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "build the package binary first with `cargo build --locked -p superloop-lane --bin superloop-lane`"
+        ),
+        "missing build warning: {output:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "focused child did not run: {output:?}"
+    );
 }
 
 /// # Panics

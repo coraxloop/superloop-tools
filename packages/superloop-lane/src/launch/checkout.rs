@@ -884,11 +884,11 @@ fn copy_pack_stream(
     receiver: &mut impl std::io::Write,
 ) -> std::io::Result<u64> {
     let mut bytes = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = [0_u8; 16 * 1024];
     loop {
         let read = loop {
             match source.read(&mut buffer) {
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 result => break result?,
             }
         };
@@ -900,7 +900,7 @@ fn copy_pack_stream(
             match receiver.write(&buffer[written..read]) {
                 Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
                 Ok(count) => written += count,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error),
             }
         }
@@ -1677,7 +1677,7 @@ mod tests {
         .expect("rendezvous pipe");
         let rendezvous = rendezvous.to_str().expect("UTF-8 fixture path");
         let pack_script = format!(
-            r#"import os,pathlib,select,sys
+            r"import os,pathlib,select,sys
 p=pathlib.Path({rendezvous:?})
 with p.open('rb') as gate:
     pid=int(gate.read())
@@ -1686,15 +1686,15 @@ poll=select.poll()
 poll.register(fd, select.POLLIN)
 poll.poll()
 os.close(fd)
-sys.stdout.buffer.write(b'x' * (4 * 1024 * 1024))"#
+sys.stdout.buffer.write(b'x' * (4 * 1024 * 1024))"
         );
         let index_script = format!(
-            r#"import os,pathlib
+            r"import os,pathlib
 os.close(0)
 with pathlib.Path({rendezvous:?}).open('wb') as gate:
     gate.write(str(os.getpid()).encode())
 os.write(2,b'index closed input\n')
-os._exit(0)"#
+os._exit(0)"
         );
         let (sender, receiver) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
