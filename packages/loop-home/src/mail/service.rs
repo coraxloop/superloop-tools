@@ -20,6 +20,9 @@ use std::time::{Duration, Instant as Monotonic};
 trait Clock {
     fn now(&mut self) -> Result<Instant>;
     fn wait(&mut self);
+    fn monotonic(&self) -> Monotonic {
+        Monotonic::now()
+    }
 }
 struct HostClock;
 impl Clock for HostClock {
@@ -43,6 +46,10 @@ pub(super) struct Service {
     clock: Box<dyn Clock>,
     last_scan: Option<Monotonic>,
     retries: retry::Queue,
+    refused: BTreeMap<retry::Key, (u64, u64, u64)>,
+    configuration: u64,
+    #[cfg(test)]
+    attempts: usize,
 }
 impl Service {
     pub fn new(directory: Directory, journal: Journal) -> Self {
@@ -53,6 +60,10 @@ impl Service {
             clock: Box::new(HostClock),
             last_scan: None,
             retries: retry::Queue::default(),
+            refused: BTreeMap::new(),
+            configuration: 0,
+            #[cfg(test)]
+            attempts: 0,
         }
     }
     fn pins(inventory: &Inventory, records: &[Record]) -> Result<Pins> {
@@ -108,50 +119,100 @@ impl Service {
         }
     }
     pub fn wait_for_change(
-        &self,
+        &mut self,
         notifications: &mut super::notify::Notifications,
     ) -> Result<Wake> {
         loop {
             let maintenance = self.maintenance_wait(notifications);
             let wait = self
                 .retries
-                .wait(Monotonic::now())
+                .wait(self.clock.monotonic())
                 .map_or(maintenance, |retry| retry.min(maintenance));
-            for change in notifications.wait(wait)? {
+            let changes = notifications.wait(wait)?;
+            // Decode the complete batch before filtering: configuration can follow an outbox event.
+            self.configuration_changed(notifications);
+            let mut scan = false;
+            let mut retry = false;
+            for change in changes {
                 match change {
-                    super::notify::Change::Reconcile => return Ok(Wake::Scan),
+                    super::notify::Change::Reconcile => scan = true,
                     super::notify::Change::Timer => {
-                        if self.maintenance_wait(notifications).is_zero() {
-                            return Ok(Wake::Scan);
-                        }
-                        if self
+                        scan |= self.maintenance_wait(notifications).is_zero();
+                        retry |= self
                             .retries
-                            .wait(Monotonic::now())
-                            .is_some_and(|wait| wait.is_zero())
-                        {
-                            return Ok(Wake::Retry);
-                        }
+                            .wait(self.clock.monotonic())
+                            .is_some_and(|wait| wait.is_zero());
                     }
                     super::notify::Change::Outbox(path, sender, name) => {
-                        // Ignore only an exact, protected service sidecar. A suffix grants nothing.
+                        if !self.source_ready(&sender, &name, self.clock.monotonic()) {
+                            continue;
+                        }
                         let recognized = io::absolute(&path, true).and_then(|outbox| {
                             refusal::recognized(&self.journal, &outbox, &sender.to_string(), &name)
                         });
-                        if !matches!(recognized, Ok(true)) {
-                            return Ok(Wake::Scan);
-                        }
+                        scan |= !matches!(recognized, Ok(true));
                     }
                 }
             }
+            scan |= self.maintenance_wait(notifications).is_zero();
+            retry |= self
+                .retries
+                .wait(self.clock.monotonic())
+                .is_some_and(|wait| wait.is_zero());
+            if scan {
+                return Ok(Wake::Scan);
+            }
+            if retry {
+                return Ok(Wake::Retry);
+            }
         }
     }
+    fn configuration_changed(&mut self, notifications: &super::notify::Notifications) {
+        if self.configuration != notifications.configuration() {
+            self.refused.clear();
+            self.configuration = notifications.configuration();
+        }
+    }
+    fn source_identity(&self, sender: &Address, name: &OsStr) -> Result<(u64, u64, u64)> {
+        let path = self
+            .directory
+            .home
+            .join(".var/loops")
+            .join(sender.relative_mailbox())
+            .join("outbox");
+        let outbox = io::absolute(&path, true)?;
+        let info =
+            nix::sys::stat::fstatat(&outbox, name, nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW)?;
+        Ok((
+            info.st_dev,
+            info.st_ino,
+            u64::try_from(info.st_size)
+                .map_err(|_| MailError::Invalid("invalid-file: negative source size"))?,
+        ))
+    }
+    fn source_ready(&mut self, sender: &Address, name: &OsStr, now: Monotonic) -> bool {
+        let key = (sender.clone(), name.to_owned());
+        let Some(prior) = self.refused.get(&key).copied() else {
+            return true;
+        };
+        let current = self.source_identity(sender, name);
+        if matches!(&current, Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            self.refused.remove(&key);
+            self.retries.remove_source(&key);
+        }
+        self.retries.ready(&key, now) || current.ok() != Some(prior)
+    }
     fn retry_later(&mut self, sender: &Address, name: &OsStr, work: retry::Work) {
-        self.retries
-            .schedule((sender.clone(), name.to_owned()), work, Monotonic::now());
+        self.retries.schedule(
+            (sender.clone(), name.to_owned()),
+            work,
+            self.clock.monotonic(),
+        );
     }
     /// The retry clock enumerates only due keys, never sender outboxes or a discovery scan.
     pub fn retry_due(&mut self) -> Vec<String> {
-        self.retry_due_at(Monotonic::now())
+        self.retry_due_at(self.clock.monotonic())
     }
     fn retry_due_at(&mut self, now: Monotonic) -> Vec<String> {
         let mut failures = Vec::new();
@@ -168,7 +229,11 @@ impl Service {
             tracing::debug!(sender = %key.0, letter = %key.1.to_string_lossy(), success = result.is_ok(), "mail retry complete");
             if let Err(error) = result {
                 failures.push(format!("{}: {error}", key.0));
-                self.retries.failed(key, entry, Monotonic::now());
+                if !matches!(&entry.work, retry::Work::Source) || timed_retry(&error) {
+                    self.retries.failed(key, entry, self.clock.monotonic());
+                } else {
+                    self.retries.remove_source(&key);
+                }
             } else {
                 self.retries.remove(&key);
             }
@@ -205,6 +270,8 @@ impl Service {
         }
     }
     fn retry_source(&mut self, sender: &Address, name: &OsStr) -> Result<()> {
+        // The due queue authorizes this attempt even though it has removed the deadline.
+        self.refused.remove(&(sender.clone(), name.to_owned()));
         // Presence is only a hint; candidate performs every fresh admission check itself.
         let path = self
             .directory
@@ -251,6 +318,7 @@ impl Service {
         });
         inventory.failures.extend(failures);
         notifications.finish_scan();
+        self.configuration_changed(notifications);
         // Arming precedes candidate enumeration, including the first scan after restart.
         let count = inventory.actors.len();
         let result = self.scan_inventory(&inventory);
@@ -578,12 +646,36 @@ impl Service {
         Ok(failures)
     }
     fn candidate(&mut self, sender_address: &Address, name: &OsStr) -> Result<()> {
+        if !self.source_ready(sender_address, name, self.clock.monotonic()) {
+            return Ok(());
+        }
+        let key = (sender_address.clone(), name.to_owned());
+        let due = self.retries.take_source_due(&key, self.clock.monotonic());
+        // Observe before attempting; an actor replacement during refusal is not the refused inode.
+        let identity = self.source_identity(sender_address, name).ok();
+        #[cfg(test)]
+        {
+            self.attempts += 1;
+        }
+        tracing::debug!(sender = %sender_address, letter = %name.to_string_lossy(), "mail candidate attempt");
         let result = self.try_candidate(sender_address, name);
-        if result.as_ref().is_err_and(timed_retry) {
-            self.retry_later(sender_address, name, retry::Work::Source);
-        } else if result.is_ok() {
-            self.retries
-                .remove(&(sender_address.clone(), name.to_owned()));
+        if result.is_err() {
+            if let Some(identity) = identity {
+                self.refused.insert(key.clone(), identity);
+            }
+            if result.as_ref().is_err_and(timed_retry) {
+                if let Some(entry) = due {
+                    self.retries
+                        .failed(key.clone(), entry, self.clock.monotonic());
+                } else {
+                    self.retry_later(sender_address, name, retry::Work::Source);
+                }
+            } else {
+                self.retries.remove_source(&key);
+            }
+        } else {
+            self.refused.remove(&key);
+            self.retries.remove(&key);
         }
         result
     }

@@ -46,6 +46,29 @@ impl Queue {
         self.deadlines.remove(&(entry.when, key.clone()));
         Some(entry)
     }
+    pub fn ready(&self, key: &Key, now: Monotonic) -> bool {
+        self.keys.get(key).is_some_and(|entry| entry.when <= now)
+    }
+    pub fn take_source_due(&mut self, key: &Key, now: Monotonic) -> Option<Entry> {
+        if self
+            .keys
+            .get(key)
+            .is_some_and(|entry| entry.when <= now && matches!(&entry.work, Work::Source))
+        {
+            self.remove(key)
+        } else {
+            None
+        }
+    }
+    pub fn remove_source(&mut self, key: &Key) {
+        if self
+            .keys
+            .get(key)
+            .is_some_and(|entry| matches!(&entry.work, Work::Source))
+        {
+            self.remove(key);
+        }
+    }
     pub fn wait(&self, now: Monotonic) -> Option<Duration> {
         self.deadlines
             .first()

@@ -230,6 +230,7 @@ fn mail_service_scan_delivers_a_self_addressed_letter() {
         |service, home| {
             assert_eq!(service.scan().expect("scan"), Vec::<String>::new());
             delivered(home, "alpha", 1);
+            delivered(home, "beta", 1);
             assert!(
                 !home
                     .join(".var/loops/alpha/mail/outbox/alpha.self.letter")
@@ -451,6 +452,121 @@ fn mail_retry_clock_finishes_accepted_publication_without_a_wake() {
                 publication::pending_preparations(&service.journal).expect("reconciled intent"),
                 Vec::<(Address, Address, String)>::new()
             );
+        },
+    );
+}
+
+struct ControlledClock {
+    base: Monotonic,
+    seconds: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+impl Clock for ControlledClock {
+    fn now(&mut self) -> Result<Instant> {
+        Instant::now()
+    }
+    fn wait(&mut self) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    fn monotonic(&self) -> Monotonic {
+        self.base + Duration::from_secs(self.seconds.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// ´claim:loophome:mail-refusal-identity-gates-scans-until-change-or-deadline´
+/// ´test:unit:mail-refusal-identity-gates-scans-until-change-or-deadline´
+#[test]
+fn mail_refusal_identity_gates_scans_until_change_or_deadline() {
+    fixture(
+        "mail_refusal_identity_gates_scans_until_change_or_deadline",
+        |service, home| {
+            let seconds = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            service.clock = Box::new(ControlledClock {
+                base: Monotonic::now(),
+                seconds: seconds.clone(),
+            });
+            fs::remove_file(home.join(".var/loops/beta/mail/outbox/beta.self.letter"))
+                .expect("one source");
+            let records = home.join(".var/loops/.mail-service/deliveries");
+            fs::set_permissions(&records, fs::Permissions::from_mode(0o500))
+                .expect("persistent post-claim failure");
+            let source = home.join(".var/loops/alpha/mail/outbox/alpha.self.letter");
+            let original = source.metadata().expect("original identity").ino();
+            for second in 0..=60 {
+                seconds.store(second, std::sync::atomic::Ordering::Relaxed);
+                if second == 3 || second == 15 {
+                    assert_eq!(
+                        service.retry_due().len(),
+                        1,
+                        "timer retries without an event"
+                    );
+                }
+                service.scan().expect("scan with a refused candidate");
+                assert_eq!(
+                    service.retry_due(),
+                    Vec::<String>::new(),
+                    "scan consumes its due source deadline"
+                );
+            }
+            assert_eq!(
+                service.attempts, 6,
+                "attempts only at 0, 1, 3, 7, 15 and 31 seconds"
+            );
+            assert_eq!(source.metadata().expect("restored source").ino(), original);
+            let before = service.attempts;
+            let mut notifications = notify::Notifications::new();
+            notifications.invalidate_configuration();
+            service.configuration_changed(&notifications);
+            service.scan().expect("configuration wake");
+            assert_eq!(
+                service.attempts,
+                before + 1,
+                "configuration retries unchanged source"
+            );
+            let replacement = source.with_file_name("replacement");
+            fs::copy(&source, &replacement).expect("new inode with equal size");
+            fs::rename(&replacement, &source).expect("replace source");
+            service.scan().expect("inode change");
+            assert_eq!(
+                service.attempts,
+                before + 2,
+                "replacement retries without waiting"
+            );
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&source)
+                .expect("fixture-owned replacement")
+                .write_all(b"longer")
+                .expect("size change");
+            service.scan().expect("size change");
+            assert_eq!(
+                service.attempts,
+                before + 3,
+                "same inode with new size retries"
+            );
+            service.scan().expect("unchanged permanent refusal");
+            assert_eq!(service.attempts, before + 3);
+        },
+    );
+}
+
+/// ´claim:loophome:mail-refusal-timer-drops-a-source-that-becomes-permanent´
+/// ´test:unit:mail-refusal-timer-drops-a-source-that-becomes-permanent´
+#[test]
+fn mail_refusal_timer_drops_a_source_that_becomes_permanent() {
+    fixture(
+        "mail_refusal_timer_drops_a_source_that_becomes_permanent",
+        |service, home| {
+            let sender = Address::parse("alpha").expect("sender");
+            let name = OsStr::new("malformed");
+            let source = home.join(".var/loops/alpha/mail/outbox/malformed");
+            fs::write(&source, b"invalid fixture source").expect("source");
+            let base = Monotonic::now();
+            service
+                .retries
+                .schedule((sender.clone(), name.to_owned()), retry::Work::Source, base);
+            assert_eq!(service.retry_due_at(base + Duration::from_secs(1)).len(), 1);
+            assert_eq!(service.retries.wait(base + Duration::from_secs(100)), None);
+            assert!(!service.source_ready(&sender, name, base + Duration::from_secs(100)));
         },
     );
 }
