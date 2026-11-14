@@ -1615,6 +1615,10 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child test must execute"
+        );
     }
 
     /// ´test:unit:checkout-recorded-transfer-names-both-exits´
