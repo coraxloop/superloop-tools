@@ -101,9 +101,24 @@ fn fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
     ))
 }
 
+#[cfg(not(test))]
 pub(super) fn measure(registration: &Registration, rows: &mut Vec<Value>) -> Result<(), LaneError> {
     measure_inner(registration, rows, fixture)
         .map_err(|error| LaneError::operation("exercise-door-agent", error.to_string()))
+}
+
+#[cfg(test)]
+pub(super) fn measure_controlled(
+    registration: &Registration,
+    rows: &mut Vec<Value>,
+) -> Result<(), LaneError> {
+    measure_with_judge(
+        registration,
+        rows,
+        tests::controlled_fixture,
+        tests::controlled_judge,
+    )
+    .map_err(|error| LaneError::operation("exercise-door-agent", error.to_string()))
 }
 
 fn measure_inner(
@@ -302,7 +317,9 @@ while not Path({}).exists(): time.sleep(0.005)
         Ok(())
     }
 
-    fn controlled_fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
+    pub(super) fn controlled_fixture(
+        script: &str,
+    ) -> io::Result<(Directory, CodexRunner, DoorInput)> {
         let (root, runner, input) = fixture(script)?;
         let timeout = script.contains("os.fork()");
         ready_program(&runner, script, timeout)?;
@@ -393,7 +410,7 @@ os.execv(sys.argv[4], sys.argv[4:])
         }
     }
 
-    fn controlled_judge(
+    pub(super) fn controlled_judge(
         runner: &CodexRunner,
         input: &[u8],
         remaining: Duration,

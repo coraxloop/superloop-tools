@@ -368,6 +368,9 @@ fn measure_into(
     restoration?;
     *stage = "runner-probes";
     let mut runner_fixtures = Vec::new();
+    #[cfg(test)]
+    let probes = super::agent_probes::measure_controlled(registration, &mut runner_fixtures);
+    #[cfg(not(test))]
     let probes = super::agent_probes::measure(registration, &mut runner_fixtures);
     report["runner_fixtures"] = json!(runner_fixtures);
     probes?;

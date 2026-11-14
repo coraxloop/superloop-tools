@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Door agent exercise tests now run their semantic and timeout probes through the existing controlled judge, so a loaded node cannot make a real-clock 2,600 ms probe appear to fail. The deployed exercise still measures real time and keeps its production budgets (``test:unit:door-agent-case-uses-production-handler-and-names-unmeasured-vendor``; ``test:unit:door-agent-audit-loop-measures-all-modes-without-prior-labels``).
+
 - The door exercise admission fixture now waits for its first observed refusal before releasing the held admission, and its test-only retry uses a distant hang bound. A loaded node can no longer exhaust a two-second test retry before that release; the deployed exercise keeps its two-second retry (``test:unit:door-exercise-retries-concurrent-admission``).
 
 - Agent fixture tests now use one distant hang bound for both runner cap and early-refusal judge budget, so node load cannot turn their semantic verdicts into fixture timeouts. Short-budget claims still run on controlled clocks; running doors keep their production budget (``test:unit:runner-isolates-loop-sign-in-and-rubric``; ``test:unit:agent-input-limit-and-refresh-link-replacement``; ``test:unit:real-agent-absent-sign-in-is-unmeasured-from-runner``).
