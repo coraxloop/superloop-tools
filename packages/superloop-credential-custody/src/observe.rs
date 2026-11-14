@@ -249,6 +249,15 @@ fn sample_bytes(record: &Parameters) -> Result<BTreeMap<(String, u64, String), u
 }
 
 pub fn run(record: &Parameters, discover: Option<&Path>) -> Result<Value> {
+    // Other accounts cannot replace any directory component while the reviewed
+    // payload rereads these paths. Concurrent mutation by the effective user is
+    // still excluded by the caller's observation protocol.
+    let _root = receipt::sealed_directory(&record.sealed_root)?;
+    let _names: Vec<_> = record
+        .names
+        .iter()
+        .map(|name| receipt::sealed_directory(&record.sealed_root.join(name)))
+        .collect::<Result<_>>()?;
     if let Some(relative) = discover {
         if !crate::record::path(relative, false) {
             return Err("discovery-path");

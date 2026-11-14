@@ -49,6 +49,18 @@ fn hash(bytes: &[u8]) -> String {
 fn mode(path: &Path, value: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(value)).unwrap();
 }
+fn parameter_bytes(path: &Path, bytes: &[u8]) {
+    if path.exists() {
+        mode(path, 0o600);
+    }
+    fs::write(path, bytes).unwrap();
+    mode(path, 0o400);
+}
+fn refused(output: &Output, class: &str) {
+    refuse(output);
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(diagnostic["message"], class);
+}
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_superloop-credential-custody"))
 }
@@ -80,6 +92,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::create_dir(root.join("sealed")).unwrap();
+        mode(&root.join("sealed"), 0o700);
         fs::create_dir(root.join("evidence")).unwrap();
         mode(&root.join("evidence"), 0o700);
         fs::create_dir(root.join("source")).unwrap();
@@ -130,6 +143,7 @@ impl Fixture {
         let mut samples = Vec::new();
         for name in ["alpha", "beta"] {
             fs::create_dir(root.join("sealed").join(name)).unwrap();
+            mode(&root.join("sealed").join(name), 0o700);
             for length in 3..=5 {
                 for content in ["a", "b"] {
                     // Synthetic padded base64: known decoded sizes 3, 4 and 5.
@@ -163,11 +177,10 @@ impl Fixture {
         Self { dir, record }
     }
     fn save(&self) {
-        fs::write(
-            self.dir.path().join("parameters.json"),
-            serde_json::to_vec(&self.record).unwrap(),
-        )
-        .unwrap();
+        parameter_bytes(
+            &self.dir.path().join("parameters.json"),
+            &serde_json::to_vec(&self.record).unwrap(),
+        );
     }
     fn command(&self, identity: bool) -> Command {
         self.save();
@@ -283,7 +296,7 @@ fn duplicate_and_excessive_records() {
     ] {
         let f = Fixture::new();
         let mut command = f.command(false);
-        fs::write(f.dir.path().join("parameters.json"), content).unwrap();
+        parameter_bytes(&f.dir.path().join("parameters.json"), content.as_bytes());
         refuse(&command.output().unwrap());
     }
     let f = Fixture::new();
@@ -291,7 +304,7 @@ fn duplicate_and_excessive_records() {
     let text = serde_json::to_string(&f.record)
         .unwrap()
         .replace("\"wrap\":0", "\"wrap\":0,\"wrap\":0");
-    fs::write(f.dir.path().join("parameters.json"), text).unwrap();
+    parameter_bytes(&f.dir.path().join("parameters.json"), text.as_bytes());
     refuse(&command.output().unwrap());
 }
 
@@ -639,4 +652,77 @@ fn complete_partial_file_is_not_calibration() {
     let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(diagnostic["message"], "calibration-path");
     refuse(&output);
+}
+
+/// ´test:integration:parameter-custody-before-probes´
+#[test]
+fn parameter_custody_before_probes() {
+    let f = Fixture::new();
+    let mut command = f.command(false);
+    mode(f.dir.path(), 0o777);
+    refused(&command.output().unwrap(), "directory-ancestor-custody");
+    mode(f.dir.path(), 0o700);
+    let f = Fixture::new();
+    let mut command = f.command(false);
+    mode(&f.dir.path().join("parameters.json"), 0o600);
+    refused(&command.output().unwrap(), "parameter-custody");
+    for permissions in [0o600, 0o440, 0o444, 0o2400] {
+        let mut f = Fixture::new();
+        let marker = f.dir.path().join("probe-ran");
+        f.record["probes"][0]["argv"] = json!(["/usr/bin/touch", marker]);
+        let mut command = f.command(false);
+        mode(&f.dir.path().join("parameters.json"), permissions);
+        refused(&command.output().unwrap(), "parameter-custody");
+        assert!(!marker.exists());
+    }
+    let f = Fixture::new();
+    let mut command = f.command(false);
+    fs::hard_link(
+        f.dir.path().join("parameters.json"),
+        f.dir.path().join("alias.json"),
+    )
+    .unwrap();
+    refused(&command.output().unwrap(), "parameter-custody");
+    let f = Fixture::new();
+    let mut command = f.command(false);
+    fs::rename(
+        f.dir.path().join("parameters.json"),
+        f.dir.path().join("other.json"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("other.json", f.dir.path().join("parameters.json")).unwrap();
+    refused(&command.output().unwrap(), "path-open");
+}
+
+/// ´test:integration:sealed-directory-custody-before-probes´
+#[test]
+fn sealed_directory_custody_before_probes() {
+    let f = Fixture::new();
+    mode(&f.dir.path().join("sealed"), 0o755);
+    refused(&f.observe(), "sealed-directory-custody");
+    for relative in ["sealed", "sealed/alpha", "sealed/beta"] {
+        let mut f = Fixture::new();
+        let marker = f.dir.path().join("probe-ran");
+        f.record["probes"][0]["argv"] = json!(["/usr/bin/touch", marker]);
+        mode(&f.dir.path().join(relative), 0o755);
+        refused(&f.observe(), "sealed-directory-custody");
+        assert!(!marker.exists());
+    }
+    let mut f = Fixture::new();
+    let ancestor = f.dir.path().join("unsafe-parent");
+    fs::create_dir(&ancestor).unwrap();
+    mode(&ancestor, 0o777);
+    fs::rename(f.dir.path().join("sealed"), ancestor.join("sealed")).unwrap();
+    f.record["sealed_root"] = json!(ancestor.join("sealed"));
+    refused(&f.observe(), "directory-ancestor-custody");
+    mode(&ancestor, 0o1777);
+    pass(&f.observe());
+    let f = Fixture::new();
+    fs::rename(
+        f.dir.path().join("sealed/alpha"),
+        f.dir.path().join("saved-alpha"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("../saved-alpha", f.dir.path().join("sealed/alpha")).unwrap();
+    refused(&f.observe(), "path-open");
 }

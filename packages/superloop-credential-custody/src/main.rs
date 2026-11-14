@@ -110,7 +110,7 @@ fn execute(command: &Command, start: Instant) -> Result<()> {
     {
         return Err("receipt-name");
     }
-    let bytes = receipt::read(parameters, record::RECORD_LIMIT as u64, false)?;
+    let bytes = receipt::parameters(parameters)?;
     let record = record::parse(&bytes)?;
     let (label, evidence) = match command {
         Command::LengthObserve { case, discover, .. } => {

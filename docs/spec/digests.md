@@ -461,9 +461,9 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/README.md:13,17,19,21,23,25,29,33``|D246–D248; identity, custody and build documentation.|
 |``packages/superloop-credential-custody/meson.build:34,35``|D248; reviewed executable expressions and scope.|
 |``packages/superloop-credential-custody/src/identity.rs:8,13,39,76,77,102,103,116``|D246; hashing live files and retained calibration bytes.|
-|``packages/superloop-credential-custody/src/observe.rs:177,178,197,211,236,313,318``|D246–D247; source-payload selection and completed sealed-file comparisons.|
+|``packages/superloop-credential-custody/src/observe.rs:177,178,197,211,236,322,327``|D246–D247; source-payload selection and completed sealed-file comparisons.|
 |``packages/superloop-credential-custody/src/record.rs:14,15,33,78,131,155,187,199,208,287,310``|D246–D247; strict identity fields and full-digest grammar.|
-|``packages/superloop-credential-custody/tests/subprocess_contract.rs:3,39,115,152,156,158,207,248,343,345,433,501,578,583,585,587``|Controlled synthetic evidence for D246–D247, not a production reference.|
+|``packages/superloop-credential-custody/tests/subprocess_contract.rs:3,39,128,166,170,172,220,261,356,358,446,514,591,596,598,600``|Controlled synthetic evidence for D246–D247, not a production reference.|
 |``packages/superloop-gate-submit/README.md:59,114``|D194; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/superloop-gate-submit/meson.build:74,75,76,77,81,85``|D221, D222; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/superloop-gate-submit/src/lib.rs:1216,1217,1220``|D049; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|

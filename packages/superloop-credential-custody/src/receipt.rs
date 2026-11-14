@@ -9,6 +9,10 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Component, Path};
 
 pub fn open(path: &Path, directory: bool) -> Result<File> {
+    walk(path, directory, false)
+}
+
+fn walk(path: &Path, directory: bool, protected: bool) -> Result<File> {
     if !crate::record::path(path, true) {
         return Err("unsafe-path");
     }
@@ -21,6 +25,13 @@ pub fn open(path: &Path, directory: bool) -> Result<File> {
         })
         .collect();
     for (index, part) in parts.iter().enumerate() {
+        if protected {
+            let meta = current.metadata().map_err(|_| "directory-metadata")?;
+            let trusted_owner = meta.uid() == 0 || meta.uid() == nix::unistd::geteuid().as_raw();
+            if !trusted_owner || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0) {
+                return Err("directory-ancestor-custody");
+            }
+        }
         let flags = OFlag::O_RDONLY
             | OFlag::O_NOFOLLOW
             | OFlag::O_CLOEXEC
@@ -37,6 +48,31 @@ pub fn open(path: &Path, directory: bool) -> Result<File> {
     Ok(current)
 }
 
+/// Private directories may have filesystem-dependent link counts. A live
+/// directory needs a nonzero count, not the regular-file single-link rule.
+pub fn sealed_directory(path: &Path) -> Result<File> {
+    let dir = walk(path, true, true)?;
+    let meta = dir.metadata().map_err(|_| "directory-metadata")?;
+    if meta.uid() != nix::unistd::geteuid().as_raw()
+        || meta.mode() & 0o7777 != 0o700
+        || meta.nlink() == 0
+    {
+        return Err("sealed-directory-custody");
+    }
+    Ok(dir)
+}
+
+pub fn parameters(path: &Path) -> Result<Vec<u8>> {
+    let file = walk(path, false, true)?;
+    read_file(file, crate::record::RECORD_LIMIT as u64, true).map_err(|class| {
+        if class == "file-custody" {
+            "parameter-custody"
+        } else {
+            class
+        }
+    })
+}
+
 pub fn read(path: &Path, limit: u64, immutable: bool) -> Result<Vec<u8>> {
     read_file(open(path, false)?, limit, immutable)
 }
@@ -47,7 +83,7 @@ pub fn read_file(mut file: File, limit: u64, immutable: bool) -> Result<Vec<u8>>
         || (immutable && before.nlink() != 1)
         || before.len() > limit
         || (immutable
-            && (before.mode() & 0o777 != 0o400 || before.uid() != nix::unistd::geteuid().as_raw()))
+            && (before.mode() & 0o7777 != 0o400 || before.uid() != nix::unistd::geteuid().as_raw()))
     {
         return Err("file-custody");
     }
