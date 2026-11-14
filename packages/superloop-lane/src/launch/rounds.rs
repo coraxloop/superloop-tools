@@ -4768,6 +4768,30 @@ mod choice_tests {
         assert!(!require_thread_choice(&saved, None).expect("intent cannot create failed choice"));
     }
 
+    /// The enclosing settled phase is required even with a completed failed row.
+    /// ´test:unit:failed-round-choice-requires-settled-reservation´
+    #[test]
+    fn failed_round_choice_requires_settled_reservation() {
+        let mut saved = record();
+        assert!(failed_continuation(&saved), "settled failed control");
+        for phase in ["failed", "preparing", "started", "retired"] {
+            saved["phase"] = json!(phase);
+            assert!(
+                !failed_continuation(&saved),
+                "outer {phase} cannot owe a choice"
+            );
+            assert!(!require_thread_choice(&saved, None).expect("no choice gate"));
+            assert_eq!(
+                require_thread_choice(&saved, Some(ThreadChoice::Fresh))
+                    .expect_err("choice unavailable outside settlement")
+                    .kind,
+                "round-choice"
+            );
+        }
+        saved["phase"] = json!("settled");
+        assert!(failed_continuation(&saved), "row was never changed");
+    }
+
     /// A fresh request retains the old reservation identity until its own event is read.
     ///
     /// # Panics
