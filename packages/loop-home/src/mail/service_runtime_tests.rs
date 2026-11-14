@@ -1670,3 +1670,99 @@ fn mail_activity_counts_unwritten_refusals_and_stays_quiet() {
         },
     );
 }
+
+/// ´claim:loophome:mail-prunes-on-pressure-or-controlled-hourly-deadline´
+/// ´test:unit:mail-prunes-on-pressure-or-controlled-hourly-deadline´
+#[test]
+fn mail_prunes_on_pressure_or_controlled_hourly_deadline() {
+    use super::super::journal::{
+        JOURNAL_MAX_BYTES, RECORD_MAX_BYTES, RESERVATION_PINS_MAX_BYTES, SUMMARY_MAX_BYTES,
+    };
+
+    fixture(
+        "mail_prunes_on_pressure_or_controlled_hourly_deadline",
+        |service, home| {
+            let seconds = std::sync::Arc::new(AtomicU64::new(0));
+            service.clock = Box::new(ControlledClock {
+                base: Monotonic::now(),
+                seconds: seconds.clone(),
+            });
+            service.scan().expect("startup");
+            let inventory = service.directory.inventory().expect("accounting");
+            super::super::journal::RECORD_SCANS.with(|count| count.set(0));
+            service.admit_capacity(&inventory).expect("room remains");
+            assert_eq!(
+                super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+                0,
+                "ordinary admission does not prune history"
+            );
+            seconds.store(3599, Ordering::Relaxed);
+            service.admit_capacity(&inventory).expect("before deadline");
+            assert_eq!(
+                super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+                0
+            );
+            seconds.store(3600, Ordering::Relaxed);
+            service.admit_capacity(&inventory).expect("hourly prune");
+            assert_eq!(
+                super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+                1
+            );
+            let padding = home.join(".var/loops/.mail-service/fixture-capacity");
+            let file = File::create(&padding).expect("fixture-only outside writer");
+            fs::set_permissions(&padding, fs::Permissions::from_mode(0o600))
+                .expect("private padding");
+            file.set_len(
+                JOURNAL_MAX_BYTES
+                    - service.journal.journal_bytes().expect("bytes")
+                    - 3 * RECORD_MAX_BYTES
+                    - 3 * SUMMARY_MAX_BYTES
+                    - RESERVATION_PINS_MAX_BYTES
+                    + 1,
+            )
+            .expect("pressure");
+            service
+                .journal
+                .remeasure()
+                .expect("observe fixture-only outside write");
+            super::super::journal::RECORD_SCANS.with(|count| count.set(0));
+            assert!(matches!(
+                service.admit_capacity(&inventory),
+                Err(MailError::Capacity)
+            ));
+            assert_eq!(
+                super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+                1,
+                "pressure gets one prune then refuses without evicting recent history"
+            );
+            fs::remove_file(&padding).expect("remove fixture-only outside padding");
+            let mut notifications = notify::Notifications::new();
+            for second in [7200, 10800] {
+                seconds.store(second, Ordering::Relaxed);
+                super::super::store::SIZE_SCANS.with(|count| count.set(0));
+                if second == 7200 {
+                    service
+                        .maintain(&mut notifications)
+                        .expect("hourly accounting");
+                } else {
+                    service
+                        .scan_watching(&mut notifications)
+                        .expect("full scan hourly accounting");
+                }
+                assert!(
+                    super::super::store::SIZE_SCANS.with(std::cell::Cell::get) >= 2,
+                    "hourly maintenance remeasures the root and retained records"
+                );
+            }
+
+            assert_eq!(
+                service
+                    .journal
+                    .records()
+                    .expect("retained recent history")
+                    .len(),
+                2
+            );
+        },
+    );
+}

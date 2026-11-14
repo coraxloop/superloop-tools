@@ -405,6 +405,7 @@ impl Service {
         self.last_full_scan = self.last_scan;
         // Fallback and invalidation scans must not postpone hourly reconsideration.
         if self.maintenance_due() {
+            self.journal.remeasure()?;
             self.last_maintenance = Some(self.clock.monotonic());
         }
         notifications.begin_scan();
@@ -506,6 +507,7 @@ impl Service {
         notifications: &mut super::notify::Notifications,
         inventory: &Inventory,
     ) -> Result<()> {
+        self.journal.remeasure()?;
         self.directory.watch_configuration(notifications)?;
         if notifications.configuration() != self.configuration {
             notifications.reconcile();
@@ -935,9 +937,6 @@ impl Service {
         // The current staging/retention contract still requires the global census.
         // It also retains cross-mailbox UID collision admission, before any source read.
         let (inventory, accounting) = self.directory.resolve_for_admission(&targets)?;
-        if self.prune_due() {
-            self.prune(&accounting)?;
-        }
         let sender = admitted_actor(&inventory, &accounting, sender_address)?;
         let observation = observe(sender, name).ok();
         match self.deliver(&inventory, &accounting, sender_address, name) {
@@ -1015,6 +1014,26 @@ impl Service {
         }
         Err(error)
     }
+    fn admit_capacity(&mut self, accounting: &Inventory) -> Result<()> {
+        let pruned = self.prune_due();
+        if pruned {
+            self.prune(accounting)?;
+        }
+        let staging = publication::staging_bytes(
+            &accounting
+                .actors
+                .values()
+                .map(|actor| &actor.endpoint)
+                .collect::<Vec<_>>(),
+        )?;
+        match self.journal.capacity(staging) {
+            Err(MailError::Capacity) if !pruned => {
+                self.prune(accounting)?;
+                self.journal.capacity(staging)
+            }
+            result => result,
+        }
+    }
     fn deliver(
         &mut self,
         inventory: &Inventory,
@@ -1032,14 +1051,7 @@ impl Service {
             .decision(sender_address, &outgoing.recipient)?;
         let sender = actor(inventory, sender_address)?;
         let recipient = admitted_actor(inventory, accounting, &outgoing.recipient)?;
-        self.prune(accounting)?;
-        self.journal.capacity(publication::staging_bytes(
-            &accounting
-                .actors
-                .values()
-                .map(|actor| &actor.endpoint)
-                .collect::<Vec<_>>(),
-        )?)?;
+        self.admit_capacity(accounting)?;
         let (original, observed) = observe_file(sender, name)?;
         let original_info = original.metadata()?;
         let identity = super::journal::Identity {

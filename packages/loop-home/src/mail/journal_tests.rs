@@ -458,9 +458,15 @@ fn journal_capacity_includes_scratch_and_never_evicts_pins() {
         - RESERVATION_PINS_MAX_BYTES;
     file.set_len(room).expect("inclusive capacity fixture");
     journal
+        .remeasure()
+        .expect("observe fixture-only outside writer");
+    journal
         .capacity(0)
         .expect("inclusive journal cap reserves all scratch");
     file.set_len(room + 1).expect("one byte over capacity");
+    journal
+        .remeasure()
+        .expect("observe fixture-only outside writer");
     assert!(matches!(journal.capacity(0), Err(MailError::Capacity)));
     assert_eq!(
         journal
@@ -705,6 +711,9 @@ fn journal_record_growth_preserves_compaction_scratch() {
     padding
         .set_len(JOURNAL_MAX_BYTES - current - 2 * SUMMARY_MAX_BYTES)
         .expect("reserve only compaction scratch");
+    journal
+        .remeasure()
+        .expect("observe fixture-only outside writer");
     let terminal = journal.record(&first()).expect("terminal");
     assert!(matches!(
         journal.replace(&terminal),
@@ -1090,4 +1099,108 @@ fn journal_reservation_binding_retains_custody() {
         );
     }
     fs::set_permissions(&retained, fs::Permissions::from_mode(0o700)).expect("restore mode");
+}
+
+/// ´claim:loophome:journal-running-bytes-follow-writes-and-compaction´
+/// ´test:unit:journal-running-bytes-follow-writes-and-compaction´
+#[test]
+fn journal_running_bytes_follow_writes_and_compaction() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    store::SIZE_SCANS.with(|count| count.set(0));
+    let item = accept(&mut journal);
+    complete(&mut journal, &item);
+    journal.capacity(0).expect("capacity");
+    assert_eq!(
+        store::SIZE_SCANS.with(std::cell::Cell::get),
+        0,
+        "writes and admission do not census retained history"
+    );
+    assert_eq!(
+        journal.journal_bytes().expect("running bytes"),
+        store::size(&journal.root).expect("independent census")
+    );
+    journal.prune(&later(), &Pins::default()).expect("compact");
+    assert_eq!(
+        journal.journal_bytes().expect("after deletion"),
+        store::size(&journal.root).expect("independent census")
+    );
+    drop(journal);
+    let journal = fixture.open();
+    assert_eq!(
+        journal.journal_bytes().expect("restart"),
+        store::size(&journal.root).expect("independent census")
+    );
+}
+
+/// ´claim:loophome:journal-running-bytes-count-interrupted-replacements´
+/// ´test:unit:journal-running-bytes-count-interrupted-replacements´
+#[test]
+fn journal_running_bytes_count_interrupted_replacements() {
+    for boundary in 1..=4 {
+        let fixture = Fixture::new();
+        let mut journal = fixture.create();
+        let item = accept(&mut journal);
+        store::INTERRUPT.with(|selected| selected.set(boundary));
+        assert!(
+            journal
+                .discard(&first(), &present(&item), "restore source")
+                .is_err()
+        );
+        assert_eq!(
+            journal.journal_bytes().expect("account even on error"),
+            store::size(&journal.root).expect("committed and scratch bytes")
+        );
+        drop(journal);
+        let journal = fixture.open();
+        assert_eq!(
+            journal.journal_bytes().expect("after recovery"),
+            store::size(&journal.root).expect("cleaned census")
+        );
+    }
+}
+
+/// ´claim:loophome:journal-running-bytes-observe-external-reservations-under-lock´
+/// ´test:unit:journal-running-bytes-observe-external-reservations-under-lock´
+#[test]
+fn journal_running_bytes_observe_external_reservations_under_lock() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    accept(&mut journal);
+    let admission = journal.usage.admit(&journal.root).expect("hold exclusion");
+    assert!(
+        Flock::lock(
+            store::open(&journal.root, ".", true).expect("independent description"),
+            FlockArg::LockExclusiveNonblock
+        )
+        .is_err()
+    );
+    journal.capacity(0).expect("nested writer accounting");
+    drop(admission);
+    for add in [true, false] {
+        let admission = reservation_admission(&journal.root).expect("outside writer lock");
+        let mut pins = journal.read_reservation_pins().expect("pins");
+        if add {
+            pins.deliveries
+                .insert("synthetic:reservation".into(), first());
+        } else {
+            pins.deliveries.clear();
+        }
+        store::write(
+            &journal.root,
+            &journal.root,
+            "reservation-pins.toml",
+            &pins,
+            true,
+        )
+        .expect("outside reservation writer");
+        drop(admission);
+        store::SIZE_SCANS.with(|count| count.set(0));
+        let accounted = journal.journal_bytes().expect("outside delta");
+        assert_eq!(store::SIZE_SCANS.with(std::cell::Cell::get), 0);
+        assert_eq!(
+            accounted,
+            store::size(&journal.root).expect("independent census")
+        );
+    }
 }

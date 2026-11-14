@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The slow 206 MiB route transfer check now uses the gate build profile and reports transfer time as a measurement, without treating node load as a failed upload. Its integrity and 512 MiB output-bound checks remain; the door's 120-second production command deadline is unchanged.
 
+- Keep running journal byte accounting under writer and reservation exclusion, and prune at the hourly deadline or capacity pressure instead of before every mail delivery (``proto:loophome:mail-journal-byte-accounting``).
+
 - Reconsider unchanged mail refusals through bounded per-letter hourly retries, and publish quiet-at-rest service activity counters with rate-limited diagnostics when a refusal cannot be written (``proto:loophome:mail-change-wakeup``; ``proto:loophome:mail-activity-counters``).
 
 - A resumed launch whose preparing publication fails now reports `unchanged: preparing reservation was not published` when a locked read-back proves the exact settled bytes remain. A changed or unreadable reservation still takes rollback and may report `retained:`. Compatibility: no record shape changes; a running launcher keeps its old wording (``test:unit:round-preparing-publication-refuses-without-retaining-unchanged-run``).

@@ -561,7 +561,7 @@ impl Prepared {
         journal.accept(&record)?;
         #[cfg(test)]
         boundary(17)?;
-        store::remove(journal.publication_root(), &self.preparation)?;
+        journal.remove_private(journal.publication_root(), &self.preparation)?;
         Ok(record)
     }
 }
@@ -1105,13 +1105,7 @@ fn allocate_preparation(
         },
     };
     let key = preparation_key(&sender.address, outgoing);
-    store::write(
-        journal.publication_root(),
-        journal.publication_root(),
-        &key,
-        &intent,
-        false,
-    )?;
+    journal.write_private(journal.publication_root(), &key, &intent, false)?;
     Ok(key)
 }
 
@@ -1185,7 +1179,7 @@ pub fn reconcile_accepted_preparation(
                     == intent.copy_path.as_ref()
         })
         .ok_or(MailError::Invalid("preparation lacks matching acceptance"))?;
-    store::remove(journal.publication_root(), &key)?;
+    journal.remove_private(journal.publication_root(), &key)?;
     tracing::info!(recovered = 1, delivery = %record.delivery, "accepted preparation recovered");
     Ok(record.delivery)
 }
@@ -1390,13 +1384,7 @@ pub fn reconcile_unpublished(
                 &snapshot_name,
                 &copy_name,
             )?;
-            store::write(
-                journal.publication_root(),
-                journal.publication_root(),
-                &intent_name,
-                &intent,
-                false,
-            )?;
+            journal.write_private(journal.publication_root(), &intent_name, &intent, false)?;
             intent
         }
         Err(error) => return Err(error),
@@ -1437,9 +1425,9 @@ pub fn reconcile_unpublished(
     }
     let key = preparation_key(&sender.address, outgoing);
     if store::names(journal.publication_root())?.contains(&key) {
-        store::remove(journal.publication_root(), &key)?;
+        journal.remove_private(journal.publication_root(), &key)?;
     }
-    store::remove(journal.publication_root(), &intent_name)?;
+    journal.remove_private(journal.publication_root(), &intent_name)?;
     tracing::info!(restored = 1, "unpublished letter restored");
     Ok(())
 }

@@ -200,7 +200,7 @@ pub(super) fn clear(
         unlinkat(staging, temporary.as_str(), UnlinkatFlags::NoRemoveDir)?;
         staging.sync_all()?;
     }
-    store::remove(journal.publication_root(), &key)
+    journal.remove_private(journal.publication_root(), &key)
 }
 
 fn raw_name(value: &str) -> Result<std::ffi::OsString> {
@@ -344,7 +344,8 @@ pub(super) fn project(
     if bytes.len() as u64 > RECORD_MAX_BYTES
         || projection.staging_bytes.saturating_add(bytes.len() as u64)
             > super::journal::STAGING_MAX_BYTES
-        || store::size(journal.publication_root())?
+        || journal
+            .journal_bytes()?
             .saturating_add(RECORD_MAX_BYTES + 2 * super::journal::SUMMARY_MAX_BYTES)
             > super::journal::JOURNAL_MAX_BYTES
     {
@@ -382,13 +383,7 @@ pub(super) fn project(
         digest: digest(&bytes),
         source_digest: reason.digest,
     };
-    store::write(
-        journal.publication_root(),
-        journal.publication_root(),
-        &key,
-        &binding,
-        false,
-    )?;
+    journal.write_private(journal.publication_root(), &key, &binding, false)?;
     #[cfg(test)]
     boundary(3)?;
     renameat2(
