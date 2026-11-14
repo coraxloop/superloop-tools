@@ -28,3 +28,10 @@ pub fn run_observer() -> std::process::ExitCode {
 pub fn run_fixture() -> std::process::ExitCode {
     fixture_cli::main()
 }
+
+// Private cores are intentionally unselected until a keeper and its adapters exist.
+#[allow(
+    dead_code,
+    reason = "launcher cores are reviewed before any entrypoint is wired"
+)]
+mod launch;

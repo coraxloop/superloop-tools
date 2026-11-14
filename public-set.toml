@@ -3604,3 +3604,21 @@ pattern = "packages/superloop-lane/src/placement/commands_tests.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/placement_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/policy.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/measure.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/state.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/store.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/tests.rs"

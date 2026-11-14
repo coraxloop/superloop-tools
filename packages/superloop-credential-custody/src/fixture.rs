@@ -235,3 +235,27 @@ pub fn emit(path: &Path) -> Result<()> {
     })
     .map_err(|_| "output-write")
 }
+
+// The launcher uses the fixture's one strict parser, not a second case schema.
+pub fn validate_launch_case(
+    bytes: &[u8],
+    id: &str,
+    streams: &[(&str, u64, &str); 2],
+    timeout_ms: u64,
+) -> Result<()> {
+    let case = parse(bytes)?;
+    if case.case != id
+        || case.timeout_ms > timeout_ms
+        || case.streams.iter().zip(streams).any(|(actual, expected)| {
+            actual.name != expected.0
+                || actual.length != expected.1
+                || match actual.pattern {
+                    Pattern::Ascending => "ascending",
+                    Pattern::Descending => "descending",
+                } != expected.2
+        })
+    {
+        return Err("launch-public-case-binding");
+    }
+    Ok(())
+}

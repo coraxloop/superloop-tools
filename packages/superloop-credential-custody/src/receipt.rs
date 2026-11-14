@@ -167,14 +167,23 @@ fn read_with_custody(
 }
 
 pub fn publish(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
-    let dir = walk(root, true, true)?;
+    publish_held(&walk(root, true, true)?, name, bytes)
+}
+
+pub fn publish_held(dir: &File, name: &str, bytes: &[u8]) -> Result<()> {
+    if !crate::record::name(name) || name.starts_with('.') || name.ends_with(".partial") {
+        return Err("receipt-name");
+    }
     let meta = dir.metadata().map_err(|_| "receipt-root")?;
-    if meta.uid() != nix::unistd::geteuid().as_raw() || meta.mode() & 0o777 != 0o700 {
+    if !meta.is_dir()
+        || meta.uid() != nix::unistd::geteuid().as_raw()
+        || meta.mode() & 0o777 != 0o700
+    {
         return Err("receipt-root-custody");
     }
     let temporary = format!(".{name}.partial");
     let fd = openat(
-        &dir,
+        dir,
         temporary.as_str(),
         OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::from_bits_truncate(0o600),
@@ -192,9 +201,9 @@ pub fn publish(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
             .map_err(|_| "receipt-mode")?;
         file.sync_all().map_err(|_| "receipt-sync")?;
         renameat2(
-            &dir,
+            dir,
             temporary.as_str(),
-            &dir,
+            dir,
             name,
             RenameFlags::RENAME_NOREPLACE,
         )
@@ -202,7 +211,7 @@ pub fn publish(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
         dir.sync_all().map_err(|_| "receipt-directory-sync")
     })();
     if result.is_err() {
-        let _ignored = unlinkat(&dir, temporary.as_str(), UnlinkatFlags::NoRemoveDir);
+        let _ignored = unlinkat(dir, temporary.as_str(), UnlinkatFlags::NoRemoveDir);
     }
     result
 }
