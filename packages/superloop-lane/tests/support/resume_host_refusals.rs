@@ -246,7 +246,7 @@ if test -f fixture-fault; then
     *' _inspect-round '*' --record '*) test "$selection" = inspector && fault=$selection ;;
     *' _container-helper '*)
       case " $* " in *' --preflight-round '*) ;; *)
-        case "$selection" in helper-pin|credential|readiness) fault=$selection;; live-process|changed-request) fault=helper-pin;; esac
+        case "$selection" in helper-pin|credential|readiness|stop-race) fault=$selection;; live-process|changed-request) fault=helper-pin;; esac
       esac ;;
   esac
 fi

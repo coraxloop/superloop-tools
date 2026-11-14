@@ -39,7 +39,9 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
         .to_string(),
         0o600,
     );
-    fixture.reply();
+    if !home.join("without-reply").exists() {
+        fixture.reply();
+    }
     let output = host::mapped(&home, DRIVER);
     std::io::stdout()
         .lock()
@@ -80,7 +82,14 @@ assert request['thread_id']=='fixture-thread'
 prompt=('Read /mail/inbox/'+request['mail']['inbox_name']+'. Step review.').encode()
 payload=b'\0'+request['thread_id'].encode()+b'\0'+prompt
 step=Path(record['rounds'][-1]['driver_dir']);held=os.open(step,os.O_RDONLY|os.O_DIRECTORY)
-os.chdir(home/'runs');os.setgroups([]);os.setgid(64000);os.setuid(64000)
+stop_race=(home/'fixture-fault').exists() and (home/'fixture-fault').read_text()=='stop-race'
+os.chdir(home/'runs')
+if stop_race:
+ import ctypes
+ libc=ctypes.CDLL(None,use_errno=True)
+ watch=libc.inotify_init1(os.O_CLOEXEC);assert watch>=0
+ assert libc.inotify_add_watch(watch,b'.',0x200)>=0
+os.setgroups([]);os.setgid(64000);os.setuid(64000)
 assert int(os.readlink('/proc/self'))==os.getpid()
 assert Path('/proc/self/cgroup').read_text().strip().endswith('/work')
 peer=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);peer.settimeout(30);peer.connect('.container-R.sock')
@@ -104,7 +113,15 @@ while True:
  assert len(out)+len(err)<=65536
 peer.close()
 ended=select.poll();ended.register(helper_exit,select.POLLIN)
-assert ended.poll(30000),'actual helper completion event'
+if stop_race:
+ # The real cleanup unlinks before our injected pause. Observe that event rather
+ # than a scheduling delay; the host will encounter the actual missing socket.
+ while Path('.control-R.sock').exists():
+  assert select.select([watch],[],[],180)[0],'control unlink event'
+  os.read(watch,65536)
+ os.close(watch)
+else:
+ assert ended.poll(30000),'actual helper completion event'
 os.close(helper_exit);os.fchdir(held);os.close(held)
 events=Path('events.jsonl');offset=events.stat().st_size
 archive=Path('steps/dispatch');archive.mkdir(mode=0o700,parents=True)

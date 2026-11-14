@@ -99,3 +99,14 @@ int fsync(int fd) {
     if(intent){fired=1;hit("persisted intent fsync");errno=EIO;return -1;}
     return result;
 }
+
+/* Hold a real finishing helper after its control pathname has disappeared. */
+int unlinkat(int fd,const char *path,int flags) {
+    int (*next)(int,const char*,int)=dlsym(RTLD_NEXT,"unlinkat");
+    int result=next(fd,path,flags);
+    if(!result && fault("stop-race") && strstr(path,".control-R.sock")) {
+        hit("control unlinked before helper exit");
+        for(;;) pause();
+    }
+    return result;
+}

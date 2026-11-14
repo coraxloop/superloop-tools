@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- A public launch recovery rehearsal now identifies the retained-letter custody refusal that blocks interrupted settlement after a helper-stop error, with and without a reply. The tests require the refused preview to leave the run unchanged; they add no recovery command or production behavior (``test:integration:public-helper-stop-recovery-refuses-retained-letter-with-reply``; ``test:integration:public-helper-stop-recovery-refuses-retained-letter-without-reply``).
+
 - Keep ordinary mail preparation off the retained delivery history with a writer-owned lookup rebuilt at restart and updated after durable transitions. Delivery checks and record formats stay unchanged; the service still reads history for retention and exceptional recovery, and still counts staging across mailboxes. Install the binary and restart the mail service; loops need no mailbox rewrite or resubmission (``proto:loophome:mail-preparation-index``).
 
 - An allow-mode door releases its admission slot after the durable effect and sent final reply, before joining its advisory agent. Later calls from that worker can overlap agent work and see judgement history before the earlier verdict is recorded; learning and correction authority do not change. The waiting publication gets a fresh, uncredited lock-admission allowance of at least 300 seconds or the original request deadline plus maximum credit if later, with failures visible in the journal and status and retained for recovery. Hold new requests and require `unpublished_effects` to be empty before refreshing and restarting each door; no record migration is needed (``rule:superlooplane:door-request-admission``).
