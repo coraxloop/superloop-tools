@@ -536,19 +536,27 @@ mod tests {
         std::fs::remove_file(&auth).expect("absent synthetic credential");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(agent::tests::FIXTURE_HANG_MS),
         );
         assert_eq!(result.reason, "door-agent-sign-in-unavailable");
-        let report = real_result(&result, 3000, result.rubric_digest.as_deref());
+        let report = real_result(
+            &result,
+            agent::tests::FIXTURE_HANG_MS,
+            result.rubric_digest.as_deref(),
+        );
         assert_eq!(report["status"], "unmeasured");
         assert_eq!(report["remedy"], "superloop-lane door-sign-in alpha");
         std::os::unix::fs::symlink("/missing-credential", &auth).expect("unsafe credential");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(agent::tests::FIXTURE_HANG_MS),
         );
         assert_eq!(
-            real_result(&result, 3000, result.rubric_digest.as_deref())["status"],
+            real_result(
+                &result,
+                agent::tests::FIXTURE_HANG_MS,
+                result.rubric_digest.as_deref()
+            )["status"],
             "fail"
         );
     }

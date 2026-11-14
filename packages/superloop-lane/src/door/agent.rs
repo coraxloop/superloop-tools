@@ -810,6 +810,8 @@ fn nonblocking(fd: &impl std::os::fd::AsFd) -> std::io::Result<()> {
 pub(super) mod tests {
     use super::*;
 
+    pub const FIXTURE_HANG_MS: u64 = 120_000;
+
     /// ´test:unit:judgement-binding-matches-recorded-source´
     #[test]
     fn judgement_binding_matches_recorded_source() {
@@ -930,7 +932,7 @@ pub(super) mod tests {
             executable,
             model: "configured-not-observed".into(),
             effort: "high".into(),
-            cap_ms: 3000,
+            cap_ms: FIXTURE_HANG_MS,
             rubric_path: rubric,
         };
         let input = DoorInput {
@@ -1288,7 +1290,7 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
         let guard = crate::credential::lock(root.path(), "alpha").expect("box helper lock");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.reason, "door-agent-refresh-busy");
         drop(guard);
@@ -1303,7 +1305,7 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
             .expect("lock-observing CLI");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.status, "verdict", "{result:?}");
         let released_guard =
@@ -1313,7 +1315,7 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
         std::os::unix::fs::symlink(&runner.rubric_path, &lock).expect("unsafe lock link");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.reason, "door-agent-refresh-lock");
     }
@@ -1353,7 +1355,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         let listing = std::fs::read_dir(root.path());
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
             .expect("restore fixture cleanup access");
@@ -1380,7 +1382,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
             .expect("selection-only fixture");
         let unreported = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(unreported.status, "verdict");
         assert!(
@@ -1392,7 +1394,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         std::os::unix::fs::symlink("/not-a-loop-sign-in", &auth).expect("external source fixture");
         let refused = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert!(refused.reason.eq("door-agent-sign-in-unavailable"));
         assert_eq!(refused.verdict, "refer");
@@ -1475,7 +1477,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         std::fs::remove_file(&runner.rubric_path).expect("absent rubric");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.reason, "door-rubric-unavailable");
         assert_eq!(result.verdict, "refer");
@@ -1744,7 +1746,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
         );
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.status, "failure");
         assert_eq!(result.reason, "door-agent-sign-in-link-replaced");
@@ -1754,7 +1756,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
             input.encode().expect_err("bounded prompt encoder").0,
             "door-agent-input-limit"
         );
-        let result = runner.judge(&vec![b'x'; 262_145], Duration::from_secs(3));
+        let result = runner.judge(&vec![b'x'; 262_145], Duration::from_millis(FIXTURE_HANG_MS));
         assert_eq!(result.reason, "door-agent-input-limit");
         assert_eq!(result.verdict, "refer");
         assert_eq!(
@@ -1762,7 +1764,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
             json!({"usage":usage::Usage::absent(false)})
         );
         runner.loop_uid = None;
-        let result = runner.judge(b"{}", Duration::from_secs(3));
+        let result = runner.judge(b"{}", Duration::from_millis(FIXTURE_HANG_MS));
         assert_eq!(result.reason, "door-agent-loop-uid-unmeasured");
     }
 
@@ -1789,7 +1791,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
                 .expect("injected entry");
             let result = runner.judge(
                 &input.encode().expect("bounded fixture input"),
-                Duration::from_secs(3),
+                Duration::from_millis(FIXTURE_HANG_MS),
             );
             assert_eq!(result.status, status);
             assert_eq!(result.reason, reason);
@@ -1813,7 +1815,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
         .expect("distinct mapped owner");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert!(result.reason.eq("door-agent-sign-in-unavailable"));
         assert_eq!(result.observations["sign_in_absent"], false);

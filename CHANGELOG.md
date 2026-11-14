@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Agent fixture tests now use one distant hang bound for both runner cap and early-refusal judge budget, so node load cannot turn their semantic verdicts into fixture timeouts. Short-budget claims still run on controlled clocks; running doors keep their production budget (``test:unit:runner-isolates-loop-sign-in-and-rubric``; ``test:unit:agent-input-limit-and-refresh-link-replacement``; ``test:unit:real-agent-absent-sign-in-is-unmeasured-from-runner``).
+
 - The slow 206 MiB route transfer check now uses the gate build profile and reports transfer time as a measurement, without treating node load as a failed upload. Its integrity and 512 MiB output-bound checks remain; the door's 120-second production command deadline is unchanged.
 
 - Keep running journal byte accounting under writer and reservation exclusion, and prune at the hourly deadline or capacity pressure instead of before every mail delivery (``proto:loophome:mail-journal-byte-accounting``).
