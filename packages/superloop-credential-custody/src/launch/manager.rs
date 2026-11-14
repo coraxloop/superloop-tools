@@ -62,7 +62,9 @@ pub(super) struct Snapshot {
     pub result: String,
     pub code: i32,
     pub status: i32,
+    /// Full binding of actual reply bytes to protected policy and held CLI expectations.
     pub raw_sha256: String,
+    /// Full binding of canonical, compared loaded properties to those expectations.
     pub configuration_sha256: String,
     pub properties: Vec<u8>,
 }
@@ -86,6 +88,9 @@ impl<'a> Manager<'a> {
             start: find(ArtifactRole::ManagerStart)?,
             query: find(ArtifactRole::ManagerQuery)?,
         })
+    }
+    pub const fn deadline(&self) -> Instant {
+        self.deadline
     }
     pub fn start_vector(&self, paths: &[PathBuf; 2]) -> Result<Vec<String>> {
         let policy = self.admission.policy();
@@ -353,7 +358,7 @@ fn parse(bytes: &[u8], wire: &Expected<'_>, expected: Option<&str>) -> Result<Sn
 
 #[cfg(test)]
 #[path = "manager_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 fn version(bytes: &[u8]) -> Option<u32> {
     let text = std::str::from_utf8(bytes).ok()?;

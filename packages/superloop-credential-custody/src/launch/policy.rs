@@ -258,7 +258,7 @@ impl Policy {
                 && (1..=16_777_216).contains(&l.sealed_bytes)
                 && (1..=2_147_483_648).contains(&l.total_sealed_bytes)
                 && (1..=16_384).contains(&l.diagnostic_bytes)
-                && (1..=67_108_864).contains(&l.artifact_bytes)
+                && (1..=134_217_728).contains(&l.artifact_bytes)
                 && (5..=64).contains(&l.observed_fds)
                 && (1..=128).contains(&l.mapped_files)
                 && (1..=256).contains(&l.event_queue),

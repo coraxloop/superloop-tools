@@ -1,11 +1,15 @@
-//! Unselected launcher cores. No entrypoint, manager adapter or plaintext reader.
+//! Unselected launcher cores. No installed entrypoint or plaintext reader.
 mod channel;
 mod confinement;
+mod control;
 mod fifo;
+mod keeper;
 mod manager;
 mod measure;
 mod policy;
+mod process_pin;
 mod sealer;
+mod startup;
 mod state;
 mod store;
 

@@ -33,6 +33,9 @@ pub(super) struct Pipes {
     uncertain: bool,
 }
 impl Pipes {
+    pub const fn directory(&self) -> &Directory {
+        &self.directory
+    }
     pub fn create(admission: &Admission, index: usize) -> Result<Self> {
         let case = admission
             .policy()

@@ -402,6 +402,25 @@ impl<'a> Session<'a> {
     }
     // Explicit cancellation is also the deterministic deadline control: tests
     // inject the event, not a claim about how quickly a shared machine ran.
+    // Ambiguous manager ownership or observation loss must retain outputs.
+    pub fn quarantine(&mut self, class: &'static str) -> &'static str {
+        if self.finished {
+            return "sealer-session-terminal";
+        }
+        for (running, exit) in self.running.iter_mut().zip(&mut self.exits) {
+            running.cancel();
+            *exit = running.exit;
+        }
+        self.running.clear();
+        self.finished = true;
+        if matches!(self.store.phase(), Phase::Failed | Phase::Uncertain) {
+            return class;
+        }
+        if self.store.uncertain(class).is_err() {
+            return "sealer-failure-custody";
+        }
+        class
+    }
     pub fn fail(&mut self, class: &'static str) -> &'static str {
         if self.finished {
             return "sealer-session-terminal";

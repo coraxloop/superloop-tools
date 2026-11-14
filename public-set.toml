@@ -3666,6 +3666,24 @@ pattern = "packages/superloop-credential-custody/src/launch/confinement.rs"
 pattern = "packages/superloop-credential-custody/src/launch/fifo.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/startup.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/process_pin.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/keeper.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/keeper_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control_tests.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-credential-custody/src/launch/manager.rs"
 
 [[include.rows]]

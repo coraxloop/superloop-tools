@@ -5,6 +5,10 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 fn fixture() -> Fixture {
     let mut f = Fixture::new();
+    add_images(&mut f);
+    f
+}
+pub(in crate::launch) fn add_images(f: &mut Fixture) {
     let current = std::env::current_exe().unwrap();
     let image = current
         .ancestors()
@@ -28,9 +32,9 @@ fn fixture() -> Fixture {
     f.value["limits"]["artifact_bytes"] = (64 * 1024 * 1024).into();
     f.value["limits"]["case_ms"] = 600_000.into();
     f.value["limits"]["campaign_ms"] = 600_000.into();
-    f
 }
-fn reply(admission: &Admission) -> Vec<u8> {
+
+pub(in crate::launch) fn reply(admission: &Admission) -> Vec<u8> {
     let policy = admission.policy();
     let mut values = BTreeMap::from([
         ("Id", policy.cases[0].generator_unit.clone()),
@@ -78,12 +82,15 @@ fn reply(admission: &Admission) -> Vec<u8> {
             out
         })
         .into_bytes();
-    for (name, stream) in [("left.fifo", "left"), ("right.fifo", "right")] {
+    for (name, stream) in ["left.fifo", "right.fifo"]
+        .into_iter()
+        .zip(&policy.cases[0].streams)
+    {
         out.extend_from_slice(
             format!(
                 "OpenFile={}:{}:append\n",
                 policy.roots.runtime.join("sample").join(name).display(),
-                stream
+                stream.name
             )
             .as_bytes(),
         );

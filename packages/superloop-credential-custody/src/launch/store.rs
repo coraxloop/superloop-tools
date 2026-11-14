@@ -22,6 +22,19 @@ pub(super) struct Directory {
     object: ObjectIdentity,
 }
 impl Directory {
+    pub fn try_clone(&self) -> Result<Self> {
+        self.verify()?;
+        Ok(Self {
+            parent: self
+                .parent
+                .try_clone()
+                .map_err(|_| "launch-directory-open")?,
+            file: self.file.try_clone().map_err(|_| "launch-directory-open")?,
+            name: self.name.clone(),
+            object: self.object,
+        })
+    }
+
     pub const fn file(&self) -> &File {
         &self.file
     }
@@ -105,6 +118,8 @@ struct Snapshot<'a> {
     created_outputs: Vec<&'a Entry>,
     invocation: Option<&'a Invocation>,
     configuration: Option<&'a ConfigurationMeasurement>,
+    manager_reply_sha256: Option<&'a str>,
+    manager_configuration_sha256: Option<&'a str>,
 }
 pub(super) struct Store {
     sealed: Directory,
@@ -122,6 +137,8 @@ pub(super) struct Store {
     original_cause: Option<&'static str>,
     invocation: Option<Invocation>,
     configuration: Option<ConfigurationMeasurement>,
+    manager_reply_sha256: Option<String>,
+    manager_configuration_sha256: Option<String>,
 }
 impl Store {
     pub fn reserve(admission: &Admission, index: usize) -> Result<Self> {
@@ -148,6 +165,8 @@ impl Store {
             expected_image: admission.fixture_image(),
             invocation: None,
             configuration: None,
+            manager_reply_sha256: None,
+            manager_configuration_sha256: None,
             sealed_limit: admission.policy().limits.sealed_bytes,
             refusal_class: None,
             original_cause: None,
@@ -247,6 +266,8 @@ impl Store {
             created_outputs: self.outputs.iter().map(|o| &o.entry).collect(),
             invocation: self.invocation.as_ref(),
             configuration: self.configuration.as_ref(),
+            manager_reply_sha256: self.manager_reply_sha256.as_deref(),
+            manager_configuration_sha256: self.manager_configuration_sha256.as_deref(),
         };
         let bytes = serde_json::to_vec(&snapshot).map_err(|_| "launch-evidence-encoding")?;
         receipt::publish_held(
@@ -254,6 +275,25 @@ impl Store {
             &format!("state-{sequence:02}.json"),
             &bytes,
         )
+    }
+    // These full digests come from the manager adapter's measured reply and
+    // compared canonical properties, never from declared digest fields. The
+    // independently protected policy and held CLI images supply expectations.
+    pub fn capture_manager(
+        &mut self,
+        invocation: Invocation,
+        snapshot: &super::manager::Snapshot,
+    ) -> Result<()> {
+        require(
+            self.state.phase() == Phase::Submitted,
+            "launch-capture-order",
+        )?;
+        self.manager_reply_sha256 = Some(snapshot.raw_sha256.clone());
+        self.manager_configuration_sha256 = Some(snapshot.configuration_sha256.clone());
+        self.capture(invocation, &snapshot.properties)
+    }
+    pub fn remember_cause(&mut self, class: &'static str) {
+        self.original_cause.get_or_insert(class);
     }
     pub fn capture(&mut self, invocation: Invocation, properties: &[u8]) -> Result<()> {
         require(
