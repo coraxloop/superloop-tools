@@ -132,6 +132,8 @@ fn invoke(case: &Case, convention: &str, raw: Option<&[u8]>, mode: u32, drain: b
     let missing = convention == "missing-fd";
     let alias = convention == "alias";
     let readonly = convention == "readonly";
+    // The root-refusal control needs enabled unprivileged user namespaces.
+    // A gate without them cannot execute this control; it is not a product failure.
     let root_namespace = convention == "root";
     let mapping = format!("0 {} 1\n", nix::unistd::geteuid()).into_bytes();
     let mapping_length = isize::try_from(mapping.len()).unwrap();

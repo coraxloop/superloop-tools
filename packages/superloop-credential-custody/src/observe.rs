@@ -185,6 +185,7 @@ fn payload(record: &Parameters) -> Result<Vec<u8>> {
     command
         .arg("--no-pager")
         .arg("--no-replace-objects")
+        .args(["-c", "protocol.allow=never"])
         .arg("-C")
         .arg(&record.payload.repository)
         .arg("show")
@@ -193,7 +194,7 @@ fn payload(record: &Parameters) -> Result<Vec<u8>> {
             record.payload.source_commit,
             record.payload.document.display()
         ));
-    let document = process::capture(command, &[], &record.limits)?;
+    let document = process::capture_git(command, &record.limits)?;
     let text = std::str::from_utf8(&document).map_err(|_| "payload-source-encoding")?;
     let mut matches = 0;
     let lines: Vec<_> = text.split_inclusive('\n').collect();
@@ -305,7 +306,7 @@ pub fn run(record: &Parameters) -> Result<Value> {
         } else {
             "0"
         });
-    let output = process::capture(command, &source, &record.limits)?;
+    let output = process::capture_matching(command, &source, &record.limits, &live.interpreter)?;
     let (rows, constants, comparisons) = rows(&output)?;
     validate(record, &rows, &constants, &comparisons)?;
     for row in &rows {
@@ -320,11 +321,11 @@ pub fn run(record: &Parameters) -> Result<Value> {
     }
     // Re-read identities after the observation; deployment exclusion remains an
     // operator prerequisite, not something a successful digest check establishes.
-    if live != identity::live(record)? {
+    if live.identity != identity::live(record)?.identity {
         return Err("identity-drift");
     }
     Ok(
-        json!({"identity": live, "config_digest": record.config_digest, "code_digest": record.code_digest,
+        json!({"identity": live.identity, "config_digest": record.config_digest, "code_digest": record.code_digest,
         "rows": rows, "constants": constants, "comparisons": comparisons}),
     )
 }

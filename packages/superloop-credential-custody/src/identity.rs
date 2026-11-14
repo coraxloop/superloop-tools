@@ -23,9 +23,16 @@ pub fn hash(bytes: &[u8]) -> String {
         .collect()
 }
 
-pub fn live(record: &Parameters) -> Result<Identity> {
+pub struct LiveIdentity {
+    pub identity: Identity,
+    pub interpreter: std::fs::File,
+}
+
+pub fn live(record: &Parameters) -> Result<LiveIdentity> {
     let mut live = record.identity.clone();
     let mut objects = BTreeSet::new();
+    let interpreter_path = live.files.interpreter.path.clone();
+    let mut interpreter = None;
     for file in [
         &mut live.files.sealer,
         &mut live.files.library,
@@ -43,6 +50,9 @@ pub fn live(record: &Parameters) -> Result<Identity> {
         let meta = input.metadata().map_err(|_| "file-metadata")?;
         if !objects.insert((meta.dev(), meta.ino())) {
             return Err("identity-file-alias");
+        }
+        if file.path == interpreter_path {
+            interpreter = Some(input.try_clone().map_err(|_| "identity-interpreter-hold")?);
         }
         file.sha256 = hash(&receipt::read_file(input, 268_435_456, false)?);
     }
@@ -63,7 +73,10 @@ pub fn live(record: &Parameters) -> Result<Identity> {
     if live != record.identity {
         return Err("identity-drift");
     }
-    Ok(live)
+    Ok(LiveIdentity {
+        identity: live,
+        interpreter: interpreter.ok_or("identity-member")?,
+    })
 }
 
 #[derive(Deserialize)]

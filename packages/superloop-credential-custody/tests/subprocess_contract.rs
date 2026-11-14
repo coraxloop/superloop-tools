@@ -1018,3 +1018,49 @@ fn probe_digest_record_is_strict() {
     probe.insert("bytes".into(), json!([65]));
     refused(&f.observe(), "record-shape");
 }
+
+/// ´test:integration:source-missing-object-cannot-start-transport´
+#[test]
+fn source_missing_object_cannot_start_transport() {
+    let f = Fixture::new();
+    let repo = f.dir.path().join("source");
+    let blob = String::from_utf8(git(&repo, &["rev-parse", "HEAD:procedure.md"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    fs::remove_file(repo.join(".git/objects").join(&blob[..2]).join(&blob[2..])).unwrap();
+    let marker = f.dir.path().join("transport.ran");
+    let helper = f.dir.path().join("transport");
+    fs::write(&helper, b"#!/bin/sh\nprintf ran > \"$0.ran\"\nexit 1\n").unwrap();
+    mode(&helper, 0o700);
+    for (key, value) in [
+        ("core.repositoryformatversion", "1"),
+        ("extensions.partialclone", "origin"),
+        ("remote.origin.promisor", "true"),
+        ("remote.origin.url", "ssh://synthetic.invalid/repository"),
+        // A per-protocol setting overrides the global protocol.allow default.
+        ("protocol.ssh.allow", "always"),
+        ("ssh.variant", "ssh"),
+        ("core.sshCommand", helper.to_str().unwrap()),
+    ] {
+        git(&repo, &["config", key, value]);
+    }
+    refused(&f.observe(), "child-failed");
+    assert!(
+        !marker.exists(),
+        "observation must not invoke the transport"
+    );
+    // Positive control: the same missing object and repository really do ask
+    // for the hostile transport when the overriding empty allowlist is absent.
+    let output = Command::new("/usr/bin/git")
+        .args(["-c", "protocol.allow=never", "-C"])
+        .arg(&repo)
+        .args(["show", "HEAD:procedure.md"])
+        .env_clear()
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(marker.exists(), "positive control must reach the transport");
+}

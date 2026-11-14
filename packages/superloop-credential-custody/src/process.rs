@@ -58,6 +58,14 @@ pub fn pin_program(
     command: &mut Command,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
 ) -> Result<()> {
+    pin_matching(command, environment, None)
+}
+
+fn pin_matching(
+    command: &mut Command,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    expected: Option<&std::fs::File>,
+) -> Result<()> {
     use loop_home::anchor::{
         HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement, Transport,
     };
@@ -101,6 +109,14 @@ pub fn pin_program(
     if pin.record().device != meta.dev() || pin.record().inode != meta.ino() {
         return Err("program-identity");
     }
+    if let Some(expected) = expected {
+        let measured = expected
+            .metadata()
+            .map_err(|_| "identity-interpreter-hold")?;
+        if (pin.record().device, pin.record().inode) != (measured.dev(), measured.ino()) {
+            return Err("interpreter-execution-identity");
+        }
+    }
     let manifest = Manifest {
         version: 1,
         transport: Transport::Rights,
@@ -131,8 +147,39 @@ pub fn pin_program(
         .map_err(|_| "program-exec")
 }
 
-pub fn capture(mut command: Command, input: &[u8], limits: &Limits) -> Result<Vec<u8>> {
-    pin_program(&mut command, &[])?;
+pub fn capture(command: Command, input: &[u8], limits: &Limits) -> Result<Vec<u8>> {
+    capture_inner(command, input, limits, None, &[])
+}
+
+/// Git must not escape through a repository-configured fetch transport.
+pub fn capture_git(command: Command, limits: &Limits) -> Result<Vec<u8>> {
+    capture_inner(
+        command,
+        &[],
+        limits,
+        None,
+        &[("GIT_ALLOW_PROTOCOL".into(), "".into())],
+    )
+}
+
+/// The retained file is the very inode whose bytes supplied the identity digest.
+pub fn capture_matching(
+    command: Command,
+    input: &[u8],
+    limits: &Limits,
+    measured: &std::fs::File,
+) -> Result<Vec<u8>> {
+    capture_inner(command, input, limits, Some(measured), &[])
+}
+
+fn capture_inner(
+    mut command: Command,
+    input: &[u8],
+    limits: &Limits,
+    measured: Option<&std::fs::File>,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Result<Vec<u8>> {
+    pin_matching(&mut command, environment, measured)?;
     command
         .env_clear()
         .current_dir("/")
@@ -206,4 +253,47 @@ pub fn capture(mut command: Command, input: &[u8], limits: &Limits) -> Result<Ve
     }
     let _ignored = child.wait();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// ´test:unit:interpreter-execution-retains-measured-inode´
+    #[test]
+    fn interpreter_execution_retains_measured_inode() {
+        // Exercise the real descriptor-execution boundary with native stand-ins:
+        // replacing the host's fixed Python path would need host root. No CLI
+        // override or production test hook is added to make that swap possible.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("interpreter");
+        let replacement = dir.path().join("replacement");
+        for target in [&path, &replacement] {
+            fs::copy("/usr/bin/printf", target).unwrap();
+            fs::set_permissions(target, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        assert_eq!(fs::read(&path).unwrap(), fs::read(&replacement).unwrap());
+        let measured = fs::File::open(&path).unwrap();
+        let limits = Limits {
+            file_bytes: 1024,
+            output_bytes: 1024,
+            timeout_ms: 5000,
+        };
+        let command = || {
+            let mut c = Command::new(&path);
+            c.arg("synthetic");
+            c
+        };
+        assert_eq!(
+            capture_matching(command(), &[], &limits, &measured).unwrap(),
+            b"synthetic"
+        );
+        fs::rename(&replacement, &path).unwrap();
+        assert_eq!(
+            capture_matching(command(), &[], &limits, &measured),
+            Err("interpreter-execution-identity")
+        );
+    }
 }
