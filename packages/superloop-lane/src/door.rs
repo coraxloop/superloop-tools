@@ -3162,12 +3162,14 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-fn exercise_retry_window() -> Duration {
-    #[cfg(test)]
-    if let Some(hang) = EXERCISE_RETRY_HANG.with(std::cell::Cell::get) {
-        return hang;
-    }
+#[cfg(not(test))]
+const fn exercise_retry_window() -> Duration {
     EXERCISE_RETRY_WINDOW
+}
+
+#[cfg(test)]
+fn exercise_retry_window() -> Duration {
+    EXERCISE_RETRY_HANG.with(|hang| hang.get().unwrap_or(EXERCISE_RETRY_WINDOW))
 }
 
 pub(crate) fn exercise_admission_unmeasured(kind: &str) -> bool {
