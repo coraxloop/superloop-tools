@@ -271,7 +271,7 @@ impl Directory {
         for name in ["registry.toml", "allocations.toml"] {
             let path = self.home.join(".config/loops").join(name);
             let file = configuration_file(&path, self.configuration.as_deref())?;
-            notifications.add(&path, &file, None)?;
+            notifications.hint(&path, &file);
             let current = configuration_file(&path, self.configuration.as_deref())?;
             let before = file.metadata()?;
             let after = current.metadata()?;
@@ -731,3 +731,6 @@ pub(super) fn verify_outbox(outbox: &File, uid: u32, service: u32, active: bool)
     }
     Ok(())
 }
+
+#[cfg(test)]
+pub(super) use tests::bounded;

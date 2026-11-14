@@ -19,6 +19,7 @@ mod entry_anchors;
 mod io;
 mod notify;
 mod refusal;
+mod retry;
 mod service;
 
 pub mod configuration_store;

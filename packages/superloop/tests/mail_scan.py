@@ -1,5 +1,5 @@
 """Synthetic mail population; every service launch uses the installed production entry."""
-import os, sys, pathlib, struct, subprocess, json, time
+import os, sys, pathlib, struct, subprocess, json, time, math
 P=pathlib.Path
 SERVICE=65535
 
@@ -85,7 +85,7 @@ def history(home,n):
     if n:
         (root/'state.toml').write_text(f'version=1\ngreatest_reserved="{stamp}"\nacceptance_available=false\n')
 
-def measure(count,binary,tag):
+def measure(count,binary,tag,post_claim=False):
     root=P(os.environ['TMPDIR'])
     for path in [root,*root.parents]:
         if not path.stat().st_mode & 1:
@@ -121,6 +121,9 @@ def measure(count,binary,tag):
             inspected=subprocess.run(['/usr/bin/podman','unshare',sys.executable,str(P(__file__).resolve()),'inspect',str(service_pid),str(home)],capture_output=True,text=True,check=True)
             descriptor_count=int(inspected.stdout)
             scan_count=log.read_text().count('mail scan complete');c=cpu();t=time.monotonic();time.sleep(10);elapsed=time.monotonic()-t;used=cpu()-c;idle_scans=log.read_text().count('mail scan complete')-scan_count
+            if post_claim:
+                post_claim_refusal(home,service_pid,log)
+                return
             probe=r'''
     import os,sys,time,pathlib,json
     home=pathlib.Path(sys.argv[1]);reader,writer=os.pipe();pid=os.fork()
@@ -154,6 +157,52 @@ def measure(count,binary,tag):
             if process.poll() is None:process.terminate()
             process.wait(timeout=30)
 
+def post_claim_refusal(home,service_pid,log):
+    # Only this fixture's accepted-record directory is made unwritable.
+    probe=r'''
+import ctypes,os,pathlib,select,struct,sys,time
+home=pathlib.Path(sys.argv[1]);pid=int(sys.argv[2]);libc=ctypes.CDLL(None,use_errno=True)
+fd=libc.inotify_init1(os.O_NONBLOCK|os.O_CLOEXEC)
+assert fd>=0
+outbox=home/'.var/loops/loop00/mail/outbox';name='loop01.postclaim.letter'
+assert libc.inotify_add_watch(fd,os.fsencode(outbox),0x40|0x80)>=0
+handle=os.pidfd_open(pid)
+command=pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+assert len(command)>2 and command[1]==b'_serve' and os.fsdecode(command[2])==str(home)
+assert not select.select([handle],[],[],0)[0], 'fixture service exited before fault'
+(home/'.var/loops/.mail-service/deliveries').chmod(0o500)
+os.close(handle)
+actor=os.fork()
+if actor==0:
+ os.setgroups([33280]);os.setgid(1000);os.setuid(1000)
+ draft=home/'.var/loops/loop00/mail/draft/postclaim';draft.write_bytes(b'x'*8192)
+ os.rename(draft,outbox/name);os._exit(0)
+os.waitpid(actor,0);claimed=False;deadline=time.monotonic()+60
+while time.monotonic()<deadline:
+ if select.select([fd],[],[],.05)[0]:
+  events=os.read(fd,65536);offset=0
+  while offset<len(events):
+   wd,mask,cookie,length=struct.unpack_from('iIII',events,offset)
+   entry=events[offset+16:offset+16+length].split(b'\0',1)[0];offset+=16+length
+   if entry==name.encode() and mask&0x40:claimed=True
+ if claimed:
+  try:
+   restored=(outbox/name).read_bytes()==b'x'*8192
+   reasons=[p.read_text() for p in outbox.iterdir() if p.name!=name]
+   if restored and any('Permission denied' in reason for reason in reasons):break
+  except (FileNotFoundError,PermissionError):pass
+else:raise RuntimeError('fixture did not witness a post-claim journal refusal and restoration')
+os.close(fd)
+'''
+    subprocess.run(['/usr/bin/podman','unshare',sys.executable,'-c',probe,str(home),str(service_pid)],check=True,timeout=70)
+    before=log.read_text().count('mail scan complete');start=time.monotonic();time.sleep(3);elapsed=time.monotonic()-start
+    scans=log.read_text().count('mail scan complete')-before
+    bound=math.ceil(elapsed/.250)+1
+    alive=subprocess.run(['/usr/bin/podman','unshare',sys.executable,str(P(__file__).resolve()),'inspect',str(service_pid),str(home)],capture_output=True,text=True,check=True)
+    assert alive.stdout.strip(), 'fixture service exited during refused-letter retries'
+    assert scans<=bound, f'post-claim restoration caused {scans} scans; bound {bound}'
+    print(json.dumps({'case':'post-claim-refusal','scan_count':scans,'scan_bound':bound,'interval_seconds':elapsed}),flush=True)
+
 def own_process(pid,home,stop=False):
     import signal
     try:descriptor=os.pidfd_open(pid)
@@ -171,5 +220,6 @@ if __name__=='__main__':
     if phase=='seed':seed(P(sys.argv[2]),int(sys.argv[3]),sys.argv[4])
     elif phase=='history':history(P(sys.argv[2]),int(sys.argv[3]))
     elif phase=='measure':measure(int(sys.argv[2]),sys.argv[3],sys.argv[4])
+    elif phase=='post-claim':measure(int(sys.argv[2]),sys.argv[3],sys.argv[4],True)
     elif phase in ['inspect','stop']:own_process(int(sys.argv[2]),P(sys.argv[3]),phase=='stop')
-    else:raise ValueError('expected seed, history, measure, inspect or stop')
+    else:raise ValueError('expected seed, history, measure, post-claim, inspect or stop')

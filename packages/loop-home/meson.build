@@ -43,7 +43,9 @@ pkg_loop_home_rust = files(
   'src/mail/refusal.rs',
   'src/mail/service.rs',
   'src/mail/notify.rs',
+  'src/mail/retry.rs',
   'src/mail/service_tests.rs',
+  'src/mail/service_runtime_tests.rs',
   'src/mail/command.rs',
   'src/mail/entry_anchors.rs',
 
@@ -154,6 +156,7 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/mail/configuration_tests.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Rootless inventory fixture enters the real test binary with the received configuration and storage descriptors, then drops to the reserved service identity"}
+{"kind":"call","site":"packages/loop-home/src/mail/service_runtime_tests.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Rootless service fixture reenters this test binary, provisions only its marked temporary home, then drops to the reserved service identity"}
 ''']
 
 dependency_ledger += ['''

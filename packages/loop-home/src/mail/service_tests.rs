@@ -894,3 +894,53 @@ fn mail_retention_probes_recorded_names_without_listing_inboxes() {
     );
     assert_eq!(io::NAME_SCANS.with(std::cell::Cell::get), 0);
 }
+
+/// ´claim:loophome:mail-wake-scan-starts-have-a-minimum-gap´
+/// ´test:unit:mail-wake-scan-starts-have-a-minimum-gap´
+#[test]
+fn mail_wake_scan_starts_have_a_minimum_gap() {
+    let origin = Monotonic::now();
+    let mut last = None;
+    let mut starts = 0;
+    for millis in 0..1000 {
+        let now = origin + Duration::from_millis(millis);
+        if scan_delay(last, now).is_zero() {
+            starts += 1;
+            last = Some(now);
+        }
+    }
+    assert_eq!(
+        starts, 4,
+        "restoration events cannot start back-to-back scans"
+    );
+    assert_eq!(
+        scan_delay(Some(origin), origin + Duration::from_secs(1)),
+        Duration::ZERO
+    );
+}
+
+/// ´claim:loophome:mail-retry-batches-keep-sender-and-slug-order´
+/// ´test:unit:mail-retry-batches-keep-sender-and-slug-order´
+#[test]
+fn mail_retry_batches_keep_sender_and_slug_order() {
+    let key = |sender: &str, name: &str| {
+        (
+            Address::parse(sender).expect("sender"),
+            OsString::from(name),
+        )
+    };
+    let alpha_first = key("alpha", "zeta.01.letter");
+    let alpha_second = key("alpha", "gamma.02.letter");
+    let beta_first = key("beta", "alpha.00.letter");
+    let beta_second = key("beta", "alpha.03.letter");
+    assert_eq!(
+        retry_order([
+            beta_second.clone(),
+            alpha_second.clone(),
+            beta_first.clone(),
+            alpha_first.clone()
+        ]),
+        vec![alpha_first, beta_first, alpha_second, beta_second],
+        "deadline order must not replace sender rounds or put recipient before slug"
+    );
+}

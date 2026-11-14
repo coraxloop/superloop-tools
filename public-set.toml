@@ -3345,6 +3345,9 @@ pattern = "packages/loop-home/src/mail/refusal.rs"
 pattern = "packages/loop-home/src/mail/notify.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/mail/retry.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/mail/service.rs"
 
 [[include.rows]]
@@ -3358,6 +3361,9 @@ pattern = "packages/superloop/data/superloop-mail.service.in"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/mail/service_tests.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/service_runtime_tests.rs"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/mail/configuration_tests.rs"

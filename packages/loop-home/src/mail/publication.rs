@@ -1134,6 +1134,21 @@ pub fn pending_preparations(journal: &Journal) -> Result<Vec<(Address, Address, 
         .collect()
 }
 
+/// Reconcile this known accepted letter's preparation when one remains.
+/// The exact-key presence check does not discover other outstanding work; an
+/// existing intent receives all ordinary accepted-preparation validation.
+pub(super) fn reconcile_retry_preparation(
+    journal: &Journal,
+    sender: &Endpoint,
+    recipient: &Endpoint,
+    outgoing: &str,
+) -> Result<()> {
+    if preparation_names(journal, sender, recipient, outgoing)?.is_some() {
+        reconcile_accepted_preparation(journal, sender, recipient, outgoing)?;
+    }
+    Ok(())
+}
+
 /// Retire a preparation intent whose matching acceptance is already durable.
 /// This handles interruption after acceptance but before intent cleanup.
 ///
@@ -1434,7 +1449,7 @@ type Observer = Option<Box<dyn FnMut(u8)>>;
 
 #[cfg(test)]
 thread_local! {
-    static STOP: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+    pub(super) static STOP: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
     static OBSERVE: std::cell::RefCell<Observer> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(test)]

@@ -7,7 +7,7 @@ use super::{
     Address, Outgoing,
     directory::{Actor, Directory, Inventory},
     instant::Instant,
-    io, publication, refusal,
+    io, publication, refusal, retry,
 };
 use nix::fcntl::{RenameFlags, renameat2};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -31,11 +31,18 @@ impl Clock for HostClock {
     }
 }
 
+pub(super) enum Wake {
+    Scan,
+    Retry,
+}
+
 pub(super) struct Service {
     pub directory: Directory,
     pub journal: Journal,
     last_prune: Option<Monotonic>,
     clock: Box<dyn Clock>,
+    last_scan: Option<Monotonic>,
+    retries: retry::Queue,
 }
 impl Service {
     pub fn new(directory: Directory, journal: Journal) -> Self {
@@ -44,6 +51,8 @@ impl Service {
             journal,
             last_prune: None,
             clock: Box::new(HostClock),
+            last_scan: None,
+            retries: retry::Queue::default(),
         }
     }
     fn pins(inventory: &Inventory, records: &[Record]) -> Result<Pins> {
@@ -86,56 +95,162 @@ impl Service {
         self.last_prune
             .is_none_or(|last| last.elapsed() >= Duration::from_secs(PRUNE_INTERVAL_SECONDS))
     }
-    fn maintenance_wait(&self) -> Duration {
-        self.last_prune.map_or(Duration::ZERO, |last| {
+    fn maintenance_wait(&self, notifications: &super::notify::Notifications) -> Duration {
+        let retention = self.last_prune.map_or(Duration::ZERO, |last| {
             Duration::from_secs(PRUNE_INTERVAL_SECONDS).saturating_sub(last.elapsed())
-        })
+        });
+        if notifications.degraded() {
+            retention.min(self.last_scan.map_or(Duration::ZERO, |last| {
+                FALLBACK_INTERVAL.saturating_sub(last.elapsed())
+            }))
+        } else {
+            retention
+        }
     }
-    pub fn wait_for_change(&self, notifications: &mut super::notify::Notifications) -> Result<()> {
+    pub fn wait_for_change(
+        &self,
+        notifications: &mut super::notify::Notifications,
+    ) -> Result<Wake> {
         loop {
-            for change in notifications.wait(self.maintenance_wait())? {
+            let maintenance = self.maintenance_wait(notifications);
+            let wait = self
+                .retries
+                .wait(Monotonic::now())
+                .map_or(maintenance, |retry| retry.min(maintenance));
+            for change in notifications.wait(wait)? {
                 match change {
-                    super::notify::Change::Reconcile => return Ok(()),
+                    super::notify::Change::Reconcile => return Ok(Wake::Scan),
+                    super::notify::Change::Timer => {
+                        if self.maintenance_wait(notifications).is_zero() {
+                            return Ok(Wake::Scan);
+                        }
+                        if self
+                            .retries
+                            .wait(Monotonic::now())
+                            .is_some_and(|wait| wait.is_zero())
+                        {
+                            return Ok(Wake::Retry);
+                        }
+                    }
                     super::notify::Change::Outbox(path, sender, name) => {
                         // Ignore only an exact, protected service sidecar. A suffix grants nothing.
                         let recognized = io::absolute(&path, true).and_then(|outbox| {
                             refusal::recognized(&self.journal, &outbox, &sender.to_string(), &name)
                         });
                         if !matches!(recognized, Ok(true)) {
-                            return Ok(());
+                            return Ok(Wake::Scan);
                         }
                     }
                 }
             }
         }
     }
+    fn retry_later(&mut self, sender: &Address, name: &OsStr, work: retry::Work) {
+        self.retries
+            .schedule((sender.clone(), name.to_owned()), work, Monotonic::now());
+    }
+    /// The retry clock enumerates only due keys, never sender outboxes or a discovery scan.
+    pub fn retry_due(&mut self) -> Vec<String> {
+        self.retry_due_at(Monotonic::now())
+    }
+    fn retry_due_at(&mut self, now: Monotonic) -> Vec<String> {
+        let mut failures = Vec::new();
+        let mut entries = self
+            .retries
+            .due(now)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        for key in retry_order(entries.keys().cloned()) {
+            let Some(entry) = entries.remove(&key) else {
+                continue;
+            };
+            let result = self.retry_letter(&key.0, &key.1, &entry.work);
+            tracing::debug!(sender = %key.0, letter = %key.1.to_string_lossy(), success = result.is_ok(), "mail retry complete");
+            if let Err(error) = result {
+                failures.push(format!("{}: {error}", key.0));
+                self.retries.failed(key, entry, Monotonic::now());
+            } else {
+                self.retries.remove(&key);
+            }
+        }
+        failures
+    }
+    fn retry_letter(&mut self, sender: &Address, name: &OsStr, work: &retry::Work) -> Result<()> {
+        match work {
+            retry::Work::Accepted(delivery) => {
+                let record = self.journal.record(delivery)?;
+                if record.completed.is_none() {
+                    let inventory = self.directory.inventory()?;
+                    let recipient = Address::parse(&record.recipient)
+                        .map_err(|_| MailError::Invalid("journal recipient"))?;
+                    publication::reconcile_retry_preparation(
+                        &self.journal,
+                        &actor(&inventory, sender)?.endpoint,
+                        &actor(&inventory, &recipient)?.endpoint,
+                        &record.outgoing,
+                    )?;
+                    self.finish(&inventory, &record)?;
+                }
+                Ok(())
+            }
+            retry::Work::Restoration(recipient) => {
+                let inventory = self.directory.inventory()?;
+                let text = name
+                    .to_str()
+                    .ok_or(MailError::Invalid("restoration name encoding"))?;
+                self.reconcile(&inventory, sender, recipient, text)?;
+                self.retry_source(sender, name)
+            }
+            retry::Work::Source => self.retry_source(sender, name),
+        }
+    }
+    fn retry_source(&mut self, sender: &Address, name: &OsStr) -> Result<()> {
+        // Presence is only a hint; candidate performs every fresh admission check itself.
+        let path = self
+            .directory
+            .home
+            .join(".var/loops")
+            .join(sender.relative_mailbox())
+            .join("outbox");
+        let outbox = io::absolute(&path, true)?;
+        match nix::sys::stat::fstatat(&outbox, name, nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW) {
+            Err(nix::errno::Errno::ENOENT) => Ok(()),
+            Err(error) => Err(error.into()),
+            Ok(_) => self.candidate(sender, name),
+        }
+    }
     pub fn scan_watching(
         &mut self,
         notifications: &mut super::notify::Notifications,
     ) -> Result<Vec<String>> {
+        let now = Monotonic::now();
+        std::thread::sleep(scan_delay(self.last_scan, now));
+        self.last_scan = Some(Monotonic::now());
+        tracing::debug!("mail scan started");
+        notifications.begin_scan();
         self.directory.watch_roots(notifications)?;
-        let inventory = self.directory.inventory()?;
+        let mut inventory = self.directory.inventory()?;
+        // Only configuration needs a second identity check after inventory. Roots were armed first.
         self.directory.watch_configuration(notifications)?;
         let root = self.directory.home.join(".var/loops");
-        notifications.path(&root, true)?;
-        for name in &inventory.loops {
-            let home = root.join(name);
-            notifications.path(&home, true)?;
-            notifications.path(&home.join("workers"), true)?;
-            notifications.path(&home.join("private/.config/mail/loop.toml"), false)?;
-        }
-        for (address, actor) in &inventory.actors {
+        let mut failures = Vec::new();
+        inventory.actors.retain(|address, actor| {
             let mailbox = root.join(address.relative_mailbox());
-            notifications.path(&mailbox, true)?;
-            notifications.add(
-                &mailbox.join("outbox"),
-                &actor.outbox,
-                Some(address.clone()),
-            )?;
-            notifications.add(&mailbox.join("inbox"), &actor.inbox, None)?;
-            notifications.current(&mailbox.join("outbox"), &actor.outbox, true)?;
-            notifications.current(&mailbox.join("inbox"), &actor.inbox, true)?;
-        }
+            let registered = (|| -> Result<()> {
+                notifications.path(&mailbox, true)?;
+                notifications.add(&mailbox.join("outbox"), &actor.outbox, Some(address.clone()))?;
+                notifications.add(&mailbox.join("inbox"), &actor.inbox, None)?;
+                notifications.current(&mailbox.join("outbox"), &actor.outbox, true)?;
+                notifications.current(&mailbox.join("inbox"), &actor.inbox, true)
+            })();
+            if let Err(error) = registered {
+                tracing::warn!(%address, reason = %error, "mailbox watch registration failed; mailbox skipped");
+                failures.push(format!("{address}: notification registration: {error}"));
+                false
+            } else { true }
+        });
+        inventory.failures.extend(failures);
+        notifications.finish_scan();
         // Arming precedes candidate enumeration, including the first scan after restart.
         let count = inventory.actors.len();
         let result = self.scan_inventory(&inventory);
@@ -180,59 +295,46 @@ impl Service {
         for (sender, recipient, name) in publication::pending_restorations(&self.journal)? {
             let _span = tracing::info_span!("mail.recover_restoration", %sender, %recipient, letter = %name).entered();
             if let Err(error) = self.reconcile(inventory, &sender, &recipient, &name) {
+                self.retry_later(
+                    &sender,
+                    OsStr::new(&name),
+                    retry::Work::Restoration(recipient.clone()),
+                );
                 tracing::warn!(reason = %error, "recovery failed");
                 failures.push(error.to_string());
             }
         }
         for (sender, recipient, name) in publication::pending_preparations(&self.journal)? {
             let _span = tracing::info_span!("mail.recover_preparation", %sender, %recipient, letter = %name).entered();
-            let accepted = self.journal.records()?.into_iter().any(|record| {
+            let accepted = self.journal.records()?.into_iter().find(|record| {
                 record.sender == sender.to_string()
                     && record.outgoing == name
                     && record.completed.is_none()
             });
-            let result = if accepted {
-                publication::reconcile_accepted_preparation(
-                    &self.journal,
-                    &actor(inventory, &sender)?.endpoint,
-                    &actor(inventory, &recipient)?.endpoint,
-                    &name,
-                )
-                .map(|_| ())
-            } else {
-                self.reconcile(inventory, &sender, &recipient, &name)
-            };
+            let result = (|| -> Result<()> {
+                if accepted.is_some() {
+                    publication::reconcile_accepted_preparation(
+                        &self.journal,
+                        &actor(inventory, &sender)?.endpoint,
+                        &actor(inventory, &recipient)?.endpoint,
+                        &name,
+                    )
+                    .map(|_| ())
+                } else {
+                    self.reconcile(inventory, &sender, &recipient, &name)
+                }
+            })();
             if let Err(error) = result {
+                let work = accepted.map_or_else(
+                    || retry::Work::Restoration(recipient.clone()),
+                    |record| retry::Work::Accepted(record.delivery),
+                );
+                self.retry_later(&sender, OsStr::new(&name), work);
                 tracing::warn!(reason = %error, "recovery failed");
                 failures.push(error.to_string());
             }
         }
-        for record in self
-            .journal
-            .records()?
-            .into_iter()
-            .filter(|record| record.completed.is_none())
-        {
-            let _span = tracing::info_span!("mail.recover_publication", sender = %record.sender, recipient = %record.recipient, letter = %record.outgoing, delivery = %record.delivery).entered();
-            tracing::info!("recovering pending publication");
-            if let Err(error) = self.finish(inventory, &record) {
-                tracing::warn!(reason = %error, "publication remains pending");
-                self.journal.pending(&record.delivery, &error.to_string())?;
-                let sender = Address::parse(&record.sender)
-                    .map_err(|_| MailError::Invalid("journal sender"))?;
-                if let Err(projection) = self.project(
-                    actor(inventory, &sender)?,
-                    &sender,
-                    OsStr::new(&record.outgoing),
-                    Some((record.bytes, record.digest.clone())),
-                    ("pending-delivery", &error.to_string()),
-                    Some(record.delivery.clone()),
-                ) {
-                    failures.push(projection.to_string());
-                }
-                failures.push(error.to_string());
-            }
-        }
+        failures.extend(self.recover_accepted(inventory)?);
         let pending = self
             .journal
             .records()?
@@ -257,9 +359,51 @@ impl Service {
                     && !pending.contains(&(sender.to_string(), name.to_owned()))
                     && let Err(error) = self.reconcile(inventory, sender, &outgoing.recipient, name)
                 {
+                    self.retry_later(
+                        sender,
+                        OsStr::new(name),
+                        retry::Work::Restoration(outgoing.recipient.clone()),
+                    );
                     tracing::warn!(%sender, recipient = %outgoing.recipient, letter = %name, reason = %error, "recovery failed");
                     failures.push(error.to_string());
                 }
+            }
+        }
+        Ok(failures)
+    }
+    fn recover_accepted(&mut self, inventory: &Inventory) -> Result<Vec<String>> {
+        let mut failures = Vec::new();
+        for record in self
+            .journal
+            .records()?
+            .into_iter()
+            .filter(|record| record.completed.is_none())
+        {
+            let _span = tracing::info_span!("mail.recover_publication", sender = %record.sender, recipient = %record.recipient, letter = %record.outgoing, delivery = %record.delivery).entered();
+            tracing::info!("recovering pending publication");
+            if let Err(error) = self.finish(inventory, &record) {
+                tracing::warn!(reason = %error, "publication remains pending");
+                self.journal.pending(&record.delivery, &error.to_string())?;
+                let sender = Address::parse(&record.sender)
+                    .map_err(|_| MailError::Invalid("journal sender"))?;
+                self.retry_later(
+                    &sender,
+                    OsStr::new(&record.outgoing),
+                    retry::Work::Accepted(record.delivery.clone()),
+                );
+                if let Err(projection) = (|| -> Result<()> {
+                    self.project(
+                        actor(inventory, &sender)?,
+                        &sender,
+                        OsStr::new(&record.outgoing),
+                        Some((record.bytes, record.digest.clone())),
+                        ("pending-delivery", &error.to_string()),
+                        Some(record.delivery.clone()),
+                    )
+                })() {
+                    failures.push(projection.to_string());
+                }
+                failures.push(error.to_string());
             }
         }
         Ok(failures)
@@ -337,6 +481,8 @@ impl Service {
             )?;
             tracing::info!(delivered = 1, "letter delivered");
         }
+        self.retries
+            .remove(&(sender_address, OsString::from(&record.outgoing)));
         Ok(())
     }
     fn project(
@@ -432,6 +578,16 @@ impl Service {
         Ok(failures)
     }
     fn candidate(&mut self, sender_address: &Address, name: &OsStr) -> Result<()> {
+        let result = self.try_candidate(sender_address, name);
+        if result.is_err() {
+            self.retry_later(sender_address, name, retry::Work::Source);
+        } else {
+            self.retries
+                .remove(&(sender_address.clone(), name.to_owned()));
+        }
+        result
+    }
+    fn try_candidate(&mut self, sender_address: &Address, name: &OsStr) -> Result<()> {
         let recipient = name
             .to_str()
             .and_then(|name| Outgoing::parse(name).ok())
@@ -465,6 +621,11 @@ impl Service {
                 && record.completed.is_none()
         });
         if let Some(record) = accepted {
+            self.retry_later(
+                sender_address,
+                name,
+                retry::Work::Accepted(record.delivery.clone()),
+            );
             self.journal.pending(&record.delivery, &error.to_string())?;
             self.project(
                 sender,
@@ -484,8 +645,15 @@ impl Service {
                     nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
                 )
                 .is_ok()
+                && let Err(error) =
+                    self.reconcile(inventory, sender_address, &outgoing.recipient, text)
             {
-                self.reconcile(inventory, sender_address, &outgoing.recipient, text)?;
+                self.retry_later(
+                    sender_address,
+                    name,
+                    retry::Work::Restoration(outgoing.recipient),
+                );
+                return Err(error);
             }
             self.project(
                 sender,
@@ -558,6 +726,14 @@ impl Service {
         self.finish(inventory, &record)
     }
 }
+const FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
+const SCAN_GAP: Duration = Duration::from_millis(250);
+fn scan_delay(last: Option<Monotonic>, now: Monotonic) -> Duration {
+    last.map_or(Duration::ZERO, |last| {
+        SCAN_GAP.saturating_sub(now.saturating_duration_since(last))
+    })
+}
+
 fn actor<'a>(inventory: &'a Inventory, address: &Address) -> Result<&'a Actor> {
     inventory.actors.get(address).ok_or_else(|| {
         MailError::Io(std::io::Error::new(
@@ -593,6 +769,18 @@ fn observe_file(actor: &Actor, name: &OsStr) -> Result<(std::fs::File, (u64, Str
     let bytes = io::bounded(&file, MAX_LETTER_BYTES)?;
     Ok((file, (bytes.len() as u64, digest(&bytes))))
 }
+fn retry_order(keys: impl IntoIterator<Item = retry::Key>) -> Vec<retry::Key> {
+    let mut queues = BTreeMap::<Address, VecDeque<OsString>>::new();
+    for (sender, name) in keys {
+        queues.entry(sender).or_default().push_back(name);
+    }
+    for names in queues.values_mut() {
+        names
+            .make_contiguous()
+            .sort_by_cached_key(|name| sort_key(name));
+    }
+    schedule(queues)
+}
 fn sort_key(name: &OsStr) -> (Vec<u8>, Vec<u8>) {
     name.to_str()
         .and_then(|name| Outgoing::parse(name).ok())
@@ -622,3 +810,7 @@ fn schedule(mut queues: BTreeMap<Address, VecDeque<OsString>>) -> Vec<(Address, 
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "service_runtime_tests.rs"]
+mod runtime_tests;

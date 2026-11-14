@@ -263,12 +263,16 @@ fn anchored_serve(arguments: &[OsString], report: &mut dyn std::io::Write) -> Re
         &entered.configuration.registry,
         Some(entered.anchor),
     )?;
-    let mut notifications = super::notify::Notifications::new()?;
+    let mut notifications = super::notify::Notifications::new();
+    let mut failures = service.scan_watching(&mut notifications)?;
     loop {
-        for failure in service.scan_watching(&mut notifications)? {
+        for failure in failures {
             writeln!(report, "{failure}")?;
         }
-        service.wait_for_change(&mut notifications)?;
+        failures = match service.wait_for_change(&mut notifications)? {
+            super::service::Wake::Scan => service.scan_watching(&mut notifications)?,
+            super::service::Wake::Retry => service.retry_due(),
+        };
     }
 }
 

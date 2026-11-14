@@ -1,5 +1,5 @@
 #[path = "../../tests/support/bounded.rs"]
-mod bounded;
+pub mod bounded;
 use super::*;
 use bounded::CommandOutput as _;
 use std::fs;
