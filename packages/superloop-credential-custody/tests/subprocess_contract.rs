@@ -383,7 +383,7 @@ fn payload_complete_row_contract() {
         ),
         (
             PAYLOAD.replace("'file-bytes', len(raw)", "'file-bytes', len(raw) + 1"),
-            "payload-file-size",
+            "payload-row-inconsistent",
         ),
         (
             format!("{PAYLOAD}print('unexpected row')\n"),
@@ -831,4 +831,79 @@ fn calibration_computation_and_measure_drift() {
         mode(&path, 0o400);
         refused(&f.check(), "calibration-identity");
     }
+}
+
+/// ´test:integration:inherited-descriptors-do-not-reach-probes´
+#[test]
+#[allow(unsafe_code)]
+fn inherited_descriptors_do_not_reach_probes() {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+    use std::os::unix::process::CommandExt as _;
+    let input = fs::File::open("/dev/null").unwrap();
+    let raw = nix::fcntl::fcntl(&input, nix::fcntl::FcntlArg::F_DUPFD(1000)).unwrap();
+    // SAFETY: F_DUPFD returned a fresh owned descriptor, deliberately without
+    // CLOEXEC. Keep it alive through the observer exec and close it afterward.
+    let _inherited = unsafe { OwnedFd::from_raw_fd(raw) };
+    let mut f = Fixture::new();
+    let code = format!(
+        "import os\ntry: os.fstat({raw})\nexcept OSError: print('synthetic-v1')\nelse: raise SystemExit(9)\n"
+    );
+    f.record["probes"][0]["argv"] = json!(["/usr/bin/python3", "-I", "-c", code]);
+    let mut command = f.command(false);
+    // SAFETY: this child-only post-fork callback performs one signal syscall,
+    // allocates nothing and never changes the test parent's signal disposition.
+    unsafe {
+        command.pre_exec(|| {
+            nix::libc::signal(nix::libc::SIGCHLD, nix::libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    pass(&command.output().unwrap());
+    pass(&f.check());
+}
+
+/// ´test:integration:group-leader-is-not-reaped-before-cancellation´
+#[test]
+fn group_leader_is_not_reaped_before_cancellation() {
+    let source = r"import os, pathlib, sys, time
+parent = os.getpid()
+(pathlib.Path(sys.argv[1]) / 'watchdog-started').write_text('started')
+if os.fork(): os._exit(0)
+while pathlib.Path(f'/proc/{parent}').exists(): time.sleep(0.002)
+(pathlib.Path(sys.argv[1]) / 'reaped-before-kill').write_text('observed')
+";
+    let mut f = Fixture::payload(source);
+    f.record["limits"]["timeout_ms"] = json!(500);
+    refused(&f.observe(), "child-timeout");
+    assert!(f.dir.path().join("sealed/watchdog-started").exists());
+    assert!(!f.dir.path().join("sealed/reaped-before-kill").exists());
+}
+
+/// ´test:integration:identity-members-must-be-distinct´
+#[test]
+fn identity_members_must_be_distinct() {
+    let mut f = Fixture::new();
+    f.record["identity"]["files"]["library"] = f.record["identity"]["files"]["sealer"].clone();
+    refused(&f.observe(), "record-file-identity-distinct");
+    let mut f = Fixture::new();
+    let library = f.dir.path().join("library");
+    fs::remove_file(&library).unwrap();
+    fs::hard_link(f.dir.path().join("sealer"), &library).unwrap();
+    f.record["identity"]["files"]["library"]["sha256"] =
+        f.record["identity"]["files"]["sealer"]["sha256"].clone();
+    refused(&f.observe(), "identity-file-alias");
+}
+
+/// ´test:integration:frozen-form-binds-text-byte-count´
+#[test]
+fn frozen_form_binds_text_byte_count() {
+    let f = Fixture::new();
+    pass(&f.observe());
+    let path = f.dir.path().join("evidence/calibration");
+    let mut calibration: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    calibration["evidence"]["rows"][0]["file_bytes"] = json!(6);
+    mode(&path, 0o600);
+    fs::write(&path, serde_json::to_vec(&calibration).unwrap()).unwrap();
+    mode(&path, 0o400);
+    refused(&f.check(), "payload-row-inconsistent");
 }

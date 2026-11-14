@@ -1,13 +1,35 @@
 //! Bounded metadata-only subprocess capture. Foreign diagnostics never escape.
 use crate::record::{Limits, Result};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
-use nix::sys::signal::{Signal, killpg};
+use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, killpg};
+use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
 use nix::unistd::Pid;
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// Called once, before argument parsing or any child. No threads or signal
+/// handlers have been installed by this process at this point.
+#[allow(unsafe_code)]
+pub fn initialize() -> Result<()> {
+    // SAFETY: close_range with CLOEXEC changes only this process's descriptor
+    // flags; its scalar bounds cover every inherited non-standard descriptor.
+    // Resetting SIGCHLD at single-threaded startup prevents inherited SIG_IGN
+    // from automatically reaping children before group cancellation.
+    unsafe {
+        if nix::libc::syscall(nix::libc::SYS_close_range, 3_u32, u32::MAX, 4_u32) == -1 {
+            return Err("descriptor-inheritance");
+        }
+        nix::sys::signal::sigaction(
+            Signal::SIGCHLD,
+            &SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty()),
+        )
+        .map_err(|_| "child-signal-policy")?;
+    }
+    Ok(())
+}
 
 fn nonblocking(file: &impl AsFd) -> Result<()> {
     fcntl(file, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|_| "child-pipe")?;
@@ -82,11 +104,16 @@ pub fn capture(mut command: Command, input: &[u8], limits: &Limits) -> Result<Ve
             }
             let out_done = drain(&mut stdout, &mut output, limits.output_bytes)?;
             let err_done = drain(&mut stderr, &mut errors, limits.output_bytes)?;
-            if let Some(status) = child.try_wait().map_err(|_| "child-wait")?
-                && out_done
-                && err_done
-            {
-                return if status.success() && errors.is_empty() {
+            // WNOWAIT pins the exited leader's PID until killpg below. Never
+            // reap here: even a leader with closed pipes can have descendants.
+            let pid = i32::try_from(child.id()).map_err(|_| "child-pid")?;
+            let status = waitid(
+                Id::Pid(Pid::from_raw(pid)),
+                WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+            )
+            .map_err(|_| "child-wait")?;
+            if !matches!(status, WaitStatus::StillAlive) && out_done && err_done {
+                return if matches!(status, WaitStatus::Exited(_, 0)) && errors.is_empty() {
                     Ok(output)
                 } else {
                     Err("child-failed")

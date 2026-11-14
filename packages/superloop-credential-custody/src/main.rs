@@ -76,6 +76,9 @@ fn diagnostic(class: &'static str, exit: CommandExit) -> ExitCode {
 }
 
 fn run() -> ExitCode {
+    if let Err(class) = process::initialize() {
+        return diagnostic(class, CommandExit::Failure);
+    }
     let start = Instant::now();
     let cli = match superloop_cli_common::parse_args_from::<Cli, _, _>(std::env::args_os()) {
         Ok(cli) => cli,

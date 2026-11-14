@@ -6,6 +6,8 @@ use crate::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use std::collections::BTreeSet;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 use std::process::Command;
 
@@ -23,6 +25,7 @@ pub fn hash(bytes: &[u8]) -> String {
 
 pub fn live(record: &Parameters) -> Result<Identity> {
     let mut live = record.identity.clone();
+    let mut objects = BTreeSet::new();
     for file in [
         &mut live.files.sealer,
         &mut live.files.library,
@@ -36,7 +39,12 @@ pub fn live(record: &Parameters) -> Result<Identity> {
         } else {
             file.path.clone()
         };
-        file.sha256 = hash(&receipt::read(&resolved, 268_435_456, false)?);
+        let input = receipt::open(&resolved, false)?;
+        let meta = input.metadata().map_err(|_| "file-metadata")?;
+        if !objects.insert((meta.dev(), meta.ino())) {
+            return Err("identity-file-alias");
+        }
+        file.sha256 = hash(&receipt::read_file(input, 268_435_456, false)?);
     }
     for expected in &mut live.probes {
         let probe = record

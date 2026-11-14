@@ -134,6 +134,10 @@ pub fn validate(
             || row.base64_chars > row.file_bytes
             || row.base64_chars % 4 != 0
             || row.padding > 2
+            || row.file_bytes
+                != row.base64_chars
+                    + u64::from(row.final_lf)
+                    + (row.base64_chars - 1).checked_div(row.wrap).unwrap_or(0)
             || row.decoded != 3 * (row.base64_chars / 4) - row.padding
             || i64::try_from(row.decoded)
                 .ok()

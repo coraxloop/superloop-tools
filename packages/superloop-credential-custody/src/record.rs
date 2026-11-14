@@ -335,6 +335,7 @@ impl Identity {
         {
             return Err("record-computation");
         }
+        let mut paths = BTreeSet::new();
         for file in [
             &self.files.sealer,
             &self.files.library,
@@ -343,6 +344,9 @@ impl Identity {
         ] {
             if !path(&file.path, true) || !digest(&file.sha256) {
                 return Err("record-file-identity");
+            }
+            if !paths.insert(&file.path) {
+                return Err("record-file-identity-distinct");
             }
         }
         let roles: BTreeSet<_> = self.probes.iter().map(|p| p.role).collect();
