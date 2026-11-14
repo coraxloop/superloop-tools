@@ -73,3 +73,7 @@ harness = false
 [[test]]
 name = "reply_entry"
 harness = false
+
+[[test]]
+name = "resume_host"
+harness = false

@@ -429,7 +429,12 @@ fn package_seed(
     fs::create_dir(&driver).expect("driver directory");
     owned(&driver, 64000, 0o700);
     let _session = custody.enter(identity, false).expect("service");
-    let (_writer, instant) = delivery_for(storage, journal, &row, reply);
+    let body = if identity.reservation == "superloop-lane:R" {
+        b"Continue the synthetic round.\n".as_slice()
+    } else {
+        BODY
+    };
+    let (_writer, instant) = delivery_for_name(storage, journal, &row, reply, &identity.name, body);
     writeln!(std::io::stdout().lock(), "PACKAGE-DELIVERY {instant}").expect("seed result");
 }
 
@@ -468,10 +473,14 @@ fn child(home: &Path, case: &str) {
     let private = Arc::new(anchors.pop().expect("private"));
     let storage = Arc::new(anchors.pop().expect("storage"));
     let _config = anchors.pop().expect("config");
-    let identity = Identity {
-        uid: 64010,
-        name: "worker".into(),
-        reservation: "reply-fixture".into(),
+    let identity = if case == "package-canonical-inbound-seed" {
+        Identity::for_reservation(64010, "superloop-lane:R".into())
+    } else {
+        Identity {
+            uid: 64010,
+            name: "worker".into(),
+            reservation: "reply-fixture".into(),
+        }
     };
     if case.starts_with("override-") {
         lifetime_override(
@@ -489,7 +498,10 @@ fn child(home: &Path, case: &str) {
         &configuration,
         (&storage, &private, &executor),
     );
-    if matches!(case, "package-seed" | "package-inbound-seed") {
+    if matches!(
+        case,
+        "package-seed" | "package-inbound-seed" | "package-canonical-inbound-seed"
+    ) {
         package_seed(
             home,
             custody.expect("custody"),
@@ -674,6 +686,17 @@ fn delivery_for(
     row: &loop_home::LoopRecord,
     reply: bool,
 ) -> (journal::Journal, Instant) {
+    delivery_for_name(storage, journal_anchor, row, reply, "worker", BODY)
+}
+fn delivery_for_name(
+    storage: &Arc<Anchor>,
+    journal_anchor: &Anchor,
+    row: &loop_home::LoopRecord,
+    reply: bool,
+    worker: &str,
+    body: &[u8],
+) -> (journal::Journal, Instant) {
+    let address = format!("alpha+{worker}");
     let mut journal =
         journal::Journal::create(beneath(journal_anchor, ".")).expect("journal create");
     let durable = Durability {
@@ -683,7 +706,7 @@ fn delivery_for(
     let sender = Endpoint::open_shared_beneath(
         storage,
         row,
-        Address::parse(if reply { "alpha+worker" } else { "alpha" }).expect("sender"),
+        Address::parse(if reply { &address } else { "alpha" }).expect("sender"),
         if reply { 64021 } else { 64020 },
         durable,
     )
@@ -691,23 +714,25 @@ fn delivery_for(
     let recipient = Endpoint::open_shared_beneath(
         storage,
         row,
-        Address::parse(if reply { "alpha" } else { "alpha+worker" }).expect("recipient"),
+        Address::parse(if reply { "alpha" } else { &address }).expect("recipient"),
         if reply { 64020 } else { 64021 },
         durable,
     )
     .expect("recipient endpoint");
+    let worker_staging = format!("workers/{worker}/.mail-staging");
     let staging = beneath(
         storage,
         if reply {
-            "workers/worker/.mail-staging"
+            &worker_staging
         } else {
             ".mail-staging"
         },
     );
+    let outgoing_name = format!("{address}.01.letter");
     let outgoing = if reply {
         "alpha.01.letter"
     } else {
-        "alpha+worker.01.letter"
+        &outgoing_name
     };
     let fd = nix::fcntl::openat(
         &staging,
@@ -719,7 +744,7 @@ fn delivery_for(
         nix::sys::stat::Mode::from_bits_truncate(0o600),
     )
     .expect("fixture source");
-    File::from(fd).write_all(BODY).expect("source bytes");
+    File::from(fd).write_all(body).expect("source bytes");
     let now = Instant::parse("2026-01-01T00:00:00.001Z").expect("instant");
     let record = publication::prepare(&journal, &sender, &recipient, outgoing)
         .expect("prepare")
@@ -851,7 +876,8 @@ fn reply_session_retains_custody() {
                     "admission-verify",
                     "admission-acl",
                     "package-seed",
-                    "package-inbound-seed"
+                    "package-inbound-seed",
+                    "package-canonical-inbound-seed"
                 ]
                 .contains(&phase.as_str()),
                 "unsupported fixture phase {phase}"
