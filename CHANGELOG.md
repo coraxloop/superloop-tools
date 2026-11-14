@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A resumed launch whose preparing publication fails now reports `unchanged: preparing reservation was not published` when a locked read-back proves the exact settled bytes remain. A changed or unreadable reservation still takes rollback and may report `retained:`. Compatibility: no record shape changes; a running launcher keeps its old wording (``test:unit:round-preparing-publication-refuses-without-retaining-unchanged-run``).
+
 - Mail event scheduling resolves only selected senders, and transport resolves its sender and recipient through the existing custody verifier; global staging, retention and identity admission remain explicit accounting costs. Repeated fallback scans no longer postpone hourly refusal reconsideration (``proto:loophome:mail-change-wakeup``).
 
 - Notice in-place repairs of refused mail, reconsider missed changes hourly, and leave not-yet-due refused senders out of unrelated wakes (``proto:loophome:mail-change-wakeup``).

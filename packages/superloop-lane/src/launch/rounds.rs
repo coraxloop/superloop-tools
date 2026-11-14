@@ -1792,6 +1792,10 @@ fn resume_with_program(
         let nonce = rollback::prepare(&mut saved, &before, &request_bytes)?;
         rollback::snapshot_sockets(&mut saved, &plan)?;
         let published = publish_reservation(&path, &saved);
+        let published = match rollback::publication(&path, &before, published) {
+            rollback::Publication::Unchanged(error) => return Err(error),
+            rollback::Publication::Attempt(result) => result,
+        };
         (nonce, published)
     };
     let inspect_record = vec![
@@ -2051,6 +2055,34 @@ pub(crate) mod rollback {
     fn refusal(detail: impl ToString) -> LaneError {
         LaneError::operation("round-rollback", detail.to_string())
     }
+    pub(super) enum Publication {
+        Unchanged(LaneError),
+        Attempt(Result<(), LaneError>),
+    }
+
+    // Called under the mailbox lock. An fsync failure can follow rename, so an
+    // error alone cannot prove that publication left the reservation untouched.
+    pub(super) fn publication(
+        path: &Path,
+        before: &[u8],
+        result: Result<(), LaneError>,
+    ) -> Publication {
+        match result {
+            Err(mut error)
+                if super::super::read_reservation_raw(path, true)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|(_, bytes)| bytes == before) =>
+            {
+                error
+                    .detail
+                    .push_str("; unchanged: preparing reservation was not published");
+                Publication::Unchanged(error)
+            }
+            result => Publication::Attempt(result),
+        }
+    }
+
     pub fn nonce(record: &Value) -> Result<&str, LaneError> {
         let value = record["round_rollback"]["nonce"]
             .as_str()
@@ -2826,6 +2858,47 @@ pub(crate) mod rollback {
             assert_eq!(record["helper_pid"], 93, "helper update kept");
             assert_eq!(record["helper_parent_pid"], 91);
             assert_eq!(record["helper_parent_start"], 92);
+        }
+
+        /// Publication errors distinguish exact unchanged bytes from uncertain writes.
+        /// ´test:unit:round-preparing-publication-refuses-without-retaining-unchanged-run´
+        #[test]
+        fn round_preparing_publication_refuses_without_retaining_unchanged_run() {
+            let (root, path, before, nonce) = fixture();
+            let preparing = fs::read(&path).expect("preparing bytes");
+            let record = read_reservation(&path).expect("read").expect("record");
+            super::super::super::publish_reservation_bytes(&path, &before).expect("settled");
+            let temporary = root.path().join(format!(".reservation-{nonce}.tmp"));
+            fs::write(&temporary, b"occupied").expect("occupied own temporary");
+            let result = publish_reservation(&path, &record);
+            let Publication::Unchanged(error) = publication(&path, &before, result) else {
+                panic!("unchanged publication is not retained");
+            };
+            assert_eq!(error.kind, "uid-table");
+            assert!(
+                error
+                    .detail
+                    .ends_with("unchanged: preparing reservation was not published")
+            );
+            assert_eq!(fs::read(&path).expect("unchanged"), before);
+            assert_eq!(fs::read(&temporary).expect("other publisher"), b"occupied");
+            fs::remove_file(temporary).expect("remove own obstruction");
+            super::super::super::publish_reservation_bytes(&path, &preparing).expect("renamed");
+            assert!(
+                matches!(
+                    publication(&path, &before, Err(primary())),
+                    Publication::Attempt(Err(_))
+                ),
+                "post-rename error must still take rollback"
+            );
+            fs::remove_file(&path).expect("simulate unavailable readback");
+            assert!(
+                matches!(
+                    publication(&path, &before, Err(primary())),
+                    Publication::Attempt(Err(_))
+                ),
+                "unknown readback must retain through rollback"
+            );
         }
 
         fn primary() -> LaneError {
