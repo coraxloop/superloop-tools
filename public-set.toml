@@ -1748,6 +1748,9 @@ pattern = "packages/superloop-lane/src/door.rs"
 pattern = "packages/superloop-lane/src/door/agent.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/door/agent/usage.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/door/agent_exercise.rs"
 
 [[include.rows]]

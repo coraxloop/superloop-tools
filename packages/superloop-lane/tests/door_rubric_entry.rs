@@ -160,6 +160,9 @@ impl Fixture {
         let executable = root.path().join("codex");
         file(&executable, b"#!/usr/bin/python3\nimport json,sys\ndocument=json.load(sys.stdin)\nassert document['reviewed_rubric'] == 'Reviewed rubric.'\nprint(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({'verdict':'refer','scope':'estate','reason':'fixture'})}}))\n", 0o755);
         let runner = CodexRunner {
+            usage_monitor: std::sync::Arc::new(superloop_lane::door::agent::usage::Monitor::new(
+                superloop_lane::door::agent::usage::DEFAULT_EXPECTED_TOKENS,
+            )),
             entry,
             owner_home: root.path().into(),
             loop_name: "alpha".into(),

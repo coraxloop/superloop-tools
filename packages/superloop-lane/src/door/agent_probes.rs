@@ -79,6 +79,9 @@ fn fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
     Ok((
         directory,
         CodexRunner {
+            usage_monitor: std::sync::Arc::new(crate::door::agent::usage::Monitor::new(
+                crate::door::agent::usage::DEFAULT_EXPECTED_TOKENS,
+            )),
             entry,
             owner_home: path,
             loop_name: "fixture".into(),

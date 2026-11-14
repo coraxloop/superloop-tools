@@ -180,7 +180,66 @@ def parse_answer(output, evidence):
     return messages[0], observed_model
 
 
+def usage_record(output, vendor_code, started, interrupted=False):
+    """Vendor accounting is independent of answer parsing and wrapper cleanup."""
+    result = {"status": "not-started" if not started else "unknown",
+              "reason": "not-started" if not started else "missing-usage",
+              "turns": 0, "input_tokens": None, "cached_input_tokens": None,
+              "output_tokens": None}
+    if not started:
+        return result
+    if len(output) > 65536:
+        result["reason"] = "stream-cut"
+        return result
+    totals = [0, 0, 0]
+    malformed = False
+    failed = False
+    keys = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+            "output_tokens", "reasoning_output_tokens")
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError("event shape")
+            if event.get("type") in ("turn.failed", "error"):
+                failed = True
+            if event.get("type") != "turn.completed":
+                continue
+            usage = event.get("usage")
+            if (not isinstance(usage, dict)
+                    or any(type(usage.get(key)) is not int
+                           or not 0 <= usage[key] <= 18446744073709551615 for key in keys)
+                    or usage["cached_input_tokens"] > usage["input_tokens"]
+                    or usage["cache_write_input_tokens"] > usage["input_tokens"]
+                    or usage["reasoning_output_tokens"] > usage["output_tokens"]):
+                raise ValueError("usage shape")
+            values = [usage["input_tokens"], usage["cached_input_tokens"], usage["output_tokens"]]
+            combined = [a + b for a, b in zip(totals, values)]
+            if any(value > 18446744073709551615 for value in combined):
+                result["reason"] = "counter-overflow"
+                return result
+            totals = combined
+            result["turns"] += 1
+        except (ValueError, UnicodeError):
+            malformed = True
+            break
+    if failed or (vendor_code is not None and vendor_code != 0):
+        result["reason"] = "vendor-failure"
+        return result
+    if result["turns"]:
+        result.update(zip(("input_tokens", "cached_input_tokens", "output_tokens"), totals))
+        result["status"] = "partial" if malformed or interrupted or vendor_code is None else "complete"
+        result["reason"] = ("malformed-event" if malformed else "interrupted"
+                            if interrupted or vendor_code is None else "complete")
+    elif malformed:
+        result["reason"] = "malformed-event"
+    elif interrupted:
+        result["reason"] = "interrupted"
+    return result
+
+
 def main():
+    EVIDENCE["usage"] = usage_record(b"", None, False)
     signal.signal(signal.SIGTERM, cancel)
     parent = os.getppid()
     if ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
@@ -254,6 +313,8 @@ def main():
     call = None
     auth_link = None
     process = None
+    output = bytearray()
+    stdout_eof = False
     stage = "setup"
     stderr_tail = StderrTail()
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
@@ -304,6 +365,8 @@ def main():
         if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
             raise OSError("subreaper unavailable")
         stage = "spawn"
+        # Cancellation during Popen cannot prove that no vendor was started.
+        EVIDENCE["usage"] = usage_record(b"", None, True, True)
         process = subprocess.Popen(argv, cwd=cwd, env=environment,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, start_new_session=True)
@@ -338,6 +401,8 @@ def main():
                         stderr_tail.append(chunk)
                     else:
                         output.extend(chunk)
+                        if not chunk:
+                            stdout_eof = True
                     if not chunk:
                         selector.unregister(key.fileobj)
                     if len(output) > 65536:
@@ -370,9 +435,14 @@ def main():
                                     else errno.errorcode.get(error.errno, "UNRECOGNIZED_ERRNO"))
         emit({"service_status": "failure", "reason": "door-agent-runner-failure", "rubric_digest": rubric_digest})
         if process is None:
+            EVIDENCE["usage"] = usage_record(b"", None, False)
             RESULT["agent_runner_stderr_tail"] = "runner " + stage + ": " + EVIDENCE["runner_errno"]
             RESULT["agent_runner_first_line"] = RESULT["agent_runner_stderr_tail"]
     finally:
+        if process is not None:
+            vendor_code = process.poll()
+            EVIDENCE["usage"] = usage_record(
+                output, vendor_code, True, not stdout_eof or vendor_code is None)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
         if process is not None:

@@ -1696,7 +1696,7 @@ pub(crate) fn run_with(
     let node_plan = crate::door_node::plan(&config_directory, &config, &request.loop_name, owner)?;
     let settings = Settings::read(&config.join("workers.toml"))?;
     let agent_configuration = if fixture_group.is_some() && !config.join("door.toml").exists() {
-        json!({"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"entry":"/fixture/entry","loop_home":"/fixture/home"})
+        json!({"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":"/fixture/entry","loop_home":"/fixture/home"})
     } else {
         let configuration = crate::door::config::read(
             owner_home,

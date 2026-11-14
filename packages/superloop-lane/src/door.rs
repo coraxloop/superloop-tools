@@ -1522,14 +1522,15 @@ fn serve_request_with_agent(
         shape_record: history,
         rubric: String::new(),
     };
-    let judge = |source: &Value| {
+    let judge = |source: &Value, id: &str| {
         let mut result = agent.map_or_else(
             || agent::RunnerOutcome::referral("failure", "door-agent-unconfigured", Instant::now()),
             |runner| match input.encode() {
-                Ok(bytes) => runner.judge(
+                Ok(bytes) => runner.judge_request(
                     &bytes,
                     wait.deadline(deadline)
                         .saturating_duration_since(Instant::now()),
+                    &json!({"loop":registration.loop_name,"run":registration.run,"request_id":id}),
                 ),
                 Err(error) => agent::RunnerOutcome::referral("failure", error.0, Instant::now()),
             },
@@ -1598,7 +1599,7 @@ fn serve_request_with_agent(
     if synchronous_agent {
         // The intent is durable before any vendor call, including audit.
         // record_agent merges under the store lock before publishing waiting.
-        let (result, _verdict) = judge(&binding_source);
+        let (result, _verdict) = judge(&binding_source, &id);
         if let Err(error) = store.record_agent(
             &id,
             &result,
@@ -1642,7 +1643,7 @@ fn serve_request_with_agent(
             // the transport can execute and return its final frame immediately.
             return thread::scope(|scope| {
                 let agent_task = scope.spawn(|| {
-                    let (result, _) = judge(&binding_source);
+                    let (result, _) = judge(&binding_source, &id);
                     store.record_agent(
                         &id,
                         &result,
@@ -3521,7 +3522,7 @@ mod tests {
             "door-generation-upgrade-required"
         );
         generation["schema"] = json!(2);
-        generation["agent"] = json!({"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"entry":"/fixture/entry","loop_home":"/fixture/home"});
+        generation["agent"] = json!({"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":"/fixture/entry","loop_home":"/fixture/home"});
         assert_eq!(
             completed_door_group(&generation, "alpha").expect("group"),
             41001

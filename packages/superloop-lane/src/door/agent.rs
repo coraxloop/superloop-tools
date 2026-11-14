@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 /// Time reserved for termination, reaping and private-directory removal.
+pub mod usage;
+
 pub const CLEANUP_RESERVE: Duration = Duration::from_secs(2);
 
 /// Maximum UTF-8 bytes of a recorded stderr tail, including its cut marker.
@@ -330,6 +332,10 @@ impl RunnerOutcome {
 /// The production runner and exercise runner share the same bounded interface.
 pub trait AgentRunner: Send + Sync {
     fn judge(&self, input: &[u8], budget: Duration) -> RunnerOutcome;
+
+    fn judge_request(&self, input: &[u8], budget: Duration, _identity: &Value) -> RunnerOutcome {
+        self.judge(input, budget)
+    }
 }
 
 /// Decode the existing door profile through the shared judgement validator.
@@ -353,6 +359,7 @@ pub struct CodexRunner {
     pub effort: String,
     pub cap_ms: u64,
     pub rubric_path: PathBuf,
+    pub usage_monitor: std::sync::Arc<usage::Monitor>,
 }
 
 /// Check the rubric through the registered entry without invoking Codex or reading sign-in bytes.
@@ -424,7 +431,39 @@ pub fn check_rubric(
 
 impl AgentRunner for CodexRunner {
     fn judge(&self, input: &[u8], budget: Duration) -> RunnerOutcome {
-        self.judge_with_clock(input, budget, Instant::now)
+        let mut result = self.judge_with_clock(input, budget, Instant::now);
+        if result.observations.get("usage").is_none() {
+            if !result.observations.is_object() {
+                result.observations = json!({});
+            }
+            result.observations["usage"] = usage::Usage::absent(false).value();
+        }
+        result
+    }
+
+    fn judge_request(&self, input: &[u8], budget: Duration, identity: &Value) -> RunnerOutcome {
+        let settings = json!({"model":self.model,"effort":self.effort,
+            "agent_expected_tokens":self.usage_monitor.expected});
+        usage::journal(identity, "start", &json!({"settings":settings}), false);
+        let result = self.judge(input, budget);
+        let usage = usage::Usage::read(&result.observations["usage"]);
+        let (accounting, alarms) = self.usage_monitor.observe(&usage);
+        usage::journal(
+            identity,
+            "finish",
+            &json!({"settings":settings,"usage":usage,
+            "accounting":accounting}),
+            false,
+        );
+        for alarm in alarms {
+            usage::journal(
+                identity,
+                "excess",
+                &json!({"settings":settings,"alarm":usage::alarm_value(&alarm, &usage)}),
+                true,
+            );
+        }
+        result
     }
 }
 
@@ -627,7 +666,17 @@ impl CodexRunner {
         drop(stderr);
         let mut result =
             Self::decode_output(&output, timed_out || termination_sent, success, started);
-        let envelope = serde_json::from_slice::<Value>(&output).ok();
+        let envelope = (output.len() <= 65_536)
+            .then(|| serde_json::from_slice::<Value>(&output).ok())
+            .flatten();
+        let usage = envelope.as_ref().map_or_else(
+            || usage::Usage::absent(true),
+            |value| usage::Usage::read(&value["runner_evidence"]["usage"]),
+        );
+        if !result.observations.is_object() {
+            result.observations = json!({});
+        }
+        result.observations["usage"] = usage.value();
         // A valid envelope reports the configured executable. Otherwise the
         // observed termination belongs to the entry/Python wrapper itself.
         if !success
@@ -870,6 +919,9 @@ pub(super) mod tests {
         let executable = root.path().join("codex");
         crate::fixture_exec::write_executable(&executable, script.as_bytes()).expect("fake CLI");
         let runner = CodexRunner {
+            usage_monitor: std::sync::Arc::new(crate::door::agent::usage::Monitor::new(
+                crate::door::agent::usage::DEFAULT_EXPECTED_TOKENS,
+            )),
             entry,
             owner_home: root.path().into(),
             loop_name: "alpha".into(),
@@ -1035,6 +1087,141 @@ pub(super) mod tests {
                 assert!(!format!("{outcome:?}").contains("private-answer"), "{name}");
             }
         }
+    }
+
+    // The captured completed-turn line in driver/codex/mod.rs, without alteration.
+    const USAGE_TURN: &str = r#"{"type":"turn.completed","usage":{"input_tokens":17338944,"cached_input_tokens":17018496,"cache_write_input_tokens":0,"output_tokens":65375,"reasoning_output_tokens":26970}}"#;
+
+    /// ´test:unit:agent-usage-collector-distinguishes-vendor-exits´
+    #[test]
+    fn agent_usage_collector_distinguishes_vendor_exits() {
+        let script = format!(
+            r#"#!/usr/bin/python3
+import json, sys
+json.load(sys.stdin)
+ns = {{"__name__": "usage_fixture"}}
+exec({}, ns)
+f = ns["usage_record"]
+turn = {}.encode()
+assert f(turn, 0, True)["status"] == "complete"
+r = f(turn + b"\n" + turn, 0, True)
+assert (r["input_tokens"], r["cached_input_tokens"], r["output_tokens"], r["turns"]) == (34677888, 34036992, 130750, 2)
+for data, code, started, interrupted, status, reason in [
+    (b"", None, False, False, "not-started", "not-started"),
+    (b"", 0, True, False, "unknown", "missing-usage"),
+    (turn, None, True, True, "partial", "interrupted"),
+    (b"", None, True, True, "unknown", "interrupted"),
+    (turn + b"\n{{", 0, True, False, "partial", "malformed-event"),
+    (turn, 1, True, False, "unknown", "vendor-failure"),
+    (turn + b'\n{{"type":"turn.failed"}}', 0, True, False, "unknown", "vendor-failure"),
+    (turn + b'x' * 65536, 0, True, False, "unknown", "stream-cut")]:
+    r = f(data, code, started, interrupted)
+    assert (r["status"], r["reason"]) == (status, reason), r
+    if status in ("unknown", "not-started"):
+        assert all(r[key] is None for key in ("input_tokens", "cached_input_tokens", "output_tokens"))
+for key in json.loads(turn)["usage"]:
+    event = json.loads(turn)
+    del event["usage"][key]
+    assert f(json.dumps(event).encode(), 0, True)["reason"] == "malformed-event", key
+for key, value in [("input_tokens", True), ("cached_input_tokens", 999999999), ("cache_write_input_tokens", -1), ("output_tokens", 1.5), ("reasoning_output_tokens", 999999999)]:
+    event = json.loads(turn); event["usage"][key] = value
+    assert f(json.dumps(event).encode(), 0, True)["reason"] == "malformed-event", key
+print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":json.dumps({{"verdict":"refer","scope":"estate","reason":"usage checked"}})}}}}))
+"#,
+            json!(loop_home::runner::DOOR_AGENT_PROGRAM),
+            json!(USAGE_TURN)
+        );
+        let (_root, runner, input) = fixture(&script);
+        let result = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+        assert_eq!(result.status, "verdict", "{result:?}");
+        assert_eq!(result.reason, "usage checked");
+        assert_eq!(result.observations["usage"]["status"], "unknown");
+    }
+
+    /// ´test:unit:agent-usage-complete-survives-cleanup-refusal´
+    #[test]
+    fn agent_usage_complete_survives_cleanup_refusal() {
+        for tamper in [false, true] {
+            let script = format!(
+                r#"#!/usr/bin/python3
+import json, os, sys
+json.load(sys.stdin)
+if {}:
+    os.unlink(os.path.join(os.environ["CODEX_HOME"], "auth.json"))
+print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":json.dumps({{"verdict":"refer","scope":"estate","reason":"usage checked"}})}}}}))
+print({})
+"#,
+                if tamper { "True" } else { "False" },
+                json!(USAGE_TURN)
+            );
+            let (_root, runner, input) = fixture(&script);
+            let result = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+            assert_eq!(
+                result.status,
+                if tamper { "failure" } else { "verdict" },
+                "{result:?}"
+            );
+            if tamper {
+                assert_eq!(result.reason, "door-agent-sign-in-link-replaced");
+            }
+            assert_eq!(result.observations["usage"]["status"], "complete");
+            assert_eq!(result.observations["usage"]["input_tokens"], 17_338_944);
+            assert_eq!(
+                result.observations["usage"]["cached_input_tokens"],
+                17_018_496
+            );
+            assert_eq!(result.observations["usage"]["output_tokens"], 65_375);
+        }
+    }
+
+    /// ´test:unit:agent-usage-survives-the-existing-request-record-write´
+    #[test]
+    fn agent_usage_survives_the_existing_request_record_write() {
+        let script = format!(
+            "#!/usr/bin/python3\nimport json,sys\njson.load(sys.stdin)\nprint({})\n",
+            json!(USAGE_TURN)
+        );
+        let [record, observation] = recorded_runner(&script, false);
+        assert_eq!(record["agent_status"], "invalid-output");
+        assert_eq!(
+            record["agent_observations"]["usage"],
+            observation["observations"]["usage"]
+        );
+        assert_eq!(record["agent_observations"]["usage"]["status"], "complete");
+        assert_eq!(
+            record["agent_observations"]["usage"]["input_tokens"],
+            17_338_944
+        );
+        let [record, _] = recorded_runner("#!/usr/bin/python3\nraise SystemExit(7)\n", true);
+        assert_eq!(record["agent_observations"]["usage"]["status"], "unknown");
+        assert!(record["agent_observations"]["usage"]["input_tokens"].is_null());
+    }
+
+    /// ´test:unit:agent-usage-request-journal-preserves-verdict´
+    #[test]
+    fn agent_usage_request_journal_preserves_verdict() {
+        let script = format!(
+            r#"#!/usr/bin/python3
+import json, sys
+json.load(sys.stdin)
+print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":json.dumps({{"verdict":"refer","scope":"estate","reason":"usage checked"}})}}}}))
+print({})
+"#,
+            json!(USAGE_TURN)
+        );
+        let (_root, mut runner, input) = fixture(&script);
+        runner.usage_monitor = std::sync::Arc::new(usage::Monitor::new(1));
+        let result = runner.judge_request(
+            &input.encode().expect("input"),
+            Duration::from_secs(120),
+            &json!({"loop":"alpha","run":"R","request_id":"1a"}),
+        );
+        assert_eq!(result.status, "verdict", "{result:?}");
+        assert_eq!(result.verdict, "refer");
+        assert_eq!(result.scope, "estate");
+        assert_eq!(result.reason, "usage checked");
+        assert_eq!(result.observations["usage"]["status"], "complete");
+        assert_eq!(result.observations["usage"]["input_tokens"], 17_338_944);
     }
 
     fn drain_seam_case(expired: bool) {
@@ -1566,7 +1753,10 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
         let result = runner.judge(&vec![b'x'; 262_145], Duration::from_secs(3));
         assert_eq!(result.reason, "door-agent-input-limit");
         assert_eq!(result.verdict, "refer");
-        assert!(result.observations.is_null() || result.observations == json!({}));
+        assert_eq!(
+            result.observations,
+            json!({"usage":usage::Usage::absent(false)})
+        );
         runner.loop_uid = None;
         let result = runner.judge(b"{}", Duration::from_secs(3));
         assert_eq!(result.reason, "door-agent-loop-uid-unmeasured");

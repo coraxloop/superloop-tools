@@ -124,7 +124,7 @@ fn install_fixture(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
             json!(sockets)
         ),
     );
-    let agent = json!({"source":config.join("door.toml"),"rubric_root":home,"rubric_path":home.join("permissions/door.md"),"executable":"/usr/bin/true","model":"fixture","effort":"medium","cap_ms":30000,"entry":entry,"loop_home":home});
+    let agent = json!({"source":config.join("door.toml"),"rubric_root":home,"rubric_path":home.join("permissions/door.md"),"executable":"/usr/bin/true","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":entry,"loop_home":home});
     private_file(&config.join("door-install-generation.json"), serde_json::to_vec(&json!({
         "schema":2,"phase":"complete","loop":"alpha","template_dir":home.join("template"),
         "socket_dir":sockets,"stub_sha256":"0".repeat(64),"service_sha256":crate::build::sha256(&service).expect("service digest"),
