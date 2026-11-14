@@ -100,3 +100,8 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-credential-custody/src/launch/sealer.rs:path#1","caller":"superloop-credential-custody","owner":"SUPERLOOPCREDENTIALCUSTODY","selector":"path","callee":"external:credential-sealer","lookup":"configured-external","setting":"launch-policy.artifacts[role=sealer].path","contract":"Private C2 core executes the measured native sealer through the shared held executor; tests supply only a synthetic Cargo example image through test-only admission"}
 {"kind":"data","identity":"credential-sealer-completion","writer":"superloop-credential-custody","readers":["superloop-credential-custody"],"format_authority":"packages/superloop-credential-custody/README.md","format_contract":"Private metadata-only pipe EOF and native exit observations; no length acceptance, generator success or encryption claim","owner":"SUPERLOOPCREDENTIALCUSTODY","sites":[{"path":"packages/superloop-credential-custody/src/launch/sealer.rs","anchor":"pub(super) struct Completion"}]}
 ''']
+
+# The watchdog control uses the fixed held interpreter and event-driven pidfd observations.
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-credential-custody/src/process.rs:\"/usr/bin/python3\"#1","caller":"superloop-credential-custody","owner":"SUPERLOOPCREDENTIALCUSTODY","selector":"\"/usr/bin/python3\"","callee":"external:/usr/bin/python3","lookup":"private-exact-path","contract":"Test-only event-driven descendant watchdog exercises shared cancellation without a startup timing window"}
+''']

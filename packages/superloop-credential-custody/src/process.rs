@@ -254,9 +254,16 @@ fn capture_inner(
 
 /// Retain the leader until its process group has been cancelled.
 pub fn cancel(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    cancel_observed(child, || {})
+}
+fn cancel_observed(
+    child: &mut std::process::Child,
+    after_kill: impl FnOnce(),
+) -> Option<std::process::ExitStatus> {
     if let Ok(pid) = i32::try_from(child.id()) {
         let _ignored = killpg(Pid::from_raw(pid), Signal::SIGKILL);
     }
+    after_kill();
     child.wait().ok()
 }
 
@@ -299,6 +306,83 @@ mod tests {
         assert_eq!(
             capture_matching(command(), &[], &limits, &measured),
             Err("interpreter-execution-identity")
+        );
+    }
+    /// ´test:unit:group-leader-is-not-reaped-before-cancellation´
+    #[test]
+    #[allow(unsafe_code)]
+    fn group_leader_is_not_reaped_before_cancellation() {
+        use std::io::BufRead as _;
+        use std::os::fd::{AsRawFd, FromRawFd as _, OwnedFd};
+        fn ready(fd: &impl AsRawFd) {
+            let deadline = Instant::now() + Duration::from_secs(600);
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "emergency event-wait guard");
+                let mut item = nix::libc::pollfd {
+                    fd: fd.as_raw_fd(),
+                    events: nix::libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one live descriptor and one stack pollfd, no ownership transfer.
+                let result = unsafe {
+                    nix::libc::poll(
+                        &raw mut item,
+                        1,
+                        i32::try_from(remaining.as_millis()).unwrap(),
+                    )
+                };
+                if result < 0
+                    && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                {
+                    continue;
+                }
+                assert!(result > 0, "emergency event-wait guard or poll failure");
+                assert_ne!(item.revents & nix::libc::POLLIN, 0);
+                break;
+            }
+        }
+        fn pidfd(pid: u32) -> OwnedFd {
+            // SAFETY: pidfd_open returns a new descriptor on success.
+            let fd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid, 0) };
+            assert!(fd >= 0);
+            unsafe { OwnedFd::from_raw_fd(i32::try_from(fd).unwrap()) }
+        }
+        let source = "import os, signal, sys\npid = os.fork()\nif pid == 0:\n os.close(0); os.close(1); os.close(2)\n signal.pause()\nelse:\n print('watchdog-started', pid, flush=True)\n sys.stdin.buffer.read()\n";
+        let mut command = Command::new("/usr/bin/python3");
+        command
+            .args(["-I", "-c", source])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        loop_home::CommandDescriptors::default()
+            .configure(&mut command)
+            .unwrap();
+        pin_program(&mut command, &[]).unwrap();
+        let mut child = command.spawn().unwrap();
+        let parent = child.id();
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        ready(stdout.get_ref());
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        let fields: Vec<_> = line.split_whitespace().collect();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0], "watchdog-started");
+        let descendant = pidfd(fields[1].parse().unwrap());
+        let leader = pidfd(parent);
+        drop(child.stdin.take());
+        ready(&leader); // The exited leader remains unreaped, independent of scheduling.
+        let mut retained = false;
+        let status = cancel_observed(&mut child, || {
+            ready(&descendant); // Group death is an event, not a sleep or timing window.
+            retained = std::path::Path::new(&format!("/proc/{parent}")).exists();
+        })
+        .unwrap();
+        assert!(status.success());
+        assert!(
+            retained,
+            "leader reaped before group cancellation completed"
         );
     }
 }

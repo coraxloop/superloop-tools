@@ -862,23 +862,6 @@ fn inherited_descriptors_do_not_reach_probes() {
     pass(&f.check());
 }
 
-/// ´test:integration:group-leader-is-not-reaped-before-cancellation´
-#[test]
-fn group_leader_is_not_reaped_before_cancellation() {
-    let source = r"import os, pathlib, sys, time
-parent = os.getpid()
-(pathlib.Path(sys.argv[1]) / 'watchdog-started').write_text('started')
-if os.fork(): os._exit(0)
-while pathlib.Path(f'/proc/{parent}').exists(): time.sleep(0.002)
-(pathlib.Path(sys.argv[1]) / 'reaped-before-kill').write_text('observed')
-";
-    let mut f = Fixture::payload(source);
-    f.record["limits"]["timeout_ms"] = json!(500);
-    refused(&f.observe(), "child-timeout");
-    assert!(f.dir.path().join("sealed/watchdog-started").exists());
-    assert!(!f.dir.path().join("sealed/reaped-before-kill").exists());
-}
-
 /// ´test:integration:identity-members-must-be-distinct´
 #[test]
 fn identity_members_must_be_distinct() {
