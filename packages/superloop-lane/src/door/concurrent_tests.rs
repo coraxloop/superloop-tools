@@ -16,20 +16,21 @@ fn door_concurrent_request_refuses_before_record() {
             .output()
             .expect("built concurrency fixture");
         assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "{output:?}");
         return;
     }
     let fixture = Fixture::new();
     let store = fixture.store();
     let (runner, calls, _) = counting_runner(&fixture);
-    let (socket, first) = fixture_service(&fixture, runner, rubric(Some("allow")), 15000, None);
+    let (socket, first) = fixture_service(&fixture, runner, rubric(Some("allow")), 120_000, None);
     let mut client = UnixStream::connect(socket).expect("first connection");
     frame_write(
         &mut client,
-        &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":15000}),
+        &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
     )
     .expect("first request");
     let id = wait_filed(&store);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(120);
     while store.request(&id).expect("first record").value()["state"] != "waiting" {
         assert!(
             Instant::now() < deadline,
@@ -54,7 +55,7 @@ fn door_concurrent_request_refuses_before_record() {
             "the door waited for admission held through the durable effect and final reply; allow-mode agent publication may finish after admission is released; retry after 30 seconds"
         );
         let waited = reply["waited_seconds"].as_f64().expect("measured wait");
-        assert!((0.9..1.5).contains(&waited), "waited={waited}");
+        assert_eq!(Duration::from_secs_f64(waited), Duration::from_secs(1));
         assert_eq!(reply["retry_after_seconds"], 30);
         assert!(reply.get("request_id").is_none());
         assert!(reply.get("request_record_error").is_none());
@@ -76,7 +77,7 @@ fn door_concurrent_request_refuses_before_record() {
     assert_eq!(record.value()["state"], "adjudicated");
     // Completion releases admission, including for a subsequent refusal record.
     let (runner, _, _) = counting_runner(&fixture);
-    let (socket, next) = fixture_service(&fixture, runner, rubric(None), 15000, None);
+    let (socket, next) = fixture_service(&fixture, runner, rubric(None), 120_000, None);
     let mut peer = UnixStream::connect(socket).expect("next connection");
     frame_write(&mut peer, &json!({"schema":2})).expect("next request");
     let reply = frame_read(&mut peer).expect("next refusal");
@@ -134,6 +135,9 @@ fn concurrent_process_peer() {
     let registration = concurrent_registration(uid);
     let mut stream = UnixStream::connect(socket).expect("peer connection");
     let request = frame_read(&mut stream).expect("peer request");
+    let clock = std::rc::Rc::new(ControlledAdmissionClock::default());
+    let started = super::AdmissionClock::now(clock.as_ref());
+    super::ADMISSION_CLOCK.with(|slot| *slot.borrow_mut() = Some(clock));
     if std::env::var_os("SUPERLOOP_DOOR_CONCURRENT_ROOT").is_some() {
         super::root_refusal(
             &mut stream,
@@ -142,7 +146,7 @@ fn concurrent_process_peer() {
             &request,
             &home,
             &super::LaneError::input("fixture-root", "root absent"),
-            Instant::now(),
+            started,
         )
         .expect("root refusal");
     } else {
@@ -156,7 +160,7 @@ fn concurrent_process_peer() {
             Some(&home),
             None,
             None,
-            Instant::now(),
+            started,
         )
         .expect("peer served");
     }
@@ -185,6 +189,7 @@ fn concurrent_process_request(fixture: &Fixture, uid: u32, root: bool) -> Value 
     let reply = frame_read(&mut stream).expect("peer reply");
     let output = child.wait_with_output().expect("peer completion");
     assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "{output:?}");
     if reply["reason"] == "door-request-concurrent" {
         assert!(
             String::from_utf8_lossy(&output.stderr)
@@ -212,7 +217,7 @@ fn door_concurrent_root_refusal_and_independent_boxes() {
             *slot.borrow_mut() = Some(Box::new(move || {
                 entered_tx.send(()).expect("root admitted");
                 release_rx
-                    .recv_timeout(Duration::from_secs(30))
+                    .recv_timeout(Duration::from_secs(120))
                     .expect("release root");
             }));
         });
@@ -227,14 +232,14 @@ fn door_concurrent_root_refusal_and_independent_boxes() {
         )
     });
     entered_rx
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(Duration::from_secs(120))
         .expect("root holds admission");
     // Hold before publication and before the bounded socket write, independent of spawn speed.
     let reply = concurrent_process_request(&fixture, 3000, true);
     assert_eq!(reply["reason"], "door-request-concurrent");
     assert_eq!(reply["status"], 125);
     assert_eq!(reply["retry_after_seconds"], 30);
-    assert!((0.9..1.5).contains(&reply["waited_seconds"].as_f64().expect("root wait")));
+    assert_eq!(reply["waited_seconds"], json!(1.0));
     assert!(reply.get("request_id").is_none());
     let independent = concurrent_process_request(&fixture, 3001, false);
     assert_eq!(independent["reason"], "door-request-refusal");
@@ -277,6 +282,7 @@ fn door_two_boxes_share_the_bounded_store_wait() {
         .output()
         .expect("isolated two-box fixture");
         assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "{output:?}");
         return;
     }
     let fixture = Fixture::new();
@@ -1123,6 +1129,7 @@ fn post_reply_journal_child(phases: &[&str]) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "{output:?}");
     assert!(stdout.contains("test result: ok. 1 passed;"), "{stdout}");
     let events: Vec<Value> = stderr.lines()
         .filter_map(|line| line.strip_prefix("door-post-reply-failure "))
