@@ -177,7 +177,7 @@ pub fn emit(path: &Path) -> Result<()> {
         return Err("fixture-privilege");
     }
     let start = Instant::now();
-    let case = parse(&receipt::parameters(path)?)?;
+    let case = parse(&receipt::fixture_parameters(path)?)?;
     let fds = descriptors(&case)?;
     if case.behavior == Behavior::ReexecExtra {
         reexec(path, &fds)?;

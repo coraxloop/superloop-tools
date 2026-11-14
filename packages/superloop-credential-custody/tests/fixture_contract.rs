@@ -549,3 +549,27 @@ fn fixture_reexec_state_refuses() {
         assert!(observed.streams.iter().all(Vec::is_empty));
     }
 }
+
+/// ´test:integration:fixture-case-rejects-nonpublic-input´
+#[test]
+fn fixture_case_rejects_nonpublic_input() {
+    for field in ["bytes", "credential", "key", "environment", "input_path"] {
+        let mut case = Case::new();
+        case.value[field] = json!("synthetic forbidden value");
+        refuse(
+            &invoke(&case, "normal", None, 0o400, true),
+            "fixture-record-shape",
+        );
+        let mut case = Case::new();
+        case.value["streams"][0][field] = json!("synthetic forbidden value");
+        refuse(
+            &invoke(&case, "normal", None, 0o400, true),
+            "fixture-record-shape",
+        );
+    }
+    // Readability alone does not authorize the public class: its owner is root.
+    refuse(
+        &invoke(&Case::new(), "normal", None, 0o444, true),
+        "parameter-custody",
+    );
+}
