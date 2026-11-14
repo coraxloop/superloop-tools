@@ -52,7 +52,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- A failed external checkout pack transfer now names each Git command's exit status and a bounded, printable tail of its own error stream in the `checkout-git` refusal. Successful checkouts and their output are unchanged; no run or record migration is needed.
+- A failed external checkout pack transfer now names each Git command's exit status and a bounded, printable tail of its own error stream in the `checkout-git` refusal; the run record's failed attempt keeps, as before, only the refusal's first 256 bytes as serialized there. Successful checkouts and their output are unchanged; no run or record migration is needed (``test:unit:checkout-pack-failure-names-own-stderr``; ``test:unit:checkout-index-failure-names-own-stderr``; ``test:unit:checkout-pack-stderr-flood-stays-bounded``).
 
 - Bound mail scan wakes after restored refusals, keep delivery available through notification-limit fallback, and retry known unfinished letters on a capped backoff without waiting for unrelated changes (``proto:loophome:mail-change-wakeup``).
 
