@@ -325,7 +325,7 @@ fn malformed_sealed_files() {
     ] {
         let mut f = Fixture::new();
         f.malformed(bytes);
-        refuse(&f.observe());
+        refused(&f.observe(), "child-failed");
     }
 }
 
@@ -350,7 +350,7 @@ fn missing_and_uncompleted_files() {
 fn inconsistent_content_constant() {
     let mut f = Fixture::new();
     f.malformed(b"QUFBQQ==\n");
-    refuse(&f.observe());
+    refused(&f.observe(), "child-failed");
 }
 
 /// ´test:integration:payload-and-source-digest-refusals´
@@ -371,15 +371,30 @@ fn payload_and_source_digest_refusals() {
 /// ´test:integration:payload-complete-row-contract´
 #[test]
 fn payload_complete_row_contract() {
-    for source in [
-        "pass\n".to_owned(),
-        PAYLOAD.replace("print(name, 'constant', offsets[0])", "pass"),
-        PAYLOAD.replace("'decoded', len(decoded)", "'decoded', len(decoded) + 1"),
-        PAYLOAD.replace("'file-bytes', len(raw)", "'file-bytes', len(raw) + 1"),
-        format!("{PAYLOAD}print('unexpected row')\n"),
-        PAYLOAD.replace("values['alpha'] == values['beta']", "False"),
+    for (source, diagnostic) in [
+        ("pass\n".to_owned(), "payload-row-framing"),
+        (
+            PAYLOAD.replace("print(name, 'constant', offsets[0])", "pass"),
+            "payload-missing-rows",
+        ),
+        (
+            PAYLOAD.replace("'decoded', len(decoded)", "'decoded', len(decoded) + 1"),
+            "payload-row-inconsistent",
+        ),
+        (
+            PAYLOAD.replace("'file-bytes', len(raw)", "'file-bytes', len(raw) + 1"),
+            "payload-file-size",
+        ),
+        (
+            format!("{PAYLOAD}print('unexpected row')\n"),
+            "payload-row-shape",
+        ),
+        (
+            PAYLOAD.replace("values['alpha'] == values['beta']", "False"),
+            "payload-comparison",
+        ),
     ] {
-        refuse(&Fixture::payload(&source).observe());
+        refused(&Fixture::payload(&source).observe(), diagnostic);
     }
 }
 
@@ -431,7 +446,7 @@ fn every_identity_member_drift() {
         let mut f = Fixture::new();
         pass(&f.observe());
         f.record["probes"][role]["argv"][1] = json!("synthetic-v2\n");
-        refuse(&f.check());
+        refused(&f.check(), "identity-drift");
     }
     for member in ["sealer", "library", "parser"] {
         let f = Fixture::new();
@@ -440,22 +455,12 @@ fn every_identity_member_drift() {
             .as_str()
             .unwrap();
         fs::write(path, b"changed").unwrap();
-        refuse(&f.check());
-    }
-    for pointer in [
-        "/identity/files/interpreter/sha256",
-        "/identity/computation",
-        "/identity/measure",
-    ] {
-        let mut f = Fixture::new();
-        pass(&f.observe());
-        *f.record.pointer_mut(pointer).unwrap() = json!("changed");
-        refuse(&f.check());
+        refused(&f.check(), "identity-drift");
     }
     let mut f = Fixture::new();
     pass(&f.observe());
     f.record["identity"]["form"]["final_lf"] = json!(false);
-    refuse(&f.check());
+    refused(&f.check(), "calibration-identity");
 }
 
 /// ´test:integration:missing-calibration-member´
@@ -725,4 +730,40 @@ fn sealed_directory_custody_before_probes() {
     .unwrap();
     std::os::unix::fs::symlink("../saved-alpha", f.dir.path().join("sealed/alpha")).unwrap();
     refused(&f.observe(), "path-open");
+}
+
+/// ´test:integration:inconsistent-offsets-reach-observer´
+#[test]
+fn inconsistent_offsets_reach_observer() {
+    // Emit complete, arithmetically consistent rows without rejecting offsets
+    // in Python. The final constant remains zero, so deleting the Rust
+    // cross-content check would make the entire observation succeed.
+    let source = PAYLOAD
+        .replace(
+            "    if len(set(offsets)) != 1: raise ValueError('constant')\n",
+            "",
+        )
+        .replace("offsets[0]", "offsets[-1]");
+    let mut f = Fixture::payload(&source);
+    f.malformed(b"QUFBQQ==\n");
+    refused(&f.observe(), "length-condition-refused");
+}
+
+/// ´test:integration:calibration-computation-and-measure-drift´
+#[test]
+fn calibration_computation_and_measure_drift() {
+    for member in ["computation", "measure"] {
+        let mut f = Fixture::new();
+        f.record["identity"][member] = json!("changed");
+        refused(&f.observe(), "record-computation");
+        let f = Fixture::new();
+        pass(&f.observe());
+        let path = f.dir.path().join("evidence/calibration");
+        let mut calibration: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        calibration["evidence"]["identity"][member] = json!("changed");
+        mode(&path, 0o600);
+        fs::write(&path, serde_json::to_vec(&calibration).unwrap()).unwrap();
+        mode(&path, 0o400);
+        refused(&f.check(), "calibration-identity");
+    }
 }
