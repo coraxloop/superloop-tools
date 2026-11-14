@@ -80,6 +80,9 @@ pattern = "docs/public/unpublished-labels.toml"
 pattern = "docs/spec/build-contracts.md"
 
 [[include.rows]]
+pattern = "docs/spec/collection-journal.md"
+
+[[include.rows]]
 pattern = "docs/spec/command-contracts.md"
 
 [[include.rows]]
