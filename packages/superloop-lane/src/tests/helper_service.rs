@@ -758,10 +758,11 @@ fn template_directories(home: &Path) -> [fs::File; 3] {
     })
 }
 
+/// Publish the fixture reservation with the supplied grant and placement.
+///
 /// # Panics
-/// Panics if the built helper refuses the correctly provisioned synthetic rounds.
-pub(super) fn rounds_acceptance(home: &Path, runs: &Path, podman: &Path) {
-    let mut record = prepare(home, runs, podman);
+/// Panics if either declaration is absent or malformed, or publication fails.
+fn publish_declared(runs: &Path, record: &mut Value) {
     record["plan"]["compute_workspace"] = serde_json::from_str(
         &std::env::var("SUPERLOOP_ROUND_WORKSPACE").expect("production declaration supplied"),
     )
@@ -770,8 +771,15 @@ pub(super) fn rounds_acceptance(home: &Path, runs: &Path, podman: &Path) {
         &std::env::var("SUPERLOOP_ROUND_PLACEMENT").expect("placement supplied"),
     )
     .unwrap();
-    crate::launch::publish_reservation(&runs.join(".reservation-R.json"), &record)
+    crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
         .expect("declaration retained for helper");
+}
+
+/// # Panics
+/// Panics if the built helper refuses the correctly provisioned synthetic rounds.
+pub(super) fn rounds_acceptance(home: &Path, runs: &Path, podman: &Path) {
+    let mut record = prepare(home, runs, podman);
+    publish_declared(runs, &mut record);
     let _worker = MappedWorker {
         home: home.to_path_buf(),
         worker: record["plan"]["home"].as_str().expect("worker").into(),
