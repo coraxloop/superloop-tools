@@ -442,3 +442,7 @@ target = "TOOLS"
 [[may_cite]]
 owner = "SUPERLOOPCREDENTIALCUSTODY"
 target = "SUPERLOOPCLICOMMON"
+
+[[may_cite]]
+owner = "SUPERLOOPCREDENTIALCUSTODY"
+target = "LOOPHOME"

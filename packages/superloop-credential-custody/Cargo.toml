@@ -16,6 +16,7 @@ release-group = "credential-custody"
 workspace = true
 
 [dependencies]
+loop-home.workspace = true
 superloop-cli-common.workspace = true
 clap.workspace = true
 serde.workspace = true

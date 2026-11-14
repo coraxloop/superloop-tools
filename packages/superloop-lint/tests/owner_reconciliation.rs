@@ -303,6 +303,6 @@ fn the_repository_owner_surface_reconciles_in_both_directions() {
     assert_eq!(repository_reach, expected_repository_reach);
     assert_eq!(
         declared_reach.len(),
-        41 + imported_reach.len() + repository_reach.len()
+        42 + imported_reach.len() + repository_reach.len()
     );
 }

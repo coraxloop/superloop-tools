@@ -99,7 +99,7 @@ pub fn run(record: &Parameters, path: &Path) -> Result<Value> {
     {
         return Err("calibration-path");
     }
-    let bytes = receipt::read(path, crate::record::RECORD_LIMIT as u64, true)?;
+    let bytes = receipt::protected_read(path, crate::record::RECORD_LIMIT as u64, true)?;
     let calibration: Calibration =
         serde_json::from_slice(&bytes).map_err(|_| "calibration-shape")?;
     let evidence = &calibration.evidence;

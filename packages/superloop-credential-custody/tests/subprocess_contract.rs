@@ -907,3 +907,81 @@ fn frozen_form_binds_text_byte_count() {
     mode(&path, 0o400);
     refused(&f.check(), "payload-row-inconsistent");
 }
+
+/// ´test:integration:program-custody-before-execution´
+#[test]
+fn program_custody_before_execution() {
+    for permissions in [0o777, 0o644, 0o4755] {
+        let mut f = Fixture::new();
+        let program = f.dir.path().join("probe");
+        fs::copy("/usr/bin/printf", &program).unwrap();
+        mode(&program, permissions);
+        f.record["probes"][0]["argv"][0] = json!(program);
+        refused(&f.observe(), "program-custody");
+    }
+    let mut f = Fixture::new();
+    let program = f.dir.path().join("probe");
+    fs::copy("/usr/bin/printf", &program).unwrap();
+    mode(&program, 0o755);
+    fs::hard_link(&program, f.dir.path().join("probe-alias")).unwrap();
+    f.record["probes"][0]["argv"][0] = json!(program);
+    refused(&f.observe(), "program-custody");
+    let mut f = Fixture::new();
+    let program = f.dir.path().join("probe");
+    std::os::unix::fs::symlink("/usr/bin/printf", &program).unwrap();
+    f.record["probes"][0]["argv"][0] = json!(program);
+    refused(&f.observe(), "path-open");
+    let mut f = Fixture::new();
+    let ancestor = f.dir.path().join("untrusted");
+    fs::create_dir(&ancestor).unwrap();
+    mode(&ancestor, 0o777);
+    let program = ancestor.join("probe");
+    fs::copy("/usr/bin/printf", &program).unwrap();
+    mode(&program, 0o755);
+    f.record["probes"][0]["argv"][0] = json!(program);
+    refused(&f.observe(), "directory-ancestor-custody");
+}
+
+/// ´test:integration:repository-and-evidence-ancestors-are-protected´
+#[test]
+fn repository_and_evidence_ancestors_are_protected() {
+    let f = Fixture::new();
+    mode(&f.dir.path().join("source"), 0o777);
+    refused(&f.observe(), "repository-custody");
+    for leaf in ["source", "evidence"] {
+        let mut f = Fixture::new();
+        let ancestor = f.dir.path().join("untrusted");
+        fs::create_dir(&ancestor).unwrap();
+        mode(&ancestor, 0o777);
+        fs::rename(f.dir.path().join(leaf), ancestor.join(leaf)).unwrap();
+        if leaf == "source" {
+            f.record["payload"]["repository"] = json!(ancestor.join(leaf));
+        } else {
+            f.record["evidence_root"] = json!(ancestor.join(leaf));
+        }
+        refused(&f.observe(), "directory-ancestor-custody");
+    }
+    let mut f = Fixture::new();
+    pass(&f.observe());
+    let ancestor = f.dir.path().join("untrusted");
+    fs::create_dir(&ancestor).unwrap();
+    mode(&ancestor, 0o777);
+    fs::rename(f.dir.path().join("evidence"), ancestor.join("evidence")).unwrap();
+    f.record["evidence_root"] = json!(ancestor.join("evidence"));
+    // Calibration ancestry must refuse before any live probe, independently of
+    // the repeated publication guard at the end of a successful comparison.
+    let marker = f.dir.path().join("calibration-probe-ran");
+    f.record["probes"][0]["argv"] = json!(["/usr/bin/touch", marker]);
+    f.save();
+    let out = binary()
+        .arg("identity-check")
+        .arg("--parameters")
+        .arg(f.dir.path().join("parameters.json"))
+        .arg("--calibration")
+        .arg(ancestor.join("evidence/calibration"))
+        .args(["--receipt", "comparison"])
+        .output()
+        .unwrap();
+    refused(&out, "directory-ancestor-custody");
+    assert!(!marker.exists());
+}

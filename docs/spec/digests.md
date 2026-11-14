@@ -459,10 +459,10 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-claude-hook/tests/orchestrator/fixtures/expected/spec-project-root-disable.json:19``|Controlled fixture/oracle/reference evidence for this package’s inventoried uses; no independent production authority. Preserve algorithm vectors and reader-shape fixtures until the associated migration.|
 |``packages/superloop-claude-hook/tests/orchestrator/oracle_fixtures.rs:178,180,186``|Controlled fixture/oracle/reference evidence for this package’s inventoried uses; no independent production authority. Preserve algorithm vectors and reader-shape fixtures until the associated migration.|
 |``packages/superloop-correspondence/meson.build:49,53``|D220; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
-|``packages/superloop-credential-custody/README.md:13,17,19,21,23,25,29,33``|D246–D248; identity, custody and build documentation.|
+|``packages/superloop-credential-custody/README.md:13,23,31,33,35,37,39,43,47``|D246–D248; identity, custody and build documentation.|
 |``packages/superloop-credential-custody/meson.build:34,35``|D248; reviewed executable expressions and scope.|
 |``packages/superloop-credential-custody/src/identity.rs:8,15,47,84,85,110,111,124``|D246; hashing live files and retained calibration bytes.|
-|``packages/superloop-credential-custody/src/observe.rs:180,181,200,214,239,321,326``|D246–D247; source-payload selection and completed sealed-file comparisons.|
+|``packages/superloop-credential-custody/src/observe.rs:180,181,201,215,240,322,327``|D246–D247; source-payload selection and completed sealed-file comparisons.|
 |``packages/superloop-credential-custody/src/record.rs:48,49,67,112,165,189,221,233,242,321,345``|D246–D247; strict identity fields and full-digest grammar.|
 |``packages/superloop-credential-custody/tests/subprocess_contract.rs:3,39,128,166,170,172,220,261,356,358,584,661,666,668,670,892,893``|Controlled synthetic evidence for D246–D247, not a production reference.|
 |``packages/superloop-gate-submit/README.md:59,114``|D194; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|

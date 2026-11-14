@@ -180,6 +180,7 @@ fn payload(record: &Parameters) -> Result<Vec<u8>> {
     if identity::hash(&installed) != record.payload.sha256 {
         return Err("payload-digest");
     }
+    let _repository = receipt::repository(&record.payload.repository)?;
     let mut command = Command::new("/usr/bin/git");
     command
         .arg("--no-pager")

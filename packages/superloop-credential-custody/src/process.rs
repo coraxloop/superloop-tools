@@ -53,7 +53,83 @@ fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, limit: u64) -> Result<bool> 
     }
 }
 
+/// Retain the executable through the existing descriptor-execution owner.
+fn pin_program(command: &mut Command) -> Result<()> {
+    use loop_home::anchor::{
+        HostVerifier, Kind, Manifest, ModePolicy, Owner, Policy, Receiver, Requirement, Transport,
+    };
+    use std::os::unix::fs::MetadataExt as _;
+    use std::path::{Path, PathBuf};
+    let requested = Path::new(command.get_program());
+    // Only the fixed interpreter may be a vendor symlink. Its containing
+    // directory is protected before resolution; operator exclusion covers
+    // concurrent replacement by the trusted owner, including symlink targets.
+    let path: PathBuf = if requested == Path::new("/usr/bin/python3") {
+        let _parent = crate::receipt::walk(Path::new("/usr/bin"), true, true)?;
+        std::fs::canonicalize(requested).map_err(|_| "program-path")?
+    } else {
+        requested.into()
+    };
+    let file = crate::receipt::walk(&path, false, true)?;
+    let meta = file.metadata().map_err(|_| "program-metadata")?;
+    if !meta.is_file()
+        || (meta.nlink() == 0 || (meta.uid() != 0 && meta.nlink() != 1))
+        || (meta.uid() != 0 && meta.uid() != nix::unistd::geteuid().as_raw())
+        || meta.mode() & 0o7022 != 0
+        || meta.mode() & 0o111 == 0
+    {
+        return Err("program-custody");
+    }
+    let policy = Policy {
+        kind: Kind::File,
+        owner: if meta.uid() == 0 {
+            Owner::RootFile
+        } else {
+            Owner::Host
+        },
+        mode: ModePolicy::Executable,
+    };
+    let operation = "credential-observation";
+    let pin = HostVerifier::current()
+        .map_err(|_| "program-custody")?
+        .for_operation(operation)
+        .pin(&path, "program", 0, policy)
+        .map_err(|_| "program-custody")?;
+    if pin.record().device != meta.dev() || pin.record().inode != meta.ino() {
+        return Err("program-identity");
+    }
+    let manifest = Manifest {
+        version: 1,
+        transport: Transport::Rights,
+        operation: operation.into(),
+        loop_name: String::new(),
+        records: vec![pin.record()],
+    };
+    let anchors = Receiver::current()
+        .map_err(|_| "program-custody")?
+        .validate(
+            &manifest,
+            vec![pin.into_fd()],
+            operation,
+            "",
+            Transport::Rights,
+            &[Requirement {
+                purpose: "program".into(),
+                policy,
+                alias_group: None,
+            }],
+        )
+        .map_err(|_| "program-custody")?;
+    let argv: Vec<_> = std::iter::once(command.get_program().to_owned())
+        .chain(command.get_args().map(std::ffi::OsStr::to_owned))
+        .collect();
+    anchors[0]
+        .configure_exec(command, &argv, &[])
+        .map_err(|_| "program-exec")
+}
+
 pub fn capture(mut command: Command, input: &[u8], limits: &Limits) -> Result<Vec<u8>> {
+    pin_program(&mut command)?;
     command
         .env_clear()
         .current_dir("/")

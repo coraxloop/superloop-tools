@@ -12,7 +12,7 @@ pub fn open(path: &Path, directory: bool) -> Result<File> {
     walk(path, directory, false)
 }
 
-fn walk(path: &Path, directory: bool, protected: bool) -> Result<File> {
+pub fn walk(path: &Path, directory: bool, protected: bool) -> Result<File> {
     if !crate::record::path(path, true) {
         return Err("unsafe-path");
     }
@@ -62,6 +62,22 @@ pub fn sealed_directory(path: &Path) -> Result<File> {
     Ok(dir)
 }
 
+pub fn repository(path: &Path) -> Result<File> {
+    let dir = walk(path, true, true)?;
+    let meta = dir.metadata().map_err(|_| "repository-custody")?;
+    if (meta.uid() != 0 && meta.uid() != nix::unistd::geteuid().as_raw())
+        || meta.mode() & 0o7022 != 0
+        || meta.nlink() == 0
+    {
+        return Err("repository-custody");
+    }
+    Ok(dir)
+}
+
+pub fn protected_read(path: &Path, limit: u64, immutable: bool) -> Result<Vec<u8>> {
+    read_file(walk(path, false, true)?, limit, immutable)
+}
+
 pub fn parameters(path: &Path) -> Result<Vec<u8>> {
     let file = walk(path, false, true)?;
     read_file(file, crate::record::RECORD_LIMIT as u64, true).map_err(|class| {
@@ -106,7 +122,7 @@ pub fn read_file(mut file: File, limit: u64, immutable: bool) -> Result<Vec<u8>>
 }
 
 pub fn publish(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
-    let dir = open(root, true)?;
+    let dir = walk(root, true, true)?;
     let meta = dir.metadata().map_err(|_| "receipt-root")?;
     if meta.uid() != nix::unistd::geteuid().as_raw() || meta.mode() & 0o777 != 0o700 {
         return Err("receipt-root-custody");
