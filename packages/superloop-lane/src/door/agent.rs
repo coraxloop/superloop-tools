@@ -1037,6 +1037,58 @@ pub(super) mod tests {
         }
     }
 
+    fn drain_seam_case(expired: bool) {
+        let script = format!(
+            r#"#!/usr/bin/python3
+import json, os, sys
+json.load(sys.stdin)
+ns = {{"__name__": "drain_fixture"}}
+exec({}, ns)
+r, w = os.pipe()
+os.set_blocking(r, False)
+tail = ns["StderrTail"]()
+if {}:
+    os.write(w, b"private-answer")
+    deadline = ns["time"].monotonic() - 1
+else:
+    tail.append(b"partial vendor line")
+    deadline = ns["time"].monotonic() + 60
+eof, cut = ns["drain_stderr"](r, tail, deadline)
+assert not eof
+assert cut == {}
+assert ns["refusal_stderr"]("invalid-output", tail, eof, cut) == ("", "")
+os.close(w)
+eof, cut = ns["drain_stderr"](r, tail, ns["time"].monotonic() + 60)
+assert eof and not cut
+assert ns["refusal_stderr"]("invalid-output", tail, eof, cut) == (tail.text(), tail.first_line())
+os.close(r)
+for value in [b'"private-answer"', b'["private-answer"]']:
+    assert not ns["plain_stderr"](value)
+assert ns["plain_stderr"](b"usage limit reached")
+print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":json.dumps({{"verdict":"refer","scope":"estate","reason":"drain checked"}})}}}}))
+"#,
+            json!(loop_home::runner::DOOR_AGENT_PROGRAM),
+            if expired { "True" } else { "False" },
+            if expired { "True" } else { "False" },
+        );
+        let (_root, runner, input) = fixture(&script);
+        let result = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+        assert_eq!(result.status, "verdict", "{result:?}");
+        assert_eq!(result.reason, "drain checked");
+    }
+
+    /// ´test:unit:agent-stderr-drain-deadline-blanks-open-pipe´
+    #[test]
+    fn agent_stderr_drain_deadline_blanks_open_pipe() {
+        drain_seam_case(true);
+    }
+
+    /// ´test:unit:agent-stderr-drain-empty-open-pipe-is-not-eof´
+    #[test]
+    fn agent_stderr_drain_empty_open_pipe_is_not_eof() {
+        drain_seam_case(false);
+    }
+
     /// ´test:unit:door-runner-holds-refresh-lock-through-cli-and-refuses-contention´
     #[test]
     fn door_runner_holds_refresh_lock_through_cli_and_refuses_contention() {

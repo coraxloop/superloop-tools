@@ -89,15 +89,36 @@ def stream_class(data, complete=True):
 
 
 def plain_stderr(data):
-    """A JSON object on any line may carry an answer, even in a mixed stream."""
+    """A JSON object, array or string may carry an answer in a mixed stream."""
     for line in data.splitlines():
         try:
             value = json.loads(line)
         except (ValueError, UnicodeError):
             continue
-        if isinstance(value, dict):
+        if isinstance(value, (dict, list, str)):
             return False
     return True
+
+
+def drain_stderr(fd, tail, deadline):
+    """Drain a nonblocking pipe without treating an open empty pipe as EOF."""
+    while time.monotonic() < deadline:
+        try:
+            chunk = os.read(fd, 8192)
+        except BlockingIOError:
+            return False, False
+        if not chunk:
+            return True, False
+        tail.append(chunk)
+    return False, True
+
+
+def refusal_stderr(status, tail, eof, cut):
+    """Only a complete plain stream is safe on an invalid-output refusal."""
+    complete = tail.total == len(tail.data)
+    suppress = (status == "invalid-output"
+                and (not eof or cut or not complete or not plain_stderr(bytes(tail.data))))
+    return ("", "") if suppress else (tail.text(), tail.first_line())
 
 
 def parse_answer(output, evidence):
@@ -393,17 +414,8 @@ def main():
             EVIDENCE["private_directory_removed"] = not os.path.exists(call)
         if process is not None:
             # Never wait for an escaped descendant retaining the pipe.
-            stderr_cleanup_cut = False
-            while time.monotonic() < cleanup_end:
-                try:
-                    chunk = os.read(process.stderr.fileno(), 8192)
-                except BlockingIOError:
-                    break
-                if not chunk:
-                    break
-                stderr_tail.append(chunk)
-            else:
-                stderr_cleanup_cut = True
+            stderr_eof, stderr_cleanup_cut = drain_stderr(
+                process.stderr.fileno(), stderr_tail, cleanup_end)
             stderr_stream = bytes(stderr_tail.data)
             stderr_complete = stderr_tail.total == len(stderr_stream)
             if stderr_cleanup_cut:
@@ -416,12 +428,11 @@ def main():
             RESULT["agent_runner_exit"] = (
                 None if code is None else {"code": code} if code >= 0 else {"signal": -code})
             if RESULT.get("service_status") is not None:
-                # Invalid output may carry an answer in any JSON object or cut stream.
-                suppress_stderr = (RESULT.get("service_status") == "invalid-output"
-                                   and (stderr_cleanup_cut or not stderr_complete
-                                        or not plain_stderr(stderr_stream)))
-                RESULT["agent_runner_stderr_tail"] = "" if suppress_stderr else stderr_tail.text()
-                RESULT["agent_runner_first_line"] = "" if suppress_stderr else stderr_tail.first_line()
+                tail, first = refusal_stderr(
+                    RESULT["service_status"], stderr_tail, stderr_eof, stderr_cleanup_cut)
+                RESULT["agent_runner_stderr_tail"] = tail
+                RESULT["agent_runner_first_line"] = first
+
 
 
 if __name__ == "__main__":

@@ -44,6 +44,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Door agent invalid-output refusals retain stderr only after end of stream: an open empty pipe, a cleanup deadline, and JSON strings or arrays cannot expose an answer. Complete plain vendor errors remain readable.
+
 - The top-level `superloop-lane` launch usage now lists `--compute-workspace JSON` with its existing arguments, matching the launch refusal's usage; parsing and existing runs are unchanged (``prob:lanes:top-level-usage-lists-the-compute-workspace-argument``).
 
 - Clarify launch interruption on each side of reservation publication: only a published reservation lets retirement name its reserved mail birth. Pin the production ordering-helper call and distinguish legacy refusal evidence from workspace-tagged evidence; no launch or reader behavior changes (``proto:superlooplane:workspace-launch-declaration``; ``test:unit:workspace-private-make-uses-birth-publication-boundary``).
