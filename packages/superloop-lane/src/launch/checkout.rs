@@ -859,7 +859,7 @@ fn pack_transfer_detail(
         value.map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
     };
     format!(
-        "{cause}; pack-objects {pack_status}; pack-objects stderr: {pack_stderr}; index-pack {index_status}; index-pack stderr: {index_stderr}",
+        "{cause}; pack-objects {pack_status}; index-pack {index_status}; pack-objects stderr: {pack_stderr}; index-pack stderr: {index_stderr}",
         pack_status = status(source_status),
         pack_stderr = pack_stderr_tail(source_stderr),
         index_status = status(receiver_status),
@@ -1398,10 +1398,7 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Stdio};
 
-    fn synthetic_transfer(
-        pack_script: &str,
-        index_script: &str,
-    ) -> Result<(), crate::error::LaneError> {
+    fn synthetic_commands(pack_script: &str, index_script: &str) -> (Command, Command) {
         let mut pack = Command::new("/usr/bin/python3");
         pack.args(["-c", pack_script]).stdout(Stdio::piped());
         let mut index = Command::new("/usr/bin/python3");
@@ -1409,6 +1406,14 @@ mod tests {
             .args(["-c", index_script])
             .stdin(Stdio::piped())
             .stdout(Stdio::null());
+        (pack, index)
+    }
+
+    fn synthetic_transfer(
+        pack_script: &str,
+        index_script: &str,
+    ) -> Result<(), crate::error::LaneError> {
+        let (pack, index) = synthetic_commands(pack_script, index_script);
         transfer_pack(pack, index)
     }
 
@@ -1451,11 +1456,20 @@ mod tests {
     /// ´test:unit:checkout-pack-stderr-flood-stays-bounded´
     #[test]
     fn checkout_pack_stderr_flood_stays_bounded() {
-        let error = synthetic_transfer(
-            "import sys; sys.stderr.buffer.write(b'x' * 65536 + b'\\npack flood tail\\n'); sys.exit(43)",
-            "import sys; sys.stdin.buffer.read()",
-        )
-        .expect_err("flooding pack failure");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(synthetic_transfer(
+                    "import sys; sys.stderr.buffer.write(b'x' * (4 * 1024 * 1024) + b'\\npack flood tail\\n'); sys.exit(43)",
+                    "import sys; sys.stdin.buffer.read()",
+                ))
+                .expect("flood result receiver");
+        });
+        let error = receiver
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("pack stderr flood blocked the transfer")
+            .expect_err("flooding pack failure");
+        worker.join().expect("flood transfer thread");
         assert!(error.detail.contains("pack flood tail"));
         assert!(
             error.detail.len() <= 4500,
@@ -1503,6 +1517,96 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// ´test:unit:checkout-recorded-transfer-names-both-exits´
+    #[test]
+    fn checkout_recorded_transfer_names_both_exits() {
+        let error = synthetic_transfer(
+            "import sys; sys.stderr.buffer.write(b'p' * 4096); sys.stdout.buffer.write(b'pack'); sys.exit(41)",
+            "import sys; sys.stdin.buffer.read(); print('index failed', file=sys.stderr); sys.exit(42)",
+        )
+        .expect_err("both Git commands failed");
+        let recorded = super::detail_bytes(&error.detail);
+        assert!(recorded.contains("pack-objects exit status: 41"));
+        assert!(
+            recorded.contains("index-pack exit status: 42"),
+            "{recorded}"
+        );
+        assert!(
+            serde_json::to_string(&recorded)
+                .expect("serialized detail")
+                .len()
+                <= 256
+        );
+    }
+
+    /// ´test:unit:checkout-transfer-spawn-failures-name-command-status´
+    #[test]
+    fn checkout_transfer_spawn_failures_name_command_status() {
+        let scratch = tempfile::tempdir().expect("scratch directory");
+        let absent = scratch.path().join("absent");
+        let (mut pack, index) = synthetic_commands("pass", "pass");
+        pack.current_dir(&absent);
+        let error = transfer_pack(pack, index).expect_err("packing spawn failure");
+        assert!(error.detail.contains("pack preserved bare:"));
+        assert!(error.detail.contains("pack-objects unavailable"));
+        assert!(error.detail.contains("index-pack unavailable"));
+
+        let (mut pack, mut index) =
+            synthetic_commands("import sys; sys.stdin.buffer.read()", "pass");
+        pack.stdin(Stdio::piped());
+        index.current_dir(&absent);
+        let error = transfer_pack(pack, index).expect_err("indexing spawn failure");
+        assert!(error.detail.contains("index preserved pack:"));
+        assert!(error.detail.contains("index-pack unavailable"));
+        assert!(error.detail.contains("pack-objects "));
+    }
+
+    /// ´test:unit:checkout-transfer-copy-failure-keeps-status-and-stderr´
+    #[test]
+    fn checkout_transfer_copy_failure_keeps_status_and_stderr() {
+        let scratch = tempfile::tempdir().expect("scratch directory");
+        let rendezvous = scratch.path().join("index-closed");
+        nix::unistd::mkfifo(
+            &rendezvous,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("rendezvous pipe");
+        let rendezvous = rendezvous.to_str().expect("UTF-8 fixture path");
+        let pack_script = format!(
+            "import pathlib,sys; p=pathlib.Path({rendezvous:?}); p.open('rb').read(1); sys.stdout.buffer.write(b'x' * (1024 * 1024))"
+        );
+        let index_script = format!(
+            "import pathlib,sys; sys.stdin.close(); pathlib.Path({rendezvous:?}).open('wb').write(b'x'); print('index closed input', file=sys.stderr)"
+        );
+        let error = synthetic_transfer(&pack_script, &index_script)
+            .expect_err("copy into a closed index pipe");
+        assert!(error.detail.contains("preserved pack copy failed:"));
+        assert!(error.detail.contains("index-pack exit status: 0"));
+        assert!(
+            error
+                .detail
+                .contains("index-pack stderr: index closed input")
+        );
+    }
+
+    /// ´test:unit:checkout-transfer-missing-streams-name-the-absent-end´
+    #[test]
+    fn checkout_transfer_missing_streams_name_the_absent_end() {
+        let (mut pack, index) = synthetic_commands("pass", "pass");
+        pack.stdout(Stdio::null());
+        let error = transfer_pack(pack, index).expect_err("missing packing stdout");
+        assert!(error.detail.contains("pack stream is absent"));
+        assert!(error.detail.contains("pack-objects "));
+        assert!(error.detail.contains("index-pack "));
+
+        let (pack, mut index) = synthetic_commands("pass", "pass");
+        index.stdin(Stdio::null());
+        let error = transfer_pack(pack, index).expect_err("missing indexing stdin");
+        assert!(error.detail.contains("index stream is absent"));
+        assert!(error.detail.contains("pack-objects "));
+        assert!(error.detail.contains("index-pack "));
     }
 
     /// # Panics
