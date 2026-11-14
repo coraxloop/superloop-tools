@@ -3,6 +3,8 @@
 #[path = "channel.rs"]
 mod channel;
 pub(super) mod hold;
+#[cfg(test)]
+mod publication_tests;
 mod queue;
 #[path = "rewrite.rs"]
 mod rewrite;
@@ -825,15 +827,33 @@ impl Store {
     }
 
     fn effective_locked(&self, ledger: &ModeLedger, class: &str) -> Result<Value, LaneError> {
-        let mut effective = ledger.effective(class, self.floor).ok_or_else(|| {
+        let effective = self.base_effective(ledger, class)?;
+        let runs = if effective["mode"] == "audit" {
+            Vec::new()
+        } else {
+            self.all_runs(None)?
+        };
+        Self::effective_from_runs(ledger, class, effective, &runs, self.floor)
+    }
+
+    fn base_effective(&self, ledger: &ModeLedger, class: &str) -> Result<Value, LaneError> {
+        ledger.effective(class, self.floor).ok_or_else(|| {
             problem(
                 "door-mode-setting-refusal",
                 "class or loop first setting is absent",
             )
-        })?;
+        })
+    }
+
+    fn effective_from_runs(
+        ledger: &ModeLedger,
+        class: &str,
+        mut effective: Value,
+        runs: &[(String, u64, Vec<RequestRecord>)],
+        floor: Mode,
+    ) -> Result<Value, LaneError> {
         if effective["mode"] != "audit" {
-            let pending = self
-                .all_runs(None)?
+            let pending = runs
                 .iter()
                 .flat_map(|(_, _, rows)| rows)
                 .filter(|request| request.value()["class"] == class)
@@ -845,7 +865,7 @@ impl Store {
                     execute_command::policy::DoorMode::from_record(effective["mode"].as_str())
                         .map_err(super::command::shape)?;
                 effective["mode"] = json!(
-                    execute_command::policy::effective_mode(mode, mode, self.floor.domain(), true)
+                    execute_command::policy::effective_mode(mode, mode, floor.domain(), true)
                         .as_str()
                 );
                 effective["correction_pending"] = json!(true);
@@ -1825,6 +1845,45 @@ impl Store {
         Ok(learned)
     }
 
+    fn rollback_run(
+        &self,
+        custody: &OwnedFd,
+        run: &str,
+        old: Option<&[u8]>,
+        prior_shapes: Option<&[u8]>,
+        error: &LaneError,
+    ) -> Result<(), LaneError> {
+        let rollback = old.map_or_else(
+            || {
+                unlinkat(custody, RUN_FILE, UnlinkatFlags::NoRemoveDir)
+                    .map_err(|failure| problem("requests-record-refusal", failure.to_string()))
+            },
+            |bytes| replace_leaf(custody, RUN_FILE, bytes, self.owner, MAX_RUN_BYTES),
+        );
+        let shape_rollback = prior_shapes.map_or_else(
+            || match unlinkat(self.state_dir(), SHAPES_FILE, UnlinkatFlags::NoRemoveDir) {
+                Ok(()) | Err(Errno::ENOENT) => Ok(()),
+                Err(failure) => Err(problem("requests-record-refusal", failure.to_string())),
+            },
+            |bytes| {
+                replace_leaf(
+                    self.state_dir(),
+                    SHAPES_FILE,
+                    bytes,
+                    self.owner,
+                    MAX_SHAPES_BYTES,
+                )
+            },
+        );
+        let withdrawn = rollback.is_ok() && shape_rollback.is_ok();
+        let attempt = json!({"run":run,"phase":if withdrawn {"withdrawn"} else {"withdrawal-failed"},"reason":error.kind,
+            "rollback":if withdrawn {"completed"} else {"failed"},"at_unix_ns":now_nanos()});
+        self.record_attempt(attempt)?;
+        rollback?;
+        shape_rollback?;
+        Ok(())
+    }
+
     fn commit_run(
         &self,
         run: &str,
@@ -1881,41 +1940,15 @@ impl Store {
             self.owner,
             MAX_SHAPES_BYTES,
         ) {
-            let rollback = old.map_or_else(
-                || {
-                    unlinkat(&custody, RUN_FILE, UnlinkatFlags::NoRemoveDir)
-                        .map_err(|failure| problem("requests-record-refusal", failure.to_string()))
-                },
-                |bytes| replace_leaf(&custody, RUN_FILE, bytes, self.owner, MAX_RUN_BYTES),
-            );
-            let shape_rollback = prior_shapes.as_deref().map_or_else(
-                || match unlinkat(self.state_dir(), SHAPES_FILE, UnlinkatFlags::NoRemoveDir) {
-                    Ok(()) | Err(Errno::ENOENT) => Ok(()),
-                    Err(failure) => Err(problem("requests-record-refusal", failure.to_string())),
-                },
-                |bytes| {
-                    replace_leaf(
-                        self.state_dir(),
-                        SHAPES_FILE,
-                        bytes,
-                        self.owner,
-                        MAX_SHAPES_BYTES,
-                    )
-                },
-            );
-            let withdrawn = rollback.is_ok() && shape_rollback.is_ok();
-            let attempt = json!({"run":run,"phase":if withdrawn {"withdrawn"} else {"withdrawal-failed"},"reason":error.kind,
-                "rollback":if withdrawn {"completed"} else {"failed"},"at_unix_ns":now_nanos()});
-            self.record_attempt(attempt)?;
-            rollback?;
-            shape_rollback?;
+            self.rollback_run(&custody, run, old, prior_shapes.as_deref(), &error)?;
             return Err(error);
         }
         drop(shape_write);
         // Index publication is optional for recording a request. Its tombstone
         // survives failure; the one-time rewrite can rebuild it from custody.
-        let _published = self.write_learned(&learned);
-        self.publish_after_write();
+        if !self.write_learned(&learned).unwrap_or(false) {
+            self.publish_after_write();
+        }
         Ok(())
     }
 
@@ -2087,7 +2120,7 @@ impl Store {
         Ok(index)
     }
 
-    fn write_learned(&self, value: &Value) -> Result<(), LaneError> {
+    fn write_learned(&self, value: &Value) -> Result<bool, LaneError> {
         let _phase = hold::phase(if value["unavailable"] == true {
             hold::Phase::Tombstone
         } else {
@@ -2101,6 +2134,8 @@ impl Store {
         } else {
             &bytes
         };
+        #[cfg(test)]
+        publication_tests::learned_write()?;
         replace_leaf(
             self.state_dir(),
             LEARNED_FILE,
@@ -2108,8 +2143,7 @@ impl Store {
             self.owner,
             MAX_LEARNED_BYTES,
         )?;
-        self.publish_after_write();
-        Ok(())
+        Ok(self.publish_after_write()["published"] == true)
     }
 
     fn index_judgement(index: &mut Value, row: &Value, prior: Option<&Value>) {

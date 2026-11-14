@@ -218,6 +218,36 @@ fn envelope(
     json!({"schema":1,"records":doors,"document":document,"id":id,"pending":pending,"now_ns":now,"expected":null,"publication":null})
 }
 
+fn project_changes(
+    before: &Collection,
+    next: &mut Collection,
+    at: &str,
+) -> Result<Vec<RequestRecord>, LaneError> {
+    let sources = before
+        .requests
+        .iter()
+        .map(|row| (row.id.as_str(), row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut changed = Vec::new();
+    for row in &mut next.requests {
+        if row.kind.starts_with("door-") {
+            let old = sources
+                .get(row.id.as_str())
+                .copied()
+                .ok_or_else(|| core("preview source disappeared"))?;
+            if old != row {
+                let record = project(&source(old)?, row, at)?;
+                row.body["record"] = record.value().clone();
+                if old.decision != row.decision {
+                    changed.push(record);
+                }
+            }
+        }
+    }
+    next.validate(&kinds()).map_err(core)?;
+    Ok(changed)
+}
+
 impl Store {
     pub(super) fn channel_bound(&self) -> Result<bool, LaneError> {
         Ok(self.bound_client()?.is_some())
@@ -500,24 +530,7 @@ impl Store {
             return Ok(preview["result"].clone());
         }
         let at = request_core::utc_time(now);
-        let mut changed = Vec::new();
-        for row in &mut next.requests {
-            if row.kind.starts_with("door-") {
-                let old = before
-                    .requests
-                    .iter()
-                    .find(|old| old.id == row.id)
-                    .ok_or_else(|| core("preview source disappeared"))?;
-                if old != row {
-                    let record = project(&source(old)?, row, &at)?;
-                    row.body["record"] = record.value().clone();
-                    if old.decision != row.decision {
-                        changed.push(record);
-                    }
-                }
-            }
-        }
-        next.validate(&kinds()).map_err(core)?;
+        let changed = project_changes(&before, &mut next, &at)?;
         self.preflight_correction_modes(&changed)?;
         let prior_index = if changed.is_empty() {
             Value::Null
@@ -804,6 +817,106 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn linear_project_changes(
+        before: &Collection,
+        next: &mut Collection,
+        at: &str,
+    ) -> Result<Vec<RequestRecord>, LaneError> {
+        let mut changed = Vec::new();
+        for row in &mut next.requests {
+            if row.kind.starts_with("door-") {
+                let old = before
+                    .requests
+                    .iter()
+                    .find(|old| old.id == row.id)
+                    .ok_or_else(|| core("preview source disappeared"))?;
+                if old != row {
+                    let record = project(&source(old)?, row, at)?;
+                    row.body["record"] = record.value().clone();
+                    if old.decision != row.decision {
+                        changed.push(record);
+                    }
+                }
+            }
+        }
+        next.validate(&kinds()).map_err(core)?;
+        Ok(changed)
+    }
+
+    /// ´test:unit:channel-index-projects-shuffled-collections-identically´
+    #[test]
+    fn channel_index_projects_shuffled_collections_identically() {
+        for seed in 0..32 {
+            let rows = (1..9)
+                .map(|n| {
+                    imported(
+                        &crate::requests::tests::waiting(
+                            "R",
+                            &format!("{n:08x}"),
+                            3000,
+                            crate::requests::Mode::Audit,
+                        ),
+                        "alpha",
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let mut before = Collection {
+                schema: 1,
+                revision: 1,
+                requests: rows,
+            };
+            before.requests.rotate_left(seed % 8);
+            if seed % 2 == 1 {
+                before.requests.reverse();
+            }
+            before.validate(&kinds()).unwrap();
+            for variant in 0..4 {
+                let mut next = before.clone();
+                for row in next.requests.iter_mut().take(4) {
+                    row.state = State::ServicePending;
+                    row.decision_state = Some(State::TriageDecided);
+                    row.decision = Some(Decision {
+                        answer: json!({"outcome":"allow"}),
+                        reason: "fixture".into(),
+                    });
+                }
+                next.requests.rotate_left((seed + 3) % 8);
+                if variant == 1 {
+                    next.requests[2].id = "f".repeat(64);
+                }
+                if variant == 2 {
+                    next.requests[3].body["record"]["worker_uid"] = json!(3001);
+                }
+                if variant == 3 {
+                    next.requests[0].state = State::Marked;
+                    next.requests[0].decision = None;
+                    next.requests[0].decision_state = None;
+                }
+                next.validate(&kinds()).unwrap();
+                let mut expected = next.clone();
+                let encode = |result: Result<Vec<RequestRecord>, LaneError>| {
+                    result
+                        .map(|rows| {
+                            rows.into_iter()
+                                .map(RequestRecord::into_value)
+                                .collect::<Vec<_>>()
+                        })
+                        .map_err(|e| (e.kind, e.detail))
+                };
+                assert_eq!(
+                    encode(project_changes(&before, &mut next, "2")),
+                    encode(linear_project_changes(&before, &mut expected, "2")),
+                    "{seed}/{variant}"
+                );
+                assert_eq!(
+                    serde_json::to_vec(&next).unwrap(),
+                    serde_json::to_vec(&expected).unwrap()
+                );
+            }
+        }
+    }
 
     /// ´test:unit:channel-projection-hoist-preserves-records-and-first-match´
     #[test]

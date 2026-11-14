@@ -2093,6 +2093,9 @@ pattern = "packages/superloop-lane/src/requests/store/queue.rs"
 pattern = "packages/superloop-lane/src/requests/store/snapshot.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/requests/store/publication_tests.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/requests/test_helper.rs"
 
 [[include.rows]]
@@ -3544,3 +3547,9 @@ pattern = "packages/superloop-lane/src/placement/reader.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/placement/tests.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/journal/owner_index_tests.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/journal/requests_index_tests.rs"
