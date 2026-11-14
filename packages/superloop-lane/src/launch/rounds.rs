@@ -668,7 +668,9 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
             .and_then(|rows| rows.last())
             .ok_or_else(|| LaneError::input("round-record", "last round absent"))?;
         let observed = failed_thread(plan, record, round)?;
-        if round.get("thread").is_some_and(|saved| saved != &observed) {
+        if round.get("thread").is_some_and(|saved| saved != &observed)
+            || (observed["id"].is_string() && record["thread_id"] != observed["id"])
+        {
             return Err(LaneError::input(
                 "round-thread",
                 "failed thread evidence differs from settlement",
@@ -2568,30 +2570,40 @@ pub(crate) mod rollback {
         /// ´test:unit:failed-round-choice-survives-live-rollback´
         #[test]
         fn failed_round_choice_survives_live_rollback() {
-            let (root, path, _, _) = fixture();
-            let mut before = super::super::choice_tests::record();
-            before["rounds"][0]["driver_dir"] = json!(root.path().join("R/prior-dispatch"));
-            let bytes = format!(
-                "{}\n\n",
-                serde_json::to_string_pretty(&before).expect("before")
-            )
-            .into_bytes();
-            let mut next = before;
-            next["phase"] = json!("preparing");
-            next["active_round"] = json!("review");
-            let nonce = prepare(&mut next, &bytes, "request\n").expect("prepare");
-            publish_reservation(&path, &next).expect("preparing");
-            let absent = build::LiveChild::default();
-            let error = finish(primary(), &path, &nonce, (&absent, &absent), || Ok(()));
-            assert!(error.detail.ends_with("rollback: restored"), "{error}");
-            assert_eq!(fs::read(&path).expect("restored"), bytes);
-            let saved = read_reservation(&path).expect("read").expect("saved");
-            assert_eq!(
-                super::super::require_thread_choice(&saved, None)
-                    .expect_err("choice remains owed")
-                    .kind,
-                "round-choice"
-            );
+            for choice in [
+                super::super::ThreadChoice::Fresh,
+                super::super::ThreadChoice::Resume,
+            ] {
+                let (root, path, _, _) = fixture();
+                let mut before = super::super::choice_tests::record();
+                before["rounds"][0]["driver_dir"] = json!(root.path().join("R/prior-dispatch"));
+                let bytes = format!(
+                    "{}\n\n",
+                    serde_json::to_string_pretty(&before).expect("before")
+                )
+                .into_bytes();
+                let mut next = super::super::preflight_record(
+                    &root.path().join("R"),
+                    &before,
+                    "review",
+                    3600,
+                    Some(choice),
+                )
+                .expect("chosen prospective record");
+                let nonce = prepare(&mut next, &bytes, "request\n").expect("prepare");
+                publish_reservation(&path, &next).expect("preparing");
+                let absent = build::LiveChild::default();
+                let error = finish(primary(), &path, &nonce, (&absent, &absent), || Ok(()));
+                assert!(error.detail.ends_with("rollback: restored"), "{error}");
+                assert_eq!(fs::read(&path).expect("restored"), bytes);
+                let saved = read_reservation(&path).expect("read").expect("saved");
+                assert_eq!(
+                    super::super::require_thread_choice(&saved, None)
+                        .expect_err("choice remains owed")
+                        .kind,
+                    "round-choice"
+                );
+            }
         }
 
         fn primary() -> LaneError {

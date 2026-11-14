@@ -988,6 +988,16 @@ mod tests {
         );
         assert!(rounds::failed_continuation(&saved));
         rounds::check_identity(&plan, &saved).expect("retained provenance");
+        if provenance != "absent" {
+            let mut changed = saved;
+            changed["thread_id"] = json!("different-thread");
+            assert_eq!(
+                rounds::check_identity(&plan, &changed)
+                    .expect_err("failed thread header must match provenance")
+                    .kind,
+                "round-thread"
+            );
+        }
     }
 
     /// # Panics
