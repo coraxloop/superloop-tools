@@ -382,12 +382,12 @@ mod tests {
     fn agent_usage_hour_alarm_marks_crossing_and_return() {
         let monitor = Monitor::new(1);
         for _ in 0..8 {
-            assert!(kinds(&monitor, 10, 1).is_empty());
+            assert_eq!(kinds(&monitor, 10, 1), [] as [AlarmKind; 0]);
         }
         assert_eq!(kinds(&monitor, 10, 1), [AlarmKind::HourExcess]);
-        assert!(kinds(&monitor, 11, 1).is_empty());
+        assert_eq!(kinds(&monitor, 11, 1), [] as [AlarmKind; 0]);
         assert_eq!(kinds(&monitor, 3611, 0), [AlarmKind::HourCleared]);
-        assert!(kinds(&monitor, 3612, 0).is_empty());
+        assert_eq!(kinds(&monitor, 3612, 0), [] as [AlarmKind; 0]);
         let (value, alarms) = monitor.observe_at(3612, &measured(0, 0, 9));
         let last: Vec<_> = alarms.iter().map(|alarm| alarm.kind).collect();
         assert_eq!(last, [AlarmKind::CallExcess, AlarmKind::HourExcess]);
