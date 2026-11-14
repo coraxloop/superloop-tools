@@ -144,6 +144,10 @@ impl RequestWait {
         })
     }
 
+    pub(crate) const fn maximum_credit(&self) -> Duration {
+        Duration::from_millis(self.cap_ms)
+    }
+
     pub(crate) fn elapsed(&self) -> Duration {
         Duration::from_micros(self.micros.load(Ordering::Relaxed).min(self.cap_ms * 1000))
     }
@@ -411,7 +415,31 @@ fn post_reply_failure(store: &Store, run: &str, id: &str, phase: &str, kind: &st
     }
 }
 
-fn post_reply_event(id: &str, phase: &str, kind: &str) {
+fn recover_after_success(
+    store: &Store,
+    run: &str,
+    reply: &Value,
+    admission: &mut Option<RequestGuard>,
+) {
+    // Every caller has delivered its final reply. Recovery must not retain admission.
+    drop(admission.take());
+    if reply["status"] == 0 {
+        // The current request's lease is still held, so only older abandoned work is recovered.
+        if let Err(error) = store.recover_unpublished(Some(run)) {
+            post_reply_event("", "recovery-after-request", error.kind);
+        }
+    }
+}
+
+fn recover_at_start(home: &Path, loop_name: &str) {
+    if let Err(error) =
+        Store::open(home, loop_name, true).and_then(|store| store.recover_unpublished(None))
+    {
+        post_reply_event("", "recovery-at-start", error.kind);
+    }
+}
+
+pub(crate) fn post_reply_event(id: &str, phase: &str, kind: &str) {
     let event = json!({"request_id":id,"phase":phase,"kind":kind});
     let _logged = writeln!(io::stderr().lock(), "door-post-reply-failure {event}");
 }
@@ -1664,6 +1692,7 @@ fn serve_request_with_agent(
         frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
     }
+    let _publication_activity = store.publication_activity(&id).map_err(io::Error::other)?;
     #[cfg(test)]
     REQUEST_FILED.with(|slot| {
         if let Some(sender) = slot.borrow_mut().take() {
@@ -1789,6 +1818,12 @@ fn serve_request_with_agent(
                                 }
                             }
                         }
+                        recover_after_success(
+                            &store,
+                            &registration.run,
+                            &reply,
+                            &mut request_guard,
+                        );
                         Ok((reply, Vec::new()))
                     }
                     Err(error) => {
@@ -1843,7 +1878,10 @@ fn serve_request_with_agent(
             let _recorded =
                 store.record_incomplete(&registration.run, &id, "allow transport incomplete");
         }
-        return result.map(|reply| (reply, Vec::new()));
+        return result.map(|reply| {
+            recover_after_success(&store, &registration.run, &reply, &mut request_guard);
+            (reply, Vec::new())
+        });
     }
     let answer = wait_answer(&store, &id, stream, deadline);
     match answer {
@@ -1873,7 +1911,10 @@ fn serve_request_with_agent(
                 let _recorded =
                     store.record_incomplete(&registration.run, &id, "audit transport incomplete");
             }
-            result.map(|reply| (reply, Vec::new()))
+            result.map(|reply| {
+                recover_after_success(&store, &registration.run, &reply, &mut request_guard);
+                (reply, Vec::new())
+            })
         }
         Answer::ReadFailure(wall) => {
             let mut reply = queue_reply(
@@ -2402,6 +2443,7 @@ fn run_service_with_snapshot(
         .as_u64()
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| LaneError::input("door-registration", "row uid is absent"))?;
+    recover_at_start(&owner_home, loop_name);
     let mut peer_map = None;
     let (listener, _bound_socket) = bind_socket_slot(&slot, |listener, before| {
         peer_map = Some(socket_group_child(

@@ -16,7 +16,10 @@ fn door_concurrent_request_refuses_before_record() {
             .output()
             .expect("built concurrency fixture");
         assert!(output.status.success(), "{output:?}");
-        assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+            "{output:?}"
+        );
         return;
     }
     let fixture = Fixture::new();
@@ -189,7 +192,10 @@ fn concurrent_process_request(fixture: &Fixture, uid: u32, root: bool) -> Value 
     let reply = frame_read(&mut stream).expect("peer reply");
     let output = child.wait_with_output().expect("peer completion");
     assert!(output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+            "{output:?}"
+        );
     if reply["reason"] == "door-request-concurrent" {
         assert!(
             String::from_utf8_lossy(&output.stderr)
@@ -282,7 +288,10 @@ fn door_two_boxes_share_the_bounded_store_wait() {
         .output()
         .expect("isolated two-box fixture");
         assert!(output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+            "{output:?}"
+        );
         return;
     }
     let fixture = Fixture::new();
@@ -1026,6 +1035,36 @@ impl super::agent::AgentRunner for PostReplyAgent {
     }
 }
 
+/// ´test:unit:door-recovery-waits-without-retaining-admission´
+#[test]
+fn door_recovery_waits_without_retaining_admission() {
+    let fixture = Fixture::new();
+    let registration = concurrent_registration(3000);
+    let store = fixture.store();
+    let recovery = fixture.store();
+    let admission = super::RequestGuard::acquire(&fixture.home, &registration)
+        .expect("admission").expect("free admission");
+    thread::scope(|scope| {
+        let held = store.fixture_exclusive_lock().expect("hold request lock");
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+        let child = scope.spawn(move || {
+            crate::requests::store::AFTER_WRITER_LOCK_CONTENTION.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    observed_tx.send(()).expect("recovery is waiting");
+                }));
+            });
+            super::recover_after_success(&recovery, "R", &json!({"status":0}),
+                &mut Some(admission));
+        });
+        observed_rx.recv_timeout(FIXTURE_HANG).expect("recovery reaches held lock");
+        let next = super::RequestGuard::acquire(&fixture.home, &registration)
+            .expect("next admission").expect("recovery must not retain admission");
+        drop(next);
+        drop(held);
+        child.join().expect("recovery completes");
+    });
+}
+
 fn post_reply_failure_case(phase: &'static str) {
     let fixture = Fixture::new();
     fixture.set_floor("allow");
@@ -1058,6 +1097,10 @@ fn post_reply_failure_case(phase: &'static str) {
     let reply = fixture_final_frame(&mut client);
     assert_eq!(reply["reason"], "door-complete", "{phase}");
     let id = store.list_run("R").expect("durable effect")[0].id().to_owned();
+    let active = fixture.command(&["status", "alpha"], b"").expect("active status");
+    assert_eq!(active["unpublished_effects"][0]["publication_status"], "running");
+    super::recover_at_start(&fixture.home, "alpha");
+    assert!(store.request(&id).expect("live advice remains unpublished").publication_pending());
     release_tx.send(()).expect("release agent after final");
     let result = handler.join().expect("handler");
     assert_eq!(result.expect("no late error reaches second-refusal writer").0, reply);
@@ -1069,19 +1112,39 @@ fn post_reply_failure_case(phase: &'static str) {
     fs::remove_file(fixture.home.join(".config/loops/alpha/door-requests-attempt.json"))
         .expect("visibility does not depend on the latest marker");
     assert_unpublished_visible(&fixture, &store, &id);
+    let effect = store.request(&id).expect("original effect").value()["effect"].clone();
+    if phase == "agent-join" {
+        super::recover_at_start(&fixture.home, "alpha");
+    } else {
+        let (mut next_client, mut next_server) = UnixStream::pair().expect("next request");
+        next_client.shutdown(Shutdown::Write).expect("next EOF");
+        super::serve_request_with_agent(
+            &mut next_server, &concurrent_registration(3000), 3000,
+            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+            Some(&route_for(&fixture.home)), Some(&counting_runner(&fixture).0),
+            Some(&fixture.home), Some(&rubric(Some("allow"))), Some(&store), None,
+            None, Instant::now(),
+        ).expect("later successful request recovers prior effect");
+        assert_eq!(fixture_final_frame(&mut next_client)["status"], 0);
+    }
+    let recovered = store.request(&id).expect("recovered record");
+    assert_eq!(recovered.value()["state"], "waiting", "{phase}");
+    assert_eq!(recovered.value()["effect"], effect, "effect is not rerun");
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "prior effect was not executed again");
+    assert!(recovered.value()["label"].is_null(), "no invented owner decision");
+    assert_eq!(fixture.command(&["status", "alpha"], b"").expect("recovered status")
+        ["unpublished_effects"].as_array().expect("listing").as_slice(), [] as [Value; 0]);
 }
 
 fn assert_unpublished_visible(fixture: &Fixture, store: &Store, id: &str) {
     let status = fixture.command(&["status", "alpha"], b"").expect("owner status");
     assert_eq!(status["unpublished_effects"].as_array().expect("listing").len(), 1);
     assert_eq!(status["unpublished_effects"][0]["id"], id);
+    assert_eq!(status["unpublished_effects"][0]["publication_status"], "awaiting-recovery");
     let runs = File::open(fixture.home.join("runs")).expect("runs");
     let error = store.retirement_guard("R", &runs, true).expect_err("unpublished blocks retire");
     assert_eq!(error.kind, "retire-requests-pending");
     assert!(error.detail.contains(&format!("unpublished effect ids: {id}")));
-    store.publish_waiting(id).expect("fixture completes publication");
-    let status = fixture.command(&["status", "alpha"], b"").expect("published status");
-    assert_eq!(status["unpublished_effects"], json!([]));
 }
 
 /// # Panics
@@ -1128,8 +1191,7 @@ fn post_reply_journal_child(phases: &[&str]) -> bool {
     let output = crate::build::run_child(&spec, None).expect("bounded fixture");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"), "{output:?}");
+    assert!(output.status.success(), "{stdout}\n{stderr}");
     assert!(stdout.contains("test result: ok. 1 passed;"), "{stdout}");
     let events: Vec<Value> = stderr.lines()
         .filter_map(|line| line.strip_prefix("door-post-reply-failure "))

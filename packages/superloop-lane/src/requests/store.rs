@@ -559,9 +559,19 @@ impl Store {
 
     /// Publish after the reply under a fresh, uncredited lock-admission bound.
     pub(crate) fn publish_after_reply(&self, id: &str) -> Result<RequestRecord, LaneError> {
-        self.publication_view(Instant::now() + Duration::from_secs(15))?
+        self.publication_view(self.publication_deadline(Instant::now()))?
             .with_request_id(id)
             .publish_waiting(id)
+    }
+
+    fn publication_deadline(&self, now: Instant) -> Instant {
+        let floor = now + Duration::from_secs(300);
+        let credit = self
+            .wait_credit
+            .as_ref()
+            .map_or(Duration::ZERO, |wait| wait.maximum_credit());
+        self.writer_deadline
+            .map_or(floor, |deadline| floor.max(deadline + credit))
     }
 
     fn publication_view(&self, deadline: Instant) -> Result<Self, LaneError> {
@@ -2277,8 +2287,25 @@ impl Store {
                 "fixture waiting write failure",
             ));
         }
-        self.change_one("publish_waiting", id, false, RequestRecord::publish_waiting)
-            .map(|(request, _)| request)
+        let _lock = self.write_lock("publish_waiting")?;
+        hold::request(id);
+        self.publish_waiting_locked(id)
+    }
+
+    fn publish_waiting_locked(&self, id: &str) -> Result<RequestRecord, LaneError> {
+        let (run, _) = publication_identity(id)?;
+        let (old, revision, mut records) = self.read_run(run)?;
+        let record = records
+            .iter_mut()
+            .find(|record| record.id() == id)
+            .ok_or_else(|| problem("requests-request-refusal", "request is absent"))?;
+        if !record.value()["state"].is_null() && record.value()["effect"]["state"] != "pending" {
+            return Ok(record.clone());
+        }
+        record.publish_waiting()?;
+        let result = record.clone();
+        self.commit_run(run, old.as_deref(), revision + 1, &records)?;
+        Ok(result)
     }
 
     /// Publish a decided enforced outcome without a waiting request.
@@ -2763,6 +2790,145 @@ impl Store {
     }
 }
 
+// Missing activity files belong to older records and mean no current lease.
+// A lease is never unlinked: all contenders keep using the same inode.
+pub(crate) struct PublicationActivity {
+    _lock: Option<nix::fcntl::Flock<File>>,
+}
+
+fn publication_identity(id: &str) -> Result<(&str, &str), LaneError> {
+    let (run, nonce) = id
+        .split_once(':')
+        .ok_or_else(|| problem("requests-request-refusal", "request identifier is invalid"))?;
+    if id.len() > 160
+        || !crate::valid_run_name(run)
+        || nonce.is_empty()
+        || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(problem(
+            "requests-request-refusal",
+            "request identifier is invalid",
+        ));
+    }
+    Ok((run, nonce))
+}
+
+impl Store {
+    /// Hold before any effect or advisory work; process exit releases it.
+    pub(crate) fn publication_activity(&self, id: &str) -> Result<PublicationActivity, LaneError> {
+        self.try_publication_activity(id, true)?.ok_or_else(|| {
+            problem(
+                "requests-record-refusal",
+                "publication activity is already held",
+            )
+        })
+    }
+
+    fn try_publication_activity(
+        &self,
+        id: &str,
+        create: bool,
+    ) -> Result<Option<PublicationActivity>, LaneError> {
+        let (run, nonce) = publication_identity(id)?;
+        let custody = self.custody(run)?;
+        let name = format!("door-publication-{nonce}.lock");
+        let flags = OFlag::O_RDWR | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
+        let open = |creating| {
+            openat2(
+                &custody,
+                Path::new(&name),
+                OpenHow::new()
+                    .flags(if creating {
+                        flags | OFlag::O_CREAT | OFlag::O_EXCL
+                    } else {
+                        flags
+                    })
+                    .mode(FileMode::from_bits_truncate(if creating {
+                        0o600
+                    } else {
+                        0
+                    }))
+                    .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
+            )
+        };
+        let fd = match open(create) {
+            Ok(fd) => {
+                if create {
+                    fchmod(&fd, FileMode::from_bits_truncate(0o600))
+                        .map_err(|error| problem("requests-record-refusal", error.to_string()))?;
+                }
+                fd
+            }
+            Err(Errno::EEXIST) if create => open(false)
+                .map_err(|error| problem("requests-record-refusal", error.to_string()))?,
+            Err(Errno::ENOENT) if !create => return Ok(Some(PublicationActivity { _lock: None })),
+            Err(error) => return Err(problem("requests-record-refusal", error.to_string())),
+        };
+        let stat =
+            fstat(&fd).map_err(|error| problem("requests-record-refusal", error.to_string()))?;
+        if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
+            || stat.st_uid != self.owner
+            || stat.st_mode & 0o7777 != 0o600
+            || stat.st_nlink != 1
+            || stat.st_size != 0
+        {
+            return Err(problem(
+                "requests-record-refusal",
+                "publication activity custody differs",
+            ));
+        }
+        match nix::fcntl::Flock::lock(File::from(fd), nix::fcntl::FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => Ok(Some(PublicationActivity { _lock: Some(lock) })),
+            Err((_, Errno::EWOULDBLOCK)) => Ok(None),
+            Err((_, error)) => Err(problem("requests-record-refusal", error.to_string())),
+        }
+    }
+
+    pub(crate) fn unpublished_status(&self, record: &RequestRecord) -> Result<Value, LaneError> {
+        let mut value = record.value().clone();
+        value["publication_status"] = json!(if self
+            .try_publication_activity(record.id(), false)?
+            .is_some()
+        {
+            "awaiting-recovery"
+        } else {
+            "running"
+        });
+        Ok(value)
+    }
+
+    /// Recover only completed effects, without supplying missing advice or rerunning work.
+    pub(crate) fn recover_unpublished(&self, run: Option<&str>) -> Result<(), LaneError> {
+        let view = self.publication_view(self.publication_deadline(Instant::now()))?;
+        let _lock = view.write_lock("recover_unpublished")?;
+        let runs = if let Some(run) = run {
+            let (_, revision, records) = view.read_run(run)?;
+            vec![(run.to_owned(), revision, records)]
+        } else {
+            view.all_runs(None)?
+        };
+        for (_, _, records) in runs {
+            for record in records.iter().filter(|record| record.publication_pending()) {
+                // Nonblocking under the store lock: a live handler may need that lock.
+                let activity = view
+                    .try_publication_activity(record.id(), false)
+                    .inspect_err(|error| {
+                        crate::door::post_reply_event(record.id(), "recovery-activity", error.kind);
+                    })?;
+                let Some(_activity) = activity else {
+                    continue;
+                };
+                hold::request(record.id());
+                if let Err(error) = view.publish_waiting_locked(record.id()) {
+                    crate::door::post_reply_event(record.id(), "recovery-publication", error.kind);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 fn correction_pending(request: &RequestRecord, ledger: &ModeLedger) -> Result<bool, LaneError> {
     if !is_enforce_correction(request) {
         return Ok(false);
@@ -3038,6 +3204,243 @@ pub(crate) mod tests {
             view.write_lock("publication-released")
                 .expect("uncontended acquisition remains first"),
         );
+    }
+
+    fn unpublished_fixture(store: &Store, nonce: &str) {
+        let mut request = waiting("R", nonce, 3000, Mode::Allow).into_value();
+        request["state"] = serde_json::Value::Null;
+        request["effect"]["state"] = json!("completed");
+        request["effect"]["reason"] = json!("door-complete");
+        request["effect"]["exit_status"] = json!(0);
+        request["effect"]["ref_check"] = json!("not-applicable");
+        let request = RequestRecord::decode(request).expect("unpublished effect");
+        assert!(request.publication_pending());
+        store.file(request).expect("file effect");
+    }
+
+    /// ´test:unit:publication-recovery-skips-live-and-completes-abandoned-effects´
+    #[test]
+    fn publication_recovery_skips_live_and_completes_abandoned_effects() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        unpublished_fixture(&store, "1a");
+        let activity = store.publication_activity("R:1a").expect("live lease");
+        let before = fs::read(fixture.runs.join(".launch-R/door-requests.json")).expect("before");
+        let row = store.request("R:1a").expect("record");
+        assert_eq!(
+            store.unpublished_status(&row).expect("live status")["publication_status"],
+            "running"
+        );
+        store
+            .recover_unpublished(None)
+            .expect("startup skips live work");
+        assert_eq!(
+            fs::read(fixture.runs.join(".launch-R/door-requests.json")).expect("unchanged"),
+            before
+        );
+        drop(activity);
+        assert_eq!(
+            store.unpublished_status(&row).expect("idle status")["publication_status"],
+            "awaiting-recovery"
+        );
+        store
+            .recover_unpublished(Some("R"))
+            .expect("later completion");
+        let waiting = store.request("R:1a").expect("waiting");
+        assert_eq!(waiting.value()["state"], "waiting");
+        assert_eq!(waiting.value()["effect"], row.value()["effect"]);
+        let committed =
+            fs::read(fixture.runs.join(".launch-R/door-requests.json")).expect("committed");
+        store.recover_unpublished(None).expect("repeat startup");
+        store
+            .publish_waiting("R:1a")
+            .expect("uncertain earlier success is harmless");
+        assert_eq!(
+            fs::read(fixture.runs.join(".launch-R/door-requests.json")).expect("repeat bytes"),
+            committed
+        );
+        store
+            .triage(
+                "R",
+                &[json!({"id":"R:1a","action":"adjudicate",
+            "treatment":"allow","reason":"owner accepts recorded effect"})],
+                "owner",
+                "2",
+            )
+            .expect("owner can now finish adjudication");
+        let labelled =
+            fs::read(fixture.runs.join(".launch-R/door-requests.json")).expect("labelled");
+        store
+            .publish_waiting("R:1a")
+            .expect("repeat retains owner label");
+        assert_eq!(
+            fs::read(fixture.runs.join(".launch-R/door-requests.json")).expect("label unchanged"),
+            labelled
+        );
+        let runs = File::open(&fixture.runs).expect("runs");
+        let _retirement = store
+            .retirement_guard("R", &runs, true)
+            .expect("retirement unblocked");
+    }
+
+    /// ´test:unit:publication-recovery-preserves-pending-and-failed-commits´
+    #[test]
+    fn publication_recovery_preserves_pending_and_failed_commits() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        unpublished_fixture(&store, "1a");
+        let mut pending = waiting("R", "2b", 3000, Mode::Allow).into_value();
+        pending["state"] = serde_json::Value::Null;
+        pending["effect"]["state"] = json!("pending");
+        store
+            .file(RequestRecord::decode(pending).expect("pending intent"))
+            .expect("file intent");
+        let pending = store.request("R:2b").expect("intent");
+        let failure = with_shape_write_failure(|| store.recover_unpublished(None));
+        assert!(failure.is_err(), "failed publication remains recoverable");
+        assert!(
+            store
+                .request("R:1a")
+                .expect("retained")
+                .publication_pending()
+        );
+        store
+            .recover_unpublished(Some("R"))
+            .expect("retry after failure");
+        assert_eq!(
+            store.request("R:1a").expect("completed").value()["state"],
+            "waiting"
+        );
+        assert_eq!(
+            store.request("R:2b").expect("still pending").value(),
+            pending.value()
+        );
+    }
+
+    /// ´test:unit:publication-recovery-commits-through-the-provisioned-owner´
+    #[test]
+    fn publication_recovery_commits_through_the_provisioned_owner() {
+        if !super::publication_tests::in_namespace() {
+            return;
+        }
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = super::publication_tests::provision(&fixture);
+        store
+            .file(waiting("S", "aa", 3000, Mode::Allow))
+            .expect("seed");
+        fixture
+            .command(
+                &["triage", "alpha", "S"],
+                br#"[{"id":"S:aa","action":"mark","reason":"bind real owner"}]"#,
+            )
+            .expect("bind helper");
+        assert!(store.channel_bound().expect("bound owner"));
+        unpublished_fixture(&store, "1a");
+        store
+            .recover_unpublished(Some("R"))
+            .expect("owner completion");
+        assert_eq!(
+            store
+                .request("R:1a")
+                .expect("owner-projected record")
+                .value()["state"],
+            "waiting"
+        );
+        let journal = fixture
+            .permission_registry
+            .parent()
+            .expect("fixture root")
+            .join("permission-state/escalations.jsonl");
+        let before = fs::read(&journal).expect("owner journal");
+        store
+            .recover_unpublished(None)
+            .expect("idempotent owner completion");
+        store
+            .publish_waiting("R:1a")
+            .expect("idempotent publication");
+        assert_eq!(fs::read(&journal).expect("same journal"), before);
+    }
+
+    /// ´test:unit:publication-activity-unwind-releases-and-custody-refuses´
+    #[test]
+    fn publication_activity_unwind_releases_and_custody_refuses() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        unpublished_fixture(&store, "1a");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _lease = store.publication_activity("R:1a").expect("activity");
+            assert!(
+                store
+                    .try_publication_activity("R:1a", false)
+                    .expect("contender")
+                    .is_none()
+            );
+            panic!("handler unwinds");
+        }));
+        assert!(result.is_err());
+        let row = store.request("R:1a").expect("record");
+        assert_eq!(
+            store.unpublished_status(&row).expect("released")["publication_status"],
+            "awaiting-recovery"
+        );
+        let path = fixture.runs.join(".launch-R/door-publication-1a.lock");
+        assert_eq!(fs::read(&path).expect("empty lease"), [] as [u8; 0]);
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("private lease")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("widen lease");
+        assert!(
+            store.recover_unpublished(None).is_err(),
+            "unsafe lease refuses recovery"
+        );
+        assert!(
+            store
+                .request("R:1a")
+                .expect("retained")
+                .publication_pending()
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("restore lease");
+        store
+            .recover_unpublished(None)
+            .expect("retry corrected custody");
+        assert_eq!(
+            store.request("R:1a").expect("completed").value()["state"],
+            "waiting"
+        );
+    }
+
+    /// ´test:unit:publication-admission-retains-request-budget-and-generous-floor´
+    #[test]
+    fn publication_admission_retains_request_budget_and_generous_floor() {
+        use std::time::{Duration, Instant};
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let now = Instant::now();
+        assert_eq!(
+            store.publication_deadline(now),
+            now + Duration::from_secs(300)
+        );
+        let deadline = now + Duration::from_secs(900);
+        let store = store.for_request(deadline).expect("request view");
+        let (server, _peer) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let credit = std::sync::Arc::new(crate::door::RequestWait::new(&server).expect("credit"));
+        let maximum = credit.maximum_credit();
+        let store = store.with_wait_credit(credit);
+        assert_eq!(store.publication_deadline(now), deadline + maximum);
+        let view = store
+            .publication_view(store.publication_deadline(now))
+            .expect("view");
+        assert!(view.wait_credit.is_none());
+        assert!(view.strict_writer_deadline);
     }
 
     /// # Panics
