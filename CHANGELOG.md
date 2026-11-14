@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The slow 206 MiB route transfer check now uses the gate build profile and reports transfer time as a measurement, without treating node load as a failed upload. Its integrity and 512 MiB output-bound checks remain; the door's 120-second production command deadline is unchanged.
+
 - A resumed launch whose preparing publication fails now reports `unchanged: preparing reservation was not published` when a locked read-back proves the exact settled bytes remain. A changed or unreadable reservation still takes rollback and may report `retained:`. Compatibility: no record shape changes; a running launcher keeps its old wording (``test:unit:round-preparing-publication-refuses-without-retaining-unchanged-run``).
 
 - Mail event scheduling resolves only selected senders, and transport resolves its sender and recipient through the existing custody verifier; global staging, retention and identity admission remain explicit accounting costs. Repeated fallback scans no longer postpone hourly refusal reconsideration (``proto:loophome:mail-change-wakeup``).

@@ -556,7 +556,7 @@ endforeach
 
 syntax_scripts = harnesses + infra_shell_scripts
 test('slow-route-transfer', cargo,
-  args: ['test', '--locked', '-p', 'superloop-lane', '--lib', 'door::transport::tests::route_tests::door_upload_large_mirror_through_route', '--', '--ignored', '--exact'],
+  args: ['test', '--profile', 'gate', '--locked', '-p', 'superloop-lane', '--lib', 'door::transport::tests::route_tests::door_upload_large_mirror_through_route', '--', '--ignored', '--exact'],
   suite: 'slow', workdir: meson.project_source_root(), timeout: 300)
 
 foreach script : syntax_scripts
