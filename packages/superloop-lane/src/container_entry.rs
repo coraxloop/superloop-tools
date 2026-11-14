@@ -851,6 +851,13 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
             "rootless namespace owner is required",
         ));
     }
+    let (args, choice) = match args.split_last() {
+        Some((flag, body)) if matches!(flag.as_str(), "--fresh-thread" | "--resume-thread") => (
+            body,
+            Some(crate::launch::rounds::ThreadChoice::parse(flag)?),
+        ),
+        _ => (args, None),
+    };
     let (args, preflight) = match args {
         [body @ .., flag, step, budget_flag, seconds]
             if flag == "--preflight-round" && budget_flag == "--budget" =>
@@ -863,6 +870,9 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
         }
         _ => (args, None),
     };
+    if choice.is_some() && preflight.is_none() {
+        return Err(refusal("thread choice requires preflight"));
+    }
     let [
         command,
         driver_flag,
@@ -925,7 +935,8 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
     EXECUTABLE.with(|active| *active.borrow_mut() = Some(support));
     let _executable = ExecutableGuard;
     if let Some((step, budget)) = preflight {
-        let record = crate::container_helper::prospective_round(Path::new(run), step, budget)?;
+        let record =
+            crate::container_helper::prospective_round(Path::new(run), step, budget, choice)?;
         bind_reserved_program(
             Path::new(home),
             &manifest.loop_name,

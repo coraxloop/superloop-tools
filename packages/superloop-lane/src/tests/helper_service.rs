@@ -531,16 +531,22 @@ pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
 /// ´test:crate:built-helper-resume-retains-mail-custody´
 #[test]
 fn built_helper_resume_retains_mail_custody() {
-    built_round_fixture(false);
+    built_round_fixture(false, false);
 }
 
 /// ´test:crate:built-round-rollback-cleanup-retains-custody´
 #[test]
 fn built_round_rollback_cleanup_retains_custody() {
-    built_round_fixture(true);
+    built_round_fixture(true, false);
 }
 
-fn built_round_fixture(rollback: bool) {
+/// ´test:crate:built-failed-round-choices-preflight-under-custody´
+#[test]
+fn built_failed_round_choices_preflight_under_custody() {
+    built_round_fixture(false, true);
+}
+
+fn built_round_fixture(rollback: bool, choices: bool) {
     let workspace = super::published_workspace();
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args([
@@ -549,6 +555,7 @@ fn built_round_fixture(rollback: bool) {
             "--nocapture",
         ])
         .env("SUPERLOOP_ROUND_PROOF", "1")
+        .env("SUPERLOOP_CHOICE_PROOF", if choices { "1" } else { "0" })
         .env("SUPERLOOP_ROLLBACK_PROOF", if rollback { "1" } else { "0" })
         .env("SUPERLOOP_ROUND_WORKSPACE", workspace.to_string())
         .env(
@@ -570,6 +577,12 @@ fn built_round_fixture(rollback: bool) {
         String::from_utf8_lossy(&output.stderr)
     );
     let output = String::from_utf8_lossy(&output.stdout);
+    if choices {
+        assert!(
+            output.contains("FAILED-ROUND-CHOICES-PREFLIGHT"),
+            "{output}"
+        );
+    }
     if rollback {
         assert!(output.contains("ROLLBACK-PRIVATE-CLEANUP"), "{output}");
     }
@@ -586,6 +599,16 @@ fn built_round_fixture(rollback: bool) {
 }
 
 fn built_helper(home: &Path, runs: &Path, podman: &Path, preflight: bool) -> FixtureChild {
+    built_helper_choice(home, runs, podman, preflight, None)
+}
+
+fn built_helper_choice(
+    home: &Path,
+    runs: &Path,
+    podman: &Path,
+    preflight: bool,
+    choice: Option<&str>,
+) -> FixtureChild {
     let binary = std::env::current_exe()
         .expect("test image")
         .ancestors()
@@ -625,6 +648,9 @@ fn built_helper(home: &Path, runs: &Path, podman: &Path, preflight: bool) -> Fix
             "--budget".into(),
             "3600".into(),
         ]);
+    }
+    if let Some(choice) = choice {
+        args.push(choice.into());
     }
     let (sender, input) = UnixStream::pair().expect("rights");
     let child = Command::new("/usr/bin/podman")
@@ -863,6 +889,9 @@ p.write_text(v['text']);p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
         runs,
         "RESUMED-HELPER-READY",
     );
+    if std::env::var("SUPERLOOP_CHOICE_PROOF").as_deref() == Ok("1") {
+        check_failed_choice_previews(home, runs, podman, &settled);
+    }
     check_round_previews(home, runs, podman, &settled, uid);
     check_publication_previews(home, runs, podman, &settled, uid);
     check_built_inspection(home, runs, &settled, uid);
@@ -921,7 +950,7 @@ fn check_previous_sources(home: &Path, runs: &Path, podman: &Path, settled: &Val
             "{case}: read only"
         );
         let mut next =
-            crate::launch::rounds::preflight_record(&runs.join("R"), &prior, "review", 3600)
+            crate::launch::rounds::preflight_record(&runs.join("R"), &prior, "review", 3600, None)
                 .expect("prospective record");
         assert_eq!(
             next["plan"]["compute_placement"],
@@ -1431,4 +1460,43 @@ fn rollback_inventory(home: &Path, runs: &Path) -> Value {
         .any(|name| row[0] == *name)
     });
     inventory
+}
+
+fn check_failed_choice_previews(home: &Path, runs: &Path, podman: &Path, settled: &Value) {
+    let reservation = runs.join(".reservation-R.json");
+    let mut failed = settled.clone();
+    failed["readback_end"] = json!("completed");
+    failed["driver_end"] = json!({"state":"completed","successful":false});
+    failed["helper_end"] = json!({"state":"completed"});
+    failed["rounds"][0]["phase"] = json!("failed");
+    failed["rounds"][0]["reply"] = Value::Null;
+    failed["rounds"][0]["settle_attempts"] = json!([{"phase":"complete"}]);
+    failed["rounds"][0]["thread"] = json!({"id":"fixture-thread","provenance":"observed"});
+    crate::launch::publish_reservation(&reservation, &failed).expect("failed settlement");
+    let before = publication_inventory(home, runs);
+    let refused = built_helper(home, runs, podman, true).finish();
+    assert!(!refused.status.success(), "choice required by real entry");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("round-choice"));
+    assert_eq!(
+        publication_inventory(home, runs),
+        before,
+        "missing choice writes nothing"
+    );
+    for flag in ["--fresh-thread", "--resume-thread"] {
+        let output = built_helper_choice(home, runs, podman, true, Some(flag)).finish();
+        assert!(
+            output.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).expect("production report");
+        assert_eq!(report["state"], "passed");
+        assert_eq!(
+            publication_inventory(home, runs),
+            before,
+            "chosen preview writes nothing"
+        );
+    }
+    crate::launch::publish_reservation(&reservation, settled).expect("restore settled fixture");
+    writeln!(std::io::stdout().lock(), "FAILED-ROUND-CHOICES-PREFLIGHT").expect("marker");
 }

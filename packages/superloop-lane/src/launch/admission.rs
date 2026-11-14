@@ -173,6 +173,7 @@ mod tests {
             run: "R".into(),
             letter: fixture.path().join("letter"),
             round: None,
+            thread_choice: None,
             budget: 3600,
             dry_run: true,
             expect_digest: None,

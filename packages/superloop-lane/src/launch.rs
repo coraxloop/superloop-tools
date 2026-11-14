@@ -58,6 +58,7 @@ pub mod rounds;
 pub(crate) mod seed;
 pub mod settle;
 pub mod steering;
+mod thread_files;
 pub(crate) mod workspace;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,6 +144,7 @@ pub struct LaunchRequest {
     pub run: String,
     pub letter: PathBuf,
     pub round: Option<String>,
+    pub thread_choice: Option<rounds::ThreadChoice>,
     pub budget: u64,
     pub dry_run: bool,
     pub expect_digest: Option<String>,
@@ -258,11 +260,12 @@ impl LaunchRequest {
         let [loop_name, run, rest @ ..] = args else {
             return Err(LaneError::input(
                 "usage",
-                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] (per round, default 3600 seconds, not inherited from dispatch) [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--compute-workspace JSON] [--observe] [--proxy-bin FILE]",
+                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] (per round, default 3600 seconds, not inherited from dispatch) [--fresh-thread|--resume-thread] [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--compute-workspace JSON] [--observe] [--proxy-bin FILE]",
             ));
         };
         let mut letter = None;
         let mut round = None;
+        let mut thread_choice = None;
         let mut budget = None;
         let mut dry_run = false;
         let mut observe = false;
@@ -279,6 +282,15 @@ impl LaunchRequest {
             match rest[index].as_str() {
                 "--dry-run" if !dry_run => dry_run = true,
                 "--observe" if !observe => observe = true,
+                "--fresh-thread" | "--resume-thread" => {
+                    let choice = rounds::ThreadChoice::parse(&rest[index])?;
+                    if thread_choice.replace(choice).is_some() {
+                        return Err(LaneError::input(
+                            "round-choice",
+                            "choose exactly one of --fresh-thread and --resume-thread",
+                        ));
+                    }
+                }
                 "--letter"
                 | "--round"
                 | "--budget"
@@ -336,6 +348,12 @@ impl LaunchRequest {
                 "select exactly one of --letter and --round",
             ));
         }
+        if thread_choice.is_some() && round.is_none() {
+            return Err(LaneError::input(
+                "round-choice",
+                "thread choice requires --round",
+            ));
+        }
         if let Some(step) = round.as_deref() {
             letters::valid_step(step)?;
             if model.is_some()
@@ -369,6 +387,7 @@ impl LaunchRequest {
             run: run.clone(),
             letter: letter.map_or_else(PathBuf::new, PathBuf::from),
             round,
+            thread_choice,
             budget,
             dry_run,
             expect_digest,
@@ -6115,6 +6134,9 @@ pub(super) fn preflight_helper_round(
         "--budget".into(),
         request.budget.to_string(),
     ]);
+    if let Some(choice) = request.thread_choice {
+        words.push(choice.flag().into());
+    }
     let (sender, input) = UnixStream::pair()
         .map_err(|error| LaneError::operation("helper-preflight", error.to_string()))?;
     loop_home::anchor::transport::send(&sender, &bundle.descriptors).map_err(|error| {

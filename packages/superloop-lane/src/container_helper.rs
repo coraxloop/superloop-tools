@@ -158,7 +158,7 @@ pub(crate) fn session_event(backend: BoxBackend, line: &[u8]) -> Result<Option<S
     Ok(Some(session.to_owned()))
 }
 
-fn valid_thread(thread: &str) -> bool {
+pub(crate) fn valid_thread(thread: &str) -> bool {
     !thread.is_empty()
         && thread.len() <= 128
         && thread
@@ -897,6 +897,7 @@ pub(crate) fn prospective_round(
     run_dir: &Path,
     step: &str,
     budget: u64,
+    choice: Option<crate::launch::rounds::ThreadChoice>,
 ) -> Result<Value, LaneError> {
     crate::launch::letters::valid_step(step)?;
     if !(1..=10_800).contains(&budget) {
@@ -918,7 +919,7 @@ pub(crate) fn prospective_round(
             "preflight requires an unused settled round",
         ));
     }
-    crate::launch::rounds::preflight_record(run_dir, &record, step, budget)
+    crate::launch::rounds::preflight_record(run_dir, &record, step, budget, choice)
 }
 
 /// Check the prospective record after its runtime program has received custody.
@@ -5027,7 +5028,7 @@ mod tests {
 
     impl StartedAttemptFixture {
         fn new(run: &str) -> Self {
-            let root = TempDir::new_in("/tmp").expect("fixture");
+            let root = TempDir::new().expect("fixture");
             fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
                 .expect("protected fixture");
             seed_attempt_reservation(root.path());
@@ -5338,6 +5339,81 @@ exit 0
         capture.push(b"{\"type\":\"error\",\"message\":\"model at capacity\"}\n");
         assert!(capacity_event(capture.backend, &capture.tail));
         assert_eq!(capture.thread.as_deref(), Some("thread-1"));
+    }
+
+    /// A vendor rejection without a start event retains the requested identity, never fresh.
+    ///
+    /// # Panics
+    /// Panics if either backend drops the requested resume or retries a rejection as fresh.
+    /// ´test:unit:failed-round-vendor-rejection-keeps-requested-thread´
+    #[test]
+    fn failed_round_vendor_rejection_keeps_requested_thread() {
+        for backend in [BoxBackend::Codex, BoxBackend::Claude] {
+            let mut fixture = StartedAttemptFixture::new(
+                "printf '%s\\n' \"$@\" > \"$TEST_ARGV\"; cat >/dev/null; echo synthetic-unknown-session >&2; exit 2",
+            );
+            let arguments = fixture.root.path().join("attempt-argv");
+            fixture
+                .environment
+                .insert("TEST_ARGV".into(), arguments.display().to_string());
+            fixture.vector.extend(match backend {
+                BoxBackend::Codex => vec![
+                    "/home/worker/.local/bin/codex".into(),
+                    "exec".into(),
+                    "--json".into(),
+                    "-".into(),
+                ],
+                BoxBackend::Claude => vec!["/home/worker/.local/bin/claude".into(), "-p".into()],
+            });
+            let (mut server, mut client) = UnixStream::pair().expect("channel");
+            let request = b"\0recorded-thread\0synthetic new letter";
+            client
+                .write_all(&u32::try_from(request.len()).expect("length").to_le_bytes())
+                .expect("length");
+            client.write_all(request).expect("request");
+            let record = json!({"plan":{"backend":if backend == BoxBackend::Codex { "codex" } else { "claude" }},
+                "schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,
+                "active_round":"review","thread_id":"recorded-thread","rounds":[{"step":"review","budget_seconds":3600}]});
+            publish_reservation(&fixture.root.path().join(".reservation-R.json"), &record)
+                .expect("matching backend reservation");
+            let pid = std::process::id();
+            let outcome = run_attempt(
+                &mut server,
+                &fixture.vector,
+                &fixture.environment,
+                fixture.root.path(),
+                &fixture.root.path().join(".reservation-R.json"),
+                &record,
+                &fixture.driver,
+                1,
+                &AtomicBool::new(false),
+                LauncherIdentity {
+                    pid,
+                    start: process_start(pid).expect("start"),
+                },
+                None,
+            )
+            .expect("failed vendor outcome");
+            assert_eq!(outcome.code, 2);
+            assert!(
+                !retry_after(&outcome),
+                "unknown session never falls back to fresh"
+            );
+            assert_eq!(outcome.thread.as_deref(), Some("recorded-thread"));
+            let evidence = fixture.evidence();
+            assert_eq!(evidence["thread_id"], "recorded-thread");
+            assert_eq!(evidence["thread_id_source"], "requested");
+            assert_eq!(read_attempt_status(&mut client), 2);
+            let actual = fs::read_to_string(arguments).expect("argv");
+            assert!(
+                actual.contains(if backend == BoxBackend::Codex {
+                    "resume\nrecorded-thread\n"
+                } else {
+                    "--resume\nrecorded-thread\n"
+                }),
+                "{actual}"
+            );
+        }
     }
 
     /// ´test:unit:helper-starts-saved-first-command-and-resumed-review-command´

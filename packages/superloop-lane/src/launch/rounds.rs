@@ -1,4 +1,4 @@
-//! Resume a recorded thread on its reserved home and settle each reply of record.
+//! Choose continuation after failed rounds and settle each reply of record.
 
 use std::fs::OpenOptions;
 use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
@@ -33,48 +33,56 @@ fn held_round_directory(path: &Path, loop_uid: u32) -> Result<std::fs::File, Lan
     home::pin_loop_round(&root, path, Uid::effective().as_raw(), loop_uid).map(std::fs::File::from)
 }
 
-fn thread_evidence(dir: &Path, loop_uid: u32) -> Result<(std::fs::File, usize, usize), LaneError> {
+fn thread_evidence(
+    dir: &Path,
+    loop_uid: u32,
+) -> Result<Option<(std::fs::File, usize, usize)>, LaneError> {
     let path = dir.join("events.jsonl");
     let pinned = if home::private_is_active() {
         Some(held_round_directory(dir, loop_uid)?)
     } else {
         None
     };
-    let file = pinned
-        .as_ref()
-        .map_or_else(
-            || {
-                OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                    .open(&path)
-            },
-            |directory| {
-                nix::fcntl::openat2(
-                    directory,
-                    "events.jsonl",
-                    nix::fcntl::OpenHow::new()
-                        .flags(
-                            nix::fcntl::OFlag::O_RDONLY
-                                | nix::fcntl::OFlag::O_CLOEXEC
-                                | nix::fcntl::OFlag::O_NONBLOCK,
-                        )
-                        .resolve(
-                            nix::fcntl::ResolveFlag::RESOLVE_BENEATH
-                                | nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS,
-                        ),
-                )
-                .map(std::fs::File::from)
-                .map_err(std::io::Error::from)
-            },
-        )
-        .map_err(|error| {
-            LaneError::input("round-thread", format!("{}: {error}", path.display()))
-        })?;
+    let opened = pinned.as_ref().map_or_else(
+        || {
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&path)
+        },
+        |directory| {
+            nix::fcntl::openat2(
+                directory,
+                "events.jsonl",
+                nix::fcntl::OpenHow::new()
+                    .flags(
+                        nix::fcntl::OFlag::O_RDONLY
+                            | nix::fcntl::OFlag::O_CLOEXEC
+                            | nix::fcntl::OFlag::O_NONBLOCK,
+                    )
+                    .resolve(
+                        nix::fcntl::ResolveFlag::RESOLVE_BENEATH
+                            | nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS,
+                    ),
+            )
+            .map(std::fs::File::from)
+            .map_err(std::io::Error::from)
+        },
+    );
     let parent = pinned
         .as_ref()
         .map_or_else(|| std::fs::symlink_metadata(dir), std::fs::File::metadata)
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(LaneError::input(
+                "round-thread",
+                format!("{}: {error}", path.display()),
+            ));
+        }
+    };
     let meta = file
         .metadata()
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
@@ -96,7 +104,7 @@ fn thread_evidence(dir: &Path, loop_uid: u32) -> Result<(std::fs::File, usize, u
             .last()
             .ok_or_else(|| LaneError::input("round-thread", "step event boundary is absent"))?
     };
-    Ok((file, size, start))
+    Ok(Some((file, size, start)))
 }
 
 fn step_event_thread(
@@ -104,7 +112,25 @@ fn step_event_thread(
     dir: &Path,
     loop_uid: u32,
 ) -> Result<String, LaneError> {
-    let (mut file, size, start) = thread_evidence(dir, loop_uid)?;
+    observed_step_thread(backend, dir, loop_uid)?.ok_or_else(|| {
+        LaneError::input(
+            "round-thread",
+            match backend {
+                crate::settings::BoxBackend::Codex => "step has no thread.started event",
+                crate::settings::BoxBackend::Claude => "step has no system.init event",
+            },
+        )
+    })
+}
+
+fn observed_step_thread(
+    backend: crate::settings::BoxBackend,
+    dir: &Path,
+    loop_uid: u32,
+) -> Result<Option<String>, LaneError> {
+    let Some((mut file, size, start)) = thread_evidence(dir, loop_uid)? else {
+        return Ok(None);
+    };
     file.seek(SeekFrom::Start(start as u64))
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
     let mut reader = BufReader::new(file.take((size - start) as u64));
@@ -128,30 +154,61 @@ fn step_event_thread(
         }
         line.clear();
     }
-    observed.ok_or_else(|| {
-        LaneError::input(
-            "round-thread",
-            match backend {
-                crate::settings::BoxBackend::Codex => "step has no thread.started event",
-                crate::settings::BoxBackend::Claude => "step has no system.init event",
-            },
-        )
-    })
+    Ok(observed)
 }
 
-fn recovered_threadless_round(round: &Value) -> bool {
-    round["phase"] == "failed"
-        && round["ended_by"] == "by-report"
-        && round.get("reply").is_some_and(Value::is_null)
+/// Preserve observed identity first, then the actual requested resume, never a prior fresh thread.
+pub(super) fn failed_thread(
+    plan: &Plan,
+    record: &Value,
+    round: &Value,
+) -> Result<Value, LaneError> {
+    let directory = recorded_step_dir(plan, record, round)?;
+    let observed = observed_step_thread(
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+        &directory,
+        round_evidence_uid(plan)?,
+    )?;
+    if let Some(id) = observed {
+        return Ok(json!({"id":id,"provenance":"observed"}));
+    }
+    let requested = round.get("requested_thread").unwrap_or_else(|| {
+        if round["step"] != "dispatch" && round["fresh_thread"] != true {
+            &record["thread_id"]
+        } else {
+            &Value::Null
+        }
+    });
+    if !requested.is_null()
+        && !requested
+            .as_str()
+            .is_some_and(crate::container_helper::valid_thread)
+    {
+        return Err(LaneError::input(
+            "round-thread",
+            "requested thread is malformed",
+        ));
+    }
+    Ok(
+        json!({"id":requested,"provenance":if requested.is_string() { "requested" } else { "absent" }}),
+    )
+}
+
+/// A completed settlement without a reply owes a thread decision, regardless of end reason.
+pub(crate) fn failed_without_reply(round: &Value) -> bool {
+    round["phase"] == "failed" && round["reply"].is_null()
+}
+
+fn finalized_failed_round(round: &Value) -> bool {
+    failed_without_reply(round)
         && round["settle_attempts"]
             .as_array()
             .and_then(|rows| rows.last())
             .is_some_and(|attempt| attempt["phase"] == "complete")
 }
 
-pub(crate) fn threadless_continuation(record: &Value) -> bool {
+pub(crate) fn failed_continuation(record: &Value) -> bool {
     record["phase"] == "settled"
-        && record["thread_id"].is_null()
         && record["readback_end"] == "completed"
         && record["rounds"]
             .as_array()
@@ -159,31 +216,128 @@ pub(crate) fn threadless_continuation(record: &Value) -> bool {
             .is_some_and(|round| {
                 round["step"].is_string()
                     && round["step"] == record["active_round"]
-                    && recovered_threadless_round(round)
+                    && finalized_failed_round(round)
             })
         && (super::reaping::recovery_verdict(record).is_ok()
             || super::settle::completed_failed_round(record))
 }
 
+/// Explicit selection after a finalized round without a reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadChoice {
+    Fresh,
+    Resume,
+}
+
+impl ThreadChoice {
+    pub(crate) fn parse(flag: &str) -> Result<Self, LaneError> {
+        match flag {
+            "--fresh-thread" => Ok(Self::Fresh),
+            "--resume-thread" => Ok(Self::Resume),
+            _ => Err(LaneError::input("round-choice", "unknown thread choice")),
+        }
+    }
+    pub(crate) const fn flag(self) -> &'static str {
+        match self {
+            Self::Fresh => "--fresh-thread",
+            Self::Resume => "--resume-thread",
+        }
+    }
+}
+
+fn recorded_choice_thread(record: &Value) -> &Value {
+    record["rounds"]
+        .as_array()
+        .and_then(|rows| rows.last())
+        .and_then(|round| round.get("thread"))
+        .map_or(&record["thread_id"], |thread| &thread["id"])
+}
+
+fn require_thread_choice(record: &Value, choice: Option<ThreadChoice>) -> Result<bool, LaneError> {
+    if !failed_continuation(record) {
+        if choice.is_some() {
+            return Err(LaneError::input(
+                "round-choice",
+                "no failed-round choice is owed; omit --fresh-thread and --resume-thread",
+            ));
+        }
+        return Ok(false);
+    }
+    let identity = recorded_choice_thread(record);
+    if !identity.is_null()
+        && !identity
+            .as_str()
+            .is_some_and(crate::container_helper::valid_thread)
+    {
+        return Err(LaneError::input(
+            "round-thread",
+            "recorded thread is malformed",
+        ));
+    }
+    let thread = identity.as_str();
+    let step = record["active_round"].as_str().unwrap_or("absent");
+    match choice {
+        Some(ThreadChoice::Fresh) => Ok(true),
+        Some(ThreadChoice::Resume) if thread.is_some() => Ok(false),
+        Some(ThreadChoice::Resume) => Err(LaneError::input(
+            "round-choice",
+            format!(
+                "failed round {step}: --resume-thread unavailable: no recorded thread; choose --fresh-thread"
+            ),
+        )),
+        None => Err(LaneError::input(
+            "round-choice",
+            format!(
+                "failed round {step}: recorded thread {}; choose --fresh-thread or --resume-thread{}",
+                thread.unwrap_or("absent"),
+                if thread.is_none() {
+                    "; only --fresh-thread is available"
+                } else {
+                    ""
+                }
+            ),
+        )),
+    }
+}
+
+fn choice_preview(
+    record: &Value,
+    choice: Option<ThreadChoice>,
+    files: &Value,
+    step: &str,
+) -> Value {
+    if !failed_continuation(record) {
+        return Value::Null;
+    }
+    let round = record["rounds"].as_array().and_then(|rows| rows.last());
+    let letter = record["mail"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["step"] == step))
+        .and_then(|row| row.get("inbox_name"));
+    json!({"next_round":step,"fresh_letter":letter,"failed_round":record["active_round"],"recorded_thread":recorded_choice_thread(record),
+        "provenance":round.map(|round| &round["thread"]["provenance"]),
+        "selection":choice.map(ThreadChoice::flag),"thread_files":files,
+        "fresh_prompt":"the new round's bound letter; no old thread conversation (ordinary vendor startup instructions still apply)",
+        "choice_owed":true,"consumed":false})
+}
+
 pub(crate) fn fresh_thread_round(record: &Value) -> bool {
-    record["thread_id"].is_null()
-        && matches!(
-            record["phase"].as_str(),
-            Some("preparing" | "started" | "failed")
-        )
-        && record["rounds"]
-            .as_array()
-            .and_then(|rows| rows.split_last())
-            .is_some_and(|(round, prior)| {
-                prior.last().is_some_and(recovered_threadless_round)
-                    && round["fresh_thread"] == true
-                    && round["step"] == record["active_round"]
-                    && round["step"] != "dispatch"
-                    && matches!(
-                        round["phase"].as_str(),
-                        Some("running" | "awaiting-settlement" | "failed")
-                    )
-            })
+    matches!(
+        record["phase"].as_str(),
+        Some("preparing" | "started" | "failed")
+    ) && record["rounds"]
+        .as_array()
+        .and_then(|rows| rows.split_last())
+        .is_some_and(|(round, prior)| {
+            prior.last().is_some_and(finalized_failed_round)
+                && round["fresh_thread"] == true
+                && round["step"] == record["active_round"]
+                && round["step"] != "dispatch"
+                && matches!(
+                    round["phase"].as_str(),
+                    Some("running" | "awaiting-settlement" | "failed")
+                )
+        })
 }
 
 fn prior_round_dir(record: &Value) -> Result<&Path, LaneError> {
@@ -222,7 +376,7 @@ fn named_step_dir(plan: &Plan, record: &Value, step: &str) -> Result<PathBuf, La
     let path = PathBuf::from(directory);
     let fresh = index > 0
         && rounds[index]["fresh_thread"] == true
-        && recovered_threadless_round(&rounds[index - 1]);
+        && finalized_failed_round(&rounds[index - 1]);
     let expected = if index == 0 || fresh {
         let name = path
             .file_name()
@@ -361,7 +515,10 @@ pub(super) fn recovery_thread(
         &directory,
         round_evidence_uid(plan)?,
     )?;
-    if let Some(expected) = record["thread_id"].as_str() {
+    if let Some(expected) = record["thread_id"]
+        .as_str()
+        .filter(|_| !fresh_thread_round(record))
+    {
         if expected != actual {
             return Err(LaneError::input(
                 "round-thread",
@@ -502,7 +659,21 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
             "home, driver directory or worker UID differs from reservation",
         ));
     }
-    if threadless_continuation(record) || fresh_thread_round(record) {
+    if fresh_thread_round(record) {
+        return Ok(());
+    }
+    if failed_continuation(record) {
+        let round = record["rounds"]
+            .as_array()
+            .and_then(|rows| rows.last())
+            .ok_or_else(|| LaneError::input("round-record", "last round absent"))?;
+        let observed = failed_thread(plan, record, round)?;
+        if round.get("thread").is_some_and(|saved| saved != &observed) {
+            return Err(LaneError::input(
+                "round-thread",
+                "failed thread evidence differs from settlement",
+            ));
+        }
         return Ok(());
     }
     let saved = record["thread_id"]
@@ -514,14 +685,21 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
             rounds
                 .iter()
                 .rev()
-                .find(|round| round["phase"] == "settled")
+                .find(|round| round["phase"] == "settled" || finalized_failed_round(round))
         })
         .ok_or_else(|| LaneError::input("round-record", "settled round is absent"))?;
-    let actual = step_event_thread(
-        crate::settings::BoxBackend::from_plan(&plan.document)?,
-        &recorded_step_dir(plan, record, round)?,
-        round_evidence_uid(plan)?,
-    )?;
+    let actual = if finalized_failed_round(round) {
+        failed_thread(plan, record, round)?["id"]
+            .as_str()
+            .ok_or_else(|| LaneError::input("round-thread", "failed round has no thread"))?
+            .to_owned()
+    } else {
+        step_event_thread(
+            crate::settings::BoxBackend::from_plan(&plan.document)?,
+            &recorded_step_dir(plan, record, round)?,
+            round_evidence_uid(plan)?,
+        )?
+    };
     if actual != saved {
         return Err(LaneError::input(
             "round-thread",
@@ -690,8 +868,13 @@ fn inspect_loaded_round(
         super::publish_client_environment_named(&runtime_dir, loop_uid, &bytes, temporary)?;
         request.publish()?;
     }
+    let thread_files = if failed_continuation(record) {
+        super::thread_files::inspect(plan, recorded_choice_thread(record).as_str())?
+    } else {
+        Value::Null
+    };
     Ok(
-        json!({"schema":1,"command":"inspect-round","thread_id":record["thread_id"],"home":plan.home,"worker_uid":record["worker_uid"]}),
+        json!({"schema":1,"command":"inspect-round","thread_files":thread_files,"thread_id":record["thread_id"],"home":plan.home,"worker_uid":record["worker_uid"]}),
     )
 }
 
@@ -714,7 +897,7 @@ fn request_text(plan: &Plan, record: &Value, step: &str, budget: u64) -> Result<
         })?;
     Ok(json!({
         "schema":1,"step":step,"budget_seconds":budget,"mail":binding,
-        "thread_id":record["thread_id"],"home":plan.home,"worker_uid":record["worker_uid"]
+        "thread_id":if fresh_thread_round(record) { Value::Null } else { record["thread_id"].clone() },"home":plan.home,"worker_uid":record["worker_uid"]
     })
     .to_string())
 }
@@ -951,7 +1134,10 @@ pub(super) fn record_settlement_with_recovery(
             &step_dir?,
             round_evidence_uid(plan)?,
         )?;
-        if let Some(saved) = record["thread_id"].as_str() {
+        if let Some(saved) = record["thread_id"]
+            .as_str()
+            .filter(|_| round["fresh_thread"] != true)
+        {
             if saved != actual {
                 return Err(LaneError::input(
                     "round-thread",
@@ -1087,7 +1273,7 @@ pub(super) fn continuation_argv(
         .as_deref()
         .ok_or_else(|| LaneError::input("round-step", "round is absent"))?;
     let thread = record["thread_id"].as_str();
-    let fresh = threadless_continuation(record);
+    let fresh = require_thread_choice(record, request.thread_choice)?;
     let directory = if fresh {
         super::planned_step_dir(plan, step)?
     } else {
@@ -1104,7 +1290,9 @@ pub(super) fn continuation_argv(
         step,
         request.budget,
         fresh.then_some(directory.as_path()),
-        thread.map(|thread| (thread, directory.as_path(), selection)),
+        thread
+            .filter(|_| !fresh)
+            .map(|thread| (thread, directory.as_path(), selection)),
         record["mail"]
             .as_array()
             .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step)),
@@ -1135,9 +1323,19 @@ pub(super) fn continuation_round(
         .as_deref()
         .ok_or_else(|| LaneError::input("round-step", "round is absent"))?;
     let mut round = json!({"step":step,"budget_seconds":request.budget,"mail":letter,"phase":"running","driver_dir":directory,"ended_by":null,"in_round_letters":[]});
-    if threadless_continuation(record) {
+    if require_thread_choice(record, request.thread_choice)? {
         round["fresh_thread"] = json!(true);
     }
+    round["thread_choice"] = json!(if request.thread_choice == Some(ThreadChoice::Fresh) {
+        "fresh"
+    } else {
+        "resume"
+    });
+    round["requested_thread"] = if request.thread_choice == Some(ThreadChoice::Fresh) {
+        Value::Null
+    } else {
+        record["thread_id"].clone()
+    };
     Ok(round)
 }
 
@@ -1147,8 +1345,9 @@ pub(crate) fn preflight_record(
     record: &Value,
     step: &str,
     budget: u64,
+    choice: Option<ThreadChoice>,
 ) -> Result<Value, LaneError> {
-    let request = LaunchRequest::parse(&[
+    let mut request = LaunchRequest::parse(&[
         record["loop"]
             .as_str()
             .ok_or_else(|| LaneError::input("round-record", "loop is absent"))?
@@ -1162,11 +1361,12 @@ pub(crate) fn preflight_record(
         "--budget".into(),
         budget.to_string(),
     ])?;
+    request.thread_choice = choice;
     let binding = record["mail"]
         .as_array()
         .and_then(|rows| rows.iter().find(|row| row["step"] == step))
         .ok_or_else(|| LaneError::input("mail-delivery", "active mail binding absent"))?;
-    let directory = if threadless_continuation(record) {
+    let directory = if require_thread_choice(record, choice)? {
         super::planned_step_dir_at(run_dir, step)?
     } else {
         prior_round_dir(record)?.to_path_buf()
@@ -1204,11 +1404,11 @@ pub(crate) fn validate_preflight_record(
     Ok(())
 }
 
-/// Preview or run the next round on the same worker, starting a thread after recovery if needed.
+/// Preview or run the next round, honoring explicit failed-round thread choices.
 ///
 /// # Errors
 ///
-/// Refuses a missing letter, unsettled run, changed identity or failed driver.
+/// Refuses a missing choice or letter, unsettled run, changed identity or failed driver.
 #[allow(clippy::too_many_lines)]
 #[doc(hidden)]
 pub fn resume_with_host_root(
@@ -1330,6 +1530,12 @@ fn resume_with_program(
     plan.retain_attempt_wall(&before_reconciliation["plan"])?;
     super::compare_pinned_plan(&before_reconciliation["plan"], &plan.document)?;
     if recovering {
+        if request.thread_choice.is_some() {
+            return Err(LaneError::input(
+                "round-choice",
+                "interrupted recovery starts no next round; omit --fresh-thread and --resume-thread",
+            ));
+        }
         let runs = home::verify_host_launch_root(host_root, owner_home, &root, caller, root_uid)?;
         super::report::require_unoccupied(
             &runs,
@@ -1396,6 +1602,13 @@ fn resume_with_program(
             ),
         ));
     }
+    let choice_result = require_thread_choice(&record, request.thread_choice);
+    if let Err(error) = &choice_result
+        && (!request.dry_run || request.thread_choice.is_some())
+    {
+        return Err(LaneError::input(error.kind, error.detail.clone()));
+    }
+    let fresh = choice_result.as_ref().copied().unwrap_or(false);
     super::compare_pinned_plan(&record["plan"], &plan.document)?;
     // The entry probe precedes the private mail binding, so a mismatched pair
     // refuses before any child touches the run (´req:superlooplane:entry-version-before-reservation´).
@@ -1489,7 +1702,19 @@ fn resume_with_program(
             "private thread differs from reservation",
         ));
     }
-    let thread = inspected["thread_id"].as_str();
+    let thread_choice = choice_preview(
+        &record,
+        request.thread_choice,
+        &inspected["thread_files"],
+        step,
+    );
+    if let Err(error) = choice_result {
+        return Err(LaneError::input(
+            error.kind,
+            format!("{}; preview={thread_choice}", error.detail),
+        ));
+    }
+    let thread = inspected["thread_id"].as_str().filter(|_| !fresh);
     let (prior_dir, argv) = continuation_argv(&plan, &record, driver, request, &selection)?;
     let helper_preflight = super::preflight_helper_round(
         request,
@@ -1524,7 +1749,7 @@ fn resume_with_program(
             json!({"schema":1,"command":"launch","dry_run":true,"round":step,
                 "budget_seconds":request.budget,"letter":letter_name,
                 "letter_reconciliation_preview":letter_reconciliation,
-                "helper_preflight":helper_preflight,"proxy_service":proxy_service,
+                "helper_preflight":helper_preflight,"proxy_service":proxy_service,"thread_choice":thread_choice,
                 "thread_id":thread,"home":plan.home,"worker_uid":worker,
                 "invocation":{"program":entry_program,"argv":argv},"box_command":box_command,
                 "changed":false,"wall_seconds":began.elapsed().as_secs_f64()}),
@@ -2336,6 +2561,39 @@ pub(crate) mod rollback {
             publish_reservation(&path, &next).expect("preparing");
             (root, path, bytes, nonce)
         }
+        /// A live refusal restores the choice along with the exact settled bytes.
+        ///
+        /// # Panics
+        /// Panics if rollback consumes the failed-round choice.
+        /// ´test:unit:failed-round-choice-survives-live-rollback´
+        #[test]
+        fn failed_round_choice_survives_live_rollback() {
+            let (root, path, _, _) = fixture();
+            let mut before = super::super::choice_tests::record();
+            before["rounds"][0]["driver_dir"] = json!(root.path().join("R/prior-dispatch"));
+            let bytes = format!(
+                "{}\n\n",
+                serde_json::to_string_pretty(&before).expect("before")
+            )
+            .into_bytes();
+            let mut next = before;
+            next["phase"] = json!("preparing");
+            next["active_round"] = json!("review");
+            let nonce = prepare(&mut next, &bytes, "request\n").expect("prepare");
+            publish_reservation(&path, &next).expect("preparing");
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || Ok(()));
+            assert!(error.detail.ends_with("rollback: restored"), "{error}");
+            assert_eq!(fs::read(&path).expect("restored"), bytes);
+            let saved = read_reservation(&path).expect("read").expect("saved");
+            assert_eq!(
+                super::super::require_thread_choice(&saved, None)
+                    .expect_err("choice remains owed")
+                    .kind,
+                "round-choice"
+            );
+        }
+
         fn primary() -> LaneError {
             LaneError::input("injected-refusal", "original refusal")
         }
@@ -3356,7 +3614,16 @@ mod tests {
                 "settle_attempts":[{"phase":"complete"}]}]
         });
         let request = super::LaunchRequest::parse(
-            &["alpha", "R", "--round", "review", "--budget", "900"].map(str::to_owned),
+            &[
+                "alpha",
+                "R",
+                "--round",
+                "review",
+                "--budget",
+                "900",
+                "--fresh-thread",
+            ]
+            .map(str::to_owned),
         )
         .expect("round request");
         let selection = super::super::LaunchModel::select(
@@ -4083,5 +4350,224 @@ mod generation_tests {
         }
         assert_eq!(saved["phase"], "preparing");
         assert_eq!(saved["active_round"], "next");
+    }
+}
+
+#[cfg(test)]
+mod choice_tests {
+    use super::*;
+
+    pub(super) fn record() -> Value {
+        json!({"schema":1,"loop":"alpha","run":"R","worker_uid":3000,
+            "phase":"settled","active_round":"dispatch","readback_end":"completed",
+            "thread_id":"old-thread","driver_end":{"state":"completed","successful":false},
+            "helper_end":{"state":"completed"},"rounds":[{"step":"dispatch","phase":"failed",
+                "driver_dir":"/fixture/R/prior-dispatch","reply":null,"ended_by":"by-budget",
+                "thread":{"id":"old-thread","provenance":"observed"},
+                "settle_attempts":[{"phase":"complete"}]}],
+            "mail":[{"step":"review","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter","evidence_digest":"a".repeat(64)}]})
+    }
+
+    /// Every finalized failed outcome needs the loop's choice, with absence explicit.
+    ///
+    /// # Panics
+    /// Panics if choice admission silently chooses or ignores an argument.
+    /// ´test:unit:failed-round-choice-is-explicit´
+    #[test]
+    fn failed_round_choice_is_explicit() {
+        let mut saved = record();
+        for end in [json!("by-budget"), json!("by-report"), Value::Null] {
+            saved["rounds"][0]["ended_by"] = end;
+            let error = require_thread_choice(&saved, None).expect_err("no automatic choice");
+            for word in [
+                "dispatch",
+                "old-thread",
+                "--fresh-thread",
+                "--resume-thread",
+            ] {
+                assert!(error.detail.contains(word), "{error}");
+            }
+            assert!(require_thread_choice(&saved, Some(ThreadChoice::Fresh)).expect("fresh"));
+            assert!(!require_thread_choice(&saved, Some(ThreadChoice::Resume)).expect("resume"));
+        }
+        saved["rounds"][0]["thread"] = json!({"id":null,"provenance":"absent"});
+        assert!(
+            require_thread_choice(&saved, None)
+                .expect_err("explicit absence")
+                .detail
+                .contains("only --fresh-thread")
+        );
+        assert!(
+            require_thread_choice(&saved, Some(ThreadChoice::Resume))
+                .expect_err("no recorded thread")
+                .detail
+                .contains("no recorded thread")
+        );
+        assert!(require_thread_choice(&saved, Some(ThreadChoice::Fresh)).expect("only fresh"));
+        saved["rounds"][0]["phase"] = json!("settled");
+        saved["rounds"][0]["reply"] = json!({"bytes":1});
+        for choice in [ThreadChoice::Fresh, ThreadChoice::Resume] {
+            assert_eq!(
+                require_thread_choice(&saved, Some(choice))
+                    .expect_err("choice not owed")
+                    .kind,
+                "round-choice"
+            );
+        }
+        assert!(!require_thread_choice(&saved, None).expect("ordinary resume"));
+    }
+
+    /// A fresh request retains the old reservation identity until its own event is read.
+    ///
+    /// # Panics
+    /// Panics if settlement uses a prior thread or changes it without a start event.
+    /// ´test:unit:failed-round-fresh-thread-changes-only-with-own-start´
+    #[test]
+    fn failed_round_fresh_thread_changes_only_with_own_start() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for backend in ["codex", "claude"] {
+            let root = tempfile::tempdir().expect("fixture");
+            let plan = Plan {
+                home: root.path().join("home"),
+                driver_dir: root.path().join("R"),
+                letter: PathBuf::new(),
+                document: json!({"backend":backend}),
+            };
+            let directory = plan.driver_dir.join("new-review");
+            std::fs::create_dir_all(&directory).expect("directory");
+            std::fs::write(directory.join(".event-start"), b"0\n").expect("boundary");
+            std::fs::write(directory.join("events.jsonl"), b"").expect("before start");
+            let report = directory.join("run-report.txt");
+            std::fs::write(
+                &report,
+                format!(
+                    "RUN-REPORT lane=review exit=0 verdict=ok dir={}\n",
+                    directory.display()
+                ),
+            )
+            .expect("report");
+            std::fs::set_permissions(&report, std::fs::Permissions::from_mode(0o600))
+                .expect("report mode");
+            let mut saved = record();
+            saved["rounds"][0]["driver_dir"] = json!(plan.driver_dir.join("prior-dispatch"));
+            let request = LaunchRequest::parse(
+                &["alpha", "R", "--round", "review", "--fresh-thread"].map(str::to_owned),
+            )
+            .expect("request");
+            let round =
+                continuation_round(&saved, &request, &directory, &saved["mail"][0]).expect("next");
+            saved["rounds"].as_array_mut().expect("rounds").push(round);
+            saved["rounds"][1]["phase"] = json!("awaiting-settlement");
+            saved["phase"] = json!("started");
+            saved["active_round"] = json!("review");
+            let path = reservation_path(root.path(), "R");
+            publish_reservation(&path, &saved).expect("new round");
+            let reply = json!({"bytes":1});
+            record_settlement_with_recovery(&plan, "R", &reply, false).expect_err("no start yet");
+            assert_eq!(
+                read_reservation(&path).expect("read").expect("saved")["thread_id"],
+                "old-thread"
+            );
+            let event = if backend == "codex" {
+                json!({"type":"thread.started","thread_id":"new-thread"})
+            } else {
+                json!({"type":"system","subtype":"init","session_id":"new-thread"})
+            };
+            std::fs::write(directory.join("events.jsonl"), format!("{event}\n"))
+                .expect("own event");
+            assert_eq!(
+                recovery_thread(&plan, &saved, &saved["rounds"][1])
+                    .expect("fresh recovery reads own start"),
+                "new-thread"
+            );
+            publish_reservation(&path, &saved).expect("settlement input");
+            record_settlement_with_recovery(&plan, "R", &reply, false).expect("own thread settles");
+            assert_eq!(
+                read_reservation(&path).expect("read").expect("saved")["thread_id"],
+                "new-thread"
+            );
+        }
+    }
+
+    /// The selected request and prospective record agree without erasing the old thread.
+    ///
+    /// # Panics
+    /// Panics if fresh and resume can be confused or previews consume the choice.
+    /// ´test:unit:failed-round-choice-controls-request-and-preview´
+    #[test]
+    fn failed_round_choice_controls_request_and_preview() {
+        let root = tempfile::tempdir().expect("fixture");
+        let plan = Plan {
+            home: root.path().join("home"),
+            driver_dir: root.path().join("R"),
+            letter: PathBuf::new(),
+            document: json!({"backend":"codex"}),
+        };
+        let mut saved = record();
+        saved["rounds"][0]["driver_dir"] = json!(plan.driver_dir.join("prior-dispatch"));
+        let before = serde_json::to_vec(&saved).expect("before");
+        for (flag, expected) in [
+            ("--fresh-thread", Value::Null),
+            ("--resume-thread", json!("old-thread")),
+        ] {
+            let request =
+                LaunchRequest::parse(&["alpha", "R", "--round", "review", flag].map(str::to_owned))
+                    .expect("choice");
+            let next = preflight_record(
+                &plan.driver_dir,
+                &saved,
+                "review",
+                3600,
+                request.thread_choice,
+            )
+            .expect("prospective");
+            assert_eq!(
+                next["thread_id"], "old-thread",
+                "fresh must not erase prior thread"
+            );
+            let text: Value =
+                serde_json::from_str(&request_text(&plan, &next, "review", 3600).expect("request"))
+                    .expect("json");
+            assert_eq!(text["thread_id"], expected, "chosen request thread");
+            let preview = choice_preview(
+                &saved,
+                request.thread_choice,
+                &json!({"present":true}),
+                "review",
+            );
+            assert_eq!(preview["selection"], flag);
+            assert_eq!(preview["recorded_thread"], "old-thread");
+            assert_eq!(preview["consumed"], false);
+            assert!(
+                preview["fresh_prompt"]
+                    .as_str()
+                    .expect("prompt")
+                    .contains("no old thread")
+            );
+        }
+        let refusal = choice_preview(&saved, None, &json!({"present":false}), "review");
+        assert!(refusal["selection"].is_null());
+        assert_eq!(refusal["fresh_letter"], saved["mail"][0]["inbox_name"]);
+        assert_eq!(refusal["next_round"], "review");
+        assert_eq!(refusal["thread_files"]["present"], false);
+        assert_eq!(serde_json::to_vec(&saved).expect("after"), before);
+        for words in [
+            vec!["alpha", "R", "--letter", "letter", "--fresh-thread"],
+            vec![
+                "alpha",
+                "R",
+                "--round",
+                "review",
+                "--fresh-thread",
+                "--resume-thread",
+            ],
+        ] {
+            assert_eq!(
+                LaunchRequest::parse(&words.into_iter().map(str::to_owned).collect::<Vec<_>>())
+                    .expect_err("inapplicable choice")
+                    .kind,
+                "round-choice"
+            );
+        }
     }
 }

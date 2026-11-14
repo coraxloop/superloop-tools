@@ -2612,6 +2612,7 @@ fn execute_rotation_at(
             run: new_run.clone(),
             letter: source.path,
             round: None,
+            thread_choice: None,
             budget: 3600,
             dry_run: false,
             expect_digest: None,

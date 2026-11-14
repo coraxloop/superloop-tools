@@ -727,6 +727,7 @@ fn installed_seed_requires_recorded_image_program_and_repeats() {
         run: "pilot-1".into(),
         letter,
         round: None,
+        thread_choice: None,
         budget: 3600,
         dry_run: true,
         expect_digest: None,

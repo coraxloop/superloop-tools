@@ -2030,6 +2030,9 @@ pattern = "packages/superloop-lane/src/launch/rotation.rs"
 pattern = "packages/superloop-lane/src/launch/rounds.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/launch/thread_files.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/workspace.rs"
 
 [[include.rows]]
