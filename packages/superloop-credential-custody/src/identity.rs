@@ -54,10 +54,11 @@ pub fn live(record: &Parameters) -> Result<Identity> {
             .ok_or("identity-member")?;
         let mut command = Command::new(&probe.argv[0]);
         command.args(&probe.argv[1..]);
-        expected.bytes = process::capture(command, &[], &record.limits)?;
-        if expected.bytes.is_empty() {
+        let bytes = process::capture(command, &[], &record.limits)?;
+        if bytes.is_empty() {
             return Err("identity-member");
         }
+        expected.sha256 = hash(&bytes);
     }
     if live != record.identity {
         return Err("identity-drift");

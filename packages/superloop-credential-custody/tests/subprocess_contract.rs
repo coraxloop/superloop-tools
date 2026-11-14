@@ -139,7 +139,7 @@ impl Fixture {
             "source_commit":commit,
             "files":{"sealer":file(&root.join("sealer")), "library":file(&root.join("library")),
                 "interpreter":file(Path::new("/usr/bin/python3")), "parser":file(&root.join("parser.py"))},
-            "probes":roles.iter().map(|role| json!({"role":role,"bytes":b"synthetic-v1\n"})).collect::<Vec<_>>()});
+            "probes":roles.iter().map(|role| json!({"role":role,"sha256":hash(b"synthetic-v1\n")})).collect::<Vec<_>>()});
         let mut samples = Vec::new();
         for name in ["alpha", "beta"] {
             fs::create_dir(root.join("sealed").join(name)).unwrap();
@@ -167,7 +167,7 @@ impl Fixture {
                 }
             }
         }
-        let record = json!({"schema":1,"case":"campaign","config_digest":"a".repeat(64),"code_digest":"b".repeat(64),
+        let record = json!({"schema":2,"case":"campaign","config_digest":"a".repeat(64),"code_digest":"b".repeat(64),
             "sealed_root":root.join("sealed"),"evidence_root":root.join("evidence"),
             "payload":{"path":root.join("parser.py"),"sha256":hash(payload.as_bytes()),"repository":repo,"source_commit":commit,"document":"procedure.md"},
             "limits":{"file_bytes":1_048_576,"output_bytes":1_048_576,"timeout_ms":3000},"identity":identity,
@@ -254,7 +254,7 @@ fn known_lengths_and_identity() {
 #[test]
 fn record_refusals_before_effects() {
     for (pointer, value) in [
-        ("/schema", json!(2)),
+        ("/schema", json!(1)),
         ("/unexpected", json!(1)),
         ("/limits/timeout_ms", json!(0)),
         ("/identity/form/unknown", json!(0)),
@@ -984,4 +984,37 @@ fn repository_and_evidence_ancestors_are_protected() {
         .unwrap();
     refused(&out, "directory-ancestor-custody");
     assert!(!marker.exists());
+}
+
+/// ´test:integration:probe-output-is-digest-only´
+#[test]
+fn probe_output_is_digest_only() {
+    let mut f = Fixture::new();
+    let arbitrary = "synthetic-private-output\nwith-more-lines\n";
+    f.record["probes"][0]["argv"][1] = json!(arbitrary);
+    f.record["identity"]["probes"][0]["sha256"] = json!(hash(arbitrary.as_bytes()));
+    let out = f.observe();
+    pass(&out);
+    let receipt = fs::read(f.dir.path().join("evidence/calibration")).unwrap();
+    for bytes in [&out.stdout, &out.stderr, &receipt] {
+        assert!(!String::from_utf8_lossy(bytes).contains("synthetic-private-output"));
+    }
+    pass(&f.check());
+    f.record["probes"][0]["argv"][1] = json!("changed");
+    refused(&f.check(), "identity-drift");
+}
+
+/// ´test:integration:probe-digest-record-is-strict´
+#[test]
+fn probe_digest_record_is_strict() {
+    for value in ["", "xyz", &"a".repeat(63), &"A".repeat(64)] {
+        let mut f = Fixture::new();
+        f.record["identity"]["probes"][0]["sha256"] = json!(value);
+        refused(&f.observe(), "record-probe-identity");
+    }
+    let mut f = Fixture::new();
+    let probe = f.record["identity"]["probes"][0].as_object_mut().unwrap();
+    probe.remove("sha256");
+    probe.insert("bytes".into(), json!([65]));
+    refused(&f.observe(), "record-shape");
 }

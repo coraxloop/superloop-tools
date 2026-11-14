@@ -116,7 +116,7 @@ pub struct FileIdentity {
 #[serde(deny_unknown_fields)]
 pub struct ProbeIdentity {
     pub role: ProbeRole,
-    pub bytes: Vec<u8>,
+    pub sha256: String,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -215,7 +215,7 @@ pub fn path(value: &Path, absolute: bool) -> bool {
 
 impl Parameters {
     fn validate(&self) -> Result<()> {
-        if self.schema != 1 {
+        if self.schema != 2 {
             return Err("record-schema");
         }
         if !name(&self.case) || !digest(&self.config_digest) || !digest(&self.code_digest) {
@@ -352,10 +352,7 @@ impl Identity {
         let roles: BTreeSet<_> = self.probes.iter().map(|p| p.role).collect();
         if roles.len() != 7
             || self.probes.len() != 7
-            || self
-                .probes
-                .iter()
-                .any(|p| p.bytes.is_empty() || p.bytes.len() > 16_384)
+            || self.probes.iter().any(|p| !digest(&p.sha256))
         {
             return Err("record-probe-identity");
         }
