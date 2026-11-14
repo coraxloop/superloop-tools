@@ -377,6 +377,12 @@ fn sealer_failure_publication_collision_retains_quarantine() {
             .count(),
         2
     );
+    let receipt: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.dir.path().join("evidence/sample/state-03.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["original_cause"], "generator-failed");
+    assert_ne!(receipt["refusal_class"], receipt["original_cause"]);
     store.cleanup_outputs().unwrap();
 }
 

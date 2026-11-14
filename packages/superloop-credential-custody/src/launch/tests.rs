@@ -694,7 +694,28 @@ fn launch_capture_binds_invocation_image_and_effective_properties() {
             ..good.clone()
         },
     ] {
-        err(s.capture(bad, &bytes), "launch-invocation-binding");
+        let isolated = Fixture::new();
+        let admission = isolated.admit();
+        let mut store = Store::reserve(&admission, 0).unwrap();
+        let actual_image = admission.fixture_image();
+        let bad = Invocation {
+            image: if bad.image == image {
+                actual_image
+            } else {
+                bad.image
+            },
+            ..bad
+        };
+        store.advance(Phase::SealersStarted).unwrap();
+        store.advance(Phase::Submitted).unwrap();
+        err(store.capture(bad, &bytes), "launch-invocation-binding");
+        assert_eq!(store.phase(), Phase::Uncertain);
+        err(store.capture(good.clone(), &bytes), "launch-capture-order");
+        let receipt: Value = serde_json::from_slice(
+            &fs::read(isolated.dir.path().join("evidence/sample/state-03.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["original_cause"], "launch-invocation-binding");
     }
     err(
         s.capture(
@@ -703,6 +724,17 @@ fn launch_capture_binds_invocation_image_and_effective_properties() {
         ),
         "launch-configuration-drift",
     );
+    assert_eq!(s.phase(), Phase::Uncertain);
+    err(s.capture(good.clone(), &bytes), "launch-capture-order");
+    let f = Fixture::new();
+    let a = f.admit();
+    let mut s = Store::reserve(&a, 0).unwrap();
+    let good = Invocation {
+        image: a.fixture_image(),
+        ..good
+    };
+    s.advance(Phase::SealersStarted).unwrap();
+    s.advance(Phase::Submitted).unwrap();
     s.capture(good, &bytes).unwrap();
     let receipt: Value = serde_json::from_slice(
         &fs::read(f.dir.path().join("evidence/sample/state-03.json")).unwrap(),
@@ -903,4 +935,23 @@ fn launch_failure_publication_cannot_reopen_success() {
         store.advance(Phase::SealersStarted),
         "launch-terminal-state",
     );
+}
+
+/// ´test:unit:launch-original-cause-survives-output-loss´
+#[test]
+fn launch_original_cause_survives_output_loss() {
+    let fixture = Fixture::new();
+    let admission = fixture.admit();
+    let mut store = Store::reserve(&admission, 0).unwrap();
+    let output = fixture.dir.path().join("sealed/sample/left.sealed");
+    fs::remove_file(&output).unwrap();
+    fs::write(&output, b"foreign").unwrap();
+    err(store.fail("generator-failed"), "launch-output-binding");
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(fixture.dir.path().join("evidence/sample/state-01.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["original_cause"], "generator-failed");
+    assert_eq!(receipt["refusal_class"], "launch-output-binding");
+    assert_eq!(store.phase(), Phase::Uncertain);
 }

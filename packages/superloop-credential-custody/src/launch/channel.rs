@@ -87,10 +87,31 @@ pub(super) fn poll(items: &mut [nix::libc::pollfd], timeout: i32) -> Result<bool
 mod tests {
     use super::*;
     use std::io::Write as _;
+    fn wait_for_hangup(probe: &EofProbe) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        loop {
+            let timeout = super::super::sealer::remaining_timeout(
+                std::time::Instant::now(),
+                deadline,
+                deadline,
+            )
+            .unwrap();
+            let mut item = nix::libc::pollfd {
+                fd: probe.0.as_raw_fd(),
+                events: 0,
+                revents: 0,
+            };
+            poll(std::slice::from_mut(&mut item), timeout).unwrap();
+            if item.revents & nix::libc::POLLHUP != 0 {
+                break;
+            }
+        }
+        assert_eq!(probe.observe().unwrap(), PipeState::ClosedAndDrained);
+    }
     /// ´test:unit:sealer-eof-is-readiness-not-a-read´
     #[test]
     fn sealer_eof_is_readiness_not_a_read() {
-        let (r, w) = nix::unistd::pipe().unwrap();
+        let (r, w) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
         let (_, probe) = Input::admit(r).unwrap().split().unwrap();
         // No writer task is ever started. A read here would block forever.
         assert_eq!(probe.observe().unwrap(), PipeState::Open);
@@ -101,17 +122,17 @@ mod tests {
         // HUP does not certify drainage; the observer cannot consume the bytes.
         assert_eq!(probe.observe().unwrap(), PipeState::Buffered);
         assert_eq!(probe.observe().unwrap(), PipeState::Buffered);
-        let (r, w) = nix::unistd::pipe().unwrap();
+        let (r, w) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
         let (_, empty) = Input::admit(r).unwrap().split().unwrap();
         drop(w);
-        assert_eq!(empty.observe().unwrap(), PipeState::ClosedAndDrained);
+        wait_for_hangup(&empty);
         assert_eq!(classify(nix::libc::POLLERR), Err("sealer-input-poll"));
         assert_eq!(classify(nix::libc::POLLNVAL), Err("sealer-input-poll"));
     }
     /// ´test:unit:sealer-input-requires-two-distinct-blocking-read-pipes´
     #[test]
     fn sealer_input_requires_two_distinct_blocking_read_pipes() {
-        let (r, w) = nix::unistd::pipe().unwrap();
+        let (r, w) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
         assert_eq!(Input::admit(w).err(), Some("sealer-input-kind"));
         let duplicate = r.try_clone().unwrap();
         assert_eq!(
@@ -148,6 +169,6 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(probe.observe().unwrap(), PipeState::Open);
         drop(writer);
-        assert_eq!(probe.observe().unwrap(), PipeState::ClosedAndDrained);
+        wait_for_hangup(&probe);
     }
 }

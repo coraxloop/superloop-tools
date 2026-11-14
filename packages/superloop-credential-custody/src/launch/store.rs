@@ -93,6 +93,7 @@ struct Snapshot<'a> {
     sequence: u32,
     phase: Phase,
     refusal_class: Option<&'static str>,
+    original_cause: Option<&'static str>,
     policy_sha256: &'a str,
     code_sha256: &'a str,
     case_sha256: &'a str,
@@ -115,6 +116,7 @@ pub(super) struct Store {
     expected_image: ObjectIdentity,
     sealed_limit: u64,
     refusal_class: Option<&'static str>,
+    original_cause: Option<&'static str>,
     invocation: Option<Invocation>,
     configuration: Option<ConfigurationMeasurement>,
 }
@@ -145,6 +147,7 @@ impl Store {
             configuration: None,
             sealed_limit: admission.policy().limits.sealed_bytes,
             refusal_class: None,
+            original_cause: None,
         };
         for stream in &case.streams {
             store
@@ -232,6 +235,7 @@ impl Store {
             sequence,
             phase,
             refusal_class: self.refusal_class,
+            original_cause: self.original_cause,
             policy_sha256: &self.policy_sha256,
             code_sha256: &self.code_sha256,
             case_sha256: &self.case_sha256,
@@ -253,21 +257,30 @@ impl Store {
             self.state.phase() == Phase::Submitted,
             "launch-capture-order",
         )?;
-        require(
-            invocation.unit == self.unit
-                && invocation.id.len() == 32
-                && invocation
-                    .id
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                && invocation.id.bytes().any(|b| b != b'0')
-                && invocation.pid > 1
-                && invocation.birth > 0
-                && invocation.uid > 0
-                && invocation.image == self.expected_image,
-            "launch-invocation-binding",
-        )?;
-        let configuration = measure::configuration(&Role::Fixture.properties(), properties)?;
+        let checked = (|| {
+            require(
+                invocation.unit == self.unit
+                    && invocation.id.len() == 32
+                    && invocation
+                        .id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && invocation.id.bytes().any(|b| b != b'0')
+                    && invocation.pid > 1
+                    && invocation.birth > 0
+                    && invocation.uid > 0
+                    && invocation.image == self.expected_image,
+                "launch-invocation-binding",
+            )?;
+            measure::configuration(&Role::Fixture.properties(), properties)
+        })();
+        let configuration = match checked {
+            Ok(configuration) => configuration,
+            Err(class) => {
+                let _publication = self.uncertain(class);
+                return Err(class);
+            }
+        };
         self.invocation = Some(invocation);
         self.configuration = Some(configuration);
         self.advance(Phase::Captured)
@@ -294,6 +307,7 @@ impl Store {
     // Failure classes are internal static metadata, never child diagnostic bytes.
     pub fn fail(&mut self, class: &'static str) -> Result<()> {
         self.state.next(Phase::Failed)?;
+        self.original_cause.get_or_insert(class);
         self.check_outputs(None)?;
         self.terminal(Phase::Failed, class)
     }
@@ -302,6 +316,7 @@ impl Store {
     }
     fn terminal(&mut self, phase: Phase, class: &'static str) -> Result<()> {
         let sequence = self.state.next(phase)?;
+        self.original_cause.get_or_insert(class);
         self.refusal_class = Some(class);
         // Latch before publication: even publication failure cannot reopen success.
         self.state.commit(phase)?;
@@ -334,6 +349,7 @@ impl Store {
             // The failed slot may already be occupied. Never replace it. Latch
             // uncertainty and attempt its separate next-sequence receipt.
             self.state.publication_failed();
+            self.original_cause.get_or_insert(class);
             self.refusal_class = Some(class);
             let _publication = self.write_snapshot(sequence + 1, Phase::Uncertain);
             return Err(class);
