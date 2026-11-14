@@ -85,7 +85,7 @@ def history(home,n):
     if n:
         (root/'state.toml').write_text(f'version=1\ngreatest_reserved="{stamp}"\nacceptance_available=false\n')
 
-def measure(count,binary,tag,post_claim=False,enforce=True):
+def measure(count,binary,tag,post_claim=False,enforce=True,operations=False):
     root=P(os.environ['TMPDIR'])
     for path in [root,*root.parents]:
         if not path.stat().st_mode & 1:
@@ -121,6 +121,9 @@ def measure(count,binary,tag,post_claim=False,enforce=True):
             inspected=subprocess.run(['/usr/bin/podman','unshare',sys.executable,str(P(__file__).resolve()),'inspect',str(service_pid),str(home)],capture_output=True,text=True,check=True)
             descriptor_count=int(inspected.stdout)
             scan_count=log.read_text().count('mail scan complete');c=cpu();t=time.monotonic();time.sleep(10);elapsed=time.monotonic()-t;used=cpu()-c;idle_scans=log.read_text().count('mail scan complete')-scan_count
+            if operations:
+                operation_probe(home,service_pid,log,enforce)
+                return
             if post_claim:
                 post_claim_refusal(home,service_pid,log,enforce)
                 return
@@ -156,6 +159,109 @@ def measure(count,binary,tag,post_claim=False,enforce=True):
                 subprocess.run(['/usr/bin/podman','unshare',sys.executable,str(P(__file__).resolve()),'stop',str(service_pid),str(home)],check=True)
             if process.poll() is None:process.terminate()
             process.wait(timeout=30)
+
+def operation_probe(home,service_pid,log,enforce=True):
+    probe=r'''
+import os,pathlib,signal,subprocess,sys,time,json,re,platform
+home=pathlib.Path(sys.argv[1]);pid=int(sys.argv[2]);trace=pathlib.Path(sys.argv[3])
+command=pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+assert len(command)>2 and command[1]==b'_serve' and os.fsdecode(command[2])==str(home)
+records=sorted(p.name for p in (home/'.var/loops/.mail-service/deliveries').glob('*.toml'))
+assert records, 'operation fixture requires retained history'
+errors=trace.with_suffix('.stderr').open('w')
+tracer=subprocess.Popen(['/usr/bin/strace','-f','-qq','-yy','-e','trace=open,openat,openat2,stat,lstat,fstat,newfstatat,statx,getdents,getdents64,poll,ppoll,read,pread64,readv,preadv,preadv2,close','-o',str(trace),'-p',str(pid)],stdout=subprocess.DEVNULL,stderr=errors)
+try:
+ deadline=time.monotonic()+10
+ while time.monotonic()<deadline:
+  if tracer.poll() is not None:raise RuntimeError('strace refused fixture attachment')
+  status=pathlib.Path(f'/proc/{pid}/status').read_text()
+  if int(re.search(r'^TracerPid:\s+(\d+)',status,re.M).group(1))==tracer.pid:break
+  time.sleep(.01)
+ else:raise RuntimeError('strace attachment not observed')
+ actor=os.fork()
+ if actor==0:
+  os.setgroups([33280]);os.setgid(1000);os.setuid(1000)
+  draft=home/'.var/loops/loop00/mail/draft/operations';draft.write_bytes(b'operation-count fixture\n')
+  os.rename(draft,home/'.var/loops/loop00/mail/outbox/loop01.operations.letter');os._exit(0)
+ os.waitpid(actor,0);deadline=time.monotonic()+120
+ while time.monotonic()<deadline:
+  sent=list((home/'.var/loops/loop00/mail/sent').iterdir());inbox=list((home/'.var/loops/loop01/mail/inbox').iterdir())
+  if sent and inbox and not (home/'.var/loops/loop00/mail/outbox/loop01.operations.letter').exists():
+   assert sent[0].read_bytes()==inbox[0].read_bytes()==b'operation-count fixture\n'
+   break
+  time.sleep(.01)
+ else:raise RuntimeError('operation fixture delivery did not finish')
+ # Completion is a kernel wait after the queued self-events, not a latency assertion.
+ deadline=time.monotonic()+30;quiet=0
+ poll_calls={'x86_64':{'7','271'},'aarch64':{'73'}}.get(platform.machine())
+ assert poll_calls, 'fixture needs the architecture syscall numbers for poll'
+ while time.monotonic()<deadline:
+  syscall=pathlib.Path(f'/proc/{pid}/syscall').read_text().split()[0]
+  quiet=quiet+1 if syscall in poll_calls else 0
+  if quiet>=3:break
+  time.sleep(.1)
+ else:raise RuntimeError('fixture service never returned to poll')
+finally:
+ if tracer.poll() is None:tracer.send_signal(signal.SIGINT)
+ try:tracer.wait(timeout=10)
+ except subprocess.TimeoutExpired:
+  tracer.kill();tracer.wait();raise
+ errors.close()
+assert tracer.returncode in [0,-signal.SIGINT], trace.with_suffix('.stderr').read_text()
+counts={'open':0,'stat':0,'list':0};folders={'outbox':0,'staging':0}
+history={name:0 for name in records};record_opens=0;descriptors={}
+root=str(home/'.var/loops/loop02')
+cwd=os.readlink(f'/proc/{pid}/cwd')
+def targets(line,op):
+ paths=re.findall(r'<([^>]+)>',line)
+ at=re.search(r'\((AT_FDCWD|\d+(?:<([^>]+)>)?),\s*("(?:[^"\\]|\\.)*")',line) if op in ['openat','openat2','newfstatat','statx'] else None
+ if at:
+  name=json.loads(at.group(3));base=at.group(2) or cwd
+  paths.append(os.path.normpath(os.path.join(base,name)))
+ elif op in ['open','stat','lstat']:
+  arg=re.search(r'\(("(?:[^"\\]|\\.)*")',line)
+  if arg:paths.append(os.path.normpath(os.path.join(cwd,json.loads(arg.group(1)))))
+ return paths
+# Calibrate relative descriptor paths: the syscall need not print an absolute target.
+assert root in targets(f'newfstatat(7<{home}/.var/loops>, "loop02", {{...}}, 0) = 0','newfstatat')
+assert root+'/mail/outbox' in targets(f'openat(8<{root}/mail>, "outbox", 0) = -1 EACCES','openat')
+for line in trace.read_text().splitlines():
+ match=re.search(r'\b(open|openat|openat2|stat|lstat|fstat|newfstatat|statx|getdents|getdents64|read|pread64|readv|preadv|preadv2|close)\(',line)
+ if not match:continue
+ op=match.group(1)
+ if op.startswith('open'):
+  returned=re.search(r'= (\d+)<',line)
+  if returned:
+   descriptor=int(returned.group(1));descriptors.pop(descriptor,None)
+   stamp=re.search(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\.toml',line)
+   if stamp and stamp.group() in history and '/.mail-service/deliveries' in line:
+    record_opens+=1;descriptors[descriptor]=(stamp.group(),False)
+ if op in ['read','pread64','readv','preadv','preadv2','close']:
+  descriptor=int(re.search(r'\((\d+)',line[match.start():]).group(1))
+  if op=='close':descriptors.pop(descriptor,None)
+  elif descriptor in descriptors:
+   name,seen=descriptors[descriptor]
+   if not seen:history[name]+=1;descriptors[descriptor]=(name,True)
+  continue
+ kind='open' if op.startswith('open') else 'list' if op.startswith('getdents') else 'stat'
+ paths=targets(line,op)
+ if any(path==root or path.startswith(root+'/') for path in paths):
+  counts[kind]+=1
+  if kind=='list':
+   folders['outbox']+=int(root+'/mail/outbox' in paths)
+   folders['staging']+=int(root+'/.mail-staging' in paths)
+assert len(set(history.values()))==1, 'retained records did not receive equal whole-history reads'
+print(json.dumps({'unrelated_loop_operations':counts,'unrelated_directory_reads':folders,'history_passes':next(iter(history.values())),'history_record_reads':sum(history.values()),'history_record_opens':record_opens,'retained_records':len(history),'trace':str(trace)}))
+'''
+    result=subprocess.run(['/usr/bin/podman','unshare',sys.executable,'-c',probe,str(home),str(service_pid),str(log.parent/'operations.trace')],capture_output=True,text=True,check=True,timeout=180)
+    reading=json.loads(result.stdout)
+    print(json.dumps(reading),flush=True)
+    if enforce:
+        for operation,bound in {'open':50,'stat':53,'list':10}.items():
+            assert 0<reading['unrelated_loop_operations'][operation]<=bound, f'unrelated {operation} operations exceeded the selected-delivery bound'
+        assert reading['unrelated_directory_reads']['outbox']==0, 'unrelated outbox was listed'
+        assert reading['unrelated_directory_reads']['staging']<=2, 'extra unrelated staging walks'
+        assert reading['history_passes']==2, 'full recovery returned to the selected scan'
 
 def post_claim_refusal(home,service_pid,log,enforce=True):
     # The observer counts actual claims while only this fixture's journal is unwritable.
@@ -200,13 +306,13 @@ def cpu():
  fields=pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()
  return (int(fields[11])+int(fields[12]))/os.sysconf('SC_CLK_TCK')
 claims(0)
-before=log.read_text().count('mail scan complete');start=time.monotonic();used=cpu();attempts=0
+before=log.read_text().count('mail scan started');start=time.monotonic();used=cpu();attempts=0
 while time.monotonic()-start<30:
  attempts+=claims(min(.1,max(0,30-(time.monotonic()-start))))
 elapsed=time.monotonic()-start;used=cpu()-used
 assert not select.select([handle],[],[],0)[0], 'fixture service exited during retries'
 os.close(handle);os.close(fd)
-print(json.dumps({'case':'post-claim-refusal','attempts':attempts,'scan_count':log.read_text().count('mail scan complete')-before,'interval_seconds':elapsed,'cpu_seconds':used,'cpu_percent':100*used/elapsed}))
+print(json.dumps({'case':'post-claim-refusal','attempts':attempts,'scan_count':log.read_text().count('mail scan started')-before,'interval_seconds':elapsed,'cpu_seconds':used,'cpu_percent':100*used/elapsed}))
 '''
     result=subprocess.run(['/usr/bin/podman','unshare',sys.executable,'-c',probe,str(home),str(service_pid),str(log)],capture_output=True,text=True,check=True,timeout=100)
     reading=json.loads(result.stdout)
@@ -238,6 +344,8 @@ if __name__=='__main__':
     if phase=='seed':seed(P(sys.argv[2]),int(sys.argv[3]),sys.argv[4])
     elif phase=='history':history(P(sys.argv[2]),int(sys.argv[3]))
     elif phase=='measure':measure(int(sys.argv[2]),sys.argv[3],sys.argv[4])
+    elif phase=='operations-profile':measure(int(sys.argv[2]),sys.argv[3],sys.argv[4],enforce=False,operations=True)
+    elif phase=='operations':measure(int(sys.argv[2]),sys.argv[3],sys.argv[4],operations=True)
     elif phase=='post-claim-profile':measure(int(sys.argv[2]),sys.argv[3],sys.argv[4],True,False)
     elif phase=='post-claim':measure(int(sys.argv[2]),sys.argv[3],sys.argv[4],True)
     elif phase in ['inspect','stop']:own_process(int(sys.argv[2]),P(sys.argv[3]),phase=='stop')

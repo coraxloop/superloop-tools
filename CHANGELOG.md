@@ -52,6 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Schedule mail from event-named outboxes and known unfinished senders, retaining delivery checks while avoiding unrelated outbox scans and repeated recovery-history reads (``proto:loophome:mail-change-wakeup``).
+
 - Gate unchanged refused mail by source identity, configuration changes and retry deadlines; report persistent notification fallback and release obsolete uncovered paths (``proto:loophome:mail-change-wakeup``).
 
 - Keep permanent mail refusals off the retry clock; transient failures retain their bounded retries (``proto:loophome:mail-change-wakeup``).

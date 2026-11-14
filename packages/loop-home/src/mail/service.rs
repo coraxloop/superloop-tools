@@ -17,6 +17,11 @@ use std::os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _};
 use std::path::Path;
 use std::time::{Duration, Instant as Monotonic};
 
+#[cfg(test)]
+thread_local! {
+    static REFUSAL_HISTORY_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 trait Clock {
     fn now(&mut self) -> Result<Instant>;
     fn wait(&mut self);
@@ -36,6 +41,8 @@ impl Clock for HostClock {
 
 pub(super) enum Wake {
     Scan,
+    Senders(BTreeSet<Address>),
+    Maintenance,
     Retry,
 }
 
@@ -45,6 +52,8 @@ pub(super) struct Service {
     last_prune: Option<Monotonic>,
     clock: Box<dyn Clock>,
     last_scan: Option<Monotonic>,
+    last_full_scan: Option<Monotonic>,
+    last_maintenance: Option<Monotonic>,
     retries: retry::Queue,
     refused: BTreeMap<retry::Key, (u64, u64, u64)>,
     configuration: u64,
@@ -59,6 +68,8 @@ impl Service {
             last_prune: None,
             clock: Box::new(HostClock),
             last_scan: None,
+            last_full_scan: None,
+            last_maintenance: None,
             retries: retry::Queue::default(),
             refused: BTreeMap::new(),
             configuration: 0,
@@ -106,12 +117,19 @@ impl Service {
         self.last_prune
             .is_none_or(|last| last.elapsed() >= Duration::from_secs(PRUNE_INTERVAL_SECONDS))
     }
+    fn maintenance_due(&self) -> bool {
+        self.last_maintenance
+            .is_none_or(|last| last.elapsed() >= Duration::from_secs(PRUNE_INTERVAL_SECONDS))
+    }
     fn maintenance_wait(&self, notifications: &super::notify::Notifications) -> Duration {
         let retention = self.last_prune.map_or(Duration::ZERO, |last| {
             Duration::from_secs(PRUNE_INTERVAL_SECONDS).saturating_sub(last.elapsed())
         });
+        let retention = retention.min(self.last_maintenance.map_or(Duration::ZERO, |last| {
+            Duration::from_secs(PRUNE_INTERVAL_SECONDS).saturating_sub(last.elapsed())
+        }));
         if notifications.degraded() {
-            retention.min(self.last_scan.map_or(Duration::ZERO, |last| {
+            retention.min(self.last_full_scan.map_or(Duration::ZERO, |last| {
                 FALLBACK_INTERVAL.saturating_sub(last.elapsed())
             }))
         } else {
@@ -132,12 +150,12 @@ impl Service {
             // Decode the complete batch before filtering: configuration can follow an outbox event.
             self.configuration_changed(notifications);
             let mut scan = false;
+            let mut selected = BTreeSet::new();
             let mut retry = false;
             for change in changes {
                 match change {
                     super::notify::Change::Reconcile => scan = true,
                     super::notify::Change::Timer => {
-                        scan |= self.maintenance_wait(notifications).is_zero();
                         retry |= self
                             .retries
                             .wait(self.clock.monotonic())
@@ -150,17 +168,32 @@ impl Service {
                         let recognized = io::absolute(&path, true).and_then(|outbox| {
                             refusal::recognized(&self.journal, &outbox, &sender.to_string(), &name)
                         });
-                        scan |= !matches!(recognized, Ok(true));
+                        if !matches!(recognized, Ok(true)) {
+                            let present = self.source_identity(&sender, &name);
+                            if !matches!(&present, Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
+                            {
+                                selected.insert(sender);
+                            }
+                        }
                     }
                 }
             }
-            scan |= self.maintenance_wait(notifications).is_zero();
+            scan |= notifications.degraded()
+                && self
+                    .last_full_scan
+                    .is_none_or(|last| last.elapsed() >= FALLBACK_INTERVAL);
             retry |= self
                 .retries
                 .wait(self.clock.monotonic())
                 .is_some_and(|wait| wait.is_zero());
             if scan {
                 return Ok(Wake::Scan);
+            }
+            if !selected.is_empty() {
+                return Ok(Wake::Senders(selected));
+            }
+            if self.prune_due() || self.maintenance_due() {
+                return Ok(Wake::Maintenance);
             }
             if retry {
                 return Ok(Wake::Retry);
@@ -199,7 +232,7 @@ impl Service {
         if matches!(&current, Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
         {
             self.refused.remove(&key);
-            self.retries.remove_source(&key);
+            self.retry_later(sender, name, retry::Work::Source);
         }
         self.retries.ready(&key, now) || current.ok() != Some(prior)
     }
@@ -236,6 +269,7 @@ impl Service {
                 }
             } else {
                 self.retries.remove(&key);
+                self.refused.remove(&key);
             }
         }
         failures
@@ -259,6 +293,16 @@ impl Service {
                 Ok(())
             }
             retry::Work::Restoration(recipient) => {
+                let accepted = self.journal.records()?.into_iter().find(|record| {
+                    record.sender == sender.to_string()
+                        && Some(record.outgoing.as_str()) == name.to_str()
+                        && record.completed.is_none()
+                });
+                if let Some(record) = accepted {
+                    let work = retry::Work::Accepted(record.delivery);
+                    self.retry_later(sender, name, work.clone());
+                    return self.retry_letter(sender, name, &work);
+                }
                 let inventory = self.directory.inventory()?;
                 let text = name
                     .to_str()
@@ -281,7 +325,25 @@ impl Service {
             .join("outbox");
         let outbox = io::absolute(&path, true)?;
         match nix::sys::stat::fstatat(&outbox, name, nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW) {
-            Err(nix::errno::Errno::ENOENT) => Ok(()),
+            Err(nix::errno::Errno::ENOENT) => {
+                let inventory = self.directory.inventory()?;
+                let source = actor(&inventory, sender)?;
+                match nix::sys::stat::fstatat(
+                    &source.outbox,
+                    name,
+                    nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+                ) {
+                    Err(nix::errno::Errno::ENOENT) => refusal::clear(
+                        &self.journal,
+                        &source.outbox,
+                        &source.staging,
+                        &sender.to_string(),
+                        name,
+                    ),
+                    Err(error) => Err(error.into()),
+                    Ok(_) => self.candidate(sender, name),
+                }
+            }
             Err(error) => Err(error.into()),
             Ok(_) => self.candidate(sender, name),
         }
@@ -290,18 +352,40 @@ impl Service {
         &mut self,
         notifications: &mut super::notify::Notifications,
     ) -> Result<Vec<String>> {
-        let now = Monotonic::now();
-        std::thread::sleep(scan_delay(self.last_scan, now));
-        self.last_scan = Some(Monotonic::now());
-        tracing::debug!("mail scan started");
+        self.start_scan();
+        self.last_full_scan = self.last_scan;
+        self.last_maintenance = self.last_scan;
         notifications.begin_scan();
         self.directory.watch_roots(notifications)?;
         let mut inventory = self.directory.inventory()?;
         // Only configuration needs a second identity check after inventory. Roots were armed first.
         self.directory.watch_configuration(notifications)?;
+        self.watch_inventory(notifications, &mut inventory, None);
+        notifications.finish_scan();
+        self.configuration_changed(notifications);
+        // Arming precedes candidate enumeration, including the first scan after restart.
+        let count = inventory.actors.len();
+        let result = self.scan_inventory(&inventory);
+        drop(inventory);
+        tracing::debug!(mailboxes = count, "mail scan complete");
+        result
+    }
+    fn start_scan(&mut self) {
+        let now = Monotonic::now();
+        std::thread::sleep(scan_delay(self.last_scan, now));
+        self.last_scan = Some(Monotonic::now());
+        tracing::debug!("mail scan started");
+    }
+    fn watch_inventory(
+        &self,
+        notifications: &mut super::notify::Notifications,
+        inventory: &mut Inventory,
+        selected: Option<&BTreeSet<Address>>,
+    ) {
         let root = self.directory.home.join(".var/loops");
         let mut failures = Vec::new();
         inventory.actors.retain(|address, actor| {
+            if selected.is_some_and(|selected| !selected.contains(address)) { return true; }
             let mailbox = root.join(address.relative_mailbox());
             let registered = (|| -> Result<()> {
                 notifications.path(&mailbox, true)?;
@@ -317,14 +401,67 @@ impl Service {
             } else { true }
         });
         inventory.failures.extend(failures);
-        notifications.finish_scan();
+    }
+    /// Event selection does not replace the fresh authorization inventory required by admission.
+    pub fn scan_selected(
+        &mut self,
+        notifications: &mut super::notify::Notifications,
+        mut selected: BTreeSet<Address>,
+    ) -> Result<Vec<String>> {
+        self.start_scan();
+        selected.extend(self.refused.keys().map(|(sender, _)| sender.clone()));
+        selected.extend(self.retries.senders());
+        let mut inventory = self.directory.inventory()?;
+        if self.maintenance_due() {
+            self.maintain_inventory(notifications, &inventory)?;
+        } else if self.prune_due() {
+            self.prune(&inventory)?;
+        }
+        self.watch_inventory(notifications, &mut inventory, Some(&selected));
         self.configuration_changed(notifications);
-        // Arming precedes candidate enumeration, including the first scan after restart.
-        let count = inventory.actors.len();
-        let result = self.scan_inventory(&inventory);
-        drop(inventory);
-        tracing::debug!(mailboxes = count, "mail scan complete");
-        result
+        let mut failures = inventory.failures.clone();
+        let queues = self.candidates(&inventory, Some(&selected))?;
+        for (sender, name) in schedule(queues) {
+            if let Err(error) = self.candidate(&sender, &name) {
+                failures.push(format!("{sender}: {error}"));
+            }
+        }
+        // A steady stream of new sources must not starve already claimed work.
+        failures.extend(self.retry_due());
+        tracing::debug!(mailboxes = selected.len(), "mail selected scan complete");
+        Ok(failures)
+    }
+    /// The specification's retention interval does not enumerate outbox candidates.
+    pub fn maintain(
+        &mut self,
+        notifications: &mut super::notify::Notifications,
+    ) -> Result<Vec<String>> {
+        let inventory = self.directory.inventory()?;
+        self.maintain_inventory(notifications, &inventory)?;
+        Ok(inventory.failures)
+    }
+    fn maintain_inventory(
+        &mut self,
+        notifications: &mut super::notify::Notifications,
+        inventory: &Inventory,
+    ) -> Result<()> {
+        self.directory.watch_configuration(notifications)?;
+        if notifications.configuration() != self.configuration {
+            notifications.reconcile();
+        }
+        let root = self.directory.home.join(".var/loops");
+        for (address, actor) in &inventory.actors {
+            let mailbox = root.join(address.relative_mailbox());
+            if !notifications.covers(&mailbox.join("outbox"), &actor.outbox)?
+                || !notifications.covers(&mailbox.join("inbox"), &actor.inbox)?
+            {
+                notifications.invalidate_configuration();
+                notifications.reconcile();
+            }
+        }
+        self.prune(inventory)?;
+        self.last_maintenance = Some(Monotonic::now());
+        Ok(())
     }
     fn tick(&mut self) -> Result<Instant> {
         let mut waiting = None;
@@ -608,10 +745,14 @@ impl Service {
         }
         Ok(())
     }
-    fn candidates(&self, inventory: &Inventory) -> Result<BTreeMap<Address, VecDeque<OsString>>> {
+    fn candidates(
+        &self,
+        inventory: &Inventory,
+        selected: Option<&BTreeSet<Address>>,
+    ) -> Result<BTreeMap<Address, VecDeque<OsString>>> {
         let mut queues = BTreeMap::new();
         for (sender, actor) in &inventory.actors {
-            if !actor.active {
+            if !actor.active || selected.is_some_and(|selected| !selected.contains(sender)) {
                 continue;
             }
             let mut names = Vec::new();
@@ -631,13 +772,38 @@ impl Service {
         let inventory = self.directory.inventory()?;
         self.scan_inventory(&inventory)
     }
+    fn forget_absent_refusals(&mut self, inventory: &Inventory) {
+        let absent = self
+            .refused
+            .keys()
+            .filter(|(sender, name)| {
+                inventory.actors.get(sender).is_some_and(|actor| {
+                    !actor.active
+                        || matches!(
+                            nix::sys::stat::fstatat(
+                                &actor.outbox,
+                                name.as_os_str(),
+                                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW
+                            ),
+                            Err(nix::errno::Errno::ENOENT)
+                        )
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in absent {
+            self.refused.remove(&key);
+            self.retries.remove_source(&key);
+        }
+    }
     fn scan_inventory(&mut self, inventory: &Inventory) -> Result<Vec<String>> {
         let mut failures = inventory.failures.clone();
         failures.extend(self.recover(inventory)?);
+        self.forget_absent_refusals(inventory);
         if self.prune_due() {
             self.prune(inventory)?;
         }
-        let queues = self.candidates(inventory)?;
+        let queues = self.candidates(inventory, None)?;
         for (sender, name) in schedule(queues) {
             if let Err(error) = self.candidate(&sender, &name) {
                 failures.push(format!("{sender}: {error}"));
@@ -707,6 +873,10 @@ impl Service {
         error: MailError,
     ) -> Result<()> {
         let sender = actor(inventory, sender_address)?;
+        #[cfg(test)]
+        if REFUSAL_HISTORY_FAILURE.with(|failure| failure.replace(false)) {
+            return Err(std::io::Error::other("fixture refusal history unavailable").into());
+        }
         let accepted = self.journal.records()?.into_iter().find(|record| {
             record.sender == sender_address.to_string()
                 && Some(record.outgoing.as_str()) == name.to_str()
@@ -737,15 +907,19 @@ impl Service {
                     nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
                 )
                 .is_ok()
-                && let Err(error) =
-                    self.reconcile(inventory, sender_address, &outgoing.recipient, text)
             {
-                self.retry_later(
-                    sender_address,
-                    name,
-                    retry::Work::Restoration(outgoing.recipient),
-                );
-                return Err(error);
+                if let Err(error) =
+                    self.reconcile(inventory, sender_address, &outgoing.recipient, text)
+                {
+                    self.retry_later(
+                        sender_address,
+                        name,
+                        retry::Work::Restoration(outgoing.recipient),
+                    );
+                    return Err(error);
+                }
+                self.retries
+                    .remove_restoration(&(sender_address.clone(), name.to_owned()));
             }
             self.project(
                 sender,
@@ -802,6 +976,12 @@ impl Service {
             name,
             RenameFlags::RENAME_NOREPLACE,
         )?;
+        // Retain the claim even when refusal classification cannot read the journal.
+        self.retry_later(
+            sender_address,
+            name,
+            retry::Work::Restoration(outgoing.recipient.clone()),
+        );
         sender.outbox.sync_all()?;
         sender.staging.sync_all()?;
         let prepared =

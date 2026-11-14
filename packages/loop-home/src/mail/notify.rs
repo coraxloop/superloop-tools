@@ -211,13 +211,21 @@ impl Notifications {
         if self
             .configurations
             .insert(path.to_owned(), identity)
-            .is_some_and(|prior| prior != identity)
+            .is_none_or(|prior| prior != identity)
         {
             self.invalidate_configuration();
         }
         if let Some(watch) = self.paths.get(path).and_then(|id| self.watches.get_mut(id)) {
             watch.configuration = true;
         }
+    }
+    pub fn covers(&self, path: &Path, file: &File) -> Result<bool> {
+        let info = file.metadata()?;
+        Ok(self
+            .paths
+            .get(path)
+            .and_then(|id| self.watches.get(id))
+            .is_some_and(|watch| watch.identity == (info.dev(), info.ino())))
     }
     pub fn degraded(&self) -> bool {
         self.descriptor.is_none() || !self.uncovered.is_empty()
@@ -434,7 +442,10 @@ impl Notifications {
                         sender.clone(),
                         OsString::from_vec(name[..end].to_vec()),
                     ));
-                } else {
+                } else if watch.configuration
+                    || mask & (libc::IN_DELETE_SELF | libc::IN_MOVE_SELF) != 0
+                    || name.is_empty()
+                {
                     changes.push(Change::Reconcile);
                 }
             }
@@ -754,6 +765,19 @@ mod tests {
         assert!(
             fallback.configuration() > generation,
             "fallback detects changes without a registered watch"
+        );
+        std::fs::remove_file(&fallback_path).expect("configuration disappears");
+        fallback
+            .path(&fallback_path, false)
+            .expect("missing hint remains advisory");
+        let generation = fallback.configuration();
+        std::fs::write(&fallback_path, b"repaired").expect("configuration returns");
+        fallback
+            .path(&fallback_path, false)
+            .expect("newly visible configuration");
+        assert!(
+            fallback.configuration() > generation,
+            "recreated configuration invalidates refusals"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }

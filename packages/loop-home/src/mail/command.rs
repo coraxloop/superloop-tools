@@ -271,6 +271,10 @@ fn anchored_serve(arguments: &[OsString], report: &mut dyn std::io::Write) -> Re
         }
         failures = match service.wait_for_change(&mut notifications)? {
             super::service::Wake::Scan => service.scan_watching(&mut notifications)?,
+            super::service::Wake::Senders(senders) => {
+                service.scan_selected(&mut notifications, senders)?
+            }
+            super::service::Wake::Maintenance => service.maintain(&mut notifications)?,
             super::service::Wake::Retry => service.retry_due(),
         };
     }

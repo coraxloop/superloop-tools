@@ -299,11 +299,13 @@ fn mail_instance_limit_at_start_keeps_delivering() {
             assert!(service.maintenance_wait(&notifications) <= FALLBACK_INTERVAL);
             delivered(home, "alpha", 1);
             delivered(home, "beta", 1);
-            service.last_scan = Some(
+            service.last_full_scan = Some(
                 Monotonic::now()
                     .checked_sub(FALLBACK_INTERVAL)
                     .expect("elapsed fallback period"),
             );
+            service.last_scan = Some(Monotonic::now());
+            assert_eq!(service.maintenance_wait(&notifications), Duration::ZERO);
             assert!(matches!(
                 service
                     .wait_for_change(&mut notifications)
@@ -567,6 +569,375 @@ fn mail_refusal_timer_drops_a_source_that_becomes_permanent() {
             assert_eq!(service.retry_due_at(base + Duration::from_secs(1)).len(), 1);
             assert_eq!(service.retries.wait(base + Duration::from_secs(100)), None);
             assert!(!service.source_ready(&sender, name, base + Duration::from_secs(100)));
+        },
+    );
+}
+
+/// ´claim:loophome:mail-selected-scan-leaves-unrelated-outboxes-queued´
+/// ´test:unit:mail-selected-scan-leaves-unrelated-outboxes-queued´
+#[test]
+fn mail_selected_scan_leaves_unrelated_outboxes_queued() {
+    fixture(
+        "mail_selected_scan_leaves_unrelated_outboxes_queued",
+        |service, home| {
+            for name in ["alpha", "beta"] {
+                let base = home.join(".var/loops").join(name);
+                fs::rename(
+                    base.join(format!("mail/outbox/{name}.self.letter")),
+                    base.join(".mail-staging/selected-held"),
+                )
+                .expect("hold until startup ends");
+            }
+            let mut notifications = notify::Notifications::new();
+            service
+                .scan_watching(&mut notifications)
+                .expect("empty startup");
+            for name in ["alpha", "beta"] {
+                let base = home.join(".var/loops").join(name);
+                fs::rename(
+                    base.join(".mail-staging/selected-held"),
+                    base.join(format!("mail/outbox/{name}.self.letter")),
+                )
+                .expect("arrive after startup");
+            }
+            super::super::journal::RECORD_SCANS.with(|count| count.set(0));
+            assert_eq!(
+                service
+                    .scan_selected(
+                        &mut notifications,
+                        [Address::parse("alpha").expect("sender")].into()
+                    )
+                    .expect("selected scan"),
+                Vec::<String>::new()
+            );
+            assert_eq!(
+                super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+                2,
+                "admission retention and preparation checks read history"
+            );
+            delivered(home, "alpha", 1);
+            delivered(home, "beta", 0);
+            assert!(
+                home.join(".var/loops/beta/mail/outbox/beta.self.letter")
+                    .exists()
+            );
+            service.retries.schedule(
+                (
+                    Address::parse("beta").expect("pending sender"),
+                    "beta.self.letter".into(),
+                ),
+                retry::Work::Source,
+                Monotonic::now(),
+            );
+            assert_eq!(
+                service
+                    .scan_selected(
+                        &mut notifications,
+                        [Address::parse("alpha").expect("event sender")].into()
+                    )
+                    .expect("known retry sender"),
+                Vec::<String>::new()
+            );
+            delivered(home, "beta", 1);
+        },
+    );
+}
+
+/// ´claim:loophome:mail-selected-scan-includes-known-work-in-round-robin-order´
+/// ´test:unit:mail-selected-scan-includes-known-work-in-round-robin-order´
+#[test]
+fn mail_selected_scan_includes_known_work_in_round_robin_order() {
+    fixture(
+        "mail_selected_scan_includes_known_work_in_round_robin_order",
+        |service, home| {
+            for name in ["alpha", "beta"] {
+                let base = home.join(".var/loops").join(name);
+                fs::rename(
+                    base.join(format!("mail/outbox/{name}.self.letter")),
+                    base.join(".mail-staging/second"),
+                )
+                .expect("hold source");
+            }
+            let malformed = home.join(".var/loops/beta/mail/outbox/alpha.zz.letter");
+            fs::write(&malformed, b"permanent refusal").expect("source");
+            let mut notifications = notify::Notifications::new();
+            service
+                .scan_watching(&mut notifications)
+                .expect("initial refusal");
+            let before = service.attempts;
+            for name in ["alpha", "beta"] {
+                let base = home.join(".var/loops").join(name);
+                fs::rename(
+                    base.join(".mail-staging/held"),
+                    base.join("mail/outbox/beta.01.letter"),
+                )
+                .expect("first slug");
+                fs::rename(
+                    base.join(".mail-staging/second"),
+                    base.join("mail/outbox/alpha.02.letter"),
+                )
+                .expect("second slug");
+            }
+            assert_eq!(
+                service
+                    .scan_selected(
+                        &mut notifications,
+                        [Address::parse("alpha").expect("sender")].into()
+                    )
+                    .expect("selected known work"),
+                Vec::<String>::new()
+            );
+            assert_eq!(
+                service.attempts,
+                before + 4,
+                "unchanged refusal is not reattempted"
+            );
+            let records = service.journal.records().expect("records");
+            let order = records
+                .iter()
+                .map(|record| (record.sender.as_str(), record.outgoing.as_str()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                order,
+                [
+                    ("alpha", "beta.01.letter"),
+                    ("beta", "beta.01.letter"),
+                    ("alpha", "alpha.02.letter"),
+                    ("beta", "alpha.02.letter")
+                ]
+            );
+            delivered(home, "alpha", 2);
+            delivered(home, "beta", 2);
+        },
+    );
+}
+
+/// ´claim:loophome:mail-retention-clock-does-not-enumerate-outbox-work´
+/// ´test:unit:mail-retention-clock-does-not-enumerate-outbox-work´
+#[test]
+fn mail_retention_clock_does_not_enumerate_outbox_work() {
+    fixture(
+        "mail_retention_clock_does_not_enumerate_outbox_work",
+        |service, home| {
+            let mut notifications = notify::Notifications::new();
+            let mut inventory = service.directory.inventory().expect("endpoints");
+            service.watch_inventory(&mut notifications, &mut inventory, None);
+            service.configuration_changed(&notifications);
+            drop(inventory);
+            notifications.invalidate_configuration();
+            service.last_maintenance = Some(
+                Monotonic::now()
+                    .checked_sub(Duration::from_secs(PRUNE_INTERVAL_SECONDS))
+                    .expect("elapsed maintenance"),
+            );
+            service.last_prune = Some(Monotonic::now());
+            assert_eq!(
+                service.maintenance_wait(&notifications),
+                Duration::ZERO,
+                "admission pruning cannot postpone watch repair"
+            );
+            super::super::journal::RECORD_SCANS.with(|count| count.set(0));
+            service.maintain(&mut notifications).expect("retention");
+            assert_eq!(service.attempts, 0);
+            assert_eq!(
+                super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+                1
+            );
+            assert!(
+                home.join(".var/loops/alpha/mail/outbox/alpha.self.letter")
+                    .exists()
+            );
+            assert!(!service.maintenance_due());
+            service.last_maintenance = Some(
+                Monotonic::now()
+                    .checked_sub(Duration::from_secs(PRUNE_INTERVAL_SECONDS))
+                    .expect("elapsed maintenance again"),
+            );
+            service
+                .scan_selected(&mut notifications, BTreeSet::new())
+                .expect("events cannot postpone maintenance");
+            assert_eq!(service.attempts, 0);
+            assert!(!service.maintenance_due());
+            assert!(matches!(
+                notifications
+                    .wait(Duration::ZERO)
+                    .expect("new endpoints reconcile")
+                    .as_slice(),
+                [notify::Change::Reconcile]
+            ));
+        },
+    );
+}
+
+/// ´claim:loophome:mail-withdrawn-refusal-cleans-only-its-known-key´
+/// ´test:unit:mail-withdrawn-refusal-cleans-only-its-known-key´
+#[test]
+fn mail_withdrawn_refusal_cleans_only_its_known_key() {
+    fixture(
+        "mail_withdrawn_refusal_cleans_only_its_known_key",
+        |service, home| {
+            let sender = Address::parse("alpha").expect("sender");
+            let name = OsStr::new("malformed");
+            let outbox = home.join(".var/loops/alpha/mail/outbox");
+            fs::write(outbox.join(name), b"refused").expect("source");
+            service.scan().expect("initial recovery and refusal");
+            let sidecars = fs::read_dir(&outbox)
+                .expect("outbox")
+                .map(|entry| entry.expect("entry").path())
+                .filter(|path| path.file_name() != Some(name))
+                .collect::<Vec<_>>();
+            assert_eq!(sidecars.len(), 1);
+            fs::remove_file(outbox.join(name)).expect("withdraw source");
+            assert!(service.source_ready(&sender, name, Monotonic::now()));
+            super::super::journal::RECORD_SCANS.with(|count| count.set(0));
+            assert_eq!(
+                service.retry_due_at(Monotonic::now() + Duration::from_secs(2)),
+                Vec::<String>::new()
+            );
+            assert!(!sidecars[0].exists());
+            assert_eq!(
+                super::super::journal::RECORD_SCANS.with(std::cell::Cell::get),
+                0,
+                "exact-key cleanup needs no history scan"
+            );
+            assert_eq!(service.retries.wait(Monotonic::now()), None);
+            fs::write(outbox.join(name), b"another refusal").expect("source");
+            service.scan().expect("refusal observed");
+            assert!(
+                service
+                    .refused
+                    .contains_key(&(sender.clone(), name.to_owned()))
+            );
+            fs::remove_file(outbox.join(name)).expect("withdraw without an event");
+            service.scan().expect("fallback reconciliation");
+            assert!(!service.refused.contains_key(&(sender, name.to_owned())));
+        },
+    );
+}
+
+/// ´claim:loophome:mail-event-batch-selects-all-senders-without-inbox-reconciliation´
+/// ´test:unit:mail-event-batch-selects-all-senders-without-inbox-reconciliation´
+#[test]
+fn mail_event_batch_selects_all_senders_without_inbox_reconciliation() {
+    fixture(
+        "mail_event_batch_selects_all_senders_without_inbox_reconciliation",
+        |service, home| {
+            let mut notifications = notify::Notifications::new();
+            service.scan_watching(&mut notifications).expect("startup");
+            for name in ["alpha", "beta"] {
+                let base = home.join(".var/loops").join(name);
+                fs::rename(
+                    base.join(".mail-staging/held"),
+                    base.join(format!("mail/outbox/{name}.next.letter")),
+                )
+                .expect("arrive before reading events");
+            }
+            let Wake::Senders(selected) = service
+                .wait_for_change(&mut notifications)
+                .expect("event batch")
+            else {
+                panic!("inbox content or absent successful sources forced reconciliation");
+            };
+            assert_eq!(
+                selected,
+                [
+                    Address::parse("alpha").expect("alpha"),
+                    Address::parse("beta").expect("beta")
+                ]
+                .into()
+            );
+            service
+                .scan_selected(&mut notifications, selected)
+                .expect("selected delivery");
+            delivered(home, "alpha", 2);
+            delivered(home, "beta", 2);
+        },
+    );
+}
+
+/// ´claim:loophome:mail-claimed-retry-survives-unavailable-refusal-history´
+/// ´test:unit:mail-claimed-retry-survives-unavailable-refusal-history´
+#[test]
+fn mail_claimed_retry_survives_unavailable_refusal_history() {
+    fixture(
+        "mail_claimed_retry_survives_unavailable_refusal_history",
+        |service, home| {
+            let seconds = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            service.clock = Box::new(ControlledClock {
+                base: Monotonic::now(),
+                seconds: seconds.clone(),
+            });
+            let mut notifications = notify::Notifications::new();
+            let senders = BTreeSet::from([Address::parse("alpha").expect("sender")]);
+            publication::STOP.with(|stop| stop.set(Some(17)));
+            REFUSAL_HISTORY_FAILURE.with(|failure| failure.set(true));
+            assert_eq!(
+                service
+                    .scan_selected(&mut notifications, senders.clone())
+                    .expect("accepted classification failure")
+                    .len(),
+                1
+            );
+            assert!(
+                service
+                    .journal
+                    .records()
+                    .expect("accepted")
+                    .iter()
+                    .any(|record| record.completed.is_none())
+            );
+            seconds.store(1, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                service
+                    .scan_selected(&mut notifications, BTreeSet::new())
+                    .expect("events also advance due claimed work"),
+                Vec::<String>::new()
+            );
+            delivered(home, "alpha", 1);
+            assert_eq!(
+                service.attempts, 1,
+                "accepted work finishes without another claim"
+            );
+            assert!(
+                !service.refused.contains_key(&(
+                    Address::parse("alpha").expect("sender"),
+                    "alpha.self.letter".into()
+                )),
+                "completed work must not select its sender"
+            );
+            let base = home.join(".var/loops/alpha");
+            fs::rename(
+                base.join(".mail-staging/held"),
+                base.join("mail/outbox/alpha.unaccepted.letter"),
+            )
+            .expect("new source");
+            let records = home.join(".var/loops/.mail-service/deliveries");
+            fs::set_permissions(&records, fs::Permissions::from_mode(0o500))
+                .expect("post-claim failure");
+            REFUSAL_HISTORY_FAILURE.with(|failure| failure.set(true));
+            assert_eq!(
+                service
+                    .scan_selected(&mut notifications, senders)
+                    .expect("unaccepted classification failure")
+                    .len(),
+                1
+            );
+            fs::set_permissions(&records, fs::Permissions::from_mode(0o700))
+                .expect("repair fixture journal");
+            seconds.store(2, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                service
+                    .scan_selected(&mut notifications, BTreeSet::new())
+                    .expect("events also advance due claimed work"),
+                Vec::<String>::new()
+            );
+            delivered(home, "alpha", 2);
+            assert_eq!(service.journal.records().expect("records").len(), 2);
+            assert_eq!(service.retries.wait(Monotonic::now()), None);
+            assert!(
+                home.join(".var/loops/beta/mail/outbox/beta.self.letter")
+                    .exists()
+            );
         },
     );
 }

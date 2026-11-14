@@ -46,6 +46,9 @@ impl Queue {
         self.deadlines.remove(&(entry.when, key.clone()));
         Some(entry)
     }
+    pub fn senders(&self) -> BTreeSet<Address> {
+        self.keys.keys().map(|(sender, _)| sender.clone()).collect()
+    }
     pub fn ready(&self, key: &Key, now: Monotonic) -> bool {
         self.keys.get(key).is_some_and(|entry| entry.when <= now)
     }
@@ -58,6 +61,15 @@ impl Queue {
             self.remove(key)
         } else {
             None
+        }
+    }
+    pub fn remove_restoration(&mut self, key: &Key) {
+        if self
+            .keys
+            .get(key)
+            .is_some_and(|entry| matches!(&entry.work, Work::Restoration(_)))
+        {
+            self.remove(key);
         }
     }
     pub fn remove_source(&mut self, key: &Key) {
