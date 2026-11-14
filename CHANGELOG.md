@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The top-level `superloop-lane` launch usage now lists `--compute-workspace JSON` with its existing arguments, matching the launch refusal's usage; parsing and existing runs are unchanged (``prob:lanes:top-level-usage-lists-the-compute-workspace-argument``).
+
 - Clarify launch interruption on each side of reservation publication: only a published reservation lets retirement name its reserved mail birth. Pin the production ordering-helper call and distinguish legacy refusal evidence from workspace-tagged evidence; no launch or reader behavior changes (``proto:superlooplane:workspace-launch-declaration``; ``test:unit:workspace-private-make-uses-birth-publication-boundary``).
 
 - The `launch LOOP RUN --round STEP` usage now says its budget is per round, defaults to 3,600 seconds and is not inherited from dispatch. Pass `--budget SECONDS` on each resumed launch that needs a longer allowance; command behavior and existing runs are unchanged (``proto:superlooplane:resumed-letter-placement``).
