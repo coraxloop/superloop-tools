@@ -359,6 +359,10 @@ pub struct Journal {
 }
 
 impl Journal {
+    pub(super) fn activity<T: serde::Serialize>(&self, value: &T) -> Result<()> {
+        store::write(&self.root, &self.root, "activity.toml", value, true)
+    }
+
     /// Initialize an empty, service-private journal. This is explicit provisioning.
     ///
     /// # Errors
@@ -570,6 +574,7 @@ impl Journal {
                                 || target.starts_with("prepare-")
                                 || target.starts_with("refusal-")
                                 || target == "reservation-pins.toml"
+                                || target == "activity.toml"
                             {
                                 let _intent: toml::Value = store::read(
                                     directory,
@@ -607,7 +612,8 @@ impl Journal {
                                 && (target.starts_with("cleanup-")
                                     || target.starts_with("prepare-")
                                     || target.starts_with("refusal-")
-                                    || target == "reservation-pins.toml")
+                                    || target == "reservation-pins.toml"
+                                    || target == "activity.toml")
                                 && error.kind() == io::ErrorKind::NotFound =>
                         {
                             // The adapter performs no restoration until this intent's

@@ -227,10 +227,11 @@ fn run(arguments: &[OsString], report: &mut dyn std::io::Write) -> Result<()> {
     for failure in service.scan()? {
         writeln!(report, "{failure}")?;
     }
+    service.publish_activity();
     Ok(())
 }
 
-fn anchored_serve(arguments: &[OsString], report: &mut dyn std::io::Write) -> Result<()> {
+fn anchored_serve(arguments: &[OsString], _report: &mut dyn std::io::Write) -> Result<()> {
     if let [_, flag, home] = arguments
         && flag == "--check-ancestry"
     {
@@ -267,7 +268,7 @@ fn anchored_serve(arguments: &[OsString], report: &mut dyn std::io::Write) -> Re
     let mut failures = service.scan_watching(&mut notifications)?;
     loop {
         for failure in failures {
-            writeln!(report, "{failure}")?;
+            tracing::debug!(reason = %failure, "mail scan condition");
         }
         failures = match service.wait_for_change(&mut notifications)? {
             super::service::Wake::Scan => service.scan_watching(&mut notifications)?,

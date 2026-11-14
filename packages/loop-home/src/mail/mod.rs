@@ -12,6 +12,7 @@ mod store;
 pub use names::{Address, NameError, Outgoing, valid_identity_name};
 
 pub mod acl;
+mod activity;
 pub mod command;
 pub mod configuration;
 mod directory;

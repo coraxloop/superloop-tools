@@ -71,6 +71,7 @@ pub(super) struct Service {
     retries: retry::Queue,
     refused: BTreeMap<retry::Key, SourceObservation>,
     configuration: u64,
+    activity: super::activity::Activity,
     #[cfg(test)]
     attempts: usize,
 }
@@ -87,6 +88,7 @@ impl Service {
             retries: retry::Queue::default(),
             refused: BTreeMap::new(),
             configuration: 0,
+            activity: super::activity::Activity::default(),
             #[cfg(test)]
             attempts: 0,
         }
@@ -161,7 +163,12 @@ impl Service {
         notifications: &mut super::notify::Notifications,
     ) -> Result<Wake> {
         loop {
+            self.publish_activity();
             let maintenance = self.maintenance_wait(notifications);
+            let maintenance = self
+                .activity
+                .wait(self.clock.monotonic())
+                .map_or(maintenance, |wait| wait.min(maintenance));
             let wait = self
                 .retries
                 .wait(self.clock.monotonic())
@@ -219,6 +226,9 @@ impl Service {
                 return Ok(Wake::Retry);
             }
         }
+    }
+    pub fn publish_activity(&mut self) {
+        self.activity.publish(&self.journal, self.clock.monotonic());
     }
     fn configuration_changed(&mut self, notifications: &super::notify::Notifications) {
         if self.configuration != notifications.configuration() {
@@ -284,14 +294,27 @@ impl Service {
             let Some(entry) = entries.remove(&key) else {
                 continue;
             };
+            self.activity.counters.due_retries += 1;
+            let unwritten = self.activity.counters.refusals_unwritten;
+            let written = self.activity.counters.refusals_written;
             let result = self.retry_letter(&key.0, &key.1, &entry.work);
+            if let Err(error) = &result
+                && self.activity.counters.refusals_unwritten == unwritten
+                && self.activity.counters.refusals_written == written
+            {
+                self.activity
+                    .unwritten(self.clock.monotonic(), &key.0, &key.1, error);
+            }
             tracing::debug!(sender = %key.0, letter = %key.1.to_string_lossy(), success = result.is_ok(), "mail retry complete");
             if let Err(error) = result {
                 failures.push(format!("{}: {error}", key.0));
-                if !matches!(&entry.work, retry::Work::Source) || timed_retry(&error) {
+                if !matches!(&entry.work, retry::Work::Source | retry::Work::Reconsider)
+                    || timed_retry(&error)
+                {
                     self.retries.failed(key, entry, self.clock.monotonic());
                 } else {
                     self.retries.remove_source(&key);
+                    self.retries.reconsider(key, self.clock.monotonic());
                 }
             } else {
                 self.retries.remove(&key);
@@ -336,7 +359,7 @@ impl Service {
                 self.reconcile(&inventory, sender, recipient, text)?;
                 self.retry_source(sender, name)
             }
-            retry::Work::Source => self.retry_source(sender, name),
+            retry::Work::Source | retry::Work::Reconsider => self.retry_source(sender, name),
         }
     }
     fn retry_source(&mut self, sender: &Address, name: &OsStr) -> Result<()> {
@@ -382,7 +405,6 @@ impl Service {
         self.last_full_scan = self.last_scan;
         // Fallback and invalidation scans must not postpone hourly reconsideration.
         if self.maintenance_due() {
-            self.refused.clear();
             self.last_maintenance = Some(self.clock.monotonic());
         }
         notifications.begin_scan();
@@ -404,6 +426,7 @@ impl Service {
         let now = Monotonic::now();
         std::thread::sleep(scan_delay(self.last_scan, now));
         self.last_scan = Some(Monotonic::now());
+        self.activity.counters.scans_started += 1;
         tracing::debug!("mail scan started");
     }
     fn watch_inventory(
@@ -443,7 +466,7 @@ impl Service {
         let maintenance_failures = if self.maintenance_due() || self.prune_due() {
             let accounting = self.directory.inventory()?;
             if self.maintenance_due() {
-                selected.extend(self.maintain_inventory(notifications, &accounting)?);
+                self.maintain_inventory(notifications, &accounting)?;
             } else {
                 self.prune(&accounting)?;
             }
@@ -473,23 +496,16 @@ impl Service {
         notifications: &mut super::notify::Notifications,
     ) -> Result<Vec<String>> {
         let inventory = self.directory.inventory()?;
-        let selected = self.maintain_inventory(notifications, &inventory)?;
+        self.maintain_inventory(notifications, &inventory)?;
         let mut failures = inventory.failures.clone();
-        if !selected.is_empty() {
-            self.start_scan();
-            for (sender, name) in schedule(self.candidates(&inventory, Some(&selected))?) {
-                if let Err(error) = self.candidate(&sender, &name) {
-                    failures.push(format!("{sender}: {error}"));
-                }
-            }
-        }
+        failures.extend(self.retry_due());
         Ok(failures)
     }
     fn maintain_inventory(
         &mut self,
         notifications: &mut super::notify::Notifications,
         inventory: &Inventory,
-    ) -> Result<BTreeSet<Address>> {
+    ) -> Result<()> {
         self.directory.watch_configuration(notifications)?;
         if notifications.configuration() != self.configuration {
             notifications.reconcile();
@@ -505,14 +521,8 @@ impl Service {
             }
         }
         self.prune(inventory)?;
-        let reconsider = self
-            .refused
-            .keys()
-            .map(|(sender, _)| sender.clone())
-            .collect();
-        self.refused.clear();
         self.last_maintenance = Some(self.clock.monotonic());
-        Ok(reconsider)
+        Ok(())
     }
     fn tick(&mut self) -> Result<Instant> {
         let mut waiting = None;
@@ -735,6 +745,7 @@ impl Service {
                 &Witness::Absent,
                 Instant::now()?,
             )?;
+            self.activity.counters.deliveries += 1;
             tracing::info!(delivered = 1, "letter delivered");
         }
         self.retries
@@ -742,7 +753,7 @@ impl Service {
         Ok(())
     }
     fn project(
-        &self,
+        &mut self,
         actor: &Actor,
         sender: &Address,
         name: &OsStr,
@@ -779,6 +790,7 @@ impl Service {
                 )?,
             },
         )?;
+        self.activity.counters.refusals_written += 1;
         if diagnostic.0 == "pending-delivery" {
             tracing::warn!(
                 pending = 1,
@@ -819,6 +831,7 @@ impl Service {
     }
     /// One finite round-robin scan; arrivals during it wait for the next call.
     pub fn scan(&mut self) -> Result<Vec<String>> {
+        self.activity.counters.scans_started += 1;
         let _span = tracing::trace_span!("mail.scan").entered();
         let inventory = self.directory.inventory()?;
         self.scan_inventory(&inventory)
@@ -860,6 +873,7 @@ impl Service {
                 failures.push(format!("{sender}: {error}"));
             }
         }
+        failures.extend(self.retry_due());
         Ok(failures)
     }
     fn candidate(&mut self, sender_address: &Address, name: &OsStr) -> Result<()> {
@@ -875,7 +889,15 @@ impl Service {
             self.attempts += 1;
         }
         tracing::debug!(sender = %sender_address, letter = %name.to_string_lossy(), "mail candidate attempt");
+        self.activity.counters.candidate_attempts += 1;
+        let written = self.activity.counters.refusals_written;
         let result = self.try_candidate(sender_address, name);
+        if let Err(error) = &result
+            && self.activity.counters.refusals_written == written
+        {
+            self.activity
+                .unwritten(self.clock.monotonic(), sender_address, name, error);
+        }
         if result.is_err() {
             if let Some(identity) = identity {
                 self.refused.insert(key.clone(), identity);
@@ -889,6 +911,7 @@ impl Service {
                 }
             } else {
                 self.retries.remove_source(&key);
+                self.retries.reconsider(key.clone(), self.clock.monotonic());
             }
         } else {
             self.refused.remove(&key);

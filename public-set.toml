@@ -3381,6 +3381,9 @@ pattern = "packages/loop-home/src/mail/retry.rs"
 pattern = "packages/loop-home/src/mail/service.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/mail/activity.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/mail/command.rs"
 
 [[include.rows]]

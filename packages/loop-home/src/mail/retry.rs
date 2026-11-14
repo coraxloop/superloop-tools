@@ -12,6 +12,7 @@ const BATCH: usize = 64;
 #[derive(Clone)]
 pub(super) enum Work {
     Source,
+    Reconsider,
     Restoration(Address),
     Accepted(Instant),
 }
@@ -27,6 +28,13 @@ pub(super) struct Queue {
 }
 impl Queue {
     pub fn schedule(&mut self, key: Key, work: Work, now: Monotonic) {
+        if self
+            .keys
+            .get(&key)
+            .is_some_and(|entry| matches!(entry.work, Work::Reconsider))
+        {
+            self.remove(&key);
+        }
         if let Some(entry) = self.keys.get_mut(&key) {
             // A later accepted state supersedes a restored source, never the reverse.
             if matches!(work, Work::Accepted(_)) || matches!(entry.work, Work::Source) {
@@ -34,6 +42,11 @@ impl Queue {
             }
         } else {
             self.insert(key, work, FIRST, now);
+        }
+    }
+    pub fn reconsider(&mut self, key: Key, now: Monotonic) {
+        if !self.keys.contains_key(&key) {
+            self.insert(key, Work::Reconsider, Duration::from_secs(3600), now);
         }
     }
     fn insert(&mut self, key: Key, work: Work, delay: Duration, now: Monotonic) {
@@ -50,11 +63,18 @@ impl Queue {
         self.deadlines
             .iter()
             .take_while(|(when, _)| *when <= now)
+            .filter(|(_, key)| {
+                self.keys
+                    .get(key)
+                    .is_some_and(|entry| !matches!(entry.work, Work::Reconsider))
+            })
             .map(|(_, (sender, _))| sender.clone())
             .collect()
     }
     pub fn ready(&self, key: &Key, now: Monotonic) -> bool {
-        self.keys.get(key).is_some_and(|entry| entry.when <= now)
+        self.keys
+            .get(key)
+            .is_some_and(|entry| entry.when <= now && !matches!(entry.work, Work::Reconsider))
     }
     pub fn take_source_due(&mut self, key: &Key, now: Monotonic) -> Option<Entry> {
         if self
@@ -80,7 +100,7 @@ impl Queue {
         if self
             .keys
             .get(key)
-            .is_some_and(|entry| matches!(&entry.work, Work::Source))
+            .is_some_and(|entry| matches!(&entry.work, Work::Source | Work::Reconsider))
         {
             self.remove(key);
         }
@@ -107,8 +127,13 @@ impl Queue {
         due
     }
     pub fn failed(&mut self, key: Key, entry: Entry, now: Monotonic) {
+        let delay = if matches!(entry.work, Work::Reconsider) {
+            FIRST
+        } else {
+            (entry.delay * 2).min(CEILING)
+        };
         let work = self.remove(&key).map_or(entry.work, |current| current.work);
-        self.insert(key, work, (entry.delay * 2).min(CEILING), now);
+        self.insert(key, work, delay, now);
     }
 }
 

@@ -169,7 +169,13 @@ fn fixture_prepared<T>(
         } else {
             let subscriber = tracing_subscriber::fmt()
                 .with_test_writer()
-                .with_max_level(tracing::Level::DEBUG)
+                .with_max_level(
+                    if case == "mail_hourly_refusals_use_bounded_letter_deadlines" {
+                        tracing::Level::ERROR
+                    } else {
+                        tracing::Level::DEBUG
+                    },
+                )
                 .finish();
             let prepared = prepare(&home);
             tracing::subscriber::with_default(subscriber, || {
@@ -575,11 +581,18 @@ fn mail_refusal_timer_drops_a_source_that_becomes_permanent() {
             let source = home.join(".var/loops/alpha/mail/outbox/malformed");
             fs::write(&source, b"invalid fixture source").expect("source");
             let base = Monotonic::now();
+            service.clock = Box::new(ControlledClock {
+                base,
+                seconds: std::sync::Arc::new(AtomicU64::new(0)),
+            });
             service
                 .retries
                 .schedule((sender.clone(), name.to_owned()), retry::Work::Source, base);
             assert_eq!(service.retry_due_at(base + Duration::from_secs(1)).len(), 1);
-            assert_eq!(service.retries.wait(base + Duration::from_secs(100)), None);
+            assert_eq!(
+                service.retries.wait(base + Duration::from_secs(100)),
+                Some(Duration::from_secs(3500))
+            );
             assert!(!service.source_ready(&sender, name, base + Duration::from_secs(100)));
         },
     );
@@ -1520,6 +1533,140 @@ fn mail_full_scans_do_not_postpone_refusal_reconsideration() {
                 .scan_watching(&mut notifications)
                 .expect("same clock after the sweep");
             assert_eq!(service.attempts, 2, "one reconsideration per interval");
+        },
+    );
+}
+
+/// ´claim:loophome:mail-hourly-refusals-use-bounded-letter-deadlines´
+/// ´test:unit:mail-hourly-refusals-use-bounded-letter-deadlines´
+#[test]
+fn mail_hourly_refusals_use_bounded_letter_deadlines() {
+    fixture(
+        "mail_hourly_refusals_use_bounded_letter_deadlines",
+        |service, home| {
+            let seconds = std::sync::Arc::new(AtomicU64::new(0));
+            let base = Monotonic::now();
+            service.clock = Box::new(ControlledClock {
+                base,
+                seconds: seconds.clone(),
+            });
+            let mut notifications = notify::Notifications::new();
+            service
+                .scan_watching(&mut notifications)
+                .expect("initial deliveries");
+            let outbox = home.join(".var/loops/alpha/mail/outbox");
+            for n in 0..130 {
+                fs::write(outbox.join(format!("invalid-{n:03}")), b"refused").expect("source");
+            }
+            service.scan().expect("record refusals");
+            let initial = service.attempts;
+            seconds.store(3599, Ordering::Relaxed);
+            assert_eq!(service.retry_due(), Vec::<String>::new());
+            assert_eq!(service.attempts, initial);
+            for hour in 1..=3 {
+                let initial = service.attempts;
+                seconds.store(hour * 3600, Ordering::Relaxed);
+                match hour {
+                    1 => {
+                        service
+                            .scan_watching(&mut notifications)
+                            .expect("full scan drains one batch");
+                    }
+                    2 => {
+                        service
+                            .scan_selected(&mut notifications, BTreeSet::new())
+                            .expect("selected scan drains one batch");
+                    }
+                    _ => {
+                        service
+                            .maintain(&mut notifications)
+                            .expect("maintenance drains one batch");
+                    }
+                }
+                assert_eq!(service.attempts, initial + 64);
+                assert_eq!(service.retry_due().len(), 64);
+                assert_eq!(service.attempts, initial + 128);
+                assert_eq!(service.retry_due().len(), 2);
+                assert_eq!(service.attempts, initial + 130);
+                assert_eq!(
+                    service
+                        .retries
+                        .wait(base + Duration::from_secs(hour * 3600)),
+                    Some(Duration::from_secs(3600))
+                );
+                assert_eq!(service.retry_due(), Vec::<String>::new());
+            }
+        },
+    );
+}
+
+/// ´claim:loophome:mail-activity-counts-unwritten-refusals-and-stays-quiet´
+/// ´test:unit:mail-activity-counts-unwritten-refusals-and-stays-quiet´
+#[test]
+fn mail_activity_counts_unwritten_refusals_and_stays_quiet() {
+    fixture(
+        "mail_activity_counts_unwritten_refusals_and_stays_quiet",
+        |service, home| {
+            let seconds = std::sync::Arc::new(AtomicU64::new(0));
+            service.clock = Box::new(ControlledClock {
+                base: Monotonic::now(),
+                seconds: seconds.clone(),
+            });
+            service.scan().expect("deliver");
+            service.publish_activity();
+            let path = home.join(".var/loops/.mail-service/activity.toml");
+            let original = fs::read(&path).expect("operator counters");
+            let data: toml::Value =
+                toml::from_str(std::str::from_utf8(&original).expect("utf8")).expect("toml");
+            assert_eq!(data["counters"]["scans_started"].as_integer(), Some(1));
+            assert_eq!(data["counters"]["candidate_attempts"].as_integer(), Some(2));
+            assert_eq!(data["counters"]["deliveries"].as_integer(), Some(2));
+            let missing = Address::parse("alpha+absent").expect("sender");
+            assert!(
+                service
+                    .candidate(&missing, OsStr::new("alpha.missing.letter"))
+                    .is_err()
+            );
+            assert_eq!(service.activity.counters.refusals_unwritten, 1);
+            seconds.store(1, Ordering::Relaxed);
+            assert_eq!(service.retry_due().len(), 1);
+            assert_eq!(service.activity.counters.due_retries, 1);
+            assert_eq!(service.activity.counters.refusals_unwritten, 2);
+            fs::write(
+                home.join(".var/loops/alpha/mail/outbox/invalid"),
+                b"refused",
+            )
+            .expect("source");
+            service.scan().expect("refuse");
+            assert_eq!(service.activity.counters.refusals_written, 1);
+            seconds.store(59, Ordering::Relaxed);
+            service.publish_activity();
+            assert_eq!(fs::read(&path).expect("unchanged"), original);
+            seconds.store(60, Ordering::Relaxed);
+            service.publish_activity();
+            let changed = fs::read(&path).expect("updated");
+            assert_ne!(changed, original);
+            let data: toml::Value =
+                toml::from_str(std::str::from_utf8(&changed).expect("utf8")).expect("toml");
+            assert_eq!(data["counters"]["refusals_unwritten"].as_integer(), Some(2));
+            let inode = fs::metadata(&path).expect("published").ino();
+            seconds.store(3600, Ordering::Relaxed);
+            service.publish_activity();
+            assert_eq!(fs::metadata(&path).expect("quiet").ino(), inode);
+            assert_eq!(service.activity.wait(service.clock.monotonic()), None);
+            service.activity.counters.scans_started += 1;
+            let root = home.join(".var/loops/.mail-service");
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o0))
+                .expect("deny counters write");
+            service.publish_activity();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("restore root");
+            assert_eq!(
+                service.activity.wait(service.clock.monotonic()),
+                Some(Duration::from_secs(60))
+            );
+            seconds.store(3660, Ordering::Relaxed);
+            service.publish_activity();
+            assert_eq!(service.activity.wait(service.clock.monotonic()), None);
         },
     );
 }
