@@ -72,6 +72,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The helper's absent-launcher test now waits for the observed zombie state, with a distant hang guard, before checking that the unreaped launcher is treated as absent. Deployed process classification is unchanged (``test:unit:helper-detects-the-launchers-absent-process``).
+
 - The trickling-peer deadline test now keeps its writer socket open until the frame read returns, so a loaded reader observes the deadline rather than an early end-of-file. The door's frame deadline is unchanged (``test:unit:door-frame-deadline-bounds-a-trickling-peer``).
 
 - Busy-admission exercise tests now carry a controlled admission clock into the fixture service thread and prove one refused attempt from events. They no longer spend thirty real seconds per case; deployed admission and exercise retry budgets are unchanged (``test:unit:door-exercise-retries-concurrent-admission``; ``test:unit:door-exercises-busy-admission-is-unmeasured``; ``test:unit:door-enforce-retains-floor-claim-before-busy-admission``).

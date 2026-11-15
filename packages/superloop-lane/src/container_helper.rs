@@ -6051,11 +6051,16 @@ exit 0
         };
         assert!(launcher_alive(identity));
         child.kill().expect("end launcher");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while super::process_info(child.id())
-            .is_ok_and(|(_, _, state)| state != b'Z' && state != b'X')
-            && std::time::Instant::now() < deadline
-        {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let (_, _, state) = super::process_info(child.id()).expect("unreaped process state");
+            if matches!(state, b'Z' | b'X') {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "zombie state never arrived"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(!launcher_alive(identity), "unreaped zombie is absent");
