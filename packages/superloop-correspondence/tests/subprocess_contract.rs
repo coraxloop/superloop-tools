@@ -349,7 +349,7 @@ fn release_harness_keeps_all_correspondence_pins() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("PASS all 21 correspondence harness pins")
+        String::from_utf8_lossy(&output.stdout).contains("PASS all 22 correspondence harness pins")
     );
 }
 

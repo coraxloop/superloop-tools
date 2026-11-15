@@ -60,7 +60,7 @@ run_watch() {
 prepare_transport() {
   local mode=$1 host status observed
   SNAPSHOT=
-  [ "$mode" != slow ] || return 0
+  [ "$mode" != slow ] && [ "$mode" != empty-then-content ] || return 0
   SNAPSHOT=$CASE_DIR/transport-ready
   mkdir -p "$SNAPSHOT"
   for host in alpha beta; do
@@ -225,7 +225,7 @@ run_feed content 200 10 alpha
 pass "successful polls advance cursor files"
 
 new_case watch-content
-run_watch content 500 100 10 alpha
+run_watch content 120000 120000 10 alpha
 [ "$STATUS" -eq 0 ] || fail "watch content exit was $STATUS"
 grep -q '^host=alpha from=user sender=test file=/messages/alpha$' "$CASE_OUT" || fail "watch content output"
 [ "$(tail -n 1 "$CASE_OUT")" = FEED-CONTENT ] || fail "watch content verdict"
@@ -238,11 +238,19 @@ grep -q '^FEED-FAILED all ssh polls failed:' "$CASE_OUT" || fail "watch failure 
 pass "supervisor loud-failure path propagates exit 1 and verdict"
 
 new_case watch-deadline
-run_watch empty 500 150 50 alpha
+run_watch empty 1 150 50 alpha
 [ "$STATUS" -eq 2 ] || fail "watch deadline exit was $STATUS"
 grep -Eq '^FEED-DURATION-MS [0-9]+$' "$CASE_OUT" || fail "watch deadline omitted wall"
 [ "$(wc -l < "$CASE_OUT")" -eq 1 ] || fail "empty watch emitted records"
-[ "$(grep -c '^CALL' "$CASE_LOG")" -gt 1 ] || fail "watcher did not re-invoke feeder"
-pass "supervisor deadline path exits 2 with its wall after repeated polls"
+[ ! -s "$CASE_LOG" ] || fail "expired watch reached ssh"
+pass "supervisor exhausted budget exits 2 without ssh"
+
+new_case watch-repoll
+run_watch empty-then-content 120000 120000 10 alpha
+[ "$STATUS" -eq 0 ] || fail "watch repoll exit was $STATUS"
+[ "$(grep -c '^CALL' "$CASE_LOG")" -eq 2 ] || fail "watch did not poll again after an empty transport"
+grep -q '^host=alpha from=user sender=test file=/messages/alpha$' "$CASE_OUT" || fail "watch repoll content"
+[ "$(tail -n 1 "$CASE_OUT")" = FEED-CONTENT ] || fail "watch repoll verdict"
+pass "supervisor polls again after empty transport and returns its content"
 
 echo "PASS all $PASS_COUNT correspondence harness pins"

@@ -50,6 +50,14 @@ case $MODE in
   empty)
     printf '%s\n' "-- cursor: cursor-$host"
     ;;
+  empty-then-content)
+    if [ -e "$LOG.first" ]; then
+      printf '%s\n' "from=user sender=test file=/messages/$host" "-- cursor: cursor-$host-new"
+    else
+      : > "$LOG.first"
+      printf '%s\n' "-- cursor: cursor-$host"
+    fi
+    ;;
   admin-only)
     printf '%s\n' "from=admin sender=test file=/messages/$host-admin" "-- cursor: cursor-$host-admin-new"
     ;;
