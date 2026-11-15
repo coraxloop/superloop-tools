@@ -580,11 +580,16 @@ mod tests {
     /// ´test:unit:stepped-failed-transport-does-not-advance-cursor´
     #[test]
     fn stepped_failed_transport_does_not_advance_cursor() {
+        // The failed reply still carries a cursor line, so only the failure keeps it unsaved.
         let failed = check_with_cursor(
             false,
             &["alpha"],
             (100, 10, 50, 100),
-            &[Reply::failed(50)],
+            &[Reply {
+                body: "-- cursor: new\n",
+                status: 124,
+                work_ms: 50,
+            }],
             true,
             Some(b"old"),
         );
