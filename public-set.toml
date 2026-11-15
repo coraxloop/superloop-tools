@@ -662,7 +662,10 @@ pattern = "packages/pulldown-cmark-to-cmark/meson.build"
 pattern = "packages/pulldown-cmark-to-cmark/src/lib.rs"
 
 [[include.rows]]
-pattern = "packages/pulldown-cmark-to-cmark/src/source_range.rs"
+pattern = "packages/pulldown-cmark-to-cmark/src/render.rs"
+
+[[include.rows]]
+pattern = "packages/pulldown-cmark-to-cmark/src/state.rs"
 
 [[include.rows]]
 pattern = "packages/pulldown-cmark-to-cmark/src/text_modifications.rs"

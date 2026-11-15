@@ -169,7 +169,8 @@ fn check_continues_after_a_guard_rejection() {
     let root = tempfile::tempdir().expect("temporary directory");
     let rejected = root.path().join("guard-rejected.md");
     let reflowable = root.path().join("reflowable.md");
-    let rejected_before = "A \\&copy; literal.\n";
+    // Upstream now preserves escaped entities; a multiline reference still changes its ID.
+    let rejected_before = "A [the\nparser].\n\n[the parser]: https://example.com\n";
     let reflowable_before = "A paragraph that is\nhard wrapped.\n";
     fs::write(&rejected, rejected_before).expect("write rejected fixture");
     fs::write(&reflowable, reflowable_before).expect("write reflowable fixture");
@@ -202,12 +203,12 @@ fn check_continues_after_a_guard_rejection() {
         rejected.to_string_lossy().as_ref()
     );
     assert_eq!(report["rejected"][0]["kind"], "integrity_guard");
-    assert_eq!(report["rejected"][0]["event_index"], 1);
+    assert_eq!(report["rejected"][0]["event_index"], 2);
     assert!(
         report["rejected"][0]["difference"]
             .as_str()
             .expect("difference")
-            .contains("text differs"),
+            .contains("attribute differs"),
         "the rejection names what differs"
     );
     assert_eq!(
@@ -503,7 +504,8 @@ fn write_mode_records_a_rejection_and_formats_the_remaining_file() {
     let root = tempfile::tempdir().expect("temporary directory");
     let rejected = root.path().join("00-guard-rejected.md");
     let reflowable = root.path().join("01-hard-wrapped.md");
-    let rejected_before = "A \\&copy; literal.\n";
+    // Upstream now preserves escaped entities; a multiline reference still changes its ID.
+    let rejected_before = "A [the\nparser].\n\n[the parser]: https://example.com\n";
     let reflowable_before = "A paragraph that is\nhard wrapped.\n";
     fs::write(&rejected, rejected_before).expect("write rejected fixture");
     fs::write(&reflowable, reflowable_before).expect("write reflowable fixture");

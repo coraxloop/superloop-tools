@@ -54,6 +54,7 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
+unicase = "2.6"
 
 [workspace.lints.rust]
 deprecated_safe = { level = "deny", priority = -1 }

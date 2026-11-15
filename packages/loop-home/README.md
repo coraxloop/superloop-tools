@@ -176,7 +176,7 @@ After a complete home's inner probe returns, a fixed-path cleanup probe counts r
 Ordinary entry, bridges, `driver-launch` and `provision` retain their byte-for-byte standard-error line `ENTER-REPORT loop=NAME uid=UID exit=STATUS wall=S.Ss created=N corrected=M`, or the existing `--json` equivalent with `created` and `corrected`. When the entry forwards a terminating signal, or its child ends by one, the line appends `signal=NAME` and `--json` adds `signal`, with `exit` at 128 plus the signal number. After `verify` creates its temporary report, it uses `ENTER-REPORT loop=NAME uid=UID exit=STATUS wall=S.Ss would_create=N would_correct=M`, or `--json` fields `would_create` and `would_correct`; counts are `null` if root inspection fails before observing them. A missing container route returns its diagnostic before report creation and therefore has no `ENTER-REPORT` line. `registry` writes no report line.
 
 |Status|`verify` meaning|
-|------|--------|
+|------|----------------|
 |0|Home is as ensured; the inner probe ran.|
 |1|An existing runtime, filesystem, probe or publication failure; no complete report can be trusted.|
 |2|An existing command-line, registry or pre-entry grammar refusal.|

@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The Markdown formatter uses the adopted upstream writer 23.0.1, retaining reference labels, authored code spans and blank-line padding. Escaped entities that previously triggered its integrity guard now format successfully; the guard still refuses changed document events. The writer now receives the parser flags and uses Unicode reference-label comparisons (`sec:publictools:build`).
+
 - Chat export uses MiniJinja 3 with explicit Serde contexts, retaining HTML escaping and its single safe Markdown value. The embedded-template feature set stays limited to macros, cross-template operations and Serde (`sec:publictools:build`).
 
 - Build Unix process and namespace operations against nix 0.32. The workspace uses none of the changed socket-accept or splice interfaces; no command form or operator action changes (`sec:publictools:build`).

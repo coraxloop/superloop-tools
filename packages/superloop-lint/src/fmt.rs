@@ -346,6 +346,7 @@ fn serialize_markdown(source: &str) -> Result<String, FormatError> {
             .map(|(event, range)| (event, Some(range.clone()))),
         source,
         &mut rendered,
+        parser_options(),
         serializer_options(fence_width),
     )
     .map_err(|error| FormatError::new(format!("could not serialize Markdown: {error}")))?;
@@ -607,7 +608,9 @@ fn reflow_soft_breaks<'a>(
         }
 
         let event = match event {
-            Event::Code(_) => Event::InlineHtml(source[range.clone()].into()),
+            Event::Code(_) => Parser::new_ext(&source[range.clone()], ParseOptions::empty())
+                .find(|parsed| matches!(parsed, Event::Code(_)))
+                .unwrap_or(event),
             event => event,
         };
 
