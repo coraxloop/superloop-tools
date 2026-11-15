@@ -4587,12 +4587,7 @@ fn run_with_program(
         persist_settlement_field(
             &reservation,
             "helper_end",
-            helper_parent_end(
-                helper.id(),
-                helper_parent_start,
-                status,
-                helper_stop.as_ref().err(),
-            ),
+            helper_stopped_end(helper.id(), helper_parent_start, status, &helper_stop),
         )?;
     }
     let observer_end = finish_dispatch_observer(
@@ -4600,7 +4595,7 @@ fn run_with_program(
         &mut proxy,
         &record["observer_start"],
         caller.0,
-        || helper_stop_with_stderr(helper_stop, &mut helper, helper_stderr),
+        || helper_stop_with_stderr(helper_stop.map(|_| ()), &mut helper, helper_stderr),
     )?;
     let observed = if request.observe {
         let argv = vec![
@@ -6418,6 +6413,19 @@ fn helper_parent_end(
     json!({"state":"completed","successful":detail.is_none() && status.success(),"parent_pid":parent_pid,"parent_start":parent_start,"status":status.to_string(),"detail":detail.map(LaneError::line)})
 }
 
+fn helper_stopped_end(
+    parent_pid: u32,
+    parent_start: u64,
+    status: std::process::ExitStatus,
+    stopped: &Result<Option<LaneError>, LaneError>,
+) -> Value {
+    let mut end = helper_parent_end(parent_pid, parent_start, status, stopped.as_ref().err());
+    if let Ok(Some(handshake)) = stopped {
+        end["detail"] = json!(handshake.line());
+    }
+    end
+}
+
 fn helper_stop_with_stderr(
     result: Result<(), LaneError>,
     helper: &mut Child,
@@ -6435,13 +6443,17 @@ fn helper_stop_with_stderr(
     Ok(())
 }
 
-fn stop_helper(child: &mut Child, plan: &Plan, verified_runs: &OwnedFd) -> Result<(), LaneError> {
+fn stop_helper(
+    child: &mut Child,
+    plan: &Plan,
+    verified_runs: &OwnedFd,
+) -> Result<Option<LaneError>, LaneError> {
     if let Some(status) = child
         .try_wait()
         .map_err(|error| LaneError::operation("helper-stop", error.to_string()))?
     {
         return if status.success() {
-            Ok(())
+            Ok(None)
         } else {
             Err(LaneError::operation(
                 "helper-stop",
@@ -6488,10 +6500,10 @@ fn wait_helper_after_stop(
     child: &mut Child,
     handshake: Result<(), LaneError>,
     deadline: Instant,
-) -> Result<(), LaneError> {
+) -> Result<Option<LaneError>, LaneError> {
     let waited = wait_helper_exit(child, deadline);
     match (handshake, waited) {
-        (_, Ok(())) => Ok(()),
+        (handshake, Ok(())) => Ok(handshake.err()),
         (Ok(()), Err(error)) => Err(error),
         (Err(mut handshake), Err(wait)) => {
             handshake.detail.push_str("; helper exit: ");
@@ -8558,15 +8570,25 @@ mod tests {
             let result = super::wait_helper_after_stop(&mut child.0, handshake, deadline);
             match exit {
                 Some(0) => {
-                    result.expect("successful exact exit overrides failed handshake");
                     assert!(
-                        child
-                            .0
-                            .try_wait()
-                            .expect("waited")
-                            .expect("reaped")
-                            .success()
+                        result.is_ok(),
+                        "successful exact exit overrides failed handshake: {result:?}"
                     );
+                    let status = child.0.try_wait().expect("waited").expect("reaped");
+                    assert!(status.success());
+                    let end = super::helper_stopped_end(child.0.id(), 1, status, &result);
+                    assert_eq!(
+                        end["successful"], true,
+                        "handshake detail is not an exit failure"
+                    );
+                    if handshake_ok {
+                        assert!(end["detail"].is_null());
+                    } else {
+                        assert_eq!(
+                            end["detail"], "helper-stop: injected connection reset",
+                            "successful helper end keeps failed handshake detail"
+                        );
+                    }
                 }
                 Some(_) => {
                     let error = result.expect_err("nonzero exit refuses");

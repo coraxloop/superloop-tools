@@ -1932,15 +1932,10 @@ fn resume_with_program(
         persist_settlement_field(
             &path,
             "helper_end",
-            super::helper_parent_end(
-                helper.id(),
-                helper_start,
-                status,
-                helper_stop.as_ref().err(),
-            ),
+            super::helper_stopped_end(helper.id(), helper_start, status, &helper_stop),
         )?;
     }
-    super::helper_stop_with_stderr(helper_stop, &mut helper, helper_stderr)?;
+    super::helper_stop_with_stderr(helper_stop.map(|_| ()), &mut helper, helper_stderr)?;
     let settle = vec![
         "unshare".into(),
         exe_word,
