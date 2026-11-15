@@ -32,7 +32,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- The Markdown formatter uses the adopted upstream writer 23.0.1, retaining reference labels, authored code spans and blank-line padding. Escaped entities that previously triggered its integrity guard now format successfully; the guard still refuses changed document events. The writer now receives the parser flags and uses Unicode reference-label comparisons (`sec:publictools:build`).
+- The exec wrapper uses textwrap 0.16.4 with the ICU line breaker. Non-ASCII text may wrap at different positions in calligraphic output; plain output is unchanged (`sec:publictools:build`).
+
+- The Markdown formatter uses the adopted upstream writer 23.0.1, retaining reference labels, authored code spans and blank-line padding. The writer now receives the parser flags and uses Unicode reference-label comparisons. Compatibility: after the rebuilt linter is deployed, `superloop-lint fmt --check` flags tables whose separators previously omitted code spans from header widths; run the rebuilt `fmt` over repositories held to this linter to size separators to the whole header cell. Escaped entities formerly refused by the integrity guard now format successfully; the unchanged guard still refuses changed document events (`sec:publictools:build`).
 
 - Chat export uses MiniJinja 3 with explicit Serde contexts, retaining HTML escaping and its single safe Markdown value. The embedded-template feature set stays limited to macros, cross-template operations and Serde (`sec:publictools:build`).
 

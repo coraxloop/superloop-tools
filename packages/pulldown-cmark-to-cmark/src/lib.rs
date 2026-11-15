@@ -201,7 +201,7 @@ impl Options<'_> {
     /// Spacing and fence lengths are preferences, clamped to syntactic minima.
     ///
     /// # Errors
-    /// Returns an error for invalid parser options, events or source ranges, or a failed output write.
+    /// Returns an error for unsupported parser options or invalid formatting preferences.
     pub fn validate(&self, parser_options: ParserOptions) -> Result<(), OptionsError> {
         let unsupported = parser_options.difference(SUPPORTED_PARSER_OPTIONS);
         if !unsupported.is_empty() {
