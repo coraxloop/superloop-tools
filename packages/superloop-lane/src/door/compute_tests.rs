@@ -136,11 +136,13 @@ fn compute_service_with_policy(
         &json!({"schema":1,"class":"compute","undecided_reason":"fixture undecided","rules":rules}),
     )
     .expect("rubric");
+    let filed = super::REQUEST_FILED.with(|slot| slot.borrow_mut().take());
     let server = thread::spawn(move || {
         super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = contended);
+        super::REQUEST_FILED.with(|slot| *slot.borrow_mut() = filed);
         let (mut stream, _) = listener.accept()?;
         let started = Instant::now();
-        let request = frame_read_until(&mut stream, started + Duration::from_secs(2))?;
+        let request = frame_read_until(&mut stream, started + Duration::from_secs(120))?;
         serve_request(
             &mut stream,
             &registration,
@@ -1553,17 +1555,15 @@ fn compute_refusal_call(socket: &std::path::Path, use_stub: bool) -> (Value, Opt
     (reply, Some(observed_credit))
 }
 
-fn compute_queue_refusal(fixture: &Fixture) -> thread::JoinHandle<()> {
+fn compute_queue_refusal(
+    fixture: &Fixture,
+    filed: std::sync::mpsc::Receiver<String>,
+) -> thread::JoinHandle<()> {
     let store = fixture.store();
     thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let id = loop {
-            if let Some(record) = store.list_run("R").expect("queued request").first() {
-                break record.id().to_owned();
-            }
-            assert!(Instant::now() < deadline, "compute request never queued");
-            thread::sleep(Duration::from_millis(5));
-        };
+        let id = filed
+            .recv_timeout(Duration::from_secs(120))
+            .expect("compute request filed");
         store.triage("R", &[json!({"id":id,"action":"adjudicate","treatment":"refuse","reason":"fixture refusal"})], "fixture", "1").expect("queued refusal");
     })
 }
@@ -1586,7 +1586,7 @@ fn compute_deadline_refusal_case(
         let (contended, observed) = std::sync::mpsc::channel();
         let release = thread::spawn(move || {
             observed
-                .recv_timeout(Duration::from_secs(10))
+                .recv_timeout(Duration::from_secs(120))
                 .expect("measured store contention");
             drop(held);
         });
@@ -1598,6 +1598,10 @@ fn compute_deadline_refusal_case(
         words: ["cargo", "test", "--locked"].map(str::to_owned).to_vec(),
         deadline_ms: 3_600_000,
     };
+    let (filed_tx, filed_rx) = std::sync::mpsc::channel();
+    if queue == "refused" {
+        super::REQUEST_FILED.with(|slot| *slot.borrow_mut() = Some(filed_tx));
+    }
     let (socket, calls, server) = compute_service_with_policy(
         &fixture,
         "R",
@@ -1609,7 +1613,7 @@ fn compute_deadline_refusal_case(
         None,
         contended,
     );
-    let answer = (queue == "refused").then(|| compute_queue_refusal(&fixture));
+    let answer = (queue == "refused").then(|| compute_queue_refusal(&fixture, filed_rx));
     let (reply, observed_credit) = compute_refusal_call(&socket, use_stub);
     server.join().expect("server").expect("service");
     if let Some(answer) = answer {
@@ -1767,7 +1771,7 @@ fn door_rejected_compute_announces_before_admission() {
         let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, scope, None);
         let mut client = UnixStream::connect(socket).expect("connect");
         frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),command.as_bytes().to_vec()],"deadline_ms":60000})).expect("compute-shaped request");
-        let announced = frame_read_until(&mut client, Instant::now() + Duration::from_secs(5))
+        let announced = frame_read_until(&mut client, Instant::now() + Duration::from_secs(120))
             .expect("announcement precedes the held admission guard");
         assert_eq!(announced["type"], "compute-deadline");
         assert_eq!(announced["registered_deadline_ms"], compute::DEADLINE_MS);
@@ -1781,7 +1785,7 @@ fn door_rejected_compute_announces_before_admission() {
                 .is_empty()
         );
         drop(held);
-        let reply = frame_read_until(&mut client, Instant::now() + Duration::from_secs(5))
+        let reply = frame_read_until(&mut client, Instant::now() + Duration::from_secs(120))
             .expect("named refusal after admission");
         server.join().expect("server").expect("service");
         assert_eq!(reply["reason"], reason);

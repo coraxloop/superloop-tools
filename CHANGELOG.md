@@ -72,6 +72,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The compute refusal fixture now waits for its filed request event before adjudicating it; compute announcement and admission tests use distant frame and effect hang guards. The two-box admission fixture checks release and distinct records without a short wall limit. Deployed admission and request deadlines are unchanged (``test:unit:door-compute-deadline-refusal-names-the-owner-bound``; ``test:unit:door-two-boxes-share-the-bounded-store-wait``).
+
 - The request-store contention tests now decide by the named lock refusal and holder evidence instead of 500 ms and one-second upper wall bounds. The request deadlines and lock handling in deployed commands are unchanged (``test:unit:request-writer-deadline-names-lock-wait-and-holder``; ``test:unit:request-reader-renews-budget-per-read``).
 
 - The helper's absent-launcher test now waits for the observed zombie state, with a distant hang guard, before checking that the unreaped launcher is treated as absent. Deployed process classification is unchanged (``test:unit:helper-detects-the-launchers-absent-process``).
