@@ -87,13 +87,6 @@ fn public_resumed_rollback_retains_dispatch_intent() {
     scope::run("retained-intent");
 }
 
-fn public_helper_stop_recovery_refuses_retained_letter_with_reply() {
-    scope::recover_stop_race(true);
-}
-fn public_helper_stop_recovery_refuses_retained_letter_without_reply() {
-    scope::recover_stop_race(false);
-}
-
 fn public_helper_stop_recovers_resumed_reply() {
     scope::complete_stop_race(true);
 }
@@ -147,7 +140,7 @@ fn main() -> std::process::ExitCode {
             std::io::stdout().lock(),
             "test result: {}. {passed} passed; {failed} failed; 0 ignored; {} filtered out",
             if failed == 0 { "ok" } else { "FAILED" },
-            14 - passed - failed
+            12 - passed - failed
         )
         .expect("summary");
     }
@@ -158,7 +151,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn cases() -> [(&'static str, fn()); 14] {
+fn cases() -> [(&'static str, fn()); 12] {
     [
         (
             "public_helper_stop_recovers_resumed_reply",
@@ -167,14 +160,6 @@ fn cases() -> [(&'static str, fn()); 14] {
         (
             "public_helper_stop_recovers_resumed_no_reply",
             public_helper_stop_recovers_resumed_no_reply,
-        ),
-        (
-            "public_helper_stop_recovery_refuses_retained_letter_with_reply",
-            public_helper_stop_recovery_refuses_retained_letter_with_reply,
-        ),
-        (
-            "public_helper_stop_recovery_refuses_retained_letter_without_reply",
-            public_helper_stop_recovery_refuses_retained_letter_without_reply,
         ),
         (
             "public_resumed_inspector_refusal_restores_and_retries",

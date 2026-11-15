@@ -282,6 +282,14 @@ print(json.dumps(sorted(rows)))
             |_| panic!("observing fixture needs no proxy reply"),
             &mut |_| assert!(!request.dry_run, "preview starts no driver"),
             &self.lane,
+            if fs::read_to_string(self.home.join("fixture-fault"))
+                .is_ok_and(|fault| fault == "stop-race")
+            {
+                // The real helper is paused at its unlink event, not merely slow.
+                Duration::ZERO
+            } else {
+                Duration::from_secs(90)
+            },
         )
     }
     fn bind(&self) {

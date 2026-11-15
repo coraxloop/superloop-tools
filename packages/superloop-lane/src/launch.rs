@@ -3906,6 +3906,7 @@ fn run_with_program(
             proxy_state,
             on_failure,
             lane_bin,
+            Duration::from_secs(90),
         );
     }
     let started = Instant::now();
@@ -6460,6 +6461,15 @@ fn stop_helper(
     plan: &Plan,
     verified_runs: &OwnedFd,
 ) -> Result<Option<LaneError>, LaneError> {
+    stop_helper_with_bound(child, plan, verified_runs, Duration::from_secs(90))
+}
+
+fn stop_helper_with_bound(
+    child: &mut Child,
+    plan: &Plan,
+    verified_runs: &OwnedFd,
+    stop_bound: Duration,
+) -> Result<Option<LaneError>, LaneError> {
     if let Some(status) = child
         .try_wait()
         .map_err(|error| LaneError::operation("helper-stop", error.to_string()))?
@@ -6474,7 +6484,7 @@ fn stop_helper(
         };
     }
     let handshake = helper_stop_handshake(plan, verified_runs);
-    wait_helper_after_stop(child, handshake, Instant::now() + Duration::from_secs(90))
+    wait_helper_after_stop(child, handshake, Instant::now() + stop_bound, stop_bound)
 }
 
 fn helper_stop_handshake(plan: &Plan, verified_runs: &OwnedFd) -> Result<(), LaneError> {
@@ -6512,8 +6522,9 @@ fn wait_helper_after_stop(
     child: &mut Child,
     handshake: Result<(), LaneError>,
     deadline: Instant,
+    bound: Duration,
 ) -> Result<Option<LaneError>, LaneError> {
-    let waited = wait_helper_exit(child, deadline);
+    let waited = wait_helper_exit(child, deadline, bound);
     match (handshake, waited) {
         (handshake, Ok(())) => Ok(handshake.err()),
         (Ok(()), Err(error)) => Err(error),
@@ -6525,7 +6536,11 @@ fn wait_helper_after_stop(
     }
 }
 
-fn wait_helper_exit(child: &mut Child, deadline: Instant) -> Result<(), LaneError> {
+fn wait_helper_exit(
+    child: &mut Child,
+    deadline: Instant,
+    bound: Duration,
+) -> Result<(), LaneError> {
     loop {
         if let Some(status) = child
             .try_wait()
@@ -6543,7 +6558,10 @@ fn wait_helper_exit(child: &mut Child, deadline: Instant) -> Result<(), LaneErro
         if Instant::now() >= deadline {
             return Err(LaneError::operation(
                 "helper-stop",
-                "helper did not finish bounded container cancellation within 90 seconds",
+                format!(
+                    "helper did not finish bounded container cancellation within {} seconds",
+                    bound.as_secs_f64()
+                ),
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -8588,7 +8606,12 @@ mod tests {
             } else {
                 Instant::now()
             };
-            let result = super::wait_helper_after_stop(&mut child.0, handshake, deadline);
+            let result = super::wait_helper_after_stop(
+                &mut child.0,
+                handshake,
+                deadline,
+                Duration::from_secs(90),
+            );
             match exit {
                 Some(0) => {
                     assert!(

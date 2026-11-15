@@ -190,6 +190,10 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
     if case == "stop-race" {
         let error = fixture.launch(false).expect_err("real helper stop refuses");
         assert_eq!(error.kind, "helper-stop", "{error}");
+        assert!(
+            error.detail.contains("within 0 seconds"),
+            "fixture stop bound reached: {error}"
+        );
         writeln!(std::io::stdout().lock(), "STOP-RACE {error}").expect("refusal");
         let record: serde_json::Value =
             serde_json::from_slice(&fixture.reservation()).expect("race record");
@@ -274,9 +278,7 @@ fn stopped_race(reply: bool) -> Scope {
     scope
 }
 
-pub(super) fn recover_stop_race(reply: bool) {
-    let scope = stopped_race(reply);
-    let fixture = scope.fixture.as_ref().expect("retained fixture");
+fn assert_retained_letter_barrier(fixture: &host::Host, reply: bool) {
     let record: serde_json::Value =
         serde_json::from_slice(&fixture.reservation()).expect("race record");
     let mut request = superloop_lane::launch::LaunchRequest::parse(&[
@@ -330,6 +332,7 @@ pub(super) fn recover_stop_race(reply: bool) {
 pub(super) fn complete_stop_race(reply: bool) {
     let mut scope = stopped_race(reply);
     let fixture = scope.fixture.as_ref().expect("retained fixture");
+    assert_retained_letter_barrier(fixture, reply);
     let before = fixture.reservation();
     let preview = fixture
         .recover(None)

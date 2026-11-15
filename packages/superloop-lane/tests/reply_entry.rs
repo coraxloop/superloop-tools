@@ -859,6 +859,7 @@ fn resume_route(home: &Path, entry: &Path, kind: &str) {
         |_| Ok(("active".into(), "fixture-invocation".into())),
         &mut |_| panic!("must not reach workload or preparing record"),
         entry,
+        std::time::Duration::from_secs(90),
     );
     if kind == "inbound-resume-forged" {
         assert!(

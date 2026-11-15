@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use super::{
     LaunchRequest, admission, entry_argv_round, launch_environment, lock_mailbox,
     lock_run_preparation, persist_settlement_field, publish_reservation, read_reservation,
-    reservation_path, stop_helper,
+    reservation_path,
 };
 use crate::error::LaneError;
 use crate::plan::Plan;
@@ -1411,7 +1411,7 @@ pub(crate) fn validate_preflight_record(
 /// # Errors
 ///
 /// Refuses a missing choice or letter, unsettled run, changed identity or failed driver.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 #[doc(hidden)]
 pub fn resume_with_host_root(
     owner_home: &Path,
@@ -1421,6 +1421,7 @@ pub fn resume_with_host_root(
     proxy_state: impl FnMut(&str) -> Result<(String, String), LaneError>,
     on_failure: &mut dyn FnMut(&Value),
     lane_bin: &Path,
+    stop_bound: std::time::Duration,
 ) -> Result<Value, LaneError> {
     resume_with_program(
         owner_home,
@@ -1432,6 +1433,7 @@ pub fn resume_with_host_root(
         crate::container_helper::process_presence,
         |record| super::reaping::reap_interrupted_scope(record, owner_home),
         lane_bin,
+        stop_bound,
     )
 }
 
@@ -1476,6 +1478,7 @@ pub(super) fn resume_with_evidence(
         presence,
         reap,
         &exe,
+        std::time::Duration::from_secs(90),
     )
 }
 
@@ -1490,6 +1493,7 @@ fn resume_with_program(
     mut presence: impl FnMut(u32, u64) -> crate::container_helper::ProcessPresence,
     reap: impl FnOnce(&Value) -> Result<Value, LaneError>,
     lane_bin: &Path,
+    stop_bound: std::time::Duration,
 ) -> Result<Value, LaneError> {
     if request.backend.is_some() {
         return Err(LaneError::input(
@@ -1886,7 +1890,8 @@ fn resume_with_program(
     let launch_bound = match intent {
         Ok(bound) => bound,
         Err(error) => {
-            let _cancel = stop_helper(&mut helper, &plan, &verified_runs);
+            let _cancel =
+                super::stop_helper_with_bound(&mut helper, &plan, &verified_runs, stop_bound);
             let _stop = super::stop_observer(&mut helper);
             if helper_receipt.absent() {
                 let _stderr = helper_stderr.join();
@@ -1924,7 +1929,7 @@ fn resume_with_program(
         "driver_end",
         super::driver_completion(&result, driver_started, &child_end),
     )?;
-    let helper_stop = stop_helper(&mut helper, &plan, &verified_runs);
+    let helper_stop = super::stop_helper_with_bound(&mut helper, &plan, &verified_runs, stop_bound);
     if let Some(status) = helper
         .try_wait()
         .map_err(|error| LaneError::operation("helper-stop", error.to_string()))?
