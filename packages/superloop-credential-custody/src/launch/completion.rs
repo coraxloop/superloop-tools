@@ -1,21 +1,39 @@
 //! Invocation-bound generator retention and keeper-only holder cleanup.
 use super::{Keeper, Phase, Result, require};
 use crate::launch::{manager::Snapshot, store::Invocation};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(in crate::launch) struct Generator {
     invocation: Invocation,
     started: u64,
     exited: u64,
     code: i32,
     status: i32,
+    result: String,
     successful: bool,
     reply_sha256: String,
     configuration_sha256: String,
 }
 impl Generator {
+    pub(in crate::launch) fn accepts(&self, invocation: &Invocation) -> bool {
+        self.invocation == *invocation
+            && self.successful
+            && self.started > 0
+            && self.exited >= self.started
+            && self.code == 1
+            && self.status == 0
+            && self.result == "success"
+            && [&self.reply_sha256, &self.configuration_sha256]
+                .iter()
+                .all(|s| {
+                    s.len() == 64
+                        && s.bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+    }
     fn observe(
         snapshot: &Snapshot,
         invocation: &Invocation,
@@ -85,6 +103,7 @@ impl Generator {
             exited: snapshot.exited,
             code: snapshot.code,
             status: snapshot.status,
+            result: snapshot.result.clone(),
             successful,
             reply_sha256: snapshot.raw_sha256.clone(),
             configuration_sha256: snapshot.configuration_sha256.clone(),
@@ -123,6 +142,13 @@ impl Keeper<'_> {
             Ok(true)
         })();
         self.release_result(result)
+    }
+    pub fn serve_completion(&mut self, deadline: Instant) -> Result<()> {
+        let view = self.session.store().completion_view();
+        self.control
+            .as_ref()
+            .ok_or("keeper-not-captured")?
+            .serve_completion(&view, deadline.min(self.manager.deadline()))
     }
     pub fn finish_completion(&mut self) -> Result<()> {
         self.finish_completion_at(self.manager.deadline())

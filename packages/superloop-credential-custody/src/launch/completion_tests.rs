@@ -69,6 +69,66 @@ fn retained(f: &Fixture) -> serde_json::Value {
     assert!(evidence(f).join("state-07.json").is_file());
     serde_json::from_slice(&fs::read(evidence(f).join("state-07.json")).unwrap()).unwrap()
 }
+fn observe_keeper(f: &Fixture, keeper: &mut Keeper<'_>) {
+    use crate::launch::control::completion_client::{Binding, Observation, receive};
+    use std::io::{Read as _, Write as _};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(f.dir.path().join("runtime/sample/control-manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let mut request = manifest.clone();
+    request.as_object_mut().unwrap().remove("image");
+    request.as_object_mut().unwrap().remove("socket");
+    request["operation"] = "completion".into();
+    request["nonce"] = "0123456789abcdef0123456789abcdef".into();
+    let mut bytes = serde_json::to_vec(&request).unwrap();
+    bytes.push(b'\n');
+    let mut command = std::process::Command::new(f.dir.path().join("launcher"));
+    command
+        .arg("--control-client")
+        .arg(f.dir.path().join("runtime/sample/control.sock"))
+        .env_clear()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    loop_home::CommandDescriptors::default()
+        .configure(&mut command)
+        .unwrap();
+    let mut child = command.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(&bytes).unwrap();
+    let stdout = child.stdout.as_mut().unwrap();
+    let mut event = nix::libc::pollfd {
+        fd: stdout.as_raw_fd(),
+        events: nix::libc::POLLIN,
+        revents: 0,
+    };
+    crate::launch::channel::poll(std::slice::from_mut(&mut event), 600_000).unwrap();
+    assert_ne!(event.revents & nix::libc::POLLIN, 0);
+    let mut ready = [0; 10];
+    stdout.read_exact(&mut ready).unwrap();
+    assert_eq!(&ready, b"connected\n");
+    keeper.serve_completion(keeper.manager.deadline()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let (mut writer, mut reader) = UnixStream::pair().unwrap();
+    writer.write_all(&output.stdout).unwrap();
+    writer.shutdown(Shutdown::Write).unwrap();
+    let binding = Binding {
+        case: "sample",
+        nonce: "0123456789abcdef0123456789abcdef",
+        keeper_pid: std::process::id(),
+        keeper_birth: manifest["keeper_birth"].as_u64().unwrap(),
+        keeper_uid: nix::unistd::geteuid().as_raw(),
+        invocation: keeper.process.as_ref().unwrap().invocation(),
+        sealed_limit: keeper.admission.policy().limits.sealed_bytes,
+    };
+    assert_eq!(
+        receive(&mut reader, &binding, keeper.manager.deadline()),
+        Ok(Observation::Complete)
+    );
+}
 fn no_completion(f: &Fixture) {
     assert!(!evidence(f).join("completion.json").exists());
 }
@@ -191,6 +251,7 @@ fn completion_retains_before_cleanup_and_accepts_only_two_sealers() {
     assert_eq!(generator["generator"]["exited"], 200);
     keeper.finish_completion().unwrap();
     assert_eq!(keeper.phase(), Phase::Complete);
+    observe_keeper(&f, &mut keeper);
     assert!(!f.dir.path().join("manager-reply").exists()); // cleanup can unload the unit
     assert_eq!(keeper.finish_completion(), Err("completion-order"));
     let path = evidence(&f).join("completion.json");
@@ -320,6 +381,7 @@ fn completion_retains_full_output_generator_failure() {
     );
     assert_eq!(retained(&f)["generator"]["status"], status);
     assert_eq!(retained(&f)["generator"]["successful"], false);
+    assert_eq!(retained(&f)["generator"]["result"], "exit-code");
     assert_eq!(keeper.phase(), Phase::Uncertain);
     no_completion(&f);
 }

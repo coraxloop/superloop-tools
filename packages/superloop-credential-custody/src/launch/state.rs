@@ -1,8 +1,8 @@
 //! Private case-state core. Later adapters supply observations, never inferred success.
 use super::{Result, require};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Phase {
     Reserved,

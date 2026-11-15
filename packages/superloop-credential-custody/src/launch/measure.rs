@@ -5,13 +5,14 @@ use super::{
     require,
 };
 use crate::{identity::hash, receipt, record};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ObjectIdentity {
     pub device: u64,
     pub inode: u64,

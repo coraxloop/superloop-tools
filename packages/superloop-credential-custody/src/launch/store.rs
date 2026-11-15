@@ -10,7 +10,7 @@ use crate::receipt;
 use nix::fcntl::{OFlag, openat};
 use nix::sys::stat::{Mode, mkdirat};
 use nix::unistd::{UnlinkatFlags, unlinkat};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{File, Permissions};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
@@ -91,7 +91,8 @@ struct Output {
     file: File,
     entry: Entry,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Invocation {
     pub id: String,
     pub unit: String,
@@ -279,6 +280,13 @@ impl Store {
             inventory_sha256: self.inventory_sha256.as_deref(),
             generator: self.generator.as_ref(),
             sealers: self.sealers.as_ref(),
+        }
+    }
+    pub fn completion_view(&self) -> super::control::completion_client::View {
+        super::control::completion_client::View {
+            phase: self.phase(),
+            generator: self.generator.clone(),
+            sealers: self.sealers.clone(),
         }
     }
     pub fn retain_generator(&mut self, result: super::keeper::completion::Generator) -> Result<()> {

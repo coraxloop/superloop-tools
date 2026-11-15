@@ -3696,6 +3696,12 @@ pattern = "packages/superloop-credential-custody/src/launch/keeper.rs"
 pattern = "packages/superloop-credential-custody/src/launch/release.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/completion_client.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/completion_client_tests.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-credential-custody/src/launch/completion.rs"
 
 [[include.rows]]

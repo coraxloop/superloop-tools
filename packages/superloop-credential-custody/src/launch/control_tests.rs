@@ -84,6 +84,16 @@ fn transaction_role(
     phase: Phase,
     observer: bool,
 ) -> (Result<()>, Vec<u8>) {
+    transaction_completion(control, bytes, pin, phase, observer, None)
+}
+fn transaction_completion(
+    control: &Control,
+    bytes: &[u8],
+    pin: Option<&ProcessPin>,
+    phase: Phase,
+    observer: bool,
+    completion: Option<&super::completion_client::View>,
+) -> (Result<()>, Vec<u8>) {
     let path = format!(
         "/proc/{}/fd/{}/control.sock",
         std::process::id(),
@@ -149,7 +159,12 @@ fn transaction_role(
     assert_eq!(&frame, b"connected\n");
     let deadline = Instant::now() + Duration::from_secs(600);
     let result = pin.map_or_else(
-        || control.serve_once(Phase::Captured, deadline),
+        || {
+            completion.map_or_else(
+                || control.serve_once(Phase::Captured, deadline),
+                |view| control.serve_completion(view, deadline),
+            )
+        },
         |pin| control.serve_pidfd(phase, deadline, pin, &"a".repeat(64)),
     );
     if pin.is_some() {
@@ -420,4 +435,50 @@ fn control_peer_handle_refuses_a_different_live_process() {
     );
     correct.unwrap().verify().unwrap();
     assert_eq!(wrong.err(), Some("keeper-pidfd-binding"));
+}
+
+/// ´test:unit:completion-server-is-read-only-and-requires-its-operation´
+#[test]
+fn completion_server_is_read_only_and_requires_its_operation() {
+    let (_files, control) = setup();
+    let mut value = request(&control);
+    value["operation"] = "completion".into();
+    assert_eq!(
+        transaction(&control, &encoded(&value)).0,
+        Err("control-operation")
+    );
+    let view = super::completion_client::View {
+        phase: Phase::Released,
+        generator: None,
+        sealers: None,
+    };
+    let (result, bytes) = transaction_completion(
+        &control,
+        &encoded(&value),
+        None,
+        Phase::Released,
+        false,
+        Some(&view),
+    );
+    assert_eq!(result, Ok(()));
+    let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(reply["view"]["phase"], "released");
+    assert_eq!(reply["view"]["generator"], serde_json::Value::Null);
+    assert_eq!(reply["keeper_pid"], control.keeper.invocation().pid);
+    assert_eq!(reply["keeper_birth"], control.keeper.invocation().birth);
+    assert_eq!(reply["nonce"], value["nonce"]);
+    value["operation"] = "pidfd".into();
+    assert_eq!(
+        transaction_completion(
+            &control,
+            &encoded(&value),
+            None,
+            Phase::Released,
+            false,
+            Some(&view)
+        )
+        .0,
+        Err("control-operation")
+    );
+    control.cleanup().unwrap();
 }

@@ -42,6 +42,7 @@ struct Request {
 enum Operation {
     Status,
     Pidfd,
+    Completion,
 }
 pub(super) struct Control {
     directory: Directory,
@@ -174,7 +175,7 @@ impl Control {
         )
     }
     pub fn serve_once(&self, phase: Phase, deadline: Instant) -> Result<()> {
-        self.serve(phase, deadline, None)
+        self.serve(phase, deadline, None, None)
     }
     pub fn serve_pidfd(
         &self,
@@ -186,13 +187,21 @@ impl Control {
         require(phase == Phase::InventoryComplete, "handoff-phase")?;
         require(pin.invocation().id == self.invocation, "handoff-invocation")?;
         pin.verify()?;
-        self.serve(phase, deadline, Some((pin, digest)))
+        self.serve(phase, deadline, Some((pin, digest)), None)
+    }
+    pub fn serve_completion(
+        &self,
+        view: &completion_client::View,
+        deadline: Instant,
+    ) -> Result<()> {
+        self.serve(view.phase, deadline, None, Some(view))
     }
     fn serve(
         &self,
         phase: Phase,
         deadline: Instant,
         handoff: Option<(&ProcessPin, &str)>,
+        completion: Option<&completion_client::View>,
     ) -> Result<()> {
         let deadline = deadline.min(self.deadline);
         self.verify()?;
@@ -249,9 +258,23 @@ impl Control {
             };
             return super::handoff::send(&mut stream, &binding, pin, deadline);
         }
-        let mut response=serde_json::to_vec(&serde_json::json!({"schema":1,"case":self.case,"invocation":self.invocation,"phase":phase,"nonce":request.nonce})).map_err(|_|"control-encoding")?;
+        let mut response = if matches!(request.operation, Operation::Completion) {
+            let view = completion.ok_or("control-operation")?;
+            serde_json::to_vec(&completion_client::Reply {
+                schema: 1,
+                case: self.case.clone(),
+                invocation: self.invocation.clone(),
+                keeper_pid: self.keeper.invocation().pid,
+                keeper_birth: self.keeper.invocation().birth,
+                nonce: request.nonce.clone(),
+                view: view.clone(),
+            })
+            .map_err(|_| "control-encoding")?
+        } else {
+            serde_json::to_vec(&serde_json::json!({"schema":1,"case":self.case,"invocation":self.invocation,"phase":phase,"nonce":request.nonce})).map_err(|_|"control-encoding")?
+        };
         response.push(b'\n');
-        require(response.len() <= 1024, "control-response-size")?;
+        require(response.len() <= REQUEST_LIMIT, "control-response-size")?;
         let mut remaining = response.as_slice();
         while !remaining.is_empty() {
             budget(deadline)?;
@@ -310,7 +333,7 @@ fn wait(fd: i32, events: i16, deadline: Instant) -> Result<()> {
         "control-poll",
     )
 }
-fn read_request(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
+pub(super) fn read_request(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 512];
     loop {
@@ -376,7 +399,7 @@ pub(super) fn peer_credentials(stream: &UnixStream) -> Result<nix::libc::ucred> 
 }
 
 #[allow(unsafe_code)]
-fn peer_pidfd(stream: &UnixStream) -> Result<OwnedFd> {
+pub(super) fn peer_pidfd(stream: &UnixStream) -> Result<OwnedFd> {
     let mut fd: i32 = -1;
     let mut length = nix::libc::socklen_t::try_from(std::mem::size_of_val(&fd))
         .map_err(|_| "control-peer-pidfd")?;
@@ -399,3 +422,6 @@ fn peer_pidfd(stream: &UnixStream) -> Result<OwnedFd> {
     )?;
     Ok(handle)
 }
+
+#[path = "completion_client.rs"]
+pub(super) mod completion_client;
