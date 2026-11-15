@@ -3540,7 +3540,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread::JoinHandle;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn seed_attempt_reservation(root: &Path) {
@@ -5040,16 +5040,16 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn helper_reaps_dead_driver_through_built_process() {
         if let Some(ready) = std::env::var_os("HELPER_DRIVER_READY") {
-            fs::write(ready, b"ready").expect("driver ready");
-            std::thread::sleep(Duration::from_secs(60));
-            return;
+            fs::write(ready, b"started").expect("driver ready");
+            loop {
+                std::thread::park();
+            }
         }
         for recorded_end in [false, true] {
-            let mut fixture = StartedAttemptFixture::new(
-                "printf started > \"$TEST_STARTED\"; exec /bin/sleep 30",
-            );
+            let mut fixture = StartedAttemptFixture::new("exec /bin/sleep infinity");
             let ready = fixture.root.path().join("driver-ready");
-            let mut driver = crate::fixture_exec::spawn(
+            let mut ready_event = fixture_marker(&ready);
+            let driver = crate::fixture_exec::spawn(
                 Command::new(std::env::current_exe().expect("test binary"))
                     .args([
                         "--exact",
@@ -5061,16 +5061,15 @@ mod tests {
                     .stderr(Stdio::null()),
             )
             .expect("built driver process");
-            wait_fixture_ready(&ready).expect("driver start");
+            await_fixture_marker(&mut ready_event, *b"started");
+            let driver_pid = driver.id();
+            let driver_guard = HolderGuard::new();
+            driver_guard.0.lock().expect("driver holder").child = Some(driver);
             let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,
-                "driver_entry_pid":driver.id(),"driver_entry_start":process_start(driver.id()).expect("driver identity"),
+                "driver_entry_pid":driver_pid,"driver_entry_start":process_start(driver_pid).expect("driver identity"),
                 "active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
             let reservation = fixture.root.path().join(".reservation-R.json");
             publish_reservation(&reservation, &record).expect("record");
-            let started = fixture.root.path().join("container-started");
-            fixture
-                .environment
-                .insert("TEST_STARTED".into(), started.display().to_string());
             let stopped = fixture.root.path().join("stopped");
             fixture
                 .environment
@@ -5079,9 +5078,15 @@ mod tests {
             client.write_all(&0_u32.to_le_bytes()).expect("prompt");
             let saved = record.clone();
             let reservation_copy = reservation.clone();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let signal = Arc::clone(&cancelled);
+            let (observed, measurement) = mpsc::sync_channel(1);
+            let (release, released) = mpsc::sync_channel(1);
+            let (done, completed) = mpsc::sync_channel(1);
             let helper = std::thread::spawn(move || {
                 let pid = std::process::id();
-                let result = run_attempt(
+                let mut first = true;
+                let result = run_attempt_with(
                     &mut server,
                     &fixture.vector,
                     &fixture.environment,
@@ -5090,37 +5095,56 @@ mod tests {
                     &saved,
                     &fixture.driver,
                     1,
-                    &AtomicBool::new(false),
+                    &signal,
                     LauncherIdentity {
                         pid,
                         start: process_start(pid).expect("launcher"),
                     },
+                    STREAM_LIMIT,
+                    STREAM_DRAIN_GRACE,
+                    STREAM_STOP_GRACE,
+                    |child| {
+                        if first {
+                            first = false;
+                            let _ignored = observed.send(());
+                            released
+                                .recv_timeout(RETAINED_READER_HANG_BOUND)
+                                .map_err(std::io::Error::other)?;
+                        }
+                        child.try_wait()
+                    },
+                    |_| Ok(()),
+                    |_| {
+                        publish_reservation(
+                            &reservation_copy,
+                            &json!({"schema":1,"phase":"started"}),
+                        )?;
+                        Ok(())
+                    },
                     None,
                 );
+                let _ignored = done.send(());
                 (result, fixture.evidence(), fixture)
             });
-            wait_fixture_ready(&started).expect("container started");
-            publish_reservation(&reservation, &json!({"schema":1,"phase":"started"}))
-                .expect("temporarily unmeasured identity");
-            std::thread::sleep(Duration::from_millis(2100));
+            measurement
+                .recv_timeout(RETAINED_READER_HANG_BOUND)
+                .expect("unknown driver measurement event");
             assert!(
                 !stopped.exists(),
                 "unknown presence must not stop a live driver"
             );
             publish_reservation(&reservation, &record).expect("identity restored");
-            let began = Instant::now();
             if recorded_end {
                 let mut ended = record;
                 ended["driver_end"] = json!({"state":"completed","successful":false});
                 publish_reservation(&reservation, &ended).expect("recorded end");
             } else {
-                driver.kill().expect("driver dies");
+                driver_guard.close();
             }
-            let (result, evidence, fixture) = helper.join().expect("helper finishes");
-            if recorded_end {
-                driver.kill().expect("end fixture driver");
-            }
-            driver.wait().expect("reap fixture driver");
+            release.send(()).expect("release measured helper");
+            let (result, evidence, fixture) =
+                finish_attempt_fixture(helper, &completed, &cancelled);
+            driver_guard.close();
             assert_eq!(result.err().expect("named reap").kind, "survivors-reaped");
             assert_eq!(
                 evidence["reaping"]["driver"]["state"],
@@ -5133,7 +5157,6 @@ mod tests {
             assert_eq!(evidence["reaping"]["state"], "survivors-reaped");
             assert_eq!(evidence["removal"]["state"], "removed");
             assert!(stopped.exists() && fixture.removal.exists());
-            assert!(began.elapsed() < Duration::from_secs(10));
             drop(client);
         }
     }
@@ -5763,20 +5786,6 @@ exit 0
         let result = runner.join().expect("reap attempt fixture");
         event.expect("attempt completion event before distant hang guard");
         result
-    }
-
-    fn wait_fixture_ready(path: &Path) -> std::io::Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !path.exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        if path.exists() {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(
-                "fixture child did not signal readiness",
-            ))
-        }
     }
 
     fn hold_stdout(

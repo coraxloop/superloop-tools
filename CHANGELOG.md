@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Door transport deadline fixtures consume lock-wait progress before checking the final reply, using the shared bounded frame reader; deployed behavior is unchanged (`[ORCHESTRATION-rule:conformance:ordering-and-timing-evidence]`).
 
+- The helper dead-driver regression now observes its unknown-identity measurement before releasing the driver-end case, and requires reaping and removal evidence without a ten-second elapsed verdict or finite child lifetime. Production behavior is unchanged (``test:unit:helper-reaps-dead-driver-through-built-process``).
+
 - Silent-helper cancellation tests now distinguish the control request from client disappearance and require completion plus stop/wait evidence from a child with no natural end, instead of a five-second elapsed-time verdict. Installed behavior is unchanged (``proto:superlooplane:container-attempt-completion``).
 
 - Helper wall-stop coverage now waits for completion and checks the named wall cause against a child with no natural end; node scheduling no longer decides an elapsed-time verdict. Production deadlines are unchanged (``test:unit:helper-wall-stop-retains-cause-in-outcome-and-round``).
