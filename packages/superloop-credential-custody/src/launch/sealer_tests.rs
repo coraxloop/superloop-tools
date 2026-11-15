@@ -51,8 +51,11 @@ pub(super) fn make_fixture(mode: &str) -> Fixture {
     fixture.value["cases"][0]["expected_case_sha256"] = hash(&bytes).into();
     let key = fixture.dir.path().join("key");
     fs::create_dir(&key).unwrap();
-    fs::set_permissions(&key, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(key.join("synthetic-key"), b"public synthetic control").unwrap();
+    fs::set_permissions(key.join("synthetic-key"), fs::Permissions::from_mode(0o400)).unwrap();
+    fs::write(key.join("unrelated"), b"public sibling control").unwrap();
+    fs::set_permissions(key.join("unrelated"), fs::Permissions::from_mode(0o400)).unwrap();
     fixture.value["host_key"] = key.join("synthetic-key").to_str().unwrap().into();
     // The native peer uses the same loader and standard libraries as this test
     // binary. These are measured file allowances, never a directory-wide grant.
@@ -533,14 +536,12 @@ fn sealer_confinement_denies_new_authority_and_keeps_held_output() {
     let mut session = Session::start(&admission, 0, &mut store, readers).unwrap();
     assert_eq!(
         session.wait_until(hang_guard()).unwrap().sealed_bytes,
-        [20, 20]
+        [22, 22]
     );
     drop(session);
     for name in ["left.sealed", "right.sealed"] {
-        assert_eq!(
-            fs::read(fixture.dir.path().join("sealed/sample").join(name)).unwrap(),
-            b"11111111111111111111"
-        );
+        let row = fs::read(fixture.dir.path().join("sealed/sample").join(name)).unwrap();
+        assert_eq!(row, b"1111111111111111111111");
     }
     drop(outside.stdin.take());
     assert!(outside.wait().unwrap().success());
@@ -583,5 +584,55 @@ fn sealer_confinement_refuses_unprotected_key_and_missing_loader() {
                 Phase::Reserved
             }
         );
+    }
+}
+
+/// ´test:unit:sealer-host-key-path-and-file-custody-refuse-before-start´
+#[test]
+fn sealer_host_key_path_and_file_custody_refuse_before_start() {
+    let fixture = make_fixture("normal");
+    assert_eq!(
+        super::measure::admit_for_owner(&serde_json::to_vec(&fixture.value).unwrap(), 0)
+            .err()
+            .unwrap(),
+        "launch-host-key"
+    );
+    for control in ["mode", "link", "symlink", "directory", "fifo", "ancestor"] {
+        let fixture = make_fixture("normal");
+        let admission = fixture.admit();
+        let mut store = Store::reserve(&admission, 0).unwrap();
+        let key = fixture.dir.path().join("key/synthetic-key");
+        match control {
+            "mode" => fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap(),
+            "link" => fs::hard_link(&key, fixture.dir.path().join("key/alias")).unwrap(),
+            "symlink" => {
+                fs::remove_file(&key).unwrap();
+                std::os::unix::fs::symlink("unrelated", &key).unwrap();
+            }
+            "directory" => {
+                fs::remove_file(&key).unwrap();
+                fs::create_dir(&key).unwrap();
+                fs::set_permissions(&key, fs::Permissions::from_mode(0o400)).unwrap();
+            }
+            "fifo" => {
+                fs::remove_file(&key).unwrap();
+                nix::unistd::mkfifo(&key, nix::sys::stat::Mode::S_IRUSR).unwrap();
+            }
+            "ancestor" => {
+                fs::set_permissions(fixture.dir.path(), fs::Permissions::from_mode(0o777)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let (readers, _writers) = pipes();
+        assert_eq!(
+            Session::start(&admission, 0, &mut store, readers).err(),
+            Some(if control == "ancestor" {
+                "sealer-key-directory"
+            } else {
+                "sealer-key-file"
+            }),
+            "{control}"
+        );
+        assert_eq!(store.phase(), Phase::Reserved);
     }
 }

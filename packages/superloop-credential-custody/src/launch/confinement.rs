@@ -3,6 +3,7 @@ use super::{Result, measure::Admission, policy::ArtifactRole, require};
 use crate::receipt;
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::process::Command;
 
@@ -31,13 +32,9 @@ impl Confinement {
     pub fn prepare(admission: &Admission) -> Result<Self> {
         Self::require_abi(abi()?)?;
         let ruleset = create()?;
-        let key_directory = admission
-            .policy()
-            .host_key
-            .parent()
-            .ok_or("sealer-key-directory")?;
-        let key = receipt::sealed_directory(key_directory).map_err(|_| "sealer-key-directory")?;
-        add(&ruleset, &key, READ_FILE | READ_DIR)?;
+        let (directory, key) = key_handles(&admission.policy().host_key, admission.owner())?;
+        add(&ruleset, &directory, READ_DIR)?;
+        add(&ruleset, &key, READ_FILE)?;
         for artifact in admission
             .artifacts()
             .iter()
@@ -82,6 +79,37 @@ impl Confinement {
         }
         Ok(())
     }
+}
+fn key_handles(path: &std::path::Path, owner: u32) -> Result<(File, File)> {
+    let parent = path.parent().ok_or("sealer-key-directory")?;
+    let directory = receipt::walk(parent, true, true).map_err(|_| "sealer-key-directory")?;
+    let meta = directory.metadata().map_err(|_| "sealer-key-directory")?;
+    require(
+        meta.is_dir() && meta.uid() == owner && meta.mode() & 0o7022 == 0 && meta.nlink() != 0,
+        "sealer-key-directory",
+    )?;
+    // O_PATH retains identity without reading a key byte. Open beneath the held
+    // parent, and never follow a leaf link. Only this file receives READ_FILE.
+    let key = File::from(
+        nix::fcntl::openat(
+            &directory,
+            path.file_name().ok_or("sealer-key-file")?,
+            nix::fcntl::OFlag::O_PATH
+                | nix::fcntl::OFlag::O_NOFOLLOW
+                | nix::fcntl::OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::empty(),
+        )
+        .map_err(|_| "sealer-key-file")?,
+    );
+    key_custody(&key, owner)?;
+    Ok((directory, key))
+}
+fn key_custody(key: &File, owner: u32) -> Result<()> {
+    let meta = key.metadata().map_err(|_| "sealer-key-file")?;
+    require(
+        meta.is_file() && meta.uid() == owner && meta.mode() & 0o7777 == 0o400 && meta.nlink() == 1,
+        "sealer-key-file",
+    )
 }
 #[allow(unsafe_code)]
 fn abi() -> Result<i32> {
@@ -248,5 +276,25 @@ mod tests {
         assert_eq!(Confinement::require_abi(10), Ok(()));
         assert_eq!(HANDLED & (1 << 14), 1 << 14); // TRUNCATE
         assert_eq!(HANDLED & (1 << 15), 1 << 15); // IOCTL_DEV
+    }
+    /// ´test:unit:sealer-key-owner-is-exact´
+    #[test]
+    fn sealer_key_owner_is_exact() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join("synthetic");
+        std::fs::write(&path, b"public control").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let owner = nix::unistd::geteuid().as_raw();
+        let (_, key) = key_handles(&path, owner).unwrap();
+        assert_eq!(
+            key_custody(&key, owner.wrapping_add(1)),
+            Err("sealer-key-file")
+        );
+        assert_eq!(
+            key_handles(&path, owner.wrapping_add(1)).err(),
+            Some("sealer-key-directory")
+        );
     }
 }

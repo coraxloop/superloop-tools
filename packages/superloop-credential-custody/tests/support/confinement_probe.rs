@@ -120,6 +120,14 @@ fn main() {
     evidence.push(u8::from(denied) + b'0');
     evidence.extend(process_authority(outside));
     evidence.extend(scheduling(outside));
+    evidence.push(u8::from(std::fs::read_dir(root.join("key")).is_ok()) + b'0');
+    evidence.push(
+        u8::from(
+            std::fs::read(root.join("key/unrelated"))
+                .err()
+                .is_some_and(|e| e.raw_os_error() == Some(nix::libc::EACCES)),
+        ) + b'0',
+    );
     std::io::stdout().write_all(&evidence).unwrap();
 }
 

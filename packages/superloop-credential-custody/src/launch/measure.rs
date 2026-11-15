@@ -51,6 +51,7 @@ pub(super) struct CaseMeasurement {
     pub sha256: String,
 }
 pub(super) struct Admission {
+    owner: u32,
     policy: Policy,
     policy_sha256: String,
     code_sha256: String,
@@ -59,6 +60,9 @@ pub(super) struct Admission {
     fixture_image: ObjectIdentity,
 }
 impl Admission {
+    pub const fn owner(&self) -> u32 {
+        self.owner
+    }
     pub const fn policy(&self) -> &Policy {
         &self.policy
     }
@@ -95,6 +99,12 @@ pub(super) fn root_admission(path: &Path) -> Result<Admission> {
 // The root adapter always passes zero. Ordinary-user tests exercise held files.
 fn admit_bytes(bytes: &[u8], owner: u32) -> Result<Admission> {
     let policy = super::policy::parse(bytes)?;
+    // Empty-environment native sealing uses this fixed host-key path. Compare
+    // before touching artifacts; the test-only owner adapter uses synthetic keys.
+    require(
+        owner != 0 || policy.host_key == Path::new("/var/lib/systemd/credential.secret"),
+        "launch-host-key",
+    )?;
     let mut objects = BTreeSet::new();
     let mut artifacts = Vec::new();
     for expected in &policy.artifacts {
@@ -121,6 +131,7 @@ fn admit_bytes(bytes: &[u8], owner: u32) -> Result<Admission> {
         .ok_or("launch-artifact-roster")?
         .object;
     Ok(Admission {
+        owner,
         policy,
         policy_sha256: hash(bytes),
         code_sha256: canonical("custody-artifacts-v1", &measured)?,
