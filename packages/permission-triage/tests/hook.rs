@@ -729,7 +729,7 @@ fn exits_without_stdin(mut command: Command) -> Output {
             fixture_started.elapsed() < Duration::from_secs(120),
             "deadline fixture did not start its descendant"
         );
-        thread::yield_now();
+        thread::sleep(Duration::from_millis(2));
     };
     let mut child = command
         .spawn_serialized()
@@ -764,7 +764,7 @@ fn exits_without_stdin(mut command: Command) -> Output {
                     reaping_started.elapsed() < Duration::from_secs(120),
                     "deadline fixture descendant {descendant_pid} outlived its group"
                 );
-                thread::yield_now();
+                thread::sleep(Duration::from_millis(2));
             }
             return child
                 .wait_with_output()

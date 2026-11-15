@@ -128,6 +128,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Permission-triage's no-input fixture now ends its deadline process and its sleeping descendant as a group, leaving no orphan after the test succeeds (``test:integration:real-binary-exit-status-usage-and-argument-contract``; ``test:integration:version-does-not-read-stdin-and-prints-version-and-digest``).
 
+- The same no-input fixture now sleeps briefly between PID and reap event checks, avoiding a busy core while retaining the 120-second hang guards (``test:integration:real-binary-exit-status-usage-and-argument-contract``).
+
 - The failed-kill test now holds its descendant on a pipe until the runner returns, so the helper-join claim follows an event instead of a 30-second fixture lifetime (``test:crate:failed-group-kill-bounds-helper-joins``).
 
 - Ordinary permission-triage tests now pin the unchanged 120-second topology default directly and prove timeout, group kill, and reap with a shorter override; the full 120-second run remains available on demand (``test:unit:unconfigured-ceiling-is-the-pinned-production-maximum``; ``test:integration:short-ceiling-times-out-and-reaps-version-process``; ``test:integration:actual-production-ceiling-times-out-and-reaps-version-process``).
