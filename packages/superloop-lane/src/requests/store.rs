@@ -3267,6 +3267,12 @@ pub(crate) mod tests {
             view.wait_credit.is_none(),
             "post-reply admission inherits no credit"
         );
+        // A never-held lock comes first: a dropped guard's descriptor can outlive it in a
+        // child that a sibling test forked before exec, and an expired bound cannot wait.
+        drop(
+            view.write_lock("publication-released")
+                .expect("uncontended acquisition remains first"),
+        );
         let held = store.fixture_exclusive_lock().expect("holder");
         super::AFTER_WRITER_LOCK_CONTENTION.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || drop(held)));
@@ -3275,10 +3281,6 @@ pub(crate) mod tests {
             .write_lock("publication-bound")
             .expect_err("expired bound stays expired");
         assert!(super::is_lock_contention(&error));
-        drop(
-            view.write_lock("publication-released")
-                .expect("uncontended acquisition remains first"),
-        );
     }
 
     fn unpublished_fixture(store: &Store, nonce: &str) {
