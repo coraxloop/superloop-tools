@@ -39,7 +39,9 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
         .to_string(),
         0o600,
     );
-    if !home.join("without-reply").exists() {
+    if home.join("late-reply").exists() {
+        fixture.deliver_reply();
+    } else if !home.join("without-reply").exists() {
         fixture.reply();
     }
     let output = host::mapped(&home, DRIVER);

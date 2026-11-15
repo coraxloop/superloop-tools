@@ -4963,8 +4963,10 @@ fn record_readback_with_owner(
         .as_str()
         .ok_or_else(|| LaneError::input("round-record", "active round is absent"))?;
     letters::valid_step(step)?;
-    let delivery = saved["mail_replies"].as_array().and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
-        .ok_or_else(|| LaneError::input("readback", "reply has no verified mail binding; bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT before settlement"))?;
+    let delivery = saved["mail_replies"]
+        .as_array()
+        .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
+        .ok_or_else(|| LaneError::input("readback", steering::MISSING_REPLY_BINDING))?;
     let mut readback = inspect_readback(
         &plan.driver_dir.join(format!("reply-{step}.txt")),
         recorded_loop_uid(&saved)?,

@@ -48,6 +48,29 @@ impl Request {
         })
     }
 }
+pub(super) const MISSING_REPLY_BINDING: &str = "reply has no verified mail binding; bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT before settlement";
+
+fn late_reply_allowed(record: &Value, step: &str, reply: bool) -> bool {
+    reply
+        && record["phase"] == "failed"
+        && record["active_round"] == step
+        && record["rounds"]
+            .as_array()
+            .and_then(|rows| rows.last())
+            .is_some_and(|round| {
+                round["step"] == step
+                    && round["phase"] == "failed"
+                    && round["reply"].is_null()
+                    && round["settlement_error"]
+                        .as_str()
+                        .and_then(|line| line.strip_prefix("readback: "))
+                        == Some(MISSING_REPLY_BINDING)
+            })
+        && record["mail_replies"]
+            .as_array()
+            .is_some_and(|rows| !rows.iter().any(|row| row["step"] == step))
+}
+
 fn failure(error: impl std::fmt::Display) -> LaneError {
     LaneError::input("mail-delivery", error.to_string())
 }
@@ -150,7 +173,9 @@ pub fn run_from(
             "legacy reservation requires mail cutover reconciliation",
         ));
     }
-    if !matches!(record["phase"].as_str(), Some("started" | "settled")) {
+    if !matches!(record["phase"].as_str(), Some("started" | "settled"))
+        && !late_reply_allowed(&record, &request.step, reply)
+    {
         return Err(failure("binding requires a started or settled reservation"));
     }
     let key = if reply { "mail_replies" } else { "mail" };

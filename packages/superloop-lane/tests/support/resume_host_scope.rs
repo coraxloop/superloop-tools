@@ -187,6 +187,19 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
     if case == "after-reply" || case == "after-failed" {
         return next_round(&fixture, case == "after-failed");
     }
+    if case == "late-reply" {
+        let error = fixture
+            .launch(false)
+            .expect_err("unbound reply refuses readback");
+        assert_eq!(error.kind, "settle-evidence", "{error}");
+        assert!(
+            error
+                .detail
+                .contains("readback: reply has no verified mail binding"),
+            "{error}"
+        );
+        return std::process::ExitCode::SUCCESS;
+    }
     if case == "stop-race" {
         let error = fixture.launch(false).expect_err("real helper stop refuses");
         assert_eq!(error.kind, "helper-stop", "{error}");
@@ -413,4 +426,103 @@ pub(super) fn complete_stop_race(reply: bool) {
         .lock()
         .write_all(&output.stderr)
         .expect("next launch diagnostics");
+}
+
+pub(super) fn late_reply() {
+    let mut scope = Scope::new();
+    let fixture = scope.fixture.as_ref().expect("fixture");
+    host::write(fixture.home().join("late-reply"), b"", 0o600);
+    let output = scope.execute("late-reply").expect("real readback refusal");
+    scope.stop().expect("scope absent");
+    assert!(output.status.success(), "{output:?}");
+    let fixture = scope.fixture.as_ref().expect("retained fixture");
+    let original = fixture.reservation();
+    let failed: serde_json::Value = serde_json::from_slice(&original).expect("failed record");
+    assert_eq!(failed["phase"], "failed");
+    assert_eq!(failed["rounds"][1]["phase"], "failed");
+    assert!(failed["rounds"][1]["reply"].is_null());
+    late_reply_refusals(fixture, &failed);
+    host::write(
+        fixture.home().join("runs/.reservation-R.json"),
+        original,
+        0o600,
+    );
+    let binding = fixture
+        .bind_reply()
+        .expect("late reply binds after real readback refusal");
+    let bound = fixture.reservation();
+    let inventory = fixture.inventory();
+    let error = fixture
+        .bind_reply()
+        .expect_err("already-bound failed round refuses a second binding");
+    assert_eq!(error.kind, "mail-delivery");
+    assert_eq!(
+        fixture.reservation(),
+        bound,
+        "binding refusal preserves record"
+    );
+    assert_eq!(
+        fixture.inventory(),
+        inventory,
+        "binding refusal preserves files"
+    );
+    let preview = fixture
+        .settle(None)
+        .expect("bound reply settlement preview");
+    let digest = preview["preview_sha256"]
+        .as_str()
+        .expect("settlement digest");
+    fixture
+        .settle(Some(digest))
+        .expect("digest-bound late reply settlement");
+    let saved: serde_json::Value = serde_json::from_slice(&fixture.reservation()).expect("settled");
+    assert_eq!(saved["phase"], "settled");
+    assert_eq!(saved["rounds"][1]["phase"], "settled");
+    assert_eq!(
+        saved["rounds"][1]["reply"]["sha256"],
+        binding["mail"]["evidence_digest"]
+    );
+    assert_eq!(
+        saved["rounds"][1]["reply"]["bytes"],
+        binding["mail"]["bytes"]
+    );
+    let next = fixture
+        .next_launch(false, true)
+        .expect("late reply owes no thread choice");
+    assert_eq!(next["helper_preflight"]["state"], "passed");
+}
+
+fn late_reply_refusals(fixture: &host::Host, failed: &serde_json::Value) {
+    for shape in ["other-refusal", "existing-reply", "wrong-step"] {
+        let mut changed = failed.clone();
+        match shape {
+            "other-refusal" => {
+                changed["rounds"][1]["settlement_error"] =
+                    serde_json::json!("settle-evidence: different refusal");
+            }
+            "existing-reply" => changed["rounds"][1]["reply"] = serde_json::json!({"bytes":1}),
+            _ => changed["active_round"] = serde_json::json!("dispatch"),
+        }
+        host::write(
+            fixture.home().join("runs/.reservation-R.json"),
+            serde_json::to_vec(&changed).expect("changed record"),
+            0o600,
+        );
+        let before = fixture.reservation();
+        let inventory = fixture.inventory();
+        let error = fixture
+            .bind_reply()
+            .expect_err("unrelated or already-replied failed round refuses");
+        assert_eq!(error.kind, "mail-delivery", "{shape}: {error}");
+        assert_eq!(
+            fixture.reservation(),
+            before,
+            "refusal preserves record: {shape}"
+        );
+        assert_eq!(
+            fixture.inventory(),
+            inventory,
+            "refusal preserves files: {shape}"
+        );
+    }
 }

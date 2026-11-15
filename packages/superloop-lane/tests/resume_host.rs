@@ -175,6 +175,10 @@ for p in [root,leaf]:os.chown(p,64010,64010)
     );
 }
 
+fn public_late_reply_binds_and_settles_after_readback_refusal() {
+    scope::late_reply();
+}
+
 fn main() -> std::process::ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|s| s == "--fixture-scope") {
@@ -221,7 +225,7 @@ fn main() -> std::process::ExitCode {
             std::io::stdout().lock(),
             "test result: {}. {passed} passed; {failed} failed; 0 ignored; {} filtered out",
             if failed == 0 { "ok" } else { "FAILED" },
-            13 - passed - failed
+            14 - passed - failed
         )
         .expect("summary");
     }
@@ -232,8 +236,12 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn cases() -> [(&'static str, fn()); 13] {
+fn cases() -> [(&'static str, fn()); 14] {
     [
+        (
+            "public_late_reply_binds_and_settles_after_readback_refusal",
+            public_late_reply_binds_and_settles_after_readback_refusal,
+        ),
         (
             "public_failed_round_inspection_uses_allocated_worker",
             public_failed_round_inspection_uses_allocated_worker,

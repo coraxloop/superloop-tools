@@ -82,10 +82,18 @@ impl Host {
             ),
         );
     }
+    pub(super) fn deliver_reply(&self) {
+        delivery(&self.home, "package-canonical-reply");
+    }
     pub(super) fn reply(&self) {
+        self.bind_reply().expect("production reply binding");
+    }
+    pub(super) fn bind_reply(&self) -> Result<Value, superloop_lane::error::LaneError> {
         let record: Value = serde_json::from_slice(&self.reservation()).expect("active record");
         let step = record["active_round"].as_str().expect("active step");
-        if record["mail_replies"].as_array().is_none_or(Vec::is_empty) {
+        if !self.home.join("late-reply").exists()
+            && record["mail_replies"].as_array().is_none_or(Vec::is_empty)
+        {
             delivery(&self.home, "package-canonical-reply");
         }
         let request = superloop_lane::launch::steering::Request::parse(&[
@@ -107,7 +115,6 @@ impl Host {
                 Some(&self.lane),
             ),
         )
-        .expect("production reply binding");
     }
     pub(super) fn place(&self) {
         let parent = self.home.join("placement-parent");
