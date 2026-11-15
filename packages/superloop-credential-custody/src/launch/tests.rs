@@ -189,7 +189,7 @@ fn launch_policy_bounds_all_work() {
         }
     }
     let mut oversized = Fixture::new();
-    oversized.value["limits"]["artifact_bytes"] = json!(134_217_729);
+    oversized.value["limits"]["artifact_bytes"] = json!(67_108_865);
     oversized.refusal("launch-policy-limit");
     for (field, value) in [("campaign_ms", 1), ("total_sealed_bytes", 1)] {
         let mut f = Fixture::new();

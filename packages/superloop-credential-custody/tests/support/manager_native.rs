@@ -1,12 +1,5 @@
 //! Test-only manager CLI peer: records vectors and supplies synthetic metadata.
 use std::fs;
-#[allow(
-    dead_code,
-    clippy::redundant_pub_crate,
-    reason = "the peer includes the exact entry-only closure mechanism, not a second implementation"
-)]
-#[path = "../../src/launch/startup.rs"]
-mod startup;
 use std::io::{Read as _, Write as _};
 fn main() {
     if run().is_err() {
@@ -20,12 +13,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("environment".into());
     }
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.first().is_some_and(|a| a == "--startup-control") {
-        return startup_control(&args);
-    }
-    if args.first().is_some_and(|a| a == "--root-control") {
-        return root_control();
-    }
     if args.first().is_some_and(|a| a == "emit") {
         return stopped_fixture(&args);
     }
@@ -33,6 +20,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if unsafe_fd(fd) {
             return Err("descriptor".into());
         }
+    }
+    if args.first().is_some_and(|a| a == "--control-client") {
+        return control_client(&args);
     }
     let mut input = Vec::new();
     std::io::stdin().read_to_end(&mut input)?;
@@ -79,23 +69,6 @@ fn unsafe_fd(fd: i32) -> bool {
 }
 
 #[allow(unsafe_code)]
-fn startup_control(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let fd = args.get(1).ok_or("fd")?.parse::<i32>()?;
-    if fd < 9 || !unsafe_fd(fd) {
-        return Err("ambient missing".into());
-    }
-    // SAFETY: this native peer is single-threaded and owns no nonstandard
-    // descriptors; the selected fd is an inherited raw capability only.
-    unsafe {
-        startup::close_inherited().map_err(std::io::Error::other)?;
-    }
-    if unsafe_fd(fd) {
-        return Err("ambient retained".into());
-    }
-    std::io::stdout().write_all(b"resident-descriptors-closed\n")?;
-    Ok(())
-}
-#[allow(unsafe_code)]
 fn stopped_fixture(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::fd::FromRawFd as _;
     if args.len() != 3 || args[1] != "--case-record" {
@@ -120,15 +93,20 @@ fn stopped_fixture(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[allow(unsafe_code)]
-fn root_control() -> Result<(), Box<dyn std::error::Error>> {
-    if nix::unistd::geteuid().as_raw() == 0 {
-        return Err("ordinary control required".into());
+fn control_client(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    if args.len() != 2 {
+        return Err("control arguments".into());
     }
-    // SAFETY: this fresh native peer is single-threaded with no owned fd above 2.
-    if unsafe { startup::RootStartup::initialize() }.err() != Some("keeper-root-required") {
-        return Err("root guard".into());
-    }
-    std::io::stdout().write_all(b"root-required\n")?;
+    let mut bytes = Vec::new();
+    std::io::stdin().read_to_end(&mut bytes)?;
+    let mut stream = UnixStream::connect(&args[1])?;
+    stream.write_all(&bytes)?;
+    stream.shutdown(Shutdown::Write)?;
+    std::io::stdout().write_all(b"connected\n")?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    std::io::stdout().write_all(&response)?;
     Ok(())
 }

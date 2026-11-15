@@ -8,7 +8,7 @@ use std::time::Duration;
 pub(in crate::launch) fn fixture() -> Fixture {
     let mut f = make_fixture("normal");
     manager::tests::add_images(&mut f);
-    f.value["limits"]["artifact_bytes"] = (128 * 1024 * 1024).into();
+    f.value["limits"]["artifact_bytes"] = (64 * 1024 * 1024).into();
     let peer = f.dir.path().join("manager-start");
     let bytes = fs::read(peer).unwrap();
     let path = f.dir.path().join("fixture");
@@ -16,10 +16,11 @@ pub(in crate::launch) fn fixture() -> Fixture {
     fs::write(&path, &bytes).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o555)).unwrap();
     f.value["artifacts"][1]["expected_sha256"] = crate::identity::hash(&bytes).into();
-    let own = std::env::current_exe().unwrap();
-    f.value["artifacts"][0]["path"] = own.to_str().unwrap().into();
-    f.value["artifacts"][0]["expected_sha256"] =
-        crate::identity::hash(&fs::read(&own).unwrap()).into();
+    let own = f.dir.path().join("launcher");
+    fs::set_permissions(&own, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&own, &bytes).unwrap();
+    fs::set_permissions(&own, fs::Permissions::from_mode(0o555)).unwrap();
+    f.value["artifacts"][0]["expected_sha256"] = crate::identity::hash(&bytes).into();
     f
 }
 struct ChildGuard(Child);
@@ -102,7 +103,10 @@ fn captured(fixture: &Fixture, admission: &Admission, keeper: &mut Keeper<'_>) -
     let (child, writers) = start(fixture, &keeper.pipes);
     set_reply(fixture, admission, child.0.id());
     keeper
-        .capture_with(|_| Ok(writers.each_ref().map(|f| f.try_clone().unwrap())))
+        .capture_with(
+            |_| Ok(writers.each_ref().map(|f| f.try_clone().unwrap())),
+            Control::test_bind,
+        )
         .unwrap();
     drop(writers);
     child
@@ -118,7 +122,10 @@ fn keeper_captures_real_stopped_image_with_manager_stand_in() {
     assert_eq!(keeper.phase(), Phase::Captured);
     keeper.verify_capture().unwrap();
     assert_eq!(
-        keeper.capture_with(|_| panic!("duplicate capture must not copy")),
+        keeper.capture_with(
+            |_| panic!("duplicate capture must not copy"),
+            Control::test_bind
+        ),
         Err("keeper-capture-order")
     );
     let receipt: serde_json::Value = serde_json::from_slice(
@@ -166,10 +173,13 @@ fn keeper_contradiction_and_ambiguous_start_retain_quarantine() {
     let (child, writers) = start(&f, &keeper.pipes);
     set_reply(&f, &admission, child.0.id());
     assert_eq!(
-        keeper.capture_with(|_| Ok([
-            writers[0].try_clone().unwrap(),
-            writers[0].try_clone().unwrap()
-        ])),
+        keeper.capture_with(
+            |_| Ok([
+                writers[0].try_clone().unwrap(),
+                writers[0].try_clone().unwrap()
+            ]),
+            Control::test_bind
+        ),
         Err("fifo-writer-binding")
     );
     assert_eq!(keeper.phase(), Phase::Uncertain);
@@ -265,12 +275,17 @@ fn process_pin_refuses_wrong_image_command_and_exit() {
 #[test]
 #[allow(unsafe_code)]
 fn resident_startup_closes_ambient_descriptors_before_residency() {
-    let f = fixture();
     let file = tempfile::tempfile().unwrap();
     let raw = nix::fcntl::fcntl(&file, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(1000)).unwrap();
     // SAFETY: F_DUPFD_CLOEXEC returned a new owned descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-    let program = f.dir.path().join("manager-start");
+    let current = std::env::current_exe().unwrap();
+    let program = current
+        .ancestors()
+        .take(8)
+        .map(|p| p.join("examples/custody-startup-test"))
+        .find(|p| p.is_file())
+        .unwrap();
     let mut command = Command::new(&program);
     command
         .args(["--startup-control", &raw.to_string()])

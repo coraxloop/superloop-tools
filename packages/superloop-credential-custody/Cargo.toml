@@ -51,3 +51,8 @@ test = false
 name = "custody-manager-test"
 path = "tests/support/manager_native.rs"
 test = false
+
+[[example]]
+name = "custody-startup-test"
+path = "tests/support/startup_native.rs"
+test = false

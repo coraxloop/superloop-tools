@@ -15,7 +15,20 @@ fn setup() -> (crate::launch::tests::Fixture, Control) {
         uid: nix::unistd::geteuid().as_raw(),
         image: admission.fixture_image(),
     };
-    let control = Control::bind(
+    // A production keeper must still match the admitted image; the test runner
+    // is deliberately a different inode from the small native control client.
+    assert_eq!(
+        Control::bind(
+            &RootStartup::test_owner(),
+            &pipes,
+            &admission,
+            0,
+            &invocation
+        )
+        .err(),
+        Some("keeper-image")
+    );
+    let control = Control::test_bind(
         &RootStartup::test_owner(),
         &pipes,
         &admission,
@@ -28,19 +41,48 @@ fn setup() -> (crate::launch::tests::Fixture, Control) {
 fn request(control: &Control) -> serde_json::Value {
     serde_json::json!({"schema":1,"case":"sample","keeper_pid":control.keeper.invocation().pid,"keeper_birth":control.keeper.invocation().birth,"invocation":control.invocation,"operation":"status","nonce":"0123456789abcdef0123456789abcdef"})
 }
-fn transaction(control: &Control, bytes: Vec<u8>) -> (Result<()>, Vec<u8>) {
+fn transaction(control: &Control, bytes: &[u8]) -> (Result<()>, Vec<u8>) {
     let path = format!(
-        "/proc/self/fd/{}/control.sock",
+        "/proc/{}/fd/{}/control.sock",
+        std::process::id(),
         control.directory.file().as_raw_fd()
     );
-    let mut client = UnixStream::connect(path).unwrap();
-    let thread = std::thread::spawn(move || {
-        let _write = client.write_all(&bytes);
-        let _shutdown = client.shutdown(Shutdown::Write);
-        let mut result = Vec::new();
-        let _read = client.read_to_end(&mut result);
-        result
-    });
+    let directory = fs::read_link(format!(
+        "/proc/self/fd/{}",
+        control.directory.file().as_raw_fd()
+    ))
+    .unwrap();
+    let image = directory
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("launcher");
+    let mut command = std::process::Command::new(&image);
+    command
+        .args(["--control-client", &path])
+        .env_clear()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    loop_home::CommandDescriptors::default()
+        .configure(&mut command)
+        .unwrap();
+    let mut child = command.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    let stdout = child.stdout.as_mut().unwrap();
+    let mut ready = nix::libc::pollfd {
+        fd: stdout.as_raw_fd(),
+        events: nix::libc::POLLIN,
+        revents: 0,
+    };
+    // Emergency hang guard only. The peer writes this ten-byte readiness frame
+    // in one PIPE_BUF-sized write after it has connected and sent the request.
+    super::super::channel::poll(std::slice::from_mut(&mut ready), 600_000).unwrap();
+    assert_ne!(ready.revents & nix::libc::POLLIN, 0);
+    let mut frame = [0; 10];
+    stdout.read_exact(&mut frame).unwrap();
+    assert_eq!(&frame, b"connected\n");
     let result = control.serve_once(Phase::Captured, Instant::now() + Duration::from_secs(600));
     // A deadline can refuse before accept. Close this harness-owned queued
     // connection before waiting for its reader; the test never waits for time.
@@ -49,8 +91,11 @@ fn transaction(control: &Control, bytes: Vec<u8>) -> (Result<()>, Vec<u8>) {
     {
         drop(pending);
     }
-    let response = thread.join().unwrap();
-    (result, response)
+    let output = child.wait_with_output().unwrap();
+    if result.is_ok() {
+        assert!(output.status.success());
+    }
+    (result, output.stdout)
 }
 fn encoded(value: &serde_json::Value) -> Vec<u8> {
     let mut b = serde_json::to_vec(value).unwrap();
@@ -61,7 +106,7 @@ fn encoded(value: &serde_json::Value) -> Vec<u8> {
 #[test]
 fn control_transaction_binds_owner_image_case_and_keeper_birth() {
     let (_f, mut control) = setup();
-    let (result, bytes) = transaction(&control, encoded(&request(&control)));
+    let (result, bytes) = transaction(&control, &encoded(&request(&control)));
     assert_eq!(result, Ok(()));
     let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(reply["phase"], "captured");
@@ -85,7 +130,7 @@ fn control_transaction_binds_owner_image_case_and_keeper_birth() {
     ] {
         let mut r = request(&control);
         r[key] = value;
-        let (result, bytes) = transaction(&control, encoded(&r));
+        let (result, bytes) = transaction(&control, &encoded(&r));
         assert_eq!(result, Err("control-transaction"), "{key}");
         assert_eq!(bytes.len(), 0);
     }
@@ -97,7 +142,7 @@ fn control_transaction_binds_owner_image_case_and_keeper_birth() {
     ] {
         let mut value = request(&control);
         value["nonce"] = serde_json::json!(nonce);
-        let (result, bytes) = transaction(&control, encoded(&value));
+        let (result, bytes) = transaction(&control, &encoded(&value));
         assert_eq!(result, Err("control-nonce"));
         assert_eq!(bytes.len(), 0);
     }
@@ -106,7 +151,7 @@ fn control_transaction_binds_owner_image_case_and_keeper_birth() {
         device: 0,
         inode: 0,
     };
-    let (result, bytes) = transaction(&control, encoded(&request(&control)));
+    let (result, bytes) = transaction(&control, &encoded(&request(&control)));
     assert_eq!(result, Err("keeper-image"));
     assert_eq!(bytes.len(), 0);
     control.image = image;
@@ -130,11 +175,11 @@ fn control_record_is_closed_bounded_and_metadata_only() {
         b"not-json\n".to_vec(),
         format!("{valid}{valid}").into_bytes(),
     ] {
-        let (result, response) = transaction(&control, bytes);
+        let (result, response) = transaction(&control, &bytes);
         assert_eq!(result, Err("control-record"));
         assert_eq!(response.len(), 0);
     }
-    let (result, response) = transaction(&control, vec![b'x'; REQUEST_LIMIT + 1]);
+    let (result, response) = transaction(&control, &vec![b'x'; REQUEST_LIMIT + 1]);
     assert_eq!(result, Err("control-size"));
     assert_eq!(response.len(), 0);
     let path = format!(
@@ -152,7 +197,7 @@ fn control_record_is_closed_bounded_and_metadata_only() {
     let (stale, _address) = control.listener.accept().unwrap();
     drop(stale);
     control.deadline = Instant::now();
-    let (result, response) = transaction(&control, encoded(&request(&control)));
+    let (result, response) = transaction(&control, &encoded(&request(&control)));
     assert_eq!(result, Err("control-deadline"));
     assert_eq!(response.len(), 0);
     control.cleanup().unwrap();

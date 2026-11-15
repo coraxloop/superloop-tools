@@ -69,6 +69,25 @@ impl Control {
             .ok_or("control-image")?;
         image.unchanged()?;
         let keeper = ProcessPin::peer(std::process::id(), owner, image.object)?;
+        Self::bind_pinned(
+            pipes,
+            admission,
+            index,
+            invocation,
+            keeper,
+            image.object,
+            owner,
+        )
+    }
+    fn bind_pinned(
+        pipes: &Pipes,
+        admission: &Admission,
+        index: usize,
+        invocation: &Invocation,
+        keeper: ProcessPin,
+        image: ObjectIdentity,
+        owner: u32,
+    ) -> Result<Self> {
         let directory = pipes.directory().try_clone()?;
         directory.verify()?;
         let path = format!(
@@ -97,7 +116,7 @@ impl Control {
             case,
             invocation: invocation.id.clone(),
             keeper,
-            image: image.object,
+            image,
             owner,
             deadline: Instant::now()
                 + std::time::Duration::from_millis(admission.policy().limits.case_ms),
@@ -106,6 +125,38 @@ impl Control {
         let manifest=serde_json::to_vec(&serde_json::json!({"schema":1,"case":control.case,"invocation":control.invocation,"keeper_pid":control.keeper.invocation().pid,"keeper_birth":control.keeper.invocation().birth,"image":control.image,"socket":control.object})).map_err(|_|"control-encoding")?;
         receipt::publish_held(control.directory.file(), "control-manifest.json", &manifest)?;
         Ok(control)
+    }
+    // The ordinary-user harness has a large Rust test runner and a distinct,
+    // small native client image. Production bind above never takes this path.
+    #[cfg(test)]
+    pub(super) fn test_bind(
+        startup: &RootStartup,
+        pipes: &Pipes,
+        admission: &Admission,
+        index: usize,
+        invocation: &Invocation,
+    ) -> Result<Self> {
+        let image = admission
+            .artifacts()
+            .iter()
+            .find(|a| a.role == ArtifactRole::Launcher)
+            .ok_or("control-image")?;
+        image.unchanged()?;
+        let own = std::fs::File::open("/proc/self/exe").map_err(|_| "keeper-image")?;
+        let keeper = ProcessPin::peer(
+            std::process::id(),
+            startup.owner(),
+            ObjectIdentity::of(&own)?,
+        )?;
+        Self::bind_pinned(
+            pipes,
+            admission,
+            index,
+            invocation,
+            keeper,
+            image.object,
+            startup.owner(),
+        )
     }
     fn verify(&self) -> Result<()> {
         self.directory.verify()?;

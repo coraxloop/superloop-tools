@@ -56,9 +56,19 @@ impl<'a> Keeper<'a> {
         Ok(())
     }
     pub fn capture(&mut self) -> Result<()> {
-        self.capture_with(ProcessPin::writers)
+        self.capture_with(ProcessPin::writers, Control::bind)
     }
-    fn capture_with(&mut self, copy: impl FnOnce(&ProcessPin) -> Result<[File; 2]>) -> Result<()> {
+    fn capture_with(
+        &mut self,
+        copy: impl FnOnce(&ProcessPin) -> Result<[File; 2]>,
+        bind: impl FnOnce(
+            &RootStartup,
+            &Pipes,
+            &Admission,
+            usize,
+            &super::store::Invocation,
+        ) -> Result<Control>,
+    ) -> Result<()> {
         require(
             !self.terminal && self.session.store().phase() == Phase::Submitted,
             "keeper-capture-order",
@@ -100,7 +110,7 @@ impl<'a> Keeper<'a> {
                 .capture_manager(process.invocation().clone(), &snapshot)?;
             self.pipes.capture([&writers[0], &writers[1]])?;
             drop(writers); // Poll-only sealer duplicates remain; no keeper writer remains.
-            self.control = Some(Control::bind(
+            self.control = Some(bind(
                 &self.startup,
                 &self.pipes,
                 self.admission,

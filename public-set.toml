@@ -3693,6 +3693,9 @@ pattern = "packages/superloop-credential-custody/src/launch/manager_tests.rs"
 pattern = "packages/superloop-credential-custody/tests/support/manager_native.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-credential-custody/tests/support/startup_native.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-credential-custody/tests/support/confinement_probe.rs"
 
 [[include.rows]]
