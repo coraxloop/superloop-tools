@@ -5723,7 +5723,6 @@ exit 0
             let child = {
                 let mut state = self.0.lock().expect("holder lock");
                 state.closed = true;
-                drop(state.release.take());
                 state.child.take()
             };
             if let Some(mut child) = child {
@@ -5736,6 +5735,7 @@ exit 0
     impl Drop for HolderGuard {
         fn drop(&mut self) {
             self.close();
+            drop(self.0.lock().expect("holder lock").release.take());
         }
     }
 
