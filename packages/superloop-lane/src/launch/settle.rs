@@ -305,9 +305,12 @@ fn recovery_basis(
     Ok(())
 }
 
-/// Refuse a failed round in neither admitted shape, naming the recorded ends that decided it.
+/// Refuse a failed round in neither admitted shape, naming each recorded term of the
+/// driver-failure shape, so that a loop sees which term kept its record out.
 fn unsettled_failed_round(record: &Value, round: &Value) -> LaneError {
+    let driver_state = &record["driver_end"]["state"];
     let driver = &record["driver_end"]["successful"];
+    let helper_state = &record["helper_end"]["state"];
     let helper = &record["helper_end"]["successful"];
     let readback = &record["readback_end"];
     let reply = if round["reply"].is_null() {
@@ -315,10 +318,12 @@ fn unsettled_failed_round(record: &Value, round: &Value) -> LaneError {
     } else {
         "present"
     };
+    let pre_driver = &record["pre_driver_failure"];
+    let recovery = &record["reaping_recovery"]["state"];
     LaneError::input(
         "settle-state-refusal",
         format!(
-            "failed round has no settlement refusal and is not a driver failure after its reply was read back with a successful helper end: driver_end.successful {driver}, helper_end.successful {helper}, readback_end {readback}, reply {reply}"
+            "failed round has no settlement refusal and is not a driver failure after its reply was read back with a successful helper end: driver_end.state {driver_state}, driver_end.successful {driver}, helper_end.state {helper_state}, helper_end.successful {helper}, readback_end {readback}, reply {reply}, pre_driver_failure {pre_driver}, reaping_recovery.state {recovery}"
         ),
     )
 }
@@ -4526,22 +4531,32 @@ esac
             "readback: retained reply differs from its verified service delivery"
         );
         std::fs::write(&reply, b"reply\n").expect("bound reply");
+        assert_eq!(std::fs::read(&path).expect("refused previews"), launcher);
         for (pointer, value) in [
             ("/driver_end/successful", json!(true)),
             ("/helper_end/successful", json!(false)),
+            ("/driver_end/state", json!("absent-on-recovery")),
+            ("/pre_driver_failure", json!("proxy-start")),
+            ("/reaping_recovery/state", json!("collected")),
         ] {
             let field = pointer.trim_start_matches('/').replace('/', ".");
             let expected = format!("{field} {value}");
             let mut changed = record.clone();
-            *changed.pointer_mut(pointer).expect("field") = value;
+            let mut slot = &mut changed;
+            for key in pointer.split('/').skip(1) {
+                slot = &mut slot[key];
+            }
+            *slot = value;
             assert!(!driver_failed_after_readback(&changed), "{pointer}");
             super::super::publish_reservation(&path, &changed).expect("other end");
+            let published = std::fs::read(&path).expect("other end bytes");
             let error = private_recover_core(&plan, fixture.path(), &request, owner, |_, _| {
                 ProcessPresence::Absent
             })
             .expect_err("other end refuses");
             assert_eq!(error.kind, "settle-state-refusal", "{pointer}");
             assert!(error.detail.contains(&expected), "{}", error.detail);
+            assert_eq!(std::fs::read(&path).expect("refused term"), published);
         }
         super::super::publish_reservation(&path, &record).expect("launcher record");
         assert_eq!(
