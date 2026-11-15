@@ -91,7 +91,7 @@ struct Output {
     file: File,
     entry: Entry,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(super) struct Invocation {
     pub id: String,
     pub unit: String,

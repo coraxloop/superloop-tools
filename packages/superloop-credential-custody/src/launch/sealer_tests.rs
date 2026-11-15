@@ -643,3 +643,32 @@ fn sealer_host_key_path_and_file_custody_refuse_before_start() {
         assert_eq!(store.phase(), Phase::Reserved);
     }
 }
+
+/// ´test:unit:sealer-status-readback-observes-both-live-children´
+#[test]
+fn sealer_status_readback_observes_both_live_children() {
+    let fixture = make_fixture("normal");
+    let admission = fixture.admit();
+    let mut store = Store::reserve(&admission, 0).unwrap();
+    let (left, _writer_left) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+    let (right, _writer_right) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+    let mut session = Session::start(&admission, 0, &mut store, [left, right]).unwrap();
+    let statuses = session.statuses().unwrap();
+    assert_ne!(statuses[0].pid, statuses[1].pid);
+    for status in statuses {
+        assert_eq!(status.uids, [nix::unistd::geteuid().as_raw(); 4]);
+        assert_eq!(
+            [
+                status.inheritable,
+                status.permitted,
+                status.effective,
+                status.ambient
+            ],
+            [0; 4]
+        );
+        assert_eq!(status.no_new_privileges, 1);
+        assert_eq!(status.seccomp, 2);
+    }
+    session.fail("synthetic-cancel");
+    assert_eq!(session.statuses().err(), Some("sealer-status-terminal"));
+}

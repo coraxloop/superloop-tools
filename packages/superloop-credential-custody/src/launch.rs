@@ -1,8 +1,10 @@
 //! Unselected launcher cores. No installed entrypoint or plaintext reader.
 mod channel;
+mod child_status;
 mod confinement;
 mod control;
 mod fifo;
+mod inventory;
 mod keeper;
 mod manager;
 mod measure;

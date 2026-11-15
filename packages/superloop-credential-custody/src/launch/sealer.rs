@@ -33,6 +33,8 @@ pub(super) enum Exit {
 }
 struct Running {
     child: Child,
+    directory: File,
+    birth: u64,
     pidfd: OwnedFd,
     probe: EofProbe,
     errors: ChildStderr,
@@ -49,10 +51,15 @@ impl Running {
             let pidfd = pidfd(child.id())?;
             let errors = child.stderr.take().ok_or("sealer-stderr")?;
             fcntl(&errors, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|_| "sealer-stderr")?;
-            Ok((pidfd, errors))
+            let directory = File::open(format!("/proc/{}", child.id()))
+                .map_err(|_| "sealer-status-directory")?;
+            let (birth, _) = super::process_pin::stat(&directory)?;
+            Ok((pidfd, errors, directory, birth))
         })();
         match setup {
-            Ok((pidfd, errors)) => Ok(Self {
+            Ok((pidfd, errors, directory, birth)) => Ok(Self {
+                directory,
+                birth,
                 child,
                 pidfd,
                 probe,
@@ -250,6 +257,8 @@ fn child_limits(command: &mut Command, limit: u64) {
 
 pub(super) struct Session<'a> {
     store: &'a mut Store,
+    owner: u32,
+    bounding: u64,
     running: Vec<Running>,
     diagnostic_limit: u64,
     sealed_limit: u64,
@@ -274,6 +283,9 @@ impl<'a> Session<'a> {
         mut spawn: impl FnMut(Command, EofProbe, File) -> Result<Running>,
     ) -> Result<Self> {
         let deadline = Instant::now() + Duration::from_millis(admission.policy().limits.case_ms);
+        let own = super::child_status::ChildStatus::read(
+            &File::open("/proc/self").map_err(|_| "sealer-status-directory")?,
+        )?;
         let confinement = Confinement::prepare(admission)?;
         let inputs = Input::pair(readers)?;
         let outputs = store.sealer_outputs(admission, index)?;
@@ -314,6 +326,8 @@ impl<'a> Session<'a> {
         }
         let mut session = Self {
             store,
+            owner: nix::unistd::geteuid().as_raw(),
+            bounding: own.bounding,
             running: Vec::new(),
             diagnostic_limit,
             sealed_limit,
@@ -331,6 +345,30 @@ impl<'a> Session<'a> {
             return Err(session.fail(class));
         }
         Ok(session)
+    }
+    pub fn statuses(&self) -> Result<[super::child_status::ChildStatus; 2]> {
+        require(
+            !self.finished && self.running.len() == 2,
+            "sealer-status-terminal",
+        )?;
+        let mut statuses = Vec::new();
+        for running in &self.running {
+            require(!running.done, "sealer-status-exited")?;
+            let mut item = nix::libc::pollfd {
+                fd: running.pidfd.as_raw_fd(),
+                events: nix::libc::POLLIN,
+                revents: 0,
+            };
+            channel::poll(std::slice::from_mut(&mut item), 0)?;
+            require(item.revents == 0, "sealer-status-exited")?;
+            let status = super::child_status::ChildStatus::read(&running.directory)?;
+            require(status.birth == running.birth, "sealer-status-identity")?;
+            status.verify(running.child.id(), self.owner, self.bounding)?;
+            channel::poll(std::slice::from_mut(&mut item), 0)?;
+            require(item.revents == 0, "sealer-status-exited")?;
+            statuses.push(status);
+        }
+        statuses.try_into().map_err(|_| "sealer-status-count")
     }
     pub fn wait_until(&mut self, deadline: Instant) -> Result<Completion> {
         let result = self.wait_inner(deadline);
