@@ -35,11 +35,11 @@ case "$response" in
         : > "${capture}.stdin"
         (
             exec 3<"${PERMISSION_TRIAGE_FAKE_HOLD_FIFO:?}"
-            : > "${capture}.pipe-open"
             exec cat <&3
         ) &
         descendant=$!
         printf '%s\n' "$descendant" > "${capture}.child-pid"
+        : > "${capture}.child-recorded"
         wait "$descendant"
         ;;
     never-read-double-fork)

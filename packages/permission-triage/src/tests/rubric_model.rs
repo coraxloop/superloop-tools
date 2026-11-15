@@ -695,8 +695,8 @@ fn failed_group_kill_bounds_helper_joins() {
         .expect("the test holds the pipe open");
     let submitted = large_prompt(&directory);
     let missing_kill = directory.path().join("missing-kill").into_os_string();
-    // The descendant opens the held pipe before the short deadline starts. Its lifetime is
-    // controlled by this test's file descriptor, not a thirty-second sleep.
+    // The short deadline starts after the shell has recorded its descendant's PID, so a killed
+    // shell cannot leave it unrecorded; this test's held pipe, not a sleep, keeps it alive.
     let deadline = interrupting_deadline(Duration::from_millis(40));
     let mut environment = fixture_environment(&capture, "never-read-short-descendant");
     environment.push((
@@ -709,13 +709,13 @@ fn failed_group_kill_bounds_helper_joins() {
         deadline,
         environment,
         missing_kill,
-        capture_file(&capture, ".pipe-open"),
+        capture_file(&capture, ".child-recorded"),
     );
     let cleanup = FixtureProcessGuard::new(captured_process_id(&capture, ".child-pid"));
     let outcome = cleanup.outcome();
     assert!(matches!(result, Err(ModelError::Kill(_))));
-    // The failed group kill returned while the descendant is still held on the pipe;
-    // that event ordering proves the helper joins did not wait for its exit.
+    // The failed group kill returned while the descendant, held by this test's pipe, is still
+    // alive; that event ordering proves the helper joins did not wait for its exit.
     assert_process_alive(cleanup.process_id());
     drop(cleanup);
     drop(hold);
