@@ -76,6 +76,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The permission-triage zombie-lock fixture now waits for its shell's exit without reaping it, so node load cannot turn a 10-second fixture poll into a failed lock-recovery test. Deployed lock recovery is unchanged (``test:integration:a-zombie-lock-holder-is-dead-for-stale-recovery``).
+
 - A first-dispatch helper-stop refusal now preserves the observer’s actual stop result. Recovery no longer accepts an observer merely because it is absent; a premature observer exit still refuses settlement. Compatibility: running launchers keep their old accounting (``test:unit:dispatch-observer-end-precedes-helper-stop-refusal``).
 
 - The boxed helper now removes its control pathname before draining queued stop connections and closing the listener, answering requests that already reached it. Errors from peers drained after cancellation are logged without failing an otherwise clean stop; the honoured controller request and listener errors still propagate. The launcher still requires the helper's successful exit. Compatibility: deploy the host wait fix with this close fix; installation does not replace an in-flight helper (``test:unit:helper-close-answers-every-queued-control``).
