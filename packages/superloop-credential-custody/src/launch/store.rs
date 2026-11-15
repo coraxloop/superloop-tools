@@ -121,6 +121,8 @@ struct Snapshot<'a> {
     manager_reply_sha256: Option<&'a str>,
     manager_configuration_sha256: Option<&'a str>,
     inventory_sha256: Option<&'a str>,
+    generator: Option<&'a super::keeper::completion::Generator>,
+    sealers: Option<&'a super::sealer::Completion>,
 }
 pub(super) struct Store {
     sealed: Directory,
@@ -141,6 +143,8 @@ pub(super) struct Store {
     manager_reply_sha256: Option<String>,
     manager_configuration_sha256: Option<String>,
     inventory_sha256: Option<String>,
+    generator: Option<super::keeper::completion::Generator>,
+    sealers: Option<super::sealer::Completion>,
 }
 impl Store {
     pub fn reserve(admission: &Admission, index: usize) -> Result<Self> {
@@ -170,6 +174,8 @@ impl Store {
             manager_reply_sha256: None,
             manager_configuration_sha256: None,
             inventory_sha256: None,
+            generator: None,
+            sealers: None,
             sealed_limit: admission.policy().limits.sealed_bytes,
             refusal_class: None,
             original_cause: None,
@@ -271,7 +277,23 @@ impl Store {
             manager_reply_sha256: self.manager_reply_sha256.as_deref(),
             manager_configuration_sha256: self.manager_configuration_sha256.as_deref(),
             inventory_sha256: self.inventory_sha256.as_deref(),
+            generator: self.generator.as_ref(),
+            sealers: self.sealers.as_ref(),
         }
+    }
+    pub fn retain_generator(&mut self, result: super::keeper::completion::Generator) -> Result<()> {
+        require(self.phase() == Phase::Released, "completion-order")?;
+        self.generator = Some(result);
+        self.advance(Phase::GeneratorRetained)
+    }
+    pub fn retain_sealers(&mut self, result: super::sealer::Completion) -> Result<()> {
+        require(self.phase() == Phase::HolderReleased, "completion-order")?;
+        require(
+            result.eof == [true; 2] && result.exits == [super::sealer::Exit::Code(0); 2],
+            "completion-sealers",
+        )?;
+        self.sealers = Some(result);
+        self.advance(Phase::EofAndSealersComplete)
     }
     pub fn inventory_context(&self) -> Result<serde_json::Value> {
         serde_json::to_value(self.snapshot(self.state.sequence(), self.phase()))
@@ -291,7 +313,11 @@ impl Store {
         let bytes = serde_json::to_vec(&snapshot).map_err(|_| "launch-evidence-encoding")?;
         receipt::publish_held(
             &self.evidence.file,
-            &format!("state-{sequence:02}.json"),
+            &if phase == Phase::Complete {
+                "completion.json".into()
+            } else {
+                format!("state-{sequence:02}.json")
+            },
             &bytes,
         )
     }

@@ -88,6 +88,19 @@ impl ProcessPin {
         pin.verify()?;
         Ok(pin)
     }
+    pub fn exited(&self) -> Result<bool> {
+        let mut item = nix::libc::pollfd {
+            fd: self.pidfd.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        channel::poll(std::slice::from_mut(&mut item), 0)?;
+        require(
+            item.revents & (nix::libc::POLLERR | nix::libc::POLLNVAL) == 0,
+            "completion-process",
+        )?;
+        Ok(item.revents & nix::libc::POLLIN != 0)
+    }
     pub fn verify(&self) -> Result<()> {
         let mut item = nix::libc::pollfd {
             fd: self.pidfd.as_raw_fd(),

@@ -182,7 +182,7 @@ impl Keeper<'_> {
         })();
         self.release_result(result)
     }
-    fn release_result<T>(&mut self, result: Result<T>) -> Result<T> {
+    pub(super) fn release_result<T>(&mut self, result: Result<T>) -> Result<T> {
         if let Err(class) = result {
             if !self.terminal {
                 let _latched = self.session.store().uncertain(class);
@@ -195,4 +195,4 @@ impl Keeper<'_> {
 }
 #[cfg(test)]
 #[path = "release_tests.rs"]
-mod tests;
+pub(super) mod tests;

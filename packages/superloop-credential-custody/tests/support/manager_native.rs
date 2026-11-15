@@ -52,6 +52,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "show") {
         std::io::stdout().write_all(&fs::read(root.join("manager-reply"))?)?;
     }
+    if args.iter().any(|a| a == "stop") {
+        if root.join("manager-require-retained").exists() {
+            let retained: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join("evidence/sample/state-07.json"))?)?;
+            if retained["phase"] != "generator-retained" || !retained["generator"].is_object() {
+                return Err("generator not retained".into());
+            }
+        }
+        fs::write(root.join("manager-stopped"), b"stop\n")?;
+        if root.join("manager-unload-after-stop").exists() {
+            fs::remove_file(root.join("manager-reply"))?;
+        }
+    }
     for (operation, name) in [
         ("--no-block", "manager-start-output"),
         ("stop", "manager-stop-output"),

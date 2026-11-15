@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-const FIELDS: [&str; 27] = [
+const FIELDS: [&str; 33] = [
     "Id",
     "InvocationID",
     "MainPID",
@@ -20,6 +20,12 @@ const FIELDS: [&str; 27] = [
     "Result",
     "ExecMainCode",
     "ExecMainStatus",
+    "LoadState",
+    "ConditionResult",
+    "AssertResult",
+    "ExecMainPID",
+    "ExecMainStartTimestampMonotonic",
+    "ExecMainExitTimestampMonotonic",
     "NoNewPrivileges",
     "CapabilityBoundingSet",
     "AmbientCapabilities",
@@ -63,6 +69,12 @@ pub(super) struct Snapshot {
     pub result: String,
     pub code: i32,
     pub status: i32,
+    pub load: String,
+    pub condition: bool,
+    pub assertion: bool,
+    pub exec_pid: u32,
+    pub started: u64,
+    pub exited: u64,
     /// Full binding of actual reply bytes to protected policy and held CLI expectations.
     pub raw_sha256: String,
     /// Full binding of canonical, compared loaded properties to those expectations.
@@ -342,8 +354,17 @@ fn parse(bytes: &[u8], wire: &Expected<'_>, expected: Option<&str>) -> Result<Sn
         (0..=6).contains(&code) && (0..=255).contains(&status),
         "manager-status",
     )?;
+    let boolean = |key| match values[key] {
+        "yes" => Ok(true),
+        "no" => Ok(false),
+        _ => Err("manager-condition"),
+    };
+    let number = |key| values[key].parse::<u64>().map_err(|_| "manager-execution");
     let properties = properties(&values, wire)?;
-    let measured: BTreeMap<_, _> = FIELDS[8..].iter().map(|key| (*key, values[*key])).collect();
+    let measured: BTreeMap<_, _> = FIELDS[14..]
+        .iter()
+        .map(|key| (*key, values[*key]))
+        .collect();
     let configuration_sha256 = super::measure::canonical(
         "credential-manager-properties-v1",
         &serde_json::json!({"properties":measured,"open_files":openfiles}),
@@ -356,6 +377,12 @@ fn parse(bytes: &[u8], wire: &Expected<'_>, expected: Option<&str>) -> Result<Sn
         result: values["Result"].into(),
         code,
         status,
+        load: values["LoadState"].into(),
+        condition: boolean("ConditionResult")?,
+        assertion: boolean("AssertResult")?,
+        exec_pid: u32::try_from(number("ExecMainPID")?).map_err(|_| "manager-execution")?,
+        started: number("ExecMainStartTimestampMonotonic")?,
+        exited: number("ExecMainExitTimestampMonotonic")?,
         raw_sha256: hash(bytes),
         configuration_sha256,
         properties,

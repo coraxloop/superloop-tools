@@ -1,4 +1,4 @@
-//! Per-case ownership through captured inventory and release; no completion claim.
+//! Per-case ownership through captured inventory, release and observed completion.
 use super::control::Control;
 use super::{
     Result, fifo::Pipes, manager::Manager, measure::Admission, policy::ArtifactRole,
@@ -18,6 +18,9 @@ pub(super) struct Keeper<'a> {
     process: Option<ProcessPin>,
     invocation: Option<String>,
     terminal: bool,
+    holder_stopped: bool,
+    holder_stop_attempted: bool,
+    execution: Option<(u64, String)>,
     control: Option<Control>,
     inventory: Option<release::Evidence>,
 }
@@ -45,6 +48,9 @@ impl<'a> Keeper<'a> {
             process: None,
             invocation: None,
             terminal: false,
+            holder_stopped: false,
+            holder_stop_attempted: false,
+            execution: None,
             control: None,
             inventory: None,
         })
@@ -86,6 +92,16 @@ impl<'a> Keeper<'a> {
                     && snapshot.result == "success",
                 "keeper-unit-state",
             )?;
+            require(
+                snapshot.load == "loaded"
+                    && snapshot.condition
+                    && snapshot.assertion
+                    && snapshot.exec_pid == snapshot.pid
+                    && snapshot.started > 0
+                    && snapshot.exited == 0,
+                "keeper-execution",
+            )?;
+            self.execution = Some((snapshot.started, snapshot.configuration_sha256.clone()));
             let policy = self.admission.policy();
             let case = &policy.cases[self.index];
             let fixture = policy
@@ -159,10 +175,7 @@ impl<'a> Keeper<'a> {
         }
         self.terminal = true;
         self.session.store().remember_cause(class);
-        let stopped = self
-            .invocation
-            .as_deref()
-            .is_some_and(|id| self.manager.stop(id).is_ok());
+        let stopped = self.holder_stopped || self.stop_holder().is_ok();
         if !stopped || self.session.store().phase() == Phase::Uncertain {
             self.session
                 .quarantine(if self.invocation.is_some() && !stopped {
@@ -197,6 +210,14 @@ impl<'a> Keeper<'a> {
     pub const fn phase(&mut self) -> Phase {
         self.session.store().phase()
     }
+    fn stop_holder(&mut self) -> Result<()> {
+        require(!self.holder_stop_attempted, "completion-stop-attempted")?;
+        let id = self.invocation.as_deref().ok_or("keeper-not-captured")?;
+        self.holder_stop_attempted = true;
+        self.manager.stop(id)?;
+        self.holder_stopped = true;
+        Ok(())
+    }
 }
 impl Drop for Keeper<'_> {
     fn drop(&mut self) {
@@ -212,3 +233,6 @@ pub(super) mod tests;
 
 #[path = "release.rs"]
 mod release;
+
+#[path = "completion.rs"]
+pub(in crate::launch) mod completion;

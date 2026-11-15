@@ -6,7 +6,7 @@ use crate::launch::{
 use std::fs;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::PermissionsExt as _;
-fn setup(behavior: &str) -> Fixture {
+pub(in crate::launch) fn setup(behavior: &str) -> Fixture {
     let mut f = fixture::fixture(behavior);
     manager::tests::add_images(&mut f);
     let bytes = fs::read(f.dir.path().join("manager-start")).unwrap();
@@ -22,7 +22,11 @@ fn setup(behavior: &str) -> Fixture {
     .unwrap();
     f
 }
-fn captured(f: &Fixture, admission: &Admission, keeper: &mut Keeper<'_>) -> fixture::ChildGuard {
+pub(in crate::launch) fn captured(
+    f: &Fixture,
+    admission: &Admission,
+    keeper: &mut Keeper<'_>,
+) -> fixture::ChildGuard {
     // Ordinary-user stand-in: admission checks the public layout; the real
     // fixture then uses its caller-owned immutable form. No root ownership is faked.
     fs::set_permissions(
@@ -49,7 +53,7 @@ fn captured(f: &Fixture, admission: &Admission, keeper: &mut Keeper<'_>) -> fixt
         .unwrap();
     child
 }
-fn evidence(f: &Fixture) -> std::path::PathBuf {
+pub(in crate::launch) fn evidence(f: &Fixture) -> std::path::PathBuf {
     f.dir.path().join("evidence/sample")
 }
 fn receipt(f: &Fixture) -> std::path::PathBuf {

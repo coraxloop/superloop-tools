@@ -22,11 +22,13 @@ use std::path::Path;
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub(super) struct Completion {
     pub sealed_bytes: [u64; 2],
+    pub eof: [bool; 2],
+    pub exits: [Exit; 2],
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
 pub(super) enum Exit {
     Code(i32),
     Signal(i32),
@@ -404,6 +406,14 @@ impl<'a> Session<'a> {
                 remaining_timeout(Instant::now(), self.deadline, deadline)?;
                 return Ok(Completion {
                     sealed_bytes: [sizes[0], sizes[1]],
+                    eof: [
+                        self.running[0].probe.observe()? == PipeState::ClosedAndDrained,
+                        self.running[1].probe.observe()? == PipeState::ClosedAndDrained,
+                    ],
+                    exits: [
+                        self.exits[0].ok_or("sealer-exit-missing")?,
+                        self.exits[1].ok_or("sealer-exit-missing")?,
+                    ],
                 });
             }
             let mut items = Vec::new();

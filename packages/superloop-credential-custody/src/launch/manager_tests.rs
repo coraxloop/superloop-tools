@@ -45,6 +45,12 @@ pub(in crate::launch) fn reply(admission: &Admission) -> Vec<u8> {
         ("Result", "success".into()),
         ("ExecMainCode", "0".into()),
         ("ExecMainStatus", "0".into()),
+        ("LoadState", "loaded".into()),
+        ("ConditionResult", "yes".into()),
+        ("AssertResult", "yes".into()),
+        ("ExecMainPID", "123".into()),
+        ("ExecMainStartTimestampMonotonic", "100".into()),
+        ("ExecMainExitTimestampMonotonic", "0".into()),
         ("NoNewPrivileges", "yes".into()),
         ("CapabilityBoundingSet", String::new()),
         ("AmbientCapabilities", String::new()),
@@ -252,7 +258,7 @@ fn manager_reply_requires_complete_invocation_bound_properties() {
         .err(),
         Some("manager-reply-shape")
     );
-    for key in &FIELDS[8..] {
+    for key in &FIELDS[14..] {
         let line = text
             .lines()
             .find(|l| l.starts_with(&format!("{key}=")))
