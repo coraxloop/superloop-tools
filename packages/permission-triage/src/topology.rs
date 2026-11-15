@@ -1396,7 +1396,11 @@ fn raw_harness_version(output: &ProcessOutput) -> String {
 }
 
 fn configured_ceiling() -> Result<Duration, TopologyError> {
-    let Some(value) = env::var_os("PERMISSION_TRIAGE_TOPOLOGY_CEILING_MS") else {
+    ceiling_from_value(env::var_os("PERMISSION_TRIAGE_TOPOLOGY_CEILING_MS"))
+}
+
+fn ceiling_from_value(value: Option<OsString>) -> Result<Duration, TopologyError> {
+    let Some(value) = value else {
         return Ok(Duration::from_millis(MAX_TOPOLOGY_CEILING_MS));
     };
     let parsed = value
@@ -1405,6 +1409,21 @@ fn configured_ceiling() -> Result<Duration, TopologyError> {
         .filter(|milliseconds| *milliseconds > 0)
         .ok_or(TopologyError::InvalidCeiling)?;
     Ok(Duration::from_millis(parsed.min(MAX_TOPOLOGY_CEILING_MS)))
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::{MAX_TOPOLOGY_CEILING_MS, ceiling_from_value};
+    use std::time::Duration;
+
+    #[test]
+    fn unconfigured_ceiling_is_the_pinned_production_maximum() {
+        assert_eq!(MAX_TOPOLOGY_CEILING_MS, 120_000);
+        assert_eq!(
+            ceiling_from_value(None).expect("unconfigured ceiling"),
+            Duration::from_millis(MAX_TOPOLOGY_CEILING_MS)
+        );
+    }
 }
 
 fn configured_harness() -> Result<PathBuf, TopologyError> {

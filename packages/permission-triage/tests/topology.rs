@@ -2367,10 +2367,22 @@ fn topology_ceiling_retains_half_second_real_wait() {
     assert_eq!(verdict["deployment_blocked"], true);
 }
 
-/// The production default kills the harness group, including a descendant holding the capture pipe.
+/// The short override still kills the harness group and reaps the pipe-holding descendant.
+#[test]
+fn short_ceiling_times_out_and_reaps_version_process() {
+    assert_version_ceiling_kills_group(Some(20_000));
+}
+
+/// Run the full production ceiling on demand; ordinary gates pin its value with a pure test.
+/// `cargo test --locked -p permission-triage --test topology actual_production_ceiling_times_out_and_reaps_version_process -- --ignored --exact`
 /// ´test:integration:actual-production-ceiling-times-out-and-reaps-version-process´
 #[test]
+#[ignore = "120-second production ceiling is verified on demand"]
 fn actual_production_ceiling_times_out_and_reaps_version_process() {
+    assert_version_ceiling_kills_group(None);
+}
+
+fn assert_version_ceiling_kills_group(ceiling_override: Option<u64>) {
     let directory = FixtureDirectory::new("production-ceiling");
     let root = directory.probe_root();
     let home = directory.scratch_home();
@@ -2421,14 +2433,16 @@ sys.exit(result.returncode)
         }
     }
     let started = std::time::Instant::now();
-    let output = command
+    command
         .env("PERMISSION_TRIAGE_HARNESS_BIN", &harness)
-        .env("TOPOLOGY_PRODUCTION_WAIT_PID", &pid_path)
-        .output_serialized()
-        .expect("production ceiling probe");
+        .env("TOPOLOGY_PRODUCTION_WAIT_PID", &pid_path);
+    if let Some(milliseconds) = ceiling_override {
+        command.env("PERMISSION_TRIAGE_TOPOLOGY_CEILING_MS", milliseconds.to_string());
+    }
+    let output = command.output_serialized().expect("ceiling probe");
     assert!(
         started.elapsed().as_millis()
-            >= u128::from(permission_triage::topology::MAX_TOPOLOGY_CEILING_MS)
+            >= u128::from(ceiling_override.unwrap_or(MAX_TOPOLOGY_CEILING_MS))
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains(
