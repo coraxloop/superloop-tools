@@ -911,6 +911,11 @@ fn a_zombie_lock_holder_is_dead_for_stale_recovery() -> Result<(), Box<dyn std::
         nix::sys::wait::Id::Pid(nix::unistd::Pid::from_raw(i32::try_from(zombie_pid)?)),
         nix::sys::wait::WaitPidFlag::WEXITED | nix::sys::wait::WaitPidFlag::WNOWAIT,
     )?;
+    let stat = fs::read_to_string(format!("/proc/{zombie_pid}/stat"))?;
+    let state = stat
+        .rsplit_once(") ")
+        .and_then(|(_, fields)| fields.split_whitespace().next());
+    assert_eq!(state, Some("Z"), "the unreaped holder must be a zombie");
     let lock = root.join("escalations.lock");
     fs::write(&lock, format!("{zombie_pid}\n"))?;
     fs::set_permissions(&lock, fs::Permissions::from_mode(0o600))?;

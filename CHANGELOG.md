@@ -123,6 +123,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The permission-triage failed-kill fixture now starts its short model deadline after its descendant records readiness, and checks that descendant is still alive when the failed kill returns. A loaded shell start no longer makes a missing PID look like a failed cleanup; the deployed model deadline is unchanged (``test:crate:failed-group-kill-bounds-helper-joins``).
 
 - The permission-triage zombie-lock fixture now waits for its shell's exit without reaping it, so node load cannot turn a 10-second fixture poll into a failed lock-recovery test. Deployed lock recovery is unchanged (``test:integration:a-zombie-lock-holder-is-dead-for-stale-recovery``).
+- The permission-triage lock-recovery test checks that its unreaped holder is actually a zombie before testing recovery, so a different process state cannot satisfy the fixture (``test:integration:a-zombie-lock-holder-is-dead-for-stale-recovery``).
 
 - A first-dispatch helper-stop refusal now preserves the observer’s actual stop result. Recovery no longer accepts an observer merely because it is absent; a premature observer exit still refuses settlement. Compatibility: running launchers keep their old accounting (``test:unit:dispatch-observer-end-precedes-helper-stop-refusal``).
 
