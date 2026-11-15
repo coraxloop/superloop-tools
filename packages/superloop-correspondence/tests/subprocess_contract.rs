@@ -409,7 +409,7 @@ fn cursor_lock_contention_and_killed_holder_recovery() {
     assert!(capacity > 0 && capacity < 1_048_576 - 1);
     let mut client = f
         .command("poll", "bulk")
-        // Lock ordering is the subject, not the fixture's 400 ms feed timeout.
+        // Lock ordering is the subject; the client blocks in publication until it is killed below.
         .env("CORRESPONDENCE_FEED_DEADLINE_MS", "30000")
         .args(["--advance-cursor", "alpha"])
         .stdout(Stdio::from(write))
