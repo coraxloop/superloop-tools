@@ -112,7 +112,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Door class, full-store and mode-exercise fixtures consume lock-wait progress before reading their final reply. This removes first-frame assumptions from these tests without changing installed doors (``prob:gates:load-sensitive-tests-made-deterministic``).
 
-- The correspondence harness now checks admin-only feed delivery and an empty watch's deadline separately, so a 250 ms watch window cannot turn node scheduling delay into a failed combined case. The deployed poll and watch behavior is unchanged.
+- The correspondence harness now checks admin-only feed delivery and an empty watch's deadline separately, so a 250 ms watch window cannot turn node scheduling delay into a failed combined case. The deployed poll and watch behavior is unchanged (``test:integration:release-harness-keeps-all-correspondence-pins``).
 
 - A run whose driver failed after its bound reply was read back can now be settled. Both launch paths leave it `failed` with its round `failed`, the reply retained and no settlement refusal, a state every command but `retire` refused; `settle LOOP RUN --round STEP --dry-run` and then its `--expect-digest` apply now re-read the reply against its delivery, end the round `settled` with that reply and the run `settled`, keep `driver_end` unsuccessful as the record of the failure, and publish the recovered launch report, after which the next round resumes the recorded thread with no choice owed. A failed round that `settle` still refuses now names each recorded term of that state: its driver and helper end states and successes, its readback end and reply, any pre-driver failure and any recovery record's state. Compatibility: no record shape changes and runs already in this state need no migration; install the lane program before settling them (``test:unit:driver-failed-after-readback-settles-with-its-reply``; ``proto:superlooplane:failed-round-settlement``).
 
@@ -126,15 +126,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The permission-triage lock-recovery test checks that its unreaped holder is actually a zombie before testing recovery, so a different process state cannot satisfy the fixture (``test:integration:a-zombie-lock-holder-is-dead-for-stale-recovery``).
 
-- Permission-triage's no-input fixture now ends its deadline process and its sleeping descendant as a group, leaving no orphan after the test succeeds.
+- Permission-triage's no-input fixture now ends its deadline process and its sleeping descendant as a group, leaving no orphan after the test succeeds (``test:integration:real-binary-exit-status-usage-and-argument-contract``; ``test:integration:version-does-not-read-stdin-and-prints-version-and-digest``).
 
-- The failed-kill test now holds its descendant on a pipe until the runner returns, so the helper-join claim follows an event instead of a 30-second fixture lifetime.
+- The failed-kill test now holds its descendant on a pipe until the runner returns, so the helper-join claim follows an event instead of a 30-second fixture lifetime (``test:crate:failed-group-kill-bounds-helper-joins``).
 
-- Ordinary permission-triage tests now pin the unchanged 120-second topology default directly and prove timeout, group kill, and reap with a shorter override; the full 120-second run remains available on demand.
+- Ordinary permission-triage tests now pin the unchanged 120-second topology default directly and prove timeout, group kill, and reap with a shorter override; the full 120-second run remains available on demand (``test:unit:unconfigured-ceiling-is-the-pinned-production-maximum``; ``test:integration:short-ceiling-times-out-and-reaps-version-process``; ``test:integration:actual-production-ceiling-times-out-and-reaps-version-process``).
 
-- The topology ceiling matrix now checks recorded walls on its existing 20 ms trials, with one separate real half-second process wait; ordinary gates no longer repeat that wait across 171 trials.
+- The topology ceiling matrix now checks recorded walls on its existing 20 ms trials, with one separate real half-second process wait; ordinary gates no longer repeat that wait across 171 trials (``test:integration:topology-ceiling-trials-account-for-short-real-wait``; ``test:unit:one-half-second-process-wait-reaches-its-ceiling``).
 
-- The pack cut replay now judges the hung linter's 120-second refusal and retained diagnostics without an upper wall verdict; the deployed route timeout is named and pinned, and the real route test still spends that timeout.
+- The pack cut replay now judges the hung linter's 120-second refusal and retained diagnostics without an upper wall verdict; the deployed route timeout is named and pinned, and the real route test still spends that timeout (``test:unit:route-citation-timeout-is-pinned``; ``test:integration:cut-route-refuses-a-hung-linter``).
 
 - A first-dispatch helper-stop refusal now preserves the observer’s actual stop result. Recovery no longer accepts an observer merely because it is absent; a premature observer exit still refuses settlement. Compatibility: running launchers keep their old accounting (``test:unit:dispatch-observer-end-precedes-helper-stop-refusal``).
 
