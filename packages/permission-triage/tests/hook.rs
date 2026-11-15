@@ -750,7 +750,7 @@ fn exits_without_stdin(mut command: Command) -> Output {
             panic!("deadline fixture exited without its marker");
         }
         // WAIT: poll interval of the loop above, which races the binary's exit against a fixture
-        // process that marks its own two-second deadline; the interval only decides how finely that
+        // process that marks its own distant hang bound; the interval only decides how finely that
         // race is sampled.
         thread::sleep(Duration::from_millis(5));
     }

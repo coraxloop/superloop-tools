@@ -13,7 +13,7 @@ printf '%s\n' "$$" > "${capture}.pid"
 
 case "$response" in
     stdin-gate-deadline)
-        sleep 2
+        sleep 120
         : > "${capture}.deadline"
         exit 0
         ;;
