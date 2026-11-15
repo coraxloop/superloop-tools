@@ -6339,6 +6339,8 @@ pub(crate) mod tests {
     /// ´test:unit:request-reader-renews-budget-per-read´
     #[test]
     fn request_reader_renews_budget_per_read() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
         let fixture = Fixture::new();
         let store = fixture.store().with_reader_budget(Duration::from_secs(1));
@@ -6353,8 +6355,11 @@ pub(crate) mod tests {
             .expect_err("expired explicit deadline");
         assert!(super::is_lock_contention(&error));
         let (contended_tx, contended_rx) = std::sync::mpsc::channel();
+        let fired = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&fired);
         AFTER_READER_LOCK_CONTENTION.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
+                observed.store(true, Ordering::Relaxed);
                 contended_tx.send(()).expect("reader contention");
             }));
         });
@@ -6363,15 +6368,16 @@ pub(crate) mod tests {
                 contended_rx
                     .recv_timeout(Duration::from_secs(5))
                     .expect("reader started");
-                std::thread::sleep(Duration::from_millis(300));
                 drop(lock);
             });
-            let started = Instant::now();
             assert_eq!(
                 store.list_run("R").expect("read with renewed budget").len(),
                 1
             );
-            assert!(started.elapsed() >= Duration::from_millis(300));
+            assert!(
+                fired.load(Ordering::Relaxed),
+                "reader contention hook fired"
+            );
             holder.join().expect("writer released");
         });
     }

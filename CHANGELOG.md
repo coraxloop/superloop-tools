@@ -72,6 +72,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The request reader's renewed-budget test releases its competing writer on the observed contention hook and checks that the hook fired; a 300 ms fixture delay no longer spends the reader's one-second real budget. Deployed reader budgets are unchanged (``test:unit:request-reader-renews-budget-per-read``).
+
 - The store lock-retry credit and deadline tests now use a test-only clock, including progress frames at each 50 ms threshold. The six-second service integration proof remains available by its documented on-demand command and no longer runs in ordinary or Meson slow gates; deployed lock and agent budgets are unchanged (``test:unit:request-lock-clock-credits-exact-contention-and-expires``; ``test:unit:door-wait-credit-announces-fifty-ms-steps-and-caps-deadline``).
 
 - The receive deadline tests now check the input pump's deadline with a held-open partial packet and start the recording fixture's deadline after its request is filed, so durable mediation work cannot decide the test. The deployed receive deadline and packet handling are unchanged (``test:unit:door-input-pump-deadline-before-packet-keeps-ref-not-reached``; ``test:unit:door-receive-deadline-before-packet-records-not-reached``).
