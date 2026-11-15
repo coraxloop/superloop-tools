@@ -13,7 +13,10 @@ printf '%s\n' "$$" > "${capture}.pid"
 
 case "$response" in
     stdin-gate-deadline)
-        sleep 120
+        sleep 120 &
+        descendant=$!
+        printf '%s\n' "$descendant" > "${capture}.child-pid"
+        wait "$descendant"
         : > "${capture}.deadline"
         exit 0
         ;;

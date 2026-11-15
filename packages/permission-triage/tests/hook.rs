@@ -11,6 +11,7 @@ use std::fs;
 use std::io::Write as _;
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -709,12 +710,27 @@ fn exits_without_stdin(mut command: Command) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .process_group(0)
         .env("PERMISSION_TRIAGE_FAKE_CAPTURE", &capture)
         .env("PERMISSION_TRIAGE_FAKE_RESPONSE", "stdin-gate-deadline");
     let mut deadline = deadline
         .spawn_serialized()
         .expect("stdin-gate deadline fixture starts");
     let deadline_marker = capture_file(&capture, ".deadline");
+    let deadline_descendant = capture_file(&capture, ".child-pid");
+    let fixture_started = Instant::now();
+    let descendant_pid = loop {
+        if let Ok(pid) = fs::read_to_string(&deadline_descendant) {
+            if let Ok(pid) = pid.trim().parse::<u32>() {
+                break pid;
+            }
+        }
+        assert!(
+            fixture_started.elapsed() < Duration::from_secs(120),
+            "deadline fixture did not start its descendant"
+        );
+        thread::yield_now();
+    };
     let mut child = command
         .spawn_serialized()
         .expect("permission-triage binary starts");
@@ -726,8 +742,30 @@ fn exits_without_stdin(mut command: Command) -> Output {
             .is_some()
         {
             drop(stdin);
-            let _deadline_kill = deadline.kill();
+            nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(i32::try_from(deadline.id()).expect("fixture pid")),
+                nix::sys::signal::Signal::SIGKILL,
+            )
+            .expect("deadline fixture group is killed");
             let _deadline_status = deadline.wait();
+            let reaping_started = Instant::now();
+            loop {
+                let stat = fs::read_to_string(format!("/proc/{descendant_pid}/stat"));
+                let running = stat
+                    .as_deref()
+                    .ok()
+                    .and_then(|line| line.rsplit_once(") "))
+                    .and_then(|(_, fields)| fields.split_whitespace().next())
+                    .is_some_and(|state| state != "Z" && state != "X");
+                if !running {
+                    break;
+                }
+                assert!(
+                    reaping_started.elapsed() < Duration::from_secs(120),
+                    "deadline fixture descendant {descendant_pid} outlived its group"
+                );
+                thread::yield_now();
+            }
             return child
                 .wait_with_output()
                 .expect("finished output is captured");
