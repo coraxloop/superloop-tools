@@ -459,9 +459,41 @@ where
 
 #[cfg(test)]
 mod tests {
-    use pulldown_cmark::{Options as ParseOptions, Parser};
+    use pulldown_cmark::{Event, Options as ParseOptions, Parser};
 
     use super::{Options as SerializeOptions, cmark_with_source_range_and_options};
+
+    /// Only an exact code event may supply its authored delimiter spelling.
+    ///
+    /// # Panics
+    /// Panics if serialization fails or preserves a nonmatching source range.
+    ///
+    /// ´test:unit:code-source-preservation-requires-exact-event-shape´
+    #[test]
+    fn code_source_preservation_requires_exact_event_shape() {
+        for (source, expected) in [
+            ("``x``", "``x``"),
+            ("extra `x`", "`x`"),
+            ("`x` extra", "`x`"),
+            ("`x`\n\nextra", "`x`"),
+            ("`different`", "`x`"),
+        ] {
+            let events = Parser::new("`x`").map(|event| {
+                let range = matches!(event, Event::Code(_)).then_some(0..source.len());
+                (event, range)
+            });
+            let mut output = String::new();
+            cmark_with_source_range_and_options(
+                events,
+                source,
+                &mut output,
+                ParseOptions::empty(),
+                SerializeOptions::default(),
+            )
+            .expect("serialize code with an optional source spelling");
+            assert_eq!(output, expected, "source {source:?}");
+        }
+    }
 
     fn assert_round_trip(input: &str, parse_options: ParseOptions) {
         let events: Vec<_> = Parser::new_ext(input, parse_options)

@@ -741,10 +741,11 @@ impl Renderer {
                         write!(header, "`{text}`")?;
                     }
                     if let Some(source) = events[i].source.as_deref().filter(|source| {
-                        Parser::new_ext(source, ParserOptions::empty())
-                            .find(|event| matches!(event, Event::Code(_)))
-                            .as_ref()
-                            == Some(event)
+                        let mut parsed = Parser::new_ext(source, ParserOptions::empty());
+                        parsed.next() == Some(Event::Start(Tag::Paragraph))
+                            && parsed.next().as_ref() == Some(event)
+                            && parsed.next() == Some(Event::End(TagEnd::Paragraph))
+                            && parsed.next().is_none()
                     }) {
                         self.output.write_str(source)?;
                         self.last = Last::Inline;
