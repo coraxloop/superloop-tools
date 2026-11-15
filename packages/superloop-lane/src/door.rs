@@ -5692,7 +5692,7 @@ mod tests {
                 registered,
             );
             let mut client = send_probe(&socket, 2000);
-            let reply = frame_read(&mut client).expect("typed refusal");
+            let reply = fixture_final_frame(&mut client);
             server.join().expect("service").expect("refusal");
             assert_eq!(reply["reason"], expected);
             assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);

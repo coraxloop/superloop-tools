@@ -785,3 +785,7 @@ The library returns existing measurement and outcome types without writing custo
 **Problem (The top-level usage lists the launch command's workspace argument)** · `prob:lanes:top-level-usage-lists-the-compute-workspace-argument`
 
 **CLOSED (2026-11-14).** The program's top-level usage text lists `[--compute-workspace JSON]` in the position the launch command's parse refusal gives it, and the assertion that pins the launch clause is updated with it, landed as ad37b642; argument parsing and existing runs are unchanged.
+
+**Problem (The door file refusals test reads the final frame under store-lock contention)** · `prob:gates:door-file-refusals-test-reads-the-final-frame`
+
+**CLOSED (2026-11-15).** The typed file-refusal fixture consumes request-lock-wait progress frames through the shared final-frame reader within one bounded read window, then checks the refusal reason and the unchanged effect count. A progress frame has no refusal reason and cannot stand in for the final reply (``test:unit:door-file-refusals-and-absent-registration-are-typed``). This changes the test only; installed doors and operator procedures are unchanged.
