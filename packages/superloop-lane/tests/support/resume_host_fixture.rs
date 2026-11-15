@@ -188,6 +188,9 @@ print(json.dumps(sorted(rows)))
             "--round".into(),
             "review".into(),
         ];
+        if self.home.join("over-budget").exists() {
+            words.extend(["--budget".into(), "7200".into()]);
+        }
         if resume {
             words.push("--resume-thread".into());
         }

@@ -465,6 +465,10 @@ pub(super) fn late_reply(driver: &str) {
     );
     assert!(failed["rounds"][1]["reply"].is_null());
     if driver == "over-budget" {
+        assert_eq!(
+            failed["rounds"][1]["budget_seconds"], 7200,
+            "over-budget report matches launch budget"
+        );
         let before = fixture.reservation();
         let error = fixture
             .settle(None)
