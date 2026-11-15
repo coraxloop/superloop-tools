@@ -915,6 +915,8 @@ struct CitationFailure {
     stderr: Vec<u8>,
 }
 
+const CITATION_LINTER_TIMEOUT: Duration = Duration::from_secs(120);
+
 fn citation_output(mut child: Child, bound: Duration) -> Result<Output, CitationFailure> {
     let started = Instant::now();
     let mut stdout = Vec::new();
@@ -1008,7 +1010,7 @@ fn resolved_sites(
         .process_group(0)
         .spawn()
         .map_err(|_| refuse("citation-sites linter could not run"))?;
-    let output = match citation_output(child, Duration::from_secs(120)) {
+    let output = match citation_output(child, CITATION_LINTER_TIMEOUT) {
         Ok(output) if output.status.success() => output,
         result => {
             let (reason, stdout, stderr) = match result {
@@ -1386,6 +1388,11 @@ mod guard_tests {
     use std::os::unix::process::CommandExt as _;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn route_citation_timeout_is_pinned() {
+        assert_eq!(super::CITATION_LINTER_TIMEOUT, Duration::from_secs(120));
+    }
 
     fn citation_fixture(script: &str) -> (tempfile::TempDir, Child) {
         let root = tempfile::tempdir().expect("fixture");

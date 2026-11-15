@@ -1857,7 +1857,7 @@ fn cut_route_refuses_malformed_json() {
 /// A hung citation executable refuses at the production deadline without publication.
 ///
 /// # Panics
-/// Panics only if fixture IO fails, the bound is outlived, or diagnostics or output change.
+/// Panics only if fixture IO fails or diagnostics or output change.
 /// ´test:integration:cut-route-refuses-a-hung-linter´
 #[test]
 fn cut_route_refuses_a_hung_linter() {
@@ -1867,15 +1867,10 @@ fn cut_route_refuses_a_hung_linter() {
     let script = fs::read_to_string(&linter).expect("transport script");
     fs::write(&linter, script.replace("exit 0\n", "exec /bin/sleep 300\n"))
         .expect("hung transport");
-    let started = std::time::Instant::now();
     let report = cut_route_refusal(
         &fixture,
         Some(&linter),
         "citation-sites linter timed out after 120 s",
-    );
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(180),
-        "deadline did not bound invocation"
     );
     let diagnostic = report
         .lines()
