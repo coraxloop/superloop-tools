@@ -457,6 +457,11 @@ pub(super) fn late_reply() {
         .expect_err("already-bound failed round refuses a second binding");
     assert_eq!(error.kind, "mail-delivery");
     assert_eq!(
+        error.detail,
+        "failed reservation already binds a reply for step review; preview recovery with settle alpha R --round review --dry-run",
+        "rebind refusal names the binding and recovery route"
+    );
+    assert_eq!(
         fixture.reservation(),
         bound,
         "binding refusal preserves record"

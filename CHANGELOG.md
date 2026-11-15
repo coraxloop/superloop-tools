@@ -92,6 +92,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Helper retained-reader tests now inject drain expiry and wait for holder, runtime-stop and cleanup events, with distant hang guards instead of short scheduling windows. Deployed helper deadlines and cleanup behavior are unchanged (``proto:superlooplane:container-attempt-completion``).
 
+- Repeating `bind-reply` after a late binding now names the existing binding and gives the `settle --dry-run` recovery route instead of claiming that only a started or settled run may bind (``test:integration:public-late-reply-binds-and-settles-after-readback-refusal``).
+
 - A reply left unbound when launch refuses at readback can now be recovered: run `bind-reply`, then preview and apply `settle` with its digest. Only the selected last failed round with the exact missing-binding refusal and no reply or reply binding is admitted; other failed runs still refuse. Deploy is a notice: running launchers keep their code, and the new binding command can recover an existing matching refusal without a record migration (`public_late_reply_binds_and_settles_after_readback_refusal`).
 
 - Resuming a failed boxed round now checks session files against that run’s allocated worker, rather than the allocation block’s base. A run refused for this mismatch can repeat its preview after installing the new lane command; foreign-owned session files still refuse (`public_failed_round_inspection_uses_allocated_worker`).

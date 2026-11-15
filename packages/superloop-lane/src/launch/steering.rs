@@ -176,6 +176,17 @@ pub fn run_from(
     if !matches!(record["phase"].as_str(), Some("started" | "settled"))
         && !late_reply_allowed(&record, &request.step, reply)
     {
+        if reply
+            && record["phase"] == "failed"
+            && record["mail_replies"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row["step"] == request.step))
+        {
+            return Err(failure(format!(
+                "failed reservation already binds a reply for step {}; preview recovery with settle {} {} --round {} --dry-run",
+                request.step, request.loop_name, request.run, request.step
+            )));
+        }
         return Err(failure("binding requires a started or settled reservation"));
     }
     let key = if reply { "mail_replies" } else { "mail" };
