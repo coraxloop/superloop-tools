@@ -517,22 +517,33 @@ fn sealer_confinement_denies_new_authority_and_keeps_held_output() {
     let fixture = make_fixture("confinement");
     fs::write(fixture.dir.path().join("outside-canary"), b"public").unwrap();
     fs::write(fixture.dir.path().join("evidence/canary"), b"public").unwrap();
+    let mut command = std::process::Command::new(fixture.dir.path().join("sealer"));
+    command.arg("outside").stdin(std::process::Stdio::piped());
+    loop_home::CommandDescriptors::default()
+        .configure(&mut command)
+        .unwrap();
+    let mut outside = command.spawn().unwrap();
+    // This child remains alive on its held input until both probes finish.
+    let outside_pid = nix::unistd::Pid::from_raw(i32::try_from(outside.id()).unwrap());
+    nix::sys::signal::kill(outside_pid, nix::sys::signal::Signal::SIGCONT).unwrap();
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
     let (readers, writers) = pipes();
-    feed(writers, b"synthetic");
+    feed(writers, outside.id().to_string().as_bytes());
     let mut session = Session::start(&admission, 0, &mut store, readers).unwrap();
     assert_eq!(
         session.wait_until(hang_guard()).unwrap().sealed_bytes,
-        [10, 10]
+        [20, 20]
     );
     drop(session);
     for name in ["left.sealed", "right.sealed"] {
         assert_eq!(
             fs::read(fixture.dir.path().join("sealed/sample").join(name)).unwrap(),
-            b"1111111111"
+            b"11111111111111111111"
         );
     }
+    drop(outside.stdin.take());
+    assert!(outside.wait().unwrap().success());
     assert!(!fixture.dir.path().join("key/forbidden").exists());
 }
 

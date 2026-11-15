@@ -69,6 +69,10 @@ fn ring_denied() -> bool {
 }
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["outside"] {
+        std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
+        return;
+    }
     assert_eq!(args.len(), 5);
     assert_eq!(args[0], "encrypt");
     assert_eq!(args[1], "--with-key=host");
@@ -77,11 +81,14 @@ fn main() {
     assert_eq!(std::env::vars_os().count(), 0);
     let image = std::env::current_exe().unwrap();
     let root = image.parent().unwrap();
-    std::io::copy(
-        &mut std::io::stdin().take(2 * 1024 * 1024),
-        &mut std::io::sink(),
-    )
-    .unwrap();
+    let mut input = String::new();
+    std::io::stdin()
+        .take(1024)
+        .read_to_string(&mut input)
+        .unwrap();
+    let outside: i32 = input.trim().parse().unwrap();
+    assert!(outside > 1);
+
     let mut evidence = Vec::new();
     for family in [nix::libc::AF_UNIX, nix::libc::AF_INET, nix::libc::AF_INET6] {
         evidence.push(u8::from(socket_denied(family)) + b'0');
@@ -111,5 +118,89 @@ fn main() {
     .err()
     .is_some_and(|e| e.raw_os_error() == Some(nix::libc::EPERM));
     evidence.push(u8::from(denied) + b'0');
+    evidence.extend(process_authority(outside));
+    evidence.extend(scheduling(outside));
     std::io::stdout().write_all(&evidence).unwrap();
+}
+
+#[allow(unsafe_code)]
+fn process_authority(outside: i32) -> [u8; 4] {
+    let denied = |result| {
+        result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::EPERM)
+    };
+    // SAFETY: the parent supplies its live, owned control child's pid. SIGCONT
+    // is harmless; the mutation can only lower that control's core-file limit.
+    unsafe {
+        let limit = nix::libc::rlimit64 {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        let mut own = limit;
+        [
+            u8::from(denied(nix::libc::kill(outside, nix::libc::SIGCONT).into())) + b'0',
+            u8::from(denied(nix::libc::syscall(
+                nix::libc::SYS_prlimit64,
+                outside,
+                nix::libc::RLIMIT_CORE,
+                &raw const limit,
+                std::ptr::null::<u8>(),
+            ))) + b'0',
+            u8::from(nix::libc::kill(nix::libc::getpid(), nix::libc::SIGCONT) == 0) + b'0',
+            u8::from(
+                nix::libc::syscall(
+                    nix::libc::SYS_prlimit64,
+                    0,
+                    nix::libc::RLIMIT_CORE,
+                    std::ptr::null::<u8>(),
+                    &raw mut own,
+                ) == 0,
+            ) + b'0',
+        ]
+    }
+}
+
+#[allow(unsafe_code)]
+fn scheduling(outside: i32) -> [u8; 6] {
+    let denied = |result| {
+        u8::from(
+            result == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::EPERM),
+        ) + b'0'
+    };
+    // SAFETY: targets only the owned control child; null structures cannot
+    // change scheduling if the filter is deliberately removed by a mutation.
+    unsafe {
+        [
+            denied(nix::libc::syscall(
+                nix::libc::SYS_setpriority,
+                nix::libc::PRIO_PROCESS,
+                outside,
+                0,
+            )),
+            denied(nix::libc::syscall(
+                nix::libc::SYS_sched_setparam,
+                outside,
+                std::ptr::null::<u8>(),
+            )),
+            denied(nix::libc::syscall(
+                nix::libc::SYS_sched_setscheduler,
+                outside,
+                0,
+                std::ptr::null::<u8>(),
+            )),
+            denied(nix::libc::syscall(
+                nix::libc::SYS_sched_setattr,
+                outside,
+                std::ptr::null::<u8>(),
+                0,
+            )),
+            denied(nix::libc::syscall(
+                nix::libc::SYS_sched_setaffinity,
+                outside,
+                0,
+                std::ptr::null::<u8>(),
+            )),
+            denied(nix::libc::syscall(nix::libc::SYS_ioprio_set, 1, outside, 0)),
+        ]
+    }
 }

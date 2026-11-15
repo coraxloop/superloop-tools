@@ -6,7 +6,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt as _;
 use std::process::Command;
 
-pub(super) const ABI_FLOOR: i32 = 5;
+pub(super) const ABI_FLOOR: i32 = 6;
 // ABI 5 handles every filesystem right through IOCTL_DEV, including REFER and
 // TRUNCATE. Never mask this policy down for an older kernel.
 const HANDLED: u64 = (1 << 16) - 1;
@@ -16,6 +16,8 @@ const EXECUTE: u64 = 1;
 #[repr(C)]
 struct Ruleset {
     handled_access_fs: u64,
+    handled_access_net: u64,
+    scoped: u64,
 }
 #[repr(C, packed)]
 struct Beneath {
@@ -101,6 +103,8 @@ fn abi() -> Result<i32> {
 fn create() -> Result<OwnedFd> {
     let rules = Ruleset {
         handled_access_fs: HANDLED,
+        handled_access_net: 0,
+        scoped: 3, // ABI 6: abstract UNIX sockets and signals stay within the domain.
     };
     // SAFETY: one correctly sized stack structure; a successful fd is newly owned.
     let fd = unsafe {
@@ -160,9 +164,33 @@ fn socket_filter() -> Result<Vec<nix::libc::sock_filter>> {
         instruction(0x45, 0, 1, 0x4000_0000),
         instruction(0x06, 0, 0, 0x8000_0000),
     ];
+    // prlimit64(pid=0) is needed by libc for the child's own limits. Every
+    // nonzero pid is refused, including its explicit own pid. Inspect both
+    // halves so a noncanonical argument cannot bypass the filter.
+    filter.extend([
+        instruction(
+            0x15,
+            0,
+            6,
+            u32::try_from(nix::libc::SYS_prlimit64).map_err(|_| "sealer-seccomp-architecture")?,
+        ),
+        instruction(0x20, 0, 0, 16),
+        instruction(0x15, 0, 3, 0),
+        instruction(0x20, 0, 0, 20),
+        instruction(0x15, 0, 1, 0),
+        instruction(0x06, 0, 0, 0x7fff_0000),
+        instruction(0x06, 0, 0, 0x0005_0001),
+    ]);
     // io_uring can create sockets without SYS_socket; deny that alternate route
     // as well. No ring descriptor is admitted across this child exec.
     let mut denied = vec![
+        // No scheduling or IO-priority mutation is needed, even for self.
+        nix::libc::SYS_setpriority,
+        nix::libc::SYS_sched_setparam,
+        nix::libc::SYS_sched_setscheduler,
+        nix::libc::SYS_sched_setattr,
+        nix::libc::SYS_sched_setaffinity,
+        nix::libc::SYS_ioprio_set,
         nix::libc::SYS_socket,
         nix::libc::SYS_socketpair,
         nix::libc::SYS_io_uring_setup,
@@ -210,13 +238,13 @@ mod tests {
     /// ´test:unit:sealer-landlock-floor-never-degrades´
     #[test]
     fn sealer_landlock_floor_never_degrades() {
-        for version in [-1, 0, 1, 2, 3, 4] {
+        for version in [-1, 0, 1, 2, 3, 4, 5] {
             assert_eq!(
                 Confinement::require_abi(version),
                 Err("sealer-landlock-abi")
             );
         }
-        assert_eq!(Confinement::require_abi(5), Ok(()));
+        assert_eq!(Confinement::require_abi(6), Ok(()));
         assert_eq!(Confinement::require_abi(10), Ok(()));
         assert_eq!(HANDLED & (1 << 14), 1 << 14); // TRUNCATE
         assert_eq!(HANDLED & (1 << 15), 1 << 15); // IOCTL_DEV

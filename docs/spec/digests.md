@@ -477,15 +477,14 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/README.md:13,24,32,34,36,38,40,44,48,64,78,84,86,122``|D246–D248 and D250; identity, custody and build documentation.|
 |``packages/superloop-credential-custody/meson.build:72,73,82,83,90,91``|D248; reviewed executable expressions and scope.|
 |``packages/superloop-credential-custody/src/identity.rs:8,15,57,71,98,99,124,125,138``|D246; hashing live files and retained calibration bytes.|
-|``packages/superloop-credential-custody/src/launch/measure.rs:34,51,55,56,65,66,68,69,116,125,126,145,146,162,163,185,186,192,211,213,223``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
-|``packages/superloop-credential-custody/src/launch/policy.rs:67,133,293,333``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/launch/keeper_tests.rs:18,21,130,134``|D250, D252; synthetic controls compare measured artifact and manager metadata with their retained receipts.|
 |``packages/superloop-credential-custody/src/launch/manager.rs:66,68,341,353,354,414``|D252; observed manager metadata and synthetic controls, no root rehearsal claim.|
 |``packages/superloop-credential-custody/src/launch/manager_tests.rs:28,135,136``|D252; observed manager metadata and synthetic controls, no root rehearsal claim.|
+|``packages/superloop-credential-custody/src/launch/measure.rs:34,51,55,56,65,66,68,69,116,125,126,145,146,162,163,185,186,192,211,213,223``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
+|``packages/superloop-credential-custody/src/launch/policy.rs:67,133,293,333``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/launch/sealer_tests.rs:37,51,67,498``|D250; synthetic measured-image controls, no encryption or root rehearsal claim.|
 |``packages/superloop-credential-custody/src/launch/store.rs:113,114,115,121,122,130,131,132,140,141,161,162,163,168,169,197,198,261,262,263,269,270,279,280,291,292``|D250, D252; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/launch/tests.rs:39,65,92,93,233,347,350,369,397,425,429,430,497,498,746,757``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
-|``packages/superloop-credential-custody/src/launch/sealer_tests.rs:37,51,67,498``|D250; synthetic measured-image controls, no encryption or root rehearsal claim.|
 |``packages/superloop-credential-custody/src/observe.rs:180,181,202,216,241,323,328``|D246–D247; source-payload selection and completed sealed-file comparisons.|
 |``packages/superloop-credential-custody/src/process.rs:165``|D246; the held interpreter identity is compared before execution; no independent digest producer.|
 |``packages/superloop-credential-custody/src/record.rs:48,49,67,112,119,165,189,221,233,242,321,345,355``|D246–D247; strict identity fields and full-digest grammar.|
