@@ -4927,7 +4927,7 @@ mod tests {
         if let Some(treatment) = answer {
             label(&store, &id, treatment);
         }
-        let _reply = frame_read(&mut client).expect("fixture final frame");
+        let _reply = fixture_final_frame(&mut client);
         server.join().expect("fixture service").expect("reply");
         id
     }
@@ -5602,7 +5602,7 @@ mod tests {
             let (runner, calls, _states) = counting_runner(&fixture);
             let (socket, server) = fixture_service(&fixture, runner, rubric(None), 2000, Some(0));
             let mut client = send_probe(&socket, 2000);
-            let final_frame = frame_read(&mut client).expect("full store frame");
+            let final_frame = fixture_final_frame(&mut client);
             server.join().expect("service").expect("reply");
             assert_eq!(
                 final_frame["reason"],
@@ -6141,7 +6141,7 @@ mod tests {
                 })
                 .expect("new request");
             label(&store, &id, treatment);
-            let _reply = frame_read(&mut client).expect("final frame");
+            let _reply = fixture_final_frame(&mut client);
             server.join().expect("service").expect("reply");
         }
         let records = store
@@ -6181,7 +6181,7 @@ mod tests {
         let (runner, _, _) = counting_runner(&fixture);
         let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 2000, None);
         let mut client = send_probe(&socket, 2000);
-        let _reply = frame_read(&mut client).expect("allow frame");
+        let _reply = fixture_final_frame(&mut client);
         server.join().expect("service").expect("allow");
         let id = store.list().expect("allow record").0[0].id().to_owned();
         label(&store, &id, "allow");
