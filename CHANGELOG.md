@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The helper-parent lock regression now observes the exact mailbox lock's waiter in `/proc/locks` before releasing its holder, replacing a scheduling window with positive kernel evidence. No installed behavior changes (``test:unit:live-round-parent-publication-takes-mailbox-lock``).
+
 - A public launch recovery rehearsal now identifies the retained-letter custody refusal that blocks interrupted settlement after a helper-stop error, with and without a reply. The tests require the refused preview to leave the run unchanged; they add no recovery command or production behavior (``test:integration:public-helper-stop-recovery-refuses-retained-letter-with-reply``; ``test:integration:public-helper-stop-recovery-refuses-retained-letter-without-reply``).
 
 - Keep ordinary mail preparation off the retained delivery history with a writer-owned lookup rebuilt at restart and updated after durable transitions. Delivery checks and record formats stay unchanged; the service still reads history for retention and exceptional recovery, and still counts staging across mailboxes. Install the binary and restart the mail service; loops need no mailbox rewrite or resubmission (``proto:loophome:mail-preparation-index``).

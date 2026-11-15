@@ -2839,11 +2839,28 @@ pub(crate) mod rollback {
             observed
                 .recv_timeout(Duration::from_secs(30))
                 .expect("callback entry event");
-            // The entry event precedes flock, not its kernel wait: flock exposes
-            // no notification that this thread has queued. This negative window
-            // is supplemental; the final result and preserved helper update also
-            // check overlap. It cannot guarantee mutant sensitivity under stall.
-            let blocked = completion.recv_timeout(Duration::from_millis(100));
+            let metadata = lock.metadata().expect("held lock identity");
+            let key = format!(
+                "{:02x}:{:02x}:{}",
+                nix::sys::stat::major(metadata.dev()),
+                nix::sys::stat::minor(metadata.dev()),
+                metadata.ino()
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(180);
+            let blocked = loop {
+                let locks = fs::read_to_string("/proc/locks").expect("kernel lock census");
+                if locks.lines().any(|line| {
+                    line.contains("->") && line.split_whitespace().any(|word| word == key)
+                }) {
+                    break true;
+                }
+                if !matches!(completion.try_recv(), Err(mpsc::TryRecvError::Empty))
+                    || std::time::Instant::now() >= deadline
+                {
+                    break false;
+                }
+                std::thread::yield_now();
+            };
             fs::remove_file(temporary).expect("helper completed temporary");
             let mut record = read_reservation(&path).expect("read").expect("record");
             record["helper_pid"] = json!(93);
@@ -2851,8 +2868,8 @@ pub(crate) mod rollback {
             drop(lock);
             callback.join().expect("callback joined");
             assert!(
-                matches!(blocked, Err(mpsc::RecvTimeoutError::Timeout)),
-                "callback must wait for mailbox owner, got {blocked:?}"
+                blocked,
+                "callback must be a kernel-recorded waiter on the held mailbox lock"
             );
             completion
                 .recv_timeout(Duration::from_secs(30))
