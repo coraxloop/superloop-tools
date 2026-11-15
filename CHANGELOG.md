@@ -80,6 +80,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Agent fixture tests now use one distant hang bound for runner cap and semantic judge budgets, including recorded-runner and temporary-home checks, so node load cannot turn their verdicts into fixture timeouts. The immediately refused 10 ms request is decided before execution; the shortened reaping claim uses a controlled clock. Running doors keep their production budget (``test:unit:runner-isolates-loop-sign-in-and-rubric``; ``test:unit:agent-input-limit-and-refresh-link-replacement``; ``test:unit:real-agent-absent-sign-in-is-unmeasured-from-runner``).
 
+- Door recovery keeps decided enforce outcomes observed instead of reopening them for triage. Other unpublished outcomes still become waiting. Refresh and restart each door under the documented hold to use the corrected recovery choice (``claim:superlooplane:unpublished-effects-recover-without-reexecuting``).
+
 - Doors retain abandoned recorded effects for startup or later-request recovery, and give post-reply publication at least five minutes of lock admission or the remaining request-wide allowance if greater. Request status distinguishes running publication work from work awaiting recovery. Hold new work and drain unpublished effects before a normal refresh and restart; for old abandoned effects, stop the old door before starting the refreshed door, verify recovery, then resume. Pending effects are not reconstructed.
 
 - The separate-process door admission fixtures use the controlled admission clock for both ordinary and root-refusal peers, so scheduling stalls cannot change their logical wait verdicts. Door timing is unchanged (``rule:superlooplane:door-request-admission``).

@@ -2293,6 +2293,14 @@ impl Store {
     }
 
     fn publish_waiting_locked(&self, id: &str) -> Result<RequestRecord, LaneError> {
+        self.publish_locked(id, RequestRecord::publish_waiting)
+    }
+
+    fn publish_locked(
+        &self,
+        id: &str,
+        publish: fn(&mut RequestRecord) -> Result<(), LaneError>,
+    ) -> Result<RequestRecord, LaneError> {
         let (run, _) = publication_identity(id)?;
         let (old, revision, mut records) = self.read_run(run)?;
         let record = records
@@ -2302,7 +2310,7 @@ impl Store {
         if !record.value()["state"].is_null() && record.value()["effect"]["state"] != "pending" {
             return Ok(record.clone());
         }
-        record.publish_waiting()?;
+        publish(record)?;
         let result = record.clone();
         self.commit_run(run, old.as_deref(), revision + 1, &records)?;
         Ok(result)
@@ -2919,7 +2927,14 @@ impl Store {
                     continue;
                 };
                 hold::request(record.id());
-                if let Err(error) = view.publish_waiting_locked(record.id()) {
+                let publish = if record.value()["mode"] == "enforce"
+                    && record.value()["would_do"]["decision"] != "undecided"
+                {
+                    RequestRecord::publish_observed
+                } else {
+                    RequestRecord::publish_waiting
+                };
+                if let Err(error) = view.publish_locked(record.id(), publish) {
                     crate::door::post_reply_event(record.id(), "recovery-publication", error.kind);
                     return Err(error);
                 }
@@ -3216,6 +3231,60 @@ pub(crate) mod tests {
         let request = RequestRecord::decode(request).expect("unpublished effect");
         assert!(request.publication_pending());
         store.file(request).expect("file effect");
+    }
+
+    fn recovery_outcome(store: &Store, nonce: &str, mode: &str, decision: &str) {
+        let mut row = waiting("R", nonce, 3000, Mode::Allow).into_value();
+        row["mode"] = json!(mode);
+        row["class_setting"]["mode"] = json!(mode);
+        row["loop_setting"]["mode"] = json!(mode);
+        row["would_do"]["decision"] = json!(decision);
+        row["state"] = serde_json::Value::Null;
+        row["effect"]["state"] = json!("completed");
+        row["effect"]["reason"] = json!("door-complete");
+        row["effect"]["exit_status"] = json!(0);
+        row["effect"]["ref_check"] = json!("not-applicable");
+        if decision == "refuse" {
+            row["effect"]["state"] = json!("refused");
+            row["effect"]["reason"] = json!("door-rubric-refusal");
+            row["effect"]["exit_status"] = json!(125);
+            row["effect"]["ref_check"] = json!("not-reached");
+        }
+        crate::requests::judgement::initialize(&mut row);
+        store
+            .file(RequestRecord::decode(row).expect("outcome"))
+            .expect("file outcome");
+    }
+
+    /// ´test:unit:publication-recovery-preserves-decided-enforce-outcomes´
+    #[test]
+    fn publication_recovery_preserves_decided_enforce_outcomes() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        for (nonce, mode, decision) in [
+            ("1a", "enforce", "allow"),
+            ("2b", "enforce", "refuse"),
+            ("3c", "enforce", "undecided"),
+            ("4d", "allow", "allow"),
+        ] {
+            recovery_outcome(&store, nonce, mode, decision);
+        }
+        store
+            .recover_unpublished(Some("R"))
+            .expect("recover outcomes");
+        for (id, expected) in [
+            ("R:1a", "observed"),
+            ("R:2b", "observed"),
+            ("R:3c", "waiting"),
+            ("R:4d", "waiting"),
+        ] {
+            assert_eq!(
+                store.request(id).expect("recovered").value()["state"],
+                expected,
+                "{id}"
+            );
+        }
     }
 
     /// ´test:unit:publication-recovery-skips-live-and-completes-abandoned-effects´
