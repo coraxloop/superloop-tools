@@ -236,3 +236,8 @@ mod release;
 
 #[path = "completion.rs"]
 pub(in crate::launch) mod completion;
+
+// Only the keeper and its children can name Manager or invoke its stop method.
+// Other cores receive snapshots; C6 cannot create a second cleanup owner.
+#[path = "manager.rs"]
+pub(in crate::launch) mod manager;

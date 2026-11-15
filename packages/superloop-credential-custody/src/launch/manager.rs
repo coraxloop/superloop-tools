@@ -1,5 +1,5 @@
 //! Pinned manager CLI transport. Replies are bounded metadata, never diagnostics.
-use super::{
+use crate::launch::{
     Result,
     measure::{Admission, HeldArtifact},
     policy::{ArtifactRole, FIXTURE_STANDARD_STREAMS},
@@ -61,7 +61,7 @@ pub(super) struct Manager<'a> {
     query: &'a HeldArtifact,
 }
 #[derive(Debug)]
-pub(super) struct Snapshot {
+pub(in crate::launch) struct Snapshot {
     pub invocation: String,
     pub pid: u32,
     pub active: String,
@@ -282,7 +282,7 @@ impl<'a> Manager<'a> {
                 .diagnostic_bytes
                 .min(64 * 1024),
             timeout_ms: u64::try_from(
-                super::sealer::remaining_timeout(Instant::now(), deadline, deadline)
+                crate::launch::sealer::remaining_timeout(Instant::now(), deadline, deadline)
                     .map_err(|_| "manager-deadline")?,
             )
             .map_err(|_| "manager-deadline")?,
@@ -365,7 +365,7 @@ fn parse(bytes: &[u8], wire: &Expected<'_>, expected: Option<&str>) -> Result<Sn
         .iter()
         .map(|key| (*key, values[*key]))
         .collect();
-    let configuration_sha256 = super::measure::canonical(
+    let configuration_sha256 = crate::launch::measure::canonical(
         "credential-manager-properties-v1",
         &serde_json::json!({"properties":measured,"open_files":openfiles}),
     )?;
@@ -391,7 +391,7 @@ fn parse(bytes: &[u8], wire: &Expected<'_>, expected: Option<&str>) -> Result<Sn
 
 #[cfg(test)]
 #[path = "manager_tests.rs"]
-pub(super) mod tests;
+pub(in crate::launch) mod tests;
 
 fn version(bytes: &[u8]) -> Option<u32> {
     let text = std::str::from_utf8(bytes).ok()?;
@@ -463,13 +463,13 @@ fn properties(values: &BTreeMap<&str, &str>, wire: &Expected<'_>) -> Result<Vec<
             && duration_us(values["TimeoutStopUSec"]) == Some(5_000_000),
         "manager-property-drift",
     )?;
-    let actual = super::policy::Properties {
+    let actual = crate::launch::policy::Properties {
         capability_bounding_set: Vec::new(),
         ambient_capabilities: Vec::new(),
         no_new_privileges: values["NoNewPrivileges"] == "yes",
-        protect_system: super::policy::Protection::Strict,
-        user_namespace: super::policy::Namespace::Host,
-        pid_namespace: super::policy::Namespace::Host,
+        protect_system: crate::launch::policy::Protection::Strict,
+        user_namespace: crate::launch::policy::Namespace::Host,
+        pid_namespace: crate::launch::policy::Namespace::Host,
         manager_access: false,
         dynamic_user: values["DynamicUser"] == "yes",
         writable: Vec::new(),

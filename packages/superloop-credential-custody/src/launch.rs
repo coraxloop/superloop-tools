@@ -7,7 +7,7 @@ mod fifo;
 mod handoff;
 mod inventory;
 mod keeper;
-mod manager;
+use keeper::manager;
 mod measure;
 mod policy;
 mod process_pin;

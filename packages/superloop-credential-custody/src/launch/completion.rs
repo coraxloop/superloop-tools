@@ -118,12 +118,19 @@ impl Keeper<'_> {
         self.capture_generator_at(self.manager.deadline())
     }
     fn capture_generator_at(&mut self, deadline: Instant) -> Result<bool> {
+        self.capture_generator_with_clock(deadline, Instant::now)
+    }
+    fn capture_generator_with_clock(
+        &mut self,
+        deadline: Instant,
+        mut now: impl FnMut() -> Instant,
+    ) -> Result<bool> {
         require(
             !self.terminal && self.session.store().phase() == Phase::Released,
             "completion-order",
         )?;
         let result = (|| {
-            require(Instant::now() < deadline, "completion-deadline")?;
+            require(now() < deadline, "completion-deadline")?;
             let pin = self.process.as_ref().ok_or("keeper-not-captured")?;
             let snapshot = self.manager.snapshot(Some(&pin.invocation().id))?;
             let observation = Generator::observe(
@@ -136,8 +143,10 @@ impl Keeper<'_> {
                 return Ok(false);
             };
             let successful = observation.successful;
-            require(Instant::now() < deadline, "completion-deadline")?;
             self.session.store().retain_generator(observation)?;
+            // Retention is evidence, not acceptance. Even expiry after a valid
+            // terminal observation must preserve it before matched-holder cleanup.
+            require(now() < deadline, "completion-deadline")?;
             require(successful, "completion-generator-failed")?;
             Ok(true)
         })();

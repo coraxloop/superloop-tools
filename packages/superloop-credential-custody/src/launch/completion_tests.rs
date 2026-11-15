@@ -133,6 +133,41 @@ fn no_completion(f: &Fixture) {
     assert!(!evidence(f).join("completion.json").exists());
 }
 
+/// ´test:unit:completion-retains-an-observation-before-late-expiry-cleanup´
+#[test]
+fn completion_retains_an_observation_before_late_expiry_cleanup() {
+    let _case = case_guard();
+    for failed in [false, true] {
+        let f = setup(if failed {
+            "fail-after-output"
+        } else {
+            "normal"
+        });
+        let admission = f.admit();
+        let mut store = Store::reserve(&admission, 0).unwrap();
+        let mut keeper =
+            Keeper::prepare(RootStartup::test_owner(), &admission, 0, &mut store).unwrap();
+        let status = released(&f, &admission, &mut keeper);
+        assert_eq!(status != 0, failed);
+        terminal_reply(&f, status);
+        fs::write(f.dir.path().join("manager-require-retained"), b"").unwrap();
+        let before = Instant::now();
+        let deadline = before + std::time::Duration::from_secs(600);
+        let mut instants = [before, deadline].into_iter();
+        assert_eq!(
+            keeper.capture_generator_with_clock(deadline, || instants.next().unwrap()),
+            Err("completion-deadline")
+        );
+        assert!(evidence(&f).join("state-07.json").is_file());
+        let result = retained(&f);
+        assert_eq!(result["generator"]["status"], status);
+        assert_eq!(result["generator"]["successful"], status == 0);
+        assert!(f.dir.path().join("manager-stopped").is_file());
+        assert_eq!(keeper.phase(), Phase::Uncertain);
+        no_completion(&f);
+    }
+}
+
 /// ´test:unit:completion-start-identity-is-captured-before-release´
 #[test]
 fn completion_start_identity_is_captured_before_release() {

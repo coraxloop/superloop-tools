@@ -147,7 +147,7 @@ fn manager_held_cli_uses_closed_vectors_and_empty_child_table() {
     assert_eq!((snapshot.code, snapshot.status), (0, 0));
     assert_eq!(
         snapshot.properties,
-        serde_json::to_vec(&super::super::policy::Role::Fixture.properties()).unwrap()
+        serde_json::to_vec(&crate::launch::policy::Role::Fixture.properties()).unwrap()
     );
     manager.stop(&snapshot.invocation).unwrap();
     let args: Vec<String> =
