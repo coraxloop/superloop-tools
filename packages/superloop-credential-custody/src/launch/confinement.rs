@@ -226,6 +226,8 @@ fn denied_syscalls() -> Vec<nix::libc::c_long> {
     // as well. No ring descriptor is admitted across this child exec.
     let mut denied = vec![
         // No kernel keyring or SysV/POSIX message-queue authority is needed.
+        nix::libc::SYS_setpgid,
+        nix::libc::SYS_setsid,
         nix::libc::SYS_keyctl,
         nix::libc::SYS_add_key,
         nix::libc::SYS_request_key,

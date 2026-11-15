@@ -129,6 +129,7 @@ fn main() {
         ) + b'0',
     );
     evidence.extend(ipc());
+    evidence.extend(group_changes());
     std::io::stdout().write_all(&evidence).unwrap();
 }
 
@@ -254,4 +255,25 @@ fn ipc() -> Vec<u8> {
         ) + b'0'
     })
     .collect()
+}
+
+#[allow(unsafe_code)]
+fn group_changes() -> [u8; 2] {
+    // SAFETY: setpgid(0,0) is a harmless no-op without the filter. A private
+    // forked child is not a group leader, so setsid would succeed without it.
+    // That child uses only scalar syscalls and exits before the parent proceeds.
+    unsafe {
+        let group = nix::libc::setpgid(0, 0) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::EPERM);
+        let pid = nix::libc::fork();
+        assert!(pid >= 0);
+        if pid == 0 {
+            let result = nix::libc::setsid();
+            let denied = result == -1 && *nix::libc::__errno_location() == nix::libc::EPERM;
+            nix::libc::_exit(i32::from(!denied));
+        }
+        let mut status = 0;
+        assert_eq!(nix::libc::waitpid(pid, &raw mut status, 0), pid);
+        [u8::from(group) + b'0', u8::from(status == 0) + b'0']
+    }
 }

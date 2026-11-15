@@ -117,6 +117,7 @@ dependency_ledger += ['''
 # The watchdog control uses the fixed held interpreter and event-driven pidfd observations.
 dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-credential-custody/src/process.rs:\"/usr/bin/python3\"#1","caller":"superloop-credential-custody","owner":"SUPERLOOPCREDENTIALCUSTODY","selector":"\"/usr/bin/python3\"","callee":"external:/usr/bin/python3","lookup":"private-exact-path","contract":"Test-only event-driven descendant watchdog exercises shared cancellation without a startup timing window"}
+{"kind":"call","site":"packages/superloop-credential-custody/src/process.rs:\"/usr/bin/python3\"#2","caller":"superloop-credential-custody","owner":"SUPERLOOPCREDENTIALCUSTODY","selector":"\"/usr/bin/python3\"","callee":"external:/usr/bin/python3","lookup":"private-exact-path","contract":"Test-only escaped leader proves retained-pidfd cancellation independently of group membership"}
 ''']
 
 # The CLI adapter is private and exercised only with a native test peer here.

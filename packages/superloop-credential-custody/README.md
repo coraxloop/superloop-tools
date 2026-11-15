@@ -140,3 +140,5 @@ The ordinary-user keeper harness admits the small native manager example as its 
 The build-only `custody-startup-test` Cargo example retains the exact entry guard and descriptor-closure control separately, so the native manager/control peer does not link that unused dependency closure. Neither example is staged or installed.
 
 Fixture harnesses observe a stop or early-exit event under a 600-second emergency guard. The blocked-stream control holds both read ends open and unread until the child exits; its small configured timeout is the behavior under test. Ordinary parser/probe fixtures use the existing 60-second policy maximum as their hang allowance. The timeout control reads a pipe whose writer never writes; exception and output-limit controls use the longer allowance and assert their distinct diagnostic classes. No assertion compares elapsed time.
+
+Sealers cannot change process groups or sessions. Cancellation kills the retained group before reaping and independently signals the leader through its retained pidfd, so a changed group cannot strand the keeper in its leader wait. The pre-pidfd setup-failure path also kills its still-unreaped child directly.

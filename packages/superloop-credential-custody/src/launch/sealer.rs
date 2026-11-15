@@ -16,7 +16,7 @@ use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
 use nix::unistd::Pid;
 use std::fs::File;
 use std::io::Read as _;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd as _, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::Path;
 use std::process::{Child, ChildStderr, Command, Stdio};
@@ -129,7 +129,7 @@ impl Running {
 impl Running {
     fn cancel(&mut self) {
         if !self.done
-            && let Some(status) = cancel(&mut self.child)
+            && let Some(status) = crate::process::cancel_pinned(&mut self.child, self.pidfd.as_fd())
         {
             self.exit = status
                 .code()
