@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Build Unix process and namespace operations against nix 0.32. The workspace uses none of the changed socket-accept or splice interfaces; no command form or operator action changes (`sec:publictools:build`).
+
 - The helper-parent lock regression observes the exact mailbox lock's waiter in `/proc/locks` before releasing its holder, deriving its device and inode token from the kernel holder line rather than `stat`, including on btrfs. No installed behavior changes (``test:unit:live-round-parent-publication-takes-mailbox-lock``; ``test:unit:mailbox-waiter-uses-kernel-holder-device``).
 
 - The public helper-stop recovery rehearsal checks the retained-letter refusal and the complete resumed recovery on one raced record per reply variant, preserving every assertion while removing duplicate setups. Its hidden library stop bound is injected after the real helper is paused at the unlink event; installed launches keep 90 seconds (``test:integration:public-helper-stop-recovers-resumed-reply``; ``test:integration:public-helper-stop-recovers-resumed-no-reply``).

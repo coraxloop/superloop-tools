@@ -34,7 +34,7 @@ loop-home = { path = "packages/loop-home" }
 # receive values the program has already counted, cut and summarised; debug
 # stays off because the templates are compiled into the binary and tested.
 minijinja = { version = "2", default-features = false, features = ["macros", "multi_template", "serde"] }
-nix = { version = "0.31", features = ["process", "signal", "fs", "term", "dir", "user", "mount"] }
+nix = { version = "0.32", features = ["process", "signal", "fs", "term", "dir", "user", "mount"] }
 # Graph features include serde-1 for state serialization; dot_parser and
 # rayon stay off. Consumers use DiGraph, NodeIndex, Direction and visit.
 petgraph = { version = "0.8", features = ["serde-1"] }
