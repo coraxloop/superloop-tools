@@ -5097,7 +5097,7 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(reply["reason"], "door-request-record-refusal");
             assert_eq!(reply["request_id"], rows[0].id());
-            assert_eq!(fixture_final_frame(&mut peer), reply);
+            assert_eq!(fixture_final_frame(&mut peer), as_sent(&reply));
             assert!(rows[0].value()["agent_status"].is_null());
             assert!(rows[0].value()["state"].is_null());
             assert_incomplete(&fixture, rows[0].id());
@@ -5271,6 +5271,13 @@ mod tests {
         }
     }
 
+    // A reply as its peer decodes it. Frames are `serde_json::to_vec`, and the default
+    // parser can land one unit in the last place away from a printed float measurement.
+    fn as_sent(reply: &Value) -> Value {
+        let bytes = serde_json::to_vec(reply).expect("encode reply");
+        serde_json::from_slice(&bytes).expect("decode reply")
+    }
+
     /// ´test:unit:door-final-reply-follows-lock-wait-credits´
     #[test]
     fn door_final_reply_follows_lock_wait_credits() {
@@ -5288,7 +5295,7 @@ mod tests {
                 Instant::now(),
             );
             super::frame_write_no_drain(&mut writer, &reply).expect("final reply");
-            assert_eq!(fixture_final_frame(&mut reader), reply);
+            assert_eq!(fixture_final_frame(&mut reader), as_sent(&reply));
         }
     }
 

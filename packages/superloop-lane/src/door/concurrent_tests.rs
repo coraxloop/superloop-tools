@@ -367,7 +367,7 @@ fn bounded_box_request(home: &std::path::Path, store: &Store, uid: u32) -> Value
         Instant::now(),
     )
     .expect("box request completes");
-    assert_eq!(frame_read(&mut client).expect("final reply"), reply);
+    assert_eq!(frame_read(&mut client).expect("final reply"), as_sent(&reply));
     assert_eq!(reply["reason"], "door-request-refusal");
     assert!(reply["request_id"].is_string());
     assert!(reply.get("request_record_error").is_none());
@@ -1103,7 +1103,7 @@ fn post_reply_failure_case(phase: &'static str) {
     assert!(store.request(&id).expect("live advice remains unpublished").publication_pending());
     release_tx.send(()).expect("release agent after final");
     let result = handler.join().expect("handler");
-    assert_eq!(result.expect("no late error reaches second-refusal writer").0, reply);
+    assert_eq!(as_sent(&result.expect("no late error reaches second-refusal writer").0), reply);
     let mut tail = Vec::new();
     std::io::Read::read_to_end(&mut client, &mut tail).expect("closed handler");
     assert!(tail.is_empty(), "{phase}: post-final bytes {tail:?}");
