@@ -1413,7 +1413,9 @@ fn ceiling_from_value(value: Option<OsString>) -> Result<Duration, TopologyError
 
 #[cfg(test)]
 mod ceiling_tests {
-    use super::{MAX_TOPOLOGY_CEILING_MS, ceiling_from_value};
+    use super::{MAX_TOPOLOGY_CEILING_MS, ceiling_from_value, run_process};
+    use std::ffi::OsString;
+    use std::path::Path;
     use std::time::Duration;
 
     #[test]
@@ -1423,6 +1425,21 @@ mod ceiling_tests {
             ceiling_from_value(None).expect("unconfigured ceiling"),
             Duration::from_millis(MAX_TOPOLOGY_CEILING_MS)
         );
+    }
+
+    #[test]
+    fn one_half_second_process_wait_reaches_its_ceiling() {
+        let output = run_process(
+            Path::new("/bin/sleep"),
+            &[OsString::from("10")],
+            Path::new("/"),
+            &[],
+            Duration::from_millis(500),
+        )
+        .expect("the process wait completes");
+        assert!(output.timed_out);
+        assert!(output.wall_ms >= 500);
+        assert!(!output.status.success());
     }
 }
 

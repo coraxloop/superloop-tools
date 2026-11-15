@@ -2348,11 +2348,11 @@ fn topology_ceiling_disqualifies_before_evidence_classes() {
     assert_topology_disqualifier("topology-ceiling", "ceiling");
 }
 
-/// Retain the original half-second real wait while other matrices only prove that the cap fires.
-/// ´test:integration:topology-ceiling-retains-half-second-real-wait´
+/// The cached 20 ms matrix proves the recorded invocation wall reaches its ceiling.
+/// ´test:integration:topology-ceiling-trials-account-for-short-real-wait´
 #[test]
-fn topology_ceiling_retains_half_second_real_wait() {
-    let (_directory, output, verdict) = run_mode_with_ceiling("topology-ceiling", 500.to_string());
+fn topology_ceiling_trials_account_for_short_real_wait() {
+    let (output, verdict) = cached_mode("topology-ceiling");
     assert_eq!(output.status.code(), Some(3));
     let trials = verdict["trials"]
         .as_array()
@@ -2361,7 +2361,7 @@ fn topology_ceiling_retains_half_second_real_wait() {
     for trial in trials {
         assert_eq!(trial["timed_out"], true);
         assert_eq!(trial["classification_reason"], "ceiling");
-        assert!(trial["invocation_wall_ms"].as_u64().expect("real wait") >= 500);
+        assert!(trial["invocation_wall_ms"].as_u64().expect("real wait") >= 20);
     }
     assert_eq!(verdict["selected_topology"], "blocked");
     assert_eq!(verdict["deployment_blocked"], true);
@@ -2437,7 +2437,10 @@ sys.exit(result.returncode)
         .env("PERMISSION_TRIAGE_HARNESS_BIN", &harness)
         .env("TOPOLOGY_PRODUCTION_WAIT_PID", &pid_path);
     if let Some(milliseconds) = ceiling_override {
-        command.env("PERMISSION_TRIAGE_TOPOLOGY_CEILING_MS", milliseconds.to_string());
+        command.env(
+            "PERMISSION_TRIAGE_TOPOLOGY_CEILING_MS",
+            milliseconds.to_string(),
+        );
     }
     let output = command.output_serialized().expect("ceiling probe");
     assert!(

@@ -127,6 +127,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Permission-triage's no-input fixture now ends its deadline process and its sleeping descendant as a group, leaving no orphan after the test succeeds.
 - The failed-kill test now holds its descendant on a pipe until the runner returns, so the helper-join claim follows an event instead of a 30-second fixture lifetime.
 - Ordinary permission-triage tests now pin the unchanged 120-second topology default directly and prove timeout, group kill, and reap with a shorter override; the full 120-second run remains available on demand.
+- The topology ceiling matrix now checks recorded walls on its existing 20 ms trials, with one separate real half-second process wait; ordinary gates no longer repeat that wait across 171 trials.
 
 - A first-dispatch helper-stop refusal now preserves the observer’s actual stop result. Recovery no longer accepts an observer merely because it is absent; a premature observer exit still refuses settlement. Compatibility: running launchers keep their old accounting (``test:unit:dispatch-observer-end-precedes-helper-stop-refusal``).
 
