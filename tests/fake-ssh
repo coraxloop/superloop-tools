@@ -61,6 +61,14 @@ case $MODE in
   admin-only)
     printf '%s\n' "from=admin sender=test file=/messages/$host-admin" "-- cursor: cursor-$host-admin-new"
     ;;
+  admin-then-content)
+    if [ -e "$LOG.first" ]; then
+      printf '%s\n' "from=user sender=test file=/messages/$host-user" "-- cursor: cursor-$host-user-new"
+    else
+      : > "$LOG.first"
+      printf '%s\n' "from=admin sender=test file=/messages/$host-admin" "-- cursor: cursor-$host-admin-new"
+    fi
+    ;;
   mixed)
     printf '%s\n' \
       "from=admin sender=test file=/messages/$host-admin" \
@@ -71,7 +79,10 @@ case $MODE in
     printf '%s\n' "from=user sender=test file=/messages/$host" "-- cursor: cursor-$host-new"
     ;;
   slow)
-    exec sleep "${FAKE_SSH_SLEEP_SECONDS:-30}"
+    sleep "${FAKE_SSH_SLEEP_SECONDS:-30}" &
+    sleeper=$!
+    trap 'kill "$sleeper" 2>/dev/null; wait "$sleeper" 2>/dev/null; exit 143' TERM
+    wait "$sleeper"
     ;;
   *)
     echo "unknown fake ssh mode: $MODE" >&2

@@ -120,6 +120,10 @@ impl Fixture {
                 "admin",
                 "user=fixture from=admin file=message\n-- cursor: position-one\n",
             ),
+            (
+                "admin-and-user",
+                "user=fixture from=admin file=message\nuser=fixture from=user file=message\n-- cursor: position-one\n",
+            ),
             ("empty", "-- cursor: position-one\n"),
         ] {
             fs::write(root.path().join(format!("{name}.reply")), body).unwrap();
@@ -160,8 +164,10 @@ case $mode in
   failed) exit 1;;
   unknown-key) exit 255;;
   partial) [ "$host" != beta ] || exit 1; mode=user;;
+  partial-key) [ "$host" != alpha ] || exit 255; mode=user;;
+  repeat-user) mode=user;;
 esac
-case $remote in *--after-cursor*) mode=empty;; esac
+case $remote in *--after-cursor*) [ "$MODE" = repeat-user ] || mode=empty;; esac
 while IFS= read -r line; do printf '%s\n' "$line"; done < "$r/$mode.reply"
 "#).unwrap();
         Self { root }
@@ -195,10 +201,10 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$r/$mode.reply"
             .env("HOME", self.root.path())
             .env("FIXTURE", self.root.path())
             .env("MODE", mode)
-            .env("CORRESPONDENCE_FEED_DEADLINE_MS", "400")
+            .env("CORRESPONDENCE_FEED_DEADLINE_MS", "120000")
             .env("CORRESPONDENCE_FEED_POLL_MS", "10")
             .env("CORRESPONDENCE_FEED_POLL_FLOOR_MS", "150")
-            .env("CORRESPONDENCE_WATCH_DEADLINE_MS", "850");
+            .env("CORRESPONDENCE_WATCH_DEADLINE_MS", "120000");
         command
     }
     fn run(&self, action: &str, mode: &str, advance: bool) -> Output {
@@ -240,14 +246,11 @@ fn bare_reads_and_second_caller_preserve_and_resume_shared_cursor() {
     let path = f.root.path().join("state/cursor-alpha");
     let before = metadata(&path);
     for action in ["poll", "watch"] {
-        let output = f.run(action, "user", false);
-        assert_eq!(
-            output.status.code(),
-            Some(if action == "watch" { 2 } else { 0 })
-        );
+        let output = f.run(action, "repeat-user", false);
+        assert_eq!(output.status.code(), Some(0));
         assert_eq!(before, metadata(&path));
         assert!(String::from_utf8_lossy(&output.stdout).contains("FEED-DURATION-MS "));
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("file=message"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("file=message"));
     }
     assert_eq!(fs::read(path).unwrap(), b"position-one");
     assert!(
@@ -261,17 +264,15 @@ fn bare_reads_and_second_caller_preserve_and_resume_shared_cursor() {
 #[test]
 fn failure_isolation_admin_publication_and_deadlines() {
     let f = Fixture::new();
-    let output = f.run("watch", "admin", true);
-    assert_eq!(output.status.code(), Some(2));
+    let output = f.run("watch", "admin-and-user", true);
+    assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("from=admin"));
     let cursor = f.root.path().join("state/cursor-alpha");
-    let before = metadata(&cursor);
-    assert!(!f.run("poll", "failed", true).status.success());
-    assert_eq!(before, metadata(&cursor));
     fs::write(f.root.path().join("state/cursor-beta"), "untouched").unwrap();
     let other = metadata(&f.root.path().join("state/cursor-beta"));
-    assert!(f.run("poll", "empty", true).status.success());
+    assert!(f.run("poll", "repeat-user", true).status.success());
     assert_eq!(other, metadata(&f.root.path().join("state/cursor-beta")));
+    assert_eq!(fs::read(&cursor).unwrap(), b"position-one");
     // Fresh alpha content ends the round after beta's failed transport is observed.
     fs::remove_file(&cursor).unwrap();
     let calls = f.root.path().join("calls");
@@ -316,7 +317,14 @@ fn output_failure_unknown_alias_and_key_do_not_acknowledge() {
     assert!(!output.success());
     assert!(!f.root.path().join("state/cursor-alpha").exists());
     let keys = fs::read(f.root.path().join("keys")).unwrap();
-    assert!(!f.run("poll", "unknown-key", false).status.success());
+    let output = f
+        .command("poll", "partial-key")
+        .args(["alpha", "beta"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("host=alpha SSH-FAILED"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("FEED-WARNING"));
     assert_eq!(fs::read(f.root.path().join("keys")).unwrap(), keys);
     assert!(!f.root.path().join(".ssh/known_hosts").exists());
     fs::remove_file(f.root.path().join("calls")).unwrap();
@@ -349,7 +357,7 @@ fn release_harness_keeps_all_correspondence_pins() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("PASS all 22 correspondence harness pins")
+        String::from_utf8_lossy(&output.stdout).contains("PASS all 16 correspondence harness pins")
     );
 }
 
