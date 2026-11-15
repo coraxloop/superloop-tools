@@ -293,6 +293,7 @@ thread_local! {
     pub(crate) static WRITER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static READER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static BEFORE_LEAF_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static WRITE_ACQUISITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FAIL_SHAPE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_MODE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FILE_CAP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
@@ -306,7 +307,7 @@ thread_local! {
     static FAIL_INCOMPLETE_ID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static AFTER_READER_RECORDS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_FIRST_LOCK_MISS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static AFTER_READER_LOCK_CONTENTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static AFTER_READER_LOCK_CONTENTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_READER_LOCK_TIMEOUT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_READER_LOCK_ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_WRITER_POLL: std::cell::RefCell<Option<WriterPollHook>> = const { std::cell::RefCell::new(None) };
@@ -728,6 +729,9 @@ impl Store {
                 "requests-record-refusal",
                 "retirement runs descriptor differs from request custody",
             ));
+        }
+        if !dry_run {
+            self.recover_if_unpublished(run)?;
         }
         let guard =
             if dry_run && read_leaf(self.state_dir(), LOCK_FILE, self.owner, 4096)?.is_none() {
@@ -1531,6 +1535,8 @@ impl Store {
     fn write_lock(&self, path: &'static str) -> Result<StoreLock, LaneError> {
         let guard = self.lock(true)?;
         hold::name(path);
+        #[cfg(test)]
+        WRITE_ACQUISITIONS.with(|count| count.set(count.get() + 1));
         Ok(guard)
     }
 
@@ -2885,24 +2891,70 @@ impl Store {
                 "publication activity custody differs",
             ));
         }
-        match nix::fcntl::Flock::lock(File::from(fd), nix::fcntl::FlockArg::LockExclusiveNonblock) {
+        let operation = if create {
+            nix::fcntl::FlockArg::LockExclusiveNonblock
+        } else {
+            nix::fcntl::FlockArg::LockSharedNonblock
+        };
+        match nix::fcntl::Flock::lock(File::from(fd), operation) {
             Ok(lock) => Ok(Some(PublicationActivity { _lock: Some(lock) })),
             Err((_, Errno::EWOULDBLOCK)) => Ok(None),
             Err((_, error)) => Err(problem("requests-record-refusal", error.to_string())),
         }
     }
 
-    pub(crate) fn unpublished_status(&self, record: &RequestRecord) -> Result<Value, LaneError> {
+    pub(crate) fn unpublished_status(&self, record: &RequestRecord) -> Value {
         let mut value = record.value().clone();
-        value["publication_status"] = json!(if self
-            .try_publication_activity(record.id(), false)?
-            .is_some()
-        {
-            "awaiting-recovery"
-        } else {
-            "running"
-        });
-        Ok(value)
+        match self.try_publication_activity(record.id(), false) {
+            Ok(activity) => {
+                value["publication_status"] = json!(if activity.is_some() {
+                    "awaiting-recovery"
+                } else {
+                    "running"
+                });
+            }
+            Err(error) => {
+                value["publication_status"] = json!("recovery-refused");
+                value["publication_refusal"] = json!({"request_id":record.id(),
+                    "kind":error.kind,"detail":error.detail});
+            }
+        }
+        value
+    }
+
+    /// Avoid an exclusive recovery hold when the run has no unpublished effects.
+    pub(crate) fn recover_if_unpublished(&self, run: &str) -> Result<(), LaneError> {
+        if !crate::valid_run_name(run) {
+            return Err(problem("requests-record-refusal", "run name is invalid"));
+        }
+        let pending = {
+            let _lock = if read_leaf(self.state_dir(), LOCK_FILE, self.owner, 4096)?.is_none() {
+                self.write_lock("recovery_initialize")?
+            } else {
+                self.lock(false)?
+            };
+            let custody = match openat2(
+                &self.runs,
+                format!(".launch-{run}").as_str(),
+                OpenHow::new()
+                    .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+                    .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
+            ) {
+                Ok(custody) => custody,
+                Err(Errno::ENOENT) => return Ok(()),
+                Err(error) => return Err(problem("requests-record-refusal", error.to_string())),
+            };
+            checked_dir(&custody, self.owner)?;
+            let collection = self.channel_read()?;
+            self.read_run_from_custody(run, &custody, collection.as_deref())?
+                .2
+                .iter()
+                .any(RequestRecord::publication_pending)
+        };
+        if pending {
+            self.recover_unpublished(Some(run))?;
+        }
+        Ok(())
     }
 
     /// Recover only completed effects, without supplying missing advice or rerunning work.
@@ -2915,14 +2967,18 @@ impl Store {
         } else {
             view.all_runs(None)?
         };
+        let mut failure = None;
         for (_, _, records) in runs {
             for record in records.iter().filter(|record| record.publication_pending()) {
                 // Nonblocking under the store lock: a live handler may need that lock.
-                let activity = view
-                    .try_publication_activity(record.id(), false)
-                    .inspect_err(|error| {
+                let activity = match view.try_publication_activity(record.id(), false) {
+                    Ok(activity) => activity,
+                    Err(error) => {
                         crate::door::post_reply_event(record.id(), "recovery-activity", error.kind);
-                    })?;
+                        failure.get_or_insert(error);
+                        continue;
+                    }
+                };
                 let Some(_activity) = activity else {
                     continue;
                 };
@@ -2940,7 +2996,7 @@ impl Store {
                 }
             }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -3287,6 +3343,104 @@ pub(crate) mod tests {
         }
     }
 
+    /// ´test:unit:publication-status-probe-does-not-exclude-recovery´
+    #[test]
+    fn publication_status_probe_does_not_exclude_recovery() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        unpublished_fixture(&store, "1a");
+        drop(store.publication_activity("R:1a").expect("create lease"));
+        let _probe = store
+            .try_publication_activity("R:1a", false)
+            .expect("status probe")
+            .expect("idle");
+        store
+            .recover_unpublished(Some("R"))
+            .expect("recover while probe lives");
+        assert_eq!(
+            store.request("R:1a").expect("published").value()["state"],
+            "waiting"
+        );
+    }
+
+    /// ´test:unit:publication-recovery-isolates-malformed-activity´
+    #[test]
+    fn publication_recovery_isolates_malformed_activity() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        for nonce in ["1a", "2b"] {
+            unpublished_fixture(&store, nonce);
+        }
+        drop(store.publication_activity("R:1a").expect("create lease"));
+        fs::set_permissions(
+            fixture.runs.join(".launch-R/door-publication-1a.lock"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .expect("malformed lease");
+        let status = fixture
+            .command(&["status", "alpha"], b"")
+            .expect("status remains usable");
+        let rows = status["unpublished_effects"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        let bad = rows
+            .iter()
+            .find(|row| row["id"] == "R:1a")
+            .expect("bad row");
+        assert_eq!(bad["publication_status"], "recovery-refused");
+        assert_eq!(bad["publication_refusal"]["request_id"], "R:1a");
+        assert!(
+            store.recover_unpublished(Some("R")).is_err(),
+            "aggregate failure"
+        );
+        assert!(
+            store
+                .request("R:1a")
+                .expect("bad retained")
+                .publication_pending()
+        );
+        assert_eq!(
+            store.request("R:2b").expect("good completed").value()["state"],
+            "waiting"
+        );
+    }
+
+    /// ´test:unit:retirement-recovers-last-decided-effect-without-restart´
+    #[test]
+    fn retirement_recovers_last_decided_effect_without_restart() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        recovery_outcome(&store, "1a", "enforce", "allow");
+        let runs = File::open(&fixture.runs).expect("runs");
+        assert!(
+            store.retirement_guard("R", &runs, true).is_err(),
+            "dry run unchanged"
+        );
+        assert!(
+            store
+                .request("R:1a")
+                .expect("still unpublished")
+                .publication_pending()
+        );
+        let live = store.publication_activity("R:1a").expect("live handler");
+        assert!(
+            store.retirement_guard("R", &runs, false).is_err(),
+            "live work protected"
+        );
+        drop(live);
+        drop(
+            store
+                .retirement_guard("R", &runs, false)
+                .expect("real retirement recovers"),
+        );
+        assert_eq!(
+            store.request("R:1a").expect("completed").value()["state"],
+            "observed"
+        );
+    }
+
     /// ´test:unit:publication-recovery-skips-live-and-completes-abandoned-effects´
     #[test]
     fn publication_recovery_skips_live_and_completes_abandoned_effects() {
@@ -3298,7 +3452,7 @@ pub(crate) mod tests {
         let before = fs::read(fixture.runs.join(".launch-R/door-requests.json")).expect("before");
         let row = store.request("R:1a").expect("record");
         assert_eq!(
-            store.unpublished_status(&row).expect("live status")["publication_status"],
+            store.unpublished_status(&row)["publication_status"],
             "running"
         );
         store
@@ -3310,7 +3464,7 @@ pub(crate) mod tests {
         );
         drop(activity);
         assert_eq!(
-            store.unpublished_status(&row).expect("idle status")["publication_status"],
+            store.unpublished_status(&row)["publication_status"],
             "awaiting-recovery"
         );
         store
@@ -3453,7 +3607,7 @@ pub(crate) mod tests {
         assert!(result.is_err());
         let row = store.request("R:1a").expect("record");
         assert_eq!(
-            store.unpublished_status(&row).expect("released")["publication_status"],
+            store.unpublished_status(&row)["publication_status"],
             "awaiting-recovery"
         );
         let path = fixture.runs.join(".launch-R/door-publication-1a.lock");

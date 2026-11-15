@@ -136,7 +136,7 @@ fn read(store: &Store, action: &str, loop_name: &str, pending: bool) -> Result<V
                 .iter()
                 .filter(|row| row.publication_pending())
                 .map(|row| store.unpublished_status(row))
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Vec<_>>()
         );
         result["door_floor"] = json!(store.floor().as_str());
         result["shape_path"] = json!(store.shape_path());

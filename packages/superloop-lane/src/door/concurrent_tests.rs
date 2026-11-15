@@ -1048,7 +1048,7 @@ fn door_recovery_waits_without_retaining_admission() {
         let held = store.fixture_exclusive_lock().expect("hold request lock");
         let (observed_tx, observed_rx) = std::sync::mpsc::channel();
         let child = scope.spawn(move || {
-            crate::requests::store::AFTER_WRITER_LOCK_CONTENTION.with(|slot| {
+            crate::requests::store::AFTER_READER_LOCK_CONTENTION.with(|slot| {
                 *slot.borrow_mut() = Some(Box::new(move || {
                     observed_tx.send(()).expect("recovery is waiting");
                 }));
@@ -1204,4 +1204,24 @@ fn post_reply_journal_child(phases: &[&str]) -> bool {
         assert_eq!(event.as_object().expect("event").len(), 3);
     }
     false
+}
+
+/// ´test:unit:door-success-without-pending-adds-no-exclusive-recovery-hold´
+#[test]
+fn door_success_without_pending_adds_no_exclusive_recovery_hold() {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let store = fixture.store();
+    let mut row = crate::requests::tests::waiting("R", "aa", 3000,
+        crate::requests::Mode::Allow).into_value();
+    row["effect"]["state"] = json!("completed");
+    row["effect"]["reason"] = json!("door-complete");
+    row["effect"]["exit_status"] = json!(0);
+    row["effect"]["ref_check"] = json!("not-applicable");
+    store.file(crate::requests::RequestRecord::decode(row).expect("published record"))
+        .expect("successful request's record");
+    crate::requests::store::WRITE_ACQUISITIONS.set(0);
+    super::recover_after_success(&store, "R", &json!({"status":0}), &mut None);
+    assert_eq!(crate::requests::store::WRITE_ACQUISITIONS.get(), 0,
+        "ordinary successful after-request path adds no exclusive hold");
 }

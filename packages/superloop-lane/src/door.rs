@@ -425,7 +425,7 @@ fn recover_after_success(
     drop(admission.take());
     if reply["status"] == 0 {
         // The current request's lease is still held, so only older abandoned work is recovered.
-        if let Err(error) = store.recover_unpublished(Some(run)) {
+        if let Err(error) = store.recover_if_unpublished(run) {
             post_reply_event("", "recovery-after-request", error.kind);
         }
     }

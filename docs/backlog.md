@@ -498,7 +498,7 @@ Measured again by torrust-index on 2026-10-29 at 18:20Z, over its run hpinwalls 
 
 The admission followup gives post-reply publication a fresh 300-second lock-admission floor or the original request deadline plus maximum credit, whichever is later, against the recorded 16.3-second triage median and 37–132-second field holds. Expiry preserves the durable unpublished effect. Startup and later successful requests recover inactive recorded effects under the request lock; private activity leases distinguish live advisory work, and repeated publication writes nothing. Pending effects remain outside recovery. This changes neither transaction scope nor the helper's unbounded tail.
 
-(2026-11-14) Admission recovery now preserves decided enforce outcomes as observed rather than reopening triage; other outcomes remain waiting, using the same record transitions as the handler (``test:unit:publication-recovery-preserves-decided-enforce-outcomes``).
+(2026-11-14) Admission recovery preserves decided enforce outcomes as observed and leaves other outcomes waiting. The later-request path first checks under a shared lock, adding no exclusive recovery hold when nothing is unpublished. Shared activity probes cannot exclude recovery; malformed leases are named per record and do not hide or block healthy records. Real retirement retries its own run before the unchanged guard; dry-run remains read-only. No transaction boundary, record schema or owner authority changes (``claim:superlooplane:unpublished-effects-recover-without-reexecuting``).
 
 **Problem (The door-agent exercise meets the queue it finds or refuses early with the reason)** · `prob:door:agent-exercise-meets-the-queue-or-refuses-early`
 
