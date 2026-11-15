@@ -440,12 +440,16 @@ pub(super) fn complete_stop_race(reply: bool) {
         .expect("next launch diagnostics");
 }
 
-pub(super) fn late_reply(driver_failed: bool) {
+pub(super) fn late_reply(driver: &str) {
+    let driver_failed = driver == "failed";
     let mut scope = Scope::new();
     let fixture = scope.fixture.as_ref().expect("fixture");
     host::write(fixture.home().join("late-reply"), b"", 0o600);
     if driver_failed {
         host::write(fixture.home().join("driver-failed"), b"", 0o600);
+    }
+    if driver == "over-budget" {
+        host::write(fixture.home().join("over-budget"), b"", 0o600);
     }
     let output = scope.execute("late-reply").expect("real readback refusal");
     scope.stop().expect("scope absent");
@@ -460,12 +464,33 @@ pub(super) fn late_reply(driver_failed: bool) {
         "real driver completion"
     );
     assert!(failed["rounds"][1]["reply"].is_null());
+    if driver == "over-budget" {
+        let before = fixture.reservation();
+        let error = fixture
+            .settle(None)
+            .expect_err("unbound over-budget reply refuses settlement");
+        assert!(
+            error
+                .detail
+                .contains("absent reply requires a matching completed driver verdict"),
+            "{error}"
+        );
+        assert_eq!(
+            fixture.reservation(),
+            before,
+            "refused preview preserves the late-binding admission"
+        );
+    }
     late_reply_refusals(fixture, &failed);
     host::write(
         fixture.home().join("runs/.reservation-R.json"),
         original,
         0o600,
     );
+    settle_late_reply(fixture, &failed);
+}
+
+fn settle_late_reply(fixture: &host::Host, failed: &serde_json::Value) {
     let binding = fixture
         .bind_reply()
         .expect("late reply binds after real readback refusal");

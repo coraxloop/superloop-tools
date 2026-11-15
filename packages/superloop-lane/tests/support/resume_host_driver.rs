@@ -63,13 +63,15 @@ runs=home/'runs';run=runs/'R'
 assert (runs.stat().st_uid,runs.stat().st_mode&0o777)==(0,0o711)
 assert (run.stat().st_uid,run.stat().st_mode&0o777)==(64000,0o700)
 assert record['phase']=='started'
-failed=(home/'driver-failed').exists()
+failed=(home/'driver-failed').exists();over_budget=(home/'over-budget').exists()
 step=record['active_round'];assert step in ('review','after')
 p=Path(record['rounds'][-1]['driver_dir']);os.chdir(p)
 os.setgroups([]);os.setgid(64000);os.setuid(64000)
 assert os.geteuid()==64000 and int(os.readlink('/proc/self'))==os.getpid()
 assert Path('/proc/self/cgroup').read_text().strip().endswith('/work')
-line='RUN-REPORT lane='+step+(' exit=1 wall=0s budget=3600s verdict=FAILED dir=' if failed else ' exit=0 wall=0s budget=3600s verdict=OK dir=')+str(p)
+result='exit=1 wall=0s budget=3600s verdict=FAILED' if failed else 'exit=0 wall=0s budget=3600s verdict=OK'
+if over_budget:result='exit=0 wall=7616s budget=7200s verdict=OVER-BUDGET'
+line='RUN-REPORT lane='+step+' '+result+' dir='+str(p)
 Path('run-report.txt').write_text(line+'\n');os.chmod('run-report.txt',0o600)
 print(line)
 ";

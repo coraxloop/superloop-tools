@@ -92,6 +92,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Helper retained-reader tests now inject drain expiry and wait for holder, runtime-stop and cleanup events, with distant hang guards instead of short scheduling windows. Deployed helper deadlines and cleanup behavior are unchanged (``proto:superlooplane:container-attempt-completion``).
 
+- An over-budget round with a letter-delivered reply can recover through `bind-reply` after the missing-binding readback refusal, then digest-bound `settle`; the public regression reproduces the unbound preview refusal and the successful reply settlement (``claim:superlooplane:late-reply-recovery-keeps-delivered-replies``).
+
 - Repeating `bind-reply` after a late binding now names the existing binding and gives the `settle --dry-run` recovery route instead of claiming that only a started or settled run may bind (``claim:superlooplane:late-reply-recovery-keeps-delivered-replies``).
 
 - A reply left unbound when launch refuses at readback can now be recovered: run `bind-reply`, then preview and apply `settle` with its digest. Only the selected last failed round with the exact missing-binding refusal and no reply or reply binding is admitted; other failed runs still refuse. Deploy is a notice: running launchers keep their code, and the new binding command can recover an existing matching refusal without a record migration (``claim:superlooplane:late-reply-recovery-keeps-delivered-replies``).
