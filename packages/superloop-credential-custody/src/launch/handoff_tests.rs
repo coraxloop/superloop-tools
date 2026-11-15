@@ -35,11 +35,7 @@ fn pidfd_handoff_binds_peer_receipt_and_stopped_process() {
     // transport's 30-second emergency limit is not the readiness witness.
     let imported = receive(&mut receiver, &expected, deadline()).unwrap();
     imported.matches(pin.invocation()).unwrap();
-    let fd = imported.duplicate().unwrap();
-    assert_ne!(
-        nix::fcntl::fcntl(&fd, nix::fcntl::FcntlArg::F_GETFD).unwrap() & nix::libc::FD_CLOEXEC,
-        0
-    );
+    assert!(imported.close_on_exec());
     for change in [
         "peer",
         "owner",

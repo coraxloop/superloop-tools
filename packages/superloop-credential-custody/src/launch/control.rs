@@ -235,6 +235,7 @@ impl Control {
         budget(deadline)?;
         if matches!(request.operation, Operation::Pidfd) {
             let (pin, digest) = handoff.ok_or("control-operation")?;
+            peer.observer_role()?;
             let binding = super::handoff::Binding {
                 schema: 1,
                 case: &self.case,

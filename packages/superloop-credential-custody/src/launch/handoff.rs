@@ -1,5 +1,10 @@
 //! Exact retained-pidfd handoff; no stream capability or release permission.
-use super::{Result, channel, process_pin::ProcessPin, require, store::Invocation};
+use super::{
+    Result, channel,
+    process_pin::{ObservationPin, ProcessPin},
+    require,
+    store::Invocation,
+};
 use serde::Serialize;
 use std::io::{Read as _, Write as _};
 use std::os::{fd::AsRawFd as _, unix::net::UnixStream};
@@ -62,7 +67,7 @@ pub fn receive(
     stream: &mut UnixStream,
     binding: &Binding<'_>,
     deadline: Instant,
-) -> Result<ProcessPin> {
+) -> Result<ObservationPin> {
     let peer = super::control::peer_credentials(stream)?;
     require(
         peer.uid == binding.keeper_uid && u32::try_from(peer.pid).ok() == Some(binding.keeper_pid),

@@ -181,7 +181,7 @@ impl Role {
             capability_bounding_set: match self {
                 Self::CalibrationRun => vec![SysPtrace, Kill],
                 Self::Descriptors => vec![SysPtrace],
-                Self::BarrierRelease => vec![Kill],
+
                 _ => vec![],
             },
             ambient_capabilities: vec![],

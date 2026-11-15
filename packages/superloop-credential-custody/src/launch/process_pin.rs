@@ -15,6 +15,21 @@ pub(super) struct ProcessPin {
     invocation: Invocation,
     stopped: bool,
 }
+// The receiving side deliberately has no resume, raw-fd or duplication API.
+pub(super) struct ObservationPin(ProcessPin);
+impl ObservationPin {
+    pub fn matches(&self, expected: &Invocation) -> Result<()> {
+        self.0.matches(expected)
+    }
+    pub fn verify(&self) -> Result<()> {
+        self.0.verify()
+    }
+    #[cfg(test)]
+    pub fn close_on_exec(&self) -> bool {
+        nix::fcntl::fcntl(&self.0.pidfd, nix::fcntl::FcntlArg::F_GETFD)
+            .is_ok_and(|f| f & nix::libc::FD_CLOEXEC != 0)
+    }
+}
 impl ProcessPin {
     pub fn capture(
         pid: u32,
@@ -129,11 +144,23 @@ impl ProcessPin {
         };
         require(result == 0, "release-signal")
     }
+    pub fn observer_role(&self) -> Result<()> {
+        self.verify()?;
+        let status = super::child_status::ChildStatus::read(&self.directory)?;
+        require(
+            status.pid == self.invocation.pid
+                && status.birth == self.invocation.birth
+                && status.uids == [self.invocation.uid; 4],
+            "handoff-peer-identity",
+        )?;
+        status.observer_role()?;
+        self.verify()
+    }
     pub fn duplicate(&self) -> Result<OwnedFd> {
         self.verify()?;
         self.pidfd.try_clone().map_err(|_| "handoff-duplicate")
     }
-    pub fn transferred(pidfd: OwnedFd, invocation: Invocation) -> Result<Self> {
+    pub fn transferred(pidfd: OwnedFd, invocation: Invocation) -> Result<ObservationPin> {
         let mut event = nix::libc::pollfd {
             fd: pidfd.as_raw_fd(),
             events: nix::libc::POLLIN,
@@ -168,7 +195,7 @@ impl ProcessPin {
             stopped: true,
         };
         pin.verify()?;
-        Ok(pin)
+        Ok(ObservationPin(pin))
     }
     pub fn matches(&self, expected: &Invocation) -> Result<()> {
         require(&self.invocation == expected, "keeper-invocation-binding")?;

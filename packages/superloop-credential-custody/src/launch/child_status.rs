@@ -65,6 +65,15 @@ impl ChildStatus {
             seccomp: number("Seccomp:")?,
         })
     }
+    pub const fn observer_role(&self) -> Result<()> {
+        const CAP_KILL: u64 = 1 << 5;
+        require(
+            (self.inheritable | self.permitted | self.effective | self.ambient | self.bounding)
+                & CAP_KILL
+                == 0,
+            "handoff-peer-signalling",
+        )
+    }
     pub fn verify(&self, pid: u32, owner: u32, bounding: u64) -> Result<()> {
         require(
             self.pid == pid && self.uids == [owner; 4],
@@ -86,6 +95,25 @@ impl ChildStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// ´test:unit:observer-role-refuses-signalling-in-every-capability-set´
+    #[test]
+    fn observer_role_refuses_signalling_in_every_capability_set() {
+        let clean = TEXT.replace("CapBnd:\tff", "CapBnd:\t0");
+        ChildStatus::parse(clean.as_bytes(), 99)
+            .unwrap()
+            .observer_role()
+            .unwrap();
+        for field in ["CapInh", "CapPrm", "CapEff", "CapAmb", "CapBnd"] {
+            let bytes = clean.replace(&format!("{field}:\t0"), &format!("{field}:\t20"));
+            assert_eq!(
+                ChildStatus::parse(bytes.as_bytes(), 99)
+                    .unwrap()
+                    .observer_role(),
+                Err("handoff-peer-signalling"),
+                "{field}"
+            );
+        }
+    }
     const TEXT: &str = "Pid:\t123\nTgid:\t123\nUid:\t2000 2000 2000 2000\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapAmb:\t0\nCapBnd:\tff\nNoNewPrivs:\t1\nSeccomp:\t2\n";
     /// ´test:unit:child-status-requires-complete-observed-fields´
     #[test]

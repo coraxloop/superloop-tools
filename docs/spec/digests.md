@@ -478,10 +478,10 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/README.md:13,24,32,34,36,38,40,44,48,64,78,84,86,122,148,152``|D246–D248 and D250; identity, custody and build documentation.|
 |``packages/superloop-credential-custody/meson.build:80,81,90,91,98,99``|D248; reviewed executable expressions and scope.|
 |``packages/superloop-credential-custody/src/identity.rs:8,15,57,71,98,99,124,125,138``|D246; hashing live files and retained calibration bytes.|
-|``packages/superloop-credential-custody/src/launch/control.rs:184,189,237,246``|D253; retained inventory and authenticated handoff correspondence.|
-|``packages/superloop-credential-custody/src/launch/control_tests.rs:24,324``|D253; retained inventory and authenticated handoff correspondence.|
-|``packages/superloop-credential-custody/src/launch/handoff.rs:16``|D253; retained inventory binding in the authenticated pidfd protocol.|
-|``packages/superloop-credential-custody/src/launch/handoff_tests.rs:14,49,61``|D253; synthetic handoff correspondence controls.|
+|``packages/superloop-credential-custody/src/launch/control.rs:184,189,237,247``|D253; retained inventory and authenticated handoff correspondence.|
+|``packages/superloop-credential-custody/src/launch/control_tests.rs:24``|D253; retained inventory and authenticated handoff correspondence.|
+|``packages/superloop-credential-custody/src/launch/handoff.rs:21``|D253; retained inventory binding in the authenticated pidfd protocol.|
+|``packages/superloop-credential-custody/src/launch/handoff_tests.rs:14,45,57``|D253; synthetic handoff correspondence controls.|
 |``packages/superloop-credential-custody/src/launch/inventory_tests.rs:36,48``|D250; synthetic fixture-image and public-case measurement inputs.|
 |``packages/superloop-credential-custody/src/launch/keeper_tests.rs:18,23,137,141``|D250, D252; synthetic controls compare measured artifact and manager metadata with their retained receipts.|
 |``packages/superloop-credential-custody/src/launch/manager.rs:66,68,342,354,355,415``|D252; observed manager metadata and synthetic controls, no root rehearsal claim.|
@@ -492,7 +492,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/src/launch/release_tests.rs:17,71,85,87,106,114,129,132,133,134,155,172,182,195,208,227,278,295,313,329,348,355``|D250, D253; synthetic artifact and immutable inventory controls.|
 |``packages/superloop-credential-custody/src/launch/sealer_tests.rs:37,51,70,501``|D250; synthetic measured-image controls, no encryption or root rehearsal claim.|
 |``packages/superloop-credential-custody/src/launch/store.rs:113,114,115,121,122,123,131,132,133,141,142,143,163,164,165,170,171,172,200,201,263,264,265,271,272,273,283,285,298,299,310,311``|D250, D252; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
-|``packages/superloop-credential-custody/src/launch/tests.rs:39,65,92,93,233,347,350,369,397,425,429,430,497,498,746,757``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
+|``packages/superloop-credential-custody/src/launch/tests.rs:39,65,92,93,233,351,354,373,401,429,433,434,501,502,750,761``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/observe.rs:180,181,202,216,241,323,328``|D246–D247; source-payload selection and completed sealed-file comparisons.|
 |``packages/superloop-credential-custody/src/process.rs:165``|D246; the held interpreter identity is compared before execution; no independent digest producer.|
 |``packages/superloop-credential-custody/src/record.rs:48,49,67,112,119,165,189,221,233,242,321,345,355``|D246–D247; strict identity fields and full-digest grammar.|

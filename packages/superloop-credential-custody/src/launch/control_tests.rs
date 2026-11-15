@@ -293,9 +293,9 @@ fn control_cleanup_never_removes_a_replacement() {
     );
 }
 
-/// ´test:unit:control-transfers-only-the-captured-pidfd-after-inventory´
+/// ´test:unit:control-refuses-signalling-peer-before-pidfd-transfer´
 #[test]
-fn control_transfers_only_the_captured_pidfd_after_inventory() {
+fn control_refuses_signalling_peer_before_pidfd_transfer() {
     let f = crate::launch::inventory::tests::fixture("normal");
     let (_readers, writers) = crate::launch::inventory::tests::pipes();
     let (_child, pin) = crate::launch::inventory::tests::start(&f, &writers);
@@ -316,12 +316,10 @@ fn control_transfers_only_the_captured_pidfd_after_inventory() {
     );
     control.invocation = original;
     let (result, bytes) = transaction_with(&control, &encoded(&value), Some(&pin));
-    assert_eq!(result, Ok(()));
-    let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(reply["invocation"]["pid"], pin.invocation().pid);
-    assert_eq!(reply["invocation"]["birth"], pin.invocation().birth);
-    assert_eq!(reply["nonce"], value["nonce"]);
-    assert_eq!(reply["inventory_sha256"], "a".repeat(64));
+    // Ordinary-user processes retain CAP_KILL in their bounding set. Read it
+    // live through the authenticated native peer and refuse before sending bytes.
+    assert_eq!(result, Err("handoff-peer-signalling"));
+    assert_eq!(bytes.len(), 0);
     pin.verify().unwrap();
 }
 /// ´test:unit:control-status-endpoint-refuses-descriptor-requests´

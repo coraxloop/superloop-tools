@@ -306,6 +306,10 @@ fn launch_policy_cases_and_paths_are_distinct() {
 /// ´test:unit:launch-roles-require-the-reviewed-property-matrix´
 #[test]
 fn launch_roles_require_the_reviewed_property_matrix() {
+    assert_eq!(
+        Role::BarrierRelease.properties().capability_bounding_set,
+        Vec::new()
+    );
     for index in 0..6 {
         for key in [
             "no_new_privileges",
