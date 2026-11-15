@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Door transport deadline fixtures consume lock-wait progress before checking the final reply, using the shared bounded frame reader; deployed behavior is unchanged (`[ORCHESTRATION-rule:conformance:ordering-and-timing-evidence]`).
 
+- Request-reader regressions now order writer publication through contention events and check deadline credit with the existing fixture clock, so scheduler delay cannot decide their verdicts. Installed lock limits are unchanged (``test:unit:request-reader-outlasts-slow-writer-sync``; ``test:unit:request-reader-refuses-after-lock-bound``).
+
 - The helper dead-driver regression now observes its unknown-identity measurement before releasing the driver-end case, and requires reaping and removal evidence without a ten-second elapsed verdict or finite child lifetime. Production behavior is unchanged (``test:unit:helper-reaps-dead-driver-through-built-process``).
 
 - Silent-helper cancellation tests now distinguish the control request from client disappearance and require completion plus stop/wait evidence from a child with no natural end, instead of a five-second elapsed-time verdict. Installed behavior is unchanged (``proto:superlooplane:container-attempt-completion``).

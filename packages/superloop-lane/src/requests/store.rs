@@ -6063,7 +6063,7 @@ pub(crate) mod tests {
     /// ´test:unit:request-reader-outlasts-slow-writer-sync´
     #[test]
     fn request_reader_outlasts_slow_writer_sync() {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
         let fixture = Fixture::new();
         let writer = fixture.store();
         writer
@@ -6081,9 +6081,8 @@ pub(crate) mod tests {
                     *hook.borrow_mut() = Some(Box::new(move || {
                         sync_tx.send(()).expect("sync reached under exclusive lock");
                         read_rx
-                            .recv_timeout(Duration::from_secs(30))
+                            .recv_timeout(Duration::from_secs(120))
                             .expect("reader contended");
-                        std::thread::sleep(Duration::from_millis(2300));
                     }));
                 });
                 writer
@@ -6091,18 +6090,20 @@ pub(crate) mod tests {
                     .expect("writer committed");
             });
             sync_rx
-                .recv_timeout(Duration::from_secs(30))
+                .recv_timeout(Duration::from_secs(120))
                 .expect("writer reached sync");
             AFTER_READER_LOCK_CONTENTION.with(|hook| {
                 *hook.borrow_mut() =
                     Some(Box::new(move || read_tx.send(()).expect("reader signal")));
             });
-            let started = Instant::now();
             let rows = reader
                 .list_run("R")
                 .expect("reader waits through slow sync");
-            assert!(started.elapsed() >= Duration::from_millis(2300));
-            assert_eq!(rows.len(), 2);
+            assert_eq!(
+                rows.len(),
+                2,
+                "reader observes the writer commit after contention"
+            );
             writer.join().expect("writer joined");
         });
     }
@@ -6112,7 +6113,7 @@ pub(crate) mod tests {
     /// ´test:unit:request-reader-refuses-after-lock-bound´
     #[test]
     fn request_reader_refuses_after_lock_bound() {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
         assert_eq!(super::READER_LOCK_WAIT, Duration::from_secs(15));
         let reader_bound = Duration::from_millis(300);
         super::READER_LOCK_WAIT_OVERRIDE.set(Some(reader_bound));
@@ -6122,17 +6123,24 @@ pub(crate) mod tests {
             .file(waiting("R", "1a", 3000, Mode::Audit))
             .expect("request");
         let _lock = store.fixture_exclusive_lock().expect("writer lock");
-        let started = Instant::now();
-        let error = store.list_run("R").expect_err("reader bound");
+        let (result, clock) = super::with_fixture_lock_clock(|| store.list_run("R"));
+        let error = result.expect_err("reader bound");
         assert!(super::is_lock_contention(&error), "{}", error.line());
-        assert!(started.elapsed() >= reader_bound);
-        assert!(started.elapsed() < reader_bound + Duration::from_secs(5));
-        let started = Instant::now();
-        let error = store
-            .list_run_until("R", started + Duration::from_millis(100))
-            .expect_err("caller bound");
+        assert_eq!(
+            clock.waited.get(),
+            reader_bound,
+            "configured reader wait credit"
+        );
+        let (result, clock) = super::with_fixture_lock_clock(|| {
+            store.list_run_until("R", super::lock_retry_now() + Duration::from_millis(100))
+        });
+        let error = result.expect_err("caller bound");
         assert!(super::is_lock_contention(&error));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            clock.waited.get(),
+            Duration::from_millis(100),
+            "caller wait credit"
+        );
         super::READER_LOCK_WAIT_OVERRIDE.set(None);
     }
 
