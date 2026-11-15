@@ -5700,6 +5700,7 @@ exit 0
 
     struct HolderState {
         child: Option<Child>,
+        release: Option<fs::File>,
         closed: bool,
     }
 
@@ -5709,6 +5710,7 @@ exit 0
         fn new() -> Self {
             Self(Arc::new(Mutex::new(HolderState {
                 child: None,
+                release: None,
                 closed: false,
             })))
         }
@@ -5721,6 +5723,7 @@ exit 0
             let child = {
                 let mut state = self.0.lock().expect("holder lock");
                 state.closed = true;
+                drop(state.release.take());
                 state.child.take()
             };
             if let Some(mut child) = child {
@@ -5753,17 +5756,20 @@ exit 0
     fn hold_stdout(
         pid: u32,
         holder: &Arc<Mutex<HolderState>>,
-        ready: &Path,
         release: &Path,
         published: &mpsc::SyncSender<()>,
     ) -> std::io::Result<()> {
-        wait_fixture_ready(ready)?;
         let writer = fs::OpenOptions::new()
             .write(true)
             .open(format!("/proc/{pid}/fd/1"))?;
-        let child = Command::new("/bin/sleep")
-            .arg0("r002d23-fixture-holder")
-            .arg("30")
+        let mut release = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(release)?;
+        let release_keeper = release.try_clone()?;
+        let child = Command::new("/bin/cat")
+            .arg0("fixture-retained-writer")
+            .stdin(Stdio::piped())
             .process_group(0)
             .stdout(Stdio::from(writer))
             .spawn()?;
@@ -5774,49 +5780,69 @@ exit 0
                 true
             } else {
                 state.child = child.take();
+                state.release = Some(release_keeper);
                 false
             }
         };
         if closed && let Some(mut child) = child {
             let _ignored = child.kill();
             let _ignored = child.wait();
+            return Err(std::io::Error::other("fixture holder cancelled"));
         }
         let _ = published.send(());
-        fs::write(release, b"")
+        release.write_all(b"release\n")
     }
 
-    fn retained_reader_fixture() -> (StartedAttemptFixture, PathBuf, PathBuf) {
-        let mut fixture = StartedAttemptFixture::new(
-            "printf ready > \"$TEST_READY\"; while [ ! -e \"$TEST_RELEASE\" ]; do sleep 0.01; done; exit 0",
-        );
-        let ready = fixture.root.path().join("ready");
+    const RETAINED_READER_HANG_BOUND: Duration = Duration::from_secs(120);
+
+    fn retained_reader_fixture() -> (StartedAttemptFixture, PathBuf) {
+        let mut fixture = StartedAttemptFixture::new("read -r release < \"$TEST_RELEASE\"; exit 0");
         let release = fixture.root.path().join("release");
-        fixture
-            .environment
-            .insert("TEST_READY".into(), ready.display().to_string());
+        nix::unistd::mkfifo(
+            &release,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("release FIFO");
         fixture
             .environment
             .insert("TEST_RELEASE".into(), release.display().to_string());
-        (fixture, ready, release)
+        (fixture, release)
     }
 
     fn finish_held_runner<T>(
         guard: &HolderGuard,
         published: &mpsc::Receiver<()>,
+        finished: &mpsc::Receiver<()>,
         runner: JoinHandle<T>,
-        bound: Duration,
     ) -> T {
-        let handoff = published.recv_timeout(Duration::from_secs(5)).is_ok();
-        let deadline = Instant::now() + bound;
-        while !runner.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let bounded = runner.is_finished();
+        let handoff = published.recv_timeout(RETAINED_READER_HANG_BOUND);
+        let completion = finished.recv_timeout(RETAINED_READER_HANG_BOUND);
         guard.close();
         let result = runner.join().expect("reap fixture runner");
-        assert!(handoff, "holder was published before the bound began");
-        assert!(bounded, "fixture runner exceeded its cleanup bound");
+        handoff.expect("holder publication event");
+        completion.expect("fixture completion event before hang guard");
         result
+    }
+
+    fn await_stop_marker(marker: &mut fs::File) {
+        let mut reader = marker.try_clone().expect("stop FIFO reader");
+        let (sent, received) = mpsc::sync_channel(1);
+        let waiter = std::thread::spawn(move || {
+            let mut bytes = [0; 7];
+            let result = reader.read_exact(&mut bytes).map(|()| bytes);
+            let _ignored = sent.send(result);
+        });
+        let event = received.recv_timeout(RETAINED_READER_HANG_BOUND);
+        if event.is_err() {
+            marker
+                .write_all(b"cancel!")
+                .expect("release stop-event waiter");
+        }
+        waiter.join().expect("reap stop-event waiter");
+        let bytes = event
+            .expect("stop event before distant hang guard")
+            .expect("stop marker bytes");
+        assert_eq!(&bytes, b"stopped", "runtime stop event");
     }
 
     fn read_attempt_status(stream: &mut UnixStream) -> i32 {
@@ -5984,10 +6010,11 @@ exit 0
     /// ´test:unit:helper-bounds-reader-after-thread-creation-error´
     #[test]
     fn helper_bounds_reader_after_thread_creation_error() {
-        let (fixture, ready, release) = retained_reader_fixture();
+        let (fixture, release) = retained_reader_fixture();
         let holder = HolderGuard::new();
         let runner_holder = holder.slot();
         let (published, publication) = mpsc::sync_channel(1);
+        let (finished, completion) = mpsc::sync_channel(1);
         let (mut server, mut client) = UnixStream::pair().expect("channel");
         client
             .write_all(&0_u32.to_le_bytes())
@@ -5997,8 +6024,8 @@ exit 0
                 .run_with_seams(
                     &mut server,
                     STREAM_LIMIT,
-                    Duration::from_millis(200),
-                    Duration::from_millis(200),
+                    Duration::ZERO,
+                    Duration::ZERO,
                     Child::try_wait,
                     |name| {
                         if name == "stderr" {
@@ -6008,21 +6035,20 @@ exit 0
                         }
                     },
                     |pid| {
-                        hold_stdout(pid, &runner_holder, &ready, &release, &published).map_err(
-                            |error| {
-                                crate::error::LaneError::operation("fixture", error.to_string())
-                            },
-                        )
+                        hold_stdout(pid, &runner_holder, &release, &published).map_err(|error| {
+                            crate::error::LaneError::operation("fixture", error.to_string())
+                        })
                     },
                 )
                 .err()
                 .expect("thread creation refuses");
             let evidence = fixture.evidence();
             let removed = fs::read_to_string(fixture.removal).expect("removal");
+            finished.send(()).expect("completion receiver");
             (refusal, evidence, removed)
         });
         let (refusal, evidence, removed) =
-            finish_held_runner(&holder, &publication, runner, Duration::from_secs(2));
+            finish_held_runner(&holder, &publication, &completion, runner);
         assert_eq!(refusal.kind, "container-thread");
         assert_eq!(read_attempt_status(&mut client), 1);
         assert_eq!(evidence["status"], 1);
@@ -6034,10 +6060,11 @@ exit 0
     /// ´test:unit:helper-bounds-reader-after-child-exit´
     #[test]
     fn helper_bounds_reader_after_child_exit() {
-        let (fixture, ready, release) = retained_reader_fixture();
+        let (fixture, release) = retained_reader_fixture();
         let holder = HolderGuard::new();
         let runner_holder = holder.slot();
         let (published, publication) = mpsc::sync_channel(1);
+        let (finished, completion) = mpsc::sync_channel(1);
         let (mut server, mut client) = UnixStream::pair().expect("channel");
         client
             .write_all(&0_u32.to_le_bytes())
@@ -6047,26 +6074,25 @@ exit 0
                 .run_with_seams(
                     &mut server,
                     STREAM_LIMIT,
-                    Duration::from_millis(200),
-                    Duration::from_millis(200),
+                    Duration::ZERO,
+                    Duration::ZERO,
                     Child::try_wait,
                     |_| Ok(()),
                     |pid| {
-                        hold_stdout(pid, &runner_holder, &ready, &release, &published).map_err(
-                            |error| {
-                                crate::error::LaneError::operation("fixture", error.to_string())
-                            },
-                        )
+                        hold_stdout(pid, &runner_holder, &release, &published).map_err(|error| {
+                            crate::error::LaneError::operation("fixture", error.to_string())
+                        })
                     },
                 )
                 .err()
                 .expect("retained reader refuses");
             let evidence = fixture.evidence();
             let removed = fs::read_to_string(fixture.removal).expect("removal");
+            finished.send(()).expect("completion receiver");
             (refusal, evidence, removed)
         });
         let (refusal, evidence, removed) =
-            finish_held_runner(&holder, &publication, runner, Duration::from_secs(20));
+            finish_held_runner(&holder, &publication, &completion, runner);
         assert_eq!(refusal.kind, "container-stream");
         assert_eq!(read_attempt_status(&mut client), 1);
         assert_eq!(evidence["status"], 1);
@@ -6078,14 +6104,25 @@ exit 0
     /// ´test:unit:helper-retains-drain-expiry-after-reader-finishes-during-stop´
     #[test]
     fn helper_retains_drain_expiry_after_reader_finishes_during_stop() {
-        let (mut fixture, ready, release) = retained_reader_fixture();
+        let (mut fixture, release) = retained_reader_fixture();
         let marker = fixture.root.path().join("stopped");
+        nix::unistd::mkfifo(
+            &marker,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("stop FIFO");
+        let mut stop_event = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&marker)
+            .expect("stop event receiver");
         fixture
             .environment
             .insert("TEST_STOP_MARKER".into(), marker.display().to_string());
         let holder = HolderGuard::new();
         let runner_holder = holder.slot();
         let (published, publication) = mpsc::sync_channel(1);
+        let (finished, completion) = mpsc::sync_channel(1);
         let (mut server, mut client) = UnixStream::pair().expect("channel");
         client
             .write_all(&0_u32.to_le_bytes())
@@ -6095,38 +6132,38 @@ exit 0
                 .run_with_seams(
                     &mut server,
                     STREAM_LIMIT,
-                    Duration::from_millis(200),
-                    Duration::from_millis(200),
+                    Duration::ZERO,
+                    RETAINED_READER_HANG_BOUND,
                     Child::try_wait,
                     |_| Ok(()),
                     |pid| {
-                        hold_stdout(pid, &runner_holder, &ready, &release, &published).map_err(
-                            |error| {
-                                crate::error::LaneError::operation("fixture", error.to_string())
-                            },
-                        )
+                        hold_stdout(pid, &runner_holder, &release, &published).map_err(|error| {
+                            crate::error::LaneError::operation("fixture", error.to_string())
+                        })
                     },
                 )
                 .err()
                 .expect("expired drain refuses");
-            (refusal, fixture.evidence())
+            let evidence = fixture.evidence();
+            finished.send(()).expect("completion receiver");
+            (refusal, evidence)
         });
-        let handoff = publication.recv_timeout(Duration::from_secs(5)).is_ok();
-        let marker_deadline = Instant::now() + Duration::from_secs(2);
-        while !marker.exists() && Instant::now() < marker_deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let stopped = marker.exists();
+        publication
+            .recv_timeout(RETAINED_READER_HANG_BOUND)
+            .expect("holder published before stop");
+        await_stop_marker(&mut stop_event);
         holder.close();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !runner.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let bounded = runner.is_finished();
+        let completed = completion.recv_timeout(RETAINED_READER_HANG_BOUND);
         let (refusal, evidence) = runner.join().expect("reap fixture runner");
-        assert!(handoff, "holder was published before stop");
-        assert!(stopped, "stop follows drain expiry");
-        assert!(bounded, "cleanup is bounded");
+        completed.expect("cleanup completion event before hang guard");
+        assert_eq!(
+            evidence["stream_errors"]
+                .as_array()
+                .expect("stream errors")
+                .len(),
+            1,
+            "reader finishes during stop; only the retained drain expiry remains"
+        );
         assert_eq!(refusal.kind, "container-stream");
         assert!(refusal.detail.contains("stream drain exceeded"));
         assert_eq!(evidence["stream_error"]["stream"], "drain");
