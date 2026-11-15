@@ -1445,7 +1445,9 @@ pub(super) fn interrupted_round(record: &Value, step: &str) -> bool {
                         && step != "dispatch"
                         && (round["phase"] == "running"
                             || (round["phase"] == "awaiting-settlement"
-                                && record["driver_end"]["state"] == "completed"))
+                                && record["driver_end"]["state"] == "completed"
+                                && record["driver_end"]["successful"] == true
+                                && record["helper_end"]["successful"] != false))
                 })
         })
 }
@@ -3201,6 +3203,22 @@ mod tests {
         }
         let mut record = good.clone();
         record["driver_end"]["successful"] = json!(false);
+        assert!(
+            !super::interrupted_round(&record, "review"),
+            "unsuccessful driver is not the stop race"
+        );
+        record["driver_end"]["successful"] = serde_json::Value::Null;
+        assert!(
+            !super::interrupted_round(&record, "review"),
+            "driver success must be recorded"
+        );
+        record = good.clone();
+        record["helper_end"] = json!({"state":"completed","successful":false});
+        assert!(
+            !super::interrupted_round(&record, "review"),
+            "unsuccessful helper is not the stop race"
+        );
+        record["helper_end"]["successful"] = json!(true);
         assert!(super::interrupted_round(&record, "review"));
         assert!(!super::interrupted_round(&good, "other"));
         record["phase"] = json!("settled");
