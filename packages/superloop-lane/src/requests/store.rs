@@ -315,6 +315,69 @@ thread_local! {
     pub(crate) static AFTER_WRITER_LOCK_ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_TIMEOUT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static STRETCH_SHARED_HOLD: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    static LOCK_RETRY_CLOCK: std::cell::RefCell<Option<std::rc::Rc<FixtureLockClock>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct FixtureLockClock {
+    now: std::cell::Cell<Instant>,
+    waited: std::cell::Cell<Duration>,
+}
+
+#[cfg(test)]
+struct RestoreLockClock(Option<std::rc::Rc<FixtureLockClock>>);
+
+#[cfg(test)]
+impl Drop for RestoreLockClock {
+    fn drop(&mut self) {
+        LOCK_RETRY_CLOCK.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+
+#[cfg(test)]
+fn with_fixture_lock_clock<T>(f: impl FnOnce() -> T) -> (T, std::rc::Rc<FixtureLockClock>) {
+    let clock = std::rc::Rc::new(FixtureLockClock {
+        now: std::cell::Cell::new(Instant::now()),
+        waited: std::cell::Cell::new(Duration::ZERO),
+    });
+    let _restore =
+        RestoreLockClock(LOCK_RETRY_CLOCK.with(|slot| slot.replace(Some(clock.clone()))));
+    (f(), clock)
+}
+
+#[cfg(test)]
+fn lock_retry_now() -> Instant {
+    LOCK_RETRY_CLOCK.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map_or_else(Instant::now, |clock| clock.now.get())
+    })
+}
+
+#[cfg(not(test))]
+fn lock_retry_now() -> Instant {
+    Instant::now()
+}
+
+fn lock_retry_sleep(bound: Duration, ticket: Option<&queue::Ticket<'_>>) {
+    #[cfg(test)]
+    if LOCK_RETRY_CLOCK.with(|slot| {
+        let Some(clock) = slot.borrow().as_ref().cloned() else {
+            return false;
+        };
+        clock.now.set(clock.now.get() + bound);
+        clock.waited.set(clock.waited.get() + bound);
+        true
+    }) {
+        return;
+    }
+    if let Some(ticket) = ticket {
+        ticket.wait_turn(bound);
+    } else {
+        std::thread::sleep(bound);
+    }
 }
 
 #[cfg(test)]
@@ -1201,7 +1264,7 @@ impl Store {
         // A late effect, deadline outcome or agent publication still gets the
         // base writer allowance. Fix this bound once, never at each retry.
         let base_deadline = if changing && !self.strict_writer_deadline {
-            deadline.map(|end| end.max(started + writer_lock_wait()))
+            deadline.map(|end| end.max(lock_retry_now() + writer_lock_wait()))
         } else {
             deadline
         };
@@ -1213,19 +1276,18 @@ impl Store {
                 base_deadline.map(|end| end + self.credited_wait().saturating_sub(initial_credit));
             match result {
                 Err(ReadFailure::Contended(_))
-                    if deadline.is_some_and(|end| Instant::now() < end) =>
+                    if deadline.is_some_and(|end| lock_retry_now() < end) =>
                 {
                     // Yield between bounded acquisitions just as wait callers do.
-                    let waiting = Instant::now();
-                    std::thread::sleep(
-                        Duration::from_millis(10).min(
-                            deadline
-                                .unwrap_or_else(Instant::now)
-                                .saturating_duration_since(Instant::now()),
-                        ),
+                    let waiting = lock_retry_now();
+                    let bound = Duration::from_millis(10).min(
+                        deadline
+                            .unwrap_or_else(lock_retry_now)
+                            .saturating_duration_since(lock_retry_now()),
                     );
+                    lock_retry_sleep(bound, None);
                     if let Some(credit) = &self.wait_credit {
-                        credit.credit(waiting.elapsed());
+                        credit.credit(lock_retry_now().saturating_duration_since(waiting));
                     }
                 }
                 Err(ReadFailure::Contended(mut error)) => {
@@ -1363,7 +1425,7 @@ impl Store {
         let started = Instant::now();
         let mut contended = false;
         let mut holder = None;
-        let attempt_deadline = started + if changing { writer_wait } else { reader_wait };
+        let attempt_deadline = lock_retry_now() + if changing { writer_wait } else { reader_wait };
         let initial_credit = self.credited_wait();
         loop {
             let caller_deadline = caller_deadline
@@ -1458,7 +1520,7 @@ impl Store {
             if error.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline {
+            if error.kind() == std::io::ErrorKind::WouldBlock && lock_retry_now() < deadline {
                 #[cfg(test)]
                 if !changing {
                     BEFORE_READER_LOCK_SLEEP.with(|slot| {
@@ -1467,16 +1529,12 @@ impl Store {
                         }
                     });
                 }
-                let sleep_started = Instant::now();
+                let sleep_started = lock_retry_now();
                 let bound = Duration::from_millis(10)
-                    .min(deadline.saturating_duration_since(Instant::now()));
-                if !head && let Some(ticket) = ticket.as_ref() {
-                    ticket.wait_turn(bound);
-                } else {
-                    std::thread::sleep(bound);
-                }
+                    .min(deadline.saturating_duration_since(lock_retry_now()));
+                lock_retry_sleep(bound, if head { None } else { ticket.as_ref() });
                 if let Some(wait) = &self.wait_credit {
-                    wait.credit(sleep_started.elapsed());
+                    wait.credit(lock_retry_now().saturating_duration_since(sleep_started));
                 }
                 continue;
             }
@@ -1489,7 +1547,8 @@ impl Store {
                 ),
             );
             if error.kind() == std::io::ErrorKind::WouldBlock {
-                let outcome = if retry && caller_deadline.is_some_and(|end| Instant::now() < end) {
+                let outcome = if retry && caller_deadline.is_some_and(|end| lock_retry_now() < end)
+                {
                     "retry"
                 } else {
                     "timeout"
@@ -3068,6 +3127,35 @@ pub(crate) mod tests {
 
     pub fn arm_mode_write_failure() {
         FAIL_MODE_WRITE.with(|fail| fail.set(true));
+    }
+
+    /// ´test:unit:request-lock-clock-credits-exact-contention-and-expires´
+    #[test]
+    fn request_lock_clock_credits_exact_contention_and_expires() {
+        use std::os::unix::net::UnixStream;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let fixture = Fixture::new();
+        let holder = fixture.store().with_request_id("R:holder");
+        let held = holder.fixture_exclusive_lock().expect("held writer");
+        let (server, _peer) = UnixStream::pair().expect("credit pair");
+        let credit = Arc::new(crate::door::RequestWait::new(&server).expect("wait credit"));
+        let waiter = fixture.store().with_wait_credit(Arc::clone(&credit));
+        let (result, clock) = super::with_fixture_lock_clock(|| {
+            super::WRITER_LOCK_WAIT_OVERRIDE
+                .with(|slot| slot.set(Some(Duration::from_millis(120))));
+            let mut ticket = None;
+            let result = waiter.lock_attempt(true, None, false, &mut ticket);
+            super::WRITER_LOCK_WAIT_OVERRIDE.with(|slot| slot.set(None));
+            result
+        });
+        assert!(result.expect_err("expired lock wait").is_contention());
+        assert_eq!(clock.waited.get(), Duration::from_millis(120));
+        assert_eq!(credit.elapsed(), clock.waited.get());
+        let base = Instant::now();
+        assert_eq!(credit.deadline(base), base + Duration::from_millis(120));
+        drop(held);
     }
 
     /// ´test:unit:requests-registry-reader-validates-the-named-acl-mask´

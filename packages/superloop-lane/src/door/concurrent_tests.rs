@@ -888,8 +888,11 @@ fn door_receive_completes_beside_running_compute() {
     assert_eq!(compute_calls.load(Ordering::Relaxed), 1);
 }
 
+/// This real-clock integration proof runs on demand with
+/// `cargo test --locked -p superloop-lane --lib door::tests::door_two_requesters_credit_contention_before_unlocked_triage -- --ignored --exact`.
 /// ´test:unit:door-two-requesters-credit-contention-before-unlocked-triage´
 #[test]
+#[ignore = "real-clock credit and agent budget proof; run on demand"]
 fn door_two_requesters_credit_contention_before_unlocked_triage() {
     struct PausedAgent {
         run: &'static str,
@@ -976,6 +979,28 @@ fn door_two_requesters_credit_contention_before_unlocked_triage() {
         assert_eq!(rows[0].id(), pending_ids[run]);
         assert_eq!(rows[0].value()["would_do"]["reason"], format!("fixture independent judgement {run}"));
     }
+}
+
+/// ´test:unit:door-wait-credit-announces-fifty-ms-steps-and-caps-deadline´
+#[test]
+fn door_wait_credit_announces_fifty_ms_steps_and_caps_deadline() {
+    let (server, mut peer) = UnixStream::pair().expect("pair");
+    peer.set_read_timeout(Some(Duration::from_secs(120)))
+        .expect("hang guard");
+    let wait = super::RequestWait::new(&server).expect("wait credit");
+    wait.credit(Duration::from_millis(49));
+    assert_eq!(*wait.announced.lock().expect("announcement"), 0);
+    wait.credit(Duration::from_millis(1));
+    assert_eq!(frame_read(&mut peer).expect("first credit")["wait_ms"], 50);
+    wait.credit(Duration::from_millis(49));
+    assert_eq!(*wait.announced.lock().expect("announcement"), 50);
+    wait.credit(Duration::from_millis(1));
+    assert_eq!(frame_read(&mut peer).expect("second credit")["wait_ms"], 100);
+    wait.credit(Duration::from_secs(200));
+    assert_eq!(frame_read(&mut peer).expect("capped credit")["wait_ms"], 120_000);
+    assert_eq!(wait.elapsed(), Duration::from_secs(120));
+    let base = Instant::now();
+    assert_eq!(wait.deadline(base), base + Duration::from_secs(120));
 }
 
 /// # Panics
