@@ -479,7 +479,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/meson.build:80,81,90,91,98,99``|D248; reviewed executable expressions and scope.|
 |``packages/superloop-credential-custody/src/identity.rs:8,15,57,71,98,99,124,125,138``|D246; hashing live files and retained calibration bytes.|
 |``packages/superloop-credential-custody/src/launch/control.rs:184,189,237,247``|D253; retained inventory and authenticated handoff correspondence.|
-|``packages/superloop-credential-custody/src/launch/control_tests.rs:24``|D253; retained inventory and authenticated handoff correspondence.|
+|``packages/superloop-credential-custody/src/launch/control_tests.rs:24,374``|D253; retained inventory and authenticated handoff correspondence.|
 |``packages/superloop-credential-custody/src/launch/handoff.rs:21``|D253; retained inventory binding in the authenticated pidfd protocol.|
 |``packages/superloop-credential-custody/src/launch/handoff_tests.rs:14,45,57``|D253; synthetic handoff correspondence controls.|
 |``packages/superloop-credential-custody/src/launch/inventory_tests.rs:36,48``|D250; synthetic fixture-image and public-case measurement inputs.|
@@ -487,7 +487,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/src/launch/manager.rs:67,69,347,359,360,424``|D252; observed manager metadata and synthetic controls, no root rehearsal claim.|
 |``packages/superloop-credential-custody/src/launch/manager_tests.rs:28,136,137``|D252; observed manager metadata and synthetic controls, no root rehearsal claim.|
 |``packages/superloop-credential-custody/src/launch/measure.rs:34,51,56,57,69,70,72,73,126,136,137,156,157,173,174,196,197,203,222,224,234``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
-|``packages/superloop-credential-custody/src/launch/policy.rs:99,165,325,365``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
+|``packages/superloop-credential-custody/src/launch/policy.rs:99,165,324,364``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/launch/release.rs:18,40,59,64,89,90,119,121,122,135,136,144,149,150,154,157,161,173``|D253; retained receipt measurement and release correspondence.|
 |``packages/superloop-credential-custody/src/launch/release_tests.rs:17,71,85,87,106,114,129,132,133,134,155,172,182,195,208,227,278,295,313,329,348,355``|D250, D253; synthetic artifact and immutable inventory controls.|
 |``packages/superloop-credential-custody/src/launch/sealer_tests.rs:37,51,70,501``|D250; synthetic measured-image controls, no encryption or root rehearsal claim.|

@@ -75,6 +75,15 @@ fn transaction_at(
     pin: Option<&ProcessPin>,
     phase: Phase,
 ) -> (Result<()>, Vec<u8>) {
+    transaction_role(control, bytes, pin, phase, false)
+}
+fn transaction_role(
+    control: &Control,
+    bytes: &[u8],
+    pin: Option<&ProcessPin>,
+    phase: Phase,
+    observer: bool,
+) -> (Result<()>, Vec<u8>) {
     let path = format!(
         "/proc/{}/fd/{}/control.sock",
         std::process::id(),
@@ -85,6 +94,11 @@ fn transaction_at(
         control.directory.file().as_raw_fd()
     ))
     .unwrap();
+    let path = if observer {
+        directory.join("control.sock").display().to_string()
+    } else {
+        path
+    };
     let image = directory
         .parent()
         .unwrap()
@@ -94,7 +108,9 @@ fn transaction_at(
     let mut command = std::process::Command::new(&image);
     command
         .args([
-            if pin.is_some() {
+            if observer {
+                "--observer-client"
+            } else if pin.is_some() {
                 "--pidfd-client"
             } else {
                 "--control-client"
@@ -332,4 +348,29 @@ fn control_status_endpoint_refuses_descriptor_requests() {
         transaction(&status_only, &encoded(&value)).0,
         Err("control-operation")
     );
+}
+
+/// ´test:unit:control-transfers-pidfd-to-a-nonsignalling-live-peer´
+#[test]
+fn control_transfers_pidfd_to_a_nonsignalling_live_peer() {
+    let f = crate::launch::inventory::tests::fixture("normal");
+    let (_readers, writers) = crate::launch::inventory::tests::pipes();
+    let (_child, pin) = crate::launch::inventory::tests::start(&f, &writers);
+    let (_files, control) = setup_with(Some(pin.invocation().clone()));
+    let mut value = request(&control);
+    value["operation"] = "pidfd".into();
+    let (result, bytes) = transaction_role(
+        &control,
+        &encoded(&value),
+        Some(&pin),
+        Phase::InventoryComplete,
+        true,
+    );
+    assert_eq!(result, Ok(()));
+    let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(reply["invocation"]["pid"], pin.invocation().pid);
+    assert_eq!(reply["invocation"]["birth"], pin.invocation().birth);
+    assert_eq!(reply["nonce"], value["nonce"]);
+    assert_eq!(reply["inventory_sha256"], "a".repeat(64));
+    pin.verify().unwrap();
 }

@@ -15,6 +15,7 @@ fn main() {
         Some("--startup-control") => startup_control(&args),
         Some("--root-control") => root_control(),
         Some("--pidfd-client") => pidfd_client(&args),
+        Some("--observer-client") => observer_client(&args),
         _ => Err("arguments".into()),
     };
     if result.is_err() {
@@ -103,4 +104,61 @@ fn pidfd_client(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     std::io::stdout().write_all(&reply)?;
     Ok(())
+}
+
+#[allow(unsafe_code)]
+fn observer_client(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    #[repr(C)]
+    struct Header {
+        version: u32,
+        pid: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Caps {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    let uid = nix::unistd::geteuid().as_raw();
+    // This control requires unprivileged user namespaces. It never acquires
+    // authority over the host namespace or changes the parent keeper's role.
+    if unsafe { nix::libc::unshare(nix::libc::CLONE_NEWUSER) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n"))?;
+    let header = Header {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let mut caps = [Caps {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    // SAFETY: single-threaded native peer, initialized ABI-sized buffers and
+    // scalar prctl calls. Drop the bounding bit before losing SETPCAP.
+    unsafe {
+        if nix::libc::prctl(nix::libc::PR_CAPBSET_DROP, 5, 0, 0, 0) != 0
+            || nix::libc::syscall(nix::libc::SYS_capget, &raw const header, caps.as_mut_ptr()) != 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        caps[0].effective &= !(1 << 5);
+        caps[0].permitted &= !(1 << 5);
+        caps[0].inheritable &= !(1 << 5);
+        if nix::libc::syscall(nix::libc::SYS_capset, &raw const header, caps.as_ptr()) != 0
+            || nix::libc::prctl(
+                nix::libc::PR_CAP_AMBIENT,
+                nix::libc::PR_CAP_AMBIENT_CLEAR_ALL,
+                0,
+                0,
+                0,
+            ) != 0
+            || nix::libc::prctl(nix::libc::PR_SET_DUMPABLE, 1, 0, 0, 0) != 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    pidfd_client(args)
 }
