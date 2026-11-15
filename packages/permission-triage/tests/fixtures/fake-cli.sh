@@ -33,7 +33,11 @@ case "$response" in
         ;;
     never-read-short-descendant)
         : > "${capture}.stdin"
-        sleep 30 &
+        (
+            exec 3<"${PERMISSION_TRIAGE_FAKE_HOLD_FIFO:?}"
+            : > "${capture}.pipe-open"
+            exec cat <&3
+        ) &
         descendant=$!
         printf '%s\n' "$descendant" > "${capture}.child-pid"
         wait "$descendant"

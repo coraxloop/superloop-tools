@@ -682,26 +682,43 @@ fn group_signalling_never_resolves_kill_through_path() {
 fn failed_group_kill_bounds_helper_joins() {
     let directory = FixtureDirectory::new();
     let capture = directory.path().join("bounded-cleanup");
+    let hold_pipe = directory.path().join("descendant-hold.fifo");
+    nix::unistd::mkfifo(
+        &hold_pipe,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .expect("descendant hold pipe is created");
+    let hold = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&hold_pipe)
+        .expect("the test holds the pipe open");
     let submitted = large_prompt(&directory);
     let missing_kill = directory.path().join("missing-kill").into_os_string();
-    // The fixture's descendant must exist before the short deadline starts; otherwise a loaded
-    // shell can be killed before recording the process whose survival is the assertion below.
+    // The descendant opens the held pipe before the short deadline starts. Its lifetime is
+    // controlled by this test's file descriptor, not a thirty-second sleep.
     let deadline = interrupting_deadline(Duration::from_millis(40));
+    let mut environment = fixture_environment(&capture, "never-read-short-descendant");
+    environment.push((
+        OsString::from("PERMISSION_TRIAGE_FAKE_HOLD_FIFO"),
+        hold_pipe.into_os_string(),
+    ));
     let result = run_fixture_model_with_kill_program_after_marker(
         fake_cli().as_os_str(),
         &submitted,
         deadline,
-        fixture_environment(&capture, "never-read-short-descendant"),
+        environment,
         missing_kill,
-        capture_file(&capture, ".child-pid"),
+        capture_file(&capture, ".pipe-open"),
     );
     let cleanup = FixtureProcessGuard::new(captured_process_id(&capture, ".child-pid"));
     let outcome = cleanup.outcome();
     assert!(matches!(result, Err(ModelError::Kill(_))));
-    // The failed group kill returned while the thirty-second descendant is still alive;
-    // that ordering proves the helper joins did not wait for the descendant's exit.
+    // The failed group kill returned while the descendant is still held on the pipe;
+    // that event ordering proves the helper joins did not wait for its exit.
     assert_process_alive(cleanup.process_id());
     drop(cleanup);
+    drop(hold);
     assert_guard_killed(&outcome);
 }
 
