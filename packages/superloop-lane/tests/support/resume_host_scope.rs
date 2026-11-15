@@ -188,7 +188,6 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
         return next_round(&fixture, case == "after-failed");
     }
     if case == "stop-race" {
-        fixture.observer();
         let error = fixture.launch(false).expect_err("real helper stop refuses");
         assert_eq!(error.kind, "helper-stop", "{error}");
         writeln!(std::io::stdout().lock(), "STOP-RACE {error}").expect("refusal");

@@ -35,6 +35,7 @@ impl Host {
             runtime,
         };
         host.record();
+        host.dispatch_observer();
         host.bind();
         host
     }
@@ -70,7 +71,7 @@ impl Host {
             lane,
         }
     }
-    pub(super) fn observer(&self) {
+    fn dispatch_observer(&self) {
         let program = PathBuf::from(env!("CARGO_BIN_EXE_superloop-lane-vendor-proxy"));
         mapped(
             &self.home,
@@ -457,11 +458,27 @@ with open(os.devnull,'r+b') as null:
  child=subprocess.Popen([proxy,'--socket',str(socket_path),'--group','64000','--observe','R',
   '--observed-file',str(home/'runs/.observed-R.txt'),'--verified-runs-root-fd',str(runs),
   '--verified-socket-dir-fd',str(sockets),'--owner-home',str(home)],
-  stdin=null,stdout=null,stderr=subprocess.PIPE,pass_fds=(runs,sockets))
- line=child.stderr.readline();assert b'proxy-ready' in line,line
- start=int(Path('/proc',str(child.pid),'stat').read_text().rsplit(')',1)[1].split()[19])
- record['observer_pid']=child.pid;record['observer_start']=start
- file.write_text(json.dumps(record));os.chmod(file,0o600)
- print('REAL-OBSERVER '+line.decode().strip())
+  stdin=null,stdout=null,stderr=subprocess.PIPE,pass_fds=(runs,sockets),start_new_session=True)
+ try:
+  line=child.stderr.readline();assert b'proxy-ready' in line,line
+  start=int(Path('/proc',str(child.pid),'stat').read_text().rsplit(')',1)[1].split()[19])
+  identity=socket_path.lstat();assert child.poll() is None,'dispatch observer exited early'
+  os.killpg(child.pid,15);status=child.wait(timeout=180)
+  try: os.killpg(child.pid,0)
+  except ProcessLookupError: pass
+  else: raise RuntimeError('dispatch observer group remains')
+  try: named=socket_path.lstat()
+  except FileNotFoundError: socket_state='absent'
+  else:
+   assert (named.st_dev,named.st_ino)==(identity.st_dev,identity.st_ino)
+   socket_path.unlink();socket_state='removed'
+  record['observer_pid']=child.pid;record['observer_start']=start
+  record['observer_state']='ended';record['observation_end']='completed';record['settlement_uncertain']=False
+  record['observer_end']={'state':'stopped','pid':child.pid,'start':start,'already_exited':False,
+   'stop_signals':['SIGTERM'],'group_presence':'absent','status':str(status),'socket':{'state':socket_state}}
+  file.write_text(json.dumps(record));os.chmod(file,0o600)
+  print('DISPATCH-OBSERVER-STOPPED '+str(child.pid))
+ finally:
+  if child.poll() is None: os.killpg(child.pid,9);child.wait()
 os.close(runs);os.close(sockets)
 ";

@@ -263,8 +263,7 @@ fn recovery_basis(
         &record["observer_end"],
         record["observer_state"].as_str().unwrap_or_default(),
         record["settlement_uncertain"] != false,
-    ) && !super::recovered_observer_ready(record)
-    {
+    ) {
         return Err(LaneError::input(
             "settle-state-refusal",
             "observer disposition is not settled",

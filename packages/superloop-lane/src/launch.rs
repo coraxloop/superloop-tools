@@ -3382,9 +3382,6 @@ fn interrupted_settlement_success(current: &Value, evidence: &Value) -> bool {
         && evidence["attempts"]
             .as_array()
             .is_some_and(|items| items.iter().all(|item| item["error_free"] == true));
-    let socket = current["observer_end"]["socket"]["state"]
-        .as_str()
-        .unwrap_or_default();
     let completed_attempt = attempts_clean
         && last_status == Some(0)
         && current["driver_end"]["state"] == "completed"
@@ -3399,12 +3396,11 @@ fn interrupted_settlement_success(current: &Value, evidence: &Value) -> bool {
         && current["helper_end"]["successful"] != false
         && current["readback_end"] == "completed"
         && current["observation_end"] == "completed"
-        && (["stopped", "not-started"].contains(
-            &current["observer_end"]["state"]
-                .as_str()
-                .unwrap_or_default(),
-        ) || recovered_observer_ready(current))
-        && ["removed", "absent", "not-applicable"].contains(&socket)
+        && settlement_observer_ready(
+            &current["observer_end"],
+            current["observer_state"].as_str().unwrap_or_default(),
+            current["settlement_uncertain"] == true,
+        )
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -4599,27 +4595,13 @@ fn run_with_program(
             ),
         )?;
     }
-    let observer_stop = if let Some((child, _)) = proxy.as_mut() {
-        Some(stop_observer(child)?)
-    } else {
-        None
-    };
-    helper_stop_with_stderr(helper_stop, &mut helper, helper_stderr)?;
-    let observer_end = if let Some((child, slot)) = proxy.as_mut() {
-        let mut end = observer_stop.unwrap_or_default();
-        end["pid"] = json!(child.id());
-        end["start"] = record["observer_start"].clone();
-        end["socket"] = json!({"state":"pending"});
-        persist_settlement_field(&reservation, "observer_end", end.clone())?;
-        end["socket"] = observer_socket_disposition(slot, caller.0);
-        persist_settlement_field(&reservation, "observer_end", end.clone())?;
-        end
-    } else {
-        json!({"state":"not-started","socket":{"state":"not-applicable"}})
-    };
-    if !request.observe {
-        persist_settlement_field(&reservation, "observer_end", observer_end.clone())?;
-    }
+    let observer_end = finish_dispatch_observer(
+        &reservation,
+        &mut proxy,
+        &record["observer_start"],
+        caller.0,
+        || helper_stop_with_stderr(helper_stop, &mut helper, helper_stderr),
+    )?;
     let observed = if request.observe {
         let argv = vec![
             "unshare".into(),
@@ -4903,16 +4885,28 @@ pub(super) fn verify_settlement_driver_dir(root: &Path, loop_uid: u32) -> Result
     Ok(())
 }
 
-// Absence is not an exit status: retain its provenance and require the full
-// identity-bound collected-scope proof before accepting it for settlement.
-pub(super) fn recovered_observer_ready(record: &Value) -> bool {
-    reaping::recovery_verdict(record).is_ok()
-        && record["observer_end"]["state"] == "absent-on-recovery"
-        && ["removed", "absent", "not-applicable"].contains(
-            &record["observer_end"]["socket"]["state"]
-                .as_str()
-                .unwrap_or_default(),
-        )
+// First-dispatch stop accounting must survive a subsequent helper-stop refusal.
+fn finish_dispatch_observer(
+    reservation: &Path,
+    proxy: &mut Option<(Child, crate::SocketSlot)>,
+    start: &Value,
+    owner: u32,
+    helper_result: impl FnOnce() -> Result<(), LaneError>,
+) -> Result<Value, LaneError> {
+    let end = if let Some((child, slot)) = proxy.as_mut() {
+        let mut end = stop_observer(child)?;
+        end["pid"] = json!(child.id());
+        end["start"] = start.clone();
+        end["socket"] = json!({"state":"pending"});
+        persist_settlement_field(reservation, "observer_end", end.clone())?;
+        end["socket"] = observer_socket_disposition(slot, owner);
+        end
+    } else {
+        json!({"state":"not-started","socket":{"state":"not-applicable"}})
+    };
+    persist_settlement_field(reservation, "observer_end", end.clone())?;
+    helper_result()?;
+    Ok(end)
 }
 
 pub(super) fn settlement_observer_ready(
@@ -8385,7 +8379,7 @@ mod tests {
     /// ´test:unit:interrupted-completion-requires-successful-process-ends´
     #[test]
     fn interrupted_completion_requires_successful_process_ends() {
-        let mut record = json!({"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"readback_end":"completed","observation_end":"completed","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}}});
+        let mut record = json!({"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"readback_end":"completed","observation_end":"completed","observer_state":"not-started","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}}});
         let evidence = json!({"state":"complete","attempts":[{"status":0,"error_free":true}]});
         assert!(super::interrupted_settlement_success(&record, &evidence));
         for end in ["driver_end", "helper_end"] {
@@ -8394,15 +8388,10 @@ mod tests {
             record[end]["successful"] = json!(true);
             assert!(super::interrupted_settlement_success(&record, &evidence));
         }
-    }
-
-    /// ´test:unit:recovered-observer-needs-collected-identity-proof´
-    #[test]
-    fn recovered_observer_needs_collected_identity_proof() {
         let scope = json!({"unit":"superloop-lane-run-proof.service",
             "cgroup":"/user.slice/superloop-lane-run-proof.service/work",
             "device":1,"inode":2,"proxy_unit":"proxy.service","proxy_invocation":"fixture"});
-        let mut record = json!({"launcher_pid":321,"launcher_start":88,
+        let collected = json!({"launcher_pid":321,"launcher_start":88,
             "driver_entry_pid":322,"driver_entry_start":89,"helper_pid":323,"helper_start":90,
             "helper_parent_pid":325,"helper_parent_start":92,"observer_pid":324,"observer_start":91,
             "run_scope":scope,"observer_state":"running",
@@ -8412,28 +8401,107 @@ mod tests {
                 "container_payload":{"state":"absent","by":"loop-and-run-label"},
                 "identities":{"launcher":[321,88],"driver":[322,89],"helper":[323,90],
                     "helper_parent":[325,92],"observer":[324,91]}}});
+        for (key, value) in collected.as_object().expect("proof record") {
+            record[key] = value.clone();
+        }
+        record["observer_state"] = json!("ended");
+        assert!(super::reaping::recovery_verdict(&record).is_ok());
         assert!(
-            super::recovered_observer_ready(&record),
-            "full measured proof"
+            !super::interrupted_settlement_success(&record, &evidence),
+            "collected scope cannot turn absent observer into stopped"
         );
-        for (pointer, replacement) in [
-            ("/reaping_recovery/presence", json!("unknown")),
-            ("/reaping_recovery/identities/observer", json!([324, 92])),
-            ("/observer_end/socket/state", json!("pending")),
-            ("/observer_end/state", json!("stopped")),
-        ] {
-            let mut changed = record.clone();
-            *changed.pointer_mut(pointer).expect("field") = replacement;
+        record["observer_end"]["state"] = json!("stopped");
+        assert!(super::interrupted_settlement_success(&record, &evidence));
+        record["settlement_uncertain"] = json!(true);
+        assert!(
+            !super::interrupted_settlement_success(&record, &evidence),
+            "uncertain observer still refuses interrupted completion"
+        );
+    }
+
+    /// ´test:unit:dispatch-observer-end-precedes-helper-stop-refusal´
+    #[test]
+    fn dispatch_observer_end_precedes_helper_stop_refusal() {
+        struct Observer(Option<(std::process::Child, crate::SocketSlot)>);
+        impl Drop for Observer {
+            fn drop(&mut self) {
+                if let Some((child, _)) = self.0.as_mut() {
+                    drop(child.kill());
+                    drop(child.wait());
+                }
+            }
+        }
+        for exited in [false, true] {
+            let root = tempfile::tempdir().expect("private runs root");
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("mode");
+            let path = root.path().join(".reservation-R.json");
+            let record = json!({"schema":1,"worker_uid":3000,"loop":"alpha","run":"R","phase":"started","active_round":"dispatch",
+                "observer_state":"running","settlement_uncertain":false});
+            super::publish_reservation(&path, &record).expect("active first dispatch");
+            let slot = crate::SocketSlot::new(
+                fs::File::open(root.path()).expect("directory").into(),
+                "observer".as_ref(),
+            )
+            .expect("observer slot");
+            let _listener = std::os::unix::net::UnixListener::bind(slot.address()).expect("socket");
+            let mut child = if exited {
+                std::process::Command::new("/usr/bin/true")
+            } else {
+                let mut command = std::process::Command::new("/usr/bin/sleep");
+                command.arg("infinity");
+                command
+            };
+            let mut child = child
+                .process_group(0)
+                .spawn()
+                .expect("real observer process");
+            if exited {
+                child.wait().expect("observer died during dispatch");
+            }
+            let mut proxy = Observer(Some((child, slot)));
+            let error = super::finish_dispatch_observer(
+                &path,
+                &mut proxy.0,
+                &json!(42),
+                nix::unistd::Uid::effective().as_raw(),
+                || {
+                    Err(super::LaneError::operation(
+                        "helper-stop",
+                        "injected stop refusal",
+                    ))
+                },
+            )
+            .expect_err("original helper refusal");
+            assert_eq!(error.detail, "injected stop refusal");
+            let saved = super::read_reservation(&path)
+                .expect("read")
+                .expect("record");
+            assert_eq!(
+                saved["observer_end"]["state"],
+                if exited {
+                    "failed-before-stop"
+                } else {
+                    "stopped"
+                }
+            );
+            assert_eq!(saved["observer_end"]["socket"]["state"], "removed");
+            assert_eq!(saved["observer_state"], "ended");
+            assert_eq!(
+                super::settlement_observer_ready(&saved["observer_end"], "ended", false),
+                !exited
+            );
+            assert!(!super::settlement_observer_ready(
+                &saved["observer_end"],
+                "ended",
+                true
+            ));
+            let mut absent = saved["observer_end"].clone();
+            absent["state"] = json!("absent-on-recovery");
             assert!(
-                !super::recovered_observer_ready(&changed),
-                "{pointer}: {changed}"
+                !super::settlement_observer_ready(&absent, "ended", false),
+                "absence cannot prove a requested stop"
             );
         }
-        record["reaping_recovery"] = Value::Null;
-        assert!(
-            !super::recovered_observer_ready(&record),
-            "absence alone is not proof"
-        );
     }
 
     /// ´test:unit:helper-stop-waits-for-exit-after-handshake-failure´
