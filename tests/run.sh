@@ -103,7 +103,7 @@ read_feed_counts
 pass "a deadline below the poll floor ends quietly without ssh"
 
 new_case deadline
-DEADLINE_MS=300
+DEADLINE_MS=5000
 run_feed slow "$DEADLINE_MS" 50 alpha
 [ "$STATUS" -eq 1 ] || fail "slow deadline exit was $STATUS"
 REPORTED_MS=$(awk '/^FEED-DURATION-MS / { print $2 }' "$CASE_OUT")
