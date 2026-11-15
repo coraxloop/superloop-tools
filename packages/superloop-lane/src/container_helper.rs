@@ -680,22 +680,8 @@ fn control_loop_observed(
     while !cancelled.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((mut stream, _)) => {
-                if peer_credentials(&stream)?.uid != owner_uid {
-                    continue;
-                }
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
-                accepted();
-                let mut word = [0_u8];
-                stream
-                    .read_exact(&mut word)
-                    .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
-                if word == *b"C" {
-                    cancelled.store(true, Ordering::Release);
-                    stream.write_all(b"K").map_err(|error| {
-                        LaneError::operation("helper-control", error.to_string())
-                    })?;
+                answer_control(&mut stream, cancelled, owner_uid, &mut accepted)?;
+                if cancelled.load(Ordering::Acquire) {
                     return Ok(());
                 }
             }
@@ -706,6 +692,60 @@ fn control_loop_observed(
         }
     }
     Ok(())
+}
+
+fn answer_control(
+    stream: &mut UnixStream,
+    cancelled: &AtomicBool,
+    owner_uid: u32,
+    accepted: &mut impl FnMut(),
+) -> Result<(), LaneError> {
+    if peer_credentials(stream)?.uid != owner_uid {
+        return Ok(());
+    }
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
+    accepted();
+    let mut word = [0_u8];
+    stream
+        .read_exact(&mut word)
+        .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
+    if word == *b"C" {
+        cancelled.store(true, Ordering::Release);
+        stream
+            .write_all(b"K")
+            .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn drain_control(
+    listener: &UnixListener,
+    cancelled: &AtomicBool,
+    owner: u32,
+) -> Result<(), LaneError> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| LaneError::operation("helper-control", error.to_string()))?;
+    let mut first = None;
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                if let Err(error) = answer_control(&mut stream, cancelled, owner, &mut || {}) {
+                    first.get_or_insert(error);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => {
+                first.get_or_insert_with(|| {
+                    LaneError::operation("helper-control", error.to_string())
+                });
+                break;
+            }
+        }
+    }
+    first.map_or(Ok(()), Err)
 }
 
 fn next_client(
@@ -2365,6 +2405,10 @@ impl ServiceSocket {
     }
 
     fn remove(self) -> Result<(), LaneError> {
+        self.unlink()
+    }
+
+    fn unlink(&self) -> Result<(), LaneError> {
         let current = self
             .slot
             .metadata()
@@ -2403,6 +2447,7 @@ struct ServiceResources {
     controller: Option<JoinHandle<Result<(), LaneError>>>,
     refresher: Option<JoinHandle<Result<(), LaneError>>>,
     cancelled: Arc<AtomicBool>,
+    owner_uid: u32,
     #[cfg(test)]
     failure: Option<ServiceSetupFailure>,
     #[cfg(test)]
@@ -2417,6 +2462,7 @@ impl ServiceResources {
             controller: None,
             refresher: None,
             cancelled: Arc::new(AtomicBool::new(false)),
+            owner_uid: nix::unistd::Uid::effective().as_raw(),
             #[cfg(test)]
             failure: None,
             #[cfg(test)]
@@ -2439,6 +2485,7 @@ impl ServiceResources {
         owner: (u32, u32),
         group: u32,
     ) -> Result<(), LaneError> {
+        self.owner_uid = owner.0;
         self.socket = Some(ServiceSocket::bind(
             socket,
             "helper-socket",
@@ -2555,22 +2602,29 @@ impl ServiceResources {
 
     fn finish(&mut self, primary: Result<(), LaneError>) -> Result<(), LaneError> {
         self.cancelled.store(true, Ordering::Release);
-        // Cancellation stops accept polling; an already accepted control read has
-        // its existing five-second timeout. Join it, never detach it on a timer.
+        // Stop new connections before joining the controller. Its accepted read
+        // keeps its five-second bound; queued peers are answered below.
+        let control_socket = self.control.take();
+        let control_remove = control_socket
+            .as_ref()
+            .map_or(Ok(()), ServiceSocket::unlink);
         let control = Self::join(
             self.controller.take(),
             "helper-control",
             "control thread panicked",
         );
+        let drain = control_socket.as_ref().map_or(Ok(()), |socket| {
+            drain_control(&socket.listener, &self.cancelled, self.owner_uid)
+        });
+        drop(control_socket);
         let refresh = Self::join(
             self.refresher.take(),
             "credential-thread",
             "authority thread panicked",
         );
         let socket = self.socket.take().map_or(Ok(()), ServiceSocket::remove);
-        let control_remove = self.control.take().map_or(Ok(()), ServiceSocket::remove);
         let mut result = primary;
-        for secondary in [refresh, control, socket, control_remove] {
+        for secondary in [refresh, control, socket, control_remove, drain] {
             if let Err(error) = secondary {
                 match &mut result {
                     Ok(()) => result = Err(error),
@@ -3100,6 +3154,35 @@ mod tests {
                 "request.sock"
             };
             assert!(!root.path().join(other).exists());
+        }
+    }
+
+    /// ´test:unit:helper-close-answers-every-queued-control´
+    #[test]
+    fn helper_close_answers_every_queued_control() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let mut resources = super::ServiceResources::new();
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let gid = nix::unistd::Gid::effective().as_raw();
+        let (socket, control) = cleanup_slots(root.path());
+        resources
+            .bind(socket, control, (uid, gid), gid)
+            .expect("bound");
+        let mut peers = Vec::new();
+        for _ in 0..3 {
+            let mut peer = UnixStream::connect(root.path().join("control.sock")).expect("queued");
+            peer.set_read_timeout(Some(Duration::from_secs(180)))
+                .expect("hang bound");
+            peer.write_all(b"C").expect("request queued before close");
+            peers.push(peer);
+        }
+        resources.finish(Ok(())).expect("orderly close");
+        assert_service_removed(root.path(), &resources);
+        for mut peer in peers {
+            let mut ack = [0];
+            peer.read_exact(&mut ack)
+                .expect("queued stop acknowledged before listener drop");
+            assert_eq!(ack, *b"K");
         }
     }
 

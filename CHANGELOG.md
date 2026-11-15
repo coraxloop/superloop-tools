@@ -74,6 +74,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The boxed helper now removes its control pathname before draining queued stop connections and closing the listener, answering requests that already reached it. The launcher still requires the helper's successful exit. Compatibility: deploy the host wait fix with this close fix; installation does not replace an in-flight helper (``test:unit:helper-close-answers-every-queued-control``).
+
 - A launcher now waits for its exact helper child after a failed stop handshake and proceeds to settlement only after a successful exit. Non-zero exits and the existing 90-second timeout retain both the handshake and exit errors. Compatibility: new launchers tolerate the close race in an older helper; a launcher already running retains its old stop behavior (``test:unit:helper-stop-waits-for-exit-after-handshake-failure``).
 
 - A resumed round left awaiting settlement after a helper-stop error can now be recovered with its original `launch --round STEP --dry-run`, then the preview's digest. Admission requires a completed driver end and the existing process-absence and evidence checks. A recovered reply settles normally; without a reply, complete `settle` and explicitly choose the next thread. Compatibility: install the matching launcher and private settlement entry before recovery; a running launcher keeps its old code (``test:integration:public-helper-stop-recovers-resumed-reply``; ``test:integration:public-helper-stop-recovers-resumed-no-reply``).
