@@ -523,19 +523,23 @@ fn door_exercise_retries_concurrent_admission() {
             drop(guard);
         }));
     });
-    // The release follows the observed refusal, so the retry window is only a hang bound.
-    super::EXERCISE_RETRY_HANG.with(|slot| slot.set(Some(Duration::from_secs(120))));
-    let report = super::fixture_agent_call(
-        &fixture.home,
-        &registration,
-        "fixture-retry",
-        Some("allow"),
-        Some("allow"),
-        Some(Arc::new(super::CatRunner)),
-        None,
-    )
-    .expect("retried fixture");
+    // The service spends its admission budget on logical polls; the release follows
+    // the observed refusal, so the retry window remains only a hang bound.
+    let (result, clock) = super::with_fixture_admission_clock(Duration::from_secs(120), || {
+        super::fixture_agent_call(
+            &fixture.home,
+            &registration,
+            "fixture-retry",
+            Some("allow"),
+            Some("allow"),
+            Some(Arc::new(super::CatRunner)),
+            None,
+        )
+    });
+    let report = result.expect("retried fixture");
     assert!(retried.get(), "first admission refusal was not observed");
+    assert_eq!(clock.waited(), super::ADMISSION_WAIT);
+    assert_eq!(clock.attempts(), 2, "one refusal then one admitted retry");
     assert_eq!(report["final"]["reason"], "door-complete", "{report}");
     assert_eq!(
         fixture

@@ -405,6 +405,77 @@ thread_local! {
     static ADMISSION_CLOCK: std::cell::RefCell<Option<std::rc::Rc<dyn AdmissionClock>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_LAST_POLL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static FIXTURE_ADMISSION_CLOCK: std::cell::RefCell<Option<Arc<FixtureAdmissionClock>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct FixtureAdmissionClock {
+    now: std::sync::Mutex<Instant>,
+    slept_ms: AtomicU64,
+    attempts: AtomicUsize,
+}
+
+#[cfg(test)]
+impl FixtureAdmissionClock {
+    pub(crate) fn waited(&self) -> Duration {
+        Duration::from_millis(self.slept_ms.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+impl AdmissionClock for Arc<FixtureAdmissionClock> {
+    fn now(&self) -> Instant {
+        *self
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn sleep(&self, duration: Duration) {
+        let mut now = self
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *now += duration;
+        drop(now);
+        self.slept_ms.fetch_add(
+            u64::try_from(duration.as_millis()).expect("bounded admission poll"),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+#[cfg(test)]
+struct FixtureClockRestore(Option<Arc<FixtureAdmissionClock>>, Option<Duration>);
+
+#[cfg(test)]
+impl Drop for FixtureClockRestore {
+    fn drop(&mut self) {
+        FIXTURE_ADMISSION_CLOCK.with(|slot| {
+            slot.replace(self.0.take());
+        });
+        EXERCISE_RETRY_HANG.with(|slot| slot.set(self.1.take()));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_fixture_admission_clock<T>(
+    retry_window: Duration,
+    f: impl FnOnce() -> T,
+) -> (T, Arc<FixtureAdmissionClock>) {
+    let clock = Arc::new(FixtureAdmissionClock {
+        now: std::sync::Mutex::new(Instant::now()),
+        slept_ms: AtomicU64::new(0),
+        attempts: AtomicUsize::new(0),
+    });
+    let prior_clock = FIXTURE_ADMISSION_CLOCK.with(|slot| slot.replace(Some(Arc::clone(&clock))));
+    let prior_retry = EXERCISE_RETRY_HANG.with(|slot| slot.replace(Some(retry_window)));
+    let _restore = FixtureClockRestore(prior_clock, prior_retry);
+    (f(), clock)
 }
 
 const RETRY_AFTER_SECONDS: u64 = 30;
@@ -3342,6 +3413,12 @@ fn fixture_agent_call_once(
     use nix::fcntl::{OFlag, OpenHow, ResolveFlag, openat2};
     use nix::sys::stat::{Mode, fchmod, mkdirat};
     use std::ffi::OsString;
+    #[cfg(test)]
+    FIXTURE_ADMISSION_CLOCK.with(|slot| {
+        if let Some(clock) = slot.borrow().as_ref() {
+            clock.attempts.fetch_add(1, Ordering::Relaxed);
+        }
+    });
     // This fixture uses the ordinary Git/probe request's 120-second budget.
     let deadline = Instant::now() + Duration::from_secs(120);
     let owner = nix::unistd::Uid::effective().as_raw();
@@ -3421,7 +3498,13 @@ fn fixture_agent_call_once(
         Store::open(owner_home, &registration.loop_name, true)?.with_reader_deadline(deadline);
     #[cfg(test)]
     let fault = FIXTURE_HELPER_FAULT.with(|selected| *selected.borrow());
+    #[cfg(test)]
+    let admission_clock = FIXTURE_ADMISSION_CLOCK.with(|slot| slot.borrow().clone());
     let server = thread::spawn(move || -> io::Result<(Value, u32)> {
+        #[cfg(test)]
+        if let Some(clock) = admission_clock {
+            ADMISSION_CLOCK.with(|slot| *slot.borrow_mut() = Some(std::rc::Rc::new(clock)));
+        }
         let (mut stream, _) = listener.accept()?;
         let socket_peer_uid = peer_uid(&stream)?;
         if socket_peer_uid != owner {

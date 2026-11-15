@@ -72,6 +72,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Busy-admission exercise tests now carry a controlled admission clock into the fixture service thread and prove one refused attempt from events. They no longer spend thirty real seconds per case; deployed admission and exercise retry budgets are unchanged (``test:unit:door-exercise-retries-concurrent-admission``; ``test:unit:door-exercises-busy-admission-is-unmeasured``; ``test:unit:door-enforce-retains-floor-claim-before-busy-admission``).
+
 - Test-build fixture executables now retry transient text-file-busy spawn errors under a distant hang bound; the held-writer test drives expiry with an already exhausted budget and proves release by the retry event. Deployed spawning is unchanged (``test:unit:fixture-spawn-retries-only-text-file-busy``; ``test:unit:fixture-exec-fork-during-write-is-bounded``).
 
 - Door agent exercise tests now run their semantic and timeout probes through the existing controlled judge, so a loaded node cannot make a real-clock 2,600 ms probe appear to fail. The deployed exercise still measures real time and keeps its production budgets (``test:unit:door-agent-case-uses-production-handler-and-names-unmeasured-vendor``; ``test:unit:door-agent-audit-loop-measures-all-modes-without-prior-labels``).
