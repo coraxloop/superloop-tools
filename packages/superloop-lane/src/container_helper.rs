@@ -720,6 +720,8 @@ fn answer_control(
     Ok(())
 }
 
+pub(crate) const QUEUED_CONTROL_WARNING: &str = "helper-control queued peer: ";
+
 fn drain_control(
     listener: &UnixListener,
     cancelled: &AtomicBool,
@@ -733,7 +735,10 @@ fn drain_control(
         match listener.accept() {
             Ok((mut stream, _)) => {
                 if let Err(error) = answer_control(&mut stream, cancelled, owner, &mut || {}) {
-                    first.get_or_insert(error);
+                    // Cancellation was already honoured. A queued peer cannot
+                    // turn that completed stop into a failed helper exit.
+                    let _logged =
+                        writeln!(std::io::stderr().lock(), "{QUEUED_CONTROL_WARNING}{error}");
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -3168,6 +3173,8 @@ mod tests {
         resources
             .bind(socket, control, (uid, gid), gid)
             .expect("bound");
+        let bad = UnixStream::connect(root.path().join("control.sock")).expect("bad queued owner");
+        bad.shutdown(std::net::Shutdown::Write).expect("queued EOF");
         let mut peers = Vec::new();
         for _ in 0..3 {
             let mut peer = UnixStream::connect(root.path().join("control.sock")).expect("queued");
@@ -3176,7 +3183,9 @@ mod tests {
             peer.write_all(b"C").expect("request queued before close");
             peers.push(peer);
         }
-        resources.finish(Ok(())).expect("orderly close");
+        resources
+            .finish(Ok(()))
+            .expect("bad queued peer cannot fail an honoured stop");
         assert_service_removed(root.path(), &resources);
         for mut peer in peers {
             let mut ack = [0];
@@ -3184,6 +3193,16 @@ mod tests {
                 .expect("queued stop acknowledged before listener drop");
             assert_eq!(ack, *b"K");
         }
+        let (mut server, mut peer) = UnixStream::pair().expect("honoured stop pair");
+        peer.write_all(b"C").expect("stop request");
+        drop(peer);
+        let cancelled = AtomicBool::new(false);
+        let honoured = super::answer_control(&mut server, &cancelled, uid, &mut || {});
+        assert!(cancelled.load(Ordering::Acquire), "request honoured");
+        let error = resources
+            .finish(honoured)
+            .expect_err("honoured stop failure still refuses");
+        assert_eq!(error.kind, "helper-control");
     }
 
     /// ´test:unit:helper-service-cleanup-joins-an-accepted-control-read´

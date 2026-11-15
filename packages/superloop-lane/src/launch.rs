@@ -6306,6 +6306,7 @@ fn start_helper_observed(
                     tail.drain(..tail.len() - 4096);
                 }
             }
+            helper_control_warnings(&tail, &mut std::io::stderr().lock());
             tail
         });
         loop_home::anchor::transport::send(&transfer, &bundle.descriptors).map_err(|error| {
@@ -6424,6 +6425,17 @@ fn helper_stopped_end(
         end["detail"] = json!(handshake.line());
     }
     end
+}
+
+// The bounded stderr reader reports shutdown warnings even when its successful
+// result is not joined by the host. Other helper output stays on the error path.
+fn helper_control_warnings(bytes: &[u8], output: &mut impl std::io::Write) {
+    for line in String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|line| line.starts_with(crate::container_helper::QUEUED_CONTROL_WARNING))
+    {
+        let _logged = writeln!(output, "{line}");
+    }
 }
 
 fn helper_stop_with_stderr(
@@ -7795,6 +7807,15 @@ mod tests {
         .expect_err("helper refusal");
         assert_eq!(error.kind, "helper-stop");
         assert!(error.detail.contains("helper-pin: fixture refusal"));
+        let mut warnings = Vec::new();
+        super::helper_control_warnings(
+            b"other diagnostic\nhelper-control queued peer: injected EOF\nignored\n",
+            &mut warnings,
+        );
+        assert_eq!(
+            warnings, b"helper-control queued peer: injected EOF\n",
+            "successful helper warnings reach the host diagnostic stream"
+        );
     }
 
     /// # Panics
