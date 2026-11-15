@@ -191,12 +191,24 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
         let error = fixture
             .launch(false)
             .expect_err("unbound reply refuses readback");
-        assert_eq!(error.kind, "settle-evidence", "{error}");
-        assert!(
-            error
-                .detail
-                .contains("readback: reply has no verified mail binding"),
+        let driver_failed = fixture.home().join("driver-failed").exists();
+        assert_eq!(
+            error.kind,
+            if driver_failed {
+                "driver-launch"
+            } else {
+                "settle-evidence"
+            },
             "{error}"
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fixture.reservation()).expect("failed record");
+        assert!(
+            saved["rounds"][1]["settlement_error"]
+                .as_str()
+                .expect("readback refusal")
+                .contains("readback: reply has no verified mail binding"),
+            "{saved}"
         );
         return std::process::ExitCode::SUCCESS;
     }
@@ -428,10 +440,13 @@ pub(super) fn complete_stop_race(reply: bool) {
         .expect("next launch diagnostics");
 }
 
-pub(super) fn late_reply() {
+pub(super) fn late_reply(driver_failed: bool) {
     let mut scope = Scope::new();
     let fixture = scope.fixture.as_ref().expect("fixture");
     host::write(fixture.home().join("late-reply"), b"", 0o600);
+    if driver_failed {
+        host::write(fixture.home().join("driver-failed"), b"", 0o600);
+    }
     let output = scope.execute("late-reply").expect("real readback refusal");
     scope.stop().expect("scope absent");
     assert!(output.status.success(), "{output:?}");
@@ -440,6 +455,10 @@ pub(super) fn late_reply() {
     let failed: serde_json::Value = serde_json::from_slice(&original).expect("failed record");
     assert_eq!(failed["phase"], "failed");
     assert_eq!(failed["rounds"][1]["phase"], "failed");
+    assert_eq!(
+        failed["driver_end"]["successful"], !driver_failed,
+        "real driver completion"
+    );
     assert!(failed["rounds"][1]["reply"].is_null());
     late_reply_refusals(fixture, &failed);
     host::write(
@@ -483,6 +502,10 @@ pub(super) fn late_reply() {
     let saved: serde_json::Value = serde_json::from_slice(&fixture.reservation()).expect("settled");
     assert_eq!(saved["phase"], "settled");
     assert_eq!(saved["rounds"][1]["phase"], "settled");
+    assert_eq!(
+        saved["driver_end"], failed["driver_end"],
+        "settlement preserves driver failure"
+    );
     assert_eq!(
         saved["rounds"][1]["reply"]["sha256"],
         binding["mail"]["evidence_digest"]

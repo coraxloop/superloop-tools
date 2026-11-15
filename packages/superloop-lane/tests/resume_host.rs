@@ -176,7 +176,11 @@ for p in [root,leaf]:os.chown(p,64010,64010)
 }
 
 fn public_late_reply_binds_and_settles_after_readback_refusal() {
-    scope::late_reply();
+    scope::late_reply(false);
+}
+
+fn public_late_reply_settles_after_failed_driver() {
+    scope::late_reply(true);
 }
 
 fn main() -> std::process::ExitCode {
@@ -225,7 +229,7 @@ fn main() -> std::process::ExitCode {
             std::io::stdout().lock(),
             "test result: {}. {passed} passed; {failed} failed; 0 ignored; {} filtered out",
             if failed == 0 { "ok" } else { "FAILED" },
-            14 - passed - failed
+            15 - passed - failed
         )
         .expect("summary");
     }
@@ -236,8 +240,12 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn cases() -> [(&'static str, fn()); 14] {
+fn cases() -> [(&'static str, fn()); 15] {
     [
+        (
+            "public_late_reply_settles_after_failed_driver",
+            public_late_reply_settles_after_failed_driver,
+        ),
         (
             "public_late_reply_binds_and_settles_after_readback_refusal",
             public_late_reply_binds_and_settles_after_readback_refusal,
