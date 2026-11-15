@@ -7,6 +7,12 @@ use serde_json::{Value, json};
 
 use crate::error::LaneError;
 
+/// Select the handler and recovery publication for a decided enforce outcome.
+#[must_use]
+pub(crate) fn decided_enforce(mode: &str, decision: &Value) -> bool {
+    mode == "enforce" && matches!(decision.as_str(), Some("allow" | "refuse"))
+}
+
 mod channel_client;
 pub(crate) mod command;
 pub mod commands;

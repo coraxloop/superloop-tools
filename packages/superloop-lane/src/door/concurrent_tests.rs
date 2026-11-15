@@ -1212,16 +1212,63 @@ fn door_success_without_pending_adds_no_exclusive_recovery_hold() {
     let fixture = Fixture::new();
     fixture.set_floor("allow");
     let store = fixture.store();
-    let mut row = crate::requests::tests::waiting("R", "aa", 3000,
-        crate::requests::Mode::Allow).into_value();
-    row["effect"]["state"] = json!("completed");
-    row["effect"]["reason"] = json!("door-complete");
-    row["effect"]["exit_status"] = json!(0);
-    row["effect"]["ref_check"] = json!("not-applicable");
-    store.file(crate::requests::RequestRecord::decode(row).expect("published record"))
-        .expect("successful request's record");
+    recovery_record(&store, false);
     crate::requests::store::WRITE_ACQUISITIONS.set(0);
     super::recover_after_success(&store, "R", &json!({"status":0}), &mut None);
     assert_eq!(crate::requests::store::WRITE_ACQUISITIONS.get(), 0,
         "ordinary successful after-request path adds no exclusive hold");
+}
+
+fn recovery_record(store: &Store, unpublished: bool) {
+    let mut row = crate::requests::tests::waiting("R", "aa", 3000,
+        crate::requests::Mode::Allow).into_value();
+    row["mode"] = json!("allow");
+    row["class_setting"]["mode"] = json!("allow");
+    row["loop_setting"]["mode"] = json!("allow");
+    if unpublished { row["state"] = Value::Null; }
+    row["effect"]["state"] = json!("completed");
+    row["effect"]["reason"] = json!("door-complete");
+    row["effect"]["exit_status"] = json!(0);
+    row["effect"]["ref_check"] = json!("not-applicable");
+    store.file(crate::requests::RequestRecord::decode(row).expect("recovery record"))
+        .expect("file recovery record");
+}
+
+/// ´test:unit:door-live-publication-adds-no-exclusive-recovery-hold´
+#[test]
+fn door_live_publication_adds_no_exclusive_recovery_hold() {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let store = fixture.store();
+    recovery_record(&store, true);
+    let _live = store.publication_activity("R:aa").expect("live advisory handler");
+    let before = store.request("R:aa").expect("before").into_value();
+    crate::requests::store::WRITE_ACQUISITIONS.set(0);
+    super::recover_after_success(&store, "R", &json!({"status":0}), &mut None);
+    assert_eq!(crate::requests::store::WRITE_ACQUISITIONS.get(), 0,
+        "live advisory work adds no exclusive recovery hold");
+    assert_eq!(store.request("R:aa").expect("unchanged").value(), &before);
+}
+
+/// ´test:unit:door-idle-or-malformed-publication-enters-recovery´
+#[test]
+fn door_idle_or_malformed_publication_enters_recovery() {
+    for malformed in [false, true] {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        recovery_record(&store, true);
+        drop(store.publication_activity("R:aa").expect("create then release lease"));
+        if malformed {
+            fs::set_permissions(fixture.home.join("runs/.launch-R/door-publication-aa.lock"),
+                fs::Permissions::from_mode(0o644)).expect("malformed lease");
+        }
+        crate::requests::store::WRITE_ACQUISITIONS.set(0);
+        super::recover_after_success(&store, "R", &json!({"status":0}), &mut None);
+        assert_eq!(crate::requests::store::WRITE_ACQUISITIONS.get(), 1,
+            "idle or malformed candidate escalates: malformed={malformed}");
+        let row = store.request("R:aa").expect("result");
+        assert_eq!(row.publication_pending(), malformed, "malformed={malformed}");
+        if !malformed { assert_eq!(row.value()["state"], "waiting"); }
+    }
 }

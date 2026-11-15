@@ -1726,8 +1726,7 @@ fn serve_request_with_agent(
         }
         would_do = json!({"decision":result.verdict,"reason":result.reason});
     }
-    let decided_enforce =
-        mode == "enforce" && matches!(would_do["decision"].as_str(), Some("allow" | "refuse"));
+    let decided_enforce = crate::requests::decided_enforce(mode, &would_do["decision"]);
     let immediate = mode == "allow" || decided_enforce;
     if decided_enforce && would_do["decision"] == "refuse" {
         let mut reply = transport::refusal(registration, peer, "door-rubric-refusal", started);

@@ -2922,7 +2922,7 @@ impl Store {
         value
     }
 
-    /// Avoid an exclusive recovery hold when the run has no unpublished effects.
+    /// Avoid an exclusive recovery hold without an idle or malformed unpublished effect.
     pub(crate) fn recover_if_unpublished(&self, run: &str) -> Result<(), LaneError> {
         if !crate::valid_run_name(run) {
             return Err(problem("requests-record-refusal", "run name is invalid"));
@@ -2949,7 +2949,10 @@ impl Store {
             self.read_run_from_custody(run, &custody, collection.as_deref())?
                 .2
                 .iter()
-                .any(RequestRecord::publication_pending)
+                .any(|record| {
+                    record.publication_pending()
+                        && !matches!(self.try_publication_activity(record.id(), false), Ok(None))
+                })
         };
         if pending {
             self.recover_unpublished(Some(run))?;
@@ -2983,9 +2986,10 @@ impl Store {
                     continue;
                 };
                 hold::request(record.id());
-                let publish = if record.value()["mode"] == "enforce"
-                    && record.value()["would_do"]["decision"] != "undecided"
-                {
+                let publish = if super::decided_enforce(
+                    record.value()["mode"].as_str().unwrap_or_default(),
+                    &record.value()["would_do"]["decision"],
+                ) {
                     RequestRecord::publish_observed
                 } else {
                     RequestRecord::publish_waiting
