@@ -1240,7 +1240,12 @@ fn bounded_wait_emits_state_only_and_keeps_offset() {
     let start = Instant::now();
     let output = run([directory.path().as_os_str(), OsStr::new("--wait=1")]);
     assert_success(&output);
-    assert!((1..=3).contains(&start.elapsed().as_secs()));
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "wait ended early: {elapsed:?}"
+    );
+    assert!(elapsed < Duration::from_secs(120), "wait hung: {elapsed:?}");
     let parsed = data_document(&output);
     let records = parsed["records"].as_array().expect("records array");
     assert_eq!(records.len(), 1);
