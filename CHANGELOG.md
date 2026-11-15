@@ -138,6 +138,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The pack cut replay now judges the hung linter's 120-second refusal and retained diagnostics without an upper wall verdict; the deployed route timeout is named and pinned, and the real route test still spends that timeout (``test:unit:route-citation-timeout-is-pinned``; ``test:integration:cut-route-refuses-a-hung-linter``).
 
+- Ordinary pack tests now prove a hung citation linter's refusal, both kept streams and group reap with a short in-process bound; the unchanged 120-second binary replay is available on demand (``test:unit:resolved-sites-timeout-retains-diagnostics-and-reaps-group``; ``test:integration:cut-route-refuses-a-hung-linter``).
+
 - A first-dispatch helper-stop refusal now preserves the observer’s actual stop result. Recovery no longer accepts an observer merely because it is absent; a premature observer exit still refuses settlement. Compatibility: running launchers keep their old accounting (``test:unit:dispatch-observer-end-precedes-helper-stop-refusal``).
 
 - The boxed helper now removes its control pathname before draining queued stop connections and closing the listener, answering requests that already reached it. Errors from peers drained after cancellation are logged without failing an otherwise clean stop; the honoured controller request and listener errors still propagate. The launcher still requires the helper's successful exit. Compatibility: deploy the host wait fix with this close fix; installation does not replace an in-flight helper (``test:unit:helper-close-answers-every-queued-control``).

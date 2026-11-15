@@ -995,6 +995,8 @@ fn resolved_sites(
     root: &Path,
     commit: &str,
     linter: Option<&Path>,
+    bound: Duration,
+    #[cfg(test)] ready_marker: Option<&Path>,
 ) -> Result<CitationSites, CutError> {
     let linter = linter.ok_or_else(|| refuse("unpublished labels require --linter"))?;
     let linter =
@@ -1010,7 +1012,21 @@ fn resolved_sites(
         .process_group(0)
         .spawn()
         .map_err(|_| refuse("citation-sites linter could not run"))?;
-    let output = match citation_output(child, CITATION_LINTER_TIMEOUT) {
+    #[cfg(test)]
+    let mut child = child;
+    #[cfg(test)]
+    if let Some(marker) = ready_marker {
+        let started = Instant::now();
+        while !marker.exists() {
+            if started.elapsed() >= Duration::from_secs(120) {
+                let _killed = killpg(Pid::from_raw(child.id().cast_signed()), Signal::SIGKILL);
+                let _reaped = child.wait();
+                return Err(refuse("citation fixture did not become ready"));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    let output = match citation_output(child, bound) {
         Ok(output) if output.status.success() => output,
         result => {
             let (reason, stdout, stderr) = match result {
@@ -1078,7 +1094,14 @@ fn unpublished_register<'a>(
         .as_deref()
         .map(|path| cut_burn_register(root, burn_register).map(|burn| (path, burn)))
         .transpose()?;
-    let sites = resolved_sites(root, commit, linter)?;
+    let sites = resolved_sites(
+        root,
+        commit,
+        linter,
+        CITATION_LINTER_TIMEOUT,
+        #[cfg(test)]
+        None,
+    )?;
     let mut labels = std::collections::BTreeSet::new();
     for site in sites.sites {
         if !included.contains(&site.citing_path) {
@@ -1385,7 +1408,9 @@ pub fn write_cut_report<W: io::Write>(
 
 #[cfg(test)]
 mod guard_tests {
+    use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::process::CommandExt as _;
+    use std::path::Path;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -1393,6 +1418,90 @@ mod guard_tests {
     #[test]
     fn route_citation_timeout_is_pinned() {
         assert_eq!(super::CITATION_LINTER_TIMEOUT, Duration::from_secs(120));
+    }
+
+    /// A short timeout through the route retains both streams and reaps the linter's group.
+    ///
+    /// # Panics
+    /// Panics only if the fixture cannot be built or the timeout loses its refusal or evidence.
+    /// ´test:unit:resolved-sites-timeout-retains-diagnostics-and-reaps-group´
+    #[test]
+    fn resolved_sites_timeout_retains_diagnostics_and_reaps_group() {
+        let root = tempfile::tempdir().expect("repository fixture");
+        super::git(root.path(), &["init", "-q", "--template="]).expect("initialize fixture");
+        std::fs::write(root.path().join("README.md"), "fixture\n").expect("fixture source");
+        super::git(root.path(), &["add", "README.md"]).expect("add fixture source");
+        super::git(
+            root.path(),
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        )
+        .expect("commit fixture source");
+        let commit = super::git(root.path(), &["rev-parse", "HEAD"]).expect("fixture commit");
+        let commit = std::str::from_utf8(&commit)
+            .expect("commit id is UTF-8")
+            .trim();
+
+        let linter = root.path().join("linter.sh");
+        let pid_path = root.path().join("descendant.pid");
+        let ready = root.path().join("ready");
+        let script = format!(
+            "#!/bin/sh\nprintf 'kept-out'\nprintf 'kept-err' >&2\n/bin/sleep 30 &\nprintf '%s' $! > '{}'\nprintf ready > '{}'\nwait\n",
+            pid_path.display(),
+            ready.display()
+        );
+        std::fs::write(&linter, script).expect("linter fixture");
+        std::fs::set_permissions(&linter, std::fs::Permissions::from_mode(0o700))
+            .expect("executable linter fixture");
+
+        let Err(refusal) = super::resolved_sites(
+            root.path(),
+            commit,
+            Some(&linter),
+            Duration::from_millis(100),
+            Some(&ready),
+        ) else {
+            panic!("hung linter must refuse");
+        };
+        let message = refusal.to_string();
+        assert!(message.contains("citation-sites linter timed out after 0.1 s"));
+        let diagnostic = message
+            .split_once("diagnostic scratch=")
+            .map(|(_, path)| Path::new(path).to_path_buf())
+            .expect("retained scratch is named");
+        assert_eq!(
+            std::fs::read(diagnostic.join("citation-sites.stdout")).expect("kept stdout"),
+            b"kept-out"
+        );
+        assert_eq!(
+            std::fs::read(diagnostic.join("citation-sites.stderr")).expect("kept stderr"),
+            b"kept-err"
+        );
+        let pid = std::fs::read_to_string(pid_path).expect("descendant pid");
+        let process = Path::new("/proc").join(pid.trim());
+        let started = Instant::now();
+        while process.exists() {
+            let state = std::fs::read_to_string(process.join("stat"));
+            if state.as_ref().is_ok_and(|text| {
+                text.rsplit_once(") ")
+                    .is_some_and(|(_, fields)| fields.starts_with('Z'))
+            }) {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "linter descendant survived group termination: {state:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::fs::remove_dir_all(diagnostic).expect("retained scratch cleanup");
     }
 
     fn citation_fixture(script: &str) -> (tempfile::TempDir, Child) {

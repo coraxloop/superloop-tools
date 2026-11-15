@@ -1855,11 +1855,14 @@ fn cut_route_refuses_malformed_json() {
 }
 
 /// A hung citation executable refuses at the production deadline without publication.
+/// Run the full binary deadline on demand with
+/// `cargo test --locked -p superloop-pack --test replay cut_route_refuses_a_hung_linter -- --ignored --exact`.
 ///
 /// # Panics
 /// Panics only if fixture IO fails or diagnostics or output change.
 /// ´test:integration:cut-route-refuses-a-hung-linter´
 #[test]
+#[ignore = "120-second binary deadline is verified on demand"]
 fn cut_route_refuses_a_hung_linter() {
     let fixture = Fixture::new();
     let observed = citation_probe(&fixture);
