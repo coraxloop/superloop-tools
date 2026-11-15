@@ -817,12 +817,17 @@ pub(super) fn inspect_current_round(
     run: &str,
     evidence: Option<(&str, u64)>,
 ) -> Result<Value, LaneError> {
-    let (plan, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
+    let (mut plan, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
     let root = plan
         .driver_dir
         .parent()
         .ok_or_else(|| LaneError::input("round-home", "runs root is absent"))?;
     let record = inspection_record(root, run)?;
+    let worker = record["worker_uid"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| LaneError::input("round-record", "worker UID is absent"))?;
+    plan.select_worker_uid(worker)?;
     check_identity(&plan, &record)?;
     inspect_loaded_round(&plan, &record, evidence)
 }

@@ -146,7 +146,7 @@ fn choice_check(fixture: &host::Host, failed: bool, before: &[u8]) {
         "choice refusal writes nothing"
     );
 }
-fn failed_history(fixture: &host::Host) {
+pub(super) fn failed_history(fixture: &host::Host) {
     // A finalized failure is the before-image, not an invented result of this attempt.
     let mut record: Value = serde_json::from_slice(&fixture.reservation()).expect("history");
     record["readback_end"] = json!("completed");

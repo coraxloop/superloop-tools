@@ -94,6 +94,87 @@ fn public_helper_stop_recovers_resumed_no_reply() {
     scope::complete_stop_race(false);
 }
 
+fn public_failed_round_inspection_uses_allocated_worker() {
+    let fixture = host::Host::new();
+    refusals::failed_history(&fixture);
+    let allocation = fixture.home().join(".config/loops/allocations.toml");
+    let text = std::fs::read_to_string(&allocation).expect("allocation");
+    assert!(text.contains("uids={base=64010,count=2}"));
+    host::write(
+        allocation,
+        text.replace("uids={base=64010,count=2}", "uids={base=64009,count=3}")
+            .replace(
+                "mail_gids={base=64020,count=3}",
+                "mail_gids={base=64019,count=4}",
+            ),
+        0o600,
+    );
+    let (base, _) =
+        superloop_lane::load_plan(fixture.home(), "alpha", "R", (0, 0)).expect("base plan");
+    let record: serde_json::Value = serde_json::from_slice(&fixture.reservation()).expect("record");
+    assert_eq!(base.document["worker_uid"], 64009);
+    assert_eq!(record["worker_uid"], 64010);
+    let session = r"
+import json,os,sys
+from pathlib import Path
+home=Path(sys.argv[1]);record=json.loads((home/'runs/.reservation-R.json').read_text())
+# The loop mailbox occupies the allocation's first group; the worker keeps 64021.
+mail=home/'.var/loops/alpha/mail'
+for p in [mail,*mail.rglob('*')]:
+ if p.lstat().st_gid==64020:os.chown(p,-1,64019)
+root=Path(record['plan']['home'])/'.codex/sessions'
+root.mkdir(parents=True,exist_ok=True)
+leaf=root/'rollout-fixture-fixture-thread.jsonl';leaf.write_bytes(b'synthetic session existence only')
+for p in [root,leaf]:os.chown(p,64010,64010)
+";
+    host::mapped(fixture.home(), session);
+    let before = fixture.reservation();
+    let error = fixture
+        .launch(true)
+        .expect_err("failed round requires explicit choice");
+    assert_eq!(
+        error.kind, "round-choice",
+        "allocated session owner accepted: {error}"
+    );
+    let preview: serde_json::Value = serde_json::from_str(
+        error
+            .detail
+            .split_once("; preview=")
+            .expect("choice evidence")
+            .1,
+    )
+    .expect("preview");
+    assert_eq!(preview["thread_files"]["present"], true);
+    let chosen = fixture
+        .launch_choice(true, true)
+        .expect("allocated worker resume preview");
+    assert_eq!(chosen["helper_preflight"]["state"], "passed");
+    assert_eq!(
+        fixture.reservation(),
+        before,
+        "inspection publishes nothing"
+    );
+    host::mapped(
+        fixture.home(),
+        &session.replace("os.chown(p,64010,64010)", "os.chown(p,64009,64009)"),
+    );
+    let error = fixture
+        .launch(true)
+        .expect_err("foreign session owner refuses");
+    assert_eq!(error.kind, "inspect-round");
+    assert!(
+        error
+            .detail
+            .contains("session directory owner differs from worker"),
+        "{error}"
+    );
+    assert_eq!(
+        fixture.reservation(),
+        before,
+        "foreign owner refusal publishes nothing"
+    );
+}
+
 fn main() -> std::process::ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|s| s == "--fixture-scope") {
@@ -140,7 +221,7 @@ fn main() -> std::process::ExitCode {
             std::io::stdout().lock(),
             "test result: {}. {passed} passed; {failed} failed; 0 ignored; {} filtered out",
             if failed == 0 { "ok" } else { "FAILED" },
-            12 - passed - failed
+            13 - passed - failed
         )
         .expect("summary");
     }
@@ -151,8 +232,12 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn cases() -> [(&'static str, fn()); 12] {
+fn cases() -> [(&'static str, fn()); 13] {
     [
+        (
+            "public_failed_round_inspection_uses_allocated_worker",
+            public_failed_round_inspection_uses_allocated_worker,
+        ),
         (
             "public_helper_stop_recovers_resumed_reply",
             public_helper_stop_recovers_resumed_reply,
