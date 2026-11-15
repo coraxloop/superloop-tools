@@ -202,7 +202,7 @@ pass "admin-only delta prints and ends FEED-EMPTY"
 pass "admin-only deltas advance cursor files"
 
 new_case mixed
-run_feed mixed 200 10 alpha
+run_feed mixed 120000 10 alpha
 [ "$STATUS" -eq 0 ] || fail "mixed exit was $STATUS"
 grep -q '^host=alpha from=admin sender=test file=/messages/alpha-admin$' "$CASE_OUT" || fail "mixed admin output"
 grep -q '^host=alpha from=user sender=test file=/messages/alpha-user$' "$CASE_OUT" || fail "mixed user output"
@@ -210,7 +210,7 @@ grep -q '^host=alpha from=user sender=test file=/messages/alpha-user$' "$CASE_OU
 pass "mixed admin and user delta prints both and ends FEED-CONTENT"
 
 new_case user-only
-run_feed user-only 200 10 alpha
+run_feed user-only 120000 10 alpha
 [ "$STATUS" -eq 0 ] || fail "user-only exit was $STATUS"
 grep -q '^host=alpha from=user sender=test file=/messages/alpha$' "$CASE_OUT" || fail "user-only delta output"
 [ "$(tail -n 1 "$CASE_OUT")" = FEED-CONTENT ] || fail "user-only verdict"
@@ -219,7 +219,7 @@ pass "user-only delta remains FEED-CONTENT"
 new_case successful-cursor
 mkdir -p "$CASE_HOME/dev/superloop-tools/correspondence-watch"
 printf '%s' cursor-old > "$CASE_HOME/dev/superloop-tools/correspondence-watch/cursor-alpha"
-run_feed content 200 10 alpha
+run_feed content 120000 10 alpha
 [ "$STATUS" -eq 0 ] || fail "successful cursor poll exit was $STATUS"
 [ "$(cat "$CASE_HOME/dev/superloop-tools/correspondence-watch/cursor-alpha")" = cursor-alpha-new ] || fail "successful poll did not advance cursor"
 pass "successful polls advance cursor files"
