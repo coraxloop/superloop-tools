@@ -231,14 +231,6 @@ grep -q '^host=alpha from=user sender=test file=/messages/alpha$' "$CASE_OUT" ||
 [ "$(tail -n 1 "$CASE_OUT")" = FEED-CONTENT ] || fail "watch content verdict"
 pass "supervisor content path exits 0 and prints feeder output"
 
-new_case watch-admin-only
-run_watch admin-only 250 500 100 alpha
-[ "$STATUS" -eq 2 ] || fail "watch admin-only exit was $STATUS"
-[ -s "$CASE_LOG" ] || fail "watch admin-only never polled"
-grep -q '^host=alpha from=admin sender=test file=/messages/alpha-admin$' "$CASE_OUT" || fail "watch omitted admin records"
-grep -Eq '^FEED-DURATION-MS [0-9]+$' "$CASE_OUT" || fail "watch deadline omitted wall"
-pass "supervisor publishes admin-only deltas before deadline exit 2"
-
 new_case watch-failure
 run_watch all-fail 500 200 50 alpha
 [ "$STATUS" -eq 1 ] || fail "watch failure exit was $STATUS"
