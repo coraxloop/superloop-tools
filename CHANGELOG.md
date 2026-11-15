@@ -72,6 +72,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The request-store contention tests now decide by the named lock refusal and holder evidence instead of 500 ms and one-second upper wall bounds. The request deadlines and lock handling in deployed commands are unchanged (``test:unit:request-writer-deadline-names-lock-wait-and-holder``; ``test:unit:request-reader-renews-budget-per-read``).
+
 - The helper's absent-launcher test now waits for the observed zombie state, with a distant hang guard, before checking that the unreaped launcher is treated as absent. Deployed process classification is unchanged (``test:unit:helper-detects-the-launchers-absent-process``).
 
 - The trickling-peer deadline test now keeps its writer socket open until the frame read returns, so a loaded reader observes the deadline rather than an early end-of-file. The door's frame deadline is unchanged (``test:unit:door-frame-deadline-bounds-a-trickling-peer``).

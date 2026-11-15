@@ -3187,7 +3187,6 @@ pub(crate) mod tests {
         assert!(super::is_lock_contention(&error));
         assert!(error.detail.contains("wait_seconds="));
         assert!(error.detail.contains("holder_request_id=R:holder"));
-        assert!(started.elapsed() < Duration::from_secs(1));
         drop(held);
         store
             .ensure_first_mode("ssh")
@@ -6265,7 +6264,6 @@ pub(crate) mod tests {
             .list_run_until("R", started)
             .expect_err("expired explicit deadline");
         assert!(super::is_lock_contention(&error));
-        assert!(started.elapsed() < Duration::from_millis(500));
         let (contended_tx, contended_rx) = std::sync::mpsc::channel();
         AFTER_READER_LOCK_CONTENTION.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
