@@ -5061,10 +5061,10 @@ mod tests {
                     .stderr(Stdio::null()),
             )
             .expect("built driver process");
-            await_fixture_marker(&mut ready_event, *b"started");
             let driver_pid = driver.id();
             let driver_guard = HolderGuard::new();
             driver_guard.0.lock().expect("driver holder").child = Some(driver);
+            await_fixture_marker(&mut ready_event, *b"started");
             let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,
                 "driver_entry_pid":driver_pid,"driver_entry_start":process_start(driver_pid).expect("driver identity"),
                 "active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
@@ -5129,10 +5129,7 @@ mod tests {
             measurement
                 .recv_timeout(RETAINED_READER_HANG_BOUND)
                 .expect("unknown driver measurement event");
-            assert!(
-                !stopped.exists(),
-                "unknown presence must not stop a live driver"
-            );
+            let unknown_kept_live = !stopped.exists();
             publish_reservation(&reservation, &record).expect("identity restored");
             if recorded_end {
                 let mut ended = record;
@@ -5145,6 +5142,10 @@ mod tests {
             let (result, evidence, fixture) =
                 finish_attempt_fixture(helper, &completed, &cancelled);
             driver_guard.close();
+            assert!(
+                unknown_kept_live,
+                "unknown presence must not stop a live driver"
+            );
             assert_eq!(result.err().expect("named reap").kind, "survivors-reaped");
             assert_eq!(
                 evidence["reaping"]["driver"]["state"],
