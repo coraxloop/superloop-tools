@@ -82,12 +82,16 @@ impl Host {
         );
     }
     pub(super) fn reply(&self) {
-        delivery(&self.home, "package-canonical-reply");
+        let record: Value = serde_json::from_slice(&self.reservation()).expect("active record");
+        let step = record["active_round"].as_str().expect("active step");
+        if record["mail_replies"].as_array().is_none_or(Vec::is_empty) {
+            delivery(&self.home, "package-canonical-reply");
+        }
         let request = superloop_lane::launch::steering::Request::parse(&[
             "alpha".into(),
             "R".into(),
             "--step".into(),
-            "review".into(),
+            step.into(),
             "--delivery".into(),
             "2026-01-01T00:00:00.002Z".into(),
         ])
@@ -230,9 +234,10 @@ print(json.dumps(sorted(rows)))
             &mut |_| {},
         )
     }
-    pub(super) fn next_preview(
+    pub(super) fn next_launch(
         &self,
         choose: bool,
+        dry: bool,
     ) -> Result<Value, superloop_lane::error::LaneError> {
         let binding = superloop_lane::launch::steering::Request::parse(&[
             "alpha".into(),
@@ -253,13 +258,10 @@ print(json.dumps(sorted(rows)))
                 Some(&self.lane),
             ),
         )?;
-        let mut words = vec![
-            "alpha".into(),
-            "R".into(),
-            "--round".into(),
-            "after".into(),
-            "--dry-run".into(),
-        ];
+        let mut words = vec!["alpha".into(), "R".into(), "--round".into(), "after".into()];
+        if dry {
+            words.push("--dry-run".into());
+        }
         if choose {
             words.push("--resume-thread".into());
         }

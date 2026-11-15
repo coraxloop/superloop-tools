@@ -138,6 +138,33 @@ pub(super) fn run(case: &str) {
         .expect("scope diagnostics");
 }
 
+fn next_round(fixture: &host::Host, choose: bool) -> std::process::ExitCode {
+    let report = fixture
+        .next_launch(choose, false)
+        .expect("next real public launch");
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fixture.reservation()).expect("next record");
+    assert_eq!(saved["phase"], "settled", "{report}");
+    assert_eq!(saved["active_round"], "after");
+    assert_eq!(
+        saved["rounds"]
+            .as_array()
+            .expect("round rows")
+            .last()
+            .expect("next row")["phase"],
+        "settled"
+    );
+    assert_eq!(saved["thread_id"], "fixture-thread");
+    assert_eq!(saved["driver_end"]["successful"], true);
+    assert_eq!(saved["helper_end"]["successful"], true);
+    writeln!(
+        std::io::stdout().lock(),
+        "NEXT-ROUND-SETTLED choice={choose}"
+    )
+    .expect("next result");
+    std::process::ExitCode::SUCCESS
+}
+
 pub(super) fn child(args: &[String]) -> std::process::ExitCode {
     let [case, home, device, inode] = args else {
         panic!("scope arguments");
@@ -156,6 +183,9 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
     if let Some((fault, history)) = case.split_once(':') {
         crate::refusals::run(&fixture, fault, history == "failed");
         return std::process::ExitCode::SUCCESS;
+    }
+    if case == "after-reply" || case == "after-failed" {
+        return next_round(&fixture, case == "after-failed");
     }
     if case == "stop-race" {
         fixture.observer();
@@ -299,7 +329,7 @@ pub(super) fn recover_stop_race(reply: bool) {
 }
 
 pub(super) fn complete_stop_race(reply: bool) {
-    let scope = stopped_race(reply);
+    let mut scope = stopped_race(reply);
     let fixture = scope.fixture.as_ref().expect("retained fixture");
     let before = fixture.reservation();
     let preview = fixture
@@ -334,7 +364,7 @@ pub(super) fn complete_stop_race(reply: bool) {
         writeln!(std::io::stdout().lock(), "FAILED-SETTLED {settled}").expect("report");
     }
     let before = fixture.reservation();
-    let preview = fixture.next_preview(false);
+    let preview = fixture.next_launch(false, true);
     if reply {
         let preview = preview.expect("reply resumes without a choice");
         assert_eq!(preview["helper_preflight"]["state"], "passed", "{preview}");
@@ -347,7 +377,9 @@ pub(super) fn complete_stop_race(reply: bool) {
             error.detail.contains("--fresh-thread or --resume-thread"),
             "{error}"
         );
-        let choice = fixture.next_preview(true).expect("chosen next preview");
+        let choice = fixture
+            .next_launch(true, true)
+            .expect("chosen next preview");
         assert_eq!(choice["helper_preflight"]["state"], "passed", "{choice}");
         assert_eq!(choice["thread_id"], "fixture-thread");
     }
@@ -358,4 +390,25 @@ pub(super) fn complete_stop_race(reply: bool) {
     assert_eq!(after["phase"], "settled");
     assert_eq!(after["rounds"], before["rounds"]);
     writeln!(std::io::stdout().lock(), "RECOVERY-COMPLETE reply={reply}").expect("report");
+    std::fs::remove_file(fixture.home().join("fixture-fault")).expect("remove own injected pause");
+    if !reply {
+        std::fs::remove_file(fixture.home().join("without-reply")).expect("next reply enabled");
+    }
+    scope.stopped = false;
+    let output = scope.execute(if reply { "after-reply" } else { "after-failed" });
+    let stopped = scope.stop();
+    assert!(stopped.is_ok(), "{stopped:?}");
+    let output = output.expect("next actual scoped launch");
+    assert!(
+        output.status.success(),
+        "next launch after recovery: {output:?}"
+    );
+    std::io::stdout()
+        .lock()
+        .write_all(&output.stdout)
+        .expect("next launch evidence");
+    std::io::stderr()
+        .lock()
+        .write_all(&output.stderr)
+        .expect("next launch diagnostics");
 }
