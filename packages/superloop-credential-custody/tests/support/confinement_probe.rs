@@ -128,6 +128,7 @@ fn main() {
                 .is_some_and(|e| e.raw_os_error() == Some(nix::libc::EACCES)),
         ) + b'0',
     );
+    evidence.extend(ipc());
     std::io::stdout().write_all(&evidence).unwrap();
 }
 
@@ -183,7 +184,7 @@ fn scheduling(outside: i32) -> [u8; 6] {
                 nix::libc::SYS_setpriority,
                 nix::libc::PRIO_PROCESS,
                 outside,
-                0,
+                19,
             )),
             denied(nix::libc::syscall(
                 nix::libc::SYS_sched_setparam,
@@ -211,4 +212,46 @@ fn scheduling(outside: i32) -> [u8; 6] {
             denied(nix::libc::syscall(nix::libc::SYS_ioprio_set, 1, outside, 0)),
         ]
     }
+}
+
+#[allow(unsafe_code)]
+fn ipc() -> Vec<u8> {
+    // Invalid pointers/IDs and no creation flags: even a mutation cannot create,
+    // read payloads from or remove another process's IPC object. EPERM must precede argument
+    // validation, proving the syscall route is closed independently of ownership.
+    [
+        nix::libc::SYS_keyctl,
+        nix::libc::SYS_add_key,
+        nix::libc::SYS_request_key,
+        nix::libc::SYS_semget,
+        nix::libc::SYS_semop,
+        nix::libc::SYS_semtimedop,
+        nix::libc::SYS_semctl,
+        nix::libc::SYS_shmget,
+        nix::libc::SYS_shmat,
+        nix::libc::SYS_shmdt,
+        nix::libc::SYS_shmctl,
+        nix::libc::SYS_msgget,
+        nix::libc::SYS_msgsnd,
+        nix::libc::SYS_msgrcv,
+        nix::libc::SYS_msgctl,
+        nix::libc::SYS_mq_open,
+        nix::libc::SYS_mq_unlink,
+        nix::libc::SYS_mq_timedsend,
+        nix::libc::SYS_mq_timedreceive,
+        nix::libc::SYS_mq_notify,
+        nix::libc::SYS_mq_getsetattr,
+    ]
+    .into_iter()
+    .map(|number| {
+        // SAFETY: scalar syscall selectors; every possible pointer is invalid
+        // or null, every object ID is -1, and creation flags are zero.
+        let result =
+            unsafe { nix::libc::syscall(number, -1_i64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64) };
+        u8::from(
+            result == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::EPERM),
+        ) + b'0'
+    })
+    .collect()
 }

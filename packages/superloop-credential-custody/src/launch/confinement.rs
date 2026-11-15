@@ -209,9 +209,44 @@ fn socket_filter() -> Result<Vec<nix::libc::sock_filter>> {
         instruction(0x06, 0, 0, 0x7fff_0000),
         instruction(0x06, 0, 0, 0x0005_0001),
     ]);
+    for syscall in denied_syscalls() {
+        filter.push(instruction(
+            0x15,
+            0,
+            1,
+            u32::try_from(syscall).map_err(|_| "sealer-seccomp-architecture")?,
+        ));
+        filter.push(instruction(0x06, 0, 0, 0x0005_0001));
+    }
+    filter.push(instruction(0x06, 0, 0, 0x7fff_0000));
+    Ok(filter)
+}
+fn denied_syscalls() -> Vec<nix::libc::c_long> {
     // io_uring can create sockets without SYS_socket; deny that alternate route
     // as well. No ring descriptor is admitted across this child exec.
     let mut denied = vec![
+        // No kernel keyring or SysV/POSIX message-queue authority is needed.
+        nix::libc::SYS_keyctl,
+        nix::libc::SYS_add_key,
+        nix::libc::SYS_request_key,
+        nix::libc::SYS_semget,
+        nix::libc::SYS_semop,
+        nix::libc::SYS_semtimedop,
+        nix::libc::SYS_semctl,
+        nix::libc::SYS_shmget,
+        nix::libc::SYS_shmat,
+        nix::libc::SYS_shmdt,
+        nix::libc::SYS_shmctl,
+        nix::libc::SYS_msgget,
+        nix::libc::SYS_msgsnd,
+        nix::libc::SYS_msgrcv,
+        nix::libc::SYS_msgctl,
+        nix::libc::SYS_mq_open,
+        nix::libc::SYS_mq_unlink,
+        nix::libc::SYS_mq_timedsend,
+        nix::libc::SYS_mq_timedreceive,
+        nix::libc::SYS_mq_notify,
+        nix::libc::SYS_mq_getsetattr,
         // No scheduling or IO-priority mutation is needed, even for self.
         nix::libc::SYS_setpriority,
         nix::libc::SYS_sched_setparam,
@@ -248,17 +283,7 @@ fn socket_filter() -> Result<Vec<nix::libc::sock_filter>> {
         nix::libc::SYS_utimes,
         nix::libc::SYS_futimesat,
     ]);
-    for syscall in denied {
-        filter.push(instruction(
-            0x15,
-            0,
-            1,
-            u32::try_from(syscall).map_err(|_| "sealer-seccomp-architecture")?,
-        ));
-        filter.push(instruction(0x06, 0, 0, 0x0005_0001));
-    }
-    filter.push(instruction(0x06, 0, 0, 0x7fff_0000));
-    Ok(filter)
+    denied
 }
 #[cfg(test)]
 mod tests {
