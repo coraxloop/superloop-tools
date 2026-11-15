@@ -68,12 +68,13 @@ fn door_receive_flush_without_ref_records_no_ref() {
 fn door_receive_deadline_before_packet_records_not_reached() {
     use std::io::Write as _;
 
-    // This exercises a real socket timeout. Allow five seconds for the request
-    // to reach packet reception: the old 100 ms budget also covered durable
-    // mediation writes and could expire before compute on a loaded node.
     const RECEIVE_DEADLINE_MS: u64 = 5000;
+    super::super::REQUEST_READY.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(|_| {
+            Ok(Instant::now() + Duration::from_millis(RECEIVE_DEADLINE_MS))
+        }));
+    });
     let (temp, socket, server) = fixture(Scope::Work);
-    let started = Instant::now();
     let mut client = UnixStream::connect(&socket).expect("receive client");
     let deadline = Instant::now() + Duration::from_secs(120);
     frame_write_until(
@@ -85,15 +86,48 @@ fn door_receive_deadline_before_packet_records_not_reached() {
     .expect("receive request");
     client.write_all(b"000a").expect("incomplete packet");
     let reply = frame_read_until(&mut client, deadline).expect("deadline reply");
-    assert!(started.elapsed() >= Duration::from_millis(RECEIVE_DEADLINE_MS));
     assert_eq!(reply["ref_check"], "not-reached");
-    assert!(matches!(
-        reply["reason"].as_str(),
-        Some("door-deadline-refusal" | "door-git-packet-refusal")
-    ), "packet-phase refusal: {reply}");
+    assert!(
+        matches!(
+            reply["reason"].as_str(),
+            Some("door-deadline-refusal" | "door-git-packet-refusal")
+        ),
+        "packet-phase refusal: {reply}"
+    );
     server.join().expect("server join").expect("server reply");
     let records = temp.store().list_run("R").expect("request records");
     assert_eq!(records[0].value()["effect"]["ref_check"], "not-reached");
+}
+
+/// ´test:unit:door-input-pump-deadline-before-packet-keeps-ref-not-reached´
+#[test]
+fn door_input_pump_deadline_before_packet_keeps_ref_not_reached() {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let (socket, mut peer) = UnixStream::pair().expect("input pair");
+    peer.write_all(b"000a").expect("partial receive packet");
+    let count = Arc::new(AtomicUsize::new(0));
+    let ref_check = Arc::new(AtomicU8::new(super::REF_NOT_REACHED));
+    let ref_packet = Arc::new(Mutex::new(None));
+    let abort = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let result = super::input_pump(
+        socket,
+        Vec::new(),
+        Some("refs/heads/lane/R"),
+        &count,
+        &ref_check,
+        &ref_packet,
+        &abort,
+        &stopped,
+        Instant::now() + Duration::from_millis(40),
+    );
+    assert_eq!(result, Err("door-deadline-refusal"));
+    assert_eq!(ref_check.load(Ordering::Relaxed), super::REF_NOT_REACHED);
+    assert!(abort.load(Ordering::Relaxed));
+    assert!(ref_packet.lock().expect("packet state").is_none());
 }
 
 /// ´test:unit:door-upload-records-not-applicable-ref-check´

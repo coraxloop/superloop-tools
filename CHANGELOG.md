@@ -72,6 +72,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The receive deadline tests now check the input pump's deadline with a held-open partial packet and start the recording fixture's deadline after its request is filed, so durable mediation work cannot decide the test. The deployed receive deadline and packet handling are unchanged (``test:unit:door-input-pump-deadline-before-packet-keeps-ref-not-reached``; ``test:unit:door-receive-deadline-before-packet-records-not-reached``).
+
 - The driver-follow bounded-wait test keeps its one-second minimum and uses a distant hang guard instead of treating three seconds of loaded-node wall time as a failure. The command's wait setting is unchanged (``test:integration:bounded-wait-emits-state-only-and-keeps-offset``).
 
 - The compute refusal fixture now waits for its filed request event before adjudicating it; compute announcement and admission tests use distant frame and effect hang guards. The two-box admission fixture checks release and distinct records without a short wall limit. Deployed admission and request deadlines are unchanged (``test:unit:door-compute-deadline-refusal-names-the-owner-bound``; ``test:unit:door-two-boxes-share-the-bounded-store-wait``).
