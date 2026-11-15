@@ -1453,7 +1453,7 @@ mod guard_tests {
         let pid_path = root.path().join("descendant.pid");
         let ready = root.path().join("ready");
         let script = format!(
-            "#!/bin/sh\nprintf 'kept-out'\nprintf 'kept-err' >&2\n/bin/sleep 30 &\nprintf '%s' $! > '{}'\nprintf ready > '{}'\nwait\n",
+            "#!/bin/sh\nprintf 'kept-out'\nprintf 'kept-err' >&2\n/bin/sleep 300 &\nprintf '%s' $! > '{}'\nprintf ready > '{}'\nwait\n",
             pid_path.display(),
             ready.display()
         );
