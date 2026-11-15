@@ -76,6 +76,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A run whose driver failed after its bound reply was read back can now be settled. Both launch paths leave it `failed` with its round `failed`, the reply retained and no settlement refusal, a state every command but `retire` refused; `settle LOOP RUN --round STEP --dry-run` and then its `--expect-digest` apply now re-read the reply against its delivery, end the round `settled` with that reply and the run `settled`, keep `driver_end` unsuccessful as the record of the failure, and publish the recovered launch report, after which the next round resumes the recorded thread with no choice owed. A failed round that `settle` still refuses now names its recorded driver, helper, readback and reply ends. Compatibility: no record shape changes and runs already in this state need no migration; install the lane program before settling them (``test:unit:driver-failed-after-readback-settles-with-its-reply``; ``prob:lanes:a-driver-failing-after-its-bound-reply-leaves-a-run-only-retire-admits``).
+
 - The permission-triage two-stealer test now gives each of its five channel events a distant 120-second hang guard, so a delayed test thread cannot look like a failed lock ordering. The deployed lock wait is unchanged (``test:crate:journal-two-stealers-restore-during-release``).
 
 - The permission-triage no-stdin fixture now uses a 120-second hang guard for its five usage and version invocations, so load cannot make a healthy hook outlive a two-second sentinel. The tests still fail if the hook waits for input; deployed hook behavior is unchanged.

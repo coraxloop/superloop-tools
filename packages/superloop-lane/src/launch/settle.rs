@@ -229,11 +229,9 @@ fn recovery_basis(
         && !record["readback_end"]
             .as_str()
             .is_some_and(|end| end.contains("settle-evidence:"))
+        && !driver_failed_after_readback(record)
     {
-        return Err(LaneError::input(
-            "settle-state-refusal",
-            "failed round has no settlement refusal",
-        ));
+        return Err(unsettled_failed_round(record, round));
     }
     let recovery = super::reaping::recovery_verdict(record);
     if record["reaping_recovery"]["state"] == "collected" {
@@ -305,6 +303,24 @@ fn recovery_basis(
         }
     }
     Ok(())
+}
+
+/// Refuse a failed round in neither admitted shape, naming the recorded ends that decided it.
+fn unsettled_failed_round(record: &Value, round: &Value) -> LaneError {
+    let driver = &record["driver_end"]["successful"];
+    let helper = &record["helper_end"]["successful"];
+    let readback = &record["readback_end"];
+    let reply = if round["reply"].is_null() {
+        "absent"
+    } else {
+        "present"
+    };
+    LaneError::input(
+        "settle-state-refusal",
+        format!(
+            "failed round has no settlement refusal and is not a driver failure after its reply was read back with a successful helper end: driver_end.successful {driver}, helper_end.successful {helper}, readback_end {readback}, reply {reply}"
+        ),
+    )
 }
 
 type SettlementPreview = (PathBuf, Value, String, Vec<Value>, String, Value);
@@ -538,6 +554,30 @@ pub(super) fn completed_failed_round(record: &Value) -> bool {
                     && round["step"].is_string()
                     && round["step"] == record["active_round"]
                     && round["reply"].is_null()
+            })
+}
+
+/// Recognize a run whose driver failed after its bound reply was read back: the launcher's
+/// private settlement settled the round with that reply before the driver's failure failed the
+/// run and the round. Settlement re-reads the reply against its delivery before it settles both.
+pub(super) fn driver_failed_after_readback(record: &Value) -> bool {
+    record["phase"] == "failed"
+        && record["pre_driver_failure"].is_null()
+        && record["reaping_recovery"].is_null()
+        && record["driver_end"]["state"] == "completed"
+        && record["driver_end"]["successful"] == false
+        && record["helper_end"]["state"] == "completed"
+        && record["helper_end"]["successful"] == true
+        && record["readback_end"] == "completed"
+        && record["rounds"]
+            .as_array()
+            .and_then(|rows| rows.last())
+            .is_some_and(|round| {
+                round["phase"] == "failed"
+                    && round["step"].is_string()
+                    && round["step"] == record["active_round"]
+                    && !round["reply"].is_null()
+                    && round["settlement_error"].is_null()
             })
 }
 
@@ -4333,6 +4373,219 @@ esac
                 reply.display()
             )
         );
+    }
+
+    /// Build the launcher's record of a driver that failed after its bound reply was read back,
+    /// through the writers the launcher and its private settlement call, in their order.
+    ///
+    /// # Panics
+    /// Panics only if a production writer refuses the launcher's own sequence.
+    fn fail_after_bound_reply(plan: &crate::plan::Plan, record: &mut Value) {
+        let root = plan.driver_dir.parent().expect("runs root");
+        let path = super::super::reservation_path(root, "R");
+        let directory = plan.driver_dir.join("20261007T043545Z-work");
+        std::fs::write(
+            directory.join("run-report.txt"),
+            format!(
+                "RUN-REPORT lane=work exit=1 verdict=FAILED dir={}\n",
+                directory.display()
+            ),
+        )
+        .expect("failed driver report");
+        let fields = record.as_object_mut().expect("record object");
+        for field in [
+            "driver_end",
+            "helper_end",
+            "observation_end",
+            "readback_end",
+            "reaping",
+        ] {
+            let _unwritten = fields.remove(field);
+        }
+        record["phase"] = json!("started");
+        record["rounds"] = json!([{"step":"work","budget_seconds":900,"letter":"work.md","phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":1,"in_round_letters":[]}]);
+        super::super::publish_reservation(&path, record).expect("running round");
+        let driver_end = json!({"state":"completed","successful":false,"detail":"exit 1"});
+        let helper_end = json!({"state":"completed","successful":true});
+        let observer_end = json!({"state":"not-started","socket":{"state":"not-applicable"}});
+        for (field, value) in [
+            ("driver_end", driver_end),
+            ("helper_end", helper_end),
+            ("observer_end", observer_end),
+            ("observation_end", json!("completed")),
+        ] {
+            super::super::persist_settlement_field(&path, field, value)
+                .expect("ends recorded before settlement");
+        }
+        let owner = Uid::effective().as_raw();
+        rounds::recover_step_directory(plan, "R").expect("failed driver's step");
+        let readback = super::super::record_readback_with_owner(plan, "alpha", "R", true, owner)
+            .expect("bound reply read back");
+        rounds::record_settlement(plan, "alpha", "R", &readback).expect("private settlement");
+        let reaping_end = json!({"state":"verified-empty","container_payload":{"state":"absent"}});
+        for (field, value) in [
+            ("readback_end", json!("completed")),
+            ("reaping", reaping_end),
+        ] {
+            super::super::persist_settlement_field(&path, field, value)
+                .expect("evidence recorded after settlement");
+        }
+        *record = read_reservation(&path).expect("read").expect("record");
+        record["rounds"][0]["phase"] = json!("failed");
+        record["phase"] = json!("failed");
+        record["observer_state"] = json!("not-started");
+        record["settlement_uncertain"] = json!(false);
+        super::super::publish_reservation(&path, record).expect("launcher failure record");
+        assert_eq!(record["rounds"][0]["reply"], readback);
+        assert_eq!(record["rounds"][0]["ended_by"], "by-report");
+        assert!(record["rounds"][0]["settlement_error"].is_null());
+        assert!(driver_failed_after_readback(record));
+    }
+
+    /// # Panics
+    /// Panics if the next round of a reply-settled run owes or accepts a thread choice.
+    fn assert_resume_owes_no_choice(plan: &crate::plan::Plan, saved: &Value) {
+        let selection = super::super::LaunchModel::select(
+            b"Model: gpt-6-sol\nEffort: high\nReport.\n",
+            None,
+            None,
+        )
+        .expect("selection");
+        let mut resumable = saved.clone();
+        resumable["mail"] = json!([{"step":"report","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter","evidence_digest":"a".repeat(64)}]);
+        let resume = super::super::LaunchRequest::parse(&[
+            "alpha".into(),
+            "R".into(),
+            "--round".into(),
+            "report".into(),
+            "--dry-run".into(),
+        ])
+        .expect("resume request");
+        let (directory, argv) = rounds::continuation_argv(
+            plan,
+            &resumable,
+            Path::new("/usr/bin/true"),
+            &resume,
+            &selection,
+        )
+        .expect("a reply-settled round resumes with no thread choice");
+        assert_eq!(directory, plan.driver_dir.join("20261007T043545Z-work"));
+        let resumed = argv.windows(2).any(|pair| pair == ["-r", "thread-1"]);
+        assert!(resumed, "{argv:?}");
+        let fresh = super::super::LaunchRequest::parse(&[
+            "alpha".into(),
+            "R".into(),
+            "--fresh-thread".into(),
+            "--round".into(),
+            "report".into(),
+            "--dry-run".into(),
+        ])
+        .expect("fresh request");
+        assert_eq!(
+            rounds::continuation_argv(
+                plan,
+                &resumable,
+                Path::new("/usr/bin/true"),
+                &fresh,
+                &selection,
+            )
+            .expect_err("a reply-settled round accepts no thread choice")
+            .kind,
+            "round-choice"
+        );
+    }
+
+    /// # Panics
+    /// Panics only if fixture setup or the settlement contract fails.
+    /// ´test:unit:driver-failed-after-readback-settles-with-its-reply´
+    #[test]
+    fn driver_failed_after_readback_settles_with_its_reply() {
+        let (fixture, plan, mut request) = recovery_fixture();
+        let path = super::super::reservation_path(fixture.path(), "R");
+        let mut record = read_reservation(&path).expect("read").expect("record");
+        fail_after_bound_reply(&plan, &mut record);
+        let bound = record["rounds"][0]["reply"].clone();
+        let launcher = std::fs::read(&path).expect("launcher record");
+        let owner = Uid::effective().as_raw();
+        assert_eq!(
+            private_recover_core(&plan, fixture.path(), &request, owner, |_, _| {
+                ProcessPresence::Present
+            })
+            .expect_err("live")
+            .line(),
+            "settle-live-refusal: driver is still alive"
+        );
+        let reply = plan.driver_dir.join("reply-work.txt");
+        std::fs::write(&reply, b"other\n").expect("changed reply");
+        assert_eq!(
+            private_recover_core(&plan, fixture.path(), &request, owner, |_, _| {
+                ProcessPresence::Absent
+            })
+            .expect_err("changed reply")
+            .line(),
+            "readback: retained reply differs from its verified service delivery"
+        );
+        std::fs::write(&reply, b"reply\n").expect("bound reply");
+        for (pointer, value) in [
+            ("/driver_end/successful", json!(true)),
+            ("/helper_end/successful", json!(false)),
+        ] {
+            let field = pointer.trim_start_matches('/').replace('/', ".");
+            let expected = format!("{field} {value}");
+            let mut changed = record.clone();
+            *changed.pointer_mut(pointer).expect("field") = value;
+            assert!(!driver_failed_after_readback(&changed), "{pointer}");
+            super::super::publish_reservation(&path, &changed).expect("other end");
+            let error = private_recover_core(&plan, fixture.path(), &request, owner, |_, _| {
+                ProcessPresence::Absent
+            })
+            .expect_err("other end refuses");
+            assert_eq!(error.kind, "settle-state-refusal", "{pointer}");
+            assert!(error.detail.contains(&expected), "{}", error.detail);
+        }
+        super::super::publish_reservation(&path, &record).expect("launcher record");
+        assert_eq!(
+            rounds::record_settlement(&plan, "alpha", "R", &bound)
+                .expect_err("only settle admits the failed round")
+                .kind,
+            "round-record"
+        );
+        assert_eq!(std::fs::read(&path).expect("unchanged record"), launcher);
+        let preview = private_recover_core(&plan, fixture.path(), &request, owner, |_, _| {
+            ProcessPresence::Absent
+        })
+        .expect("preview admits the launcher's record");
+        assert_eq!(preview["readback"], bound);
+        assert_eq!(std::fs::read(&path).expect("after preview"), launcher);
+        request.dry_run = false;
+        request.expect_digest = preview["preview_sha256"].as_str().map(str::to_owned);
+        let settled = private_recover_core(&plan, fixture.path(), &request, owner, |_, _| {
+            ProcessPresence::Absent
+        })
+        .expect("digest-bound settlement");
+        assert_eq!(settled["settlement"]["readback"], bound);
+        assert_eq!(settled["settlement"]["ended_by"], "by-report");
+        let saved = read_reservation(&path).expect("read").expect("settled");
+        assert_eq!(saved["phase"], "settled");
+        assert_eq!(saved["readback_end"], "completed");
+        assert_eq!(saved["rounds"][0]["phase"], "settled");
+        assert_eq!(
+            serde_json::to_vec(&saved["rounds"][0]["reply"]).expect("settled reply"),
+            serde_json::to_vec(&bound).expect("bound reply")
+        );
+        assert!(saved["rounds"][0]["settlement_error"].is_null());
+        assert_eq!(
+            saved["rounds"][0]["settle_attempts"][0]["phase"],
+            "complete"
+        );
+        assert_eq!(saved["driver_end"], record["driver_end"]);
+        assert_eq!(saved["driver_end"]["successful"], json!(false));
+        assert!(!driver_failed_after_readback(&saved));
+        assert!(super::final_round_ready(&saved));
+        assert!(!rounds::failed_continuation(&saved));
+        rounds::check_identity(&plan, &saved).expect("recorded thread");
+        assert_resume_owes_no_choice(&plan, &saved);
+        assert_first_recovered_report(&fixture, &plan, &request, &saved, &settled, &preview);
     }
 
     /// ´test:unit:settle-rejects-live-driver-and-already-settled-round´

@@ -1118,7 +1118,8 @@ pub(super) fn record_settlement_with_recovery(
             && (round["settlement_error"].is_string()
                 || record["readback_end"]
                     .as_str()
-                    .is_some_and(|end| end.contains("settle-evidence:"))))
+                    .is_some_and(|end| end.contains("settle-evidence:"))
+                || super::settle::driver_failed_after_readback(&record)))
     {
         return Err(LaneError::input(
             "round-record",
