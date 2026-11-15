@@ -72,6 +72,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A default door test now checks that two pending agent judgements release the request writer lock, using entry and release events instead of the on-demand six-second credit fixture. Deployed lock and agent behavior is unchanged (``test:unit:door-pending-judgements-release-request-writer-lock``).
+
 - The driver-follow bounded-wait test now runs through its child-owning 120-second hang guard, so a hung command is stopped and reaped rather than leaving an unreachable elapsed-time check after `.output()`. Its one-second minimum and document assertions remain (``test:integration:bounded-wait-emits-state-only-and-keeps-offset``).
 
 - The request reader's renewed-budget test releases its competing writer on the observed contention hook and checks that the hook fired; a 300 ms fixture delay no longer spends the reader's one-second real budget. Deployed reader budgets are unchanged (``test:unit:request-reader-renews-budget-per-read``).

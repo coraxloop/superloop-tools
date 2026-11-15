@@ -462,6 +462,44 @@ fn door_concurrent_allow_agent_publication_window() {
 }
 
 /// # Panics
+/// Panics if either paused judgement holds the request store's writer lock.
+/// ´test:unit:door-pending-judgements-release-request-writer-lock´
+#[test]
+fn door_pending_judgements_release_request_writer_lock() {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let store = fixture.store();
+    let mut calls = Vec::new();
+    for _ in 0..2 {
+        let mut call = history_call(&fixture);
+        call.input
+            .recv_timeout(FIXTURE_HANG)
+            .expect("agent judgement pending");
+        assert_eq!(fixture_final_frame(&mut call.client)["reason"], "door-complete");
+        call.slot_released
+            .recv_timeout(FIXTURE_HANG)
+            .expect("admission released while judgement waits");
+        calls.push(call);
+    }
+    let lock_error = match store.fixture_exclusive_lock() {
+        Ok(lock) => {
+            drop(lock);
+            None
+        }
+        Err(error) => Some(error),
+    };
+    assert_eq!(store.list_run("R").expect("two filed requests").len(), 2);
+    for call in calls {
+        call.release.send(()).expect("release judgement");
+        call.handler.join().expect("handler").expect("publication");
+    }
+    assert!(
+        lock_error.is_none(),
+        "writer lock while both judgements are pending: {lock_error:?}"
+    );
+}
+
+/// # Panics
 /// Panics only if unavailable admission custody loses the root preflight name.
 /// ´test:unit:door-root-admission-custody-failure-keeps-preflight-name´
 #[test]
