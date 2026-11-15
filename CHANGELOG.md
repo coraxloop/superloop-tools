@@ -32,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- The helper-parent lock regression now observes the exact mailbox lock's waiter in `/proc/locks` before releasing its holder, replacing a scheduling window with positive kernel evidence. No installed behavior changes (``test:unit:live-round-parent-publication-takes-mailbox-lock``).
+- The helper-parent lock regression observes the exact mailbox lock's waiter in `/proc/locks` before releasing its holder, deriving its device and inode token from the kernel holder line rather than `stat`, including on btrfs. No installed behavior changes (``test:unit:live-round-parent-publication-takes-mailbox-lock``; ``test:unit:mailbox-waiter-uses-kernel-holder-device``).
 
 - A public launch recovery rehearsal now identifies the retained-letter custody refusal that blocks interrupted settlement after a helper-stop error, with and without a reply. The tests require the refused preview to leave the run unchanged; they add no recovery command or production behavior (``test:integration:public-helper-stop-recovery-refuses-retained-letter-with-reply``; ``test:integration:public-helper-stop-recovery-refuses-retained-letter-without-reply``).
 

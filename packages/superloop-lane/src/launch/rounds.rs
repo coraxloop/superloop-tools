@@ -2819,6 +2819,34 @@ pub(crate) mod rollback {
             );
         }
 
+        fn kernel_holder_key(locks: &str, pid: u32, inode: u64) -> Option<&str> {
+            let pid = pid.to_string();
+            let inode = format!(":{inode}");
+            locks.lines().find_map(|line| {
+                let words = line.split_whitespace().collect::<Vec<_>>();
+                if words.get(1) == Some(&"FLOCK") && words.get(4) == Some(&pid.as_str()) {
+                    words.get(5).copied().filter(|word| word.ends_with(&inode))
+                } else {
+                    None
+                }
+            })
+        }
+
+        /// ´test:unit:mailbox-waiter-uses-kernel-holder-device´
+        #[test]
+        fn mailbox_waiter_uses_kernel_holder_device() {
+            let locks = "1: FLOCK ADVISORY WRITE 12 00:3d:99 0 EOF\n\
+                         2: -> FLOCK ADVISORY WRITE 42 00:17:99 0 EOF\n\
+                         3: FLOCK ADVISORY WRITE 42 00:24:99 0 EOF\n";
+            assert_eq!(
+                kernel_holder_key(locks, 42, 99),
+                Some("00:24:99"),
+                "kernel holder, not stat device, foreign holder or waiter"
+            );
+            assert_eq!(kernel_holder_key(locks, 42, 100), None);
+            assert_eq!(kernel_holder_key(locks, 43, 99), None);
+        }
+
         /// A parent callback waits for the helper publisher and preserves its identity.
         /// ´test:unit:live-round-parent-publication-takes-mailbox-lock´
         #[test]
@@ -2842,12 +2870,9 @@ pub(crate) mod rollback {
                 .recv_timeout(Duration::from_secs(30))
                 .expect("callback entry event");
             let metadata = lock.metadata().expect("held lock identity");
-            let key = format!(
-                "{:02x}:{:02x}:{}",
-                nix::sys::stat::major(metadata.dev()),
-                nix::sys::stat::minor(metadata.dev()),
-                metadata.ino()
-            );
+            let locks = fs::read_to_string("/proc/locks").expect("kernel holder census");
+            let key = kernel_holder_key(&locks, std::process::id(), metadata.ino())
+                .expect("this process's kernel holder identity");
             let deadline = std::time::Instant::now() + Duration::from_secs(180);
             let blocked = loop {
                 let locks = fs::read_to_string("/proc/locks").expect("kernel lock census");
