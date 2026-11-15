@@ -1433,7 +1433,9 @@ pub fn write_loops_index(
         .collect();
     let html = environment
         .get_template("loops.html")
-        .and_then(|template| template.render(minijinja::context! { loops => minijinja::value::Serde(loops) }))
+        .and_then(|template| {
+            template.render(minijinja::context! { loops => minijinja::value::Serde(loops) })
+        })
         .map_err(other)?;
     write_root_files(
         chats,
