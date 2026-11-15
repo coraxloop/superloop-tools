@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Chat export uses MiniJinja 3 with explicit Serde contexts, retaining HTML escaping and its single safe Markdown value. The embedded-template feature set stays limited to macros, cross-template operations and Serde (`sec:publictools:build`).
+
 - Build Unix process and namespace operations against nix 0.32. The workspace uses none of the changed socket-accept or splice interfaces; no command form or operator action changes (`sec:publictools:build`).
 
 - The helper-parent lock regression observes the exact mailbox lock's waiter in `/proc/locks` before releasing its holder, deriving its device and inode token from the kernel holder line rather than `stat`, including on btrfs. No installed behavior changes (``test:unit:live-round-parent-publication-takes-mailbox-lock``; ``test:unit:mailbox-waiter-uses-kernel-holder-device``).
