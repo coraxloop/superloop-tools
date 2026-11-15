@@ -1389,6 +1389,7 @@ mod guard_tests {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
+    /// ´test:unit:route-citation-timeout-is-pinned´
     #[test]
     fn route_citation_timeout_is_pinned() {
         assert_eq!(super::CITATION_LINTER_TIMEOUT, Duration::from_secs(120));

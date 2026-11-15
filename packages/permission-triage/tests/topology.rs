@@ -2368,6 +2368,7 @@ fn topology_ceiling_trials_account_for_short_real_wait() {
 }
 
 /// The short override still kills the harness group and reaps the pipe-holding descendant.
+/// ´test:integration:short-ceiling-times-out-and-reaps-version-process´
 #[test]
 fn short_ceiling_times_out_and_reaps_version_process() {
     assert_version_ceiling_kills_group(Some(20_000));

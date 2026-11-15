@@ -720,10 +720,10 @@ fn exits_without_stdin(mut command: Command) -> Output {
     let deadline_descendant = capture_file(&capture, ".child-pid");
     let fixture_started = Instant::now();
     let descendant_pid = loop {
-        if let Ok(pid) = fs::read_to_string(&deadline_descendant) {
-            if let Ok(pid) = pid.trim().parse::<u32>() {
-                break pid;
-            }
+        if let Ok(pid) = fs::read_to_string(&deadline_descendant)
+            && let Ok(pid) = pid.trim().parse::<u32>()
+        {
+            break pid;
         }
         assert!(
             fixture_started.elapsed() < Duration::from_secs(120),

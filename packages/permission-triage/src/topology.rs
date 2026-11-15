@@ -1411,38 +1411,6 @@ fn ceiling_from_value(value: Option<OsString>) -> Result<Duration, TopologyError
     Ok(Duration::from_millis(parsed.min(MAX_TOPOLOGY_CEILING_MS)))
 }
 
-#[cfg(test)]
-mod ceiling_tests {
-    use super::{MAX_TOPOLOGY_CEILING_MS, ceiling_from_value, run_process};
-    use std::ffi::OsString;
-    use std::path::Path;
-    use std::time::Duration;
-
-    #[test]
-    fn unconfigured_ceiling_is_the_pinned_production_maximum() {
-        assert_eq!(MAX_TOPOLOGY_CEILING_MS, 120_000);
-        assert_eq!(
-            ceiling_from_value(None).expect("unconfigured ceiling"),
-            Duration::from_millis(MAX_TOPOLOGY_CEILING_MS)
-        );
-    }
-
-    #[test]
-    fn one_half_second_process_wait_reaches_its_ceiling() {
-        let output = run_process(
-            Path::new("/bin/sleep"),
-            &[OsString::from("10")],
-            Path::new("/"),
-            &[],
-            Duration::from_millis(500),
-        )
-        .expect("the process wait completes");
-        assert!(output.timed_out);
-        assert!(output.wall_ms >= 500);
-        assert!(!output.status.success());
-    }
-}
-
 fn configured_harness() -> Result<PathBuf, TopologyError> {
     let path = env::var_os("PERMISSION_TRIAGE_HARNESS_BIN")
         .map(PathBuf::from)
@@ -4032,4 +4000,38 @@ fn acceptance_names(rows: &[Value], classification: &str) -> Vec<Value> {
         .filter(|row| row["classification"] == classification)
         .map(|row| row["row"].clone())
         .collect()
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::{MAX_TOPOLOGY_CEILING_MS, ceiling_from_value, run_process};
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::time::Duration;
+
+    /// ´test:unit:unconfigured-ceiling-is-the-pinned-production-maximum´
+    #[test]
+    fn unconfigured_ceiling_is_the_pinned_production_maximum() {
+        assert_eq!(MAX_TOPOLOGY_CEILING_MS, 120_000);
+        assert_eq!(
+            ceiling_from_value(None).expect("unconfigured ceiling"),
+            Duration::from_millis(MAX_TOPOLOGY_CEILING_MS)
+        );
+    }
+
+    /// ´test:unit:one-half-second-process-wait-reaches-its-ceiling´
+    #[test]
+    fn one_half_second_process_wait_reaches_its_ceiling() {
+        let output = run_process(
+            Path::new("/bin/sleep"),
+            &[OsString::from("10")],
+            Path::new("/"),
+            &[],
+            Duration::from_millis(500),
+        )
+        .expect("the process wait completes");
+        assert!(output.timed_out);
+        assert!(output.wall_ms >= 500);
+        assert!(!output.status.success());
+    }
 }
