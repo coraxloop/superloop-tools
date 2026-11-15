@@ -6738,6 +6738,7 @@ mod tests {
     #[test]
     fn door_frame_deadline_bounds_a_trickling_peer() {
         let (mut client, mut server) = UnixStream::pair().expect("fixture pair");
+        let (read_done, hold_writer) = std::sync::mpsc::channel();
         let writer = thread::spawn(move || {
             client
                 .write_all(&32_u32.to_be_bytes())
@@ -6748,11 +6749,15 @@ mod tests {
                     break;
                 }
             }
+            hold_writer
+                .recv_timeout(Duration::from_secs(120))
+                .expect("reader returned before writer closes");
         });
         let deadline = Instant::now() + std::time::Duration::from_millis(40);
-        let error =
-            super::frame_read_until(&mut server, deadline).expect_err("whole frame deadline");
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        let result = super::frame_read_until(&mut server, deadline);
+        read_done.send(()).expect("release writer after read");
         writer.join().expect("bounded writer");
+        let error = result.expect_err("whole frame deadline");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 }
