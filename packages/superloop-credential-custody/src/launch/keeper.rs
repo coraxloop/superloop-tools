@@ -1,4 +1,4 @@
-//! Per-case ownership through capture. No descriptor release or completion claim.
+//! Per-case ownership through captured inventory and release; no completion claim.
 use super::control::Control;
 use super::{
     Result, fifo::Pipes, manager::Manager, measure::Admission, policy::ArtifactRole,
@@ -19,6 +19,7 @@ pub(super) struct Keeper<'a> {
     invocation: Option<String>,
     terminal: bool,
     control: Option<Control>,
+    inventory: Option<release::Evidence>,
 }
 impl<'a> Keeper<'a> {
     pub fn prepare(
@@ -45,6 +46,7 @@ impl<'a> Keeper<'a> {
             invocation: None,
             terminal: false,
             control: None,
+            inventory: None,
         })
     }
     pub fn submit(&mut self) -> Result<()> {
@@ -207,3 +209,6 @@ impl Drop for Keeper<'_> {
 #[cfg(test)]
 #[path = "keeper_tests.rs"]
 pub(super) mod tests;
+
+#[path = "release.rs"]
+mod release;

@@ -62,6 +62,9 @@ impl Pipes {
             uncertain: false,
         })
     }
+    pub const fn identities(&self) -> [ObjectIdentity; 2] {
+        [self.ends[0].entry.object, self.ends[1].entry.object]
+    }
     pub const fn paths(&self) -> &[PathBuf; 2] {
         &self.paths
     }

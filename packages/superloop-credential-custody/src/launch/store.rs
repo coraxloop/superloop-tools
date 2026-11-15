@@ -120,6 +120,7 @@ struct Snapshot<'a> {
     configuration: Option<&'a ConfigurationMeasurement>,
     manager_reply_sha256: Option<&'a str>,
     manager_configuration_sha256: Option<&'a str>,
+    inventory_sha256: Option<&'a str>,
 }
 pub(super) struct Store {
     sealed: Directory,
@@ -139,6 +140,7 @@ pub(super) struct Store {
     configuration: Option<ConfigurationMeasurement>,
     manager_reply_sha256: Option<String>,
     manager_configuration_sha256: Option<String>,
+    inventory_sha256: Option<String>,
 }
 impl Store {
     pub fn reserve(admission: &Admission, index: usize) -> Result<Self> {
@@ -167,6 +169,7 @@ impl Store {
             configuration: None,
             manager_reply_sha256: None,
             manager_configuration_sha256: None,
+            inventory_sha256: None,
             sealed_limit: admission.policy().limits.sealed_bytes,
             refusal_class: None,
             original_cause: None,
@@ -247,9 +250,8 @@ impl Store {
         }
         Ok(())
     }
-    fn write_snapshot(&self, sequence: u32, phase: Phase) -> Result<()> {
-        self.evidence.verify()?;
-        let snapshot = Snapshot {
+    fn snapshot(&self, sequence: u32, phase: Phase) -> Snapshot<'_> {
+        Snapshot {
             schema: 1,
             command: "launch-state",
             case: &self.case,
@@ -268,7 +270,24 @@ impl Store {
             configuration: self.configuration.as_ref(),
             manager_reply_sha256: self.manager_reply_sha256.as_deref(),
             manager_configuration_sha256: self.manager_configuration_sha256.as_deref(),
-        };
+            inventory_sha256: self.inventory_sha256.as_deref(),
+        }
+    }
+    pub fn inventory_context(&self) -> Result<serde_json::Value> {
+        serde_json::to_value(self.snapshot(self.state.sequence(), self.phase()))
+            .map_err(|_| "launch-evidence-encoding")
+    }
+    pub fn evidence(&self) -> Result<Directory> {
+        self.evidence.try_clone()
+    }
+    pub fn inventory_complete(&mut self, digest: String) -> Result<()> {
+        require(self.phase() == Phase::Captured, "inventory-order")?;
+        self.inventory_sha256 = Some(digest);
+        self.advance(Phase::InventoryComplete)
+    }
+    fn write_snapshot(&self, sequence: u32, phase: Phase) -> Result<()> {
+        self.evidence.verify()?;
+        let snapshot = self.snapshot(sequence, phase);
         let bytes = serde_json::to_vec(&snapshot).map_err(|_| "launch-evidence-encoding")?;
         receipt::publish_held(
             &self.evidence.file,

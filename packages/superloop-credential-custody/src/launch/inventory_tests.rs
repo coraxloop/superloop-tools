@@ -19,6 +19,19 @@ pub(in crate::launch) fn fixture(behavior: &str) -> Fixture {
     let path = f.dir.path().join("fixture");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::write(&path, &image).unwrap();
+    // The dev artifact's debug sections exceed the production image ceiling.
+    // Remove debug metadata from this private copy, then measure the bytes that run.
+    let mut strip = Command::new("strip");
+    strip
+        .args(["--strip-debug", "--"])
+        .arg(&path)
+        .env_clear()
+        .stdin(Stdio::null());
+    loop_home::CommandDescriptors::default()
+        .configure(&mut strip)
+        .unwrap();
+    assert!(strip.status().unwrap().success());
+    let image = std::fs::read(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555)).unwrap();
     f.value["artifacts"][1]["expected_sha256"] = crate::identity::hash(&image).into();
     let path = f.dir.path().join("public.json");
@@ -165,6 +178,10 @@ fn external_inventory_observes_real_fixture_barrier() {
     let inventory = Inventory::observe(&pin, expected, 16).unwrap();
     assert_eq!(inventory.descriptors.len(), 5);
     assert_eq!(
+        Inventory::observe(&pin, expected, 65).err(),
+        Some("inventory-ceiling")
+    );
+    assert_eq!(
         Inventory::observe(&pin, expected, 4).err(),
         Some("inventory-ceiling")
     );
@@ -190,10 +207,9 @@ fn external_inventory_observes_real_fixture_barrier() {
         }
         assert_eq!(validate(&rows, expected), Err(class));
     }
-    assert_eq!(
-        validate(&inventory.descriptors, [expected[0]; 2]),
-        Err("inventory-alias")
-    );
+    let mut aliased = inventory.descriptors;
+    aliased[4].object = aliased[3].object;
+    assert_eq!(validate(&aliased, [expected[0]; 2]), Err("inventory-alias"));
     assert_eq!(flags(b"flags:\t01\nflags:\t01\n"), Err("inventory-fdinfo"));
     assert_eq!(flags(b"unrecognized\n"), Err("inventory-fdinfo"));
     assert_eq!(flags(b"flags:\tbogus\n"), Err("inventory-fdinfo"));

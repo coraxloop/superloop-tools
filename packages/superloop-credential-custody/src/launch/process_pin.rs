@@ -110,6 +110,25 @@ impl ProcessPin {
             "keeper-image",
         )
     }
+    #[allow(unsafe_code)]
+    pub fn resume(&mut self) -> Result<()> {
+        require(self.stopped, "release-duplicate")?;
+        self.verify()?;
+        // Consume authority before the syscall. An interrupted/failed attempt
+        // is uncertain and must never be retried through a numeric PID.
+        self.stopped = false;
+        // SAFETY: retained live pidfd, SIGCONT, null siginfo, zero flags.
+        let result = unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_pidfd_send_signal,
+                self.pidfd.as_raw_fd(),
+                nix::libc::SIGCONT,
+                std::ptr::null::<nix::libc::siginfo_t>(),
+                0,
+            )
+        };
+        require(result == 0, "release-signal")
+    }
     pub fn matches(&self, expected: &Invocation) -> Result<()> {
         require(&self.invocation == expected, "keeper-invocation-binding")?;
         self.verify()
