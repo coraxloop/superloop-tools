@@ -413,6 +413,7 @@ fn expected_start(base: &std::path::Path, paths: &[PathBuf; 2]) -> Vec<String> {
     let mut expected: Vec<String> = [
         "--system",
         "--no-block",
+        "--quiet",
         "--unit=synthetic-sample.service",
         "--service-type=oneshot",
         "--remain-after-exit",

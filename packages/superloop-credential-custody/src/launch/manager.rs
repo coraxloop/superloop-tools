@@ -108,6 +108,7 @@ impl<'a> Manager<'a> {
         let mut args = vec![
             "--system".into(),
             "--no-block".into(),
+            "--quiet".into(),
             format!("--unit={}", case.generator_unit),
             "--service-type=oneshot".into(),
             "--remain-after-exit".into(),

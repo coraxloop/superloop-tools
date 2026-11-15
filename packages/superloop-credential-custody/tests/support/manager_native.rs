@@ -49,6 +49,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::io::stdout().write_all(&bytes)?;
         return Ok(());
     }
+    if args.iter().any(|a| a == "--no-block") && !args.iter().any(|a| a == "--quiet") {
+        let unit = args
+            .iter()
+            .find_map(|a| a.strip_prefix("--unit="))
+            .ok_or("unit")?;
+        writeln!(
+            std::io::stderr(),
+            "Running as unit: {unit}; invocation ID: 1234567890abcdef1234567890abcdef"
+        )?;
+    }
     if args.iter().any(|a| a == "show") {
         std::io::stdout().write_all(&fs::read(root.join("manager-reply"))?)?;
     }
