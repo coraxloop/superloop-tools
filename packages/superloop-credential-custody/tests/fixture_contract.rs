@@ -11,7 +11,7 @@ use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // Serialize staging and fork: another test child must not inherit a staging
 // writer and transiently deny exec with ETXTBSY. This does not serialize streams.
@@ -27,7 +27,7 @@ impl Case {
             dir: tempfile::tempdir().unwrap(),
             value: json!({"schema":1,"command":"fixture-emit","case":"synthetic",
             "streams":[{"name":"left","length":5,"pattern":"ascending"},{"name":"right","length":5,"pattern":"descending"}],
-            "behavior":"normal","timeout_ms":1000}),
+            "behavior":"normal","timeout_ms":60000}),
         }
     }
     fn save(&self) -> std::path::PathBuf {
@@ -79,6 +79,12 @@ fn invoke(case: &Case, convention: &str, raw: Option<&[u8]>, mode: u32, drain: b
     let (read_a, write_a) = pipe2(OFlag::O_CLOEXEC).unwrap();
     let mut read_a = Some(read_a);
     let (read_b, write_b) = pipe2(OFlag::O_CLOEXEC).unwrap();
+    if !drain {
+        // A one-megabyte stream cannot fit; no reader starts before child exit.
+        for fd in [read_a.as_ref().unwrap(), &read_b] {
+            assert_eq!(fcntl(fd, FcntlArg::F_SETPIPE_SZ(4096)).unwrap(), 4096);
+        }
+    }
     // Stable high source slots avoid dup2 collisions with the convention slots.
     let high = |fd: &OwnedFd| {
         let raw = fcntl(fd, FcntlArg::F_DUPFD_CLOEXEC(100)).unwrap();
@@ -227,70 +233,74 @@ fn invoke(case: &Case, convention: &str, raw: Option<&[u8]>, mode: u32, drain: b
     drop(write_a);
     drop(write_b);
     let pid = Pid::from_raw(i32::try_from(child.0.as_ref().unwrap().id()).unwrap());
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let (send, receive) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _sent = send.send(waitid(
+            Id::Pid(pid),
+            WaitPidFlag::WSTOPPED | WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT,
+        ));
+    });
+    // Emergency hang guard only; the verdict is the observed stop/exit event.
+    let status = match receive.recv_timeout(Duration::from_secs(600)) {
+        Ok(status) => status.unwrap(),
+        Err(error) => {
+            let _killed = child.0.as_mut().unwrap().kill();
+            waiter.join().unwrap();
+            panic!("fixture barrier guard: {error}");
+        }
+    };
+    waiter.join().unwrap();
     let mut stopped = false;
     let mut extra = false;
-    loop {
-        match waitid(
-            Id::Pid(pid),
-            WaitPidFlag::WSTOPPED
-                | WaitPidFlag::WEXITED
-                | WaitPidFlag::WNOHANG
-                | WaitPidFlag::WNOWAIT,
-        )
-        .unwrap()
-        {
-            WaitStatus::Stopped(_, Signal::SIGSTOP) => {
-                stopped = true;
-                // The observer, never the fixture, enumerates descriptors.
-                extra = fs::read_dir(format!("/proc/{}/fd", pid.as_raw()))
-                    .unwrap()
-                    .filter_map(std::result::Result::ok)
-                    .any(|e| {
-                        e.file_name()
-                            .to_string_lossy()
-                            .parse::<u32>()
-                            .is_ok_and(|fd| fd >= 5)
-                    });
-                for fd in [read_a.as_ref().unwrap(), &read_b] {
-                    fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
-                    let mut byte = [0];
-                    assert_eq!(
-                        nix::unistd::read(fd, &mut byte).unwrap_err(),
-                        nix::errno::Errno::EAGAIN,
-                        "no bytes before release"
-                    );
-                    fcntl(fd, FcntlArg::F_SETFL(OFlag::empty())).unwrap();
-                }
-                if convention == "broken" {
-                    drop(read_a.take());
-                }
-                kill(pid, Signal::SIGCONT).unwrap();
-                break;
-            }
-            WaitStatus::StillAlive => {}
-            _ => break,
+    if let WaitStatus::Stopped(_, Signal::SIGSTOP) = status {
+        stopped = true;
+        // The observer, never the fixture, enumerates descriptors.
+        extra = fs::read_dir(format!("/proc/{}/fd", pid.as_raw()))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .parse::<u32>()
+                    .is_ok_and(|fd| fd >= 5)
+            });
+        for fd in [read_a.as_ref().unwrap(), &read_b] {
+            fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                nix::unistd::read(fd, &mut byte).unwrap_err(),
+                nix::errno::Errno::EAGAIN,
+                "no bytes before release"
+            );
+            fcntl(fd, FcntlArg::F_SETFL(OFlag::empty())).unwrap();
         }
-        if Instant::now() >= deadline {
-            let _ignored = child.0.as_mut().unwrap().kill();
-            panic!("fixture did not reach barrier or exit");
+        if convention == "broken" {
+            drop(read_a.take());
         }
-        std::thread::sleep(Duration::from_millis(1));
+        kill(pid, Signal::SIGCONT).unwrap();
     }
     let readers = [read_a, Some(read_b)].map(|fd| {
-        std::thread::spawn(move || {
+        let (release, released) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
             if !drain {
-                std::thread::sleep(Duration::from_millis(1500));
+                released.recv().unwrap();
             }
             let mut bytes = Vec::new();
             if let Some(fd) = fd {
                 fs::File::from(fd).read_to_end(&mut bytes).unwrap();
             }
             bytes
-        })
+        });
+        (release, reader)
     });
     let output = child.0.take().unwrap().wait_with_output().unwrap();
-    let mut streams = readers.into_iter().map(|r| r.join().unwrap());
+    // In the blocked control both read ends stay open and unread through exit.
+    let mut streams = readers.into_iter().map(|(release, reader)| {
+        if !drain {
+            release.send(()).unwrap();
+        }
+        reader.join().unwrap()
+    });
     Observed {
         output,
         streams: [streams.next().unwrap(), streams.next().unwrap()],

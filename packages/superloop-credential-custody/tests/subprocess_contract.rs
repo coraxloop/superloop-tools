@@ -170,7 +170,7 @@ impl Fixture {
         let record = json!({"schema":2,"case":"campaign","config_digest":"a".repeat(64),"code_digest":"b".repeat(64),
             "sealed_root":root.join("sealed"),"evidence_root":root.join("evidence"),
             "payload":{"path":root.join("parser.py"),"sha256":hash(payload.as_bytes()),"repository":repo,"source_commit":commit,"document":"procedure.md"},
-            "limits":{"file_bytes":1_048_576,"output_bytes":1_048_576,"timeout_ms":3000},"identity":identity,
+            "limits":{"file_bytes":1_048_576,"output_bytes":1_048_576,"timeout_ms":60000},"identity":identity,
             "probes":roles.iter().map(|role| json!({"role":role,"argv":["/usr/bin/printf","synthetic-v1\n"]})).collect::<Vec<_>>(),
             "names":["alpha","beta"],"lengths":[3,4,5],"contents":["a","b"],"samples":samples,
             "comparisons":[{"id":"pair","left":"alpha","right":"beta"}]});
@@ -548,16 +548,25 @@ fn missing_calibration_member() {
 /// ´test:integration:bounded-child-failure-and-redaction´
 #[test]
 fn bounded_child_failure_and_redaction() {
-    for source in [
-        "import time\ntime.sleep(10)\n",
-        "raise RuntimeError('SENSITIVE_SENTINEL')\n",
-        "print('x' * 2000000)\n",
+    for (source, timeout, class) in [
+        // No writer ever supplies a byte: refusal cannot depend on node speed.
+        (
+            "import os\nr,w=os.pipe()\nos.read(r,1)\n",
+            500,
+            "child-timeout",
+        ),
+        (
+            "raise RuntimeError('SENSITIVE_SENTINEL')\n",
+            60_000,
+            "child-failed",
+        ),
+        ("print('x' * 2000000)\n", 60_000, "child-output-limit"),
     ] {
         let mut f = Fixture::payload(source);
-        f.record["limits"]["timeout_ms"] = json!(500);
+        f.record["limits"]["timeout_ms"] = json!(timeout);
         let output = f.observe();
         assert!(!String::from_utf8_lossy(&output.stderr).contains("SENSITIVE_SENTINEL"));
-        refuse(&output);
+        refused(&output, class);
     }
 }
 

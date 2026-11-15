@@ -488,7 +488,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/src/observe.rs:180,181,202,216,241,323,328``|D246–D247; source-payload selection and completed sealed-file comparisons.|
 |``packages/superloop-credential-custody/src/process.rs:165``|D246; the held interpreter identity is compared before execution; no independent digest producer.|
 |``packages/superloop-credential-custody/src/record.rs:48,49,67,112,119,165,189,221,233,242,321,345,355``|D246–D247; strict identity fields and full-digest grammar.|
-|``packages/superloop-credential-custody/tests/subprocess_contract.rs:3,39,128,142,166,170,172,220,261,356,358,584,661,666,668,670,875,876,972,974,978,990,992,995,1000``|Controlled synthetic evidence for D246–D247, not a production reference.|
+|``packages/superloop-credential-custody/tests/subprocess_contract.rs:3,39,128,142,166,170,172,220,261,356,358,593,670,675,677,679,884,885,981,983,987,999,1001,1004,1009``|Controlled synthetic evidence for D246–D247, not a production reference.|
 |``packages/superloop-gate-submit/README.md:59,114``|D194; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/superloop-gate-submit/meson.build:74,75,76,77,81,85``|D221, D222; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/superloop-gate-submit/src/lib.rs:1216,1217,1220``|D049; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
