@@ -117,7 +117,6 @@ fn observe_keeper(f: &Fixture, keeper: &mut Keeper<'_>) {
     writer.shutdown(Shutdown::Write).unwrap();
     let binding = Binding {
         case: "sample",
-        nonce: "0123456789abcdef0123456789abcdef",
         keeper_pid: std::process::id(),
         keeper_birth: manifest["keeper_birth"].as_u64().unwrap(),
         keeper_uid: nix::unistd::geteuid().as_raw(),
@@ -125,7 +124,12 @@ fn observe_keeper(f: &Fixture, keeper: &mut Keeper<'_>) {
         sealed_limit: keeper.admission.policy().limits.sealed_bytes,
     };
     assert_eq!(
-        receive(&mut reader, &binding, keeper.manager.deadline()),
+        receive(
+            &mut reader,
+            &binding,
+            "0123456789abcdef0123456789abcdef",
+            keeper.manager.deadline()
+        ),
         Ok(Observation::Complete)
     );
 }

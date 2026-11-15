@@ -479,7 +479,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/meson.build:84,85,94,95,102,103``|D248; reviewed executable expressions and scope.|
 |``packages/superloop-credential-custody/src/identity.rs:8,15,57,71,98,99,124,125,138``|D246; hashing live files and retained calibration bytes.|
 |``packages/superloop-credential-custody/src/launch/completion.rs:17,18,29,55,108,109``|D252, D253; retained measured execution metadata, inventory correspondence and synthetic completion controls.|
-|``packages/superloop-credential-custody/src/launch/completion_client_tests.rs:36,137,142``|D252; strict read-only completion metadata and synthetic controls.|
+|``packages/superloop-credential-custody/src/launch/completion_client_tests.rs:38,140,145``|D252; strict read-only completion metadata and synthetic controls.|
 |``packages/superloop-credential-custody/src/launch/completion_tests.rs:56,58``|D252, D253; retained measured execution metadata, inventory correspondence and synthetic completion controls.|
 |``packages/superloop-credential-custody/src/launch/control.rs:185,190,247,257``|D253; retained inventory and authenticated handoff correspondence.|
 |``packages/superloop-credential-custody/src/launch/control_tests.rs:24,393``|D253; retained inventory and authenticated handoff correspondence.|

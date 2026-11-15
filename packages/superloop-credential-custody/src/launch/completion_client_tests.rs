@@ -5,6 +5,7 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
 use std::time::Duration;
+const NONCE: &str = "0123456789abcdef0123456789abcdef";
 fn invocation() -> Invocation {
     Invocation {
         id: "1".repeat(32),
@@ -21,16 +22,17 @@ fn invocation() -> Invocation {
 fn expected(invocation: &Invocation) -> Binding<'_> {
     Binding {
         case: "sample",
-        nonce: "0123456789abcdef0123456789abcdef",
         keeper_pid: std::process::id(),
-        keeper_birth: 1,
+        keeper_birth: crate::launch::process_pin::stat(&std::fs::File::open("/proc/self").unwrap())
+            .unwrap()
+            .0,
         keeper_uid: nix::unistd::geteuid().as_raw(),
         invocation,
         sealed_limit: 4096,
     }
 }
 fn reply(binding: &Binding<'_>) -> serde_json::Value {
-    serde_json::json!({"schema":1,"case":binding.case,"nonce":binding.nonce,"keeper_pid":binding.keeper_pid,
+    serde_json::json!({"schema":1,"case":binding.case,"nonce":NONCE,"keeper_pid":binding.keeper_pid,
         "keeper_birth":binding.keeper_birth,"invocation":binding.invocation.id,"view":{"phase":"complete",
         "generator":{"invocation":binding.invocation,"started":100,"exited":200,"code":1,"status":0,"result":"success","successful":true,
         "reply_sha256":"a".repeat(64),"configuration_sha256":"b".repeat(64)},
@@ -48,6 +50,7 @@ fn observe(bytes: &[u8], binding: &Binding<'_>) -> Result<Observation> {
     receive(
         &mut reader,
         binding,
+        NONCE,
         Instant::now() + Duration::from_secs(600),
     )
 }
@@ -303,9 +306,62 @@ fn completion_client_refuses_a_lost_keeper_despite_buffered_success() {
         receive(
             &mut stream,
             &binding,
+            NONCE,
             Instant::now() + Duration::from_secs(600)
         ),
         Err("completion-keeper-lost")
     );
     child.wait().unwrap();
+}
+
+/// ´test:unit:completion-client-measures-keeper-birth-not-its-echo´
+#[test]
+fn completion_client_measures_keeper_birth_not_its_echo() {
+    let invocation = invocation();
+    let mut binding = expected(&invocation);
+    binding.keeper_birth += 1;
+    // Both the protected expectation and the peer's echo agree with each other,
+    // but disagree with the connection-pinned process's measured stat field.
+    assert_eq!(
+        observe(&encoded(&reply(&binding)), &binding),
+        Err("completion-keeper-birth")
+    );
+}
+
+/// ´test:unit:completion-client-generates-a-nonce-in-each-request´
+#[test]
+fn completion_client_generates_a_nonce_in_each_request() {
+    let invocation = invocation();
+    let binding = expected(&invocation);
+    let mut nonces = Vec::new();
+    for _ in 0..2 {
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let good = reply(&binding);
+        let worker = std::thread::spawn(move || {
+            server.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(600);
+            let bytes = read_request(&mut server, deadline).unwrap();
+            let message: super::super::Request = serde_json::from_slice(&bytes).unwrap();
+            assert!(matches!(
+                message.operation,
+                super::super::Operation::Completion
+            ));
+            assert_eq!(message.nonce.len(), 32);
+            let mut response = good;
+            response["nonce"] = message.nonce.clone().into();
+            super::super::write_record(&mut server, &encoded(&response), deadline).unwrap();
+            server.shutdown(Shutdown::Write).unwrap();
+            message.nonce
+        });
+        assert_eq!(
+            request(
+                &mut client,
+                &binding,
+                Instant::now() + Duration::from_secs(600)
+            ),
+            Ok(Observation::Complete)
+        );
+        nonces.push(worker.join().unwrap());
+    }
+    assert_ne!(nonces[0], nonces[1]);
 }

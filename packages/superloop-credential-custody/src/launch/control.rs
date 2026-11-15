@@ -274,21 +274,9 @@ impl Control {
             serde_json::to_vec(&serde_json::json!({"schema":1,"case":self.case,"invocation":self.invocation,"phase":phase,"nonce":request.nonce})).map_err(|_|"control-encoding")?
         };
         response.push(b'\n');
-        require(response.len() <= REQUEST_LIMIT, "control-response-size")?;
-        let mut remaining = response.as_slice();
-        while !remaining.is_empty() {
-            budget(deadline)?;
-            match stream.write(remaining) {
-                Ok(0) => return Err("control-write"),
-                Ok(n) => remaining = &remaining[n..],
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    wait(stream.as_raw_fd(), nix::libc::POLLOUT, deadline)?;
-                }
-                Err(_) => return Err("control-write"),
-            }
-        }
-        Ok(())
+        write_record(&mut stream, &response, deadline)
     }
+
     fn authenticate(&self, stream: &UnixStream, owner: u32, pid: u32) -> Result<ProcessPin> {
         require(owner == self.owner, "control-peer-owner")?;
         let handle = peer_pidfd(stream)?;
@@ -333,6 +321,23 @@ fn wait(fd: i32, events: i16, deadline: Instant) -> Result<()> {
         "control-poll",
     )
 }
+fn write_record(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> Result<()> {
+    require(bytes.len() <= REQUEST_LIMIT, "control-response-size")?;
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        budget(deadline)?;
+        match stream.write(remaining) {
+            Ok(0) => return Err("control-write"),
+            Ok(n) => remaining = &remaining[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                wait(stream.as_raw_fd(), nix::libc::POLLOUT, deadline)?;
+            }
+            Err(_) => return Err("control-write"),
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn read_request(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 512];
