@@ -76,7 +76,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- The permission-triage no-stdin fixture now uses a 120-second hang guard for its three exit checks, so load cannot make a healthy hook outlive a two-second sentinel. The tests still fail if the hook waits for input; deployed hook behavior is unchanged.
+- The permission-triage two-stealer test now gives each of its five channel events a distant 120-second hang guard, so a delayed test thread cannot look like a failed lock ordering. The deployed lock wait is unchanged (``test:crate:journal-two-stealers-restore-during-release``).
+
+- The permission-triage no-stdin fixture now uses a 120-second hang guard for its five usage and version invocations, so load cannot make a healthy hook outlive a two-second sentinel. The tests still fail if the hook waits for input; deployed hook behavior is unchanged.
 
 - The permission-triage failed-kill fixture now starts its short model deadline after its descendant records readiness, and checks that descendant is still alive when the failed kill returns. A loaded shell start no longer makes a missing PID look like a failed cleanup; the deployed model deadline is unchanged (``test:crate:failed-group-kill-bounds-helper-joins``).
 
