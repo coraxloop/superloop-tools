@@ -209,7 +209,18 @@ impl ProcessPin {
     }
     pub fn peer(pid: u32, owner: u32, image: ObjectIdentity) -> Result<Self> {
         require(pid > 1, "keeper-pid")?;
-        let pidfd = pidfd(pid)?;
+        Self::peer_handle(pidfd(pid)?, pid, owner, image)
+    }
+    pub fn peer_handle(
+        pidfd: OwnedFd,
+        pid: u32,
+        owner: u32,
+        image: ObjectIdentity,
+    ) -> Result<Self> {
+        require(pid > 1, "keeper-pid")?;
+        // A connection-owned handle must match credentials before any numeric
+        // procfs lookup; final verification also refuses exit during the walk.
+        verify_pidfd(&pidfd, pid)?;
         let directory = File::open(format!("/proc/{pid}")).map_err(|_| "keeper-process")?;
         require(
             nix::sys::statfs::fstatfs(&directory)

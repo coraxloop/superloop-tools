@@ -185,7 +185,11 @@ fn control_transaction_binds_owner_image_case_and_keeper_birth() {
     assert_eq!(reply["invocation"], control.invocation);
     assert_eq!(
         control
-            .authenticate(control.owner + 1, std::process::id())
+            .authenticate(
+                &UnixStream::pair().unwrap().0,
+                control.owner + 1,
+                std::process::id()
+            )
             .err(),
         Some("control-peer-owner")
     );
@@ -373,4 +377,47 @@ fn control_transfers_pidfd_to_a_nonsignalling_live_peer() {
     assert_eq!(reply["nonce"], value["nonce"]);
     assert_eq!(reply["inventory_sha256"], "a".repeat(64));
     pin.verify().unwrap();
+}
+
+/// ´test:unit:control-peer-handle-refuses-a-different-live-process´
+#[test]
+#[allow(unsafe_code)]
+fn control_peer_handle_refuses_a_different_live_process() {
+    let (_files, mut control) = setup();
+    control.image =
+        ObjectIdentity::of(&File::open(std::env::current_exe().unwrap()).unwrap()).unwrap();
+    let (connection, _other) = UnixStream::pair().unwrap();
+    let handle = peer_pidfd(&connection).unwrap();
+    assert_ne!(
+        nix::fcntl::fcntl(&handle, nix::fcntl::FcntlArg::F_GETFD).unwrap() & nix::libc::FD_CLOEXEC,
+        0
+    );
+    let (read, write) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+    // SAFETY: the child performs only scalar async-signal-safe syscalls and
+    // exits without Rust destructors. It never uses or passes the connection.
+    let pid = unsafe { nix::libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+        unsafe {
+            if nix::libc::dup2(read.as_raw_fd(), 0) != 0
+                || nix::libc::syscall(nix::libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) != 0
+            {
+                nix::libc::_exit(72);
+            }
+            let mut byte = 0_u8;
+            nix::libc::read(0, std::ptr::from_mut(&mut byte).cast(), 1);
+            nix::libc::_exit(0);
+        }
+    }
+    let correct = control.authenticate(&connection, control.owner, std::process::id());
+    let wrong = control.authenticate(&connection, control.owner, pid.cast_unsigned());
+    // Release by an explicit byte, independent of other forks retaining a writer.
+    nix::unistd::write(&write, &[1]).unwrap();
+    let reaped = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None).unwrap();
+    assert_eq!(
+        reaped,
+        nix::sys::wait::WaitStatus::Exited(nix::unistd::Pid::from_raw(pid), 0)
+    );
+    correct.unwrap().verify().unwrap();
+    assert_eq!(wrong.err(), Some("keeper-pidfd-binding"));
 }

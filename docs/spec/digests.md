@@ -478,8 +478,8 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/README.md:13,24,32,34,36,38,40,44,48,64,78,84,86,122,148,152``|D246–D248 and D250; identity, custody and build documentation.|
 |``packages/superloop-credential-custody/meson.build:80,81,90,91,98,99``|D248; reviewed executable expressions and scope.|
 |``packages/superloop-credential-custody/src/identity.rs:8,15,57,71,98,99,124,125,138``|D246; hashing live files and retained calibration bytes.|
-|``packages/superloop-credential-custody/src/launch/control.rs:184,189,237,247``|D253; retained inventory and authenticated handoff correspondence.|
-|``packages/superloop-credential-custody/src/launch/control_tests.rs:24,374``|D253; retained inventory and authenticated handoff correspondence.|
+|``packages/superloop-credential-custody/src/launch/control.rs:184,189,238,248``|D253; retained inventory and authenticated handoff correspondence.|
+|``packages/superloop-credential-custody/src/launch/control_tests.rs:24,378``|D253; retained inventory and authenticated handoff correspondence.|
 |``packages/superloop-credential-custody/src/launch/handoff.rs:21``|D253; retained inventory binding in the authenticated pidfd protocol.|
 |``packages/superloop-credential-custody/src/launch/handoff_tests.rs:14,45,57``|D253; synthetic handoff correspondence controls.|
 |``packages/superloop-credential-custody/src/launch/inventory_tests.rs:36,48``|D250; synthetic fixture-image and public-case measurement inputs.|

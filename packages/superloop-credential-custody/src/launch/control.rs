@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, Permissions};
 use std::io::{Read as _, Write as _};
 use std::os::{
-    fd::AsRawFd,
+    fd::{AsRawFd, FromRawFd as _, OwnedFd},
     unix::{
         fs::{MetadataExt as _, PermissionsExt as _},
         net::{UnixListener, UnixStream},
@@ -209,6 +209,7 @@ impl Control {
         stream.set_nonblocking(true).map_err(|_| "control-mode")?;
         let credentials = peer_credentials(&stream)?;
         let peer = self.authenticate(
+            &stream,
             credentials.uid,
             u32::try_from(credentials.pid).map_err(|_| "control-peer")?,
         )?;
@@ -265,9 +266,10 @@ impl Control {
         }
         Ok(())
     }
-    fn authenticate(&self, owner: u32, pid: u32) -> Result<ProcessPin> {
+    fn authenticate(&self, stream: &UnixStream, owner: u32, pid: u32) -> Result<ProcessPin> {
         require(owner == self.owner, "control-peer-owner")?;
-        ProcessPin::peer(pid, self.owner, self.image)
+        let handle = peer_pidfd(stream)?;
+        ProcessPin::peer_handle(handle, pid, self.owner, self.image)
     }
     pub fn cleanup(&self) -> Result<()> {
         self.verify()?;
@@ -371,4 +373,29 @@ pub(super) fn peer_credentials(stream: &UnixStream) -> Result<nix::libc::ucred> 
         "control-peer",
     )?;
     Ok(value)
+}
+
+#[allow(unsafe_code)]
+fn peer_pidfd(stream: &UnixStream) -> Result<OwnedFd> {
+    let mut fd: i32 = -1;
+    let mut length = nix::libc::socklen_t::try_from(std::mem::size_of_val(&fd))
+        .map_err(|_| "control-peer-pidfd")?;
+    // SAFETY: initialized, exactly sized output. On success the kernel gives
+    // us one owned CLOEXEC descriptor tied to the connection's original peer.
+    let status = unsafe {
+        nix::libc::getsockopt(
+            stream.as_raw_fd(),
+            nix::libc::SOL_SOCKET,
+            nix::libc::SO_PEERPIDFD,
+            std::ptr::from_mut(&mut fd).cast(),
+            &raw mut length,
+        )
+    };
+    require(status == 0 && fd >= 0, "control-peer-pidfd")?;
+    let handle = unsafe { OwnedFd::from_raw_fd(fd) };
+    require(
+        usize::try_from(length).ok() == Some(std::mem::size_of_val(&fd)),
+        "control-peer-pidfd",
+    )?;
+    Ok(handle)
 }
