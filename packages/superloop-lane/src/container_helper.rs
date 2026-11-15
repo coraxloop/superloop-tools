@@ -3531,7 +3531,6 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::{Read as _, Write as _};
-    use std::net::Shutdown;
     use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::net::{UnixListener, UnixStream};
@@ -5155,7 +5154,7 @@ mod tests {
             fs::write(
                 &program,
                 format!(
-                    "#!/bin/sh\ncase \"$1\" in\n run) {run};;\n stop) if [ -n \"$TEST_STOP_MARKER\" ]; then printf stopped > \"$TEST_STOP_MARKER\"; fi; exit 0;;\n wait) exit 0;;\n ps) if [ \"$TEST_REMOVE_CASE\" != absent ]; then printf '%s %s\\n' '{TEST_CONTAINER_ID}' 'superloop-lane-alpha-R-attempt-1'; fi; if [ \"$TEST_REMOVE_CASE\" = two ]; then printf '%s %s\\n' '{TEST_OTHER_ID}' 'superloop-lane-alpha-R-attempt-2'; fi;;\n container) printf '%s\\n' '{{\"org.superloop.loop\":\"alpha\",\"org.superloop.run\":\"R\"}}';;\n rm) printf removed > \"$TEST_REMOVE\"; if [ -n \"$TEST_REMOVED_ID\" ]; then printf '%s' \"$3\" > \"$TEST_REMOVED_ID\"; fi; if [ \"$TEST_REMOVE_CASE\" = mismatch ]; then printf '%s\\n' '{TEST_OTHER_ID}'; else printf '%s\\n' \"$3\"; fi;;\nesac\n"
+                    "#!/bin/sh\ncase \"$1\" in\n run) {run};;\n stop) if [ -n \"$TEST_STOP_MARKER\" ]; then printf stopped > \"$TEST_STOP_MARKER\"; fi; exit 0;;\n wait) if [ -n \"$TEST_WAIT_MARKER\" ]; then printf waited > \"$TEST_WAIT_MARKER\"; fi; exit 0;;\n ps) if [ \"$TEST_REMOVE_CASE\" != absent ]; then printf '%s %s\\n' '{TEST_CONTAINER_ID}' 'superloop-lane-alpha-R-attempt-1'; fi; if [ \"$TEST_REMOVE_CASE\" = two ]; then printf '%s %s\\n' '{TEST_OTHER_ID}' 'superloop-lane-alpha-R-attempt-2'; fi;;\n container) printf '%s\\n' '{{\"org.superloop.loop\":\"alpha\",\"org.superloop.run\":\"R\"}}';;\n rm) printf removed > \"$TEST_REMOVE\"; if [ -n \"$TEST_REMOVED_ID\" ]; then printf '%s' \"$3\" > \"$TEST_REMOVED_ID\"; fi; if [ \"$TEST_REMOVE_CASE\" = mismatch ]; then printf '%s\\n' '{TEST_OTHER_ID}'; else printf '%s\\n' \"$3\"; fi;;\nesac\n"
                 ),
             )
             .expect("runtime stand-in");
@@ -5891,6 +5890,40 @@ exit 0
         }
     }
 
+    fn fixture_marker(path: &Path) -> fs::File {
+        nix::unistd::mkfifo(
+            path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("fixture event FIFO");
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("event keeper")
+    }
+
+    fn await_fixture_marker(marker: &mut fs::File, expected: [u8; 7]) {
+        let mut reader = marker.try_clone().expect("stop FIFO reader");
+        let (sent, received) = mpsc::sync_channel(1);
+        let waiter = std::thread::spawn(move || {
+            let mut bytes = [0; 7];
+            let result = reader.read_exact(&mut bytes).map(|()| bytes);
+            let _ignored = sent.send(result);
+        });
+        let event = received.recv_timeout(RETAINED_READER_HANG_BOUND);
+        if event.is_err() {
+            marker
+                .write_all(b"cancel!")
+                .expect("release stop-event waiter");
+        }
+        waiter.join().expect("reap stop-event waiter");
+        let bytes = event
+            .expect("stop event before distant hang guard")
+            .expect("stop marker bytes");
+        assert_eq!(bytes, expected, "runtime fixture event");
+    }
+
     fn read_attempt_status(stream: &mut UnixStream) -> i32 {
         read_bounded_attempt_status(stream, 32_768)
     }
@@ -6267,175 +6300,117 @@ exit 0
     /// ´test:unit:helper-cancels-a-silent-container-and-waits-for-the-named-stop´
     #[test]
     fn helper_cancels_a_silent_container_and_waits_for_the_named_stop() {
-        let fixture = TempDir::new_in("/tmp").expect("fixture");
-        let root = fixture.path().to_path_buf();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("protected fixture");
-        let program = root.join("container-standin");
-        fs::write(&program, format!("#!/bin/sh\ncase \"$1\" in\n run) printf '%s %s' \"$_CONTAINERS_USERNS_CONFIGURED\" \"$_CONTAINERS_ROOTLESS_UID\" > '{}/markers'; printf started > '{}/started'; sleep 5;;\n stop) printf stopped > '{}/stopped';;\n wait) printf waited > '{}/waited';;\nesac\n", root.display(), root.display(), root.display(), root.display())).expect("stand-in");
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).expect("stand-in mode");
-        crate::pinned::owner_executable(&program, nix::unistd::Uid::effective().as_raw())
-            .expect("stand-in has a protected program path");
-        let driver = root.join("R");
-        fs::create_dir(&driver).expect("driver directory");
-        let custody = crate::plan::protected_identity_dir(&driver).expect("custody path");
-        fs::create_dir(&custody).expect("custody directory");
-        fs::set_permissions(&custody, fs::Permissions::from_mode(0o700)).expect("custody mode");
-        let reservation = root.join(".reservation-R.json");
-        let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
-        publish_reservation(&reservation, &record).expect("attempt reservation");
-        let vector = vec![
-            program.display().to_string(),
-            "run".into(),
-            "--name=superloop-lane-alpha-R-attempt-1".into(),
-            format!(
-                "--cidfile={}",
-                protected_identifier_path(&driver, 1)
-                    .expect("identifier path")
-                    .display()
-            ),
-        ];
+        silent_attempt_cancellation(true);
+    }
+
+    /// ´test:unit:helper-cancels-a-silent-attempt-when-its-client-disappears´
+    #[test]
+    fn helper_cancels_a_silent_attempt_when_its_client_disappears() {
+        silent_attempt_cancellation(false);
+    }
+
+    fn silent_attempt_cancellation(control: bool) {
+        let mut fixture = StartedAttemptFixture::new(
+            "printf '%s %s' \"$_CONTAINERS_USERNS_CONFIGURED\" \"$_CONTAINERS_ROOTLESS_UID\" > \"$TEST_MARKERS\"; printf started > \"$TEST_STARTED\"; exec sleep infinity",
+        );
+        let root = fixture.root.path().to_path_buf();
+        let mut started = fixture_marker(&root.join("started"));
+        for (key, file) in [
+            ("TEST_STARTED", "started"),
+            ("TEST_MARKERS", "markers"),
+            ("TEST_STOP_MARKER", "stopped"),
+            ("TEST_WAIT_MARKER", "waited"),
+        ] {
+            fixture
+                .environment
+                .insert(key.into(), root.join(file).display().to_string());
+        }
         let (mut server, mut client) = UnixStream::pair().expect("channel");
         client
             .write_all(&0_u32.to_le_bytes())
             .expect("empty prompt");
         let cancelled = Arc::new(AtomicBool::new(false));
         let signal = Arc::clone(&cancelled);
-        let launcher = LauncherIdentity {
-            pid: std::process::id(),
-            start: process_start(std::process::id()).expect("launcher start"),
-        };
         let control_path = root.join("control.sock");
-        let listener = UnixListener::bind(&control_path).expect("control socket");
-        let control_signal = Arc::clone(&cancelled);
-        let owner = nix::unistd::Uid::effective().as_raw();
-        let environment = private_podman_environment_from(&root, Some("1"), Some("41001"))
-            .expect("namespace environment");
-        let controller =
-            std::thread::spawn(move || control_loop(&listener, &control_signal, owner));
-        let began = Instant::now();
-        let handle = std::thread::spawn(move || {
-            run_attempt(
+        let controller = control.then(|| {
+            let listener = UnixListener::bind(&control_path).expect("control socket");
+            let signal = Arc::clone(&cancelled);
+            let owner = nix::unistd::Uid::effective().as_raw();
+            std::thread::spawn(move || control_loop(&listener, &signal, owner))
+        });
+        let (done, completed) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let pid = std::process::id();
+            let result = run_attempt(
                 &mut server,
-                &vector,
-                &environment,
-                &root,
-                &reservation,
-                &record,
-                &driver,
+                &fixture.vector,
+                &fixture.environment,
+                fixture.root.path(),
+                &fixture.root.path().join(".reservation-R.json"),
+                &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+                &fixture.driver,
                 1,
                 &signal,
-                launcher,
+                LauncherIdentity {
+                    pid,
+                    start: process_start(pid).expect("launcher"),
+                },
                 None,
-            )
+            );
+            let _ignored = done.send(());
+            (result, fixture)
         });
-        while !fixture.path().join("started").exists() && began.elapsed() < Duration::from_secs(2) {
-            std::thread::sleep(Duration::from_millis(10));
+        await_fixture_marker(&mut started, *b"started");
+        let client = cancel_silent_client(control, &control_path, client);
+        let (result, fixture) = finish_attempt_fixture(runner, &completed, &cancelled);
+        if let Some(controller) = controller {
+            controller
+                .join()
+                .expect("controller joined")
+                .expect("control result");
         }
-        assert!(
-            fixture.path().join("started").exists(),
-            "silent child started"
-        );
-        let mut control = UnixStream::connect(&control_path).expect("supervisor control");
-        control.write_all(b"C").expect("cancel request");
-        let mut ack = [0_u8];
-        control
-            .read_exact(&mut ack)
-            .expect("cancel acknowledgement");
-        assert_eq!(ack, [b'K']);
-        client
-            .shutdown(Shutdown::Both)
-            .expect("driver client disconnects");
-        assert!(cancelled.load(Ordering::Acquire));
-        controller
-            .join()
-            .expect("control thread")
-            .expect("control result");
-        let outcome = handle
-            .join()
-            .expect("helper thread")
-            .expect("bounded cancellation");
+        let outcome = result.expect("event-driven cancellation");
         assert_eq!(outcome.code, 1);
         assert!(!outcome.capacity);
-        assert!(fixture.path().join("stopped").exists());
-        assert!(fixture.path().join("waited").exists());
+        assert!(
+            outcome.attempt_wall.is_none(),
+            "cancellation is not a wall stop"
+        );
+        assert!(cancelled.load(Ordering::Acquire));
         assert_eq!(
-            fs::read_to_string(fixture.path().join("markers")).expect("run environment"),
+            fs::read(root.join("stopped")).expect("named stop"),
+            b"stopped"
+        );
+        assert_eq!(
+            fs::read(root.join("waited")).expect("named wait"),
+            b"waited"
+        );
+        assert_eq!(fixture.evidence()["removal"]["state"], "removed");
+        assert_eq!(
+            fs::read_to_string(root.join("markers")).expect("namespace markers"),
             "1 41001"
         );
-        assert!(
-            began.elapsed() < Duration::from_secs(5),
-            "silent child was cancelled before its natural end"
-        );
+        drop(client);
     }
 
-    /// ´test:unit:helper-cancels-a-silent-attempt-when-its-client-disappears´
-    #[test]
-    fn helper_cancels_a_silent_attempt_when_its_client_disappears() {
-        let fixture = TempDir::new_in("/tmp").expect("fixture");
-        let root = fixture.path().to_path_buf();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("protected fixture");
-        let program = root.join("container-standin");
-        fs::write(&program, format!("#!/bin/sh\ncase \"$1\" in\n run) printf started > '{}/started'; sleep 5;;\n stop) printf stopped > '{}/stopped';;\n wait) printf waited > '{}/waited';;\nesac\n", root.display(), root.display(), root.display())).expect("stand-in");
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).expect("program mode");
-        crate::pinned::owner_executable(&program, nix::unistd::Uid::effective().as_raw())
-            .expect("stand-in has a protected program path");
-        let driver = root.join("R");
-        fs::create_dir(&driver).expect("driver");
-        let custody = crate::plan::protected_identity_dir(&driver).expect("custody path");
-        fs::create_dir(&custody).expect("custody directory");
-        fs::set_permissions(&custody, fs::Permissions::from_mode(0o700)).expect("custody mode");
-        let reservation = root.join(".reservation-R.json");
-        let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
-        publish_reservation(&reservation, &record).expect("attempt reservation");
-        let vector = vec![
-            program.display().to_string(),
-            "run".into(),
-            "--name=superloop-lane-alpha-R-attempt-1".into(),
-            format!(
-                "--cidfile={}",
-                protected_identifier_path(&driver, 1)
-                    .expect("identifier")
-                    .display()
-            ),
-        ];
-        let (mut server, mut client) = UnixStream::pair().expect("channel");
-        client.write_all(&0_u32.to_le_bytes()).expect("prompt");
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let signal = Arc::clone(&cancelled);
-        let launcher = LauncherIdentity {
-            pid: std::process::id(),
-            start: process_start(std::process::id()).expect("launcher start"),
-        };
-        let began = Instant::now();
-        let handle = std::thread::spawn(move || {
-            run_attempt(
-                &mut server,
-                &vector,
-                &BTreeMap::new(),
-                &root,
-                &reservation,
-                &record,
-                &driver,
-                1,
-                &signal,
-                launcher,
-                None,
-            )
-        });
-        while !fixture.path().join("started").exists() && began.elapsed() < Duration::from_secs(2) {
-            std::thread::sleep(Duration::from_millis(10));
+    fn cancel_silent_client(
+        control: bool,
+        control_path: &Path,
+        client: UnixStream,
+    ) -> Option<UnixStream> {
+        if control {
+            let mut peer = UnixStream::connect(control_path).expect("supervisor control");
+            peer.set_read_timeout(Some(RETAINED_READER_HANG_BOUND))
+                .expect("ack hang guard");
+            peer.write_all(b"C").expect("cancel request");
+            let mut ack = [0];
+            peer.read_exact(&mut ack).expect("cancel acknowledgement");
+            assert_eq!(ack, [b'K']);
+            Some(client) // Keep this route distinct from client disappearance.
+        } else {
+            drop(client);
+            None
         }
-        assert!(fixture.path().join("started").exists());
-        drop(client);
-        let outcome = handle
-            .join()
-            .expect("helper thread")
-            .expect("bounded cancellation");
-        assert_eq!(outcome.code, 1);
-        assert!(cancelled.load(Ordering::Acquire));
-        assert!(fixture.path().join("stopped").exists());
-        assert!(fixture.path().join("waited").exists());
-        assert!(began.elapsed() < Duration::from_secs(5));
     }
 
     /// ´test:unit:helper-publishes-started-before-invoking-container-start´
