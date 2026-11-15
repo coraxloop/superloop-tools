@@ -123,6 +123,29 @@ impl Keeper<'_> {
         })();
         self.release_result(result)
     }
+    pub fn serve_pidfd(&mut self, deadline: std::time::Instant) -> Result<()> {
+        require(
+            !self.terminal && self.session.store().phase() == Phase::InventoryComplete,
+            "handoff-phase",
+        )?;
+        let result = (|| {
+            self.verify_capture()?;
+            let (invocation, inventory, children) = self.observations()?;
+            let evidence = self.inventory.as_mut().ok_or("inventory-missing")?;
+            let digest = evidence.digest.clone();
+            evidence.verify(&digest, &invocation, &inventory, &children)?;
+            self.control
+                .as_ref()
+                .ok_or("keeper-not-captured")?
+                .serve_pidfd(
+                    Phase::InventoryComplete,
+                    deadline,
+                    self.process.as_ref().ok_or("keeper-not-captured")?,
+                    &digest,
+                )
+        })();
+        self.release_result(result)
+    }
     pub fn release(&mut self, digest: &str) -> Result<()> {
         self.release_with(digest, ProcessPin::resume)
     }
@@ -130,6 +153,14 @@ impl Keeper<'_> {
         &mut self,
         digest: &str,
         signal: impl FnOnce(&mut ProcessPin) -> Result<()>,
+    ) -> Result<()> {
+        self.release_at(digest, signal, self.manager.deadline())
+    }
+    fn release_at(
+        &mut self,
+        digest: &str,
+        signal: impl FnOnce(&mut ProcessPin) -> Result<()>,
+        deadline: std::time::Instant,
     ) -> Result<()> {
         require(
             !self.terminal && self.session.store().phase() == Phase::InventoryComplete,
@@ -145,6 +176,7 @@ impl Keeper<'_> {
                 &children,
             )?;
             self.session.store().advance(Phase::ReleaseIntent)?;
+            require(std::time::Instant::now() < deadline, "release-deadline")?;
             signal(self.process.as_mut().ok_or("keeper-not-captured")?)?;
             self.session.store().advance(Phase::Released)
         })();

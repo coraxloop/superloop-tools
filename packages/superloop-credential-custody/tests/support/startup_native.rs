@@ -1,5 +1,6 @@
 //! Native entry controls are separate from the small manager/control peer.
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
+use std::os::fd::AsRawFd as _;
 #[allow(
     dead_code,
     clippy::redundant_pub_crate,
@@ -13,6 +14,7 @@ fn main() {
     let result = match args.first().map(String::as_str) {
         Some("--startup-control") => startup_control(&args),
         Some("--root-control") => root_control(),
+        Some("--pidfd-client") => pidfd_client(&args),
         _ => Err("arguments".into()),
     };
     if result.is_err() {
@@ -51,5 +53,54 @@ fn root_control() -> Result<(), Box<dyn std::error::Error>> {
         return Err("root guard".into());
     }
     std::io::stdout().write_all(b"root-required\n")?;
+    Ok(())
+}
+
+fn pidfd_client(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut input = std::io::stdin();
+    let mut length = [0; 4];
+    input.read_exact(&mut length)?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > 4096 {
+        return Err("request bound".into());
+    }
+    let mut bytes = vec![0; length];
+    input.read_exact(&mut bytes)?;
+    let mut stream = std::os::unix::net::UnixStream::connect(args.get(1).ok_or("socket")?)?;
+    stream.write_all(&bytes)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    std::io::stdout().write_all(b"connected\n")?;
+    // Parent releases this test-only event after the complete frame is queued.
+    let mut ready = [0];
+    input.read_exact(&mut ready)?;
+    if ready != [1] {
+        return Err("ready".into());
+    }
+    let mut reply = Vec::new();
+    loop {
+        let mut byte = [0];
+        stream.read_exact(&mut byte)?;
+        reply.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+        if reply.len() > 4096 {
+            return Err("reply bound".into());
+        }
+    }
+    let value: serde_json::Value = serde_json::from_slice(&reply)?;
+    let fds =
+        loop_home::anchor::transport::receive(&stream, 1, std::time::Duration::from_secs(30))?;
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", fds[0].as_raw_fd()))?;
+    let pid = info
+        .lines()
+        .find_map(|l| l.strip_prefix("Pid:"))
+        .ok_or("pidfd")?
+        .trim()
+        .parse::<u32>()?;
+    if value["invocation"]["pid"] != pid {
+        return Err("pid mismatch".into());
+    }
+    std::io::stdout().write_all(&reply)?;
     Ok(())
 }

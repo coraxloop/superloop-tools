@@ -4,17 +4,35 @@ use std::fs;
 use std::net::Shutdown;
 use std::time::Duration;
 fn setup() -> (crate::launch::tests::Fixture, Control) {
-    let f = fixture();
+    setup_with(None)
+}
+fn setup_with(captured: Option<Invocation>) -> (crate::launch::tests::Fixture, Control) {
+    let mut f = fixture();
+    if captured.is_some() {
+        let current = std::env::current_exe().unwrap();
+        let image = current
+            .ancestors()
+            .take(8)
+            .map(|p| p.join("examples/custody-startup-test"))
+            .find(|p| p.is_file())
+            .unwrap();
+        let bytes = fs::read(image).unwrap();
+        let path = f.dir.path().join("launcher");
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o555)).unwrap();
+        f.value["artifacts"][0]["expected_sha256"] = crate::identity::hash(&bytes).into();
+    }
     let admission = f.admit();
     let pipes = Pipes::create(&admission, 0).unwrap();
-    let invocation = Invocation {
+    let invocation = captured.unwrap_or_else(|| Invocation {
         id: "1234567890abcdef1234567890abcdef".into(),
         unit: admission.policy().cases[0].generator_unit.clone(),
         pid: 123,
         birth: 1,
         uid: nix::unistd::geteuid().as_raw(),
         image: admission.fixture_image(),
-    };
+    });
     // A production keeper must still match the admitted image; the test runner
     // is deliberately a different inode from the small native control client.
     assert_eq!(
@@ -42,6 +60,21 @@ fn request(control: &Control) -> serde_json::Value {
     serde_json::json!({"schema":1,"case":"sample","keeper_pid":control.keeper.invocation().pid,"keeper_birth":control.keeper.invocation().birth,"invocation":control.invocation,"operation":"status","nonce":"0123456789abcdef0123456789abcdef"})
 }
 fn transaction(control: &Control, bytes: &[u8]) -> (Result<()>, Vec<u8>) {
+    transaction_with(control, bytes, None)
+}
+fn transaction_with(
+    control: &Control,
+    bytes: &[u8],
+    pin: Option<&ProcessPin>,
+) -> (Result<()>, Vec<u8>) {
+    transaction_at(control, bytes, pin, Phase::InventoryComplete)
+}
+fn transaction_at(
+    control: &Control,
+    bytes: &[u8],
+    pin: Option<&ProcessPin>,
+    phase: Phase,
+) -> (Result<()>, Vec<u8>) {
     let path = format!(
         "/proc/{}/fd/{}/control.sock",
         std::process::id(),
@@ -60,7 +93,14 @@ fn transaction(control: &Control, bytes: &[u8]) -> (Result<()>, Vec<u8>) {
         .join("launcher");
     let mut command = std::process::Command::new(&image);
     command
-        .args(["--control-client", &path])
+        .args([
+            if pin.is_some() {
+                "--pidfd-client"
+            } else {
+                "--control-client"
+            },
+            &path,
+        ])
         .env_clear()
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -69,7 +109,15 @@ fn transaction(control: &Control, bytes: &[u8]) -> (Result<()>, Vec<u8>) {
         .configure(&mut command)
         .unwrap();
     let mut child = command.spawn().unwrap();
-    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    if pin.is_some() {
+        let input = child.stdin.as_mut().unwrap();
+        input
+            .write_all(&u32::try_from(bytes.len()).unwrap().to_be_bytes())
+            .unwrap();
+        input.write_all(bytes).unwrap();
+    } else {
+        child.stdin.take().unwrap().write_all(bytes).unwrap();
+    }
     let stdout = child.stdout.as_mut().unwrap();
     let mut ready = nix::libc::pollfd {
         fd: stdout.as_raw_fd(),
@@ -83,7 +131,14 @@ fn transaction(control: &Control, bytes: &[u8]) -> (Result<()>, Vec<u8>) {
     let mut frame = [0; 10];
     stdout.read_exact(&mut frame).unwrap();
     assert_eq!(&frame, b"connected\n");
-    let result = control.serve_once(Phase::Captured, Instant::now() + Duration::from_secs(600));
+    let deadline = Instant::now() + Duration::from_secs(600);
+    let result = pin.map_or_else(
+        || control.serve_once(Phase::Captured, deadline),
+        |pin| control.serve_pidfd(phase, deadline, pin, &"a".repeat(64)),
+    );
+    if pin.is_some() {
+        child.stdin.take().unwrap().write_all(&[1]).unwrap();
+    }
     // A deadline can refuse before accept. Close this harness-owned queued
     // connection before waiting for its reader; the test never waits for time.
     if result.is_err()
@@ -235,5 +290,48 @@ fn control_cleanup_never_removes_a_replacement() {
             .mode()
             & 0o7777,
         0o400
+    );
+}
+
+/// ´test:unit:control-transfers-only-the-captured-pidfd-after-inventory´
+#[test]
+fn control_transfers_only_the_captured_pidfd_after_inventory() {
+    let f = crate::launch::inventory::tests::fixture("normal");
+    let (_readers, writers) = crate::launch::inventory::tests::pipes();
+    let (_child, pin) = crate::launch::inventory::tests::start(&f, &writers);
+    let (_control_files, mut control) = setup_with(Some(pin.invocation().clone()));
+    let mut value = request(&control);
+    value["operation"] = "pidfd".into();
+    assert_eq!(
+        transaction_at(&control, &encoded(&value), Some(&pin), Phase::Captured).0,
+        Err("handoff-phase")
+    );
+    let original = control.invocation.clone();
+    control.invocation = "b".repeat(32);
+    let mut other = request(&control);
+    other["operation"] = "pidfd".into();
+    assert_eq!(
+        transaction_with(&control, &encoded(&other), Some(&pin)).0,
+        Err("handoff-invocation")
+    );
+    control.invocation = original;
+    let (result, bytes) = transaction_with(&control, &encoded(&value), Some(&pin));
+    assert_eq!(result, Ok(()));
+    let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(reply["invocation"]["pid"], pin.invocation().pid);
+    assert_eq!(reply["invocation"]["birth"], pin.invocation().birth);
+    assert_eq!(reply["nonce"], value["nonce"]);
+    assert_eq!(reply["inventory_sha256"], "a".repeat(64));
+    pin.verify().unwrap();
+}
+/// ´test:unit:control-status-endpoint-refuses-descriptor-requests´
+#[test]
+fn control_status_endpoint_refuses_descriptor_requests() {
+    let (_files, status_only) = setup();
+    let mut value = request(&status_only);
+    value["operation"] = "pidfd".into();
+    assert_eq!(
+        transaction(&status_only, &encoded(&value)).0,
+        Err("control-operation")
     );
 }

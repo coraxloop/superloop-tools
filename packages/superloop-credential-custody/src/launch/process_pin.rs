@@ -129,6 +129,47 @@ impl ProcessPin {
         };
         require(result == 0, "release-signal")
     }
+    pub fn duplicate(&self) -> Result<OwnedFd> {
+        self.verify()?;
+        self.pidfd.try_clone().map_err(|_| "handoff-duplicate")
+    }
+    pub fn transferred(pidfd: OwnedFd, invocation: Invocation) -> Result<Self> {
+        let mut event = nix::libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        channel::poll(std::slice::from_mut(&mut event), 0)?;
+        require(event.revents == 0, "keeper-process-exited")?;
+        verify_pidfd(&pidfd, invocation.pid)?;
+        let directory =
+            File::open(format!("/proc/{}", invocation.pid)).map_err(|_| "keeper-process")?;
+        require(
+            nix::sys::statfs::fstatfs(&directory)
+                .map_err(|_| "keeper-procfs")?
+                .filesystem_type()
+                == nix::sys::statfs::PROC_SUPER_MAGIC,
+            "keeper-procfs",
+        )?;
+        let image = File::from(
+            openat(
+                &directory,
+                "exe",
+                OFlag::O_RDONLY | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| "keeper-image")?,
+        );
+        let pin = Self {
+            pidfd,
+            directory,
+            image,
+            invocation,
+            stopped: true,
+        };
+        pin.verify()?;
+        Ok(pin)
+    }
     pub fn matches(&self, expected: &Invocation) -> Result<()> {
         require(&self.invocation == expected, "keeper-invocation-binding")?;
         self.verify()

@@ -4,6 +4,7 @@ mod child_status;
 mod confinement;
 mod control;
 mod fifo;
+mod handoff;
 mod inventory;
 mod keeper;
 mod manager;

@@ -41,6 +41,7 @@ struct Request {
 #[serde(rename_all = "kebab-case")]
 enum Operation {
     Status,
+    Pidfd,
 }
 pub(super) struct Control {
     directory: Directory,
@@ -173,6 +174,26 @@ impl Control {
         )
     }
     pub fn serve_once(&self, phase: Phase, deadline: Instant) -> Result<()> {
+        self.serve(phase, deadline, None)
+    }
+    pub fn serve_pidfd(
+        &self,
+        phase: Phase,
+        deadline: Instant,
+        pin: &ProcessPin,
+        digest: &str,
+    ) -> Result<()> {
+        require(phase == Phase::InventoryComplete, "handoff-phase")?;
+        require(pin.invocation().id == self.invocation, "handoff-invocation")?;
+        pin.verify()?;
+        self.serve(phase, deadline, Some((pin, digest)))
+    }
+    fn serve(
+        &self,
+        phase: Phase,
+        deadline: Instant,
+        handoff: Option<(&ProcessPin, &str)>,
+    ) -> Result<()> {
         let deadline = deadline.min(self.deadline);
         self.verify()?;
         let (mut stream, _address) = loop {
@@ -212,6 +233,20 @@ impl Control {
         peer.verify()?;
         self.verify()?;
         budget(deadline)?;
+        if matches!(request.operation, Operation::Pidfd) {
+            let (pin, digest) = handoff.ok_or("control-operation")?;
+            let binding = super::handoff::Binding {
+                schema: 1,
+                case: &self.case,
+                nonce: &request.nonce,
+                keeper_pid: self.keeper.invocation().pid,
+                keeper_birth: self.keeper.invocation().birth,
+                keeper_uid: self.owner,
+                invocation: pin.invocation(),
+                inventory_sha256: digest,
+            };
+            return super::handoff::send(&mut stream, &binding, pin, deadline);
+        }
         let mut response=serde_json::to_vec(&serde_json::json!({"schema":1,"case":self.case,"invocation":self.invocation,"phase":phase,"nonce":request.nonce})).map_err(|_|"control-encoding")?;
         response.push(b'\n');
         require(response.len() <= 1024, "control-response-size")?;
@@ -312,7 +347,7 @@ fn set_backlog(listener: &UnixListener, count: u64) -> Result<()> {
     )
 }
 #[allow(unsafe_code)]
-fn peer_credentials(stream: &UnixStream) -> Result<nix::libc::ucred> {
+pub(super) fn peer_credentials(stream: &UnixStream) -> Result<nix::libc::ucred> {
     let mut value = nix::libc::ucred {
         pid: 0,
         uid: 0,

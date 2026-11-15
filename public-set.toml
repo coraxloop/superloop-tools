@@ -3669,6 +3669,12 @@ pattern = "packages/superloop-credential-custody/src/launch/child_status.rs"
 pattern = "packages/superloop-credential-custody/src/launch/inventory.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/handoff_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/handoff.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-credential-custody/src/launch/inventory_tests.rs"
 
 [[include.rows]]

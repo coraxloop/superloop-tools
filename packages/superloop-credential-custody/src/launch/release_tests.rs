@@ -81,6 +81,7 @@ fn release_is_bound_to_retained_inventory_and_consumed_once() {
         5
     );
     assert_eq!(value["sealers"].as_array().unwrap().len(), 2);
+    let exit = keeper.process.as_ref().unwrap().duplicate().unwrap();
     keeper.release(&digest).unwrap();
     assert_eq!(keeper.phase(), Phase::Released);
     assert_eq!(keeper.release(&digest), Err("release-order"));
@@ -88,6 +89,13 @@ fn release_is_bound_to_retained_inventory_and_consumed_once() {
         keeper.process.as_mut().unwrap().resume(),
         Err("release-duplicate")
     );
+    let mut event = nix::libc::pollfd {
+        fd: exit.as_raw_fd(),
+        events: nix::libc::POLLIN,
+        revents: 0,
+    };
+    crate::launch::channel::poll(std::slice::from_mut(&mut event), 600_000).unwrap();
+    assert_ne!(event.revents & nix::libc::POLLIN, 0);
     assert!(child.child.wait().unwrap().success());
     for (n, phase) in [(5, "release-intent"), (6, "released")] {
         let value: serde_json::Value = serde_json::from_slice(
@@ -323,6 +331,35 @@ fn release_rechecks_manager_invocation_before_signalling() {
             Ok(())
         }),
         Err("manager-invocation-binding")
+    );
+    assert_eq!(calls, 0);
+    assert_eq!(keeper.phase(), Phase::Uncertain);
+    stopped(&child);
+}
+
+/// ´test:unit:release-refuses-expired-budget-before-signalling´
+#[test]
+fn release_refuses_expired_budget_before_signalling() {
+    let f = setup("normal");
+    let admission = f.admit();
+    let mut store = Store::reserve(&admission, 0).unwrap();
+    let mut keeper = Keeper::prepare(RootStartup::test_owner(), &admission, 0, &mut store).unwrap();
+    let child = captured(&f, &admission, &mut keeper);
+    let digest = keeper.inventory().unwrap();
+    let mut calls = 0;
+    let expired = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(
+        keeper.release_at(
+            &digest,
+            |_| {
+                calls += 1;
+                Ok(())
+            },
+            expired
+        ),
+        Err("release-deadline")
     );
     assert_eq!(calls, 0);
     assert_eq!(keeper.phase(), Phase::Uncertain);
