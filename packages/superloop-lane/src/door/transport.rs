@@ -2897,7 +2897,10 @@ mod tests {
         let owner_home = temp.home.clone();
         let socket = crate::fixture_exec::fixture_socket_path(temp.home.join("door.sock"));
         let listener = UnixListener::bind(&socket).expect("fixture socket");
+        // The ready hook is thread-local; the serving thread reads it after filing.
+        let ready = super::super::REQUEST_READY.with(|slot| slot.borrow_mut().take());
         let server = thread::spawn(move || {
+            super::super::REQUEST_READY.with(|slot| *slot.borrow_mut() = ready);
             let (mut stream, _) = listener.accept()?;
             let started = Instant::now();
             let _socket_peer = peer_uid(&stream)?;
