@@ -201,6 +201,8 @@ struct ModelRunner {
     #[cfg(test)]
     fixture_clock: Option<Arc<PollClock>>,
     #[cfg(test)]
+    fixture_start_marker: Option<PathBuf>,
+    #[cfg(test)]
     fixture_reap_before_cleanup: bool,
 }
 
@@ -284,6 +286,8 @@ impl ModelRunner {
             #[cfg(test)]
             fixture_clock: None,
             #[cfg(test)]
+            fixture_start_marker: None,
+            #[cfg(test)]
             fixture_reap_before_cleanup: false,
         })
     }
@@ -344,6 +348,9 @@ impl ModelRunner {
         let exceeded = Arc::new(AtomicBool::new(false));
         let reader = spawn_stdout_reader(stdout, Arc::clone(&exceeded));
         let writer = spawn_stdin_writer(stdin, framed_prompt);
+
+        #[cfg(test)]
+        let started = self.await_fixture_start(&mut child, kill_program, started)?;
 
         #[cfg(test)]
         if let Some(clock) = &self.fixture_clock {
@@ -408,6 +415,36 @@ impl ModelRunner {
         let writer_result = join_stdin(writer, started, cleanup_limit);
         let captured_result = join_stdout(reader, started, cleanup_limit);
         finish_model_result(completion, termination, writer_result, captured_result)
+    }
+
+    #[cfg(test)]
+    fn await_fixture_start(
+        &self,
+        child: &mut Child,
+        kill_program: Option<&OsStr>,
+        started: Instant,
+    ) -> Result<Instant, ModelError> {
+        let Some(marker) = &self.fixture_start_marker else {
+            return Ok(started);
+        };
+        let waiting = Instant::now();
+        while !marker.exists() {
+            if waiting.elapsed() >= Duration::from_secs(120) {
+                let _terminated = terminate_process_group(
+                    child,
+                    false,
+                    kill_program,
+                    Instant::now(),
+                    Duration::from_secs(2),
+                );
+                return Err(ModelError::Launch(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("fixture did not write start marker {}", marker.display()),
+                )));
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+        Ok(Instant::now())
     }
 
     /// Configured deadline in milliseconds, once the completion poll sees it as elapsed.
@@ -502,6 +539,7 @@ impl ModelRunner {
             fixture_kill_program: kill_program,
             fixture_self_stat: self_stat,
             fixture_clock: clock,
+            fixture_start_marker: None,
             fixture_reap_before_cleanup: false,
         }
     }
@@ -1047,6 +1085,21 @@ pub(crate) fn run_fixture_model_with_kill_program(
 }
 
 #[cfg(test)]
+pub(crate) fn run_fixture_model_with_kill_program_after_marker(
+    cli: &std::ffi::OsStr,
+    prompt: &Prompt,
+    deadline: Duration,
+    environment: Vec<(OsString, OsString)>,
+    kill_program: OsString,
+    marker: PathBuf,
+) -> Result<ModelResult, ModelError> {
+    let mut runner =
+        ModelRunner::fixture(cli, deadline, environment, Some(kill_program), None, None);
+    runner.fixture_start_marker = Some(marker);
+    runner.run(prompt)
+}
+
+#[cfg(test)]
 pub(crate) fn run_fixture_model_with_clock(
     cli: &std::ffi::OsStr,
     prompt: &Prompt,
@@ -1101,6 +1154,7 @@ pub(crate) fn settings_arguments_for_test(model: &str) -> Vec<OsString> {
         fixture_kill_program: None,
         fixture_self_stat: None,
         fixture_clock: None,
+        fixture_start_marker: None,
         #[cfg(test)]
         fixture_reap_before_cleanup: false,
     }

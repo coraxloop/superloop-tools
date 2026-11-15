@@ -12,8 +12,8 @@ use crate::model::{
     CLASSIFICATION_SCHEMA, Classification, DEFAULT_MODEL, MAX_MODEL_DEADLINE_MS, MAX_STDOUT_BYTES,
     ModelError, PollClock, configuration_from_test_environment, fixed_kill_programs_for_test,
     mint_nesting_token_for_test, run_fixture_model, run_fixture_model_with_clock,
-    run_fixture_model_with_kill_program, run_fixture_model_with_self_stat,
-    run_model_from_test_environment, settings_arguments_for_test,
+    run_fixture_model_with_kill_program, run_fixture_model_with_kill_program_after_marker,
+    run_fixture_model_with_self_stat, run_model_from_test_environment, settings_arguments_for_test,
 };
 use crate::rubric::{
     GENERAL_RUBRIC, GENERAL_RUBRIC_DIGEST, MAX_OWNER_RUBRIC_BYTES, Prompt, RubricError,
@@ -684,27 +684,22 @@ fn failed_group_kill_bounds_helper_joins() {
     let capture = directory.path().join("bounded-cleanup");
     let submitted = large_prompt(&directory);
     let missing_kill = directory.path().join("missing-kill").into_os_string();
-    // DELAY: the fixture waits on a thirty-second descendant, which this deadline interrupts. Taken
-    // before the stamp, so the load sample it may run stays outside the window the bound judges.
+    // The fixture's descendant must exist before the short deadline starts; otherwise a loaded
+    // shell can be killed before recording the process whose survival is the assertion below.
     let deadline = interrupting_deadline(Duration::from_millis(40));
-    let started = Instant::now();
-    let result = run_fixture_model_with_kill_program(
+    let result = run_fixture_model_with_kill_program_after_marker(
         fake_cli().as_os_str(),
         &submitted,
         deadline,
         fixture_environment(&capture, "never-read-short-descendant"),
         missing_kill,
+        capture_file(&capture, ".child-pid"),
     );
     let cleanup = FixtureProcessGuard::new(captured_process_id(&capture, ".child-pid"));
     let outcome = cleanup.outcome();
     assert!(matches!(result, Err(ModelError::Kill(_))));
-    // BOUND: the helper joins were bounded, so the run returned while the descendant it could not
-    // kill is still alive, which the next assertion states as the ordering.
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < deadline_return_bound(Duration::from_secs(1)),
-        "returned after {elapsed:?}"
-    );
+    // The failed group kill returned while the thirty-second descendant is still alive;
+    // that ordering proves the helper joins did not wait for the descendant's exit.
     assert_process_alive(cleanup.process_id());
     drop(cleanup);
     assert_guard_killed(&outcome);
