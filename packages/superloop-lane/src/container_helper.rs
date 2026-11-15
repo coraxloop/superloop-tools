@@ -5824,25 +5824,44 @@ exit 0
         result
     }
 
-    fn await_stop_marker(marker: &mut fs::File) {
+    enum RetainedEvent {
+        Stop(std::io::Result<[u8; 7]>),
+        Complete,
+    }
+
+    struct RetainedCompletion(mpsc::Sender<RetainedEvent>);
+
+    impl Drop for RetainedCompletion {
+        fn drop(&mut self) {
+            let _sent = self.0.send(RetainedEvent::Complete);
+        }
+    }
+
+    fn await_stop_marker(
+        marker: &mut fs::File,
+        sent: mpsc::Sender<RetainedEvent>,
+        received: &mpsc::Receiver<RetainedEvent>,
+    ) -> bool {
         let mut reader = marker.try_clone().expect("stop FIFO reader");
-        let (sent, received) = mpsc::sync_channel(1);
         let waiter = std::thread::spawn(move || {
             let mut bytes = [0; 7];
             let result = reader.read_exact(&mut bytes).map(|()| bytes);
-            let _ignored = sent.send(result);
+            let _ignored = sent.send(RetainedEvent::Stop(result));
         });
         let event = received.recv_timeout(RETAINED_READER_HANG_BOUND);
-        if event.is_err() {
+        if !matches!(event, Ok(RetainedEvent::Stop(_))) {
             marker
                 .write_all(b"cancel!")
                 .expect("release stop-event waiter");
         }
         waiter.join().expect("reap stop-event waiter");
-        let bytes = event
-            .expect("stop event before distant hang guard")
-            .expect("stop marker bytes");
-        assert_eq!(&bytes, b"stopped", "runtime stop event");
+        match event.expect("stop or completion event before distant hang guard") {
+            RetainedEvent::Stop(result) => {
+                assert_eq!(&result.expect("stop marker bytes"), b"stopped");
+                true
+            }
+            RetainedEvent::Complete => false,
+        }
     }
 
     fn read_attempt_status(stream: &mut UnixStream) -> i32 {
@@ -6097,6 +6116,10 @@ exit 0
         assert_eq!(read_attempt_status(&mut client), 1);
         assert_eq!(evidence["status"], 1);
         assert_eq!(evidence["stream_error"]["stream"], "drain");
+        assert_eq!(
+            evidence["stream_error"]["reason"],
+            "stream drain exceeded 0.000 seconds after child exit"
+        );
         assert_eq!(evidence["removal"]["state"], "removed");
         assert_eq!(removed, "removed");
     }
@@ -6122,40 +6145,44 @@ exit 0
         let holder = HolderGuard::new();
         let runner_holder = holder.slot();
         let (published, publication) = mpsc::sync_channel(1);
-        let (finished, completion) = mpsc::sync_channel(1);
+        let (finished, completion) = mpsc::channel();
+        let stop_events = finished.clone();
         let (mut server, mut client) = UnixStream::pair().expect("channel");
         client
             .write_all(&0_u32.to_le_bytes())
             .expect("empty prompt");
         let runner = std::thread::spawn(move || {
-            let refusal = fixture
-                .run_with_seams(
-                    &mut server,
-                    STREAM_LIMIT,
-                    Duration::ZERO,
-                    RETAINED_READER_HANG_BOUND,
-                    Child::try_wait,
-                    |_| Ok(()),
-                    |pid| {
-                        hold_stdout(pid, &runner_holder, &release, &published).map_err(|error| {
-                            crate::error::LaneError::operation("fixture", error.to_string())
-                        })
-                    },
-                )
-                .err()
-                .expect("expired drain refuses");
+            let _completion = RetainedCompletion(finished);
+            let outcome = fixture.run_with_seams(
+                &mut server,
+                STREAM_LIMIT,
+                Duration::ZERO,
+                RETAINED_READER_HANG_BOUND,
+                Child::try_wait,
+                |_| Ok(()),
+                |pid| {
+                    hold_stdout(pid, &runner_holder, &release, &published).map_err(|error| {
+                        crate::error::LaneError::operation("fixture", error.to_string())
+                    })
+                },
+            );
             let evidence = fixture.evidence();
-            finished.send(()).expect("completion receiver");
-            (refusal, evidence)
+            (outcome, evidence)
         });
         publication
             .recv_timeout(RETAINED_READER_HANG_BOUND)
             .expect("holder published before stop");
-        await_stop_marker(&mut stop_event);
+        let stopped = await_stop_marker(&mut stop_event, stop_events, &completion);
         holder.close();
-        let completed = completion.recv_timeout(RETAINED_READER_HANG_BOUND);
-        let (refusal, evidence) = runner.join().expect("reap fixture runner");
-        completed.expect("cleanup completion event before hang guard");
+        if stopped {
+            assert!(matches!(
+                completion.recv_timeout(RETAINED_READER_HANG_BOUND),
+                Ok(RetainedEvent::Complete)
+            ));
+        }
+        let (outcome, evidence) = runner.join().expect("reap fixture runner");
+        let refusal = outcome.err().expect("expired drain refuses");
+        assert!(stopped, "runtime stop precedes cleanup completion");
         assert_eq!(
             evidence["stream_errors"]
                 .as_array()
@@ -6165,13 +6192,16 @@ exit 0
             "reader finishes during stop; only the retained drain expiry remains"
         );
         assert_eq!(refusal.kind, "container-stream");
-        assert!(refusal.detail.contains("stream drain exceeded"));
+        assert_eq!(
+            refusal.detail,
+            "stream drain exceeded 0.000 seconds after child exit"
+        );
         assert_eq!(evidence["stream_error"]["stream"], "drain");
         assert!(
             evidence["stream_error"]["reason"]
                 .as_str()
                 .expect("drain reason")
-                .contains("stream drain exceeded")
+                .eq("stream drain exceeded 0.000 seconds after child exit")
         );
         assert_eq!(evidence["removal"]["state"], "removed");
         assert_eq!(read_attempt_status(&mut client), 1);

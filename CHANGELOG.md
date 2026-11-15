@@ -76,6 +76,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Door sized-run waiters remain parked after their reads while the writer publishes, replacing a fifteen-second performance verdict with lock ordering. Refusal-frame comparisons use the peer’s encode/decode form; retained-reader fixtures assert the injected zero drain and observe early runner completion. Installed behavior is unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
+
 - Helper retained-reader tests now inject drain expiry and wait for holder, runtime-stop and cleanup events, with distant hang guards instead of short scheduling windows. Deployed helper deadlines and cleanup behavior are unchanged (``proto:superlooplane:container-attempt-completion``).
 
 - Resuming a failed boxed round now checks session files against that run’s allocated worker, rather than the allocation block’s base. A run refused for this mismatch can repeat its preview after installing the new lane command; foreign-owned session files still refuse (`public_failed_round_inspection_uses_allocated_worker`).

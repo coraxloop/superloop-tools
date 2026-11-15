@@ -5978,7 +5978,7 @@ mod tests {
                             read_tx.send(()).expect("reader reached polling boundary");
                             resume_rx
                                 .recv_timeout(Duration::from_secs(120))
-                                .expect("rendezvous released readers before writer admission");
+                                .expect("writer published before readers resume");
                         }));
                     });
                     let started = Instant::now();
@@ -5993,29 +5993,30 @@ mod tests {
             }
             drop(read_tx);
             // All sixteen readers actually read the sized run, then rendezvous
-            // outside waiting_request. Resume them before the write so their
-            // sized-run polls and backoff contend with writer admission.
+            // outside waiting_request. Keep them parked until the writer has
+            // published: none may retain a store lock across this boundary.
             for _ in 0..16 {
                 read_rx
                     .recv_timeout(Duration::from_secs(120))
                     .expect("every reader reached polling boundary");
             }
+            let started = Instant::now();
+            crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(Some(Duration::ZERO));
+            let publication = store.triage(
+                "R",
+                &[json!({"id":"R:1","action":"adjudicate",
+            "treatment":"allow","reason":"sized fixture answer"})],
+                "fixture owner",
+                &super::now_nanos().to_string(),
+            );
+            crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(None);
+            publication.expect("parked readers released the writer lock");
+            let writer_wall = started.elapsed();
             for waiter in resume {
                 waiter
                     .send(())
-                    .expect("resume readers before writer admission");
+                    .expect("answer published before readers resume");
             }
-            let started = Instant::now();
-            store
-                .triage(
-                    "R",
-                    &[json!({"id":"R:1","action":"adjudicate",
-            "treatment":"allow","reason":"sized fixture answer"})],
-                    "fixture owner",
-                    &super::now_nanos().to_string(),
-                )
-                .expect("writer admits answer");
-            let writer_wall = started.elapsed();
             let longest = waiters
                 .into_iter()
                 .map(|waiter| {
@@ -6032,7 +6033,6 @@ mod tests {
                 writer_wall.as_millis(),
                 longest.as_millis()
             );
-            assert!(writer_wall < Duration::from_secs(15));
             drop(peers);
         }
     }
@@ -6730,7 +6730,7 @@ mod tests {
                 serve_one_for_peer(&mut server, &registration, peer).expect("served");
             assert_eq!(response["reason"], reason);
             assert_eq!(response["peer_uid"], peer);
-            assert_eq!(frame_read(&mut client).expect("reply"), response);
+            assert_eq!(frame_read(&mut client).expect("reply"), as_sent(&response));
         }
     }
 
