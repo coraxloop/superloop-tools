@@ -2,7 +2,7 @@
 use super::{
     Result,
     measure::{Admission, HeldArtifact},
-    policy::ArtifactRole,
+    policy::{ArtifactRole, FIXTURE_STANDARD_STREAMS},
     require,
 };
 use crate::{identity::hash, process, record::Limits};
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-const FIELDS: [&str; 26] = [
+const FIELDS: [&str; 27] = [
     "Id",
     "InvocationID",
     "MainPID",
@@ -27,8 +27,9 @@ const FIELDS: [&str; 26] = [
     "PrivateUsers",
     "PrivatePIDs",
     "DynamicUser",
-    "StandardOutput",
-    "StandardError",
+    FIXTURE_STANDARD_STREAMS[0].property,
+    FIXTURE_STANDARD_STREAMS[1].property,
+    FIXTURE_STANDARD_STREAMS[2].property,
     "ReadWritePaths",
     "InaccessiblePaths",
     "Type",
@@ -123,14 +124,18 @@ impl<'a> Manager<'a> {
             "PrivateUsers=no",
             "PrivatePIDs=no",
             "DynamicUser=yes",
-            "StandardOutput=null",
-            "StandardError=null",
             "ReadWritePaths=",
             "TimeoutStopSec=5s",
             "KillMode=control-group",
             "SendSIGKILL=yes",
         ] {
             args.push(format!("--property={value}"));
+        }
+        for stream in &FIXTURE_STANDARD_STREAMS {
+            args.push(format!(
+                "--property={}={}",
+                stream.property, stream.manager_value
+            ));
         }
         args.push(format!(
             "--property=TimeoutStartSec={}ms",
@@ -404,12 +409,16 @@ fn properties(values: &BTreeMap<&str, &str>, wire: &Expected<'_>) -> Result<Vec<
         ("PrivateUsers", "no"),
         ("PrivatePIDs", "no"),
         ("DynamicUser", "yes"),
-        ("StandardOutput", "null"),
-        ("StandardError", "null"),
         ("ReadWritePaths", ""),
         ("InaccessiblePaths", sockets.as_str()),
     ] {
         require(values[key] == value, "manager-property-drift")?;
+    }
+    for stream in &FIXTURE_STANDARD_STREAMS {
+        require(
+            values[stream.property] == stream.manager_value,
+            "manager-property-drift",
+        )?;
     }
     // Values are mapped only after each loaded wire value passed its closed
     // comparison. The raw reply digest separately binds their actual bytes.
@@ -437,8 +446,9 @@ fn properties(values: &BTreeMap<&str, &str>, wire: &Expected<'_>) -> Result<Vec<
         manager_access: false,
         dynamic_user: values["DynamicUser"] == "yes",
         writable: Vec::new(),
-        private_diagnostics: values["StandardOutput"] == "null"
-            && values["StandardError"] == "null",
+        private_diagnostics: FIXTURE_STANDARD_STREAMS
+            .iter()
+            .all(|s| values[s.property] == s.manager_value),
     };
     serde_json::to_vec(&actual).map_err(|_| "manager-reply-shape")
 }

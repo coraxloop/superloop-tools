@@ -108,17 +108,14 @@ fn validate(rows: &[Descriptor], expected: [ObjectIdentity; 2]) -> Result<()> {
             row.flags & nix::libc::O_NONBLOCK as u32 == 0,
             "inventory-flags",
         )?;
-        if slot == 0 {
+        if let Some(stream) = super::policy::FIXTURE_STANDARD_STREAMS.get(slot as usize) {
             require(
-                row.kind == SFlag::S_IFCHR.bits()
-                    && row.device == nix::sys::stat::makedev(1, 3)
-                    && access == nix::libc::O_RDONLY as u32,
-                "inventory-stdin",
-            )?;
-        } else if slot < 3 {
-            require(
-                row.kind == SFlag::S_IFSOCK.bits() && access != nix::libc::O_RDONLY as u32,
-                "inventory-journal",
+                row.kind == stream.kind && row.device == stream.device && access == stream.access,
+                if slot == 0 {
+                    "inventory-stdin"
+                } else {
+                    "inventory-output"
+                },
             )?;
         } else {
             require(

@@ -2,7 +2,7 @@ use super::*;
 use crate::launch::{sealer_tests::make_fixture, tests::Fixture};
 use std::ffi::CString;
 use std::os::fd::{AsFd as _, FromRawFd as _, OwnedFd};
-use std::os::unix::{fs::PermissionsExt as _, net::UnixStream, process::CommandExt as _};
+use std::os::unix::{fs::PermissionsExt as _, process::CommandExt as _};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -50,7 +50,6 @@ pub(in crate::launch) fn fixture(behavior: &str) -> Fixture {
 }
 pub(in crate::launch) struct ChildGuard {
     pub child: Child,
-    _journal: [UnixStream; 2],
 }
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -73,13 +72,11 @@ pub(in crate::launch) fn start(f: &Fixture, writers: &[File; 2]) -> (ChildGuard,
             nix::fcntl::fcntl(f, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(10)).unwrap(),
         )
     });
-    let (out, journal_out) = UnixStream::pair().unwrap();
-    let (err, journal_err) = UnixStream::pair().unwrap();
     let mut command = Command::new(&path);
     command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(OwnedFd::from(out)))
-        .stderr(Stdio::from(OwnedFd::from(err)))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .process_group(0)
         .env_clear();
     // SAFETY: only scalar syscalls and stack bytes after fork; argv exists before it.
@@ -125,7 +122,6 @@ pub(in crate::launch) fn start(f: &Fixture, writers: &[File; 2]) -> (ChildGuard,
     }
     let mut guard = ChildGuard {
         child: command.spawn().unwrap(),
-        _journal: [journal_out, journal_err],
     };
     drop(command);
     let pid = nix::unistd::Pid::from_raw(i32::try_from(guard.child.id()).unwrap());
@@ -191,7 +187,10 @@ fn external_inventory_observes_real_fixture_barrier() {
         (2, "inventory-stream"),
         (3, "inventory-flags"),
         (4, "inventory-stdin"),
-        (5, "inventory-journal"),
+        (5, "inventory-output"),
+        (6, "inventory-output"),
+        (7, "inventory-output"),
+        (8, "inventory-output"),
     ] {
         let mut rows = inventory.descriptors.clone();
         match change {
@@ -203,6 +202,9 @@ fn external_inventory_observes_real_fixture_barrier() {
             3 => rows[3].flags |= nix::libc::O_NONBLOCK as u32,
             4 => rows[0].device = 0,
             5 => rows[2].kind = SFlag::S_IFREG.bits(),
+            6 => rows[1].kind = SFlag::S_IFSOCK.bits(),
+            7 => rows[1].device = 0,
+            8 => rows[2].flags = nix::libc::O_RDONLY as u32,
             _ => unreachable!(),
         }
         assert_eq!(validate(&rows, expected), Err(class));

@@ -5,6 +5,38 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+// One fixture stdio template for manager submission/read-back and inventory.
+pub(super) struct StandardStream {
+    pub property: &'static str,
+    pub manager_value: &'static str,
+    pub access: u32,
+    pub kind: u32,
+    pub device: u64,
+}
+pub(super) const FIXTURE_STANDARD_STREAMS: [StandardStream; 3] = [
+    StandardStream {
+        property: "StandardInput",
+        manager_value: "null",
+        access: nix::libc::O_RDONLY as u32,
+        kind: nix::libc::S_IFCHR,
+        device: nix::sys::stat::makedev(1, 3),
+    },
+    StandardStream {
+        property: "StandardOutput",
+        manager_value: "null",
+        access: nix::libc::O_WRONLY as u32,
+        kind: nix::libc::S_IFCHR,
+        device: nix::sys::stat::makedev(1, 3),
+    },
+    StandardStream {
+        property: "StandardError",
+        manager_value: "null",
+        access: nix::libc::O_WRONLY as u32,
+        kind: nix::libc::S_IFCHR,
+        device: nix::sys::stat::makedev(1, 3),
+    },
+];
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Policy {

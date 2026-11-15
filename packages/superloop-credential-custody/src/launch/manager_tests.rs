@@ -52,6 +52,7 @@ pub(in crate::launch) fn reply(admission: &Admission) -> Vec<u8> {
         ("PrivateUsers", "no".into()),
         ("PrivatePIDs", "no".into()),
         ("DynamicUser", "yes".into()),
+        ("StandardInput", "null".into()),
         ("StandardOutput", "null".into()),
         ("StandardError", "null".into()),
         ("ReadWritePaths", String::new()),
@@ -426,12 +427,13 @@ fn expected_start(base: &std::path::Path, paths: &[PathBuf; 2]) -> Vec<String> {
         "--property=PrivateUsers=no",
         "--property=PrivatePIDs=no",
         "--property=DynamicUser=yes",
-        "--property=StandardOutput=null",
-        "--property=StandardError=null",
         "--property=ReadWritePaths=",
         "--property=TimeoutStopSec=5s",
         "--property=KillMode=control-group",
         "--property=SendSIGKILL=yes",
+        "--property=StandardInput=null",
+        "--property=StandardOutput=null",
+        "--property=StandardError=null",
         "--property=TimeoutStartSec=600000ms",
     ]
     .into_iter()
