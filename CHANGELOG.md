@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Door transport deadline fixtures consume lock-wait progress before checking the final reply, using the shared bounded frame reader; deployed behavior is unchanged (`[ORCHESTRATION-rule:conformance:ordering-and-timing-evidence]`).
 
+- Helper wall-stop coverage now waits for completion and checks the named wall cause against a child with no natural end; node scheduling no longer decides an elapsed-time verdict. Production deadlines are unchanged (``test:unit:helper-wall-stop-retains-cause-in-outcome-and-round``).
+
 - Door sized-run waiters remain parked after their reads while the writer publishes, replacing a fifteen-second performance verdict with lock ordering. Refusal-frame comparisons use the peer’s encode/decode form; retained-reader fixtures assert the injected zero drain and observe early runner completion. Installed behavior is unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
 
 - Helper retained-reader tests now inject drain expiry and wait for holder, runtime-stop and cleanup events, with distant hang guards instead of short scheduling windows. Deployed helper deadlines and cleanup behavior are unchanged (``proto:superlooplane:container-attempt-completion``).

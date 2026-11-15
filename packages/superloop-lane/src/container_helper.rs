@@ -3681,7 +3681,7 @@ mod tests {
     /// ´test:unit:helper-wall-stop-retains-cause-in-outcome-and-round´
     #[test]
     fn helper_wall_stop_retains_cause_in_outcome_and_round() {
-        let fixture = StartedAttemptFixture::new("cat >/dev/null; exec sleep 30");
+        let fixture = StartedAttemptFixture::new("cat >/dev/null; exec sleep infinity");
         let reservation = fixture.root.path().join(".reservation-R.json");
         let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":7200}],"plan":{"backend":"codex","attempt_wall_seconds":1}});
         publish_reservation(&reservation, &record).expect("planned wall");
@@ -3689,25 +3689,32 @@ mod tests {
         client
             .write_all(&0_u32.to_le_bytes())
             .expect("empty prompt");
-        let began = Instant::now();
-        let outcome = run_attempt(
-            &mut server,
-            &fixture.vector,
-            &fixture.environment,
-            fixture.root.path(),
-            &reservation,
-            &record,
-            &fixture.driver,
-            1,
-            &AtomicBool::new(false),
-            LauncherIdentity {
-                pid: std::process::id(),
-                start: process_start(std::process::id()).expect("launcher"),
-            },
-            None,
-        )
-        .expect("wall is a named outcome");
-        assert!(began.elapsed() < Duration::from_secs(10));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&cancelled);
+        let path = reservation.clone();
+        let (done, completed) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let result = run_attempt(
+                &mut server,
+                &fixture.vector,
+                &fixture.environment,
+                fixture.root.path(),
+                &path,
+                &record,
+                &fixture.driver,
+                1,
+                &signal,
+                LauncherIdentity {
+                    pid: std::process::id(),
+                    start: process_start(std::process::id()).expect("launcher"),
+                },
+                None,
+            );
+            let _ignored = done.send(());
+            (result, fixture)
+        });
+        let (result, fixture) = finish_attempt_fixture(runner, &completed, &cancelled);
+        let outcome = result.expect("wall is a named outcome");
         assert_eq!(outcome.code, 1);
         assert!(!retry_after(&outcome));
         let end = outcome.attempt_wall.expect("named wall");
@@ -5741,6 +5748,22 @@ exit 0
             self.close();
             drop(self.0.lock().expect("holder lock").release.take());
         }
+    }
+
+    // Completion is the proof; this distant bound only ends a broken fixture.
+    // Cancellation releases the child before the runner is joined, including on a mutant.
+    fn finish_attempt_fixture<T>(
+        runner: JoinHandle<T>,
+        completed: &mpsc::Receiver<()>,
+        cancelled: &AtomicBool,
+    ) -> T {
+        let event = completed.recv_timeout(RETAINED_READER_HANG_BOUND);
+        if event.is_err() {
+            cancelled.store(true, Ordering::Release);
+        }
+        let result = runner.join().expect("reap attempt fixture");
+        event.expect("attempt completion event before distant hang guard");
+        result
     }
 
     fn wait_fixture_ready(path: &Path) -> std::io::Result<()> {
