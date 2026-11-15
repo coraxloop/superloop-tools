@@ -331,6 +331,10 @@ print(json.dumps(sorted(rows)))
         let home = &self.home;
         let (mut plan, _) =
             superloop_lane::load_plan(home, "alpha", "R", (0, 0)).expect("host plan");
+        assert_ne!(
+            plan.document["worker_uid"], 64010,
+            "public fixture worker must differ from allocation base"
+        );
         plan.select_worker_uid(64010).expect("worker");
         plan.select_container_program(&self.runtime)
             .expect("runtime");
@@ -382,6 +386,17 @@ pub(super) fn mapped(home: &Path, source: &str) -> std::process::Output {
 }
 fn seed(home: &Path) {
     fixture::configuration(home);
+    let allocation = home.join(".config/loops/allocations.toml");
+    let text = fs::read_to_string(&allocation).expect("fixture allocation");
+    write(
+        allocation,
+        text.replace("uids={base=64010,count=2}", "uids={base=64009,count=3}")
+            .replace(
+                "mail_gids={base=64020,count=3}",
+                "mail_gids={base=64020,count=4}",
+            ),
+        0o600,
+    );
     let result = fixture::child_command(home, "seed")
         .fixture_output("host seed", Duration::from_secs(180))
         .expect("seed");

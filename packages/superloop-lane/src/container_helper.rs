@@ -3866,9 +3866,13 @@ mod tests {
         fs::write(&letter, "Read back.\n").expect("letter without declaration");
         let selection = json!({"model":"gpt-6-sol","effort":"high","model_source":"launch-flag","effort_source":"launch-flag"});
         let (mut plan, _) = crate::load_plan(home, "alpha", "R", (0, 0)).expect("base plan");
-        plan.select_worker_uid(3000).expect("worker UID");
+        assert_ne!(
+            plan.document["worker_uid"], 3001,
+            "helper fixture uses a non-base worker"
+        );
+        plan.select_worker_uid(3001).expect("worker UID");
         let birth = loop_home::mail::birth::Identity::for_reservation(
-            3000,
+            3001,
             format!("superloop-lane:{}", "R"),
         );
         plan.select_mailbox(
@@ -3883,7 +3887,7 @@ mod tests {
         plan.select_container_program(Path::new("/usr/bin/podman"))
             .expect("container program");
         plan.select_launch_model(&selection).expect("flag model");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":letter});
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3001,"plan":plan.document,"model_selection":selection,"letter_source":letter});
         fs::write(
             runs.join(".reservation-R.json"),
             serde_json::to_vec(&record).expect("record"),

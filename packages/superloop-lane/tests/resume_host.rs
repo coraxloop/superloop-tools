@@ -97,18 +97,6 @@ fn public_helper_stop_recovers_resumed_no_reply() {
 fn public_failed_round_inspection_uses_allocated_worker() {
     let fixture = host::Host::new();
     refusals::failed_history(&fixture);
-    let allocation = fixture.home().join(".config/loops/allocations.toml");
-    let text = std::fs::read_to_string(&allocation).expect("allocation");
-    assert!(text.contains("uids={base=64010,count=2}"));
-    host::write(
-        allocation,
-        text.replace("uids={base=64010,count=2}", "uids={base=64009,count=3}")
-            .replace(
-                "mail_gids={base=64020,count=3}",
-                "mail_gids={base=64019,count=4}",
-            ),
-        0o600,
-    );
     let (base, _) =
         superloop_lane::load_plan(fixture.home(), "alpha", "R", (0, 0)).expect("base plan");
     let record: serde_json::Value = serde_json::from_slice(&fixture.reservation()).expect("record");
@@ -118,10 +106,6 @@ fn public_failed_round_inspection_uses_allocated_worker() {
 import json,os,sys
 from pathlib import Path
 home=Path(sys.argv[1]);record=json.loads((home/'runs/.reservation-R.json').read_text())
-# The loop mailbox occupies the allocation's first group; the worker keeps 64021.
-mail=home/'.var/loops/alpha/mail'
-for p in [mail,*mail.rglob('*')]:
- if p.lstat().st_gid==64020:os.chown(p,-1,64019)
 root=Path(record['plan']['home'])/'.codex/sessions'
 root.mkdir(parents=True,exist_ok=True)
 leaf=root/'rollout-fixture-fixture-thread.jsonl';leaf.write_bytes(b'synthetic session existence only')

@@ -439,8 +439,21 @@ fn package_seed(
     } else {
         BODY
     };
-    let (_writer, instant) =
-        delivery_for_name(storage, journal, &row, reply, &identity.name, body, false);
+    let (_writer, instant) = delivery_for_name(
+        storage,
+        journal,
+        &row,
+        reply,
+        (
+            &identity.name,
+            configuration
+                .allocations
+                .mail_group("alpha", Some(identity.uid))
+                .expect("allocated worker mail group"),
+        ),
+        body,
+        false,
+    );
     writeln!(std::io::stdout().lock(), "PACKAGE-DELIVERY {instant}").expect("seed result");
 }
 
@@ -492,7 +505,13 @@ fn package_reply_child(home: &Path) {
         &journal,
         &row,
         true,
-        &identity.name,
+        (
+            &identity.name,
+            configuration
+                .allocations
+                .mail_group("alpha", Some(identity.uid))
+                .expect("allocated worker mail group"),
+        ),
         b"Synthetic completed reply.\n",
         true,
     );
@@ -721,17 +740,26 @@ fn delivery_for(
     row: &loop_home::LoopRecord,
     reply: bool,
 ) -> (journal::Journal, Instant) {
-    delivery_for_name(storage, journal_anchor, row, reply, "worker", BODY, false)
+    delivery_for_name(
+        storage,
+        journal_anchor,
+        row,
+        reply,
+        ("worker", 64021),
+        BODY,
+        false,
+    )
 }
 fn delivery_for_name(
     storage: &Arc<Anchor>,
     journal_anchor: &Anchor,
     row: &loop_home::LoopRecord,
     reply: bool,
-    worker: &str,
+    worker: (&str, u32),
     body: &[u8],
     append: bool,
 ) -> (journal::Journal, Instant) {
+    let (worker, group) = worker;
     let address = format!("alpha+{worker}");
     let mut journal = if append {
         journal::Journal::open(beneath(journal_anchor, ".")).expect("retained journal")
@@ -746,7 +774,7 @@ fn delivery_for_name(
         storage,
         row,
         Address::parse(if reply { &address } else { "alpha" }).expect("sender"),
-        if reply { 64021 } else { 64020 },
+        if reply { group } else { 64020 },
         durable,
     )
     .expect("sender endpoint");
@@ -754,7 +782,7 @@ fn delivery_for_name(
         storage,
         row,
         Address::parse(if reply { "alpha" } else { &address }).expect("recipient"),
-        if reply { 64020 } else { 64021 },
+        if reply { 64020 } else { group },
         durable,
     )
     .expect("recipient endpoint");
