@@ -1,8 +1,6 @@
-use super::tests::route_for;
+use super::tests::{fixture_final_frame, fixture_protocol_frame, route_for};
 use super::transport::{Operation, Runner};
-use super::{
-    Registration, Scope, compute, frame_read, frame_read_until, frame_write, serve_request,
-};
+use super::{Registration, Scope, compute, frame_write, serve_request};
 use crate::requests::{
     RequestRecord,
     modes::Rubric,
@@ -142,7 +140,7 @@ fn compute_service_with_policy(
         super::REQUEST_FILED.with(|slot| *slot.borrow_mut() = filed);
         let (mut stream, _) = listener.accept()?;
         let started = Instant::now();
-        let request = frame_read_until(&mut stream, started + Duration::from_secs(120))?;
+        let request = super::frame_read_until(&mut stream, started + Duration::from_secs(120))?;
         serve_request(
             &mut stream,
             &registration,
@@ -466,10 +464,7 @@ fn door_preflight_sites_file_or_report_persistence_failure() {
             );
             crate::requests::store::fixture_file_cap(None);
             let reply = result.expect("service").0;
-            let mut frame = frame_read(&mut client).expect("frame");
-            if frame["type"] == "compute-deadline" {
-                frame = frame_read(&mut client).expect("final frame");
-            }
+            let frame = fixture_final_frame(&mut client);
             assert_eq!(frame, reply);
             assert_eq!(reply["reason"], expected, "{site}: {reply}");
             assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -1342,10 +1337,10 @@ fn door_compute_queue_deadline_and_disconnect_have_no_effect() {
             drop(client);
         } else {
             assert_eq!(
-                frame_read(&mut client).expect("announcement")["type"],
+                fixture_protocol_frame(&mut client, "compute-deadline")["type"],
                 "compute-deadline"
             );
-            let reply = frame_read(&mut client).expect("deadline reply");
+            let reply = fixture_final_frame(&mut client);
             assert_eq!(reply["reason"], "door-request-deadline");
         }
         server.join().expect("server").expect("service");
@@ -1430,11 +1425,10 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
             drop(client);
         } else {
             assert_eq!(
-                frame_read(&mut client).expect("announcement")["type"],
+                fixture_protocol_frame(&mut client, "compute-deadline")["type"],
                 "compute-deadline"
             );
-            let reply = frame_read_until(&mut client, Instant::now() + Duration::from_secs(15))
-                .expect("deadline reply");
+            let reply = fixture_final_frame(&mut client);
             assert_eq!(reply["reason"], "door-deadline-refusal");
             assert!(reply["compute"]["wrapper_exit_status"].is_null());
         }
@@ -1523,9 +1517,10 @@ fn door_compute_deadline_selects_only_the_exact_owner_form() {
 }
 
 fn compute_refusal_frame(client: &mut UnixStream) -> (Value, u64) {
+    // Preserve the credit assertions; an ordinary final reader would discard them.
     let mut observed_credit = 0;
     loop {
-        let frame = frame_read(client).expect("deadline progress or final");
+        let frame = super::frame_read(client).expect("deadline progress or final");
         if frame["type"] != "request-lock-wait" {
             assert_eq!(frame["type"], "final");
             return (frame, observed_credit);
@@ -1547,7 +1542,8 @@ fn compute_refusal_call(socket: &std::path::Path, use_stub: bool) -> (Value, Opt
     let mut client = UnixStream::connect(socket).expect("socket");
     frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":1000})).expect("shorter caller bound");
     client.shutdown(Shutdown::Write).expect("EOF");
-    let announcement = frame_read(&mut client).expect("announcement");
+    // The deadline announcement precedes admission and every request-lock wait.
+    let announcement = super::frame_read(&mut client).expect("announcement");
     assert_eq!(announcement["type"], "compute-deadline");
     assert_eq!(announcement["registered_deadline_ms"], 3_600_000);
     assert_eq!(announcement["request_deadline_ms"], 1000);
@@ -1771,8 +1767,7 @@ fn door_rejected_compute_announces_before_admission() {
         let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, scope, None);
         let mut client = UnixStream::connect(socket).expect("connect");
         frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),command.as_bytes().to_vec()],"deadline_ms":60000})).expect("compute-shaped request");
-        let announced = frame_read_until(&mut client, Instant::now() + Duration::from_secs(120))
-            .expect("announcement precedes the held admission guard");
+        let announced = fixture_protocol_frame(&mut client, "compute-deadline");
         assert_eq!(announced["type"], "compute-deadline");
         assert_eq!(announced["registered_deadline_ms"], compute::DEADLINE_MS);
         assert_eq!(announced["request_deadline_ms"], 60000);
@@ -1785,8 +1780,7 @@ fn door_rejected_compute_announces_before_admission() {
                 .is_empty()
         );
         drop(held);
-        let reply = frame_read_until(&mut client, Instant::now() + Duration::from_secs(120))
-            .expect("named refusal after admission");
+        let reply = fixture_final_frame(&mut client);
         server.join().expect("server").expect("service");
         assert_eq!(reply["reason"], reason);
         assert_eq!(reply["status"], 125);
@@ -1885,7 +1879,7 @@ fn door_root_refusal_announces_before_admission() {
             nix::unistd::Uid::effective().as_raw(),
         )
         .expect("private fixture namespace");
-        let request = frame_read(&mut service).expect("request");
+        let request = super::frame_read(&mut service).expect("request");
         super::root_refusal(
             &mut service,
             &registration,
@@ -1897,8 +1891,7 @@ fn door_root_refusal_announces_before_admission() {
         )
     });
     frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":60000})).expect("request");
-    let announced = frame_read_until(&mut client, Instant::now() + Duration::from_secs(5))
-        .expect("root refusal announces while admission is held");
+    let announced = fixture_protocol_frame(&mut client, "compute-deadline");
     assert_eq!(announced["type"], "compute-deadline");
     assert_eq!(announced["registered_deadline_ms"], compute::DEADLINE_MS);
     assert!(
@@ -1910,12 +1903,17 @@ fn door_root_refusal_announces_before_admission() {
     );
     drop(held);
     let deadline = Instant::now() + Duration::from_secs(5);
+    // Here stderr is asserted as well as the answer; lock credits are intermediate.
     let reply = loop {
-        let frame = frame_read_until(&mut client, deadline).expect("root refusal frames");
+        let frame = super::frame_read_until(&mut client, deadline)
+            .expect("root diagnostic, credit or final");
         if frame.get("reason").is_some() {
             break frame;
         }
-        assert_eq!(frame["type"], "stderr");
+        assert!(matches!(
+            frame["type"].as_str(),
+            Some("stderr" | "request-lock-wait")
+        ));
     };
     server.join().expect("server").expect("root refusal");
     assert_eq!(reply["reason"], "door-compute-root-refusal");

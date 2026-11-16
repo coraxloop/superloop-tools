@@ -188,7 +188,7 @@ fn service_startup_uses_show_only_registry_entry() {
     // A reply proves the real accept loop ran after socket finalization; existence
     // or a successful connect alone would also observe an unfinished startup.
     super::frame_write(&mut stream, &json!({"schema":2,"type":"request"})).expect("request");
-    let reply = super::frame_read(&mut stream).expect("listening service reply");
+    let reply = super::tests::fixture_final_frame(&mut stream);
     assert_eq!(reply["reason"], "door-request-refusal", "{reply}");
     assert_eq!(
         fs::read_to_string(entry.with_extension("argv")).expect("entry arguments"),

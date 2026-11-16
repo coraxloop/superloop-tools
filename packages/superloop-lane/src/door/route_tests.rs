@@ -207,7 +207,8 @@ fn route_service(
             "route-service-accept-deadline",
         )?;
         let started = Instant::now();
-        let request = frame_read_until(&mut stream, started + Duration::from_secs(5))?;
+        let request =
+            super::super::frame_read_until(&mut stream, started + Duration::from_secs(5))?;
         serve_request(
             &mut stream,
             &registration,
@@ -839,7 +840,7 @@ fn door_stub_refuses_output_beyond_announced_bound() {
         )
         .expect("peer");
         let deadline = Instant::now() + Duration::from_secs(5);
-        frame_read_until(&mut peer, deadline).expect("request");
+        super::super::frame_read_until(&mut peer, deadline).expect("request");
         frame_write_until(
             &mut peer,
             &json!({"schema":2,"type":"limits","bound":3,"registered":"present"}),

@@ -3682,9 +3682,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        MAX_PEERS, Registration, Scope, admit_peer, completed_door_group, frame_read,
-        frame_read_until, frame_write, frame_write_until, peer_uid, serve_one_for_peer,
-        serve_request, serve_socket, stub_call,
+        MAX_PEERS, Registration, Scope, admit_peer, completed_door_group, frame_write,
+        frame_write_until, peer_uid, serve_one_for_peer, serve_request, serve_socket, stub_call,
     };
     use crate::door::transport::{HostRunner, Operation, Runner};
     use crate::requests::{
@@ -3737,7 +3736,7 @@ mod tests {
                 )
                 .expect("private fixture namespace");
                 let (mut stream, _) = listener.accept().expect("peer");
-                let request = frame_read(&mut stream).expect("request");
+                let request = super::frame_read(&mut stream).expect("request");
                 let registration = Registration::from_row(
                     &json!({"name":"alpha","uid":41001}),
                     "alpha",
@@ -4312,7 +4311,7 @@ mod tests {
             let started = Instant::now();
             let _socket_peer = peer_uid(&stream)?;
             let peer = 3000;
-            let request = frame_read_until(&mut stream, started + FIXTURE_HANG)?;
+            let request = super::frame_read_until(&mut stream, started + FIXTURE_HANG)?;
             let registration = Registration::from_row(
                 &json!({"name":"alpha","uid":41001}),
                 "alpha",
@@ -4384,15 +4383,7 @@ mod tests {
                 });
                 // Drop before scope joins even when a client assertion panics.
                 let _finish_watch = FinishWatch(&finished);
-                let read_reply = |client: &mut UnixStream| {
-                    let until = Instant::now() + Duration::from_secs(5);
-                    loop {
-                        let frame = frame_read_until(client, until).expect("reply or credit");
-                        if frame["type"] != "request-lock-wait" {
-                            break frame;
-                        }
-                    }
-                };
+                let read_reply = fixture_final_frame;
                 for _ in 0..2 {
                     let observed = Arc::clone(&observed);
                     // Keep the watcher live while the receive is waiting. Only
@@ -4854,8 +4845,9 @@ mod tests {
         .expect("named admission lock deadline reply");
         crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(None));
         let mut observed_credit = 0;
+        // Wire reads are intentional: every credited amount is part of this assertion.
         let delivered = loop {
-            let frame = frame_read(&mut worker).expect("worker frame");
+            let frame = super::frame_read(&mut worker).expect("worker frame");
             if frame["type"] != "request-lock-wait" {
                 break frame;
             }
@@ -5003,7 +4995,7 @@ mod tests {
             .expect("stub retains the final referral refusal")
         });
         let (mut stream, _) = listener.accept().expect("client connection");
-        let request = frame_read(&mut stream).expect("stub request");
+        let request = super::frame_read(&mut stream).expect("stub request");
         (stream, request, client)
     }
 
@@ -5340,16 +5332,43 @@ mod tests {
         server.join().expect("fragmented writer");
     }
 
-    // Keep one bounded read window across all request-lock credit frames.
+    // Default for answers: one bounded window through all protocol progress.
     pub(super) fn fixture_final_frame(client: &mut UnixStream) -> Value {
+        fixture_protocol_frame(client, "final")
+    }
+
+    // Use a named event only when that event, rather than the answer, is the claim.
+    // Raw framing stays qualified at inbound-request and wire-format test sites.
+    pub(super) fn fixture_protocol_frame(client: &mut UnixStream, expected: &str) -> Value {
         let until = Instant::now() + FIXTURE_HANG;
         loop {
-            let frame = frame_read_until(client, until).expect("reply or lock-wait credit");
-            if frame["type"] != "request-lock-wait" {
+            let frame = super::frame_read_until(client, until).expect("fixture protocol frame");
+            let kind = frame["type"].as_str();
+            if expected == "final" && frame.get("status").is_some() {
+                assert!(frame["status"].as_i64().is_some(), "final status: {frame}");
+                assert!(
+                    kind.is_none() || kind == Some("final"),
+                    "final type: {frame}"
+                );
                 return frame;
             }
-            assert_eq!(frame["schema"], 2);
-            assert!(frame["wait_ms"].as_u64().is_some_and(|wait| wait > 0));
+            if kind == Some("request-lock-wait") {
+                assert_eq!(frame["schema"], 2);
+                assert!(frame["wait_ms"].as_u64().is_some_and(|wait| wait > 0));
+            }
+            if kind == Some(expected) {
+                assert_ne!(expected, "final", "final frame lacks status: {frame}");
+                return frame;
+            }
+            assert!(
+                kind == Some("request-lock-wait")
+                    || (expected == "final"
+                        && matches!(
+                            kind,
+                            Some("compute-deadline" | "stdout" | "stderr" | "limits")
+                        )),
+                "expected {expected}, received {frame}"
+            );
         }
     }
 
@@ -5371,6 +5390,10 @@ mod tests {
                     &json!({"schema":2,"type":"request-lock-wait","wait_ms":wait_ms}),
                 )
                 .expect("credit frame");
+            }
+            for kind in ["compute-deadline", "stdout", "stderr", "limits"] {
+                frame_write(&mut writer, &json!({"schema":2,"type":kind}))
+                    .expect("intermediate frame");
             }
             let reply = super::connection_refusal(
                 &io::Error::other("synthetic framing case"),
@@ -6452,7 +6475,7 @@ mod tests {
         }
         let (mut client, mut server) = UnixStream::pair().expect("overflow peer");
         assert!(admit_peer(&active, &mut server).is_none());
-        let reply = frame_read(&mut client).expect("typed capacity reply");
+        let reply = fixture_final_frame(&mut client);
         assert_eq!(reply["reason"], "door-capacity-refusal");
         assert_eq!(reply["queue_state"], "no-queue");
         assert_eq!(reply["peer_limit"], 16);
@@ -6497,7 +6520,7 @@ mod tests {
             .expect("next request");
         serve_one_for_peer(&mut next_server, &registration, 3000).expect("next answer");
         assert_eq!(
-            frame_read(&mut next).expect("next final")["reason"],
+            fixture_final_frame(&mut next)["reason"],
             "door-compute-unregistered"
         );
         drop(grant);
@@ -6614,10 +6637,10 @@ mod tests {
         )
         .expect("probe request");
         serve_one_for_peer(&mut server, &registration, worker).expect("review refusal");
-        let announced = frame_read(&mut client).expect("compute-shaped probe announcement");
+        let announced = fixture_protocol_frame(&mut client, "compute-deadline");
         assert_eq!(announced["type"], "compute-deadline");
         assert_eq!(announced["request_deadline_ms"], 1000);
-        let reply = frame_read(&mut client).expect("typed reply");
+        let reply = fixture_final_frame(&mut client);
         assert_eq!(reply["reason"], "door-review-compute-refusal");
         assert_eq!(reply["peer_uid"], 3001);
     }
@@ -6730,7 +6753,7 @@ mod tests {
                 serve_one_for_peer(&mut server, &registration, peer).expect("served");
             assert_eq!(response["reason"], reason);
             assert_eq!(response["peer_uid"], peer);
-            assert_eq!(frame_read(&mut client).expect("reply"), as_sent(&response));
+            assert_eq!(fixture_final_frame(&mut client), as_sent(&response));
         }
     }
 
