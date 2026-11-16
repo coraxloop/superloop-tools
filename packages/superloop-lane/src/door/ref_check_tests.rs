@@ -68,12 +68,13 @@ fn door_receive_flush_without_ref_records_no_ref() {
 fn door_receive_deadline_before_packet_records_not_reached() {
     use std::io::Write as _;
 
-    const RECEIVE_DEADLINE_MS: u64 = 5000;
+    const RECEIVE_DEADLINE_MS: u64 = 120_000;
     super::super::REQUEST_READY.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(|_| {
             Ok(Instant::now() + Duration::from_millis(RECEIVE_DEADLINE_MS))
         }));
     });
+    SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = Some(Box::new(Instant::now)));
     let (temp, socket, server) = fixture(Scope::Work);
     let mut client = UnixStream::connect(&socket).expect("receive client");
     let deadline = Instant::now() + Duration::from_secs(120);

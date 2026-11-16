@@ -5274,7 +5274,7 @@ mod tests {
     }
 
     // Common fixture hang bound, not a scheduling/performance assertion.
-    const FIXTURE_HANG: Duration = Duration::from_secs(120);
+    pub(super) const FIXTURE_HANG: Duration = Duration::from_secs(120);
 
     // Observe the credit without consuming it: the final-reader mutation must
     // still encounter this very frame after the writer is released.

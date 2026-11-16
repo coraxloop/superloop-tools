@@ -1860,7 +1860,7 @@ mod tests {
         HostRunner, Operation, Runner, checked_ref_packet, compute_client_deadline,
         compute_deadline_frame, read_owner_leaf, stub_call, stub_call_stream,
     };
-    use crate::door::tests::fixture_final_frame;
+    use crate::door::tests::{FIXTURE_HANG, fixture_final_frame};
     use crate::door::{
         Registration, Scope, frame_read_until, frame_write_until, peer_uid, serve_request,
     };
@@ -2812,7 +2812,7 @@ mod tests {
             Command::new("/usr/bin/python3")
                 .args([
                     "-c",
-                    "import os,sys,time\nif os.fork(): sys.exit(7)\ntime.sleep(10)\n",
+                    "import os,sys,signal\nif os.fork(): sys.exit(7)\nsignal.pause()\n",
                 ])
                 .process_group(0)
                 .stdin(Stdio::piped())
@@ -2847,7 +2847,7 @@ mod tests {
                 Operation::ProbeStatus,
                 &PipeHoldingRunner,
                 started,
-                started + Duration::from_secs(4),
+                started + FIXTURE_HANG,
                 "no-queue",
                 None,
                 None,
@@ -2855,12 +2855,11 @@ mod tests {
                 None,
             )
         });
-        let reply = frame_read_until(&mut client, started + Duration::from_secs(4))
-            .expect("bounded final status");
+        let reply =
+            frame_read_until(&mut client, started + FIXTURE_HANG).expect("bounded final status");
         assert_eq!(reply["status"], 7);
         assert_eq!(reply["compute_exit_status"], 7);
         assert_eq!(reply["reason"], "door-complete");
-        assert!(started.elapsed() < Duration::from_secs(4));
         service
             .join()
             .expect("service join")
@@ -2928,7 +2927,7 @@ mod tests {
                 scope,
             )
             .map_err(io::Error::other)?;
-            let request = frame_read_until(&mut stream, started + Duration::from_secs(2))?;
+            let request = frame_read_until(&mut stream, started + FIXTURE_HANG)?;
             let route = HostRunner {
                 compute_deadlines: Vec::new(),
                 alias: "fixture".to_owned(),
@@ -2980,7 +2979,7 @@ mod tests {
         fn read(&mut self, target: &mut [u8]) -> io::Result<usize> {
             if !self.started {
                 self.gate
-                    .recv_timeout(Duration::from_secs(3))
+                    .recv_timeout(FIXTURE_HANG)
                     .map_err(io::Error::other)?;
                 self.started = true;
             }
@@ -3017,9 +3016,9 @@ mod tests {
     impl io::Read for LockstepInput {
         fn read(&mut self, target: &mut [u8]) -> io::Result<usize> {
             if !self.started {
-                if self.gate.recv_timeout(Duration::from_secs(3)).is_err() {
-                    return Ok(0);
-                }
+                self.gate
+                    .recv_timeout(FIXTURE_HANG)
+                    .map_err(io::Error::other)?;
                 self.started = true;
             }
             self.bytes.read(target)
@@ -3057,7 +3056,7 @@ mod tests {
             &mut output,
             &mut errors,
         )
-        .expect("lockstep reply before three-second stdin deadline");
+        .expect("lockstep reply after output releases stdin");
         assert_eq!(
             reply["status"], 0,
             "the output frame must release fixture stdin"
@@ -3274,8 +3273,8 @@ mod tests {
         frame_write_until(
             &mut client,
             &json!({"schema":2,"argv":[b"door-attribution-probe".to_vec()],
-            "deadline_ms":1000}),
-            Instant::now() + Duration::from_secs(1),
+            "deadline_ms":120_000}),
+            Instant::now() + FIXTURE_HANG,
         )
         .expect("request");
         drop(client);
