@@ -6720,6 +6720,59 @@ mod tests {
         assert_eq!(active.load(Ordering::Relaxed), 0);
     }
 
+    fn call_fixture_socket_when_ready(
+        path: &std::path::Path,
+        args: &[OsString],
+        server: thread::JoinHandle<io::Result<(serde_json::Value, Vec<u8>)>>,
+    ) -> Result<(serde_json::Value, serde_json::Value, Vec<u8>), String> {
+        let until = Instant::now() + FIXTURE_HANG;
+        let reply = loop {
+            match stub_call(path, args, b"") {
+                Ok(reply) => break reply,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    if server.is_finished() {
+                        let result = server.join().map_err(|panic| {
+                            format!("fixture server panicked before listener: {panic:?}")
+                        })?;
+                        return Err(format!(
+                            "fixture server finished before listener: {result:?}; connect: {error}"
+                        ));
+                    }
+                    if Instant::now() >= until {
+                        return Err(format!("fixture listener did not become ready: {error}"));
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => return Err(format!("fixture stub call: {error}")),
+            }
+        };
+        let (response, body) = server
+            .join()
+            .map_err(|panic| format!("fixture server panicked: {panic:?}"))?
+            .map_err(|error| format!("fixture server: {error}"))?;
+        Ok((reply, response, body))
+    }
+
+    /// # Panics
+    /// Panics only if the fixture fails to expose its server's own error.
+    /// ´test:unit:fixture-socket-reports-server-failure-before-listener´
+    #[test]
+    fn fixture_socket_reports_server_failure_before_listener() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let path = fixture.path().join("never-listened.sock");
+        let server = thread::spawn(|| Err(io::Error::other("fixture bind failed")));
+        let error =
+            call_fixture_socket_when_ready(&path, &[], server).expect_err("fixture server failure");
+        assert!(error.contains("fixture bind failed"), "{error}");
+    }
+
+    /// # Panics
+    /// Panics only if the fixture or its server fails to start or answer.
     /// ´test:unit:fixture-socket-binds-peer-and-keeps-exact-arguments´
     #[test]
     fn fixture_socket_binds_peer_and_keeps_exact_arguments() {
@@ -6734,31 +6787,8 @@ mod tests {
         let server_socket = socket.clone();
         let server = thread::spawn(move || serve_socket(&server_socket, &server_registration));
         let args = [OsString::from("door-shape-probe"), OsString::from("R")];
-        let call_when_ready = |path: &std::path::Path| {
-            let until = Instant::now() + FIXTURE_HANG;
-            loop {
-                match stub_call(path, &args, b"") {
-                    Ok(reply) => break Ok(reply),
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                        ) =>
-                    {
-                        if Instant::now() >= until {
-                            break Err(io::Error::new(
-                                io::ErrorKind::TimedOut,
-                                format!("fixture listener did not become ready: {error}"),
-                            ));
-                        }
-                        thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => break Err(error),
-                }
-            }
-        };
-        let reply = call_when_ready(&socket).expect("stub reply");
-        let (response, body) = server.join().expect("server thread").expect("served");
+        let (reply, response, body) =
+            call_fixture_socket_when_ready(&socket, &args, server).expect("stub reply");
         assert_eq!(reply, response);
         assert_eq!(body, Vec::<u8>::new());
         assert_eq!(reply["reason"], "door-transport-pending");
@@ -6772,12 +6802,9 @@ mod tests {
             crate::fixture_exec::fixture_socket_path(fixture.path().join("review.sock"));
         let server_path = review_socket.clone();
         let server = thread::spawn(move || serve_socket(&server_path, &review));
-        let reply = call_when_ready(&review_socket).expect("review probe");
+        let (reply, _, _) =
+            call_fixture_socket_when_ready(&review_socket, &args, server).expect("review probe");
         assert_eq!(reply["reason"], "door-review-compute-refusal");
-        server
-            .join()
-            .expect("review server")
-            .expect("served review");
     }
 
     /// ´test:unit:door-host-peer-maps-to-recorded-review-worker´
