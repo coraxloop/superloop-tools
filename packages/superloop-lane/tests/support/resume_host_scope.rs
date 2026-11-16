@@ -531,6 +531,7 @@ fn settle_late_reply(fixture: &host::Host, failed: &serde_json::Value) {
     let saved: serde_json::Value = serde_json::from_slice(&fixture.reservation()).expect("settled");
     assert_eq!(saved["phase"], "settled");
     assert_eq!(saved["rounds"][1]["phase"], "settled");
+    settled_bound_reply_refuses_without_recovery_remedy(fixture, &fixture.reservation());
     earlier_bound_reply_refuses_without_recovery_remedy(fixture, &fixture.reservation());
     assert_eq!(
         saved["driver_end"], failed["driver_end"],
@@ -548,6 +549,40 @@ fn settle_late_reply(fixture: &host::Host, failed: &serde_json::Value) {
         .next_launch(false, true)
         .expect("late reply owes no thread choice");
     assert_eq!(next["helper_preflight"]["state"], "passed");
+}
+
+fn settled_bound_reply_refuses_without_recovery_remedy(fixture: &host::Host, bound: &[u8]) {
+    let mut changed: serde_json::Value = serde_json::from_slice(bound).expect("bound record");
+    changed["phase"] = serde_json::json!("failed");
+    assert_eq!(changed["active_round"], "review");
+    assert_eq!(changed["rounds"][1]["phase"], "settled");
+    let path = fixture.home().join("runs/.reservation-R.json");
+    host::write(
+        path.clone(),
+        serde_json::to_vec(&changed).expect("record"),
+        0o600,
+    );
+    let before = fixture.reservation();
+    let inventory = fixture.inventory();
+    let error = fixture
+        .bind_reply_for("review")
+        .expect_err("settled round is not failed recovery");
+    assert_eq!(error.kind, "mail-delivery");
+    assert_eq!(
+        error.detail, "binding requires a started or settled reservation",
+        "settled last round must not advertise failed-round settlement"
+    );
+    assert_eq!(
+        fixture.reservation(),
+        before,
+        "settled-step refusal preserves record"
+    );
+    assert_eq!(
+        fixture.inventory(),
+        inventory,
+        "settled-step refusal preserves files"
+    );
+    host::write(path, bound, 0o600);
 }
 
 fn earlier_bound_reply_refuses_without_recovery_remedy(fixture: &host::Host, bound: &[u8]) {

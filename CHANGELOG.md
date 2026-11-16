@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Selected fake topology rosters now have a 120-second per-trial hang bound, over sixty times the largest trial wall measured under node load; their outcome assertions and full-roster deadlines are unchanged. Release builds still refuse test rosters (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
 
+- A repeated late `bind-reply` no longer suggests failed-round settlement when the last round is already settled, even if the run remains failed; the ordinary phase refusal applies (``claim:superlooplane:late-reply-recovery-keeps-delivered-replies``).
+
 - Door test fixtures expose an owned client whose answer read consumes validated progress frames; raw wire reads require an explicit opt-in. The sized-run test waits for each resumed reader to finish after proving the writer can acquire without waiting. Tests only; installed doors and operator procedures are unchanged (``sec:superlooplane:door-test-fixtures``).
 
 - Door test replies use a shared final-status reader across service, compute, concurrency and startup fixtures; intermediate protocol events are requested explicitly. Lock-wait progress cannot be mistaken for an answer. Tests only; no installed behavior or deployment procedure changes (`prob:gates:elapsed-time-assertions-are-censused-and-rewritten`).

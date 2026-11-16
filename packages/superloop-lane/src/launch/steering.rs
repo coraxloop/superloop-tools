@@ -179,6 +179,10 @@ pub fn run_from(
         if reply
             && record["phase"] == "failed"
             && record["active_round"] == request.step
+            && record["rounds"]
+                .as_array()
+                .and_then(|rows| rows.last())
+                .is_some_and(|round| round["step"] == request.step && round["phase"] == "failed")
             && record["mail_replies"]
                 .as_array()
                 .is_some_and(|rows| rows.iter().any(|row| row["step"] == request.step))
