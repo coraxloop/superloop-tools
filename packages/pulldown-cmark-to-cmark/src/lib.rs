@@ -493,6 +493,47 @@ mod tests {
             .expect("serialize code with an optional source spelling");
             assert_eq!(output, expected, "source {source:?}");
         }
+        for cell in [
+            "`\\|` *label*",
+            "`\\|` **label**",
+            "*label* `\\|`",
+            "`a \\| b` *label*",
+            "``a \\| b`` **label**",
+        ] {
+            let source = format!("|a|b|\n|-|-|\n|{cell}|c|");
+            for retain_literal_code in [false, true] {
+                let events = Parser::new_ext(&source, ParseOptions::ENABLE_TABLES)
+                    .into_offset_iter()
+                    .map(|(event, range)| {
+                        let event = if retain_literal_code && matches!(event, Event::Code(_)) {
+                            Parser::new(&source[range.clone()])
+                                .find(|event| matches!(event, Event::Code(_)))
+                                .expect("the retained spelling is a code span")
+                        } else {
+                            event
+                        };
+                        (event, Some(range))
+                    });
+                let mut output = String::new();
+                cmark_with_source_range_and_options(
+                    events,
+                    &source,
+                    &mut output,
+                    ParseOptions::ENABLE_TABLES,
+                    SerializeOptions::default(),
+                )
+                .expect("serialize table code beside emphasis with either code interpretation");
+                if retain_literal_code {
+                    assert_eq!(output, source);
+                } else {
+                    let expected: Vec<_> =
+                        Parser::new_ext(&source, ParseOptions::ENABLE_TABLES).collect();
+                    let actual: Vec<_> =
+                        Parser::new_ext(&output, ParseOptions::ENABLE_TABLES).collect();
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
     }
 
     fn assert_round_trip(input: &str, parse_options: ParseOptions) {

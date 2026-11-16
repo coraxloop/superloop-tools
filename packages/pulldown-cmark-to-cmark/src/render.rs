@@ -11,7 +11,7 @@ use pulldown_cmark::{
 };
 use std::{
     borrow::Cow,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::{self, Write},
 };
 use unicase::UniCase;
@@ -740,13 +740,11 @@ impl Renderer {
                     {
                         write!(header, "`{text}`")?;
                     }
-                    if let Some(source) = events[i].source.as_deref().filter(|source| {
-                        let mut parsed = Parser::new_ext(source, ParserOptions::empty());
-                        parsed.next() == Some(Event::Start(Tag::Paragraph))
-                            && parsed.next().as_ref() == Some(event)
-                            && parsed.next() == Some(Event::End(TagEnd::Paragraph))
-                            && parsed.next().is_none()
-                    }) {
+                    if let Some(source) = events[i]
+                        .source
+                        .as_deref()
+                        .filter(|source| code_source_matches(source, event))
+                    {
                         self.output.write_str(source)?;
                         self.last = Last::Inline;
                         i += 1;
@@ -2119,6 +2117,15 @@ fn label_matches(
     }
 }
 
+// A retained code spelling must describe exactly the supplied code event.
+fn code_source_matches(source: &str, event: &Event<'_>) -> bool {
+    let mut parsed = Parser::new_ext(source, ParserOptions::empty());
+    parsed.next() == Some(Event::Start(Tag::Paragraph))
+        && parsed.next().as_ref() == Some(event)
+        && parsed.next() == Some(Event::End(TagEnd::Paragraph))
+        && parsed.next().is_none()
+}
+
 // Check source spelling and delimiter choices after rendering the whole block,
 // because new indentation or surrounding delimiters can change their meaning.
 fn events_match(
@@ -2136,6 +2143,18 @@ fn events_match(
     } else {
         Cow::Owned(format!("{definitions}\n\n{output}"))
     };
+    // The caller's table adaptation retains literal code spelling, including
+    // the backslash in a code-span pipe. The table parser removes that escape.
+    // Reconcile only exact retained code spellings, using the same check as
+    // the renderer; all surrounding events still undergo block validation.
+    let retained_code: HashMap<_, _> = expected
+        .iter()
+        .filter(|event| matches!(event.event, Event::Code(_)))
+        .filter_map(|event| {
+            let source = event.source.as_deref()?;
+            code_source_matches(source, &event.event).then_some((source, &event.event))
+        })
+        .collect();
     let mut expected: Vec<_> =
         TextMergeStream::new(expected.iter().map(|e| e.event.clone())).collect();
     if !expected.is_empty()
@@ -2161,7 +2180,21 @@ fn events_match(
         };
         let parser =
             Parser::new_with_broken_link_callback(&markdown, parser_options, Some(callback));
-        let matches = TextMergeStream::new(parser).eq(expected.iter().cloned());
+        let mut in_table = false;
+        let parsed = parser.into_offset_iter().map(|(event, range)| {
+            match &event {
+                Event::Start(Tag::Table(_)) => in_table = true,
+                Event::End(TagEnd::Table) => in_table = false,
+                Event::Code(_) if in_table => {
+                    if let Some(retained) = retained_code.get(&markdown[range]) {
+                        return (*retained).clone();
+                    }
+                }
+                _ => {}
+            }
+            event
+        });
+        let matches = TextMergeStream::new(parsed).eq(expected.iter().cloned());
         matches && !resolves_earlier
     }
 }
