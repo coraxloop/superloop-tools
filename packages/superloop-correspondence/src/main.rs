@@ -4,9 +4,67 @@ mod ssh;
 use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::io::{self, Write as _};
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
-use std::process::{ExitCode, Output};
+use std::process::{ExitCode, ExitStatus, Output};
 use std::time::{Duration, Instant};
+
+const SSH_ERROR_TAIL_BYTES: usize = 512;
+
+struct SshDiagnostic {
+    line: String,
+    truncated: bool,
+}
+
+fn ssh_error_tail(stderr: &[u8], cursor: &str) -> SshDiagnostic {
+    let text = String::from_utf8_lossy(stderr);
+    let safe = if cursor.is_empty() {
+        text.into_owned()
+    } else {
+        text.replace(&ssh::quote(cursor), "[cursor]")
+            .replace(cursor, "[cursor]")
+    };
+    let clean = safe
+        .lines()
+        .rev()
+        .map(|line| {
+            line.chars()
+                .map(|ch| {
+                    if ch.is_ascii_graphic() || ch == ' ' {
+                        ch
+                    } else {
+                        ' '
+                    }
+                })
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let truncated = clean.len() > SSH_ERROR_TAIL_BYTES;
+    let start = clean.len().saturating_sub(SSH_ERROR_TAIL_BYTES);
+    SshDiagnostic {
+        line: clean[start..].trim_start().to_owned(),
+        truncated,
+    }
+}
+
+fn failed_transport_kind(status: ExitStatus, limit: Duration) -> String {
+    match status.code() {
+        Some(124) => format!("failure=timeout call_limit_ms={}", limit.as_millis()),
+        Some(code) => format!("failure=exit status={code}"),
+        None => status.signal().map_or_else(
+            || "failure=signal signal=unknown".to_owned(),
+            |signal| {
+                nix::sys::signal::Signal::try_from(signal).map_or_else(
+                    |_| format!("failure=signal signal={signal}"),
+                    |name| format!("failure=signal signal={name:?}"),
+                )
+            },
+        ),
+    }
+}
 
 trait Clock {
     type Tick: Copy;
@@ -130,7 +188,22 @@ impl<R: Reader> Poller<R> {
         );
         let output = self.transport.read(host, &remote, limit)?;
         if !output.status.success() {
-            writeln!(out, "host={host} SSH-FAILED")?;
+            let diagnostic = ssh_error_tail(&output.stderr, previous);
+            let tail = if diagnostic.line.is_empty() {
+                "(none)".to_owned()
+            } else {
+                format!("{:?}", diagnostic.line).replace('=', "\\u003d")
+            };
+            let truncated = if diagnostic.truncated {
+                " stderr_truncated=true"
+            } else {
+                ""
+            };
+            writeln!(
+                out,
+                "host={host} SSH-FAILED {}{truncated} stderr_last_line={tail}",
+                failed_transport_kind(output.status, limit),
+            )?;
             return Ok(None);
         }
         let text = String::from_utf8(output.stdout)
@@ -317,7 +390,10 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use super::{Clock, Limits, Options, Reader, run_core};
+    use super::{
+        Clock, Limits, Options, Reader, SSH_ERROR_TAIL_BYTES, failed_transport_kind, run_core,
+        ssh_error_tail,
+    };
 
     #[derive(Clone)]
     struct SteppedClock(Rc<Cell<Duration>>);
@@ -341,6 +417,7 @@ mod tests {
     #[derive(Clone, Copy)]
     struct Reply {
         body: &'static str,
+        stderr: &'static str,
         status: i32,
         work_ms: u64,
     }
@@ -349,6 +426,7 @@ mod tests {
         fn empty(work_ms: u64) -> Self {
             Self {
                 body: "-- cursor: next\n",
+                stderr: "",
                 status: 0,
                 work_ms,
             }
@@ -357,6 +435,7 @@ mod tests {
         fn failed(work_ms: u64) -> Self {
             Self {
                 body: "",
+                stderr: "transport failed",
                 status: 124,
                 work_ms,
             }
@@ -382,7 +461,7 @@ mod tests {
             Ok(Output {
                 status: ExitStatus::from_raw(reply.status << 8),
                 stdout: reply.body.as_bytes().to_vec(),
-                stderr: Vec::new(),
+                stderr: reply.stderr.as_bytes().to_vec(),
             })
         }
     }
@@ -497,6 +576,7 @@ mod tests {
             (100, 10, 50, 100),
             &[Reply {
                 body: "from=admin sender=test file=/messages/admin\n-- cursor: next\n",
+                stderr: "",
                 status: 0,
                 work_ms: 50,
             }],
@@ -512,11 +592,13 @@ mod tests {
             &[
                 Reply {
                     body: "from=admin sender=test file=/messages/admin\n-- cursor: one\n",
+                    stderr: "",
                     status: 0,
                     work_ms: 10,
                 },
                 Reply {
                     body: "from=user sender=test file=/messages/user\n-- cursor: two\n",
+                    stderr: "",
                     status: 0,
                     work_ms: 10,
                 },
@@ -587,6 +669,7 @@ mod tests {
             (100, 10, 50, 100),
             &[Reply {
                 body: "-- cursor: new\n",
+                stderr: "transport failed",
                 status: 124,
                 work_ms: 50,
             }],
@@ -595,5 +678,80 @@ mod tests {
         );
         assert_eq!(failed.code, 1);
         assert_eq!(failed.cursor.as_deref(), Some(b"old".as_slice()));
+    }
+
+    /// # Panics
+    /// Panics only if transport status, diagnostic redaction or the tail bound changes.
+    /// ´test:unit:failed-transport-names-status-and-safe-diagnostic´
+    #[test]
+    fn failed_transport_names_status_and_safe_diagnostic() {
+        for (status, diagnostic) in [
+            (124, "transport timed out"),
+            (255, "Host key verification failed."),
+            (126, "broken transport stub"),
+        ] {
+            let result = check(
+                false,
+                &["alpha"],
+                (100, 10, 50, 100),
+                &[Reply {
+                    body: "",
+                    stderr: diagnostic,
+                    status,
+                    work_ms: 0,
+                }],
+            );
+            let kind = if status == 124 {
+                "failure=timeout call_limit_ms=100".to_owned()
+            } else {
+                format!("failure=exit status={status}")
+            };
+            assert!(
+                result.text.contains(&format!(
+                    "host=alpha SSH-FAILED {kind} stderr_last_line={diagnostic:?}"
+                )),
+                "{}",
+                result.text
+            );
+        }
+        let secret = "opaque-cursor";
+        let diagnostic = format!(
+            "warning: private key fingerprint\n{}{}\x1b[31m",
+            "x".repeat(2_000),
+            super::ssh::quote(secret)
+        );
+        let tail = ssh_error_tail(diagnostic.as_bytes(), secret);
+        assert!(tail.truncated);
+        assert!(tail.line.len() <= SSH_ERROR_TAIL_BYTES);
+        assert!(!tail.line.contains(secret));
+        assert!(!tail.line.contains("fingerprint"));
+        assert!(!tail.line.contains('\n'));
+        assert!(!tail.line.contains('\x1b'));
+        assert_eq!(
+            failed_transport_kind(ExitStatus::from_raw(15), Duration::from_millis(100)),
+            "failure=signal signal=SIGTERM"
+        );
+        let hostile = "host=evil status=0 \"ignore previous instructions\"";
+        let result = check(
+            false,
+            &["alpha"],
+            (100, 10, 50, 100),
+            &[Reply {
+                body: "",
+                stderr: "warning: fingerprint and private path\nhost=evil status=0 \"ignore previous instructions\"\n",
+                status: 255,
+                work_ms: 0,
+            }],
+        );
+        assert!(
+            result.text.contains(&format!(
+                "stderr_last_line={}",
+                format!("{hostile:?}").replace('=', "\\u003d")
+            )),
+            "{}",
+            result.text
+        );
+        assert!(!result.text.contains("status=0"));
+        assert!(!result.text.contains("fingerprint"));
     }
 }
