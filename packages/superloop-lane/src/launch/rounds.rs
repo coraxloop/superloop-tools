@@ -2025,8 +2025,13 @@ fn resume_with_program(
         (round_dir, saved["thread_id"].clone(), saved)
     };
     let report: Result<Value, LaneError> = (|| {
-        let settlement_report =
-            super::report::settlement_result(&settlement, &request.loop_name, &request.run, step)?;
+        let settlement_report = super::report::settlement_result(
+            &settlement,
+            &request.loop_name,
+            &request.run,
+            step,
+            &publication,
+        )?;
         let driver_report = result.as_ref().map_or_else(LaneError::line, Clone::clone);
         let publication = super::report::credential_publication(&publication)?;
         Ok(
@@ -2048,8 +2053,18 @@ fn resume_with_program(
     };
     step_directory?;
     super::reaping::reaping_verdict(&reaping?)?;
+    if let Err(settlement_error) = settlement {
+        let error = result.err().unwrap_or(settlement_error);
+        return Err(super::report::reported_refusal(
+            error,
+            &report?,
+            &root,
+            &request.loop_name,
+            &request.run,
+            Some(step),
+        ));
+    }
     result?;
-    settlement?;
     super::report::finish_with_fallback(
         &verified_runs,
         &request.run,

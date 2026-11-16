@@ -4748,6 +4748,7 @@ fn run_with_program(
             record["active_round"]
                 .as_str()
                 .ok_or_else(|| LaneError::input("launch-report", "active round is absent"))?,
+            &record,
         )?;
         let output = result.as_ref().map_or_else(LaneError::line, Clone::clone);
         let publication = report::credential_publication(&record)?;
@@ -4782,9 +4783,19 @@ fn run_with_program(
     }
     step_directory?;
     reaping::reaping_verdict(&reaping?)?;
+    if let Err(settlement_error) = settlement {
+        let error = result.err().unwrap_or(settlement_error);
+        return Err(report::reported_refusal(
+            error,
+            &report?,
+            &root,
+            &request.loop_name,
+            &request.run,
+            None,
+        ));
+    }
     result?;
     observed?;
-    settlement?;
     report::finish_with_fallback(&verified_runs, &request.run, None, report?, on_failure)
 }
 

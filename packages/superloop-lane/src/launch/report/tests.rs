@@ -1,4 +1,5 @@
 use std::fs::{self, File};
+use std::io::Write as _;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
@@ -440,6 +441,18 @@ fn failed_report_archive_refuses_a_replaced_inode_with_equal_bytes() {
     );
 }
 
+fn refused_record(step: &str) -> Value {
+    json!({"phase":"failed","active_round":step,"mail_replies":[],
+        "driver_entry_pid":3001,"driver_entry_start":1,
+        "driver_end":{"state":"completed"},"helper_end":{"state":"completed"},
+        "observation_end":"completed","observer_state":"not-started",
+        "observer_end":{"state":"not-started","socket":{"state":"not-applicable"}},
+        "settlement_uncertain":false,
+        "reaping":{"state":"verified-empty","container_payload":{"state":"absent"}},
+        "rounds":[{"step":step,"phase":"failed","reply":null,
+            "settlement_error":format!("readback: {}", super::super::steering::MISSING_REPLY_BINDING)}]})
+}
+
 /// # Panics
 /// Panics only if refusal reports lose their cause, remedy, or bounded reader admission.
 /// ´test:unit:launch-readback-refusal-report-retains-cause-and-remedy´
@@ -447,13 +460,15 @@ fn failed_report_archive_refuses_a_replaced_inode_with_equal_bytes() {
 fn launch_readback_refusal_report_retains_cause_and_remedy() {
     let (fixture, runs) = held();
     for (step, mut report) in [(None, first()), (Some("review"), resumed())] {
+        let active = step.unwrap_or("dispatch");
         let error = crate::error::LaneError::operation(
             "settle-evidence",
             super::super::steering::MISSING_REPLY_BINDING,
         );
         let line = error.line();
         report["settlement"] =
-            super::settlement_result(&Err(error), "alpha", "R", "review").expect("refusal report");
+            super::settlement_result(&Err(error), "alpha", "R", active, &refused_record(active))
+                .expect("refusal report");
         if step.is_some() {
             report["thread_id"] = Value::Null;
         }
@@ -464,10 +479,96 @@ fn launch_readback_refusal_report_retains_cause_and_remedy() {
         assert_eq!(read["settlement"]["detail"], line);
         assert_eq!(
             read["settlement"]["next_command"],
-            "bind-reply alpha R --step review --delivery UTC_INSTANT"
+            format!("bind-reply alpha R --step {active} --delivery UTC_INSTANT"),
+            "report retains the released binding action"
         );
+        let terminal = super::reported_refusal(
+            crate::error::LaneError::operation("settle-evidence", "original refusal"),
+            &read,
+            fixture.path(),
+            "alpha",
+            "R",
+            step,
+        );
+        assert_eq!(terminal.status, 1);
+        assert!(terminal.detail.starts_with("original refusal;"));
+        assert!(terminal.detail.contains("launch report:"));
+        assert!(terminal.detail.contains("This refusal removed no letter from the loop inbox; any delivered reply remains unverified"),
+            "does not assume delivery when the inbox has no letter");
+        let printed = format!("{} wall_seconds=0.125000", terminal.line());
+        let tail = printed
+            .split_once("; next command: ")
+            .expect("command marker")
+            .1;
+        let mut command = serde_json::Deserializer::from_str(tail).into_iter::<String>();
+        assert_eq!(
+            command
+                .next()
+                .expect("command value")
+                .expect("self-delimited JSON command"),
+            if step.is_some() {
+                "superloop-lane read-launch-report alpha R --round review"
+            } else {
+                "superloop-lane read-launch-report alpha R"
+            }
+        );
+        assert_eq!(&tail[command.byte_offset()..], " wall_seconds=0.125000");
+        writeln!(
+            std::io::stdout().lock(),
+            "REPORT-OWNER-{active} {}",
+            read["settlement"]
+        )
+        .expect("report evidence");
+        writeln!(
+            std::io::stdout().lock(),
+            "TERMINAL-OWNER-{active} {printed}"
+        )
+        .expect("terminal evidence");
     }
-    let report = super::settlement_result(
+}
+
+/// # Panics
+/// Panics only if binding advice promises settlement that the saved observer refuses.
+/// ´test:unit:launch-binding-advice-withholds-unadmitted-settlement´
+#[test]
+fn launch_binding_advice_withholds_unadmitted_settlement() {
+    let mut record = refused_record("dispatch");
+    record["observer_state"] = json!("failed");
+    record["observer_end"] = json!({"state":"failed","socket":{"state":"uncertain"}});
+    assert!(super::super::settle::recovery_record_basis(&record, "dispatch").is_err());
+    let result = super::settlement_result(
+        &Err(crate::error::LaneError::input("readback", "binding absent")),
+        "alpha",
+        "R",
+        "dispatch",
+        &record,
+    )
+    .expect("binding remedy");
+    assert_eq!(
+        result["next_command"],
+        "bind-reply alpha R --step dispatch --delivery UTC_INSTANT"
+    );
+    let guidance = result["guidance"].as_str().expect("guidance");
+    assert!(guidance.contains("the report's next_command"));
+    assert!(guidance.contains("does not currently admit a settlement preview"));
+    assert!(!guidance.contains("preview settlement with superloop-lane settle"));
+    assert_eq!(
+        result["recorded_cause"],
+        record["rounds"][0]["settlement_error"]
+    );
+    writeln!(std::io::stdout().lock(), "BIND-OBSERVER-REPORT {result}")
+        .expect("binding report evidence");
+}
+
+/// # Panics
+/// Panics only if another readback refusal loses its admitted settle preview.
+/// ´test:unit:launch-nonbinding-refusal-prescribes-settle-preview´
+#[test]
+fn launch_nonbinding_refusal_prescribes_settle_preview() {
+    let mut record = refused_record("review");
+    record["rounds"][0]["settlement_error"] = json!("readback: reply custody differs");
+    assert!(super::super::settle::recovery_record_basis(&record, "review").is_ok());
+    let result = super::settlement_result(
         &Err(crate::error::LaneError::input(
             "readback",
             "reply custody differs",
@@ -475,10 +576,69 @@ fn launch_readback_refusal_report_retains_cause_and_remedy() {
         "alpha",
         "R",
         "review",
+        &record,
     )
-    .expect("other refusal");
+    .expect("settlement remedy");
     assert_eq!(
-        report["next_command"],
+        result["next_command"],
         "settle alpha R --round review --dry-run"
     );
+    assert_eq!(result["recorded_cause"], "readback: reply custody differs");
+    assert!(result["guidance"].as_str().expect("guidance").contains(
+        "preview settlement with superloop-lane settle alpha R --round review --dry-run"
+    ));
+    writeln!(std::io::stdout().lock(), "SETTLE-REPORT {result}")
+        .expect("settlement report evidence");
+}
+
+/// # Panics
+/// Panics only if stale in-memory readback errors prescribe an inadmissible binding.
+/// ´test:unit:launch-refusal-advice-follows-recorded-admission´
+#[test]
+fn launch_refusal_advice_follows_recorded_admission() {
+    for step in ["dispatch", "review"] {
+        let mut record = refused_record(step);
+        record["rounds"][0]["settlement_error"] = json!("run-reaping: worker absence is uncertain");
+        record["reaping"] = json!({"state":"failed","container_payload":{"state":"unknown"}});
+        assert!(super::super::settle::recovery_record_basis(&record, step).is_err());
+        let result = super::settlement_result(
+            &Err(crate::error::LaneError::input(
+                "readback",
+                super::super::steering::MISSING_REPLY_BINDING,
+            )),
+            "alpha",
+            "R",
+            step,
+            &record,
+        )
+        .expect("report keeps both causes");
+        assert!(
+            result["next_command"].is_null(),
+            "reaping supersedes binding admission"
+        );
+        assert_eq!(
+            result["recorded_cause"],
+            record["rounds"][0]["settlement_error"]
+        );
+        assert!(
+            result["detail"]
+                .as_str()
+                .expect("original refusal")
+                .contains("reply has no verified mail binding")
+        );
+        assert!(
+            !result["guidance"]
+                .as_str()
+                .expect("guidance")
+                .contains("bind-reply")
+        );
+        assert!(
+            result["guidance"]
+                .as_str()
+                .expect("guidance")
+                .contains("admits neither late reply binding nor a settlement preview")
+        );
+        writeln!(std::io::stdout().lock(), "REAPING-REPORT-{step} {result}")
+            .expect("reaping evidence");
+    }
 }

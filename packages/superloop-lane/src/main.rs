@@ -1398,6 +1398,8 @@ mod tests {
         );
     }
 
+    /// # Panics
+    /// Panics only if a refusal loses its delimited command or final wall field.
     /// ´test:unit:refusal-line-reports-wall-seconds´
     #[test]
     fn refusal_line_reports_wall_seconds() {
@@ -1406,6 +1408,18 @@ mod tests {
             refusal_line(&error, 0.125),
             "settings-grant: missing Codex backend wall_seconds=0.125000"
         );
+        let error = LaneError::input(
+            "readback",
+            "next command: \"superloop-lane read-launch-report alpha R\"",
+        );
+        let line = refusal_line(&error, 0.125);
+        let tail = line.split_once("next command: ").expect("command marker").1;
+        let mut command = serde_json::Deserializer::from_str(tail).into_iter::<String>();
+        assert_eq!(
+            command.next().expect("command").expect("JSON command"),
+            "superloop-lane read-launch-report alpha R"
+        );
+        assert_eq!(&tail[command.byte_offset()..], " wall_seconds=0.125000");
     }
 
     /// ´test:unit:private-launch-requires-matching-inherited-home´

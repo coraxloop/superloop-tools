@@ -204,11 +204,13 @@ pub fn run_with_host_root(
     Ok(report)
 }
 
-fn recovery_basis(
+pub(super) type RecoveryIdentities = [(&'static str, Option<(u32, u64)>); 5];
+
+/// Check the saved settlement state before the live process absence probe.
+pub(super) fn recovery_record_basis(
     record: &Value,
     step: &str,
-    mut presence: impl FnMut(u32, u64) -> ProcessPresence,
-) -> Result<(), LaneError> {
+) -> Result<RecoveryIdentities, LaneError> {
     if record["phase"] != "failed" || record["active_round"] != step {
         return Err(LaneError::input(
             "settle-state-refusal",
@@ -283,7 +285,15 @@ fn recovery_basis(
         ("helper parent", helper_parent_identity(record)?),
         ("observer", observer_identity(record)?),
     ];
-    for (name, identity) in identities {
+    Ok(identities)
+}
+
+fn recovery_basis(
+    record: &Value,
+    step: &str,
+    mut presence: impl FnMut(u32, u64) -> ProcessPresence,
+) -> Result<(), LaneError> {
+    for (name, identity) in recovery_record_basis(record, step)? {
         if let Some((pid, start)) = identity {
             match presence(pid, start) {
                 ProcessPresence::Absent => {}
