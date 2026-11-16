@@ -86,6 +86,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Door transport tests decide disconnect, receive expiry, child exit and input release from their events, with distant hang guards instead of short fixture windows. Installed programs and door deployment are unchanged (`prob:gates:elapsed-time-assertions-are-censused-and-rewritten`).
 
+- The unreaped-feeder regression checks the process-state branch directly, so a corpse and a deadline cannot pass as the same negative reading and scheduler delay cannot decide the verdict (``test:integration:an-unreaped-corpse-is-not-a-feeder-still-reaching-its-exec``).
+
 - Registry capture coverage now gates pipe output and child exit separately, retaining the late stderr and unsuccessful-exit checks without scheduling sleeps or lower elapsed-time verdicts (``test:crate:registry-capture-waits-for-child-and-both-streams-under-load``).
 
 - The retained credential-authority regression now observes its completed publication pass and joins through a completion event, preserving replacement-home and evidence checks without short elapsed-time verdicts. The deployed authority cadence is unchanged (``test:unit:service-credential-authority-retains-custody``).

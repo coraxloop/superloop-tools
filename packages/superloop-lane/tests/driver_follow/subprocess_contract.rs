@@ -39,14 +39,6 @@ const HOLD_OBSERVATION: Duration = Duration::from_secs(3);
 
 const WAIT_PAUSE: Duration = Duration::from_millis(50);
 
-// Longest the running reading may take to answer for a process that is already
-// a corpse. Deciding an entry that is present and dead is one read of that
-// entry, so the answer lands before even a single `WAIT_PAUSE`; twenty pauses
-// leaves a loaded machine room to be slow about scheduling the reader and is
-// still a tenth of `RELEASE_DEADLINE`, so a reading that waited its window out
-// instead of discriminating the corpse cannot pass under it.
-const CORPSE_VERDICT_BOUND: Duration = WAIT_PAUSE.saturating_mul(20);
-
 // A collection window too short for any release, so a collection over a held
 // feeder can only end in the kill-and-reap branch.
 const KILL_WINDOW: Duration = Duration::from_millis(500);
@@ -228,17 +220,28 @@ fn feeder_is_gone(pid: u32) -> bool {
 // wait early is the entry rather than the name: no entry at all, or an entry
 // that is a corpse, is an answer of no, and only a live entry that does not yet
 // carry the name is waited on.
+#[derive(Debug, PartialEq, Eq)]
+enum FeederReading {
+    AbsentOrDead,
+    Running,
+    Deadline,
+}
+
 fn feeder_runs_within(pid: u32, window: Duration) -> bool {
+    feeder_reading_within(pid, window) == FeederReading::Running
+}
+
+fn feeder_reading_within(pid: u32, window: Duration) -> FeederReading {
     let start = Instant::now();
     loop {
         if process_is_absent_or_dead(pid) {
-            return false;
+            return FeederReading::AbsentOrDead;
         }
         if !feeder_is_gone(pid) {
-            return true;
+            return FeederReading::Running;
         }
         if start.elapsed() >= window {
-            return false;
+            return FeederReading::Deadline;
         }
         std::thread::sleep(WAIT_PAUSE);
     }
@@ -980,20 +983,13 @@ fn an_unreaped_corpse_is_not_a_feeder_still_reaching_its_exec() {
         "the child {pid} never became the unreaped corpse this case reads"
     );
 
-    let start = Instant::now();
-    let running = feeder_runs_within(pid, RELEASE_DEADLINE);
-    let verdict = start.elapsed();
-
-    assert!(
-        !running,
-        "an unreaped corpse {pid} was read as a feeder that is running"
-    );
-    // Waiting the corpse out to the deadline would answer no as well, so the
-    // answer alone witnesses nothing: it is the promptness that says the entry's
-    // state decided the reading, rather than a window that merely ran out.
-    assert!(
-        verdict < CORPSE_VERDICT_BOUND,
-        "the reading took {verdict:?} over an entry that was already a corpse, past the {CORPSE_VERDICT_BOUND:?} deciding a present and dead entry may cost"
+    // A deadline answer also means not running, but is not evidence of the
+    // corpse branch. A zero window makes that alternative immediate without
+    // allowing scheduler speed to decide which verdict passes.
+    assert_eq!(
+        feeder_reading_within(pid, Duration::ZERO),
+        FeederReading::AbsentOrDead,
+        "the process state, not deadline expiry, decides the corpse reading"
     );
 }
 
