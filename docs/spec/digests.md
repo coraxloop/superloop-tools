@@ -481,7 +481,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-correspondence/src/main.rs:719,727,741,755``|Test-module fixture text and assertions about an SSH host-key warning line that the failed-transport diagnostic must not carry; not a digest value or an independent digest field.|
 |``packages/superloop-correspondence/tests/subprocess_contract.rs:277,511``|Test fixture text and an assertion about an SSH host-key warning line that the failed-transport diagnostic must not carry; not a digest value or an independent digest field.|
 |``packages/superloop-credential-custody/README.md:17,32,42,44,46,48,50,52,56,60,76,90,96,98,102,136,162,166,176,204,212``|D246–D248 and D250; identity, custody and build documentation.|
-|``packages/superloop-credential-custody/meson.build:99,100,109,117,118,180``|D248; reviewed executable expressions and scope.|
+|``packages/superloop-credential-custody/meson.build:99,100,109,117,118,184``|D248; reviewed executable expressions and scope.|
 |``packages/superloop-credential-custody/src/identity.rs:8,15,57,71,136``|D246; hashing live files and retained calibration bytes.|
 |``packages/superloop-credential-custody/src/launch/campaign.rs:28,29,64,65,109,110,177,178,182,191,192,201,202,215,216,230,252``|D250, D254; explicit child identities and retained measured completion references, never calibration acceptance.|
 |``packages/superloop-credential-custody/src/launch/campaign_tests.rs:27,75,80,397,556,557,559,560,569,581,588,592,610,611,621,632,650,655,678,683,703,723,789,802,811,822,833,837,845,853,863,869``|D250; synthetic child identity and matrix correspondence controls.|

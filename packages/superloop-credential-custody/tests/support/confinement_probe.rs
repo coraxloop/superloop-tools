@@ -130,6 +130,7 @@ fn main() {
     );
     evidence.extend(ipc());
     evidence.extend(group_changes());
+    evidence.push(u8::from(parent_death_is_kill()) + b'0');
     std::io::stdout().write_all(&evidence).unwrap();
 }
 
@@ -275,5 +276,15 @@ fn group_changes() -> [u8; 2] {
         let mut status = 0;
         assert_eq!(nix::libc::waitpid(pid, &raw mut status, 0), pid);
         [u8::from(group) + b'0', u8::from(status == 0) + b'0']
+    }
+}
+
+#[allow(unsafe_code)]
+fn parent_death_is_kill() -> bool {
+    let mut signal = 0;
+    // SAFETY: scalar prctl with a live initialized output integer.
+    unsafe {
+        nix::libc::prctl(nix::libc::PR_GET_PDEATHSIG, &raw mut signal, 0, 0, 0) == 0
+            && signal == nix::libc::SIGKILL
     }
 }

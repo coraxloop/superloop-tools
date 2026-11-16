@@ -177,6 +177,10 @@ dependency_ledger += ['''
 
 # Campaign metadata extends the existing exclusive receipt owner.
 dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-credential-custody/src/launch/driver_tests.rs:std :: env :: current_exe () . unwrap ()#1","caller":"superloop-credential-custody","owner":"SUPERLOOPCREDENTIALCUSTODY","selector":"std :: env :: current_exe () . unwrap ()","callee":"fixture:superloop-credential-custody:self","lookup":"test-executable","contract":"Reexecute a synthetic keeper and observe its direct children through retained pidfds after deliberate hard kill","binding":"current_exe"}
+{"kind":"call","site":"packages/superloop-credential-custody/src/launch/sealer.rs:fixture . dir . path () . join (\"sealer\")#1","caller":"superloop-credential-custody","owner":"SUPERLOOPCREDENTIALCUSTODY","selector":"fixture . dir . path () . join (\"sealer\")","callee":"external:credential-sealer","lookup":"configured-external","setting":"launch-policy.artifacts[role=sealer].path","contract":"Exercise the existing sealer pre-exec parent-race refusal against the native synthetic sealer"}
+''']
+dependency_ledger += ['''
 {"kind":"data","identity":"credential-campaign-matrix","writer":"superloop-credential-custody","readers":["superloop-credential-custody"],"format_authority":"packages/superloop-credential-custody/README.md","format_contract":"Schema-2 bounded ordered child-case matrix; measured output object/length/digest and configuration bindings; protected private handoff rechecks admission, completion receipts and original sealed files; no calibration acceptance","owner":"SUPERLOOPCREDENTIALCUSTODY","sites":[{"path":"packages/superloop-credential-custody/src/launch/campaign.rs","anchor":"pub(super) struct Matrix"}]}
 ''']
 

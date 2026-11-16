@@ -24,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Custody campaigns retain an immutable start binding and a separate bounded recovery sequence. Failure summaries and diagnostics name the child, stage, first cause and last recovery receipt; cleanup facts remain readable after uncertainty and distinguish observed actions from resource absence. Operators preserve completed evidence and reconcile retained runtime objects explicitly (``sec:credentialcustody:campaign-failure-evidence``).
+- Custody campaigns retain an immutable start binding and a separate bounded recovery sequence. Failure summaries and diagnostics name the child, stage, first cause and last recovery receipt; cleanup facts remain readable after uncertainty and distinguish observed actions from resource absence. Direct sealers die with a killed keeper; the documented manager activation and stop limits bound orphaned generator processes. Operators preserve completed evidence and reconcile retained runtime objects explicitly (``sec:credentialcustody:campaign-failure-evidence``).
 
 ## [0.5.0] - 2026-11-16
 

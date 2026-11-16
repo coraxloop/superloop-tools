@@ -394,7 +394,7 @@ fn cancel_targets(
     send(pidfd);
 }
 #[allow(unsafe_code)]
-fn kill_pidfd(pidfd: std::os::fd::BorrowedFd<'_>) {
+pub fn kill_pidfd(pidfd: std::os::fd::BorrowedFd<'_>) {
     use std::os::fd::AsRawFd as _;
     // SAFETY: the caller retains this leader pidfd through wait; no PID fallback.
     let _ignored = unsafe {

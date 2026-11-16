@@ -383,3 +383,150 @@ pub(in crate::launch::keeper) fn resident_case(
         result
     })
 }
+
+fn doomed_keeper_control() {
+    use std::io::Read as _;
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    let mut store = Store::reserve(&admission, 0).unwrap();
+    let reply = String::from_utf8(crate::launch::manager::tests::reply(&admission))
+        .unwrap()
+        .replace("MainPID=123", "MainPID=0")
+        .replace("ExecMainPID=123", "ExecMainPID=0")
+        .replace(
+            "ExecMainStartTimestampMonotonic=100",
+            "ExecMainStartTimestampMonotonic=0",
+        );
+    fs::write(f.dir.path().join("manager-reply"), reply).unwrap();
+    let mut keeper = Keeper::prepare(RootStartup::test_owner(), &admission, 0, &mut store).unwrap();
+    keeper.submit().unwrap();
+    assert!(!keeper.start_ready().unwrap());
+    let ready = serde_json::json!({"root":f.dir.path(),"sealers":keeper.session.test_pids()});
+    writeln!(std::io::stdout(), "keeper-ready {ready}").unwrap();
+    std::io::stdout().flush().unwrap();
+    let mut byte = [0];
+    std::io::stdin().read_exact(&mut byte).unwrap();
+    panic!("the parent must kill the keeper, never release this wait");
+}
+fn keeper_ready(stdout: &mut std::process::ChildStdout) -> serde_json::Value {
+    use std::io::Read as _;
+    let deadline = Instant::now() + std::time::Duration::from_secs(600);
+    let mut line = Vec::new();
+    loop {
+        let mut event = nix::libc::pollfd {
+            fd: stdout.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        let timeout =
+            crate::launch::sealer::remaining_timeout(Instant::now(), deadline, deadline).unwrap();
+        assert!(
+            channel::poll(std::slice::from_mut(&mut event), timeout).unwrap(),
+            "600 s event hang guard"
+        );
+        let mut byte = [0];
+        stdout.read_exact(&mut byte).unwrap();
+        line.push(byte[0]);
+        assert!(line.len() <= 4096);
+        if byte[0] == b'\n' {
+            let text = std::str::from_utf8(&line).unwrap();
+            if let Some((_, value)) = text.split_once("keeper-ready ") {
+                return serde_json::from_str(value).unwrap();
+            }
+            line.clear();
+        }
+    }
+}
+struct DoomedControl {
+    finished: bool,
+    child: std::process::Child,
+    sealers: Vec<std::os::fd::OwnedFd>,
+    root: Option<std::path::PathBuf>,
+}
+impl Drop for DoomedControl {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _status = crate::process::cancel(&mut self.child);
+        }
+        for fd in &self.sealers {
+            crate::process::kill_pidfd(std::os::fd::AsFd::as_fd(fd));
+        }
+        if let Some(root) = &self.root {
+            let _removed = fs::remove_dir_all(root);
+        }
+    }
+}
+/// ´test:unit:killed-keeper-leaves-binding-and-no-terminal-but-sealers-exit´
+#[test]
+fn killed_keeper_leaves_binding_and_no_terminal_but_sealers_exit() {
+    use std::os::unix::process::CommandExt as _;
+    if std::env::var_os("CUSTODY_KEEPER_DEATH_CONTROL").is_some() {
+        doomed_keeper_control();
+        return;
+    }
+    let _guard = crate::launch::test_support::case_guard();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.args(["--exact","launch::keeper::driver::tests::killed_keeper_leaves_binding_and_no_terminal_but_sealers_exit","--nocapture","--test-threads=1"])
+        .env_clear().env("TMPDIR",std::env::temp_dir()).env("CUSTODY_KEEPER_DEATH_CONTROL","1")
+        .process_group(0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    loop_home::CommandDescriptors::default()
+        .configure(&mut command)
+        .unwrap();
+    let mut control = DoomedControl {
+        finished: false,
+        child: command.spawn().unwrap(),
+        sealers: Vec::new(),
+        root: None,
+    };
+    let ready = keeper_ready(control.child.stdout.as_mut().unwrap());
+    let root = std::path::PathBuf::from(ready["root"].as_str().unwrap());
+    control.root = Some(root.clone());
+    for pid in ready["sealers"].as_array().unwrap() {
+        control.sealers.push(
+            crate::launch::sealer::pidfd(u32::try_from(pid.as_u64().unwrap()).unwrap()).unwrap(),
+        );
+    }
+    assert_eq!(control.sealers.len(), 2);
+    // Keep external writers alive after the keeper dies: EOF cannot explain exit.
+    let writers = ["left.fifo", "right.fifo"].map(|name| {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("runtime/sample").join(name))
+            .unwrap()
+    });
+    let binding: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("evidence/sample/lifecycle-01.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        binding["event"]["observation"]["invocation"],
+        "1234567890abcdef1234567890abcdef"
+    );
+    control.child.kill().unwrap();
+    control.child.wait().unwrap();
+    control.finished = true;
+    let deadline = Instant::now() + std::time::Duration::from_secs(600);
+    for fd in &control.sealers {
+        let mut event = nix::libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        let timeout =
+            crate::launch::sealer::remaining_timeout(Instant::now(), deadline, deadline).unwrap();
+        assert!(
+            channel::poll(std::slice::from_mut(&mut event), timeout).unwrap(),
+            "600 s event hang guard"
+        );
+        assert_ne!(event.revents & nix::libc::POLLIN, 0);
+    }
+    drop(writers);
+    for entry in fs::read_dir(root.join("evidence/sample")).unwrap() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        assert!(!["failed", "uncertain", "complete"].contains(&value["phase"].as_str().unwrap()));
+        assert_ne!(value["event"]["kind"], "recovery");
+    }
+    assert!(root.join("runtime/sample/left.fifo").exists());
+    assert!(!root.join("evidence/campaign-failure.json").exists());
+}
