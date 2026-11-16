@@ -10,6 +10,129 @@ use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Debug, serde::Serialize)]
+struct KernelFailure {
+    class: &'static str,
+    errno: Option<i32>,
+    open_descriptors: Option<usize>,
+    // A fallback scan is bounded and explicitly identifies its covered range.
+    descriptor_scan_ceiling: Option<u64>,
+    nofile_soft: Option<u64>,
+    nofile_hard: Option<u64>,
+    process_threads: Option<usize>,
+    test_threads: Option<usize>,
+}
+thread_local! {
+    static KERNEL_FAILURE: std::cell::RefCell<Option<KernelFailure>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub fn test_threads() -> Option<usize> {
+    static THREADS: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| {
+        let args: Vec<_> = std::env::args().collect();
+        args.windows(2)
+            .find(|pair| pair[0] == "--test-threads")
+            .and_then(|pair| pair[1].parse().ok())
+            .or_else(|| {
+                args.iter()
+                    .find_map(|arg| arg.strip_prefix("--test-threads=")?.parse().ok())
+            })
+            .or_else(|| std::env::var("RUST_TEST_THREADS").ok()?.parse().ok())
+            .or_else(|| {
+                std::thread::available_parallelism()
+                    .ok()
+                    .map(std::num::NonZeroUsize::get)
+            })
+    })
+}
+
+fn directory_count(path: &str) -> Option<usize> {
+    std::fs::read_dir(path)
+        .ok()?
+        .try_fold(0, |count, entry| entry.map(|_| count + 1))
+        .ok()
+}
+
+#[allow(unsafe_code)]
+fn resource_failure(class: &'static str, errno: Option<i32>) -> KernelFailure {
+    let mut limits = nix::libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes one initialized stack object; fcntl below only
+    // queries numeric descriptors and never closes or acquires an object.
+    let observed = unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &raw mut limits) } == 0;
+    let mut scan = None;
+    let descriptors = directory_count("/proc/self/fd")
+        .map(|n| n.saturating_sub(1))
+        .or_else(|| {
+            // EMFILE must not hide the count. Scan without acquiring a descriptor.
+            // A lowered hard limit or a larger kernel ceiling can leave higher
+            // descriptors outside this range; report the range, never claim an
+            // atomic or exhaustive process-wide snapshot in that case.
+            let ceiling = if observed {
+                limits.rlim_max.min(1_048_576)
+            } else {
+                1_048_576
+            };
+            scan = Some(ceiling);
+            Some(
+                (0..i32::try_from(ceiling).ok()?)
+                    .filter(|fd| unsafe { nix::libc::fcntl(*fd, nix::libc::F_GETFD) } >= 0)
+                    .count(),
+            )
+        });
+    KernelFailure {
+        class,
+        errno,
+        open_descriptors: descriptors,
+        descriptor_scan_ceiling: scan,
+        nofile_soft: observed.then_some(limits.rlim_cur),
+        nofile_hard: observed.then_some(limits.rlim_max),
+        process_threads: directory_count("/proc/self/task"),
+        test_threads: {
+            #[cfg(test)]
+            {
+                test_threads()
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        },
+    }
+}
+
+/// Preserve numeric kernel/resource evidence at the failing operation, without
+/// copying its path, arguments, foreign error text or child diagnostics.
+pub fn io_failure(class: &'static str, error: impl Into<std::io::Error>) -> &'static str {
+    let failure = resource_failure(class, error.into().raw_os_error());
+    #[cfg(test)]
+    let _diagnostic = superloop_cli_common::emit_control_plane_record(
+        &superloop_cli_common::ControlPlaneRecord::diagnostic(
+            "superloop-credential-custody-test",
+            &serde_json::to_string(&failure).unwrap_or_default(),
+        ),
+    );
+    KERNEL_FAILURE.with(|slot| *slot.borrow_mut() = Some(failure));
+    class
+}
+
+pub fn diagnostic_message(class: &'static str) -> String {
+    let failure = KERNEL_FAILURE.with(|slot| slot.borrow_mut().take());
+    failure
+        .and_then(|value| serde_json::to_string(&value).ok())
+        .map_or_else(
+            || class.into(),
+            |context| format!("{class}; kernel={context}"),
+        )
+}
+
+pub fn spawn(command: &mut Command, class: &'static str) -> Result<std::process::Child> {
+    command.spawn().map_err(|error| io_failure(class, error))
+}
+
 /// Called once, before argument parsing or any child. No threads or signal
 /// handlers have been installed by this process at this point.
 #[allow(unsafe_code)]
@@ -187,7 +310,7 @@ fn capture_inner(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    let mut child = command.spawn().map_err(|_| "child-start")?;
+    let mut child = spawn(&mut command, "child-start")?;
     let result = (|| {
         let mut stdin = child.stdin.take().ok_or("child-pipe")?;
         let mut stdout = child.stdout.take().ok_or("child-pipe")?;
@@ -311,6 +434,108 @@ mod tests {
     use std::os::fd::{AsRawFd, FromRawFd as _, OwnedFd};
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::process::ExitStatusExt as _;
+
+    fn kernel_context(class: &'static str) -> serde_json::Value {
+        let message = diagnostic_message(class);
+        let (actual, context) = message
+            .split_once("; kernel=")
+            .expect("kernel context retained");
+        assert_eq!(actual, class);
+        serde_json::from_str(context).unwrap()
+    }
+
+    /// ´test:unit:open-and-spawn-refusals-retain-kernel-context´
+    #[test]
+    fn open_and_spawn_refusals_retain_kernel_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent");
+        assert_eq!(
+            crate::receipt::open(&missing, false).err(),
+            Some("path-open")
+        );
+        let opened = kernel_context("path-open");
+        assert_eq!(opened["class"], "path-open");
+        assert_eq!(opened["errno"], nix::libc::ENOENT);
+        assert!(opened["open_descriptors"].as_u64().unwrap() >= 3);
+        assert!(
+            opened["nofile_soft"].as_u64().unwrap() >= opened["open_descriptors"].as_u64().unwrap()
+        );
+        assert!(opened["nofile_hard"].as_u64().unwrap() >= opened["nofile_soft"].as_u64().unwrap());
+        assert!(opened["process_threads"].as_u64().unwrap() > 0);
+        assert!(opened["test_threads"].as_u64().unwrap() > 0);
+        assert_eq!(
+            spawn(&mut Command::new(&missing), "child-start")
+                .err()
+                .unwrap(),
+            "child-start"
+        );
+        let spawned = kernel_context("child-start");
+        assert_eq!(spawned["errno"], nix::libc::ENOENT);
+        assert_eq!(spawned["class"], "child-start");
+        assert!(
+            !serde_json::to_string(&spawned)
+                .unwrap()
+                .contains(missing.to_str().unwrap())
+        );
+        assert_eq!(diagnostic_message("another-refusal"), "another-refusal");
+    }
+
+    /// ´test:unit:descriptor-exhaustion-keeps-numeric-failure-evidence´
+    #[test]
+    #[allow(unsafe_code)]
+    fn descriptor_exhaustion_keeps_numeric_failure_evidence() {
+        const CHILD: &str = "CUSTODY_DESCRIPTOR_CONTROL_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(test_threads(), Some(1));
+            let limits = nix::libc::rlimit {
+                rlim_cur: 64,
+                rlim_max: 64,
+            };
+            // SAFETY: this is a dedicated subprocess test; no other test runs
+            // here and its lowered hard limit dies with this process.
+            assert_eq!(
+                unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &raw const limits) },
+                0
+            );
+            let mut held = Vec::new();
+            while let Ok(file) = fs::File::open("/dev/null") {
+                held.push(file);
+            }
+            assert_eq!(
+                crate::receipt::open(std::path::Path::new("/"), true).err(),
+                Some("path-root")
+            );
+            let evidence = kernel_context("path-root");
+            drop(held);
+            assert_eq!(evidence["errno"], nix::libc::EMFILE);
+            assert_eq!(evidence["open_descriptors"], 64);
+            assert_eq!(evidence["descriptor_scan_ceiling"], 64);
+            assert_eq!(evidence["nofile_soft"], 64);
+            assert_eq!(evidence["nofile_hard"], 64);
+            assert_eq!(evidence["test_threads"], 1);
+            return;
+        }
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "process::tests::descriptor_exhaustion_keeps_numeric_failure_evidence",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD, "1");
+        loop_home::CommandDescriptors::default()
+            .configure(&mut command)
+            .unwrap();
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed;"));
+    }
 
     /// ´test:unit:interpreter-execution-retains-measured-inode´
     #[test]

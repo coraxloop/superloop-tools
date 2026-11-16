@@ -84,7 +84,10 @@ pub fn main() -> ExitCode {
 }
 
 fn diagnostic(class: &'static str, exit: CommandExit) -> ExitCode {
-    let _ignored = emit_control_plane_record(&ControlPlaneRecord::diagnostic(PROGRAM, class));
+    let _ignored = emit_control_plane_record(&ControlPlaneRecord::diagnostic(
+        PROGRAM,
+        &process::diagnostic_message(class),
+    ));
     exit.exit_code()
 }
 

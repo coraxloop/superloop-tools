@@ -3,6 +3,7 @@
 static CASE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(super) fn case_guard() -> std::sync::MutexGuard<'static, ()> {
+    let _threads = crate::process::test_threads();
     CASE.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

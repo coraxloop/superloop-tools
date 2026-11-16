@@ -52,7 +52,7 @@ impl Evidence {
             Mode::empty(),
         )
         .map(File::from)
-        .map_err(|_| "inventory-receipt-binding")
+        .map_err(|error| crate::process::io_failure("inventory-receipt-binding", error))
     }
     fn verify(
         &mut self,
@@ -68,7 +68,7 @@ impl Evidence {
         let current = Self::open(&self.directory)?;
         let m = current
             .metadata()
-            .map_err(|_| "inventory-receipt-binding")?;
+            .map_err(|error| crate::process::io_failure("inventory-receipt-binding", error))?;
         require(
             ObjectIdentity::of(&current)? == self.object
                 && ObjectIdentity::of(&self.file)? == self.object

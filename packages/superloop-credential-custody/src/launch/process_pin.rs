@@ -40,7 +40,8 @@ impl ProcessPin {
     ) -> Result<Self> {
         require(pid > 1, "keeper-pid")?;
         let pidfd = pidfd(pid)?;
-        let directory = File::open(format!("/proc/{pid}")).map_err(|_| "keeper-process")?;
+        let directory = File::open(format!("/proc/{pid}"))
+            .map_err(|error| crate::process::io_failure("keeper-process", error))?;
         require(
             nix::sys::statfs::fstatfs(&directory)
                 .map_err(|_| "keeper-procfs")?
@@ -55,12 +56,15 @@ impl ProcessPin {
                 OFlag::O_RDONLY | OFlag::O_CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|_| "keeper-image")?,
+            .map_err(|error| crate::process::io_failure("keeper-image", error))?,
         );
         // /proc/PID/exe is deliberately followed only under the verified procfs
         // directory while a pidfd binds liveness; ordinary input links still refuse.
         let (birth, stopped) = stat(&directory)?;
-        let uid = directory.metadata().map_err(|_| "keeper-process")?.uid();
+        let uid = directory
+            .metadata()
+            .map_err(|error| crate::process::io_failure("keeper-process", error))?
+            .uid();
         require(uid > 0 && stopped, "keeper-barrier")?;
         require(ObjectIdentity::of(&executable)? == image, "keeper-image")?;
         let expected = argv
@@ -118,7 +122,7 @@ impl ProcessPin {
         require(
             self.directory
                 .metadata()
-                .map_err(|_| "keeper-process")?
+                .map_err(|error| crate::process::io_failure("keeper-process", error))?
                 .uid()
                 == self.invocation.uid,
             "keeper-process-identity",
@@ -130,7 +134,7 @@ impl ProcessPin {
                 OFlag::O_RDONLY | OFlag::O_CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|_| "keeper-image")?,
+            .map_err(|error| crate::process::io_failure("keeper-image", error))?,
         );
         require(
             ObjectIdentity::of(&current)? == self.invocation.image
@@ -171,7 +175,9 @@ impl ProcessPin {
     }
     pub fn duplicate(&self) -> Result<OwnedFd> {
         self.verify()?;
-        self.pidfd.try_clone().map_err(|_| "handoff-duplicate")
+        self.pidfd
+            .try_clone()
+            .map_err(|error| crate::process::io_failure("handoff-duplicate", error))
     }
     pub fn transferred(pidfd: OwnedFd, invocation: Invocation) -> Result<ObservationPin> {
         let mut event = nix::libc::pollfd {
@@ -182,8 +188,8 @@ impl ProcessPin {
         channel::poll(std::slice::from_mut(&mut event), 0)?;
         require(event.revents == 0, "keeper-process-exited")?;
         verify_pidfd(&pidfd, invocation.pid)?;
-        let directory =
-            File::open(format!("/proc/{}", invocation.pid)).map_err(|_| "keeper-process")?;
+        let directory = File::open(format!("/proc/{}", invocation.pid))
+            .map_err(|error| crate::process::io_failure("keeper-process", error))?;
         require(
             nix::sys::statfs::fstatfs(&directory)
                 .map_err(|_| "keeper-procfs")?
@@ -198,7 +204,7 @@ impl ProcessPin {
                 OFlag::O_RDONLY | OFlag::O_CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|_| "keeper-image")?,
+            .map_err(|error| crate::process::io_failure("keeper-image", error))?,
         );
         let pin = Self {
             pidfd,
@@ -234,7 +240,8 @@ impl ProcessPin {
         // A connection-owned handle must match credentials before any numeric
         // procfs lookup; final verification also refuses exit during the walk.
         verify_pidfd(&pidfd, pid)?;
-        let directory = File::open(format!("/proc/{pid}")).map_err(|_| "keeper-process")?;
+        let directory = File::open(format!("/proc/{pid}"))
+            .map_err(|error| crate::process::io_failure("keeper-process", error))?;
         require(
             nix::sys::statfs::fstatfs(&directory)
                 .map_err(|_| "keeper-procfs")?
@@ -249,10 +256,13 @@ impl ProcessPin {
                 OFlag::O_RDONLY | OFlag::O_CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|_| "keeper-image")?,
+            .map_err(|error| crate::process::io_failure("keeper-image", error))?,
         );
         let (birth, _stopped) = stat(&directory)?;
-        let uid = directory.metadata().map_err(|_| "keeper-process")?.uid();
+        let uid = directory
+            .metadata()
+            .map_err(|error| crate::process::io_failure("keeper-process", error))?
+            .uid();
         require(uid == owner, "keeper-peer-owner")?;
         require(ObjectIdentity::of(&executable)? == image, "keeper-image")?;
         let pin = Self {
@@ -280,7 +290,12 @@ impl ProcessPin {
             let fd = unsafe {
                 nix::libc::syscall(nix::libc::SYS_pidfd_getfd, self.pidfd.as_raw_fd(), slot, 0)
             };
-            require(fd >= 0, "keeper-descriptor-copy")?;
+            if fd < 0 {
+                return Err(crate::process::io_failure(
+                    "keeper-descriptor-copy",
+                    std::io::Error::last_os_error(),
+                ));
+            }
             Ok(unsafe {
                 File::from_raw_fd(i32::try_from(fd).map_err(|_| "keeper-descriptor-copy")?)
             })
@@ -294,7 +309,12 @@ impl ProcessPin {
 fn pidfd(pid: u32) -> Result<OwnedFd> {
     // SAFETY: scalar query and ownership of a newly returned descriptor.
     let fd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid, 0) };
-    require(fd >= 0, "keeper-pidfd")?;
+    if fd < 0 {
+        return Err(crate::process::io_failure(
+            "keeper-pidfd",
+            std::io::Error::last_os_error(),
+        ));
+    }
     Ok(unsafe { OwnedFd::from_raw_fd(i32::try_from(fd).map_err(|_| "keeper-pidfd")?) })
 }
 pub(super) fn read(directory: &File, name: &str, limit: u64) -> Result<Vec<u8>> {
@@ -305,12 +325,12 @@ pub(super) fn read(directory: &File, name: &str, limit: u64) -> Result<Vec<u8>> 
             OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| "keeper-process-read")?,
+        .map_err(|error| crate::process::io_failure("keeper-process-read", error))?,
     );
     let mut bytes = Vec::new();
     file.take(limit + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "keeper-process-read")?;
+        .map_err(|error| crate::process::io_failure("keeper-process-read", error))?;
     require(bytes.len() as u64 <= limit, "keeper-process-size")?;
     Ok(bytes)
 }
@@ -328,7 +348,8 @@ pub(super) fn stat(directory: &File) -> Result<(u64, bool)> {
 }
 
 pub(super) fn verify_pidfd(fd: &impl AsRawFd, expected: u32) -> Result<()> {
-    let directory = File::open("/proc/self").map_err(|_| "keeper-pidfd-info")?;
+    let directory = File::open("/proc/self")
+        .map_err(|error| crate::process::io_failure("keeper-pidfd-info", error))?;
     let bytes = read(&directory, &format!("fdinfo/{}", fd.as_raw_fd()), 4096)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| "keeper-pidfd-info")?;
     let mut values = text.lines().filter_map(|l| l.strip_prefix("Pid:"));

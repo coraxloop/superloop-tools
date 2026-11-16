@@ -36,15 +36,17 @@ impl Inventory {
                 OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|_| "inventory-directory")?,
+            .map_err(|error| crate::process::io_failure("inventory-directory", error))?,
         );
         // This self path refers only to our retained procfs directory capability.
         let entries = std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))
-            .map_err(|_| "inventory-directory")?;
+            .map_err(|error| crate::process::io_failure("inventory-directory", error))?;
         let mut descriptors = Vec::new();
         for entry in entries {
             require((descriptors.len() as u64) < ceiling, "inventory-ceiling")?;
-            let name = entry.map_err(|_| "inventory-directory")?.file_name();
+            let name = entry
+                .map_err(|error| crate::process::io_failure("inventory-directory", error))?
+                .file_name();
             let slot = name
                 .to_str()
                 .and_then(|s| s.parse::<u32>().ok())
@@ -69,10 +71,10 @@ impl Inventory {
         pin.verify()?;
         let mut boot = String::new();
         File::open("/proc/sys/kernel/random/boot_id")
-            .map_err(|_| "inventory-boot")?
+            .map_err(|error| crate::process::io_failure("inventory-boot", error))?
             .take(65)
             .read_to_string(&mut boot)
-            .map_err(|_| "inventory-boot")?;
+            .map_err(|error| crate::process::io_failure("inventory-boot", error))?;
         let boot = boot.trim_end_matches('\n');
         require(
             boot.len() == 36

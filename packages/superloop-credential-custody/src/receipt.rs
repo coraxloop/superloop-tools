@@ -24,7 +24,8 @@ fn walk_owner(path: &Path, directory: bool, protected: bool, root_only: bool) ->
     if !crate::record::path(path, true) {
         return Err("unsafe-path");
     }
-    let mut current = File::open("/").map_err(|_| "path-root")?;
+    let mut current =
+        File::open("/").map_err(|error| crate::process::io_failure("path-root", error))?;
     let parts: Vec<_> = path
         .components()
         .filter_map(|c| match c {
@@ -51,7 +52,8 @@ fn walk_owner(path: &Path, directory: bool, protected: bool, root_only: bool) ->
                 OFlag::empty()
             };
         current = File::from(
-            openat(&current, Path::new(part), flags, Mode::empty()).map_err(|_| "path-open")?,
+            openat(&current, Path::new(part), flags, Mode::empty())
+                .map_err(|error| crate::process::io_failure("path-open", error))?,
         );
     }
     Ok(current)
@@ -188,7 +190,7 @@ pub fn publish_held(dir: &File, name: &str, bytes: &[u8]) -> Result<()> {
         OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::from_bits_truncate(0o600),
     )
-    .map_err(|_| "receipt-exclusive-create")?;
+    .map_err(|error| crate::process::io_failure("receipt-exclusive-create", error))?;
     let mut file = File::from(fd);
     let result = (|| {
         file.set_permissions(Permissions::from_mode(0o600))

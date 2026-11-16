@@ -101,7 +101,8 @@ impl Control {
         );
         // Bind beneath the retained directory, avoiding sockaddr_un path limits.
         // This is our own held directory capability, never a caller-supplied link.
-        let listener = UnixListener::bind(&path).map_err(|_| "control-exclusive")?;
+        let listener = UnixListener::bind(&path)
+            .map_err(|error| crate::process::io_failure("control-exclusive", error))?;
         std::fs::set_permissions(&path, Permissions::from_mode(0o600))
             .map_err(|_| "control-mode")?;
         listener.set_nonblocking(true).map_err(|_| "control-mode")?;
@@ -147,7 +148,8 @@ impl Control {
             .find(|a| a.role == ArtifactRole::Launcher)
             .ok_or("control-image")?;
         image.unchanged()?;
-        let own = std::fs::File::open("/proc/self/exe").map_err(|_| "keeper-image")?;
+        let own = std::fs::File::open("/proc/self/exe")
+            .map_err(|error| crate::process::io_failure("keeper-image", error))?;
         let keeper = ProcessPin::peer(
             std::process::id(),
             startup.owner(),
@@ -167,7 +169,9 @@ impl Control {
         self.directory.verify()?;
         self.keeper.verify()?;
         let file = socket_file(&self.directory)?;
-        let m = file.metadata().map_err(|_| "control-binding")?;
+        let m = file
+            .metadata()
+            .map_err(|error| crate::process::io_failure("control-binding", error))?;
         require(
             ObjectIdentity::of(&file)? == self.object
                 && m.mode() & 0o170_000 == 0o140_000
@@ -320,7 +324,7 @@ fn socket_file(directory: &Directory) -> Result<File> {
             OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| "control-binding")?,
+        .map_err(|error| crate::process::io_failure("control-binding", error))?,
     ))
 }
 fn budget(deadline: Instant) -> Result<i32> {
@@ -438,7 +442,13 @@ pub(super) fn peer_pidfd(stream: &UnixStream) -> Result<OwnedFd> {
             &raw mut length,
         )
     };
-    require(status == 0 && fd >= 0, "control-peer-pidfd")?;
+    if status != 0 {
+        return Err(crate::process::io_failure(
+            "control-peer-pidfd",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    require(fd >= 0, "control-peer-pidfd")?;
     let handle = unsafe { OwnedFd::from_raw_fd(fd) };
     require(
         usize::try_from(length).ok() == Some(std::mem::size_of_val(&fd)),

@@ -44,11 +44,16 @@ pub fn run(command: Command, parameters: &Path, case: &str) -> Result<serde_json
     // SAFETY: the sole caller is the fresh single-threaded CLI boundary, before
     // policy admission or opening any owned nonstandard descriptor.
     let startup = unsafe { RootStartup::initialize() }?;
-    ChildStatus::read(&File::open("/proc/self").map_err(|_| "launch-role-status")?)?
-        .launcher_role(command.role())?;
+    ChildStatus::read(
+        &File::open("/proc/self")
+            .map_err(|error| crate::process::io_failure("launch-role-status", error))?,
+    )?
+    .launcher_role(command.role())?;
     let admission = measure::root_admission(parameters)?;
-    let own =
-        ObjectIdentity::of(&File::open("/proc/self/exe").map_err(|_| "launch-running-image")?)?;
+    let own = ObjectIdentity::of(
+        &File::open("/proc/self/exe")
+            .map_err(|error| crate::process::io_failure("launch-running-image", error))?,
+    )?;
     let expected = admission
         .artifacts()
         .iter()

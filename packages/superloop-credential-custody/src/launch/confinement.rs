@@ -99,13 +99,15 @@ fn key_handles(path: &std::path::Path, owner: u32) -> Result<(File, File)> {
                 | nix::fcntl::OFlag::O_CLOEXEC,
             nix::sys::stat::Mode::empty(),
         )
-        .map_err(|_| "sealer-key-file")?,
+        .map_err(|error| crate::process::io_failure("sealer-key-file", error))?,
     );
     key_custody(&key, owner)?;
     Ok((directory, key))
 }
 fn key_custody(key: &File, owner: u32) -> Result<()> {
-    let meta = key.metadata().map_err(|_| "sealer-key-file")?;
+    let meta = key
+        .metadata()
+        .map_err(|error| crate::process::io_failure("sealer-key-file", error))?;
     require(
         meta.is_file() && meta.uid() == owner && meta.mode() & 0o7777 == 0o400 && meta.nlink() == 1,
         "sealer-key-file",
@@ -143,7 +145,12 @@ fn create() -> Result<OwnedFd> {
             0,
         )
     };
-    require(fd >= 0, "sealer-landlock-create")?;
+    if fd < 0 {
+        return Err(crate::process::io_failure(
+            "sealer-landlock-create",
+            std::io::Error::last_os_error(),
+        ));
+    }
     let fd =
         unsafe { OwnedFd::from_raw_fd(i32::try_from(fd).map_err(|_| "sealer-landlock-create")?) };
     nix::fcntl::fcntl(

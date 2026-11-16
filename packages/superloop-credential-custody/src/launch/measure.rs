@@ -40,7 +40,10 @@ pub(super) struct HeldArtifact {
 impl HeldArtifact {
     pub fn verify_bytes(&self) -> Result<()> {
         self.unchanged()?;
-        let mut file = self.file.try_clone().map_err(|_| "file-read")?;
+        let mut file = self
+            .file
+            .try_clone()
+            .map_err(|error| crate::process::io_failure("file-read", error))?;
         file.rewind().map_err(|_| "file-read")?;
         let bytes = receipt::read_file(file, self.length, false)?;
         require(hash(&bytes) == self.sha256, "launch-artifact-drift")?;
@@ -202,7 +205,12 @@ fn measure_artifact(
         "launch-artifact-custody",
     )?;
     require(objects.insert((m.dev(), m.ino())), "launch-artifact-alias")?;
-    let content = receipt::read_file(file.try_clone().map_err(|_| "file-read")?, limit, false)?;
+    let content = receipt::read_file(
+        file.try_clone()
+            .map_err(|error| crate::process::io_failure("file-read", error))?,
+        limit,
+        false,
+    )?;
     let sha256 = hash(&content);
     require(sha256 == expected.expected_sha256, "launch-artifact-drift")?;
     let held = HeldArtifact {

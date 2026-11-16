@@ -62,7 +62,7 @@ fn file(directory: &File, name: &str, flags: OFlag) -> Result<File> {
         Mode::empty(),
     )
     .map(File::from)
-    .map_err(|_| "client-object")
+    .map_err(|error| crate::process::io_failure("client-object", error))
 }
 impl Opened {
     fn open(root: &Path, expected: &Expected<'_>, deadline: Instant) -> Result<Self> {
@@ -123,8 +123,8 @@ impl Opened {
         let handle = peer_pidfd(&self.stream)?;
         completion_client::live(&handle)?;
         process_pin::verify_pidfd(&handle, self.manifest.keeper_pid)?;
-        let process =
-            File::open(format!("/proc/{}", self.manifest.keeper_pid)).map_err(|_| "client-stat")?;
+        let process = File::open(format!("/proc/{}", self.manifest.keeper_pid))
+            .map_err(|error| crate::process::io_failure("client-stat", error))?;
         let (birth, _) = process_pin::stat(&process)?;
         completion_client::live(&handle)?;
         require(birth == self.manifest.keeper_birth, "client-birth")?;
@@ -162,7 +162,9 @@ impl Opened {
 }
 fn verify_socket(directory: &File, manifest: &Manifest, owner: u32) -> Result<()> {
     let socket = file(directory, "control.sock", OFlag::O_PATH)?;
-    let m = socket.metadata().map_err(|_| "client-object")?;
+    let m = socket
+        .metadata()
+        .map_err(|error| crate::process::io_failure("client-object", error))?;
     require(
         ObjectIdentity::of(&socket)? == manifest.socket
             && m.mode() & 0o170_000 == 0o140_000
@@ -232,7 +234,12 @@ fn connect(path: &str, deadline: Instant) -> Result<UnixStream> {
             0,
         )
     };
-    require(fd >= 0, "client-socket")?;
+    if fd < 0 {
+        return Err(crate::process::io_failure(
+            "client-socket",
+            std::io::Error::last_os_error(),
+        ));
+    }
     let descriptor = unsafe { OwnedFd::from_raw_fd(fd) };
     let length = nix::libc::socklen_t::try_from(std::mem::size_of_val(&address))
         .map_err(|_| "client-address")?;

@@ -49,13 +49,13 @@ struct Running {
 }
 impl Running {
     fn start(mut command: Command, probe: EofProbe, output: File) -> Result<Self> {
-        let mut child = command.spawn().map_err(|_| "sealer-start")?;
+        let mut child = crate::process::spawn(&mut command, "sealer-start")?;
         let setup = (|| {
             let pidfd = pidfd(child.id())?;
             let errors = child.stderr.take().ok_or("sealer-stderr")?;
             fcntl(&errors, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|_| "sealer-stderr")?;
             let directory = File::open(format!("/proc/{}", child.id()))
-                .map_err(|_| "sealer-status-directory")?;
+                .map_err(|error| crate::process::io_failure("sealer-status-directory", error))?;
             let (birth, _) = super::process_pin::stat(&directory)?;
             Ok((pidfd, errors, directory, birth))
         })();
@@ -159,7 +159,12 @@ fn pidfd(pid: u32) -> Result<OwnedFd> {
     // SAFETY: scalar syscall, positive return is a newly owned descriptor.
     let fd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid, 0) };
     let fd = i32::try_from(fd).map_err(|_| "sealer-pidfd")?;
-    require(fd >= 0, "sealer-pidfd")?;
+    if fd < 0 {
+        return Err(crate::process::io_failure(
+            "sealer-pidfd",
+            std::io::Error::last_os_error(),
+        ));
+    }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
@@ -187,7 +192,11 @@ fn command(
         .current_dir("/")
         .process_group(0)
         .stdin(Stdio::from(input))
-        .stdout(output.try_clone().map_err(|_| "sealer-output-duplicate")?)
+        .stdout(
+            output
+                .try_clone()
+                .map_err(|error| crate::process::io_failure("sealer-output-duplicate", error))?,
+        )
         .stderr(Stdio::piped());
     loop_home::CommandDescriptors::default()
         .configure(&mut command)
@@ -287,7 +296,8 @@ impl<'a> Session<'a> {
     ) -> Result<Self> {
         let deadline = Instant::now() + Duration::from_millis(admission.policy().limits.case_ms);
         let own = super::child_status::ChildStatus::read(
-            &File::open("/proc/self").map_err(|_| "sealer-status-directory")?,
+            &File::open("/proc/self")
+                .map_err(|error| crate::process::io_failure("sealer-status-directory", error))?,
         )?;
         let confinement = Confinement::prepare(admission)?;
         let inputs = Input::pair(readers)?;

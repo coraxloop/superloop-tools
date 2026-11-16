@@ -164,7 +164,7 @@ impl Pipe {
                 OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|_| "fifo-open")?,
+            .map_err(|error| crate::process::io_failure("fifo-open", error))?,
         );
         reader
             .set_permissions(Permissions::from_mode(0o600))
@@ -175,7 +175,7 @@ impl Pipe {
             OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| "fifo-keeper")?;
+        .map_err(|error| crate::process::io_failure("fifo-keeper", error))?;
         fcntl(&reader, FcntlArg::F_SETFL(OFlag::empty())).map_err(|_| "fifo-blocking")?;
         let object = ObjectIdentity::of(&reader)?;
         let pipe = Self {
@@ -194,9 +194,11 @@ impl Pipe {
                 OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|_| "fifo-binding")?,
+            .map_err(|error| crate::process::io_failure("fifo-binding", error))?,
         );
-        let m = current.metadata().map_err(|_| "fifo-binding")?;
+        let m = current
+            .metadata()
+            .map_err(|error| crate::process::io_failure("fifo-binding", error))?;
         require(
             ObjectIdentity::of(&current)? == self.entry.object
                 && m.mode() & 0o170_000 == 0o010_000

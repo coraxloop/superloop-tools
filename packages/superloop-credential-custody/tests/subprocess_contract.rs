@@ -59,7 +59,13 @@ fn parameter_bytes(path: &Path, bytes: &[u8]) {
 fn refused(output: &Output, class: &str) {
     refuse(output);
     let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(diagnostic["message"], class);
+    let message = diagnostic["message"].as_str().unwrap();
+    assert_eq!(message.split("; kernel=").next(), Some(class));
+    if let Some((_, context)) = message.split_once("; kernel=") {
+        let context: Value = serde_json::from_str(context).unwrap();
+        assert!(context["errno"].as_i64().is_some());
+        assert!(context["open_descriptors"].as_u64().is_some());
+    }
 }
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_superloop-credential-custody"))
@@ -235,6 +241,36 @@ fn refuse(output: &Output) {
     assert_eq!(output.stdout, [] as [u8; 0]);
     let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(diagnostic["kind"], "diagnostic");
+}
+
+/// ´test:integration:kernel-open-refusal-is-metadata-only´
+#[test]
+fn kernel_open_refusal_is_metadata_only() {
+    let fixture = Fixture::new();
+    let path = fixture.dir.path().join("missing-private-parameter");
+    let output = binary()
+        .args(["length-observe", "--parameters"])
+        .arg(&path)
+        .args(["--case", "campaign", "--receipt", "length"])
+        .output()
+        .unwrap();
+    refused(&output, "path-open");
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    let message = diagnostic["message"].as_str().unwrap();
+    let (_, context) = message
+        .split_once("; kernel=")
+        .expect("open refusal preserves kernel metadata");
+    let context: Value = serde_json::from_str(context).unwrap();
+    assert_eq!(context["class"], "path-open");
+    assert_eq!(context["errno"], nix::libc::ENOENT);
+    assert!(context["open_descriptors"].as_u64().unwrap() >= 3);
+    assert!(
+        context["nofile_soft"].as_u64().unwrap() >= context["open_descriptors"].as_u64().unwrap()
+    );
+    assert!(context["nofile_hard"].as_u64().unwrap() >= context["nofile_soft"].as_u64().unwrap());
+    assert_eq!(context["process_threads"], 1);
+    assert!(context["test_threads"].is_null());
+    assert!(!message.contains(path.to_str().unwrap()));
 }
 
 /// ´test:integration:known-lengths-and-identity´

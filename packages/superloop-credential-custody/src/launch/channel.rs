@@ -33,7 +33,7 @@ impl Input {
         let probe = EofProbe(
             self.reader
                 .try_clone()
-                .map_err(|_| "sealer-input-duplicate")?,
+                .map_err(|error| crate::process::io_failure("sealer-input-duplicate", error))?,
         );
         Ok((self.reader, probe))
     }

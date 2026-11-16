@@ -28,8 +28,11 @@ impl Directory {
             parent: self
                 .parent
                 .try_clone()
-                .map_err(|_| "launch-directory-open")?,
-            file: self.file.try_clone().map_err(|_| "launch-directory-open")?,
+                .map_err(|error| crate::process::io_failure("launch-directory-open", error))?,
+            file: self
+                .file
+                .try_clone()
+                .map_err(|error| crate::process::io_failure("launch-directory-open", error))?,
             name: self.name.clone(),
             object: self.object,
         })
@@ -49,7 +52,7 @@ impl Directory {
                 OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|_| "launch-directory-open")?,
+            .map_err(|error| crate::process::io_failure("launch-directory-open", error))?,
         );
         file.set_permissions(Permissions::from_mode(0o700))
             .map_err(|_| "launch-directory-mode")?;
@@ -70,7 +73,7 @@ impl Directory {
                 OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|_| "launch-directory-binding")?,
+            .map_err(|error| crate::process::io_failure("launch-directory-binding", error))?,
         );
         let m = current.metadata().map_err(|_| "file-metadata")?;
         require(
@@ -195,9 +198,11 @@ impl Store {
                 OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
                 Mode::empty(),
             )
-            .map_err(|_| "campaign-completion-binding")?,
+            .map_err(|error| crate::process::io_failure("campaign-completion-binding", error))?,
         );
-        let m = file.metadata().map_err(|_| "campaign-completion-binding")?;
+        let m = file
+            .metadata()
+            .map_err(|error| crate::process::io_failure("campaign-completion-binding", error))?;
         require(
             m.is_file()
                 && m.uid() == nix::unistd::geteuid().as_raw()
@@ -287,11 +292,11 @@ impl Store {
             self.outputs[0]
                 .file
                 .try_clone()
-                .map_err(|_| "sealer-output-duplicate")?,
+                .map_err(|error| crate::process::io_failure("sealer-output-duplicate", error))?,
             self.outputs[1]
                 .file
                 .try_clone()
-                .map_err(|_| "sealer-output-duplicate")?,
+                .map_err(|error| crate::process::io_failure("sealer-output-duplicate", error))?,
         ])
     }
     pub const fn phase(&self) -> Phase {
@@ -308,7 +313,7 @@ impl Store {
                     OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
                     Mode::empty(),
                 )
-                .map_err(|_| "launch-output-binding")?,
+                .map_err(|error| crate::process::io_failure("launch-output-binding", error))?,
             );
             let m = current.metadata().map_err(|_| "file-metadata")?;
             require(
@@ -583,7 +588,7 @@ impl Output {
                     | OFlag::O_CLOEXEC,
                 Mode::from_bits_truncate(0o600),
             )
-            .map_err(|_| "launch-exclusive-output")?,
+            .map_err(|error| crate::process::io_failure("launch-exclusive-output", error))?,
         );
         file.set_permissions(Permissions::from_mode(0o600))
             .map_err(|_| "launch-output-mode")?;

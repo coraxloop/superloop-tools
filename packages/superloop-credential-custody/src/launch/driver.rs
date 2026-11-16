@@ -30,8 +30,8 @@ impl Keeper<'_> {
         if snapshot.pid == 0 {
             return Ok(false);
         }
-        let directory =
-            File::open(format!("/proc/{}", snapshot.pid)).map_err(|_| "keeper-start-process")?;
+        let directory = File::open(format!("/proc/{}", snapshot.pid))
+            .map_err(|error| crate::process::io_failure("keeper-start-process", error))?;
         let (_, stopped) = process_pin::stat(&directory)?;
         Ok(stopped)
     }

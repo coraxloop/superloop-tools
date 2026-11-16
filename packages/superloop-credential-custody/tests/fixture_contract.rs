@@ -317,7 +317,14 @@ fn refuse(observed: &Observed, class: &str) {
     );
     assert_eq!(observed.output.stdout, b"");
     let diagnostic: Value = serde_json::from_slice(&observed.output.stderr).unwrap();
-    assert_eq!(diagnostic["message"], class);
+    assert_eq!(
+        diagnostic["message"]
+            .as_str()
+            .unwrap()
+            .split("; kernel=")
+            .next(),
+        Some(class)
+    );
 }
 /// ´test:integration:fixture-patterns-and-barrier´
 #[test]

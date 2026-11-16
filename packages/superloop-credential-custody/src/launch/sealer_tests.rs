@@ -521,6 +521,14 @@ fn sealer_native_exec_failure_retains_a_typed_failure() {
         Session::start(&admission, 0, &mut store, readers).err(),
         Some("sealer-start")
     );
+    let diagnostic = crate::process::diagnostic_message("sealer-start");
+    let (_, context) = diagnostic
+        .split_once("; kernel=")
+        .expect("actual sealer spawn retains kernel context");
+    let context: serde_json::Value = serde_json::from_str(context).unwrap();
+    assert_eq!(context["class"], "sealer-start");
+    assert_eq!(context["errno"], nix::libc::ENOEXEC);
+    assert!(context["open_descriptors"].as_u64().unwrap() > 3);
     assert_failed(&fixture, &store);
     let receipt: serde_json::Value = serde_json::from_slice(
         &fs::read(fixture.dir.path().join("evidence/sample/state-01.json")).unwrap(),

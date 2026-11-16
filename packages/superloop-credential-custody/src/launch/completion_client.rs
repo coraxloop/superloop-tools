@@ -68,7 +68,7 @@ fn receive_reply(
     live(&handle)?;
     crate::launch::process_pin::verify_pidfd(&handle, binding.keeper_pid)?;
     let directory = std::fs::File::open(format!("/proc/{}", binding.keeper_pid))
-        .map_err(|_| "completion-keeper-stat")?;
+        .map_err(|error| crate::process::io_failure("completion-keeper-stat", error))?;
     let (birth, _) = crate::launch::process_pin::stat(&directory)?;
     live(&handle)?;
     require(birth == binding.keeper_birth, "completion-keeper-birth")?;

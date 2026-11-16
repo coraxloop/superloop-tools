@@ -436,3 +436,39 @@ fn campaign_uses_resident_driver_for_each_pair() {
     assert!(f.dir.path().join("evidence/campaign.json").is_file());
     assert!(!f.dir.path().join("runtime/second/control.sock").exists());
 }
+/// ´test:unit:completed-campaign-returns-descriptors-to-baseline´
+#[test]
+fn completed_campaign_returns_descriptors_to_baseline() {
+    const CHILD: &str = "CUSTODY_CASE_BASELINE_CONTROL";
+    if std::env::var_os(CHILD).is_some() {
+        let count = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+        let baseline = count();
+        campaign_runs_completed_pairs_in_order_and_publishes_one_matrix();
+        assert_eq!(
+            count(),
+            baseline,
+            "completed campaign retained a descriptor"
+        );
+        return;
+    }
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "launch::keeper::campaign_tests::completed_campaign_returns_descriptors_to_baseline",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(CHILD, "1");
+    loop_home::CommandDescriptors::default()
+        .configure(&mut command)
+        .unwrap();
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed;"));
+}
