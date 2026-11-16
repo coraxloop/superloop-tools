@@ -1,4 +1,5 @@
 //! Unselected launcher cores. No installed entrypoint or plaintext reader.
+mod campaign;
 mod channel;
 mod child_status;
 mod confinement;

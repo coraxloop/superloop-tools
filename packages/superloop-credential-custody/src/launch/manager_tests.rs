@@ -35,9 +35,13 @@ pub(in crate::launch) fn add_images(f: &mut Fixture) {
 }
 
 pub(in crate::launch) fn reply(admission: &Admission) -> Vec<u8> {
+    reply_case(admission, 0)
+}
+pub(in crate::launch) fn reply_case(admission: &Admission, index: usize) -> Vec<u8> {
     let policy = admission.policy();
+    let case = &policy.cases[index];
     let mut values = BTreeMap::from([
-        ("Id", policy.cases[0].generator_unit.clone()),
+        ("Id", case.generator_unit.clone()),
         ("InvocationID", "1234567890abcdef1234567890abcdef".into()),
         ("MainPID", "123".into()),
         ("ActiveState", "activating".into()),
@@ -89,14 +93,11 @@ pub(in crate::launch) fn reply(admission: &Admission) -> Vec<u8> {
             out
         })
         .into_bytes();
-    for (name, stream) in ["left.fifo", "right.fifo"]
-        .into_iter()
-        .zip(&policy.cases[0].streams)
-    {
+    for (name, stream) in ["left.fifo", "right.fifo"].into_iter().zip(&case.streams) {
         out.extend_from_slice(
             format!(
                 "OpenFile={}:{}:append\n",
-                policy.roots.runtime.join("sample").join(name).display(),
+                policy.roots.runtime.join(&case.id).join(name).display(),
                 stream.name
             )
             .as_bytes(),

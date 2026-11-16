@@ -59,8 +59,29 @@ impl Drop for ChildGuard {
 }
 #[allow(unsafe_code)]
 pub(in crate::launch) fn start(f: &Fixture, writers: &[File; 2]) -> (ChildGuard, ProcessPin) {
+    start_case(f, writers, 0)
+}
+fn descriptor_names(f: &Fixture, index: usize) -> CString {
+    CString::new(format!(
+        "LISTEN_FDNAMES={}:{}",
+        f.value["cases"][index]["streams"][0]["name"]
+            .as_str()
+            .unwrap(),
+        f.value["cases"][index]["streams"][1]["name"]
+            .as_str()
+            .unwrap()
+    ))
+    .unwrap()
+}
+#[allow(unsafe_code)]
+pub(in crate::launch) fn start_case(
+    f: &Fixture,
+    writers: &[File; 2],
+    index: usize,
+) -> (ChildGuard, ProcessPin) {
     let path = f.dir.path().join("fixture");
-    let case = f.dir.path().join("public.json");
+    let case = std::path::PathBuf::from(f.value["cases"][index]["public_case"].as_str().unwrap());
+    let names = descriptor_names(f, index);
     let args = [
         CString::new(path.as_os_str().as_encoded_bytes()).unwrap(),
         CString::new("emit").unwrap(),
@@ -106,7 +127,7 @@ pub(in crate::launch) fn start(f: &Fixture, writers: &[File; 2]) -> (ChildGuard,
             let env = [
                 variable.as_ptr().cast(),
                 c"LISTEN_FDS=2".as_ptr(),
-                c"LISTEN_FDNAMES=left:right".as_ptr(),
+                names.as_ptr(),
                 std::ptr::null(),
             ];
             let pointers = [

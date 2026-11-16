@@ -91,6 +91,18 @@ struct Output {
     file: File,
     entry: Entry,
 }
+#[derive(Debug, Serialize)]
+pub(super) struct CompletedCase {
+    pub case: String,
+    pub policy_sha256: String,
+    pub case_sha256: String,
+    pub invocation: Invocation,
+    // Full receipt binding for the campaign's protected matrix. A substituted
+    // child receipt cannot change the Store's independently retained snapshot
+    // (sec:credentialcustody:launcher-cores); compare bytes before measuring.
+    pub completion_sha256: String,
+    pub sealed_bytes: [u64; 2],
+}
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Invocation {
@@ -148,6 +160,62 @@ pub(super) struct Store {
     sealers: Option<super::sealer::Completion>,
 }
 impl Store {
+    // The campaign consumes the store's retained evidence, never an adapter's
+    // asserted success or a second interpretation of manager execution fields.
+    pub fn completed_case(&mut self) -> Result<CompletedCase> {
+        require(self.phase() == Phase::Complete, "campaign-case-incomplete")?;
+        self.check_outputs(Some(0o400))?;
+        let invocation = self.invocation.as_ref().ok_or("campaign-case-evidence")?;
+        require(
+            self.generator
+                .as_ref()
+                .is_some_and(|g| g.accepts(invocation)),
+            "campaign-case-evidence",
+        )?;
+        let sealers = self.sealers.as_ref().ok_or("campaign-case-evidence")?;
+        require(
+            sealers.eof == [true; 2]
+                && sealers.exits == [super::sealer::Exit::Code(0); 2]
+                && self
+                    .outputs
+                    .iter()
+                    .zip(sealers.sealed_bytes)
+                    .all(|(output, length)| {
+                        (1..=self.sealed_limit).contains(&length)
+                            && output.file.metadata().is_ok_and(|m| m.len() == length)
+                    }),
+            "campaign-case-evidence",
+        )?;
+        let expected = serde_json::to_vec(&self.snapshot(self.state.sequence(), Phase::Complete))
+            .map_err(|_| "launch-evidence-encoding")?;
+        let file = File::from(
+            openat(
+                self.evidence.file(),
+                "completion.json",
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|_| "campaign-completion-binding")?,
+        );
+        let m = file.metadata().map_err(|_| "campaign-completion-binding")?;
+        require(
+            m.is_file()
+                && m.uid() == nix::unistd::geteuid().as_raw()
+                && m.nlink() == 1
+                && m.mode() & 0o7777 == 0o400,
+            "campaign-completion-binding",
+        )?;
+        let bytes = receipt::read_file(file, 64 * 1024, false)?;
+        require(bytes == expected, "campaign-completion-binding")?;
+        Ok(CompletedCase {
+            case: self.case.clone(),
+            policy_sha256: self.policy_sha256.clone(),
+            case_sha256: self.case_sha256.clone(),
+            invocation: invocation.clone(),
+            completion_sha256: crate::identity::hash(&bytes),
+            sealed_bytes: sealers.sealed_bytes,
+        })
+    }
     pub fn reserve(admission: &Admission, index: usize) -> Result<Self> {
         let case = admission
             .policy()

@@ -241,3 +241,7 @@ pub(in crate::launch) mod completion;
 // Other cores receive snapshots; C6 cannot create a second cleanup owner.
 #[path = "manager.rs"]
 pub(in crate::launch) mod manager;
+
+#[cfg(test)]
+#[path = "campaign_tests.rs"]
+mod campaign_tests;

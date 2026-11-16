@@ -8,6 +8,7 @@ use crate::{identity::hash, receipt, record};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::File;
+use std::io::Seek as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
@@ -37,6 +38,14 @@ pub(super) struct HeldArtifact {
     stamp: (i64, i64, i64, i64),
 }
 impl HeldArtifact {
+    pub fn verify_bytes(&self) -> Result<()> {
+        self.unchanged()?;
+        let mut file = self.file.try_clone().map_err(|_| "file-read")?;
+        file.rewind().map_err(|_| "file-read")?;
+        let bytes = receipt::read_file(file, self.length, false)?;
+        require(hash(&bytes) == self.sha256, "launch-artifact-drift")?;
+        self.unchanged()
+    }
     pub fn unchanged(&self) -> Result<()> {
         let m = self.file.metadata().map_err(|_| "file-metadata")?;
         require(
