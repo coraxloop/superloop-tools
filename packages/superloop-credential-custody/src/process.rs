@@ -109,19 +109,26 @@ fn resource_failure(class: &'static str, errno: Option<i32>) -> KernelFailure {
 pub fn io_failure(class: &'static str, error: impl Into<std::io::Error>) -> &'static str {
     let failure = resource_failure(class, error.into().raw_os_error());
     #[cfg(test)]
-    let _diagnostic = superloop_cli_common::emit_control_plane_record(
-        &superloop_cli_common::ControlPlaneRecord::diagnostic(
-            "superloop-credential-custody-test",
-            &serde_json::to_string(&failure).unwrap_or_default(),
-        ),
-    );
+    test_diagnostic(&failure);
     KERNEL_FAILURE.with(|slot| *slot.borrow_mut() = Some(failure));
     class
+}
+
+#[cfg(test)]
+#[allow(clippy::print_stderr)]
+fn test_diagnostic(failure: &KernelFailure) {
+    // Rust's test capture owns this stream: successful tests stay quiet, and
+    // failures retain context before unwinding changes the descriptor table.
+    eprintln!(
+        "kernel={}",
+        serde_json::to_string(failure).unwrap_or_default()
+    );
 }
 
 pub fn diagnostic_message(class: &'static str) -> String {
     let failure = KERNEL_FAILURE.with(|slot| slot.borrow_mut().take());
     failure
+        .filter(|value| value.class == class)
         .and_then(|value| serde_json::to_string(&value).ok())
         .map_or_else(
             || class.into(),
@@ -482,6 +489,11 @@ mod tests {
                 .contains(missing.to_str().unwrap())
         );
         assert_eq!(diagnostic_message("another-refusal"), "another-refusal");
+        io_failure(
+            "handled-error",
+            std::io::Error::from_raw_os_error(nix::libc::EMFILE),
+        );
+        assert_eq!(diagnostic_message("later-refusal"), "later-refusal");
     }
 
     /// ´test:unit:descriptor-exhaustion-keeps-numeric-failure-evidence´

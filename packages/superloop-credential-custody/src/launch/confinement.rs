@@ -53,7 +53,7 @@ impl Confinement {
         let ruleset = self
             .ruleset
             .try_clone()
-            .map_err(|_| "sealer-landlock-duplicate")?;
+            .map_err(|error| crate::process::io_failure("sealer-landlock-duplicate", error))?;
         let filter = socket_filter()?;
         // SAFETY: the child callback only uses owned descriptors, immutable
         // arrays and Linux syscalls. The descriptor stays live until exec/drop.

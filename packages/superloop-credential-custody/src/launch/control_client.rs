@@ -70,7 +70,9 @@ impl Opened {
         let directory = receipt::sealed_directory(root)?;
         let record = file(&directory, "control-manifest.json", OFlag::O_RDONLY)?;
         let bytes = receipt::read_file(
-            record.try_clone().map_err(|_| "client-record")?,
+            record
+                .try_clone()
+                .map_err(|error| crate::process::io_failure("client-record", error))?,
             16 * 1024,
             true,
         )?;

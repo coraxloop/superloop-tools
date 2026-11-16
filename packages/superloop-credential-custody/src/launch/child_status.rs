@@ -7,6 +7,8 @@ pub(super) struct ChildStatus {
     pub pid: u32,
     pub birth: u64,
     pub uids: [u32; 4],
+    pub gids: [u32; 4],
+    pub groups: Vec<u32>,
     pub inheritable: u64,
     pub permitted: u64,
     pub effective: u64,
@@ -47,6 +49,17 @@ impl ChildStatus {
             .collect::<std::result::Result<Vec<u32>, _>>()
             .map_err(|_| "sealer-status-format")?;
         let uids = uids.try_into().map_err(|_| "sealer-status-format")?;
+        let gids = field("Gid:")?
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<std::result::Result<Vec<u32>, _>>()
+            .map_err(|_| "sealer-status-format")?;
+        let gids = gids.try_into().map_err(|_| "sealer-status-format")?;
+        let groups = field("Groups:")?
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<std::result::Result<Vec<u32>, _>>()
+            .map_err(|_| "sealer-status-format")?;
         let pid = number("Pid:")?;
         require(
             pid > 1 && number("Tgid:")? == pid && birth > 0,
@@ -56,6 +69,8 @@ impl ChildStatus {
             pid,
             birth,
             uids,
+            gids,
+            groups,
             inheritable: capability("CapInh:")?,
             permitted: capability("CapPrm:")?,
             effective: capability("CapEff:")?,
@@ -98,6 +113,10 @@ impl ChildStatus {
         )?;
         require(self.no_new_privileges == 1, "launch-role-privileges")
     }
+    pub fn verify_groups(&self, gids: &[u32; 4], groups: &[u32]) -> Result<()> {
+        require(&self.gids == gids, "sealer-status-gids")?;
+        require(self.groups == groups, "sealer-status-groups")
+    }
     pub fn verify(&self, pid: u32, owner: u32, bounding: u64) -> Result<()> {
         require(
             self.pid == pid && self.uids == [owner; 4],
@@ -138,7 +157,34 @@ mod tests {
             );
         }
     }
-    const TEXT: &str = "Pid:\t123\nTgid:\t123\nUid:\t2000 2000 2000 2000\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapAmb:\t0\nCapBnd:\tff\nNoNewPrivs:\t1\nSeccomp:\t2\n";
+    const TEXT: &str = "Pid:\t123\nTgid:\t123\nUid:\t2000 2000 2000 2000\nGid:\t2000 2000 2000 2000\nGroups:\t2000 2001\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapAmb:\t0\nCapBnd:\tff\nNoNewPrivs:\t1\nSeccomp:\t2\n";
+    /// ´test:unit:child-status-compares-all-gids-and-supplementary-groups´
+    #[test]
+    fn child_status_compares_all_gids_and_supplementary_groups() {
+        let good = ChildStatus::parse(TEXT.as_bytes(), 99).unwrap();
+        good.verify_groups(&[2000; 4], &[2000, 2001]).unwrap();
+        for slot in 0..4 {
+            let mut changed = good.clone();
+            changed.gids[slot] = 2002;
+            assert_eq!(
+                changed.verify_groups(&[2000; 4], &[2000, 2001]),
+                Err("sealer-status-gids")
+            );
+        }
+        for groups in [vec![], vec![2000], vec![2000, 2001, 2002], vec![2001, 2000]] {
+            let mut changed = good.clone();
+            changed.groups = groups;
+            assert_eq!(
+                changed.verify_groups(&[2000; 4], &[2000, 2001]),
+                Err("sealer-status-groups")
+            );
+        }
+        let empty = TEXT.replace("Groups:\t2000 2001", "Groups:\t");
+        ChildStatus::parse(empty.as_bytes(), 99)
+            .unwrap()
+            .verify_groups(&[2000; 4], &[])
+            .unwrap();
+    }
     /// ´test:unit:child-status-requires-complete-observed-fields´
     #[test]
     fn child_status_requires_complete_observed_fields() {
@@ -201,6 +247,8 @@ mod role_tests {
                 pid: 123,
                 birth: 456,
                 uids: [0; 4],
+                gids: [0; 4],
+                groups: vec![0],
                 inheritable: 0,
                 permitted: mask,
                 effective: mask,

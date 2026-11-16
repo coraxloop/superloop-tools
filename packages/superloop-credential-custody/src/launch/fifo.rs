@@ -77,12 +77,12 @@ impl Pipes {
             self.ends[0]
                 .reader
                 .try_clone()
-                .map_err(|_| "fifo-duplicate")?
+                .map_err(|error| crate::process::io_failure("fifo-duplicate", error))?
                 .into(),
             self.ends[1]
                 .reader
                 .try_clone()
-                .map_err(|_| "fifo-duplicate")?
+                .map_err(|error| crate::process::io_failure("fifo-duplicate", error))?
                 .into(),
         ])
     }

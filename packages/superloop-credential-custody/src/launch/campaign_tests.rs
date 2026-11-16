@@ -636,13 +636,24 @@ fn campaign_handoff_producer_rechecks_objects_before_hashing() {
                 .join(&admission.policy().cases[0].streams[0].output);
             let bytes = fs::read(&path).unwrap();
             store
-                .completed_case_with(|| {
-                    fs::rename(&path, path.with_extension("retained")).unwrap();
-                    if replace {
-                        fs::write(&path, bytes).unwrap();
-                        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
-                    }
-                })
+                .completed_case_hooks(
+                    || {
+                        fs::rename(&path, path.with_extension("retained")).unwrap();
+                        if replace {
+                            fs::write(&path, bytes).unwrap();
+                            fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+                        }
+                    },
+                    || {
+                        // Restore before the final store-wide check. Without the
+                        // per-open identity check, byte-identical replacement now
+                        // reaches acceptance rather than another defensive refusal.
+                        if replace {
+                            fs::remove_file(&path).unwrap();
+                        }
+                        fs::rename(path.with_extension("retained"), &path).unwrap();
+                    },
+                )
                 .map(|_| ())
         });
         assert_eq!(
@@ -673,6 +684,22 @@ fn campaign_handoff_measures_completed_outputs_and_rejects_stale_evidence() {
     let digest = crate::identity::hash(&bytes);
     handoff_positive(&f, &admission, &matrix, &path, &bytes, &digest);
     handoff_records(&admission, &path, &bytes);
+    let mut swapped: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    swapped["rows"][0]["completed"]["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    swapped["rows"][0]["completed"]["sealed_bytes"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    let swapped = serde_json::to_vec(&swapped).unwrap();
+    replace_protected(&path, &swapped);
+    assert_eq!(
+        campaign::observation(&admission, &crate::identity::hash(&swapped)).err(),
+        Some("campaign-handoff-output")
+    );
+    replace_protected(&path, &bytes);
     handoff_files(&f, &admission, &path, &bytes, &digest);
     handoff_roots(&f, &admission, &path, &bytes, &digest);
 }
@@ -971,9 +998,12 @@ fn handoff_roots(
             fs::rename(&root, &retained).unwrap();
             fs::create_dir(&root).unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            if directory == "evidence" {
+                copy_evidence(&retained, &root);
+            }
         });
         assert_eq!(result.err(), Some(class));
-        fs::remove_dir(&root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
         fs::rename(retained, root).unwrap();
     }
     assert_eq!(
@@ -987,4 +1017,52 @@ fn handoff_roots(
             .err(),
         Some("launch-artifact-changed")
     );
+}
+
+// Synthetic, bounded evidence copies only; no production custody walk is replaced.
+fn copy_evidence(from: &std::path::Path, to: &std::path::Path) {
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let destination = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            fs::create_dir(&destination).unwrap();
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o700)).unwrap();
+            copy_evidence(&entry.path(), &destination);
+        } else {
+            fs::copy(entry.path(), &destination).unwrap();
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o400)).unwrap();
+        }
+    }
+}
+
+/// ´test:unit:campaign-handoff-root-and-order-have-sole-refusal-controls´
+#[test]
+fn campaign_handoff_root_and_order_have_sole_refusal_controls() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    campaign::run(&admission, deadline(), |index, store, _| {
+        run_case(&f, &admission, index, store, "normal")
+    })
+    .unwrap();
+    let path = f.dir.path().join("evidence/campaign.json");
+    let bytes = fs::read(&path).unwrap();
+    let digest = crate::identity::hash(&bytes);
+    let mut swapped: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    swapped["rows"][0]["completed"]["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    swapped["rows"][0]["completed"]["sealed_bytes"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    let swapped = serde_json::to_vec(&swapped).unwrap();
+    replace_protected(&path, &swapped);
+    assert_eq!(
+        campaign::observation(&admission, &crate::identity::hash(&swapped)).err(),
+        Some("campaign-handoff-output")
+    );
+    replace_protected(&path, &bytes);
+    handoff_roots(&f, &admission, &path, &bytes, &digest);
 }

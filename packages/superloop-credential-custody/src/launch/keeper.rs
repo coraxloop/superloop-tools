@@ -32,6 +32,8 @@ impl<'a> Keeper<'a> {
         index: usize,
         store: &'a mut Store,
     ) -> Result<Self> {
+        #[cfg(test)]
+        super::test_support::assert_owned();
         require(
             startup.owner() == nix::unistd::geteuid().as_raw(),
             "keeper-owner",

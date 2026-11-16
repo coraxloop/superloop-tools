@@ -192,6 +192,13 @@ impl Store {
         &mut self,
         after_receipt: impl FnOnce(),
     ) -> Result<CompletedCase> {
+        self.completed_case_hooks(after_receipt, || {})
+    }
+    pub(super) fn completed_case_hooks(
+        &mut self,
+        after_receipt: impl FnOnce(),
+        after_hash: impl FnOnce(),
+    ) -> Result<CompletedCase> {
         require(self.phase() == Phase::Complete, "campaign-case-incomplete")?;
         self.check_outputs(Some(0o400))?;
         let invocation = self.invocation.as_ref().ok_or("campaign-case-evidence")?;
@@ -266,6 +273,7 @@ impl Store {
             .collect::<Result<Vec<_>>>();
         // Completion receipts are immutable. A late handoff refusal prevents the
         // campaign matrix; it cannot reopen or rewrite a completed child.
+        after_hash();
         let outputs: [CompletedOutput; 2] =
             measured?.try_into().map_err(|_| "campaign-output-roster")?;
         self.check_outputs(Some(0o400))?;
@@ -287,6 +295,8 @@ impl Store {
         })
     }
     pub fn reserve(admission: &Admission, index: usize) -> Result<Self> {
+        #[cfg(test)]
+        super::test_support::assert_owned();
         let case = admission
             .policy()
             .cases

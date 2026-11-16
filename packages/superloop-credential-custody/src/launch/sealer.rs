@@ -282,6 +282,8 @@ pub(super) struct Session<'a> {
     store: &'a mut Store,
     owner: u32,
     bounding: u64,
+    gids: [u32; 4],
+    groups: Vec<u32>,
     running: Vec<Running>,
     diagnostic_limit: u64,
     sealed_limit: u64,
@@ -305,6 +307,8 @@ impl<'a> Session<'a> {
         readers: [OwnedFd; 2],
         mut spawn: impl FnMut(Command, EofProbe, File) -> Result<Running>,
     ) -> Result<Self> {
+        #[cfg(test)]
+        super::test_support::assert_owned();
         let deadline = Instant::now() + Duration::from_millis(admission.policy().limits.case_ms);
         let own = super::child_status::ChildStatus::read(
             &File::open("/proc/self")
@@ -353,6 +357,8 @@ impl<'a> Session<'a> {
             store,
             owner: nix::unistd::geteuid().as_raw(),
             bounding: own.bounding,
+            gids: own.gids,
+            groups: own.groups,
             running: Vec::new(),
             diagnostic_limit,
             sealed_limit,
@@ -370,6 +376,17 @@ impl<'a> Session<'a> {
             return Err(session.fail(class));
         }
         Ok(session)
+    }
+    #[cfg(test)]
+    pub(super) fn test_group_mismatches(&mut self) {
+        self.gids[0] ^= 1;
+        assert_eq!(self.statuses().err(), Some("sealer-status-gids"));
+        self.gids[0] ^= 1;
+        let groups = self.groups.clone();
+        self.groups.push(u32::MAX);
+        assert_eq!(self.statuses().err(), Some("sealer-status-groups"));
+        self.groups = groups;
+        assert!(self.statuses().is_ok());
     }
     pub fn statuses(&self) -> Result<[super::child_status::ChildStatus; 2]> {
         require(
@@ -389,6 +406,7 @@ impl<'a> Session<'a> {
             let status = super::child_status::ChildStatus::read(&running.directory)?;
             require(status.birth == running.birth, "sealer-status-identity")?;
             status.verify(running.child.id(), self.owner, self.bounding)?;
+            status.verify_groups(&self.gids, &self.groups)?;
             channel::poll(std::slice::from_mut(&mut item), 0)?;
             require(item.revents == 0, "sealer-status-exited")?;
             statuses.push(status);

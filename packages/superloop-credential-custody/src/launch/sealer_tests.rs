@@ -682,6 +682,7 @@ fn sealer_status_readback_observes_both_live_children() {
     let mut session = Session::start(&admission, 0, &mut store, [left, right]).unwrap();
     let statuses = session.statuses().unwrap();
     assert_ne!(statuses[0].pid, statuses[1].pid);
+    session.test_group_mismatches();
     for status in statuses {
         assert_eq!(status.uids, [nix::unistd::geteuid().as_raw(); 4]);
         assert_eq!(
