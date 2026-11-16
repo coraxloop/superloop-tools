@@ -26,7 +26,7 @@ The contracts live in ``docs/spec/``; the contributing guide describes the build
 
 ## Versioning · `sec:publictools:versioning`
 
-This is version 0.4.2; before 1.0 backwards compatibility is explicitly excluded, every release may change any interface, file format or command, and compatibility code (a reader that accepts an older form, a shim, a deprecated alias) is a defect to be reported, not a courtesy.
+This is version 0.5.0; before 1.0 backwards compatibility is explicitly excluded, every release may change any interface, file format or command, and compatibility code (a reader that accepts an older form, a shim, a deprecated alias) is a defect to be reported, not a courtesy.
 
 ## Public releases · `sec:publictools:public-releases`
 
