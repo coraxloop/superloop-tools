@@ -4,6 +4,8 @@
 
 |Test|Area|Claim|
 |----|----|-----|
+|(`test:integration:python-runtime-is-evidence-beside-stable-build-identity`)|identity|Build reports retain the reader process's runtime and change only that member when the same reader protocol reports another implementation version.|
+|(`test:integration:mixed-python-readers-refuse-before-publication`)|identity|An invocation observing different Python readers refuses rather than publishing a verdict that attributes both readings to one interpreter.|
 |(`test:integration:repository-programme-policy-is-deferred`)|cli|Explicit local ownership defers opaque rows and keeps their checker visible.|
 |(`test:integration:unknown-policy-without-programme-still-refuses`)|cli|A bare unknown activation keeps the existing loader refusal.|
 |(`test:integration:catalogued-policy-cannot-claim-programme`)|cli|A published policy cannot be claimed by a local checker.|

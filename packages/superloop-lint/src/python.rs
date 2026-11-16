@@ -24,9 +24,18 @@ import ast
 import json
 import re
 import sys
+import traceback
 
 source = sys.stdin.buffer.read().decode('utf-8')
-tree = ast.parse(source)
+version = sys.implementation.version
+runtime = dict(implementation=sys.implementation.name,
+               version=f'{version.major}.{version.minor}.{version.micro}-{version.releaselevel}{version.serial}')
+try:
+    tree = ast.parse(source)
+except SyntaxError:
+    print(json.dumps(dict(documents=[], tests=[], runtime=runtime,
+                          error=traceback.format_exc())))
+    sys.exit(0)
 starts = [0]
 for ending in re.finditer(b'\r\n|\r|\n', source.encode('utf-8')):
     starts.append(ending.end())
@@ -63,7 +72,7 @@ def visit(node, nested_function=False):
         visit(child, nested_function or function)
 
 visit(tree)
-print(json.dumps(dict(documents=documents, tests=tests)))
+print(json.dumps(dict(documents=documents, tests=tests, runtime=runtime, error=None)))
 "
 }
 
@@ -87,6 +96,8 @@ struct Test {
 pub struct Scan {
     pub documents: Vec<Document>,
     tests: Vec<Test>,
+    runtime: superloop_cli_common::PythonRuntime,
+    error: Option<String>,
 }
 
 pub fn is_python(path: &Path) -> bool {
@@ -128,8 +139,13 @@ pub fn scan(source: &str) -> Result<Scan, String> {
         ));
     }
     written.map_err(|error| format!("python-docstrings: cannot send source: {error}"))?;
-    serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("python-docstrings: invalid reader result: {error}"))
+    let scan: Scan = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("python-docstrings: invalid reader result: {error}"))?;
+    superloop_cli_common::observe_python_runtime(scan.runtime.clone())?;
+    if let Some(error) = &scan.error {
+        return Err(format!("python-docstrings: {error}"));
+    }
+    Ok(scan)
 }
 
 pub fn tests(package: &str, path: &Path, source: &str) -> Result<Vec<TestFunction>, String> {

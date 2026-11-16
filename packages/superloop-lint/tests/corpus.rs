@@ -18,6 +18,8 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`python_runtime_is_evidence_beside_stable_build_identity`] | identity | Build reports retain the reader process's runtime and change only that member when the same reader protocol reports another implementation version. |
+//! | [`mixed_python_readers_refuse_before_publication`] | identity | An invocation observing different Python readers refuses rather than publishing a verdict that attributes both readings to one interpreter. |
 //! | [`repository_programme_policy_is_deferred`] | cli | Explicit local ownership defers opaque rows and keeps their checker visible. |
 //! | [`unknown_policy_without_programme_still_refuses`] | cli | A bare unknown activation keeps the existing loader refusal. |
 //! | [`catalogued_policy_cannot_claim_programme`] | cli | A published policy cannot be claimed by a local checker. |
@@ -194,6 +196,140 @@ fn python_fixture() -> tempfile::TempDir {
     );
     track(root.path());
     root
+}
+
+fn runtime_reader() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().expect("reader fixture");
+    let python = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
+        .map(|path| path.join("python3"))
+        .find(|path| path.is_file())
+        .expect("Python reader");
+    let program = format!("#!{}\n", python.display())
+        + r"
+import json, os, pathlib, subprocess, sys
+result = subprocess.run([sys.executable, *sys.argv[1:]], input=sys.stdin.buffer.read(), capture_output=True)
+if result.returncode:
+    sys.stderr.buffer.write(result.stderr)
+    sys.exit(result.returncode)
+record = json.loads(result.stdout)
+version = os.environ['FIXTURE_PYTHON_VERSION']
+if os.environ.get('FIXTURE_PYTHON_MIXED'):
+    counter = pathlib.Path(os.environ['FIXTURE_PYTHON_COUNTER'])
+    number = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(number + 1))
+    version = '9.8.7-final0' if number == 0 else '9.8.8-final0'
+record['runtime'] = dict(implementation='fixture', version=version)
+print(json.dumps(record))
+";
+    let path = directory.path().join("python3");
+    fs::write(&path, program).expect("stand-in reader");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("executable reader");
+    directory
+}
+
+fn runtime_command(root: &Path, reader: &Path, version: &str) -> Command {
+    let mut paths = vec![reader.to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH"),
+    ));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_superloop-lint"));
+    command
+        .env("PATH", std::env::join_paths(paths).expect("reader PATH"))
+        .env("FIXTURE_PYTHON_VERSION", version)
+        .args(["check", "--root"])
+        .arg(root);
+    command
+}
+
+/// Build reports retain the reader process's runtime and change only that
+/// member when the same reader protocol reports another implementation version.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the runtime publication contract changes.
+///
+/// ´claim:identity:python-runtime-is-evidence-beside-stable-build-identity´
+/// ´test:integration:python-runtime-is-evidence-beside-stable-build-identity´
+#[test]
+fn python_runtime_is_evidence_beside_stable_build_identity() {
+    let root = python_fixture();
+    let reader = runtime_reader();
+    let report = reader.path().join("report.json");
+    let stamp = reader.path().join("stamp");
+    let mut reports = Vec::new();
+    for version in ["9.8.7-final0", "9.8.7-final0", "9.8.8-final0"] {
+        let output = runtime_command(root.path(), reader.path(), version)
+            .arg("--write-report")
+            .arg(&report)
+            .arg("--write-stamp")
+            .arg(&stamp)
+            .output()
+            .expect("identified reader");
+        assert!(output.status.success(), "{output:?}");
+        let bytes = fs::read(&report).expect("report bytes");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("report");
+        assert_eq!(value["runtime"]["python"]["implementation"], "fixture");
+        assert_eq!(value["runtime"]["python"]["version"], version);
+        assert!(value.get("elapsed_micros").is_none());
+        reports.push(bytes);
+    }
+    assert_eq!(reports[0], reports[1]);
+    let mut before: serde_json::Value = serde_json::from_slice(&reports[0]).expect("before");
+    let mut after: serde_json::Value = serde_json::from_slice(&reports[2]).expect("after");
+    assert_ne!(before["runtime"], after["runtime"]);
+    before.as_object_mut().expect("object").remove("runtime");
+    after.as_object_mut().expect("object").remove("runtime");
+    assert_eq!(before, after);
+    fs::write(
+        root.path().join("ci/test_docstring_carrier.py"),
+        "def broken(:\n",
+    )
+    .expect("invalid Python");
+    let output = runtime_command(root.path(), reader.path(), "9.8.7-final0")
+        .output()
+        .expect("parse finding");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("finding");
+    assert_eq!(value["runtime"]["python"]["version"], "9.8.7-final0");
+}
+
+/// An invocation observing different Python readers refuses rather than
+/// publishing a verdict that attributes both readings to one interpreter.
+///
+/// # Panics
+/// Panics only if fixture IO fails or mixed readers publish a verdict.
+///
+/// ´claim:identity:mixed-python-readers-refuse-before-publication´
+/// ´test:integration:mixed-python-readers-refuse-before-publication´
+#[test]
+fn mixed_python_readers_refuse_before_publication() {
+    let root = python_fixture();
+    write(
+        root.path(),
+        "ci/test_second.py",
+        "\"\"\"Another source.\"\"\"\n",
+    );
+    track(root.path());
+    let reader = runtime_reader();
+    let report = reader.path().join("report.json");
+    let stamp = reader.path().join("stamp");
+    let output = runtime_command(root.path(), reader.path(), "9.8.7-final0")
+        .env("FIXTURE_PYTHON_MIXED", "1")
+        .env("FIXTURE_PYTHON_COUNTER", reader.path().join("counter"))
+        .arg("--write-report")
+        .arg(&report)
+        .arg("--write-stamp")
+        .arg(&stamp)
+        .output()
+        .expect("mixed readers");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.stdout, b"");
+    assert!(!report.exists());
+    assert!(!stamp.exists());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("mixed Python reader runtimes"),
+        "{output:?}"
+    );
 }
 
 fn check_carrier(root: &Path) -> (std::process::Output, serde_json::Value) {

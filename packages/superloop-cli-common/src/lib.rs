@@ -67,6 +67,85 @@ pub struct BuildIdentity {
 
 static BUILD_IDENTITY: OnceLock<BuildIdentity> = OnceLock::new();
 
+/// Interpreter reported by the process that actually read Python source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PythonRuntime {
+    /// Interpreter implementation name, without a filesystem path.
+    pub implementation: String,
+    /// Implementation version, including its release level and serial.
+    pub version: String,
+}
+
+/// Observed runtime evidence, separate from immutable executable identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeEvidence {
+    /// The Python reader used during this invocation.
+    pub python: PythonRuntime,
+}
+
+#[derive(Default)]
+struct RuntimeObservations {
+    first: Option<PythonRuntime>,
+    mixed: Option<String>,
+}
+
+static RUNTIME_OBSERVATIONS: Mutex<RuntimeObservations> = Mutex::new(RuntimeObservations {
+    first: None,
+    mixed: None,
+});
+
+/// Record the runtime reported by a reader in an identified invocation.
+/// Library callers without registered process identity do not share observations.
+///
+/// # Errors
+/// Refuses a second, different interpreter observation in the same invocation.
+pub fn observe_python_runtime(runtime: PythonRuntime) -> Result<(), String> {
+    if BUILD_IDENTITY.get().is_none() {
+        return Ok(());
+    }
+    let mut observations = RUNTIME_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(first) = &observations.first {
+        if first != &runtime {
+            let reason = format!(
+                "mixed Python reader runtimes: {} {} and {} {}",
+                first.implementation, first.version, runtime.implementation, runtime.version
+            );
+            observations.mixed = Some(reason.clone());
+            return Err(reason);
+        }
+    } else {
+        observations.first = Some(runtime);
+    }
+    drop(observations);
+    Ok(())
+}
+
+fn runtime_evidence() -> Option<RuntimeEvidence> {
+    RUNTIME_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .first
+        .clone()
+        .map(|python| RuntimeEvidence { python })
+}
+
+fn require_consistent_runtime() -> io::Result<()> {
+    if let Some(reason) = &RUNTIME_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .mixed
+    {
+        return Err(io::Error::other(format!(
+            "{reason}; refusing to publish a verdict"
+        )));
+    }
+    Ok(())
+}
+
 /// Register process-wide publication identity before parsing arguments.
 /// Returns false if an identity was already registered; it cannot be replaced.
 #[must_use]
@@ -84,12 +163,15 @@ impl<T: Serialize> Serialize for Identified<'_, T> {
         #[derive(Serialize)]
         struct Envelope<'a, T> {
             identity: &'a BuildIdentity,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            runtime: Option<RuntimeEvidence>,
             #[serde(flatten)]
             report: &'a T,
         }
         match self.identity {
             Some(identity) => Envelope {
                 identity,
+                runtime: runtime_evidence(),
                 report: self.report,
             }
             .serialize(serializer),
@@ -111,6 +193,7 @@ fn identified<T>(report: &T) -> Identified<'_, T> {
 /// # Errors
 /// Returns a serialization error if the report cannot be encoded as JSON.
 pub fn publication_json<T: Serialize>(report: &T) -> serde_json::Result<Vec<u8>> {
+    require_consistent_runtime().map_err(serde_json::Error::io)?;
     serde_json::to_vec(&identified(report))
 }
 
@@ -1013,6 +1096,7 @@ fn try_init_json_tracing_with_directive(filter_directive: &str) -> bool {
 ///
 /// Returns an error if serialisation or writing to stdout fails.
 pub fn emit<T: serde::Serialize>(value: &T) -> io::Result<()> {
+    require_consistent_runtime()?;
     let stdout = io::stdout();
     let mut out = stdout.lock();
     write_json_line(&mut out, &identified(value))
@@ -1176,6 +1260,11 @@ where
             return CommandExit::Failure.exit_code();
         }
     };
+
+    if let Err(error) = require_consistent_runtime() {
+        tracing::error!(error = %error, "Python reader runtime refused");
+        return CommandExit::Failure.exit_code();
+    }
 
     let published = if outcome.clean {
         finish_check_command(command_name, output, &outcome.report)
@@ -1462,6 +1551,10 @@ pub fn ensure_distinct_outputs(roles: &[(&str, &std::path::Path)]) -> Result<(),
 /// Failure publishing a check result through [`finish_check_command`].
 #[derive(Debug, thiserror::Error)]
 pub enum CheckResultError {
+    /// Identified readers observed incompatible interpreter versions.
+    #[error("{0}")]
+    InconsistentRuntime(String),
+
     /// Direct mode refused because stdout is a terminal (exit class 2).
     #[error("stdout is a terminal; refusing to write result data")]
     TtyRefusal,
@@ -1496,12 +1589,15 @@ pub enum CheckResultError {
 ///
 /// Returns [`CheckResultError::TtyRefusal`] in direct mode when stdout is
 /// a terminal, [`CheckResultError::InvalidMode`] if only one build-mode
-/// path is set, or [`CheckResultError::Io`] on a write failure.
+/// path is set, [`CheckResultError::InconsistentRuntime`] for mixed readers,
+/// or [`CheckResultError::Io`] on a write failure.
 pub fn finish_check_command<T: serde::Serialize>(
     command_name: &str,
     output: &CheckOutputArgs,
     report: &T,
 ) -> Result<(), CheckResultError> {
+    require_consistent_runtime()
+        .map_err(|error| CheckResultError::InconsistentRuntime(error.to_string()))?;
     match (&output.report, &output.stamp) {
         (None, None) => {
             if let Some(record) = stdout_tty_refusal_record(command_name) {
@@ -1544,7 +1640,7 @@ fn write_json_report_if_changed<T: serde::Serialize>(
     path: &std::path::Path,
     value: &T,
 ) -> io::Result<PublicationChange> {
-    let mut bytes = serde_json::to_vec(&identified(value))?;
+    let mut bytes = publication_json(value)?;
     bytes.push(b'\n');
 
     match publication::inspect_destination(path, &bytes, publication::PublicationMode::Public) {

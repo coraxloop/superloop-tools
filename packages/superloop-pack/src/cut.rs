@@ -887,6 +887,8 @@ struct CitationSites {
     // identity shape without making executable readability a corpus condition.
     #[serde(rename = "identity")]
     _identity: Option<superloop_cli_common::BuildIdentity>,
+    #[serde(rename = "runtime")]
+    _runtime: Option<superloop_cli_common::RuntimeEvidence>,
     namespace: String,
     version: [u64; 3],
     sites: Vec<CitationSite>,

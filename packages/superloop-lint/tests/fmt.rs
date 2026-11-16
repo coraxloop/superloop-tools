@@ -102,6 +102,7 @@ fn build_identity_survives_versions_results_and_refusals() {
         vec!["check", "--root", root.path().to_str().expect("root")],
     ] {
         let output = Command::new(binary)
+            .env("PATH", root.path())
             .args(&arguments)
             .output()
             .expect("linter");
@@ -114,6 +115,7 @@ fn build_identity_survives_versions_results_and_refusals() {
         for line in records {
             let value: serde_json::Value = serde_json::from_slice(line).expect("JSON record");
             let identity = &value["identity"];
+            assert!(value.get("runtime").is_none());
             assert_eq!(
                 identity["artifact_sha256"], digest,
                 "{arguments:?}: {value}"
