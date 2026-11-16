@@ -116,7 +116,7 @@ pub fn run(record: &Parameters, path: &Path) -> Result<Value> {
     let calibration: Calibration =
         serde_json::from_slice(&bytes).map_err(|_| "calibration-shape")?;
     let evidence = &calibration.evidence;
-    if calibration.schema != 2
+    if calibration.schema != 3
         || calibration.command != "length-observe"
         || calibration.case != record.case
         || calibration.outcome != "ok"

@@ -30,6 +30,12 @@ impl Command {
             Self::BarrierRelease => "barrier-release",
         }
     }
+    pub const fn result_schema(self) -> u32 {
+        match self {
+            Self::CalibrationRun => 2,
+            _ => 1,
+        }
+    }
     const fn role(self) -> Role {
         match self {
             Self::CalibrationRun => Role::CalibrationRun,
@@ -78,7 +84,7 @@ pub fn run(command: Command, parameters: &Path, case: &str) -> Result<serde_json
             let mut keeper = Keeper::prepare(startup.clone(), &admission, index, store)?;
             keeper.run(deadline)
         })?;
-        return serde_json::to_value(matrix).map_err(|_| "result-encoding");
+        return campaign::result(&admission, &matrix);
     }
     let index = admission
         .policy()

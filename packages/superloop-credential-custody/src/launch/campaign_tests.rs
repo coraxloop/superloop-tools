@@ -278,7 +278,7 @@ fn campaign_runs_completed_pairs_in_order_and_publishes_one_matrix() {
         value["rows"][1]["completed"]["case"]
     );
     assert_eq!(value["rows"][1]["completed"]["case"], "second");
-    assert_eq!(fs::metadata(path).unwrap().mode() & 0o7777, 0o400);
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o400);
     assert_eq!(
         campaign::run(&admission, deadline(), |_, _, _| panic!("rerun")).err(),
         Some("receipt-no-replace")
@@ -298,6 +298,22 @@ fn campaign_runs_completed_pairs_in_order_and_publishes_one_matrix() {
         bytes
     );
     listener.finish();
+    assert_eq!(
+        crate::launch::entry::Command::CalibrationRun.result_schema(),
+        2
+    );
+    let result = campaign::result(&admission, &matrix).unwrap();
+    assert_eq!(result["matrix_sha256"], crate::identity::hash(&bytes));
+    assert_eq!(result["matrix"], value);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut changed = bytes;
+    changed.push(b'\n');
+    fs::write(&path, changed).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+    assert_eq!(
+        campaign::result(&admission, &matrix).err(),
+        Some("campaign-result-binding")
+    );
 }
 
 /// ´test:unit:campaign-refuses-repeated-invocations-and-final-publication-collisions´
@@ -1125,4 +1141,98 @@ fn campaign_handoff_root_and_order_have_sole_refusal_controls() {
     );
     replace_protected(&path, &bytes);
     handoff_roots(&f, &admission, &path, &bytes, &digest);
+}
+
+/// ´test:unit:observation-boundary-checks-have-independent-core-controls´
+#[test]
+fn observation_boundary_checks_have_independent_core_controls() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    let _matrix = campaign::run(&admission, deadline(), |index, store, _| {
+        run_case(&f, &admission, index, store, "normal")
+    })
+    .unwrap();
+    for case in &admission.policy().cases {
+        fs::set_permissions(&case.record, fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    let policy = f.dir.path().join("policy.json");
+    fs::write(&policy, serde_json::to_vec(&f.value).unwrap()).unwrap();
+    fs::set_permissions(&policy, fs::Permissions::from_mode(0o400)).unwrap();
+    let mut files = serde_json::Map::new();
+    for (name, role) in [
+        ("sealer", ArtifactRole::Sealer),
+        ("library", ArtifactRole::Library),
+        ("interpreter", ArtifactRole::Interpreter),
+        ("parser", ArtifactRole::Parser),
+    ] {
+        let artifact = admission
+            .artifacts()
+            .iter()
+            .find(|a| a.role == role)
+            .unwrap();
+        let declared = admission
+            .policy()
+            .artifacts
+            .iter()
+            .find(|a| a.id == artifact.id)
+            .unwrap();
+        files.insert(
+            name.into(),
+            serde_json::json!({"path":declared.path,"sha256":artifact.sha256}),
+        );
+    }
+    let samples: Vec<_> = admission.policy().cases.iter().flat_map(|case| case.streams.iter().map(|stream| serde_json::json!({"case":case.id,"name":stream.name,"input_length":stream.length,"content":if stream.pattern.id()=="ascending" {"a"} else {"b"}}))).collect();
+    let record: crate::record::Parameters = serde_json::from_value(serde_json::json!({
+        "schema":3,"case":admission.policy().campaign,"campaign":{"policy":policy,"matrix_sha256":crate::identity::hash(&fs::read(f.dir.path().join("evidence/campaign.json")).unwrap())},
+        "sealed_root":f.dir.path().join("analysis"),"evidence_root":f.dir.path().join("observation"),
+        "payload":{"path":"/unused","sha256":"0".repeat(64),"repository":"/unused","source_commit":"0".repeat(40),"document":"unused"},
+        "limits":{"file_bytes":1024,"output_bytes":1024,"timeout_ms":600_000},
+        "identity":{"measure":"decoded-length","computation":"3*(N/4)-P","form":{"wrap":0,"final_lf":true},"files":files,"probes":[],"source_commit":"0".repeat(40)},
+        "probes":[],"names":[],"lengths":[],"contents":["a","b"],"comparisons":[],"samples":samples
+    })).unwrap();
+    // These core controls intentionally omit parser/identity/grid admission:
+    // each targeted boundary is the sole refusal. Built-command controls above
+    // them separately prove strict public admission and end-to-end refusals.
+    let binding = crate::launch::observation::bind(&record).unwrap();
+    let mut legacy = serde_json::to_value(&binding.evidence).unwrap();
+    let _removed = legacy.as_object_mut().unwrap().remove("admitted_owner_uid");
+    assert!(serde_json::from_value::<crate::launch::observation::Evidence>(legacy).is_err());
+    for (fault, class) in [
+        ("root", "observation-analysis-root"),
+        ("roster", "observation-roster"),
+        ("artifact", "observation-artifact"),
+        ("case", "observation-case"),
+        ("stream", "observation-stream"),
+        ("length", "observation-input"),
+        ("pattern", "observation-input"),
+        ("repeat", "observation-output-repeated"),
+    ] {
+        let mut changed = record.clone();
+        match fault {
+            "root" => changed.sealed_root = admission.policy().roots.sealed.clone(),
+            "roster" => {
+                let _removed = changed.samples.pop();
+            }
+            "artifact" => changed.identity.files.library.sha256 = "0".repeat(64),
+            "case" => changed.samples[0].case = "missing".into(),
+            "stream" => changed.samples[0].name = "missing".into(),
+            "length" => changed.samples[0].input_length += 1,
+            "pattern" => {
+                changed.samples[0].content = if changed.samples[0].content == "a" {
+                    "b"
+                } else {
+                    "a"
+                }
+                .into();
+            }
+            "repeat" => changed.samples[1] = changed.samples[0].clone(),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            crate::launch::observation::bind(&changed).err(),
+            Some(class),
+            "{fault}"
+        );
+    }
 }

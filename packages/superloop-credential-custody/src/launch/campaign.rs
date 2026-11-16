@@ -160,6 +160,21 @@ pub(super) fn run_with_checkpoint(
     Ok(matrix)
 }
 
+// The command reports the digest of the exclusively published bytes, after
+// checking they still equal the completed in-memory matrix it just produced.
+pub(super) fn result(admission: &Admission, matrix: &Matrix) -> Result<serde_json::Value> {
+    let bytes = receipt::protected_read(
+        &admission.policy().roots.evidence.join("campaign.json"),
+        256 * 1024,
+        true,
+    )?;
+    require(
+        bytes == serde_json::to_vec(matrix).map_err(|_| "result-encoding")?,
+        "campaign-result-binding",
+    )?;
+    Ok(serde_json::json!({"matrix":matrix,"matrix_sha256":crate::identity::hash(&bytes)}))
+}
+
 fn retain_failure(
     admission: &Admission,
     root: &std::fs::File,

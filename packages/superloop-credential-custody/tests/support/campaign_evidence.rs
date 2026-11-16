@@ -195,7 +195,7 @@ fn observation_rejects_legacy_assertions() {
     super::refused(&f.observe(), "record-schema");
     let f = Fixture::new();
     let report = super::pass(&f.observe());
-    assert_eq!(report["schema"], 2);
+    assert_eq!(report["schema"], 3);
     let path = f.dir.path().join("evidence/calibration");
     let mut old: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     old["schema"] = json!(1);
@@ -359,4 +359,93 @@ fn observation_rechecks_campaign_after_parser() {
     let f = Fixture::payload(&payload);
     super::refused(&f.observe(), "sealed-completion-identity");
     assert!(!f.dir.path().join("evidence/calibration").exists());
+}
+
+/// ´test:integration:calibration-measures-owner-and-refuses-earlier-form´
+#[test]
+fn calibration_measures_owner_and_refuses_earlier_form() {
+    let f = Fixture::new();
+    let report = super::pass(&f.observe());
+    assert_eq!(report["schema"], 3);
+    assert_eq!(
+        report["evidence"]["campaign"]["admitted_owner_uid"],
+        nix::unistd::geteuid().as_raw()
+    );
+    let path = f.dir.path().join("evidence/calibration");
+    let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut changed = original.clone();
+    changed["schema"] = json!(2);
+    protected(&path, &changed, 0o400);
+    super::refused(&f.check(), "calibration-identity");
+    let mut changed = original.clone();
+    changed["evidence"]["campaign"]["admitted_owner_uid"] =
+        json!(nix::unistd::geteuid().as_raw().wrapping_add(1));
+    protected(&path, &changed, 0o400);
+    super::refused(&f.check(), "calibration-identity");
+    let mut changed = original;
+    let _removed = changed["evidence"]["campaign"]
+        .as_object_mut()
+        .unwrap()
+        .remove("admitted_owner_uid");
+    protected(&path, &changed, 0o400);
+    super::refused(&f.check(), "calibration-shape");
+}
+
+/// ´test:integration:observation-receipt-root-is-disjoint´
+#[test]
+fn observation_receipt_root_is_disjoint() {
+    for path in [
+        "producer/evidence",
+        "producer/sealed",
+        "producer/runtime",
+        "producer/evidence/analysis",
+        "producer",
+    ] {
+        let mut f = Fixture::new();
+        directory(&f.dir.path().join(path));
+        f.record["evidence_root"] = json!(f.dir.path().join(path));
+        super::refused(&f.observe(), "observation-evidence-root");
+        assert!(!f.dir.path().join(path).join("calibration").exists());
+    }
+}
+
+/// ´test:integration:observation-complete-subset-is-not-whole-campaign´
+#[test]
+fn observation_complete_subset_is_not_whole_campaign() {
+    let mut f = Fixture::payload(&super::PAYLOAD.replace("(3, 4, 5)", "(3, 4)"));
+    f.record["lengths"] = json!([3, 4]);
+    f.record["samples"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|s| s["input_length"] != 5);
+    for name in ["alpha", "beta"] {
+        for content in ["a", "b"] {
+            fs::remove_file(
+                f.dir
+                    .path()
+                    .join(format!("sealed/{name}/5-{content}.sealed")),
+            )
+            .unwrap();
+        }
+    }
+    super::refused(&f.observe(), "observation-roster");
+}
+
+/// ´test:integration:observation-swapped-pattern-assignment-is-not-input´
+#[test]
+fn observation_swapped_pattern_assignment_is_not_input() {
+    let mut f = Fixture::new();
+    f.record["samples"][0]["case"] = json!("pair-3-1");
+    f.record["samples"][1]["case"] = json!("pair-3-0");
+    let a = f.dir.path().join("sealed/alpha/3-a.sealed");
+    let b = f.dir.path().join("sealed/alpha/3-b.sealed");
+    let bytes_a = fs::read(&a).unwrap();
+    let bytes_b = fs::read(&b).unwrap();
+    mode(&a, 0o600);
+    mode(&b, 0o600);
+    fs::write(&a, bytes_b).unwrap();
+    fs::write(&b, bytes_a).unwrap();
+    mode(&a, 0o400);
+    mode(&b, 0o400);
+    super::refused(&f.observe(), "observation-input");
 }
