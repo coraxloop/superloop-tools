@@ -197,7 +197,7 @@ Calibration-run admits schema-2 policy and all public cases, closes inherited de
 
 Every launcher command refuses an ordinary uid before opening policy inputs. Root must run the exact admitted launcher image in the host user map with all uid values zero and the observed capability/no-new-privileges row above. Before release, each sealer status also records all four gids and supplementary groups and compares them exactly with the keeper identity measured before child construction. The keeper does not change these groups in its child hook; the owner must approve that inherited group set under the actual role template before a real-key run. The operator must additionally retain the actual loaded unit properties, host PID-namespace and mount witnesses, and the live inability of non-manager roles to reach either manager socket. The program's own status check does not establish those filesystem or manager-access facts. Installation provenance, immutable library/configuration lookup, exclusive unit-name ownership and the installed manager's `OpenFile` append/writer lifetime remain mandatory rehearsal witnesses. No development control uses a real host key or manager unit, and none establishes the actual 48-output constants, real encryption or a real generator. Observation-record integration, calibration acceptance and all credential-set or authorization publication remain separate.
 
-For each admitted case, wait for its protected runtime `control-manifest.json`, run `descriptors` once, then `barrier-release` once after the inventory operation has succeeded, then `completion`, all within the case deadline. A missing reply is not proof that an operation did not run. Do not blindly repeat `descriptors` or `barrier-release`: a repeated inventory or release request refuses and can make the case uncertain. If `descriptors` fails after inventory may have been retained, the inventory file alone does not prove its subsequent observation-only pidfd transfer succeeded; do not bypass that failed step by running release. If a release reply is lost, do not send another release. Preserve the client diagnostic and immutable case state for operator reconciliation; neither restarting a client nor a retained receipt authorizes a repeated effect. Completion is read-only, but restart it only against the same live keeper and protected invocation binding; a changed or lost keeper refuses. Use the keeper stop and recovery procedure below; it does not authorize retrying an effect.
+For each admitted case, wait for its protected runtime `control-manifest.json`, run `descriptors` once, then `barrier-release` once after `descriptors` exits 0 with outcome `observed`, then `completion`, all within the case deadline. A missing reply is not proof that an operation did not run. Do not blindly repeat `descriptors` or `barrier-release`: a repeated inventory or release request refuses and can make the case uncertain. If `descriptors` fails after inventory may have been retained, the inventory file alone does not prove its subsequent observation-only pidfd transfer succeeded; do not bypass that failed step by running release. If a release reply is lost, do not send another release. Preserve the client diagnostic and immutable case state for operator reconciliation; neither restarting a client nor a retained receipt authorizes a repeated effect. Completion is read-only, but restart it only against the same live keeper and protected invocation binding; a changed or lost keeper refuses. After a lost reply, preserve the diagnostic and use the verified keeper stop procedure below, then reconcile its retained state. Do not send a later effect to bypass the failed step. If the keeper cannot be reached safely, its case deadline remains the bound; rerun only with fresh roots and a new policy. The procedure does not authorize retrying an effect.
 
 `calibration-run` selects the policy campaign with `--campaign`; the three per-case clients select a child with `--case`. The old calibration-run spelling is refused, with no alias.
 
@@ -205,16 +205,94 @@ The completed campaign matrix uses schema 2 and retains each sealed output’s m
 
 ## Campaign failure evidence · `sec:credentialcustody:campaign-failure-evidence`
 
-A failed or cooperatively stopped campaign publishes schema-4 ``campaign-failure.json`` in its evidence root, naming the failed child and index, the campaign stage, the first case failure stage and cause, and the last immutable lifecycle receipt. A failure before case reservation has no case receipt; a failure after a complete child preserves that child's completion. The diagnostic carries the same locator and whether the campaign failure receipt was published. A failed publication is not evidence that recovery completed. No lifecycle file or failure summary supplies calibration acceptance: use the protected completed-matrix handoff reader.
+A failed or cooperatively stopped campaign publishes schema-4 ``campaign-failure.json``. Its locator names the child, stage, first cause and last immutable lifecycle receipt. ``between-cases`` means no next case was reserved; ``next_index`` and ``completed_count`` are positions in policy order, not leftover objects. A failure during reservation can leave objects before their creation receipt exists. A production failure after submission latches ``uncertain`` and retains outputs and socket; a direct private test call to ``fail`` can instead exercise verified unlink, and is not a production failure example. No lifecycle or failure record supplies calibration acceptance: only the protected completed-matrix handoff reader does that.
 
-Within each case's evidence directory, ``state-00.json`` records the reserved objects and subsequent ``state-NN.json`` files record acceptance transitions, ``inventory.json`` records the external descriptor observation, and ``completion.json`` records successful process completion. The separate ``lifecycle-NN.json`` sequence has at most 16 exclusively created 0400 entries. It records submission acknowledgement, the first fully compared start binding before in-memory adoption, recovery intent and observed cleanup results. The runtime directory holds ``fifo-manifest.json`` and ``control-manifest.json`` for the named FIFO and socket bindings. Sequence numbers are local to that case. Read the highest published sequence; a ``.partial`` file is never a receipt. Lifecycle publication checks the held evidence directory and never overwrites an earlier record or reopens acceptance after uncertainty.
+The evidence map is finite and follows the admitted policy's case order. At the campaign root, ``campaign-start.json`` means initialization was published, ``campaign.json`` is the proposed completed matrix, and ``campaign-failure.json`` is a failure summary. Within each case, ``state-00.json`` records creation and ``state-NN.json`` records acceptance phases; ``inventory.json`` and ``completion.json`` retain observation and successful completion. The separate ``lifecycle-NN.json`` sequence has at most 16 exclusively published 0400 entries. It retains submission acknowledgement, the first fully compared start binding before memory adopts it, recovery intent and resource facts. Runtime directories retain ``fifo-manifest.json`` and, after capture, ``control-manifest.json``. A ``.partial`` is never a receipt. Missing files do not mean success or absence.
 
-The start-binding event retains the invocation and the measured manager reply and configuration digests even while execution is still pending. Recovery results preserve the first cause and distinguish a completed stop job under that invocation from an absent unit; successful unlink from retention or unknown state; and a sealer exit observed through its held handle from no observation. A stop-command exit never claims the unit record was removed. Secondary cleanup failures remain visible after an uncertain latch. Retained means the tool did not remove the resource, not that its pathname still names the original object. A failed case reservation can leave directories or files before its creation receipt exists; these remain unresolved and must not be removed by guessing. Unknown, unbound, failed and retained resources require operator reconciliation; no missing field or missing terminal record means success. Completed outputs and evidence are preserved.
+**Start with the keeper, including after a hard kill.** Use the approved launch record to obtain ``POLICY`` and the keeper unit ``KEEPER.service``; the policy's ``generator_unit`` names are different units. If that launch record or its reviewed policy digest is missing, preserve the roots and ask the owner to identify the launch rather than guess. These commands inspect public metadata only:
 
-To stop intentionally, verify the keeper unit and its live main process, then use ``systemctl kill --kill-whom=main --signal=SIGTERM KEEPER.service``. Do not stop the whole unit unless its owner-approved stop template gives the keeper time to recover. The single-threaded keeper consumes SIGINT and SIGTERM through a signal descriptor: schema-2 lifecycle records and the failure summary retain the first sender pid, uid and signal, and count later consumed requests. Standard signals can coalesce, so this is not a count of all sends or an authentication claim. The outcome ``stopped`` means the bounded recovery attempt ended, never that resources are absent. Recovery has one fresh ``case_ms`` allowance shared by completing the same admitted start comparison and stopping its bound invocation. It never stops by name alone; an unresolved binding retains its refusal class. Child execution restores the pre-listener signal mask. A published matrix is not revoked by a later stop request.
+```sh
+sha256sum -- POLICY
+python3 -m json.tool POLICY
+systemctl show --property=Id,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecStart,ControlGroup KEEPER.service
+```
 
-Never interrupt a waiting client: a closed connection refuses the case, and a lost reply never permits blind repetition of an effect. Read ``campaign-failure.json`` and its named lifecycle receipt for the last phase, original cause and secondary cleanup facts. After a killed keeper, preserve evidence and run ``systemctl show --property=InvocationID,ActiveState,SubState,MainPID UNIT.service`` for the retained unit. Compare its invocation with the durable start-binding event; keep exclusive custody of the name while issuing ``systemctl stop UNIT.service``. Query again and use ``systemctl reset-failed UNIT.service`` only after the matching unit is inactive or failed with no live main process. A changed or missing invocation is unresolved and requires owner disposition, not a name-only stop. The query and stop are not atomic. Compare each remaining runtime path with its creation manifest before using ``unlink PATH`` on that one socket or FIFO; remove the empty case runtime directory with ``rmdir CASE-DIRECTORY``. A missing manifest, replacement object or publication partial is not permission to guess. Never remove completed outputs or evidence as runtime cleanup. Rerun only with fresh roots and a new policy.
+Compare the policy digest and keeper ``ExecStart`` with the approved launch record, including ``calibration-run --parameters POLICY --campaign CAMPAIGN`` and the separately frozen image. Set the following placeholders from that policy: ``EVIDENCE``, ``RUNTIME`` and ``SEALED`` are its three roots; ``CASE`` and ``UNIT.service`` come from one case's ``id`` and ``generator_unit``. Never infer these from a PID or alphabetical directory order. If ``MainPID`` is nonzero, inspect that exact ``PID`` before sending a signal:
 
-Client signal scoping and binding the generator to the keeper's unit remain owner decisions; this program promises neither. The rehearsal must witness the keeper unit's ``KillMode=mixed`` and a ``TimeoutStopSec`` longer than the approved recovery allowance before a whole-unit stop is used. The operator procedure above signals only the keeper's main process and remains valid without those two pending mechanisms.
+```sh
+readlink /proc/PID/exe
+sha256sum /proc/PID/exe
+stat -Lc '%d %i' /proc/PID/exe
+tr '\0' '\n' < /proc/PID/cmdline
+python3 -c 'import pathlib,sys; s=pathlib.Path("/proc",sys.argv[1],"stat").read_text(); print(s[s.rfind(")")+2:].split()[19])' PID
+```
 
-The generator start vector already sets ``TimeoutStartSec=case_ms``, ``TimeoutStopSec=5s``, ``SendSIGKILL=yes`` and ``KillMode=control-group``. A fixture stranded at its start barrier cannot retain a live process beyond the activation budget plus the manager’s five-second termination allowance; a failed unit record can remain and hold the reserved name. A manager stop sends SIGTERM then SIGCONT, and the barrier fixture retains SIGTERM’s default disposition, so it exits without emitting. Direct sealers install SIGKILL parent-death behavior before execution and refuse if their creating parent has already changed. The filter then refuses clearing or replacing that setting and the uid/gid-changing syscalls that could clear it; read-only parent-death queries remain available. Admitted executable images must also have no file-capability attributes: retain an empty getcap result in the installation freeze witness, alongside the mode checks that already reject set-id images. Ordinary exec preserves the setting; a privileged image can clear it, so its absence is a required operator witness. This relies on the single-threaded keeper and does not bind the generator unit to it. A hard-killed keeper leaves no terminal lifecycle claim, and can leave runtime FIFO/socket names and publication partials; preserve these for reconciliation.
+Compare image digest and command line to the frozen launch record. Where a case has ``control-manifest.json``, compare ``keeper_pid``, ``keeper_birth`` (the last command prints start ticks) and ``image.device``/``image.inode`` too. Requery the unit immediately before signalling under exclusive ownership of its name; a changed invocation, birth or image is unresolved, not permission to signal a recycled PID. Before capture there is no control manifest: the approved unit/launch record and live manager identity are the available witness. Do not unlink runtime objects while a keeper is live or its identity is unresolved.
+
+To stop that verified keeper intentionally, signal only its main process:
+
+```sh
+systemctl kill --kill-whom=main --signal=SIGTERM KEEPER.service
+```
+
+Never interrupt a waiting client. The keeper consumes SIGINT/SIGTERM through a signal descriptor; the first sender pid, uid and signal win and later consumed requests are counted. Standard signals can coalesce; this is no authentication claim or count of every send. A second SIGTERM does not accelerate recovery. The only forced escalation is SIGKILL, which leaves no terminal receipt and requires the hard-kill procedure below. ``stopped`` means the bounded recovery attempt ended, never resource absence. Recovery has one fresh ``case_ms`` allowance, can complete the same admitted start comparison, and never stops by name alone. An interrupted stop call is not a failed-holder observation: recovery rechecks the bound invocation and completes the stop. A never-submitted holder is ``not-attempted``. A published matrix is not revoked by a later signal.
+
+**Find the interrupted case without a terminal receipt.** First query the keeper as above. ``MainPID=0`` with ``ActiveState=inactive`` or ``failed`` is the manager's witness that the keeper main process is gone. If the unit is unloaded, retain ``LoadState=not-found`` and compare any recorded keeper PID/birth against ``/proc``; a missing PID or a different birth means that recorded process is gone, not that another process may be killed. A live or ambiguous keeper blocks cleanup. Then inspect the campaign root:
+
+```sh
+ls -l -- EVIDENCE/campaign-start.json EVIDENCE/campaign.json EVIDENCE/campaign-failure.json
+```
+
+An ``ls`` missing-file diagnostic is expected after a hard kill. If ``campaign.json`` exists, validate it through the handoff reader; do not infer acceptance from its presence. If ``campaign-failure.json`` exists, print it with ``python3 -m json.tool`` and follow its locator. If neither terminal file exists and the keeper is gone, the campaign was interrupted without a terminal verdict. ``campaign-start.json`` can identify its campaign/policy/code but cannot prove completion. If even the start record is missing, admission/publication may not have finished: retain any partials and inspect only the policy-named paths, without deleting unmanifested objects.
+
+Walk ``cases`` in the printed policy's order. For each exact ``CASE`` inspect:
+
+```sh
+ls -ld -- EVIDENCE/CASE RUNTIME/CASE SEALED/CASE
+ls -l -- EVIDENCE/CASE/state-*.json EVIDENCE/CASE/lifecycle-*.json EVIDENCE/CASE/completion.json
+```
+
+The last existing evidence case without ``completion.json`` is the in-progress candidate. Read its highest published ``state-NN.json`` and ``lifecycle-NN.json`` with ``python3 -m json.tool FILE``; their phase and event state where it got to. Completed earlier cases stay preserved. If all existing cases have completion but no matrix exists, interruption may have been between cases or during final publication; do not invent a reservation for the next case. An absent evidence directory does not rule out a partially created sealed/runtime directory; objects without a creation manifest remain unresolved.
+
+Find the unit in that case's policy ``generator_unit`` and confirm it matches lifecycle ``unit``. The invocation is ``binding.invocation`` or, on the first ``start-binding`` event itself, ``event.observation.invocation``. A submission acknowledgement alone supplies no invocation. Retain the highest sequence and its binding; if none exists, the operator cannot stop that unit by name under this procedure. Preserve it for owner disposition. A killed keeper writes no terminal record; direct sealers have their independent lifetime boundary, while the generator's activation/stop limits may leave a failed unit record and reserved name.
+
+**Reconcile a bound unit and manifested runtime objects.** Keep exclusive ownership of the unit name through the following non-atomic query/stop/query sequence. Compare the first query's invocation with the retained binding before running stop; on drift, stop this procedure:
+
+```sh
+systemctl show --property=InvocationID,ActiveState,SubState,MainPID UNIT.service
+systemctl stop UNIT.service
+systemctl show --property=InvocationID,ActiveState,SubState,MainPID UNIT.service
+```
+
+A completed stop job is not unit removal. Only after the matching unit is inactive/failed with no main process, reset its failed record and witness unload:
+
+```sh
+systemctl reset-failed UNIT.service
+systemctl show --property=LoadState,MainPID UNIT.service
+getent passwd RECORDED_DYNAMIC_UID
+```
+
+Record the fixture uid before teardown from its captured inventory (or live approved observation). ``LoadState=not-found`` witnesses unload; ``getent`` exit 2 with no entry witnesses no current NSS identity for that uid, not proof it can never be reused. If a record remains loaded or the uid resolves, record that result and leave retirement unresolved; do not remove an account or force a name-only stop. No single query authenticates a later reused uid.
+
+Inspect the protected ancestors and immutable manifests before each individual runtime unlink:
+
+```sh
+namei -l -- RUNTIME/CASE/control.sock
+python3 -m json.tool RUNTIME/CASE/fifo-manifest.json
+python3 -m json.tool RUNTIME/CASE/control-manifest.json
+stat -c '%d %i %F %u %a %h' -- RUNTIME/CASE/left.fifo
+stat -c '%d %i %F %u %a %h' -- RUNTIME/CASE/right.fifo
+stat -c '%d %i %F %u %a %h' -- RUNTIME/CASE/control.sock
+```
+
+Compare device/inode to the FIFO's matching ``objects[].object`` or the control manifest's ``socket``. Require the expected FIFO/socket type, campaign owner, mode 600 and one link, with protected non-symlink ancestors. ``stat`` here does not follow a final symlink. Missing FIFOs can be expected after capture; a missing control manifest before capture is not permission to remove a later socket. A replaced object, missing manifest or uncertain ancestor remains for owner disposition. Under the same exclusive maintenance window, unlink only an individually matched leftover:
+
+```sh
+unlink RUNTIME/CASE/left.fifo
+unlink RUNTIME/CASE/right.fifo
+unlink RUNTIME/CASE/control.sock
+```
+
+These are conditional actions, not a script to run blindly: skip an absent object and stop on any mismatch. Preserve the runtime directory and its manifests for investigation; it is not empty, so do not run ``rmdir``. Disposal of those manifests/directories is a separate owner-authorized retention action. Never remove completed outputs or evidence as runtime cleanup. ``retained`` means not removed by this tool, not proof the path still names the original object. Rerun requires fresh roots and a new policy.
+
+Client signal scoping and binding the generator to the keeper unit remain owner decisions; this program promises neither. Before a whole-unit stop, the rehearsal must witness keeper ``KillMode=mixed`` and ``TimeoutStopSec`` longer than recovery. The main-process signal procedure does not depend on those pending mechanisms.

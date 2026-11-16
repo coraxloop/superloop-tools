@@ -193,7 +193,8 @@ impl<'a> Keeper<'a> {
             + std::time::Duration::from_millis(self.admission.policy().limits.case_ms);
         let stop = self.recover_holder(deadline);
         let holder = match &stop {
-            Ok(()) => D::StopJobCompleted {
+            Ok(false) => D::NotAttempted,
+            Ok(true) => D::StopJobCompleted {
                 invocation: self.invocation.clone().unwrap_or_default(),
             },
             Err(error) if self.invocation.is_none() => D::Unbound { class: error },
@@ -243,19 +244,24 @@ impl<'a> Keeper<'a> {
         class
     }
 
-    fn recover_holder(&mut self, deadline: std::time::Instant) -> Result<()> {
+    fn recover_holder(&mut self, deadline: std::time::Instant) -> Result<bool> {
         if self.holder_stopped {
-            return Ok(());
+            return Ok(true);
+        }
+        // An interrupted client call says nothing about the holder's state.
+        // Recovery rechecks the same invocation before completing its stop.
+        if self.holder_stop_failure == Some("campaign-stopped") {
+            self.holder_stop_failure = None;
+            self.holder_stop_attempted = false;
         }
         if let Some(class) = self.holder_stop_failure {
             return Err(class);
         }
         require(!self.holder_stop_attempted, "completion-stop-attempted")?;
         if self.invocation.is_none() {
-            require(
-                self.session.store().failure_context().stage == Phase::Submitted,
-                "keeper-not-submitted",
-            )?;
+            if self.session.store().failure_context().stage != Phase::Submitted {
+                return Ok(false);
+            }
             loop {
                 let snapshot = self.manager.starting_at(None, deadline)?;
                 if !snapshot.invocation.is_empty() {
@@ -284,7 +290,7 @@ impl<'a> Keeper<'a> {
             return Err(class);
         }
         self.holder_stopped = true;
-        Ok(())
+        Ok(true)
     }
 
     pub fn serve_status(&mut self, deadline: std::time::Instant) -> Result<()> {

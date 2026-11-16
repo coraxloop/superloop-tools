@@ -45,7 +45,7 @@ fn run_case(
     }
     keeper.submit()?;
     if fault == "submitted" {
-        return Err(keeper.fail("synthetic-submitted-failure"));
+        return keeper.release_result(Err("synthetic-submitted-failure"));
     }
     let writers = keeper
         .pipes
@@ -74,16 +74,16 @@ fn run_case(
         return keeper.release_result(crate::launch::stop::check());
     }
     if fault == "capture" {
-        return Err(keeper.fail("synthetic-capture-failure"));
+        return keeper.release_result(Err("synthetic-capture-failure"));
     }
     let digest = keeper.inventory()?;
     if fault == "inventory" {
-        return Err(keeper.fail("synthetic-inventory-failure"));
+        return keeper.release_result(Err("synthetic-inventory-failure"));
     }
     let exit = keeper.process.as_ref().unwrap().duplicate()?;
     keeper.release(&digest)?;
     if fault == "release" {
-        return Err(keeper.fail("synthetic-release-failure"));
+        return keeper.release_result(Err("synthetic-release-failure"));
     }
     let mut event = nix::libc::pollfd {
         fd: exit.as_raw_fd(),
@@ -108,12 +108,52 @@ fn run_case(
     fs::write(f.dir.path().join("manager-reply"), terminal).unwrap();
     assert!(keeper.capture_generator()?);
     if fault == "generator" {
-        return Err(keeper.fail("synthetic-generator-failure"));
+        return keeper.release_result(Err("synthetic-generator-failure"));
     }
     keeper.finish_completion()
 }
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(1200)
+}
+
+/// ´test:unit:campaign-stop-between-cases-does-not-claim-a-reservation´
+#[test]
+// Synthetic public record evidence stays inside libtest capture.
+#[allow(clippy::print_stderr)]
+fn campaign_stop_between_cases_does_not_claim_a_reservation() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    let result = campaign::run_with_checkpoint(
+        &admission,
+        deadline(),
+        |index, store, _| run_case(&f, &admission, index, store, "normal"),
+        |index| {
+            if index == 1 {
+                crate::launch::stop::tests::send(nix::sys::signal::Signal::SIGTERM);
+            }
+        },
+    );
+    assert_eq!(result.err(), Some("campaign-stopped"));
+    let failure: serde_json::Value = serde_json::from_slice(
+        &fs::read(f.dir.path().join("evidence/campaign-failure.json")).unwrap(),
+    )
+    .unwrap();
+    eprintln!("between-cases failure: {failure}");
+    assert_eq!(failure["failure"]["stage"], "between-cases");
+    assert!(failure["failure"]["case"].is_null());
+    assert_eq!(failure["failure"]["completed_count"], 1);
+    assert!(
+        f.dir
+            .path()
+            .join("evidence/sample/completion.json")
+            .exists()
+    );
+    for root in ["evidence", "sealed", "runtime"] {
+        assert!(!f.dir.path().join(root).join("second").exists());
+    }
+    listener.finish();
 }
 
 /// ´test:unit:campaign-cooperative-stop-retains-sender-and-recovery´
@@ -314,6 +354,8 @@ fn campaign_refuses_repeated_invocations_and_final_publication_collisions() {
     }
 }
 
+// Synthetic public record evidence stays inside libtest capture.
+#[allow(clippy::print_stderr)]
 fn stops_after_failure(fault: &str) {
     let _guard = crate::launch::test_support::case_guard();
     let f = setup();
@@ -363,10 +405,28 @@ fn stops_after_failure(fault: &str) {
     assert_eq!(recovery["event"]["kind"], "recovery");
     assert_eq!(recovery["schema"], 2);
     if fault == "sealers" {
+        eprintln!("before-submission recovery: {recovery}");
         assert_eq!(
-            recovery["event"]["observation"]["holder"]["class"],
-            "keeper-not-submitted"
+            recovery["event"]["observation"]["holder"]["evidence"],
+            "not-attempted"
         );
+        assert_eq!(recovery["phase"], "failed");
+        assert_eq!(
+            recovery["event"]["observation"]["outputs"]["evidence"],
+            "unlink-succeeded"
+        );
+        assert!(!f.dir.path().join("manager-stopped").exists());
+    }
+    if fault == "generator" {
+        eprintln!("production failure summary: {failure}");
+        eprintln!("production failure recovery: {recovery}");
+        assert_eq!(recovery["phase"], "uncertain");
+        for resource in ["socket", "outputs"] {
+            assert_eq!(
+                recovery["event"]["observation"][resource]["evidence"],
+                "retained"
+            );
+        }
     }
     assert_eq!(
         failure["completed_prefix"]["rows"]

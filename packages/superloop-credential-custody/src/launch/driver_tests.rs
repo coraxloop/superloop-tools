@@ -55,6 +55,54 @@ fn setup() -> Fixture {
     f
 }
 
+/// ´test:unit:recovery-finishes-a-holder-stop-interrupted-by-termination´
+#[test]
+// Synthetic public record evidence stays inside libtest capture.
+#[allow(clippy::print_stderr)]
+fn recovery_finishes_a_holder_stop_interrupted_by_termination() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    let mut store = Store::reserve(&admission, 0).unwrap();
+    fs::write(
+        f.dir.path().join("manager-reply"),
+        crate::launch::manager::tests::reply(&admission),
+    )
+    .unwrap();
+    let mut keeper = Keeper::prepare(RootStartup::test_owner(), &admission, 0, &mut store).unwrap();
+    keeper.submit().unwrap();
+    assert!(!keeper.start_ready().unwrap());
+    assert!(keeper.invocation.is_some());
+    fs::write(
+        f.dir.path().join("manager-stop-signal"),
+        nix::unistd::gettid().as_raw().to_string(),
+    )
+    .unwrap();
+    let result = keeper.stop_holder();
+    assert_eq!(result, Err("campaign-stopped"));
+    assert!(!f.dir.path().join("manager-stopped").exists());
+    assert_eq!(keeper.release_result(result), Err("campaign-stopped"));
+    let last = keeper
+        .session
+        .store()
+        .failure_context()
+        .last_lifecycle_receipt
+        .unwrap();
+    let recovery: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.dir.path().join("evidence/sample").join(last)).unwrap())
+            .unwrap();
+    eprintln!("interrupted-stop recovery: {recovery}");
+    assert_eq!(
+        recovery["event"]["observation"]["holder"]["evidence"],
+        "stop-job-completed"
+    );
+    assert!(f.dir.path().join("manager-stopped").exists());
+    assert_eq!(recovery["original_cause"], "campaign-stopped");
+    drop(keeper);
+    listener.finish();
+}
+
 /// ´test:unit:recovery-adopts-only-the-whole-start-comparison´
 #[test]
 fn recovery_adopts_only_the_whole_start_comparison() {
@@ -561,25 +609,43 @@ fn doomed_keeper_control() {
     let _guard = crate::launch::test_support::case_guard();
     let f = setup();
     let admission = f.admit();
-    let mut store = Store::reserve(&admission, 0).unwrap();
-    let reply = String::from_utf8(crate::launch::manager::tests::reply(&admission))
-        .unwrap()
-        .replace("MainPID=123", "MainPID=0")
-        .replace("ExecMainPID=123", "ExecMainPID=0")
-        .replace(
-            "ExecMainStartTimestampMonotonic=100",
-            "ExecMainStartTimestampMonotonic=0",
-        );
-    fs::write(f.dir.path().join("manager-reply"), reply).unwrap();
-    let mut keeper = Keeper::prepare(RootStartup::test_owner(), &admission, 0, &mut store).unwrap();
-    keeper.submit().unwrap();
-    assert!(!keeper.start_ready().unwrap());
-    let ready = serde_json::json!({"root":f.dir.path(),"sealers":keeper.session.test_pids()});
-    writeln!(std::io::stdout(), "keeper-ready {ready}").unwrap();
-    std::io::stdout().flush().unwrap();
-    let mut byte = [0];
-    std::io::stdin().read_exact(&mut byte).unwrap();
-    panic!("the parent must kill the keeper, never release this wait");
+    fs::write(
+        f.dir.path().join("policy.json"),
+        serde_json::to_vec(&f.value).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(
+        f.dir.path().join("policy.json"),
+        fs::Permissions::from_mode(0o400),
+    )
+    .unwrap();
+    let _result = crate::launch::campaign::run(
+        &admission,
+        Instant::now() + std::time::Duration::from_secs(600),
+        |index, store, _| {
+            let reply = String::from_utf8(crate::launch::manager::tests::reply(&admission))
+                .unwrap()
+                .replace("MainPID=123", "MainPID=0")
+                .replace("ExecMainPID=123", "ExecMainPID=0")
+                .replace(
+                    "ExecMainStartTimestampMonotonic=100",
+                    "ExecMainStartTimestampMonotonic=0",
+                );
+            fs::write(f.dir.path().join("manager-reply"), reply).unwrap();
+            let mut keeper =
+                Keeper::prepare(RootStartup::test_owner(), &admission, index, store).unwrap();
+            keeper.submit().unwrap();
+            assert!(!keeper.start_ready().unwrap());
+            let ready =
+                serde_json::json!({"root":f.dir.path(),"sealers":keeper.session.test_pids()});
+            writeln!(std::io::stdout(), "keeper-ready {ready}").unwrap();
+            std::io::stdout().flush().unwrap();
+            let mut byte = [0];
+            std::io::stdin().read_exact(&mut byte).unwrap();
+            panic!("the parent must kill the keeper, never release this wait");
+        },
+    );
+    panic!("the killed campaign must not return");
 }
 fn keeper_ready(stdout: &mut std::process::ChildStdout) -> serde_json::Value {
     use std::io::Read as _;

@@ -70,6 +70,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::io::stdout().write_all(&fs::read(root.join("manager-reply"))?)?;
     }
     if args.iter().any(|a| a == "stop") {
+        let signal = root.join("manager-stop-signal");
+        if signal.exists() {
+            let tid = fs::read_to_string(&signal)?;
+            fs::remove_file(signal)?;
+            signal_keeper(&["--signal-keeper".into(), tid])?;
+            return Ok(());
+        }
         if root.join("manager-require-retained").exists() {
             let retained: serde_json::Value =
                 serde_json::from_slice(&fs::read(root.join("evidence/sample/state-07.json"))?)?;

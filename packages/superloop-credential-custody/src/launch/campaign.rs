@@ -52,7 +52,15 @@ fn budget(deadline: Instant) -> Result<()> {
 pub(super) fn run(
     admission: &Admission,
     deadline: Instant,
+    case: impl FnMut(usize, &mut Store, Instant) -> Result<()>,
+) -> Result<Matrix> {
+    run_with_checkpoint(admission, deadline, case, |_| {})
+}
+pub(super) fn run_with_checkpoint(
+    admission: &Admission,
+    deadline: Instant,
     mut case: impl FnMut(usize, &mut Store, Instant) -> Result<()>,
+    mut before_reservation: impl FnMut(usize),
 ) -> Result<Matrix> {
     FAILURE.with(|slot| *slot.borrow_mut() = None);
     budget(deadline)?;
@@ -76,9 +84,11 @@ pub(super) fn run(
         let mut invocations = BTreeSet::new();
         let mut total = 0_u64;
         for (index, expected) in policy.cases.iter().enumerate() {
-            failure = serde_json::json!({"stage":"case-reservation","case":expected.id,"unit":expected.generator_unit,"index":index});
+            failure = serde_json::json!({"stage":"between-cases","case":null,"index":null,"next_index":index,"completed_count":matrix.rows.len()});
+            before_reservation(index);
             budget(deadline)?;
             verify_root(admission, &root)?;
+            failure = serde_json::json!({"stage":"case-reservation","case":expected.id,"unit":expected.generator_unit,"index":index});
             let mut store = Store::reserve(admission, index)?;
             let case_deadline =
                 deadline.min(Instant::now() + Duration::from_millis(policy.limits.case_ms));
