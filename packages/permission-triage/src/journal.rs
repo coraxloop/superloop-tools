@@ -43,11 +43,11 @@ const FILE_MODE: u32 = 0o600;
 const PUBLIC_FILE_MODE: u32 = 0o644;
 const SCHEMA: u64 = 1;
 const VERDICT_SCHEMA: u64 = 2;
-const LOCK_WAIT: Duration = Duration::from_secs(4);
+pub(crate) const LOCK_WAIT: Duration = Duration::from_secs(4);
 pub(crate) const LOCK_POLL: Duration = Duration::from_millis(2);
 const LOCK_RELEASE_BUDGET_DIVISOR: u32 = 4;
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(60);
-const LOCK_BUDGET_FLOOR: Duration = Duration::from_millis(10);
+pub(crate) const LOCK_BUDGET_FLOOR: Duration = Duration::from_millis(10);
 mod owner;
 mod request_lock;
 mod requests;
@@ -605,7 +605,15 @@ pub struct RoutedJournal {
     estate_journal: Option<Journal>,
     outbox: Option<OutboxDestination>,
     configuration_error: Option<String>,
+    exhausted_lock_wait: Option<Duration>,
     worker: bool,
+    estate_owner: bool,
+}
+
+fn role_owns_estate(role: &CallerRole, estate_root: Option<&Path>) -> bool {
+    role.is_orchestrator()
+        && estate_root
+            .is_some_and(|root| role.entry().and_then(|entry| entry.state_root()) == Some(root))
 }
 
 #[derive(Debug)]
@@ -626,7 +634,9 @@ impl RoutedJournal {
             estate_journal: None,
             outbox: None,
             configuration_error: None,
+            exhausted_lock_wait: None,
             worker: false,
+            estate_owner: false,
         }
     }
 
@@ -748,6 +758,7 @@ impl EscalationSink for RoutedJournal {
         self.outbox = None;
         self.worker =
             matches!(role, CallerRole::OrchestratorSubagent(loop_match) if loop_match.worker());
+        self.estate_owner = role_owns_estate(role, self.estate_root.as_deref());
         let sources: Vec<&Path> = [self.registry_path.as_deref(), self.owner_rubric.as_deref()]
             .into_iter()
             .flatten()
@@ -868,6 +879,7 @@ impl EscalationSink for RoutedJournal {
     }
 
     fn record(&mut self, record: &EscalationRecord) -> Result<(), Self::Error> {
+        self.exhausted_lock_wait = None;
         if self.worker && record.scope() == "estate" {
             return self.write_outbox(record);
         }
@@ -875,10 +887,25 @@ impl EscalationSink for RoutedJournal {
             "loop" => &mut self.loop_journal,
             _ => &mut self.estate_journal,
         };
-        journal
-            .as_mut()
-            .ok_or(JournalError::StateRootUnset)?
-            .record(record)
+        let journal = journal.as_mut().ok_or(JournalError::StateRootUnset)?;
+        let result = journal.record(record);
+        if matches!(&result, Err(JournalError::Lock { source, .. }) if source.kind() == io::ErrorKind::WouldBlock)
+        {
+            self.exhausted_lock_wait = Some(journal.lock_wait);
+        }
+        result
+    }
+
+    fn exhausted_lock_wait(&self) -> Option<Duration> {
+        self.exhausted_lock_wait
+    }
+
+    fn reader_is_estate_owner(&self) -> bool {
+        self.estate_owner
+    }
+
+    fn reader_is_worker(&self) -> bool {
+        self.worker
     }
 
     fn set_lock_budget(&mut self, remaining: Duration) {
@@ -894,10 +921,17 @@ impl EscalationSink for RoutedJournal {
         &mut self,
         request: &ApprovalRequest<'_>,
     ) -> Result<Option<String>, Self::Error> {
-        self.loop_journal
+        self.exhausted_lock_wait = None;
+        let journal = self
+            .loop_journal
             .as_mut()
-            .ok_or(JournalError::StateRootUnset)?
-            .consume_approval(request)
+            .ok_or(JournalError::StateRootUnset)?;
+        let result = journal.consume_approval(request);
+        if matches!(&result, Err(JournalError::Lock { source, .. }) if source.kind() == io::ErrorKind::WouldBlock)
+        {
+            self.exhausted_lock_wait = Some(journal.lock_wait);
+        }
+        result
     }
 }
 
@@ -1591,12 +1625,10 @@ fn acquire_lock(root: &Path, journal: &Journal) -> Result<LockGuard, JournalErro
                     Err(JournalError::Open(error)) if error.kind() == io::ErrorKind::NotFound => {
                         let Some(delay) = lock_retry_delay(started.elapsed(), journal.lock_wait)
                         else {
-                            return Err(lock_error(
+                            return Err(exhausted_lock_error(
                                 &path,
-                                io::Error::new(
-                                    io::ErrorKind::WouldBlock,
-                                    "lock-file race continued through the wait deadline",
-                                ),
+                                journal,
+                                "lock-file race continued",
                             ));
                         };
                         thread::sleep(delay);
@@ -1607,21 +1639,20 @@ fn acquire_lock(root: &Path, journal: &Journal) -> Result<LockGuard, JournalErro
                 match steal_stale_lock(&path)? {
                     StealOutcome::Recovered => {
                         if started.elapsed() >= journal.lock_wait {
-                            return Err(lock_error(
+                            return Err(exhausted_lock_error(
                                 &path,
-                                io::Error::new(
-                                    io::ErrorKind::WouldBlock,
-                                    "stale lock recovery exhausted the wait deadline",
-                                ),
+                                journal,
+                                "stale lock recovery exhausted",
                             ));
                         }
                     }
                     StealOutcome::Fresh | StealOutcome::Retry => {
                         let Some(delay) = lock_retry_delay(started.elapsed(), journal.lock_wait)
                         else {
-                            return Err(lock_error(
+                            return Err(exhausted_lock_error(
                                 &path,
-                                io::Error::new(io::ErrorKind::WouldBlock, "lock-file wait elapsed"),
+                                journal,
+                                "lock-file wait elapsed",
                             ));
                         };
                         thread::sleep(delay);
@@ -1951,6 +1982,16 @@ fn lock_error(path: &Path, source: io::Error) -> JournalError {
         path: path.to_path_buf(),
         source,
     }
+}
+
+fn exhausted_lock_error(path: &Path, journal: &Journal, detail: &str) -> JournalError {
+    lock_error(
+        path,
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!("{detail}; wait budget={} ms", journal.lock_wait.as_millis()),
+        ),
+    )
 }
 
 fn open_existing_read_only(path: &Path) -> Result<File, JournalError> {

@@ -8,13 +8,11 @@ use support::SerializedCommand as _;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write as _;
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -393,77 +391,6 @@ fn nested_fixture_input(capture: &Path) -> Vec<u8> {
             .expect("nested fixture request");
     input["session_id"] = json!("nested-fixture");
     serde_json::to_vec(&input).expect("nested fixture input")
-}
-
-/// Number of load samples; the maximum of them stands.
-///
-/// One sample is a coin toss on a loaded machine, where a single descheduled run reads the same as
-/// a slow machine. Three runs taken in sequence let the maximum stand for the worst moment the
-/// bounds built on it are about to meet.
-const LOAD_SAMPLE_COUNT: usize = 3;
-
-/// Multiple of a measured run allowed for a run whose journal lock wait was cut by the hook ceiling.
-///
-/// The bounded run pays one uncontended run plus whatever lock wait the ceiling leaves it, where an
-/// ignored ceiling would pay the journal's four-second default on top. Three times a measured run
-/// follows the machine while staying under that sum.
-const CEILING_CUT_WAIT_MULTIPLE: u32 = 3;
-
-/// Cap on that bound: the wait it has to detect.
-///
-/// A run that paid the journal's default lock wait costs at least one uncontended run plus those
-/// four seconds, so a bound of four seconds is below every such run no matter how slow the machine
-/// is. Without the cap the bound would pass at a sample above two seconds whether the ceiling cut
-/// the wait or not; with it, a machine loaded past the point where the measurement means anything
-/// fails the assertion instead of satisfying it vacuously.
-const CEILING_CUT_WAIT_CAP: Duration = Duration::from_secs(4);
-
-/// Largest of three timed hook runs with no lock contention, in milliseconds.
-///
-/// What the bounds in this file are really about is whether a wait inside the binary was cut; what
-/// they measure is that wait plus a process spawn, a classifier fixture and a journal write, and
-/// that second part grows with machine load while the binary's behaviour does not. Sampling it once
-/// per test binary behind a lock puts a number on it: any other thread that asks for the sample
-/// waits rather than sampling again, so what it feels is the load outside this process.
-fn measured_hook_run_ms() -> u64 {
-    static MEASURED: OnceLock<u64> = OnceLock::new();
-    *MEASURED.get_or_init(|| {
-        let directory = FixtureDirectory::new();
-        let mut samples = Vec::with_capacity(LOAD_SAMPLE_COUNT);
-        for index in 0..LOAD_SAMPLE_COUNT {
-            let capture = directory.path().join(format!("load-sample-{index}"));
-            let command = hook_command(&capture, "safe");
-            let started = Instant::now();
-            let output = run(
-                command,
-                &request("Bash", json!({ "command": "printf fixture" })),
-            );
-            let elapsed = started.elapsed();
-            assert_envelope(&output, "allow", "safe: fixture reason");
-            samples.push(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
-        }
-        let max_sample_ms = samples
-            .iter()
-            .copied()
-            .max()
-            .expect("a non-empty sample has a maximum");
-        writeln!(
-            std::io::stderr().lock(),
-            "permission-triage-hook-load-sample samples={} max_sample_ms={max_sample_ms}",
-            samples.len()
-        )
-        .expect("the measured load sample is printed");
-        max_sample_ms
-    })
-}
-
-/// BOUND ASSERTION window for a run whose journal lock wait the hook ceiling cut short.
-fn ceiling_cut_wait_bound() -> Duration {
-    Duration::from_millis(
-        measured_hook_run_ms().saturating_mul(u64::from(CEILING_CUT_WAIT_MULTIPLE)),
-    )
-    .max(Duration::from_secs(1))
-    .min(CEILING_CUT_WAIT_CAP)
 }
 
 fn run(mut command: Command, input: &[u8]) -> Output {
@@ -1968,23 +1895,18 @@ fn hook_ceiling_variable_bounds_journal_lock_wait() {
     fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).expect("lock mode is private");
     let mut command = hook_command(&capture, "suspicious");
     command.env("PERMISSION_TRIAGE_HOOK_CEILING_MS", "20");
-    let started = Instant::now();
     let output = run(
         command,
         &request("Bash", json!({ "command": "printf fixture" })),
-    );
-    // BOUND: the run gave up on the live lock inside the ceiling rather than paying the journal's
-    // default four-second wait, which is the only outcome the elapsed window separates, since both
-    // outcomes deny with the same reason.
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < ceiling_cut_wait_bound(),
-        "lock wait was {elapsed:?}"
     );
     assert_reason_prefix(
         &output,
         "deny",
         "infrastructure-failure: verdict journal failed:",
+    );
+    assert_eq!(
+        reason_text(&output),
+        "infrastructure-failure: verdict journal failed: the estate journal lock remained held through the 10 ms verdict-recording wait (the journal's 10 ms minimum); retry this request later if still needed; if the lock remains held, report this refusal to the owner of this hook"
     );
 }
 
@@ -2510,7 +2432,9 @@ fn approval_lookup_lock_wait_is_bounded_by_the_hook_ceiling() {
     let registry = write_registry(&directory, &[("orchestration.env", &entry)]);
     let capture = directory.path().join("approval-lock-budget");
     let mut escalating = hook_command(&capture, "suspicious");
-    escalating.env("PERMISSION_TRIAGE_LOOP_REGISTRY", &registry);
+    escalating
+        .env("PERMISSION_TRIAGE_LOOP_REGISTRY", &registry)
+        .env("PERMISSION_TRIAGE_FAKE_SCOPE", "loop");
     assert_reason_prefix(
         &run(
             escalating,
@@ -2519,30 +2443,28 @@ fn approval_lookup_lock_wait_is_bounded_by_the_hook_ceiling() {
         "deny",
         "escalation:",
     );
-    let lock = checkout.join("local/state/estate-escalations.lock");
+    let lock = checkout.join("local/state/escalations.lock");
     fs::write(&lock, format!("{}\n", std::process::id())).expect("live lock is written");
     fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).expect("live lock is private");
-    let mut command = hook_command(&capture, "safe");
+    let mut command = hook_command(&capture, "suspicious");
     command
         .env("PERMISSION_TRIAGE_LOOP_REGISTRY", &registry)
-        .env("PERMISSION_TRIAGE_HOOK_CEILING_MS", "25");
+        .env("PERMISSION_TRIAGE_FAKE_SCOPE", "loop")
+        .env("PERMISSION_TRIAGE_HOOK_CEILING_MS", "20");
 
-    let started = Instant::now();
     let output = run(
         command,
         &role_request("session-main", &checkout, None, None),
     );
-    let elapsed = started.elapsed();
 
     assert_reason_prefix(
         &output,
         "deny",
         "infrastructure-failure: verdict journal failed:",
     );
-    // BOUND: the approval path's lock wait was cut by the ceiling, not paid in full.
-    assert!(
-        elapsed < ceiling_cut_wait_bound(),
-        "lock wait was {elapsed:?}"
+    assert_eq!(
+        reason_text(&output),
+        "infrastructure-failure: verdict journal failed: your loop's journal lock remained held through two waits: 10 ms for approval lookup (the journal's 10 ms minimum), then 10 ms for verdict recording (the journal's 10 ms minimum); retry this request later if still needed; if the lock remains held, inspect escalations.jsonl in your loop's registered state root; if that read is refused, report this refusal to the owner of this hook"
     );
 }
 
