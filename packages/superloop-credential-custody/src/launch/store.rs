@@ -94,7 +94,8 @@ struct Output {
     file: File,
     entry: Entry,
 }
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CompletedCase {
     pub case: String,
     pub policy_sha256: String,
@@ -105,6 +106,20 @@ pub(super) struct CompletedCase {
     // (sec:credentialcustody:launcher-cores); compare bytes before measuring.
     pub completion_sha256: String,
     pub sealed_bytes: [u64; 2],
+    pub outputs: [CompletedOutput; 2],
+    pub configuration: ConfigurationMeasurement,
+    pub manager_configuration_sha256: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CompletedOutput {
+    pub name: String,
+    pub object: ObjectIdentity,
+    // Full binding: an actor replacing an analysis copy cannot rewrite the
+    // independently protected campaign matrix. Measure completed output bytes
+    // here; never accept a digest beside an untrusted copy
+    // (sec:credentialcustody:launcher-cores).
+    pub sha256: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -166,6 +181,12 @@ impl Store {
     // The campaign consumes the store's retained evidence, never an adapter's
     // asserted success or a second interpretation of manager execution fields.
     pub fn completed_case(&mut self) -> Result<CompletedCase> {
+        self.completed_case_with(|| {})
+    }
+    pub(super) fn completed_case_with(
+        &mut self,
+        after_receipt: impl FnOnce(),
+    ) -> Result<CompletedCase> {
         require(self.phase() == Phase::Complete, "campaign-case-incomplete")?;
         self.check_outputs(Some(0o400))?;
         let invocation = self.invocation.as_ref().ok_or("campaign-case-evidence")?;
@@ -212,7 +233,46 @@ impl Store {
         )?;
         let bytes = receipt::read_file(file, 64 * 1024, false)?;
         require(bytes == expected, "campaign-completion-binding")?;
+        after_receipt();
+        let measured = self
+            .outputs
+            .iter()
+            .map(|output| {
+                let file = File::from(
+                    openat(
+                        self.sealed.file(),
+                        output.entry.name.as_str(),
+                        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+                        Mode::empty(),
+                    )
+                    .map_err(|error| crate::process::io_failure("campaign-output-open", error))?,
+                );
+                require(
+                    ObjectIdentity::of(&file)? == output.entry.object,
+                    "campaign-output-binding",
+                )?;
+                let bytes = receipt::read_file(file, self.sealed_limit, true)?;
+                Ok(CompletedOutput {
+                    name: output.entry.name.clone(),
+                    object: output.entry.object,
+                    sha256: crate::identity::hash(&bytes),
+                })
+            })
+            .collect::<Result<Vec<_>>>();
+        // Completion receipts are immutable. A late handoff refusal prevents the
+        // campaign matrix; it cannot reopen or rewrite a completed child.
+        let outputs: [CompletedOutput; 2] =
+            measured?.try_into().map_err(|_| "campaign-output-roster")?;
+        self.check_outputs(Some(0o400))?;
+        let invocation = self.invocation.as_ref().ok_or("campaign-case-evidence")?;
+        let sealers = self.sealers.as_ref().ok_or("campaign-case-evidence")?;
         Ok(CompletedCase {
+            outputs,
+            configuration: self.configuration.clone().ok_or("campaign-case-evidence")?,
+            manager_configuration_sha256: self
+                .manager_configuration_sha256
+                .clone()
+                .ok_or("campaign-case-evidence")?,
             case: self.case.clone(),
             policy_sha256: self.policy_sha256.clone(),
             case_sha256: self.case_sha256.clone(),

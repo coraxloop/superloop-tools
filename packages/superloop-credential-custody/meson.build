@@ -174,7 +174,7 @@ dependency_ledger += ['''
 
 # Campaign metadata extends the existing exclusive receipt owner.
 dependency_ledger += ['''
-{"kind":"data","identity":"credential-campaign-matrix","writer":"superloop-credential-custody","readers":["superloop-credential-custody"],"format_authority":"packages/superloop-credential-custody/README.md","format_contract":"Private bounded ordered child-case matrix; successful rows require retained store completion, unchanged immutable receipts and sealed output bindings; root-only campaign adapter; no calibration acceptance","owner":"SUPERLOOPCREDENTIALCUSTODY","sites":[{"path":"packages/superloop-credential-custody/src/launch/campaign.rs","anchor":"pub(super) struct Matrix"}]}
+{"kind":"data","identity":"credential-campaign-matrix","writer":"superloop-credential-custody","readers":["superloop-credential-custody"],"format_authority":"packages/superloop-credential-custody/README.md","format_contract":"Schema-2 bounded ordered child-case matrix; measured output object/length/digest and configuration bindings; protected private handoff rechecks admission, completion receipts and original sealed files; no calibration acceptance","owner":"SUPERLOOPCREDENTIALCUSTODY","sites":[{"path":"packages/superloop-credential-custody/src/launch/campaign.rs","anchor":"pub(super) struct Matrix"}]}
 ''']
 
 dependency_ledger += ['''

@@ -164,7 +164,8 @@ pub(super) fn canonical<T: Serialize>(domain: &str, value: &T) -> Result<String>
     Ok(hash(&framed))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ConfigurationMeasurement {
     pub raw_sha256: String,
     pub typed_sha256: String,

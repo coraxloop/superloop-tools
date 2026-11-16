@@ -1,4 +1,5 @@
 use super::*;
+use crate::launch::measure::ObjectIdentity;
 use crate::launch::{campaign, inventory::tests as fixture, manager, tests::Fixture};
 use std::{
     fs,
@@ -471,4 +472,379 @@ fn completed_campaign_returns_descriptors_to_baseline() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed;"));
+}
+
+fn replace_protected(path: &std::path::Path, bytes: &[u8]) {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o400)).unwrap();
+}
+
+/// ´test:unit:campaign-handoff-producer-rechecks-objects-before-hashing´
+#[test]
+fn campaign_handoff_producer_rechecks_objects_before_hashing() {
+    let _guard = crate::launch::test_support::case_guard();
+    for replace in [false, true] {
+        let f = setup();
+        let admission = f.admit();
+        let result = campaign::run(&admission, deadline(), |index, store, _| {
+            run_case(&f, &admission, index, store, "normal")?;
+            let path = f
+                .dir
+                .path()
+                .join("sealed/sample")
+                .join(&admission.policy().cases[0].streams[0].output);
+            let bytes = fs::read(&path).unwrap();
+            store
+                .completed_case_with(|| {
+                    fs::rename(&path, path.with_extension("retained")).unwrap();
+                    if replace {
+                        fs::write(&path, bytes).unwrap();
+                        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+                    }
+                })
+                .map(|_| ())
+        });
+        assert_eq!(
+            result.err(),
+            Some(if replace {
+                "campaign-output-binding"
+            } else {
+                "campaign-output-open"
+            })
+        );
+        assert!(!f.dir.path().join("evidence/campaign.json").exists());
+        assert!(f.dir.path().join("evidence/campaign-failure.json").exists());
+    }
+}
+
+/// ´test:unit:campaign-handoff-measures-completed-outputs-and-rejects-stale-evidence´
+#[test]
+fn campaign_handoff_measures_completed_outputs_and_rejects_stale_evidence() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    let matrix = campaign::run(&admission, deadline(), |index, store, _| {
+        run_case(&f, &admission, index, store, "normal")
+    })
+    .unwrap();
+    let path = f.dir.path().join("evidence/campaign.json");
+    let bytes = fs::read(&path).unwrap();
+    let digest = crate::identity::hash(&bytes);
+    handoff_positive(&f, &admission, &matrix, &path, &bytes, &digest);
+    handoff_records(&admission, &path, &bytes);
+    handoff_files(&f, &admission, &path, &bytes, &digest);
+    handoff_roots(&f, &admission, &path, &bytes, &digest);
+}
+
+fn handoff_positive(
+    f: &Fixture,
+    admission: &Admission,
+    matrix: &campaign::Matrix,
+    path: &std::path::Path,
+    bytes: &[u8],
+    digest: &str,
+) {
+    let mut oversized = bytes.to_vec();
+    oversized.resize(256 * 1024 + 1, b' ');
+    replace_protected(path, &oversized);
+    assert_eq!(
+        campaign::observation(admission, &crate::identity::hash(&oversized)).err(),
+        Some("file-custody")
+    );
+    replace_protected(path, bytes);
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        campaign::observation(admission, digest).err(),
+        Some("file-custody")
+    );
+    fs::set_permissions(path, fs::Permissions::from_mode(0o400)).unwrap();
+    let alias = path.with_extension("alias");
+    fs::hard_link(path, &alias).unwrap();
+    assert_eq!(
+        campaign::observation(admission, digest).err(),
+        Some("file-custody")
+    );
+    fs::remove_file(alias).unwrap();
+    let observed = campaign::observation(admission, digest).unwrap();
+    assert_eq!(serde_json::to_vec(&observed).unwrap(), bytes);
+    assert_eq!(matrix.schema, 2);
+    for (row, case) in matrix.rows.iter().zip(&admission.policy().cases) {
+        let completion = fs::read(
+            f.dir
+                .path()
+                .join("evidence")
+                .join(&case.id)
+                .join("completion.json"),
+        )
+        .unwrap();
+        let completion: serde_json::Value = serde_json::from_slice(&completion).unwrap();
+        assert_eq!(
+            serde_json::to_value(&row.completed.configuration).unwrap(),
+            completion["configuration"]
+        );
+        assert_eq!(
+            row.completed.manager_configuration_sha256,
+            completion["manager_configuration_sha256"].as_str().unwrap()
+        );
+        for (output, stream) in row.completed.outputs.iter().zip(&case.streams) {
+            let file = f
+                .dir
+                .path()
+                .join("sealed")
+                .join(&case.id)
+                .join(&stream.output);
+            assert_eq!(
+                output.sha256,
+                crate::identity::hash(&fs::read(&file).unwrap())
+            );
+            assert_eq!(
+                output.object,
+                ObjectIdentity::of(&fs::File::open(file).unwrap()).unwrap()
+            );
+        }
+    }
+    assert_eq!(
+        campaign::observation(admission, &"0".repeat(64)).err(),
+        Some("campaign-handoff-digest")
+    );
+}
+
+fn handoff_header_changes() -> Vec<(&'static str, serde_json::Value, &'static str)> {
+    vec![
+        ("/schema", serde_json::json!(1), "campaign-handoff-version"),
+        (
+            "/command",
+            serde_json::json!("completion"),
+            "campaign-handoff-version",
+        ),
+        (
+            "/campaign",
+            serde_json::json!("other"),
+            "campaign-handoff-identity",
+        ),
+        (
+            "/policy_sha256",
+            serde_json::json!("0".repeat(64)),
+            "campaign-handoff-identity",
+        ),
+        (
+            "/code_sha256",
+            serde_json::json!("0".repeat(64)),
+            "campaign-handoff-identity",
+        ),
+        ("/rows", serde_json::json!([]), "campaign-handoff-roster"),
+    ]
+}
+
+fn handoff_case_changes(
+    original: &serde_json::Value,
+) -> Vec<(&'static str, serde_json::Value, &'static str)> {
+    vec![
+        (
+            "/rows/0/index",
+            serde_json::json!(1),
+            "campaign-handoff-case",
+        ),
+        (
+            "/rows/0/completed/case",
+            serde_json::json!("other"),
+            "campaign-handoff-case",
+        ),
+        (
+            "/rows/0/completed/policy_sha256",
+            serde_json::json!("0".repeat(64)),
+            "campaign-handoff-case",
+        ),
+        (
+            "/rows/0/completed/case_sha256",
+            serde_json::json!("0".repeat(64)),
+            "campaign-handoff-case",
+        ),
+        (
+            "/rows/0/completed/invocation/unit",
+            serde_json::json!("other.service"),
+            "campaign-handoff-case",
+        ),
+        (
+            "/rows/0/completed/invocation/image/inode",
+            serde_json::json!(0),
+            "campaign-handoff-case",
+        ),
+        (
+            "/rows/1/completed/invocation/id",
+            original["rows"][0]["completed"]["invocation"]["id"].clone(),
+            "campaign-handoff-invocation",
+        ),
+        (
+            "/rows/0/completed/completion_sha256",
+            serde_json::json!("0".repeat(64)),
+            "campaign-handoff-completion",
+        ),
+        (
+            "/rows/0/completed/outputs/0/name",
+            serde_json::json!("other"),
+            "campaign-handoff-output",
+        ),
+        (
+            "/rows/0/completed/sealed_bytes/0",
+            serde_json::json!(0),
+            "campaign-handoff-output",
+        ),
+        (
+            "/rows/0/completed/outputs/0/object/inode",
+            serde_json::json!(0),
+            "campaign-handoff-object",
+        ),
+        (
+            "/rows/0/completed/outputs/0/sha256",
+            serde_json::json!("0".repeat(64)),
+            "campaign-handoff-content",
+        ),
+        (
+            "/rows/0/completed/sealed_bytes/0",
+            serde_json::json!(1),
+            "campaign-handoff-content",
+        ),
+    ]
+}
+
+fn handoff_records(admission: &Admission, path: &std::path::Path, bytes: &[u8]) {
+    let original: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    for (field, value, class) in handoff_header_changes()
+        .into_iter()
+        .chain(handoff_case_changes(&original))
+    {
+        let mut changed = original.clone();
+        *changed.pointer_mut(field).unwrap() = value;
+        let changed = serde_json::to_vec(&changed).unwrap();
+        replace_protected(path, &changed);
+        assert_eq!(
+            campaign::observation(admission, &crate::identity::hash(&changed)).err(),
+            Some(class),
+            "{field}"
+        );
+    }
+    for pointer in [
+        "",
+        "/rows/0",
+        "/rows/0/completed",
+        "/rows/0/completed/outputs/0",
+        "/rows/0/completed/configuration",
+    ] {
+        let mut changed = original.clone();
+        changed
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("unreviewed".into(), true.into());
+        let changed = serde_json::to_vec(&changed).unwrap();
+        replace_protected(path, &changed);
+        assert_eq!(
+            campaign::observation(admission, &crate::identity::hash(&changed)).err(),
+            Some("campaign-handoff-shape"),
+            "{pointer}"
+        );
+    }
+    let duplicate = String::from_utf8(bytes.to_vec())
+        .unwrap()
+        .replacen('{', "{\"schema\":2,", 1);
+    replace_protected(path, duplicate.as_bytes());
+    assert_eq!(
+        campaign::observation(admission, &crate::identity::hash(duplicate.as_bytes())).err(),
+        Some("campaign-handoff-shape")
+    );
+    replace_protected(path, bytes);
+}
+
+fn handoff_files(
+    f: &Fixture,
+    admission: &Admission,
+    path: &std::path::Path,
+    bytes: &[u8],
+    digest: &str,
+) {
+    let original: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    let output = f
+        .dir
+        .path()
+        .join("sealed/sample")
+        .join(&admission.policy().cases[0].streams[0].output);
+    let content = fs::read(&output).unwrap();
+    let mut changed = content.clone();
+    changed[0] ^= 1;
+    replace_protected(&output, &changed);
+    assert_eq!(
+        campaign::observation(admission, digest).err(),
+        Some("campaign-handoff-content")
+    );
+    replace_protected(&output, &content);
+    let old = output.with_extension("retained");
+    fs::rename(&output, &old).unwrap();
+    fs::write(&output, &content).unwrap();
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o400)).unwrap();
+    assert_eq!(
+        campaign::observation(admission, digest).err(),
+        Some("campaign-handoff-object")
+    );
+    fs::remove_file(&output).unwrap();
+    fs::rename(old, &output).unwrap();
+    let completion = f.dir.path().join("evidence/sample/completion.json");
+    let retained = fs::read(&completion).unwrap();
+    let mut oversized = retained.clone();
+    oversized.resize(64 * 1024 + 1, b' ');
+    replace_protected(&completion, &oversized);
+    let mut expanded = original;
+    expanded["rows"][0]["completed"]["completion_sha256"] =
+        crate::identity::hash(&oversized).into();
+    let expanded = serde_json::to_vec(&expanded).unwrap();
+    replace_protected(path, &expanded);
+    assert_eq!(
+        campaign::observation(admission, &crate::identity::hash(&expanded)).err(),
+        Some("file-custody")
+    );
+    replace_protected(path, bytes);
+    replace_protected(&completion, b"{}");
+    assert_eq!(
+        campaign::observation(admission, digest).err(),
+        Some("campaign-handoff-completion")
+    );
+    replace_protected(&completion, &retained);
+    assert!(campaign::observation(admission, digest).is_ok());
+}
+
+fn handoff_roots(
+    f: &Fixture,
+    admission: &Admission,
+    path: &std::path::Path,
+    bytes: &[u8],
+    digest: &str,
+) {
+    for (directory, class) in [
+        ("evidence", "campaign-root-binding"),
+        ("sealed", "campaign-handoff-root"),
+    ] {
+        let root = f.dir.path().join(directory);
+        let retained = f.dir.path().join(format!("old-{directory}"));
+        let result = campaign::observation_with(admission, digest, || {
+            fs::rename(&root, &retained).unwrap();
+            fs::create_dir(&root).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        });
+        assert_eq!(result.err(), Some(class));
+        fs::remove_dir(&root).unwrap();
+        fs::rename(retained, root).unwrap();
+    }
+    assert_eq!(
+        campaign::observation_with(admission, digest, || replace_protected(path, b"{}")).err(),
+        Some("campaign-handoff-changed")
+    );
+    replace_protected(path, bytes);
+    let parser = f.dir.path().join("parser");
+    assert_eq!(
+        campaign::observation_with(admission, digest, || replace_protected(&parser, b"changed"))
+            .err(),
+        Some("launch-artifact-changed")
+    );
 }
