@@ -52,7 +52,7 @@ enum Command {
         #[arg(long)]
         parameters: PathBuf,
         #[arg(long)]
-        case: String,
+        campaign: String,
     },
     /// Observe the live keeper's invocation-bound retained completion.
     Completion {
@@ -118,9 +118,10 @@ fn run() -> ExitCode {
 
 fn launcher(command: &Command) -> Option<(entry::Command, &std::path::Path, &str)> {
     match command {
-        Command::CalibrationRun { parameters, case } => {
-            Some((entry::Command::CalibrationRun, parameters, case))
-        }
+        Command::CalibrationRun {
+            parameters,
+            campaign,
+        } => Some((entry::Command::CalibrationRun, parameters, campaign)),
         Command::Completion { parameters, case } => {
             Some((entry::Command::Completion, parameters, case))
         }
@@ -267,7 +268,11 @@ mod launch_routing_tests {
                 name,
                 "--parameters",
                 "/synthetic-policy",
-                "--case",
+                if name == "calibration-run" {
+                    "--campaign"
+                } else {
+                    "--case"
+                },
                 "sample",
             ])
             .unwrap();

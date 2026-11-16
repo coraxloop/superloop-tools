@@ -1108,7 +1108,11 @@ fn launcher_entrypoints_refuse_ordinary_uid_before_inputs() {
                 command,
                 "--parameters",
                 "/nonexistent-public-policy",
-                "--case",
+                if command == "calibration-run" {
+                    "--campaign"
+                } else {
+                    "--case"
+                },
                 "synthetic",
             ])
             .env_clear()
@@ -1118,5 +1122,32 @@ fn launcher_entrypoints_refuse_ordinary_uid_before_inputs() {
         assert_eq!(output.stdout.len(), 0);
         let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(value["message"], "keeper-root-required", "{command}");
+    }
+}
+
+/// ´test:integration:launcher-selector-spellings-are-command-specific´
+#[test]
+fn launcher_selector_spellings_are_command_specific() {
+    for (command, wrong) in [
+        ("calibration-run", "--case"),
+        ("completion", "--campaign"),
+        ("descriptors", "--campaign"),
+        ("barrier-release", "--campaign"),
+    ] {
+        let output = binary()
+            .args([
+                command,
+                "--parameters",
+                "/nonexistent-public-policy",
+                wrong,
+                "synthetic",
+            ])
+            .env_clear()
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{command}");
+        assert_eq!(output.stdout.len(), 0);
+        let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(value["kind"], "usage_error", "{command}");
     }
 }

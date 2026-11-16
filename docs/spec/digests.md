@@ -479,7 +479,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-correspondence/meson.build:50,54``|D220; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/superloop-correspondence/src/main.rs:719,727,741,755``|Test-module fixture text and assertions about an SSH host-key warning line that the failed-transport diagnostic must not carry; not a digest value or an independent digest field.|
 |``packages/superloop-correspondence/tests/subprocess_contract.rs:277,511``|Test fixture text and an assertion about an SSH host-key warning line that the failed-transport diagnostic must not carry; not a digest value or an independent digest field.|
-|``packages/superloop-credential-custody/README.md:17,32,40,42,44,46,48,52,56,72,86,92,94,98,132,158,162,172,196``|D246–D248 and D250; identity, custody and build documentation.|
+|``packages/superloop-credential-custody/README.md:17,32,40,42,44,46,48,52,56,72,86,92,94,98,132,158,162,172,200``|D246–D248 and D250; identity, custody and build documentation.|
 |``packages/superloop-credential-custody/meson.build:96,97,106,107,114,115,177``|D248; reviewed executable expressions and scope.|
 |``packages/superloop-credential-custody/src/identity.rs:8,15,57,71,98,99,124,125,138``|D246; hashing live files and retained calibration bytes.|
 |``packages/superloop-credential-custody/src/launch/campaign.rs:28,29,58,59,97,98,148,149,153,162,163,172,173,186,187,201,223``|D250, D254; explicit child identities and retained measured completion references, never calibration acceptance.|
