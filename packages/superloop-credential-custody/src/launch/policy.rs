@@ -50,6 +50,7 @@ pub(super) struct Policy {
     pub limits: Limits,
     pub artifacts: Vec<Artifact>,
     pub roles: Vec<RolePolicy>,
+    pub sealer_construction: SealerConstruction,
     pub cases: Vec<Case>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -105,7 +106,6 @@ pub(super) enum Role {
     Completion,
     Descriptors,
     BarrierRelease,
-    Sealer,
     Fixture,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -148,6 +148,12 @@ pub(super) struct Properties {
     pub dynamic_user: bool,
     pub writable: Vec<RootKind>,
     pub private_diagnostics: bool,
+}
+// A direct child construction, never a separate manager unit or a granted capability.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum SealerConstruction {
+    Landlock6SeccompV1,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -226,7 +232,6 @@ impl Role {
                 Self::CalibrationRun => vec![Runtime, Sealed, Evidence],
                 Self::Completion | Self::Descriptors => vec![Evidence],
                 Self::BarrierRelease => vec![Runtime, Evidence],
-                Self::Sealer => vec![Sealed],
                 Self::Fixture => vec![],
             },
             private_diagnostics: true,
@@ -236,7 +241,7 @@ impl Role {
 impl Policy {
     fn validate(&self) -> Result<()> {
         require(
-            self.schema == 1 && self.command == "launch-policy",
+            self.schema == 2 && self.command == "launch-policy",
             "launch-policy-schema",
         )?;
         require(
@@ -267,7 +272,7 @@ impl Policy {
         self.validate_limits()?;
         let mut roles = BTreeSet::new();
         require(
-            self.roles.len() == 6 && self.roles.iter().all(|r| roles.insert(r.role)),
+            self.roles.len() == 5 && self.roles.iter().all(|r| roles.insert(r.role)),
             "launch-role-roster",
         )?;
         require(

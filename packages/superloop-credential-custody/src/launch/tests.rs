@@ -44,7 +44,6 @@ impl Fixture {
             Role::Completion,
             Role::Descriptors,
             Role::BarrierRelease,
-            Role::Sealer,
             Role::Fixture,
         ]
         .into_iter()
@@ -55,7 +54,7 @@ impl Fixture {
             "behavior":"normal","timeout_ms":1000})).unwrap();
         fs::write(root.join("public.json"), &public_case).unwrap();
         fs::set_permissions(root.join("public.json"), fs::Permissions::from_mode(0o444)).unwrap();
-        let value = json!({"schema":1,"command":"launch-policy","campaign":"synthetic",
+        let value = json!({"schema":2,"command":"launch-policy","sealer_construction":"landlock6-seccomp-v1","campaign":"synthetic",
             "roots":{"runtime":root.join("runtime"),"sealed":root.join("sealed"),"evidence":root.join("evidence")},
             "manager_sockets":[root.join("bus.sock"),root.join("manager.sock")],"host_key":root.join("admitted-key"),
             "slice":"synthetic.slice",
@@ -120,7 +119,7 @@ fn launch_policy_rejects_open_shapes() {
     let text = String::from_utf8(f.bytes()).unwrap();
     err(
         policy::parse(
-            text.replace("\"schema\":1", "\"schema\":1,\"schema\":1")
+            text.replace("\"schema\":2", "\"schema\":2,\"schema\":2")
                 .as_bytes(),
         ),
         "launch-policy-shape",
@@ -145,7 +144,7 @@ fn launch_policy_rejects_open_shapes() {
         "launch-policy-shape",
     );
     for (pointer, value, class) in [
-        ("/schema", json!(2), "launch-policy-schema"),
+        ("/schema", json!(1), "launch-policy-schema"),
         ("/command", json!("length-observe"), "launch-policy-schema"),
         ("/campaign", json!("../invalid"), "launch-policy-name"),
         ("/slice", json!("invalid@.slice"), "launch-policy-name"),
@@ -315,7 +314,7 @@ fn launch_roles_require_the_reviewed_property_matrix() {
         Role::BarrierRelease.properties().capability_bounding_set,
         Vec::new()
     );
-    for index in 0..6 {
+    for index in 0..5 {
         for key in [
             "no_new_privileges",
             "manager_access",
@@ -974,4 +973,32 @@ fn launch_original_cause_survives_output_loss() {
     assert_eq!(receipt["original_cause"], "generator-failed");
     assert_eq!(receipt["refusal_class"], "launch-output-binding");
     assert_eq!(store.phase(), Phase::Uncertain);
+}
+
+/// ´test:unit:launch-policy-separates-direct-sealers-from-unit-roles´
+#[test]
+fn launch_policy_separates_direct_sealers_from_unit_roles() {
+    let _case = crate::launch::test_support::case_guard();
+    let f = Fixture::new();
+    let admitted = policy::parse(&f.bytes()).unwrap();
+    assert_eq!(admitted.roles.len(), 5);
+    assert!(matches!(
+        admitted.sealer_construction,
+        policy::SealerConstruction::Landlock6SeccompV1
+    ));
+    let mut f = Fixture::new();
+    f.value["schema"] = 1.into();
+    f.refusal("launch-policy-schema");
+    let mut f = Fixture::new();
+    f.value
+        .as_object_mut()
+        .unwrap()
+        .remove("sealer_construction");
+    f.refusal("launch-policy-shape");
+    let mut f = Fixture::new();
+    f.value["sealer_construction"] = "unconfined".into();
+    f.refusal("launch-policy-shape");
+    let mut f = Fixture::new();
+    f.value["roles"][0]["role"] = "sealer".into();
+    f.refusal("launch-policy-shape");
 }
