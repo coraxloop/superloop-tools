@@ -379,6 +379,27 @@ fn keeper_failed_stop_keeps_the_original_cause() {
     .unwrap();
     assert_eq!(receipt["original_cause"], "generator-failed");
     assert_eq!(receipt["refusal_class"], "manager-stop");
+    let recovery: serde_json::Value = serde_json::from_slice(
+        &fs::read(f.dir.path().join("evidence/sample/lifecycle-03.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovery["original_cause"], "generator-failed");
+    assert_eq!(
+        recovery["event"]["observation"]["holder"]["class"],
+        "manager-stop-output"
+    );
+    assert_eq!(
+        recovery["event"]["observation"]["outputs"]["evidence"],
+        "retained"
+    );
+    assert!(
+        recovery["event"]["observation"]["sealer_exits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|exit| !exit.is_null())
+    );
+
     assert_eq!(
         fs::read_dir(f.dir.path().join("sealed/sample"))
             .unwrap()

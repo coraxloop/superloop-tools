@@ -155,7 +155,12 @@ struct Snapshot<'a> {
     generator: Option<&'a super::keeper::completion::Generator>,
     sealers: Option<&'a super::sealer::Completion>,
 }
+#[path = "lifecycle.rs"]
+pub(super) mod lifecycle;
+
 pub(super) struct Store {
+    journal: lifecycle::Journal,
+    failure_stage: Option<Phase>,
     sealed: Directory,
     evidence: Directory,
     outputs: Vec<Output>,
@@ -293,6 +298,8 @@ impl Store {
         // never infer success or delete an unrecorded object by pathname.
         let evidence = Directory::create(&admission.policy().roots.evidence, &case.id)?;
         let mut store = Self {
+            journal: lifecycle::Journal::default(),
+            failure_stage: None,
             sealed,
             evidence,
             outputs: Vec::new(),
@@ -479,6 +486,7 @@ impl Store {
         self.capture(invocation, &snapshot.properties)
     }
     pub fn remember_cause(&mut self, class: &'static str) {
+        self.failure_stage.get_or_insert_with(|| self.state.phase());
         self.original_cause.get_or_insert(class);
     }
     pub fn capture(&mut self, invocation: Invocation, properties: &[u8]) -> Result<()> {
@@ -536,7 +544,7 @@ impl Store {
     // Failure classes are internal static metadata, never child diagnostic bytes.
     pub fn fail(&mut self, class: &'static str) -> Result<()> {
         self.state.next(Phase::Failed)?;
-        self.original_cause.get_or_insert(class);
+        self.remember_cause(class);
         self.check_outputs(None)?;
         self.terminal(Phase::Failed, class)
     }
@@ -545,7 +553,7 @@ impl Store {
     }
     fn terminal(&mut self, phase: Phase, class: &'static str) -> Result<()> {
         let sequence = self.state.next(phase)?;
-        self.original_cause.get_or_insert(class);
+        self.remember_cause(class);
         self.refusal_class = Some(class);
         // Latch before publication: even publication failure cannot reopen success.
         self.state.commit(phase)?;
@@ -577,8 +585,8 @@ impl Store {
         if let Err(class) = self.write_snapshot(sequence, phase) {
             // The failed slot may already be occupied. Never replace it. Latch
             // uncertainty and attempt its separate next-sequence receipt.
+            self.remember_cause(class);
             self.state.publication_failed();
-            self.original_cause.get_or_insert(class);
             self.refusal_class = Some(class);
             let _publication = self.write_snapshot(sequence + 1, Phase::Uncertain);
             return Err(class);

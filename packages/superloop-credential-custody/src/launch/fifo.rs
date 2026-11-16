@@ -33,6 +33,9 @@ pub(super) struct Pipes {
     uncertain: bool,
 }
 impl Pipes {
+    pub const fn was_unlinked(&self) -> bool {
+        self.released
+    }
     pub const fn directory(&self) -> &Directory {
         &self.directory
     }

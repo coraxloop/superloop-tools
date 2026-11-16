@@ -9,6 +9,46 @@ use std::{
     path::Path,
     process::{Command, Stdio},
 };
+
+/// ´test:unit:starting-binding-is-durable-before-process-capture´
+#[test]
+fn starting_binding_is_durable_before_process_capture() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    let mut store = Store::reserve(&admission, 0).unwrap();
+    let reply = String::from_utf8(crate::launch::manager::tests::reply(&admission))
+        .unwrap()
+        .replace("MainPID=123", "MainPID=0")
+        .replace("ExecMainPID=123", "ExecMainPID=0")
+        .replace(
+            "ExecMainStartTimestampMonotonic=100",
+            "ExecMainStartTimestampMonotonic=0",
+        );
+    fs::write(f.dir.path().join("manager-reply"), reply).unwrap();
+    let mut keeper = Keeper::prepare(RootStartup::test_owner(), &admission, 0, &mut store).unwrap();
+    keeper.submit().unwrap();
+    assert!(!keeper.start_ready().unwrap());
+    assert!(keeper.process.is_none());
+    let path = f.dir.path().join("evidence/sample/lifecycle-01.json");
+    let before = fs::read(&path).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(record["event"]["kind"], "start-binding");
+    assert_eq!(
+        record["event"]["observation"]["invocation"],
+        "1234567890abcdef1234567890abcdef"
+    );
+    assert_eq!(
+        keeper.invocation.as_deref(),
+        Some("1234567890abcdef1234567890abcdef")
+    );
+    assert!(!keeper.start_ready().unwrap());
+    assert_eq!(fs::read(path).unwrap(), before);
+    assert_eq!(
+        keeper.fail("synthetic-start-failure"),
+        "synthetic-start-failure"
+    );
+}
 fn setup() -> Fixture {
     let mut f = harness::setup("normal");
     install_launcher(&mut f);

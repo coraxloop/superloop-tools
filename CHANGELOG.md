@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A domain-rubric root needs a component with literal text: `/`, `//`, `///`, `/*/` and other slash-only or wildcard-only roots no longer name a domain candidate for local or remote paths, where the broad ones previously matched every path. Compatibility: a rubric relying on such a root gains no domain scope from it, and an orchestrator rubric that bounded its worker rubrics with one makes the worker-rubric check refuse the worker roots it alone covered; declare a restricting root instead (``sec:permissiontriage:reason-grammar``).
 
+### Added
+
+- Custody campaigns retain an immutable start binding and a separate bounded recovery sequence. Failure summaries and diagnostics name the child, stage, first cause and last recovery receipt; cleanup facts remain readable after uncertainty and distinguish observed actions from resource absence. Operators preserve completed evidence and reconcile retained runtime objects explicitly (``sec:credentialcustody:campaign-failure-evidence``).
+
 ## [0.5.0] - 2026-11-16
 
 ### Added

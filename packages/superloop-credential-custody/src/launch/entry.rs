@@ -100,3 +100,10 @@ pub fn run(command: Command, parameters: &Path, case: &str) -> Result<serde_json
         Command::CalibrationRun => Err("launch-command"),
     }
 }
+
+pub fn failure_message(class: &'static str) -> String {
+    campaign::failure_message().map_or_else(
+        || crate::process::diagnostic_message(class),
+        |failure| serde_json::json!({"class":class,"campaign_failure":failure,"kernel":crate::process::diagnostic_message(class)}).to_string(),
+    )
+}

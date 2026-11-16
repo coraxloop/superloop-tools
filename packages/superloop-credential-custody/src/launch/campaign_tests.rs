@@ -232,6 +232,25 @@ fn stops_after_failure(fault: &str) {
         &fs::read(f.dir.path().join("evidence/campaign-failure.json")).unwrap(),
     )
     .unwrap();
+    assert_eq!(failure["schema"], 3);
+    assert_eq!(failure["failure"]["index"], 0);
+    assert_eq!(failure["failure"]["case"], "sample");
+    assert_eq!(failure["failure"]["stage"], "case");
+    assert_eq!(
+        failure["failure"]["retained"]["original_cause"],
+        failure["refusal_class"]
+    );
+    assert_eq!(
+        failure["failure"]["retained"]["recovery_evidence_missing"],
+        false
+    );
+    let name = failure["failure"]["retained"]["last_lifecycle_receipt"]
+        .as_str()
+        .unwrap();
+    let recovery: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.dir.path().join("evidence/sample").join(name)).unwrap())
+            .unwrap();
+    assert_eq!(recovery["event"]["kind"], "recovery");
     assert_eq!(
         failure["completed_prefix"]["rows"]
             .as_array()
@@ -355,6 +374,10 @@ fn campaign_failure_publication_cannot_overwrite_or_accept() {
     );
     assert_eq!(visited, [0]);
     assert_eq!(fs::read(path).unwrap(), b"occupied");
+    let diagnostic = campaign::failure_message().unwrap();
+    assert_eq!(diagnostic["refusal_class"], "synthetic-failure");
+    assert_eq!(diagnostic["failure_receipt_published"], false);
+    assert_eq!(diagnostic["failure"]["case"], "sample");
     assert!(!f.dir.path().join("evidence/campaign.json").exists());
 }
 

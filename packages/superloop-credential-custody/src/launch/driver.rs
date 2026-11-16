@@ -25,6 +25,7 @@ impl Keeper<'_> {
     fn start_ready(&mut self) -> Result<bool> {
         let snapshot = self.manager.starting(self.invocation.as_deref())?;
         if !snapshot.invocation.is_empty() {
+            self.session.store().retain_start(&snapshot)?;
             self.invocation = Some(snapshot.invocation.clone());
         }
         if snapshot.pid == 0 {

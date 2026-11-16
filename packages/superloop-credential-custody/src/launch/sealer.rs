@@ -268,6 +268,7 @@ fn child_limits(command: &mut Command, limit: u64) {
 }
 
 pub(super) struct Session<'a> {
+    cleanup: super::store::lifecycle::Disposition,
     store: &'a mut Store,
     owner: u32,
     bounding: u64,
@@ -338,6 +339,7 @@ impl<'a> Session<'a> {
             ));
         }
         let mut session = Self {
+            cleanup: super::store::lifecycle::Disposition::Retained,
             store,
             owner: nix::unistd::geteuid().as_raw(),
             bounding: own.bounding,
@@ -449,6 +451,9 @@ impl<'a> Session<'a> {
     pub const fn store(&mut self) -> &mut Store {
         self.store
     }
+    pub fn cleanup_evidence(&self) -> super::store::lifecycle::Disposition {
+        self.cleanup.clone()
+    }
     pub const fn exits(&self) -> &[Option<Exit>; 2] {
         &self.exits
     }
@@ -490,13 +495,16 @@ impl<'a> Session<'a> {
         }
         self.running.clear(); // All owned groups are cancelled before output cleanup.
         self.finished = true;
-        if self
+        match self
             .store
             .fail(class)
             .and_then(|()| self.store.cleanup_outputs())
-            .is_err()
         {
-            return "sealer-failure-custody";
+            Ok(()) => self.cleanup = super::store::lifecycle::Disposition::UnlinkSucceeded,
+            Err(error) => {
+                self.cleanup = super::store::lifecycle::Disposition::Failed { class: error };
+                return "sealer-failure-custody";
+            }
         }
         class
     }

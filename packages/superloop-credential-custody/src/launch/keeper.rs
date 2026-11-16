@@ -61,6 +61,9 @@ impl<'a> Keeper<'a> {
         if let Err(class) = self.manager.start(self.pipes.paths()) {
             return Err(self.fail(class));
         }
+        if let Err(class) = self.session.store().submission_acknowledged() {
+            return Err(self.fail(class));
+        }
         Ok(())
     }
     pub fn capture(&mut self) -> Result<()> {
@@ -83,6 +86,7 @@ impl<'a> Keeper<'a> {
         )?;
         let result = (|| {
             let snapshot = self.manager.snapshot(self.invocation.as_deref())?;
+            self.session.store().retain_start(&snapshot)?;
             self.invocation = Some(snapshot.invocation.clone());
             require(
                 snapshot.active == "activating"
@@ -175,30 +179,67 @@ impl<'a> Keeper<'a> {
         }
         self.terminal = true;
         self.session.store().remember_cause(class);
-        let stopped = self.holder_stopped || self.stop_holder().is_ok();
-        if !stopped || self.session.store().phase() == Phase::Uncertain {
-            self.session
-                .quarantine(if self.invocation.is_some() && !stopped {
-                    "manager-stop"
-                } else {
-                    class
-                });
-            return class;
-        }
-        if let Some(control) = &self.control
-            && control.cleanup().is_err()
-        {
-            self.session.quarantine("control-binding");
-            return "keeper-control-custody";
-        }
-        let failure = self.session.fail(class);
-        // Captured pipes were already unlinked. Before capture, cleanup remains
-        // manifest-bound after the matched unit is stopped; failure quarantines.
-        if self.process.is_none() && self.pipes.cleanup().is_err() {
-            return "keeper-fifo-custody";
-        }
-        failure
+        self.recover(class)
     }
+    fn recover(&mut self, class: &'static str) -> &'static str {
+        use super::store::lifecycle::{Disposition as D, Recovery};
+        let intent = self.session.store().recovery_intent();
+        let stop = if self.holder_stopped {
+            Ok(())
+        } else {
+            self.stop_holder()
+        };
+        let holder = match &stop {
+            Ok(()) => D::StopJobCompleted {
+                invocation: self.invocation.clone().unwrap_or_default(),
+            },
+            Err(_) if self.invocation.is_none() => D::Unbound,
+            Err(error) => D::Failed { class: error },
+        };
+        let mut socket = D::Retained;
+        let mut fifos = if self.pipes.was_unlinked() {
+            D::UnlinkedAtCapture
+        } else {
+            D::Retained
+        };
+        let uncertain = self.session.store().phase() == Phase::Uncertain;
+        if stop.is_err() || uncertain || intent.is_err() {
+            let _cancelled =
+                self.session
+                    .quarantine(if stop.is_err() { "manager-stop" } else { class });
+        } else {
+            let control = self.control.as_ref().map_or(Ok(()), Control::cleanup);
+            socket = match control {
+                Ok(()) if self.control.is_some() => D::UnlinkSucceeded,
+                Ok(()) => D::NotAttempted,
+                Err(error) => D::Failed { class: error },
+            };
+            if control.is_err() {
+                let _cancelled = self.session.quarantine(class);
+            } else {
+                let _cancelled = self.session.fail(class);
+            }
+            if !self.pipes.was_unlinked() {
+                fifos = match self.pipes.cleanup() {
+                    Ok(()) => D::UnlinkSucceeded,
+                    Err(error) => D::Failed { class: error },
+                };
+            }
+        }
+        let observed = Recovery {
+            holder,
+            sealer_exits: *self.session.exits(),
+            outputs: self.session.cleanup_evidence(),
+            fifos,
+            socket,
+            evidence: D::Retained,
+        };
+        if self.session.store().retain_recovery(&observed).is_err() || intent.is_err() {
+            return "lifecycle-publication-missing";
+        }
+        class
+    }
+
     pub fn serve_status(&mut self, deadline: std::time::Instant) -> Result<()> {
         self.verify_capture()?;
         let phase = self.session.store().phase();

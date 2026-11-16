@@ -30,6 +30,11 @@ pub(super) struct Matrix {
     pub rows: Vec<Row>,
 }
 
+thread_local! { static FAILURE: std::cell::RefCell<Option<serde_json::Value>> = const { std::cell::RefCell::new(None) }; }
+pub(super) fn failure_message() -> Option<serde_json::Value> {
+    FAILURE.with(|slot| slot.borrow_mut().take())
+}
+
 fn verify_root(admission: &Admission, root: &File) -> Result<()> {
     let current = receipt::sealed_directory(&admission.policy().roots.evidence)?;
     require(
@@ -48,6 +53,7 @@ pub(super) fn run(
     deadline: Instant,
     mut case: impl FnMut(usize, &mut Store, Instant) -> Result<()>,
 ) -> Result<Matrix> {
+    FAILURE.with(|slot| *slot.borrow_mut() = None);
     budget(deadline)?;
     let policy = admission.policy();
     let root = receipt::sealed_directory(&policy.roots.evidence)?;
@@ -64,10 +70,12 @@ pub(super) fn run(
         "campaign-start.json",
         &serde_json::to_vec(&matrix).map_err(|_| "launch-evidence-encoding")?,
     )?;
+    let mut failure = serde_json::json!({"stage":"campaign-start","case":null,"index":null});
     let outcome = (|| {
         let mut invocations = BTreeSet::new();
         let mut total = 0_u64;
         for (index, expected) in policy.cases.iter().enumerate() {
+            failure = serde_json::json!({"stage":"case-reservation","case":expected.id,"unit":expected.generator_unit,"index":index});
             budget(deadline)?;
             verify_root(admission, &root)?;
             let mut store = Store::reserve(admission, index)?;
@@ -81,17 +89,21 @@ pub(super) fn run(
             let completed = match outcome {
                 Ok(completed) => completed,
                 Err(class) => {
+                    store.remember_cause(class);
                     if !matches!(
                         store.phase(),
                         super::state::Phase::Failed
                             | super::state::Phase::Uncertain
                             | super::state::Phase::Complete
                     ) {
-                        store.uncertain(class)?;
+                        let _terminal = store.uncertain(class);
                     }
+                    let _recovery = store.ensure_recovery_record();
+                    failure = serde_json::json!({"stage":"case","index":index,"case":expected.id,"retained":store.failure_context()});
                     return Err(class);
                 }
             };
+            failure = serde_json::json!({"stage":"case-handoff","index":index,"case":expected.id,"retained":store.failure_context()});
             require(
                 completed.case == expected.id
                     && completed.policy_sha256 == admission.policy_sha256()
@@ -115,6 +127,7 @@ pub(super) fn run(
             )?;
             matrix.rows.push(Row { index, completed });
         }
+        failure = serde_json::json!({"stage":"campaign-publication","case":null,"index":null});
         budget(deadline)?;
         verify_root(admission, &root)?;
         for artifact in admission.artifacts() {
@@ -130,16 +143,33 @@ pub(super) fn run(
         receipt::publish_held(&root, "campaign.json", &bytes)
     })();
     if let Err(class) = outcome {
-        verify_root(admission, &root)?;
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "schema":2, "command":"calibration-run", "outcome":"refused",
-            "refusal_class":class, "completed_prefix":matrix,
-        }))
-        .map_err(|_| "launch-evidence-encoding")?;
-        receipt::publish_held(&root, "campaign-failure.json", &bytes)?;
+        retain_failure(admission, &root, class, &failure, &matrix)?;
         return Err(class);
     }
     Ok(matrix)
+}
+
+fn retain_failure(
+    admission: &Admission,
+    root: &std::fs::File,
+    class: &'static str,
+    failure: &serde_json::Value,
+    matrix: &Matrix,
+) -> Result<()> {
+    FAILURE.with(|slot| *slot.borrow_mut() = Some(serde_json::json!({"refusal_class":class,"failure":failure,"failure_receipt_published":false})));
+    verify_root(admission, root)?;
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "schema":3, "command":"calibration-run", "outcome":"refused",
+        "refusal_class":class, "failure":failure, "completed_prefix":matrix,
+    }))
+    .map_err(|_| "launch-evidence-encoding")?;
+    receipt::publish_held(root, "campaign-failure.json", &bytes)?;
+    FAILURE.with(|slot| {
+        if let Some(value) = slot.borrow_mut().as_mut() {
+            value["failure_receipt_published"] = true.into();
+        }
+    });
+    Ok(())
 }
 
 // Read only the completed campaign's bounded, protected evidence. This does
