@@ -116,7 +116,7 @@ case "$response" in
             sleep 0.05
             head -c 70000 /dev/zero | tr '\000' x
             : > "${capture}.oversized-written"
-            sleep 30
+            sleep 300
         ) &
         descendant=$!
         printf '%s\n' "$descendant" > "${capture}.child-pid"
