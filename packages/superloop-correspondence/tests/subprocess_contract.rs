@@ -527,6 +527,7 @@ fn transport_failures_name_their_exit_and_diagnostic() {
         "{long_line}"
     );
     assert!(long_line.ends_with('"'), "{long_line}");
+    assert!(long_line.ends_with("decisive\""), "{long_line}");
     assert!(long_line.len() < 650, "{long_line}");
 
     write_executable(
