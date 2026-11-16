@@ -1315,6 +1315,12 @@ pub(super) fn serve_compute(
         )?;
     }
     let mut child = runner.spawn(registration, operation)?;
+    #[cfg(test)]
+    let deadline = tests::SPAWN_DEADLINE.with(|slot| {
+        slot.borrow_mut()
+            .take()
+            .map_or(deadline, |after_spawn| after_spawn())
+    });
     let stdin = child
         .stdin
         .take()
@@ -1863,6 +1869,12 @@ mod tests {
         modes::{ModeTarget, Rubric},
         store::tests::Fixture,
     };
+
+    type SpawnDeadline = Box<dyn FnOnce() -> Instant + Send>;
+
+    thread_local! {
+        pub(super) static SPAWN_DEADLINE: std::cell::RefCell<Option<SpawnDeadline>> = const { std::cell::RefCell::new(None) };
+    }
 
     struct FakeRunner;
 
@@ -2900,8 +2912,10 @@ mod tests {
         let listener = UnixListener::bind(&socket).expect("fixture socket");
         // The ready hook is thread-local; the serving thread reads it after filing.
         let ready = super::super::REQUEST_READY.with(|slot| slot.borrow_mut().take());
+        let spawned = SPAWN_DEADLINE.with(|slot| slot.borrow_mut().take());
         let server = thread::spawn(move || {
             super::super::REQUEST_READY.with(|slot| *slot.borrow_mut() = ready);
+            SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = spawned);
             let (mut stream, _) = listener.accept()?;
             let started = Instant::now();
             let _socket_peer = peer_uid(&stream)?;
@@ -3172,6 +3186,41 @@ mod tests {
         assert!(!reply.to_string().contains("refs/heads/lane/R"));
     }
 
+    /// ´test:unit:door-prespawn-deadline-refuses-before-runner´
+    #[test]
+    fn door_prespawn_deadline_refuses_before_runner() {
+        struct UnreachableRunner;
+        impl Runner for UnreachableRunner {
+            fn spawn(&self, _: &Registration, _: Operation) -> io::Result<Child> {
+                panic!("expired pre-spawn request must not invoke runner");
+            }
+        }
+        super::super::REQUEST_READY.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(|_| {
+                Instant::now()
+                    .checked_sub(
+                        Duration::from_millis(super::super::MAX_LOCK_WAIT_CREDIT_MS)
+                            + Duration::from_secs(1),
+                    )
+                    .ok_or_else(|| io::Error::other("fixture expired instant is unrepresentable"))
+            }));
+        });
+        let (_fixture, socket, server) = fixture_with_runner(Scope::Work, &UnreachableRunner);
+        let mut client = UnixStream::connect(&socket).expect("pre-spawn client");
+        frame_write_until(
+            &mut client,
+            &json!({"schema":2,"argv":[b"door-attribution-deadline".to_vec()],
+                "deadline_ms":120_000}),
+            Instant::now() + Duration::from_secs(120),
+        )
+        .expect("pre-spawn request");
+        let reply = fixture_final_frame(&mut client);
+        assert_eq!(reply["status"], 125);
+        assert_eq!(reply["reason"], "door-request-deadline");
+        assert_eq!(reply["ref_check"], "not-reached");
+        server.join().expect("server join").expect("server reply");
+    }
+
     /// ´test:unit:door-status-deadline-review-and-disconnect-have-typed-outcomes´
     #[test]
     fn door_status_deadline_review_and_disconnect_have_typed_outcomes() {
@@ -3193,15 +3242,16 @@ mod tests {
         assert_eq!(reply["reason"], "door-complete");
         server.join().expect("server join").expect("server reply");
         drop(first_fixture);
+        SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = Some(Box::new(Instant::now)));
         let (second_fixture, socket, server) = fixture_with_runner(Scope::Work, &DeadlineRunner);
         let mut client = UnixStream::connect(&socket).expect("deadline client");
         let observation = Instant::now() + Duration::from_secs(120);
-        // Admission gets a loaded-node budget; the runner cannot exit naturally
-        // before it, and the client's observation bound is independently longer.
+        // Mediation gets the maximum request budget; the test-only hook expires
+        // the running child only after spawn, before the pumps copy its deadline.
         frame_write_until(
             &mut client,
             &json!({"schema":2,
-            "argv":[b"door-attribution-deadline".to_vec()],"deadline_ms":3000}),
+            "argv":[b"door-attribution-deadline".to_vec()],"deadline_ms":120_000}),
             observation,
         )
         .expect("deadline request");

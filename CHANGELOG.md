@@ -84,6 +84,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Door transport tests distinguish pre-spawn refusal from running-child expiry by a test-only spawn hook, without a node-speed verdict; deployed deadlines are unchanged (`[ORCHESTRATION-rule:conformance:ordering-and-timing-evidence]`).
+
 - Door transport deadline fixtures consume lock-wait progress before checking the final reply, using the shared bounded frame reader; deployed behavior is unchanged (`[ORCHESTRATION-rule:conformance:ordering-and-timing-evidence]`).
 
 - Door sized-run waiters remain parked after their reads while the writer publishes, replacing a fifteen-second performance verdict with lock ordering. Refusal-frame comparisons use the peer’s encode/decode form; retained-reader fixtures assert the injected zero drain and observe early runner completion. Installed behavior is unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
