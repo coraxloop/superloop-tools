@@ -131,7 +131,50 @@ fn main() {
     evidence.extend(ipc());
     evidence.extend(group_changes());
     evidence.push(u8::from(parent_death_is_kill()) + b'0');
+    evidence.extend(parent_death_changes());
     std::io::stdout().write_all(&evidence).unwrap();
+}
+
+#[allow(unsafe_code)]
+fn parent_death_changes() -> [u8; 10] {
+    let denied = |result| {
+        u8::from(
+            result == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::EPERM),
+        ) + b'0'
+    };
+    // SAFETY: probe only its own metadata, with current identity arguments.
+    // Mutants can change no other process and cannot gain another identity.
+    unsafe {
+        let uid = nix::libc::getuid();
+        let gid = nix::libc::getgid();
+        [
+            denied(nix::libc::syscall(
+                nix::libc::SYS_prctl,
+                nix::libc::PR_SET_PDEATHSIG,
+                0,
+                0,
+                0,
+                0,
+            )),
+            denied(nix::libc::syscall(
+                nix::libc::SYS_prctl,
+                nix::libc::PR_SET_PDEATHSIG,
+                nix::libc::SIGTERM,
+                0,
+                0,
+                0,
+            )),
+            denied(nix::libc::syscall(nix::libc::SYS_setuid, uid)),
+            denied(nix::libc::syscall(nix::libc::SYS_setgid, gid)),
+            denied(nix::libc::syscall(nix::libc::SYS_setreuid, uid, uid)),
+            denied(nix::libc::syscall(nix::libc::SYS_setregid, gid, gid)),
+            denied(nix::libc::syscall(nix::libc::SYS_setresuid, uid, uid, uid)),
+            denied(nix::libc::syscall(nix::libc::SYS_setresgid, gid, gid, gid)),
+            denied(nix::libc::syscall(nix::libc::SYS_setfsuid, uid)),
+            denied(nix::libc::syscall(nix::libc::SYS_setfsgid, gid)),
+        ]
+    }
 }
 
 #[allow(unsafe_code)]

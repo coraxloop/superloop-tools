@@ -199,6 +199,27 @@ fn socket_filter() -> Result<Vec<nix::libc::sock_filter>> {
         instruction(0x45, 0, 1, 0x4000_0000),
         instruction(0x06, 0, 0, 0x8000_0000),
     ];
+    // Parent-death behavior is installed before this filter. The sealer may
+    // query it but cannot clear or replace it. prctl's option is a kernel int,
+    // so compare its low word and reload the syscall number on the allow path.
+    filter.extend([
+        instruction(
+            0x15,
+            0,
+            4,
+            u32::try_from(nix::libc::SYS_prctl).map_err(|_| "sealer-seccomp-architecture")?,
+        ),
+        instruction(0x20, 0, 0, 16),
+        instruction(
+            0x15,
+            0,
+            1,
+            u32::try_from(nix::libc::PR_SET_PDEATHSIG)
+                .map_err(|_| "sealer-seccomp-architecture")?,
+        ),
+        instruction(0x06, 0, 0, 0x0005_0001),
+        instruction(0x20, 0, 0, 0),
+    ]);
     // prlimit64(pid=0) is needed by libc for the child's own limits. Every
     // nonzero pid is refused, including its explicit own pid. Inspect both
     // halves so a noncanonical argument cannot bypass the filter.
@@ -232,6 +253,16 @@ fn denied_syscalls() -> Vec<nix::libc::c_long> {
     // io_uring can create sockets without SYS_socket; deny that alternate route
     // as well. No ring descriptor is admitted across this child exec.
     let mut denied = vec![
+        // Effective/filesystem identity changes can clear parent-death state.
+        // This direct-child construction has already fixed its identity.
+        nix::libc::SYS_setuid,
+        nix::libc::SYS_setgid,
+        nix::libc::SYS_setreuid,
+        nix::libc::SYS_setregid,
+        nix::libc::SYS_setresuid,
+        nix::libc::SYS_setresgid,
+        nix::libc::SYS_setfsuid,
+        nix::libc::SYS_setfsgid,
         // No kernel keyring or SysV/POSIX message-queue authority is needed.
         nix::libc::SYS_setpgid,
         nix::libc::SYS_setsid,

@@ -560,12 +560,15 @@ fn sealer_confinement_denies_new_authority_and_keeps_held_output() {
     let mut session = Session::start(&admission, 0, &mut store, readers).unwrap();
     assert_eq!(
         session.wait_until(hang_guard()).unwrap().sealed_bytes,
-        [46, 46]
+        [56, 56]
     );
     drop(session);
     for name in ["left.sealed", "right.sealed"] {
         let row = fs::read(fixture.dir.path().join("sealed/sample").join(name)).unwrap();
-        assert_eq!(row, b"1111111111111111111111111111111111111111111111");
+        assert_eq!(
+            row,
+            b"11111111111111111111111111111111111111111111111111111111"
+        );
         // Only the fixed, already-asserted bitmap is emitted as test evidence.
         writeln!(
             std::io::stderr(),
