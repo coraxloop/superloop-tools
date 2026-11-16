@@ -3203,17 +3203,73 @@ done
                 .line()
                 .contains("output limit")
         );
-        executable(&program, "sleep 2");
+        executable(&program, "sleep infinity");
         assert!(
             run_child(&spec(1), None)
                 .expect_err("time limit")
                 .line()
                 .contains("time limit")
         );
-        executable(&program, "sleep 30 & exit 0");
-        let mut end = super::ChildEnd::default();
+        executable(&program, "sleep infinity & exit 0");
+        exited_child_pipe_bound(spec(1));
+    }
+
+    fn exited_child_pipe_bound(spec: ChildSpec) {
+        use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
+        use std::sync::atomic::Ordering;
+        let pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let runner_pid = Arc::clone(&pid);
+        let (done, completed) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let mut end = super::ChildEnd::default();
+            let result = super::run_child_with_end(
+                &spec,
+                None,
+                None,
+                |child| {
+                    runner_pid.store(child, Ordering::Release);
+                    let child =
+                        nix::unistd::Pid::from_raw(i32::try_from(child).expect("child PID"));
+                    let bound = Instant::now() + Duration::from_secs(180);
+                    loop {
+                        let status = waitid(
+                            Id::Pid(child),
+                            WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+                        )
+                        .map_err(|error| {
+                            crate::error::LaneError::operation("fixture", error.to_string())
+                        })?;
+                        if matches!(status, WaitStatus::Exited(_, 0)) {
+                            return Ok(());
+                        }
+                        if status != WaitStatus::StillAlive || Instant::now() >= bound {
+                            return Err(crate::error::LaneError::operation(
+                                "fixture",
+                                "child did not become an unreaped successful exit",
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                },
+                &mut end,
+            );
+            let _sent = done.send(());
+            (result, end)
+        });
+        let event = completed.recv_timeout(Duration::from_secs(180));
+        if event.is_err() {
+            let child = pid.load(Ordering::Acquire);
+            if child != 0 {
+                let _killed = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(i32::try_from(child).expect("child PID")),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+        let (result, end) = runner.join().expect("reap child runner");
+        event.expect("exited child drain completes without a natural holder exit");
         assert!(
-            super::run_child_with_end(&spec(1), None, None, |_| Ok(()), &mut end)
+            result
                 .expect_err("descendant pipe holder")
                 .line()
                 .contains("time limit")
