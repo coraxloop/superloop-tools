@@ -480,7 +480,7 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-correspondence/meson.build:50,54``|D220; repeated producers, comparisons, diagnostics and fixtures inherit the purpose of the named member, not the hash function.|
 |``packages/superloop-correspondence/src/main.rs:719,727,741,755``|Test-module fixture text and assertions about an SSH host-key warning line that the failed-transport diagnostic must not carry; not a digest value or an independent digest field.|
 |``packages/superloop-correspondence/tests/subprocess_contract.rs:277,511``|Test fixture text and an assertion about an SSH host-key warning line that the failed-transport diagnostic must not carry; not a digest value or an independent digest field.|
-|``packages/superloop-credential-custody/README.md:32,42,44,46,48,50,52,56,60,76,90,96,98,102,136,162,166,176,204,212,215,220,224,230,246,302``|D246–D248 and D250; identity, custody and build documentation.|
+|``packages/superloop-credential-custody/README.md:32,42,44,46,48,50,52,56,60,76,90,96,98,102,136,162,166,176,204,212,215,220,224,230,246,316``|D246–D248 and D250; identity, custody and build documentation.|
 |``packages/superloop-credential-custody/meson.build:100,101,110,118,119,187``|D248; reviewed executable expressions and scope.|
 |``packages/superloop-credential-custody/src/identity.rs:8,15,57,71,136``|D246; hashing live files and retained calibration bytes.|
 |``packages/superloop-credential-custody/src/launch/campaign.rs:28,29,73,74,120,121,163,175,205,206,210,219,220,229,230,243,244,258,280``|D250, D254, D256; explicit child identities, retained completion and the published matrix byte reference, never calibration acceptance.|
@@ -497,15 +497,15 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/src/launch/control_client_tests.rs:34,91,120,125``|D250; synthetic binding drift controls, never runtime identity evidence.|
 |``packages/superloop-credential-custody/src/launch/control_tests.rs:91,479``|D253; retained inventory and authenticated handoff correspondence.|
 |``packages/superloop-credential-custody/src/launch/driver.rs:85,87,90,91,92,94,98,100``|D250, D253; measured image and retained inventory references through existing owners, not new digest definitions.|
-|``packages/superloop-credential-custody/src/launch/driver_tests.rs:170,256,347,354,360,447,459,468,469``|D250, D253; measured image and retained inventory references through existing owners, not new digest definitions.|
+|``packages/superloop-credential-custody/src/launch/driver_tests.rs:179,267,358,365,371,458,470,479,480``|D250, D253; measured image and retained inventory references through existing owners, not new digest definitions.|
 |``packages/superloop-credential-custody/src/launch/entry.rs:98,101``|D250, D253; measured binding references and synthetic controls, not independent identity evidence.|
 |``packages/superloop-credential-custody/src/launch/handoff.rs:21``|D253; retained inventory binding in the authenticated pidfd protocol.|
 |``packages/superloop-credential-custody/src/launch/handoff_tests.rs:14,46,58``|D253; synthetic handoff correspondence controls.|
 |``packages/superloop-credential-custody/src/launch/inventory_tests.rs:36,48``|D250; synthetic fixture-image and public-case measurement inputs.|
 |``packages/superloop-credential-custody/src/launch/keeper.rs:112``|D252; captured loaded configuration binds the completion observation.|
 |``packages/superloop-credential-custody/src/launch/keeper_tests.rs:18,23,138,142``|D250, D252; synthetic controls compare measured artifact and manager metadata with their retained receipts.|
-|``packages/superloop-credential-custody/src/launch/lifecycle.rs:9,10,69,70,104,105,235,236``|D250, D252; immutable operational binding references, never calibration acceptance.|
-|``packages/superloop-credential-custody/src/launch/manager.rs:79,81,425,443,444,508``|D252; observed manager metadata and synthetic controls, no root rehearsal claim.|
+|``packages/superloop-credential-custody/src/launch/lifecycle.rs:9,10,70,71,105,106,236,237``|D250, D252; immutable operational binding references, never calibration acceptance.|
+|``packages/superloop-credential-custody/src/launch/manager.rs:79,81,460,478,479,543``|D252; observed manager metadata and synthetic controls, no root rehearsal claim.|
 |``packages/superloop-credential-custody/src/launch/manager_tests.rs:28,144,145``|D252; observed manager metadata and synthetic controls, no root rehearsal claim.|
 |``packages/superloop-credential-custody/src/launch/measure.rs:36,49,64,69,70,82,83,85,86,146,156,157,177,178,194,195,226,227,233,252,254,264``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/launch/observation.rs:15,16,17,18,19,23,56,79,116,126,134,135,136,137,141``|D247, D256; measured handoff bindings and synthetic correspondence controls.|

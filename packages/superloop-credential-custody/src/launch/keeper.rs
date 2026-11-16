@@ -193,10 +193,7 @@ impl<'a> Keeper<'a> {
             + std::time::Duration::from_millis(self.admission.policy().limits.case_ms);
         let stop = self.recover_holder(deadline);
         let holder = match &stop {
-            Ok(false) => D::NotAttempted,
-            Ok(true) => D::StopJobCompleted {
-                invocation: self.invocation.clone().unwrap_or_default(),
-            },
+            Ok(observation) => observation.clone(),
             Err(error) if self.invocation.is_none() => D::Unbound { class: error },
             Err(error) => D::Failed { class: error },
         };
@@ -244,9 +241,15 @@ impl<'a> Keeper<'a> {
         class
     }
 
-    fn recover_holder(&mut self, deadline: std::time::Instant) -> Result<bool> {
+    fn recover_holder(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> Result<super::store::lifecycle::Disposition> {
+        use super::store::lifecycle::Disposition as D;
         if self.holder_stopped {
-            return Ok(true);
+            return Ok(D::StopJobCompleted {
+                invocation: self.invocation.clone().unwrap_or_default(),
+            });
         }
         // An interrupted client call says nothing about the holder's state.
         // Recovery rechecks the same invocation before completing its stop.
@@ -260,7 +263,7 @@ impl<'a> Keeper<'a> {
         require(!self.holder_stop_attempted, "completion-stop-attempted")?;
         if self.invocation.is_none() {
             if self.session.store().failure_context().stage != Phase::Submitted {
-                return Ok(false);
+                return Ok(D::NotAttempted);
             }
             loop {
                 let snapshot = self.manager.starting_at(None, deadline)?;
@@ -281,6 +284,13 @@ impl<'a> Keeper<'a> {
                 super::channel::poll(&mut [], timeout)?;
             }
         }
+        if self.manager.unloaded_at(deadline)? {
+            return Ok(D::UnitUnloaded {
+                unit: self.admission.policy().cases[self.index]
+                    .generator_unit
+                    .clone(),
+            });
+        }
         self.holder_stop_attempted = true;
         if let Err(class) = self.manager.stop_at(
             self.invocation.as_deref().ok_or("keeper-not-captured")?,
@@ -290,7 +300,9 @@ impl<'a> Keeper<'a> {
             return Err(class);
         }
         self.holder_stopped = true;
-        Ok(true)
+        Ok(D::StopJobCompleted {
+            invocation: self.invocation.clone().unwrap_or_default(),
+        })
     }
 
     pub fn serve_status(&mut self, deadline: std::time::Instant) -> Result<()> {

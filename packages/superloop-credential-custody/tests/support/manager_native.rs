@@ -74,6 +74,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if signal.exists() {
             let tid = fs::read_to_string(&signal)?;
             fs::remove_file(signal)?;
+            // The manager's queued stop survives interruption of its client.
+            // Publish the resulting unload before delivering that interruption.
+            fs::write(root.join("manager-stopped"), b"stop\n")?;
+            let unit = args.last().ok_or("missing unit")?;
+            fs::write(
+                root.join("manager-reply"),
+                format!("Id={unit}\nLoadState=not-found\nInvocationID=\nMainPID=0\n"),
+            )?;
             signal_keeper(&["--signal-keeper".into(), tid])?;
             return Ok(());
         }

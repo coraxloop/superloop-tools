@@ -81,7 +81,7 @@ fn recovery_finishes_a_holder_stop_interrupted_by_termination() {
     .unwrap();
     let result = keeper.stop_holder();
     assert_eq!(result, Err("campaign-stopped"));
-    assert!(!f.dir.path().join("manager-stopped").exists());
+    assert!(f.dir.path().join("manager-stopped").exists());
     assert_eq!(keeper.release_result(result), Err("campaign-stopped"));
     let last = keeper
         .session
@@ -95,8 +95,17 @@ fn recovery_finishes_a_holder_stop_interrupted_by_termination() {
     eprintln!("interrupted-stop recovery: {recovery}");
     assert_eq!(
         recovery["event"]["observation"]["holder"]["evidence"],
-        "stop-job-completed"
+        "unit-unloaded"
     );
+    assert_eq!(recovery["schema"], 3);
+    assert_eq!(
+        recovery["event"]["observation"]["holder"]["unit"],
+        "synthetic-sample.service"
+    );
+    let last_call: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.dir.path().join("manager-argv.json")).unwrap()).unwrap();
+    assert!(last_call.to_string().contains("show"));
+    assert!(!last_call.to_string().contains("\"stop\""));
     assert!(f.dir.path().join("manager-stopped").exists());
     assert_eq!(recovery["original_cause"], "campaign-stopped");
     drop(keeper);
@@ -203,11 +212,13 @@ fn recovery_expired_allowance_never_starts_a_manager_call() {
             .unwrap();
         fs::remove_file(f.dir.path().join("manager-argv.json")).unwrap();
         assert_eq!(
-            keeper.recover_holder(
-                Instant::now()
-                    .checked_sub(std::time::Duration::from_secs(1))
-                    .unwrap()
-            ),
+            keeper
+                .recover_holder(
+                    Instant::now()
+                        .checked_sub(std::time::Duration::from_secs(1))
+                        .unwrap()
+                )
+                .map(|_| ()),
             Err("manager-deadline")
         );
         assert!(!f.dir.path().join("manager-argv.json").exists());

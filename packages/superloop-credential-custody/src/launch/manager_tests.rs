@@ -337,6 +337,67 @@ fn manager_deadline_is_one_absolute_case_budget() {
     assert!(!fixture.dir.path().join("manager-argv.json").exists());
 }
 
+/// ´test:unit:manager-unload-is-an-observation-not-stop-authority´
+#[test]
+fn manager_unload_is_an_observation_not_stop_authority() {
+    let _case = crate::launch::test_support::case_guard();
+    let fixture = fixture();
+    let admission = fixture.admit();
+    let manager = Manager::new(&admission, 0).unwrap();
+    let original = "Id=synthetic-sample.service\nLoadState=not-found\nInvocationID=\nMainPID=0\n";
+    let path = fixture.dir.path().join("manager-reply");
+    for good in [original.into(), format!("{original}OpenFile=\n")] {
+        fs::write(&path, good).unwrap();
+        assert_eq!(manager.unloaded_at(manager.deadline), Ok(true));
+    }
+    fs::write(&path, original.replace("not-found", "loaded")).unwrap();
+    assert_eq!(manager.unloaded_at(manager.deadline), Ok(false));
+    for (name, changed, class) in [
+        (
+            "unit",
+            original.replace("synthetic-sample", "other"),
+            "manager-unloaded-binding",
+        ),
+        (
+            "invocation",
+            original.replace(
+                "InvocationID=",
+                "InvocationID=1234567890abcdef1234567890abcdef",
+            ),
+            "manager-unloaded-binding",
+        ),
+        (
+            "pid",
+            original.replace("MainPID=0", "MainPID=1"),
+            "manager-unloaded-binding",
+        ),
+        (
+            "open-file",
+            format!("{original}OpenFile=/unexpected:left:append\n"),
+            "manager-unloaded-binding",
+        ),
+        (
+            "missing",
+            original.replace("LoadState=not-found\n", ""),
+            "manager-reply-shape",
+        ),
+        (
+            "duplicate",
+            format!("{original}Id=synthetic-sample.service\n"),
+            "manager-reply-shape",
+        ),
+        (
+            "unknown",
+            format!("{original}Unexpected=yes\n"),
+            "manager-reply-shape",
+        ),
+    ] {
+        fs::write(&path, changed).unwrap();
+        assert_eq!(manager.unloaded_at(manager.deadline), Err(class), "{name}");
+    }
+    assert!(!fixture.dir.path().join("manager-stopped").exists());
+}
+
 fn parse(
     bytes: &[u8],
     unit: &str,

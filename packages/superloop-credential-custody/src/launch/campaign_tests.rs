@@ -419,7 +419,7 @@ fn stops_after_failure(fault: &str) {
         serde_json::from_slice(&fs::read(f.dir.path().join("evidence/sample").join(name)).unwrap())
             .unwrap();
     assert_eq!(recovery["event"]["kind"], "recovery");
-    assert_eq!(recovery["schema"], 2);
+    assert_eq!(recovery["schema"], 3);
     if fault == "sealers" {
         eprintln!("before-submission recovery: {recovery}");
         assert_eq!(

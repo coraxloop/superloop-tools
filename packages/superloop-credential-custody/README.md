@@ -207,7 +207,7 @@ The completed campaign matrix uses schema 2 and retains each sealed output’s m
 
 A failed or cooperatively stopped campaign publishes schema-4 ``campaign-failure.json``. Its locator names the child, stage, first cause and last immutable lifecycle receipt. ``between-cases`` means no next case was reserved; ``next_index`` and ``completed_count`` are positions in policy order, not leftover objects. A failure during reservation can leave objects before their creation receipt exists. A production failure after submission latches ``uncertain`` and retains outputs and socket; a direct private test call to ``fail`` can instead exercise verified unlink, and is not a production failure example. No lifecycle or failure record supplies calibration acceptance: only the protected completed-matrix handoff reader does that.
 
-The evidence map is finite and follows the admitted policy's case order. At the campaign root, ``campaign-start.json`` means initialization was published, ``campaign.json`` is the proposed completed matrix, and ``campaign-failure.json`` is a failure summary. Within each case, ``state-00.json`` records creation and ``state-NN.json`` records acceptance phases; ``inventory.json`` and ``completion.json`` retain observation and successful completion. The separate ``lifecycle-NN.json`` sequence has at most 16 exclusively published 0400 entries. It retains submission acknowledgement, the first fully compared start binding before memory adopts it, recovery intent and resource facts. Runtime directories retain ``fifo-manifest.json`` and, after capture, ``control-manifest.json``. A ``.partial`` is never a receipt. Missing files do not mean success or absence.
+The evidence map is finite and follows the admitted policy's case order. At the campaign root, ``campaign-start.json`` means initialization was published, ``campaign.json`` is the proposed completed matrix, and ``campaign-failure.json`` is a failure summary. Within each case, ``state-00.json`` records creation and ``state-NN.json`` records acceptance phases; ``inventory.json`` and ``completion.json`` retain observation and successful completion. The separate ``lifecycle-NN.json`` sequence has at most 16 exclusively published 0400 entries. Schema 3 adds an explicit unit-unloaded observation; no lifecycle compatibility reader exists. It retains submission acknowledgement, the first fully compared start binding before memory adopts it, recovery intent and resource facts. Runtime directories retain ``fifo-manifest.json`` and, after capture, ``control-manifest.json``. A ``.partial`` is never a receipt. Missing files do not mean success or absence.
 
 **Start with the keeper, including after a hard kill.** Use the approved launch record to obtain ``POLICY`` and the keeper unit ``KEEPER.service``; the policy's ``generator_unit`` names are different units. If that launch record or its reviewed policy digest is missing, preserve the roots and ask the owner to identify the launch rather than guess. These commands inspect public metadata only:
 
@@ -235,7 +235,7 @@ To stop that verified keeper intentionally, signal only its main process:
 systemctl kill --kill-whom=main --signal=SIGTERM KEEPER.service
 ```
 
-Never interrupt a waiting client. The keeper consumes SIGINT/SIGTERM through a signal descriptor; the first sender pid, uid and signal win and later consumed requests are counted. Standard signals can coalesce; this is no authentication claim or count of every send. A second SIGTERM does not accelerate recovery. The only forced escalation is SIGKILL, which leaves no terminal receipt and requires the hard-kill procedure below. ``stopped`` means the bounded recovery attempt ended, never resource absence. Recovery has one fresh ``case_ms`` allowance, can complete the same admitted start comparison, and never stops by name alone. An interrupted stop call is not a failed-holder observation: recovery rechecks the bound invocation and completes the stop. A never-submitted holder is ``not-attempted``. A published matrix is not revoked by a later signal.
+Never interrupt a waiting client. The keeper consumes SIGINT/SIGTERM through a signal descriptor; the first sender pid, uid and signal win and later consumed requests are counted. Standard signals can coalesce; this is no authentication claim or count of every send. A second SIGTERM does not accelerate recovery. The only forced escalation is SIGKILL, which leaves no terminal receipt and requires the hard-kill procedure below. ``stopped`` means the bounded recovery attempt ended, never resource absence. Recovery has one fresh ``case_ms`` allowance, can complete the same admitted start comparison, and never stops by name alone. An interrupted stop call is not a failed-holder observation: recovery either observes the bound unit already unloaded or rechecks the invocation and completes the stop. A never-submitted holder is ``not-attempted``. A published matrix is not revoked by a later signal.
 
 **Find the interrupted case without a terminal receipt.** First query the keeper as above. ``MainPID=0`` with ``ActiveState=inactive`` or ``failed`` is the manager's witness that the keeper main process is gone. If the unit is unloaded, retain ``LoadState=not-found`` and compare any recorded keeper PID/birth against ``/proc``; a missing PID or a different birth means that recorded process is gone, not that another process may be killed. A live or ambiguous keeper blocks cleanup. Then inspect the campaign root:
 
@@ -256,23 +256,37 @@ The last existing evidence case without ``completion.json`` is the in-progress c
 
 Find the unit in that case's policy ``generator_unit`` and confirm it matches lifecycle ``unit``. The invocation is ``binding.invocation`` or, on the first ``start-binding`` event itself, ``event.observation.invocation``. A submission acknowledgement alone supplies no invocation. Retain the highest sequence and its binding; if none exists, the operator cannot stop that unit by name under this procedure. Preserve it for owner disposition. A killed keeper writes no terminal record; direct sealers cannot create processes or threads and have their independent lifetime boundary, while the generator's activation/stop limits may leave a failed unit record and reserved name.
 
-**Reconcile a bound unit and manifested runtime objects.** Keep exclusive ownership of the unit name through the following non-atomic query/stop/query sequence. Compare the first query's invocation with the retained binding before running stop; on drift, stop this procedure:
+**Reconcile a bound unit and manifested runtime objects.** Keep exclusive ownership of the unit name through this non-atomic query/stop/query sequence. Begin with the exact policy unit and retained binding:
 
 ```sh
-systemctl show --property=InvocationID,ActiveState,SubState,MainPID UNIT.service
-systemctl stop UNIT.service
-systemctl show --property=InvocationID,ActiveState,SubState,MainPID UNIT.service
+systemctl show --property=LoadState,InvocationID,ActiveState,SubState,MainPID,UID UNIT.service
 ```
 
-A completed stop job is not unit removal. Only after the matching unit is inactive/failed with no main process, reset its failed record and witness unload:
+``LoadState=not-found`` with an empty ``InvocationID`` and no main process means the named unit is observed unloaded. It is not invocation drift, and proves neither an old process's exit nor that the name cannot be reused. Skip both ``stop`` and ``reset-failed`` in that state; proceed to the recorded-uid witness and manifested runtime checks. A contradictory nonzero main PID, a nonempty invocation with not-found, a failed query or missing required state is unresolved, not permission to stop.
+
+For a loaded unit, compare its nonempty invocation with the retained binding before acting. Drift or an absent binding goes to owner disposition. While that matched service still runs, retain its numeric ``UID`` as a possible pre-capture identity witness. The installed manager must actually expose it: a missing, blank, zero or unset value (4294967295) supplies no dynamic uid. Prefer ``control-manifest.json`` field ``captured.uid`` when available, and require any live value to agree. Never infer a uid from a name or allocate one for this check.
+
+Only for the matched loaded unit, run:
+
+```sh
+systemctl stop UNIT.service
+systemctl show --property=LoadState,InvocationID,ActiveState,SubState,MainPID,UID UNIT.service
+```
+
+The second query has the same branches as the first. If it reports not-found with empty invocation and no main process, the unit was observed unloaded: skip reset-failed. A successful stop command by itself means only a completed stop job. If the unit remains loaded, its invocation must still match and it must be inactive/failed with MainPID=0 before reset; otherwise stop this procedure and retain the unresolved observation. Only in that still-loaded, matched inactive/failed state run:
 
 ```sh
 systemctl reset-failed UNIT.service
-systemctl show --property=LoadState,MainPID UNIT.service
+systemctl show --property=LoadState,InvocationID,ActiveState,SubState,MainPID,UID UNIT.service
+```
+
+Again, not-found with empty invocation and no main process is the unload witness; a still-loaded record remains recorded as such, never forced into an absence claim. Do not reset an unloaded unit. Given an actually retained dynamic uid from capture or the matched live query, run:
+
+```sh
 getent passwd RECORDED_DYNAMIC_UID
 ```
 
-Record the fixture uid before teardown from `control-manifest.json` field `captured.uid` (or an approved live observation before capture). If neither exists, identity retirement is unresolved; do not invent a uid for the query. ``LoadState=not-found`` witnesses unload; ``getent`` exit 2 with no entry witnesses no current NSS identity for that uid, not proof it can never be reused. If a record remains loaded or the uid resolves, record that result and leave retirement unresolved; do not remove an account or force a name-only stop. No single query authenticates a later reused uid.
+Exit 2 with no entry witnesses no current NSS identity for that uid, not proof it can never be reused. If neither capture nor the installed manager supplied a uid before unload, the manager still owns its retirement; the operator has no account action to take, but the NSS witness is unavailable and is recorded unresolved for the owner. If the uid resolves, retain that observation too. Never remove an account or perform a name-only stop to fill this gap. The installed manager's UID exposure, collection and NSS behavior remain rehearsal witnesses. Recovery itself records ``unit-unloaded`` only from an explicit not-found/empty-invocation/no-main-process reply for the exact unit, preserving the earlier binding and first cause; that observation never supplies completion acceptance.
 
 Inspect the protected ancestors and immutable manifests before each individual runtime unlink:
 
@@ -297,6 +311,6 @@ These are conditional actions, not a script to run blindly: skip an absent objec
 
 Client signal scoping and binding the generator to the keeper unit remain owner decisions; this program promises neither. Before a whole-unit stop, the rehearsal must witness keeper ``KillMode=mixed`` and ``TimeoutStopSec`` longer than recovery. The main-process signal procedure does not depend on those pending mechanisms.
 
-The sealer filter denies clone/clone3 and, on x86-64, fork/vfork. Parent-death state is not inherited across process creation, so a positive-control promise about one installed image is insufficient for the construction's lifetime guarantee. The installed sealer must work as one direct process without helper processes or threads; that compatibility is a mandatory positive rehearsal control. No weaker fallback is offered.
+The sealer filter denies clone/clone3 and, on x86-64, fork/vfork. Parent-death state is not inherited across process creation, so a positive-control promise about one installed image is insufficient for the construction's lifetime guarantee. The installed sealer must work as one direct process without helper processes or threads; that compatibility is a mandatory positive rehearsal control. No weaker fallback is offered. A sealer that requires a denied process/thread creation call receives EPERM and normally exits nonzero; the campaign reports an ordinary sealer exit failure, not a separate diagnosis proving which syscall caused it.
 
 Calibration and comparison envelopes use schema 3 and refuse schema 2, with no compatibility reader. Their campaign evidence records ``admitted_owner_uid`` from the measured campaign admission, never a caller assertion. A real calibration requires the campaign owner to perform observation and the owner to compare ``policy_sha256`` with the independently reviewed policy hash. An ordinary-user synthetic campaign remains visibly ordinary-user evidence; its matching hashes alone are no proof of root custody. The uid field records an admission; it does not authenticate a copied JSON document or replace protected receipt custody. Observation ``evidence_root`` must be disjoint from every campaign root, as the analysis tree already is. The schema-2 calibration-run envelope supplies ``matrix_sha256`` of the exact published matrix bytes alongside matrix; no manual digest transcription is needed. Recovery records remain separate from calibration acceptance.

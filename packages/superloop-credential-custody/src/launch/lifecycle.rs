@@ -18,6 +18,7 @@ pub(in crate::launch) enum Disposition {
     NotAttempted,
     Unknown,
     StopJobCompleted { invocation: String },
+    UnitUnloaded { unit: String },
     UnlinkSucceeded,
     UnlinkedAtCapture,
     Failed { class: &'static str },
@@ -63,7 +64,7 @@ impl Store {
             self.evidence.verify()?;
             let name = format!("lifecycle-{:02}.json", self.journal.next);
             let value = serde_json::json!({
-                "schema":2,"stop_request":crate::launch::stop::request(),"command":"campaign-lifecycle","case":self.case,"unit":self.unit,
+                "schema":3,"stop_request":crate::launch::stop::request(),"command":"campaign-lifecycle","case":self.case,"unit":self.unit,
                 "sequence":self.journal.next,"phase":self.phase(),
                 "original_cause":self.original_cause,"failure_stage":self.failure_stage,
                 "policy_sha256":self.policy_sha256,"code_sha256":self.code_sha256,
