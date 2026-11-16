@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Sign-in entry fixtures now keep executable writes and child starts in one test interval, so a child forked by another test cannot retain a writer and make the inspector report an unmeasured entry. Every sign-in report assertion prints the full report on failure, including its inspection error. Tests only; installed door behavior is unchanged (``prob:gates:load-sensitive-tests-made-deterministic``).
+
 - The built-helper fixture now waits for its control socket to accept a connection, and reports a helper that exits before readiness. Its child, evidence and peer waits use distant 120-second hang guards. A socket pathname appearing during bind can no longer make a loaded test node refuse a healthy helper. Tests only; installed helper behavior is unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
 
 - Suspended lane steps count accepted resume attempts and close each attempt's record with its outcome. A stop recorded before acceptance leaves no attempt; a stop after its record and before the spawn leaves a `not-started:stopped:SIGNAL` outcome and starts no vendor child. Compatibility: the `suspend_resumes` field keeps its name and bound, but in this stop race it can count an attempt that did not start; readers of `suspend-resumes-STEP.txt` can use the new outcome field to distinguish it (``spec:output:codex-lane-report``).
