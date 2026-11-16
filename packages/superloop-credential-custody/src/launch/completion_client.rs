@@ -44,7 +44,7 @@ pub(in crate::launch) enum Observation {
     Pending,
     Complete,
 }
-fn live(handle: &std::os::fd::OwnedFd) -> Result<()> {
+pub(super) fn live(handle: &std::os::fd::OwnedFd) -> Result<()> {
     let mut item = nix::libc::pollfd {
         fd: handle.as_raw_fd(),
         events: nix::libc::POLLIN,

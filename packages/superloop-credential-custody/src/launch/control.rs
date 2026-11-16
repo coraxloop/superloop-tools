@@ -124,7 +124,7 @@ impl Control {
                 + std::time::Duration::from_millis(admission.policy().limits.case_ms),
         };
         control.verify()?;
-        let manifest=serde_json::to_vec(&serde_json::json!({"schema":1,"case":control.case,"invocation":control.invocation,"keeper_pid":control.keeper.invocation().pid,"keeper_birth":control.keeper.invocation().birth,"image":control.image,"socket":control.object})).map_err(|_|"control-encoding")?;
+        let manifest=serde_json::to_vec(&serde_json::json!({"schema":2,"case":control.case,"invocation":control.invocation,"keeper_pid":control.keeper.invocation().pid,"keeper_birth":control.keeper.invocation().birth,"image":control.image,"socket":control.object,"policy_sha256":admission.policy_sha256(),"case_sha256":admission.cases()[index].sha256,"captured":invocation})).map_err(|_|"control-encoding")?;
         receipt::publish_held(control.directory.file(), "control-manifest.json", &manifest)?;
         Ok(control)
     }
@@ -430,3 +430,6 @@ pub(super) fn peer_pidfd(stream: &UnixStream) -> Result<OwnedFd> {
 
 #[path = "completion_client.rs"]
 pub(super) mod completion_client;
+
+#[path = "control_client.rs"]
+pub(super) mod client;

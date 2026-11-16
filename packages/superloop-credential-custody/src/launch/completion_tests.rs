@@ -70,9 +70,20 @@ fn observe_keeper(f: &Fixture, keeper: &mut Keeper<'_>) {
         &fs::read(f.dir.path().join("runtime/sample/control-manifest.json")).unwrap(),
     )
     .unwrap();
+    assert_eq!(manifest["schema"], 2);
+    assert_eq!(manifest["policy_sha256"], keeper.admission.policy_sha256());
+    assert_eq!(manifest["case_sha256"], keeper.admission.cases()[0].sha256);
+    assert_eq!(
+        manifest["captured"],
+        serde_json::to_value(keeper.process.as_ref().unwrap().invocation()).unwrap()
+    );
     let mut request = manifest.clone();
     request.as_object_mut().unwrap().remove("image");
     request.as_object_mut().unwrap().remove("socket");
+    request["schema"] = 1.into();
+    for key in ["policy_sha256", "case_sha256", "captured"] {
+        request.as_object_mut().unwrap().remove(key);
+    }
     request["operation"] = "completion".into();
     request["nonce"] = "0123456789abcdef0123456789abcdef".into();
     let mut bytes = serde_json::to_vec(&request).unwrap();
