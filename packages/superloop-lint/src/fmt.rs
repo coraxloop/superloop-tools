@@ -76,7 +76,8 @@ pub struct FormatRejection {
     /// What differed at that guard event, when applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub difference: Option<String>,
-    /// The byte range in the input for the differing guard event, when applicable.
+    /// The input range of a guard event or refused row, or a zero-width range
+    /// at the known start of a block the writer could not preserve.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_range: Option<ByteRange>,
     /// Wall time spent reading, parsing, guarding, and recording the rejection.
@@ -130,12 +131,14 @@ impl std_fmt::Display for GuardRejection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FormatErrorKind {
     Other,
+    Source(Range<usize>),
+    Serialization(Option<usize>),
     Guard(GuardRejection),
 }
 
 /// A command failure from traversal, writing, or a formatter request error.
 ///
-/// Per-file read, source-parse, and integrity-guard failures are recorded as
+/// Per-file read, source-parse, serialization, and integrity-guard failures are recorded as
 /// `FormatRejection` values instead, allowing the formatter to continue through
 /// the rest of the request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,10 +166,42 @@ impl FormatError {
         Self::new(format!("{}: {message}", path.display()))
     }
 
-    const fn guard_rejection(&self) -> Option<&GuardRejection> {
-        match &self.kind {
-            FormatErrorKind::Other => None,
-            FormatErrorKind::Guard(rejection) => Some(rejection),
+    fn into_rejection(self, path: &Path, elapsed: Duration) -> FormatRejection {
+        let (kind, event_index, difference, input_range) = match self.kind {
+            FormatErrorKind::Other => ("source_parse_failure", None, None, None),
+            FormatErrorKind::Source(range) => (
+                "source_parse_failure",
+                None,
+                None,
+                Some(ByteRange {
+                    start: range.start,
+                    end: range.end,
+                }),
+            ),
+            FormatErrorKind::Serialization(start) => (
+                "serialization_failure",
+                None,
+                None,
+                start.map(|start| ByteRange { start, end: start }),
+            ),
+            FormatErrorKind::Guard(rejection) => (
+                "integrity_guard",
+                Some(rejection.event_index),
+                Some(rejection.difference),
+                Some(ByteRange {
+                    start: rejection.input_range.start,
+                    end: rejection.input_range.end,
+                }),
+            ),
+        };
+        FormatRejection {
+            path: path.to_string_lossy().into_owned(),
+            kind: kind.to_owned(),
+            cause: self.message,
+            event_index,
+            difference,
+            input_range,
+            elapsed_micros: elapsed.as_micros(),
         }
     }
 }
@@ -236,31 +271,7 @@ pub fn format_paths(paths: &[PathBuf], check: bool) -> Result<FormatReport, Form
         let rendered = match format_markdown(&source) {
             Ok(rendered) => rendered,
             Err(error) => {
-                let (kind, cause, event_index, difference, input_range) =
-                    error.guard_rejection().map_or_else(
-                        || ("source_parse_failure", error.to_string(), None, None, None),
-                        |rejection| {
-                            (
-                                "integrity_guard",
-                                error.to_string(),
-                                Some(rejection.event_index),
-                                Some(rejection.difference.clone()),
-                                Some(ByteRange {
-                                    start: rejection.input_range.start,
-                                    end: rejection.input_range.end,
-                                }),
-                            )
-                        },
-                    );
-                rejected.push(FormatRejection {
-                    path: path.to_string_lossy().into_owned(),
-                    kind: kind.to_owned(),
-                    cause,
-                    event_index,
-                    difference,
-                    input_range,
-                    elapsed_micros: file_started.elapsed().as_micros(),
-                });
+                rejected.push(error.into_rejection(&path, file_started.elapsed()));
                 continue;
             }
         };
@@ -315,7 +326,7 @@ pub fn format_paths(paths: &[PathBuf], check: bool) -> Result<FormatReport, Form
 pub fn format_markdown(source: &str) -> Result<String, FormatError> {
     let slots = overlay_slot_lines(source);
     let mut rendered = if slots.is_empty() {
-        serialize_markdown(source, 1)?
+        serialize_markdown(source, 1, 0)?
     } else {
         serialize_around_slots(source, &slots)?
     };
@@ -328,9 +339,13 @@ pub fn format_markdown(source: &str) -> Result<String, FormatError> {
     Ok(rendered)
 }
 
-fn serialize_markdown(source: &str, first_line: usize) -> Result<String, FormatError> {
+fn serialize_markdown(
+    source: &str,
+    first_line: usize,
+    first_byte: usize,
+) -> Result<String, FormatError> {
     let protected = protect_code_pipes(source);
-    validate_table_rows(source, &protected)?;
+    validate_table_rows(source, &protected, first_line, first_byte)?;
     let parsed: Vec<_> = Parser::new_ext(&protected, parser_options())
         .into_offset_iter()
         .collect();
@@ -338,7 +353,7 @@ fn serialize_markdown(source: &str, first_line: usize) -> Result<String, FormatE
         .unwrap_or(3)
         .max(3);
     let events = reflow_soft_breaks(source, parsed);
-    serialize_events(source, &events, fence_width, first_line)
+    serialize_events(source, &events, fence_width, first_line, first_byte)
 }
 
 fn serialize_events(
@@ -346,6 +361,7 @@ fn serialize_events(
     events: &[(Event<'_>, Range<usize>)],
     fence_width: usize,
     first_line: usize,
+    first_byte: usize,
 ) -> Result<String, FormatError> {
     let mut rendered = String::new();
     let mut state = State::new(parser_options(), serializer_options(fence_width));
@@ -367,9 +383,16 @@ fn serialize_events(
                             .bytes()
                             .filter(|byte| *byte == b'\n')
                             .count();
-                    format!(" in buffered block starting at line {line}")
+                    format!(" starting at line {line}")
                 });
-            FormatError::new(format!("could not serialize Markdown{location}: {error}"))
+            FormatError {
+                message: format!(
+                    "Markdown writer could not preserve the block{location}: {error}; simplify the block or report this block with the formatter version; the file was not changed"
+                ),
+                kind: FormatErrorKind::Serialization(
+                    state.pending_source_start().map(|start| first_byte + start),
+                ),
+            }
         })?;
 
     Ok(rendered)
@@ -409,7 +432,12 @@ fn protect_code_pipes(source: &str) -> String {
 
 /// Refuse shapes for which the table parser would discard cells or infer a new
 /// table boundary. Incomplete masked rows are ambiguous across cell boundaries.
-fn validate_table_rows(source: &str, protected: &str) -> Result<(), FormatError> {
+fn validate_table_rows(
+    source: &str,
+    protected: &str,
+    first_line: usize,
+    first_byte: usize,
+) -> Result<(), FormatError> {
     let tables = |text| {
         Parser::new_ext(text, parser_options())
             .into_offset_iter()
@@ -441,10 +469,19 @@ fn validate_table_rows(source: &str, protected: &str) -> Result<(), FormatError>
                 let count = table_cell_count(row);
                 let raw = &source[start..start + row.len()];
                 if count > columns || (raw != row && count < columns) {
-                    return Err(FormatError::new(format!(
-                        "table-code-pipe-row: row {:?} at byte {start} has {count} cells for {columns} columns",
-                        raw.trim()
-                    )));
+                    let line = first_line
+                        + source[..start]
+                            .bytes()
+                            .filter(|byte| *byte == b'\n')
+                            .count();
+                    return Err(FormatError {
+                        message: format!(
+                            "table-code-pipe-row: row at line {line} has {count} cells for {columns} columns; make the row match the header's column count; the file was not changed"
+                        ),
+                        kind: FormatErrorKind::Source(
+                            first_byte + start..first_byte + start + raw.len(),
+                        ),
+                    });
                 }
             }
             start += row.len();
@@ -479,6 +516,7 @@ fn serialize_around_slots(source: &str, slots: &[Range<usize>]) -> Result<String
             prose_start != 0,
             true,
             prose_line,
+            prose_start,
         )?);
         rendered.push_str(&source[slot.clone()]);
         prose_line += source[prose_start..slot.end]
@@ -493,6 +531,7 @@ fn serialize_around_slots(source: &str, slots: &[Range<usize>]) -> Result<String
         true,
         false,
         prose_line,
+        prose_start,
     )?);
     Ok(rendered)
 }
@@ -502,6 +541,7 @@ fn serialize_slot_bounded_prose(
     preserve_leading_breaks: bool,
     preserve_trailing_breaks: bool,
     first_line: usize,
+    first_byte: usize,
 ) -> Result<String, FormatError> {
     let is_break = |character: char| matches!(character, '\r' | '\n');
     let content_start = if preserve_leading_breaks {
@@ -528,6 +568,7 @@ fn serialize_slot_bounded_prose(
     rendered.push_str(&serialize_markdown(
         &source[content_start..content_end],
         first_line,
+        first_byte + content_start,
     )?);
     rendered.push_str(&source[content_end..]);
     Ok(rendered)
@@ -1035,12 +1076,12 @@ mod tests {
                 })
                 .collect();
             for first_line in [1, 9] {
-                let error = serialize_events(&source, &events, 3, first_line)
+                let error = serialize_events(&source, &events, 3, first_line, 0)
                     .expect_err("empty emphasis cannot be represented");
                 assert_eq!(
                     error.to_string(),
                     format!(
-                        "could not serialize Markdown in buffered block starting at line {}: Cannot preserve this event block with the supplied parser options",
+                        "Markdown writer could not preserve the block starting at line {}: Cannot preserve this event block with the supplied parser options; simplify the block or report this block with the formatter version; the file was not changed",
                         first_line + 2
                     )
                 );

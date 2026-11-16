@@ -230,3 +230,7 @@ dependency_ledger += ['''
 dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#29","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Assert the citation-sites executable protocol preserves resolved addresses without prose","binding":"CARGO_BIN_EXE_superloop-lint"}
 ''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-lint/tests/fmt.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#14","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
+''']
