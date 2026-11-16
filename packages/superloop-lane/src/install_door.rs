@@ -1613,6 +1613,12 @@ pub(crate) fn configuration_blocked_with_program(
     }
 }
 
+fn agent_admission_report(mut report: Value) -> Value {
+    let admission = crate::door::metadata::program_admission(&report["agent_metadata"]);
+    report["agent_program_admission"] = admission;
+    report
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_with(
     owner_home: &Path,
@@ -1690,7 +1696,7 @@ pub(crate) fn run_with(
     let node_plan = crate::door_node::plan(&config_directory, &config, &request.loop_name, owner)?;
     let settings = Settings::read(&config.join("workers.toml"))?;
     let agent_configuration = if fixture_group.is_some() && !config.join("door.toml").exists() {
-        json!({"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"entry":"/fixture/entry","loop_home":"/fixture/home"})
+        json!({"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":"/fixture/entry","loop_home":"/fixture/home"})
     } else {
         let configuration = crate::door::config::read(
             owner_home,
@@ -1999,9 +2005,9 @@ pub(crate) fn run_with(
             .extend(node_plan.actions.iter().cloned());
     }
     if request.dry_run {
-        return Ok(
+        return Ok(agent_admission_report(
             json!({"schema":1,"command":"install-door","loop":request.loop_name,"dry_run":true,"changed":changed,"actions":actions,"repin_required_runs":repin_required_runs,"repin_unmeasured_runs":inventory.repin_unmeasured_runs,"container_states":inventory.container_states,"agent":agent_configuration,"agent_metadata":agent_metadata,"node_root":node_root,"stub_sha256":stub_digest,"service_sha256":service_digest,"unit_activation_performed":false,"activation":["systemctl --user daemon-reload",format!("systemctl --user start superloop-lane-door@{}.service",request.loop_name)],"wall_seconds":started.elapsed().as_secs_f64()}),
-        );
+        ));
     }
     let attempted = if record_attempt {
         Some(
@@ -2103,9 +2109,9 @@ pub(crate) fn run_with(
         };
         replace_file(owner_home, &destination)?;
     }
-    Ok(
+    Ok(agent_admission_report(
         json!({"schema":1,"command":"install-door","loop":request.loop_name,"dry_run":false,"changed":changed,"actions":actions,"repin_required_runs":repin_required_runs,"repin_unmeasured_runs":inventory.repin_unmeasured_runs,"container_states":inventory.container_states,"agent":agent_configuration,"agent_metadata":agent_metadata,"node_root":node_root,"stub_sha256":stub_digest,"service_sha256":service_digest,"socket_dir":door_path,"unit_dir":unit_dir,"unit_activation_performed":false,"activation":["systemctl --user daemon-reload",format!("systemctl --user start superloop-lane-door@{}.service",request.loop_name)],"wall_seconds":started.elapsed().as_secs_f64()}),
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -3832,6 +3838,19 @@ mod tests {
         assert!(!unit.exists());
     }
 
+    fn metadata_vendor(config: &Path, home: &Path, program: &Path) {
+        file(
+            &config.join("door.toml"),
+            format!(
+                "rubric_root = '{}'\nexecutable = '{}'\nmodel = 'fixture'\n",
+                home.display(),
+                program.display()
+            )
+            .as_bytes(),
+            0o600,
+        );
+    }
+
     /// ´test:unit:door-installer-reports-entry-metadata-without-generation-drift´
     #[test]
     fn door_installer_reports_entry_metadata_without_generation_drift() {
@@ -3857,16 +3876,7 @@ mod tests {
             0o600,
         );
         file(&config.parent().expect("loops").join("registry.toml"), format!("namespace = 'org.superloop-tools.loophome.registry'\nversion = [1,0,0]\nloops = [{{name='alpha',uid={uid},launch='src'}}]\n").as_bytes(), 0o600);
-        file(
-            &config.join("door.toml"),
-            format!(
-                "rubric_root = '{}'\nexecutable = '{}'\nmodel = 'fixture'\n",
-                home.display(),
-                entry.display()
-            )
-            .as_bytes(),
-            0o600,
-        );
+        metadata_vendor(&config, home, &entry);
         let mut request = DoorRequest {
             podman_bin: PathBuf::new(),
             loop_name: "alpha".into(),
@@ -3875,8 +3885,22 @@ mod tests {
         let preview =
             run_with(home, &request, &stub, &service, Some(group)).expect("preview through entry");
         assert_eq!(preview["agent_metadata"]["sign_in"]["exists"], false);
+        let program = &preview["agent_metadata"]["executable_status"];
+        assert_eq!(program["usable"], true);
+        assert_eq!(program["admitted"], false);
+        assert_eq!(program["refusal"]["check"], "program-writable");
+        assert_eq!(preview["agent_program_admission"]["status"], "refused");
+        let vendor_root = tempfile::tempdir().expect("vendor under supplied temporary root");
+        let vendor = vendor_root.path().join("vendor");
+        file(&vendor, b"#!/bin/sh\nexit 1\n", 0o700);
+        metadata_vendor(&config, home, &vendor);
+        let admitted = run_with(home, &request, &stub, &service, Some(group)).expect("admitted");
         assert_eq!(
-            preview["agent_metadata"]["executable_status"]["usable"],
+            admitted["agent_program_admission"]["status"], "admitted",
+            "{admitted}"
+        );
+        assert_eq!(
+            admitted["agent_metadata"]["executable_status"]["usable"],
             true
         );
         request.dry_run = false;

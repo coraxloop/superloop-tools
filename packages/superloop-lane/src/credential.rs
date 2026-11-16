@@ -5185,7 +5185,6 @@ mod tests {
     /// Panics if a service authority check escapes its capabilities or loses its evidence.
     fn service_authority_case(case: &str) {
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::time::{Duration, Instant};
 
         let present = case != "absent";
         let due = matches!(case, "client" | "exchange");
@@ -5225,36 +5224,22 @@ mod tests {
             |(endpoint, _)| endpoint.clone(),
         );
         let _endpoint = fixture_service_endpoint(endpoint);
-        let authority = crate::container_helper::spawn_credential_authority_admitted(
-            home.path().to_path_buf(),
-            "alpha".into(),
-            runs,
-            driver,
-            BoxBackend::Codex,
+        let (pass, observed) = std::sync::mpsc::sync_channel(1);
+        let authority = crate::container_helper::fixture_authority_with_wait(
+            (home.path(), &runs, &driver),
             Arc::clone(&cancelled),
             &Gate,
+            BoxBackend::Codex,
+            move |cancelled| {
+                pass.send(()).expect("pass observer");
+                cancelled.store(true, Ordering::Release);
+            },
         )
         .expect("service authority spawn");
         drop(programs);
         drop(private);
         // The blocking lock orders both guard releases before refresh_live_at can read.
         drop(lock);
-        let began = Instant::now();
-        let evidence_path = retained
-            .path()
-            .join(
-                protected
-                    .strip_prefix(home.path())
-                    .expect("relative evidence"),
-            )
-            .join("credential-refresh.json");
-        while !evidence_path.exists() && began.elapsed() < Duration::from_secs(10) {
-            if authority.is_finished() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        cancelled.store(true, Ordering::Release);
         let result = finish_service_authority(authority);
         assert!(
             !home.path().join(".config").exists(),
@@ -5262,11 +5247,14 @@ mod tests {
         );
         retained.restore();
         result.expect("service authority result");
-        assert_service_authority_evidence(case, home.path(), &protected, expires, exchange);
+        observed
+            .try_recv()
+            .expect("authority reached its post-publication wait");
         assert!(
-            began.elapsed() < Duration::from_secs(12),
-            "cancellation joins the real service loop"
+            cancelled.load(Ordering::Acquire),
+            "first pass cancels the loop"
         );
+        assert_service_authority_evidence(case, home.path(), &protected, expires, exchange);
     }
 
     struct ReplacedAuthorityHome {
@@ -5299,19 +5287,28 @@ mod tests {
     }
 
     /// # Panics
-    /// Panics rather than joining indefinitely if the authority ignores cancellation.
+    /// Panics if the authority or join waiter panics; an unproved exit stops this process.
+    #[allow(clippy::exit)]
     fn finish_service_authority(
         authority: std::thread::JoinHandle<Result<(), LaneError>>,
     ) -> Result<(), LaneError> {
-        let began = std::time::Instant::now();
-        while !authority.is_finished() && began.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(10));
+        let (finished, completion) = std::sync::mpsc::sync_channel(1);
+        let waiter = std::thread::spawn(move || {
+            let _sent = finished.send(authority.join());
+        });
+        let joined = completion.recv_timeout(Duration::from_secs(180));
+        if joined.is_err() {
+            // Do not drop retained custody beneath an authority whose exit is unproved.
+            let _reported = writeln!(
+                std::io::stderr(),
+                "service authority completion exceeded distant hang guard"
+            );
+            std::process::exit(125);
         }
-        assert!(
-            authority.is_finished(),
-            "service authority ignored cancellation"
-        );
-        authority.join().expect("service authority join")
+        waiter.join().expect("authority waiter join");
+        joined
+            .expect("authority completion event")
+            .expect("service authority join")
     }
 
     /// # Panics

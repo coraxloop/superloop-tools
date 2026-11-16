@@ -1830,6 +1830,8 @@ fn observe_steal(step: &str) {
 #[cfg(test)]
 pub(crate) fn test_two_stealers_restore_during_release(root: &Path) -> Result<bool, JournalError> {
     use std::sync::mpsc::channel;
+    // The channels name fixture events; this is a hang guard, not the lock's wait budget.
+    const EVENT_WAIT: Duration = Duration::from_secs(120);
     let path = root.join(LOCK_NAME);
     let (snapshot_tx, snapshot_rx) = channel();
     let (claim_tx, claim_rx) = channel();
@@ -1842,14 +1844,10 @@ pub(crate) fn test_two_stealers_restore_during_release(root: &Path) -> Result<bo
             *observer.borrow_mut() = Some(Box::new(move |step| {
                 if step == "snapshot" {
                     snapshot_tx.send(()).expect("stale snapshot");
-                    claim_rx
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("fresh lock");
+                    claim_rx.recv_timeout(EVENT_WAIT).expect("fresh lock");
                 } else {
                     displaced_tx.send(()).expect("fresh lock displaced");
-                    restore_rx
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("release lookup");
+                    restore_rx.recv_timeout(EVENT_WAIT).expect("release lookup");
                 }
             }));
         });
@@ -1858,21 +1856,19 @@ pub(crate) fn test_two_stealers_restore_during_release(root: &Path) -> Result<bo
         result
     });
     snapshot_rx
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(EVENT_WAIT)
         .expect("first snapshot");
     let recovered = steal_stale_lock(&path)? == StealOutcome::Recovered;
     let guard = acquire_lock(root, &Journal::from_state_root(root))?;
     claim_tx.send(()).expect("second stealer may claim");
     displaced_rx
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(EVENT_WAIT)
         .expect("displaced lock");
     RELEASE_OBSERVER.with(|observer| {
         *observer.borrow_mut() = Some(Box::new(move |step| {
             if step == "lookup" {
                 restore_tx.send(()).expect("restore between lookups");
-                done_rx
-                    .recv_timeout(Duration::from_secs(10))
-                    .expect("restored lock");
+                done_rx.recv_timeout(EVENT_WAIT).expect("restored lock");
             }
         }));
     });

@@ -377,7 +377,7 @@ printf '%s\n' 'hold the runner lock' > "$OVERLAP_BASE/source/work.md"
 append_event "$OVERLAP_BASE" "$OVERLAP_BASE/source" work.md >/dev/null
 run_runner "$OVERLAP_BASE" block > "$OVERLAP_BASE/first.out" &
 FIRST_PID=$!
-for attempt in $(seq 1 250); do
+for attempt in $(seq 1 6000); do
   [ -e "$OVERLAP_BASE/entered" ] && break
   sleep 0.02
 done

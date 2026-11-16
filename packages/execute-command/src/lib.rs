@@ -15,3 +15,5 @@ pub mod request;
 pub mod rubric;
 pub mod snapshot;
 pub mod triage;
+
+pub mod workspace;

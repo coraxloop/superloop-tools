@@ -36,8 +36,9 @@ def inspect(path, executable=False):
                 raise ValueError('symbolic-link-or-nondirectory')
             if last:
                 directory = os.fstat(parent)
-                result['usable'] = (executable_usable(info, os.geteuid(), os.getegid(), os.getgroups())
-                                    if executable else sign_in_usable(info, directory, os.geteuid()))
+                result['usable'] = (
+                    executable_usable(info, os.geteuid(), os.getegid(), os.getgroups())
+                    if executable else sign_in_usable(info, directory, os.geteuid()))
             else:
                 os.close(parent)
                 parent, child = child, None
@@ -50,6 +51,12 @@ def inspect(path, executable=False):
             os.close(child)
         if parent is not None:
             os.close(parent)
+    if executable:
+        try:
+            admit_program(path, os.geteuid())
+            result.update(admitted=True, refusal=None)
+        except RubricFailure as error:
+            result.update(admitted=False, refusal=error.evidence)
     return result
 
 

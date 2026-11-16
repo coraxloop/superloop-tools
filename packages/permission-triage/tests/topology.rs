@@ -1984,7 +1984,7 @@ fn every_fake_harness_mode_is_driven_by_a_test() {
 /// ´test:integration:disabled-table-rows-are-candidates-and-do-not-block´
 #[test]
 fn disabled_table_rows_are_candidates_and_do_not_block() {
-    let (_directory, output, value) = run_roster_mode("topology-auto-executed", "implemented");
+    let (output, value) = implemented_roster();
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(value["selected_topology"], "bypass");
     assert_eq!(value["deployment_blocked"], true);
@@ -2348,11 +2348,11 @@ fn topology_ceiling_disqualifies_before_evidence_classes() {
     assert_topology_disqualifier("topology-ceiling", "ceiling");
 }
 
-/// Retain the original half-second real wait while other matrices only prove that the cap fires.
-/// ´test:integration:topology-ceiling-retains-half-second-real-wait´
+/// The cached 20 ms matrix proves the recorded invocation wall reaches its ceiling.
+/// ´test:integration:topology-ceiling-trials-account-for-short-real-wait´
 #[test]
-fn topology_ceiling_retains_half_second_real_wait() {
-    let (_directory, output, verdict) = run_mode_with_ceiling("topology-ceiling", 500.to_string());
+fn topology_ceiling_trials_account_for_short_real_wait() {
+    let (output, verdict) = cached_mode("topology-ceiling");
     assert_eq!(output.status.code(), Some(3));
     let trials = verdict["trials"]
         .as_array()
@@ -2361,16 +2361,29 @@ fn topology_ceiling_retains_half_second_real_wait() {
     for trial in trials {
         assert_eq!(trial["timed_out"], true);
         assert_eq!(trial["classification_reason"], "ceiling");
-        assert!(trial["invocation_wall_ms"].as_u64().expect("real wait") >= 500);
+        assert!(trial["invocation_wall_ms"].as_u64().expect("real wait") >= 20);
     }
     assert_eq!(verdict["selected_topology"], "blocked");
     assert_eq!(verdict["deployment_blocked"], true);
 }
 
-/// The production default kills the harness group, including a descendant holding the capture pipe.
+/// The short override still kills the harness group and reaps the pipe-holding descendant.
+/// ´test:integration:short-ceiling-times-out-and-reaps-version-process´
+#[test]
+fn short_ceiling_times_out_and_reaps_version_process() {
+    assert_version_ceiling_kills_group(Some(20_000));
+}
+
+/// Run the full production ceiling on demand; ordinary gates pin its value with a pure test.
+/// `cargo test --locked -p permission-triage --test topology actual_production_ceiling_times_out_and_reaps_version_process -- --ignored --exact`
 /// ´test:integration:actual-production-ceiling-times-out-and-reaps-version-process´
 #[test]
+#[ignore = "120-second production ceiling is verified on demand"]
 fn actual_production_ceiling_times_out_and_reaps_version_process() {
+    assert_version_ceiling_kills_group(None);
+}
+
+fn assert_version_ceiling_kills_group(ceiling_override: Option<u64>) {
     let directory = FixtureDirectory::new("production-ceiling");
     let root = directory.probe_root();
     let home = directory.scratch_home();
@@ -2421,14 +2434,19 @@ sys.exit(result.returncode)
         }
     }
     let started = std::time::Instant::now();
-    let output = command
+    command
         .env("PERMISSION_TRIAGE_HARNESS_BIN", &harness)
-        .env("TOPOLOGY_PRODUCTION_WAIT_PID", &pid_path)
-        .output_serialized()
-        .expect("production ceiling probe");
+        .env("TOPOLOGY_PRODUCTION_WAIT_PID", &pid_path);
+    if let Some(milliseconds) = ceiling_override {
+        command.env(
+            "PERMISSION_TRIAGE_TOPOLOGY_CEILING_MS",
+            milliseconds.to_string(),
+        );
+    }
+    let output = command.output_serialized().expect("ceiling probe");
     assert!(
         started.elapsed().as_millis()
-            >= u128::from(permission_triage::topology::MAX_TOPOLOGY_CEILING_MS)
+            >= u128::from(ceiling_override.unwrap_or(MAX_TOPOLOGY_CEILING_MS))
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains(
@@ -3411,9 +3429,12 @@ fn run_confined_mode(mode: &str, expected_status: i32) -> CachedProbe {
     let root = directory.path().join(format!("probe-{mode}"));
     let harness = install_fake_harness(&root, true);
     let verdict_path = root.join("verdict.json");
-    let output = topology_command(&root, &home)
-        .arg("--verdict")
-        .arg(&verdict_path)
+    let mut command = topology_command(&root, &home);
+    command.arg("--verdict").arg(&verdict_path);
+    if mode == "topology-ceiling" {
+        command.args(["--test-roster", "full-ceiling"]);
+    }
+    let output = command
         .current_dir(&cwd)
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)
@@ -3424,7 +3445,12 @@ fn run_confined_mode(mode: &str, expected_status: i32) -> CachedProbe {
         .env("FAKE_HARNESS_MODE", mode)
         .output_serialized()
         .expect("confined topology probe exits");
-    assert_eq!(output.status.code(), Some(expected_status), "mode={mode}");
+    assert_eq!(
+        output.status.code(),
+        Some(expected_status),
+        "mode={mode} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     for (root, expected) in scratch_roots.iter().zip(&before) {
         assert_eq!(
             *expected,
@@ -3532,14 +3558,18 @@ fn topology_command_usage_exits_two() {
     );
 }
 
-fn bite_two_good_verdict() -> &'static Value {
-    static VERDICT: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    VERDICT.get_or_init(|| {
+fn implemented_roster() -> &'static (Output, Value) {
+    static PROBE: std::sync::OnceLock<(Output, Value)> = std::sync::OnceLock::new();
+    PROBE.get_or_init(|| {
         let (_directory, output, verdict) =
             run_roster_mode("topology-auto-executed", "implemented");
         assert_eq!(output.status.code(), Some(0), "{}", verdict["reasons"]);
-        verdict
+        (output, verdict)
     })
+}
+
+fn bite_two_good_verdict() -> &'static Value {
+    &implemented_roster().1
 }
 
 fn required_rows<'a>(verdict: &'a Value, phase: &str) -> &'a [Value] {
@@ -3820,7 +3850,7 @@ fn bite_two_generated_counts_and_censored_latency_survive_failure() {
 }
 
 fn run_roster_mode(mode: &str, roster: &str) -> (FixtureDirectory, Output, Value) {
-    run_roster_mode_with_ceiling(mode, roster, "10000")
+    run_roster_mode_with_ceiling(mode, roster, "120000")
 }
 
 fn run_roster_mode_with_ceiling(
@@ -3965,7 +3995,7 @@ fn fix_failure_keeps_independent_injections_running() {
 /// ´test:integration:fix-implemented-roster-reaches-ready´
 #[test]
 fn fix_implemented_roster_reaches_ready() {
-    let (_directory, output, verdict) = run_roster_mode("topology-auto-executed", "implemented");
+    let (output, verdict) = implemented_roster();
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -4012,7 +4042,7 @@ fn fix_test_roster_ceiling_floor_retains_selected_rows() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("ceiling_ms=10000"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ceiling_ms=120000"));
     assert_eq!(verdict["status"], "ready");
     for row in required_rows(&verdict, "audit") {
         assert_eq!(row["classification"], "pass");

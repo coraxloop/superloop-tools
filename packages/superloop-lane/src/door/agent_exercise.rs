@@ -368,6 +368,9 @@ fn measure_into(
     restoration?;
     *stage = "runner-probes";
     let mut runner_fixtures = Vec::new();
+    #[cfg(test)]
+    let probes = super::agent_probes::measure_controlled(registration, &mut runner_fixtures);
+    #[cfg(not(test))]
     let probes = super::agent_probes::measure(registration, &mut runner_fixtures);
     report["runner_fixtures"] = json!(runner_fixtures);
     probes?;
@@ -383,7 +386,14 @@ fn measure_into(
                 settings.entry_bin.as_deref(),
             )
         })
-        .and_then(|value| super::config::runner(&value, owner_home, &registration.loop_name));
+        .and_then(|value| {
+            super::config::runner(
+                &value,
+                owner_home,
+                &registration.loop_name,
+                Some(registration.loop_uid),
+            )
+        });
     let real_observation = match real {
         Ok(runner) => {
             *stage = "real-runner-call";
@@ -418,9 +428,26 @@ fn measure_into(
             json!({"status":if absent {"unmeasured"} else {"fail"},"reason":error.line(),"agent_model":null,"agent_effort":null})
         }
     };
+    finish_runner_report(
+        report,
+        &observations,
+        &runner_fixtures,
+        real_observation,
+        stage,
+    );
+    Ok(())
+}
+
+pub(super) fn finish_runner_report(
+    report: &mut Value,
+    observations: &[Value],
+    runner_fixtures: &[Value],
+    real_observation: Value,
+    stage: &str,
+) {
     let failed = observations
         .iter()
-        .chain(&runner_fixtures)
+        .chain(runner_fixtures)
         .any(|row| row["status"] == "fail")
         || real_observation["status"] == "fail";
     let missing = observations.iter().any(|row| row["status"] == "unmeasured")
@@ -431,7 +458,7 @@ fn measure_into(
         } else if runner_fixtures.iter().any(|row| row["status"] == "fail") {
             "runner-probes"
         } else {
-            *stage
+            stage
         });
     }
     report["real_runner"] = real_observation;
@@ -442,7 +469,6 @@ fn measure_into(
     } else {
         "pass"
     });
-    Ok(())
 }
 
 fn real_result(result: &RunnerOutcome, cap_ms: u64, expected_digest: Option<&str>) -> Value {
@@ -529,19 +555,27 @@ mod tests {
         std::fs::remove_file(&auth).expect("absent synthetic credential");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(agent::tests::FIXTURE_HANG_MS),
         );
         assert_eq!(result.reason, "door-agent-sign-in-unavailable");
-        let report = real_result(&result, 3000, result.rubric_digest.as_deref());
+        let report = real_result(
+            &result,
+            agent::tests::FIXTURE_HANG_MS,
+            result.rubric_digest.as_deref(),
+        );
         assert_eq!(report["status"], "unmeasured");
         assert_eq!(report["remedy"], "superloop-lane door-sign-in alpha");
         std::os::unix::fs::symlink("/missing-credential", &auth).expect("unsafe credential");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(agent::tests::FIXTURE_HANG_MS),
         );
         assert_eq!(
-            real_result(&result, 3000, result.rubric_digest.as_deref())["status"],
+            real_result(
+                &result,
+                agent::tests::FIXTURE_HANG_MS,
+                result.rubric_digest.as_deref()
+            )["status"],
             "fail"
         );
     }

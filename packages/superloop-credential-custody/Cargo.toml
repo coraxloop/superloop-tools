@@ -1,0 +1,58 @@
+[package]
+name = "superloop-credential-custody"
+description = "Bounded observations of sealed-file length and calibration identity"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[package.metadata.superloop]
+tier = 2
+release-group = "credential-custody"
+
+[lints]
+workspace = true
+
+[dependencies]
+loop-home.workspace = true
+superloop-cli-common.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+nix.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "superloop-credential-custody"
+path = "src/main.rs"
+
+[[bin]]
+name = "credential-fixture"
+path = "src/fixture_main.rs"
+
+# Native subprocess peer used only by private-core tests; never staged or installed.
+[[example]]
+name = "custody-sealer-test"
+path = "tests/support/sealer_native.rs"
+test = false
+
+[[example]]
+name = "custody-confinement-probe"
+path = "tests/support/confinement_probe.rs"
+test = false
+
+[[example]]
+name = "custody-manager-test"
+path = "tests/support/manager_native.rs"
+test = false
+
+[[example]]
+name = "custody-startup-test"
+path = "tests/support/startup_native.rs"
+test = false

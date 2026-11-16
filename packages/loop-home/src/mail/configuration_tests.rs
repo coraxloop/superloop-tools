@@ -1,5 +1,5 @@
 #[path = "../../tests/support/bounded.rs"]
-mod bounded;
+pub mod bounded;
 use super::*;
 use bounded::CommandOutput as _;
 use std::fs;
@@ -817,6 +817,7 @@ fn inventory_anchor_refusal(
             storage,
             private,
         }),
+        None,
     );
     if case == "scan-private-acl" {
         assert!(

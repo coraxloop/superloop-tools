@@ -610,7 +610,13 @@ fn reconcile_both_orders(
 }
 
 fn claude_call(home: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_superloop-lane"))
+    // Only a distant hang guard; the lock cases judge budget consumption from below.
+    Command::new("/usr/bin/timeout")
+        .args([
+            "--kill-after=5s",
+            "180s",
+            env!("CARGO_BIN_EXE_superloop-lane"),
+        ])
         .env("HOME", home)
         .env("SUPERLOOP_CLAUDE_MOVE_TEST_PROC", home.join("processes"))
         .args(["prepare-signin-home", "--backend", "claude", "alpha"])
@@ -781,7 +787,10 @@ fn claude_preparation_preview_and_apply_refuse_locked_loop() {
             String::from_utf8_lossy(&refused.stderr)
                 .contains(&format!("claude-home-locked: {}", parent.display()))
         );
-        assert!(started.elapsed() < std::time::Duration::from_secs(6));
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(5),
+            "lock waits its full budget"
+        );
         assert_eq!(fs::read_dir(&parent).expect("unchanged loop").count(), 0);
     }
     drop(held);
@@ -818,7 +827,10 @@ fn claude_move_preview_refuses_locked_loop() {
         String::from_utf8_lossy(&refused.stderr)
             .contains(&format!("claude-home-locked: {}", parent.display()))
     );
-    assert!(started.elapsed() < std::time::Duration::from_secs(6));
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(5),
+        "lock waits its full budget"
+    );
     assert!(!source.join("move-record.json").exists());
     assert_eq!(fs::read_dir(&parent).expect("unchanged loop").count(), 0);
     drop(held);

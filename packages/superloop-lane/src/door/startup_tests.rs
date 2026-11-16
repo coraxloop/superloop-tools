@@ -1,8 +1,8 @@
 //! Start the production service in a built subprocess with its socket namespace step substituted and its startup run beneath the fixture's activated private home.
 
+use crate::door::tests::FixtureClient;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -124,7 +124,7 @@ fn install_fixture(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
             json!(sockets)
         ),
     );
-    let agent = json!({"source":config.join("door.toml"),"rubric_root":home,"rubric_path":home.join("permissions/door.md"),"executable":"/usr/bin/true","model":"fixture","effort":"medium","cap_ms":30000,"entry":entry,"loop_home":home});
+    let agent = json!({"source":config.join("door.toml"),"rubric_root":home,"rubric_path":home.join("permissions/door.md"),"executable":"/usr/bin/true","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":entry,"loop_home":home});
     private_file(&config.join("door-install-generation.json"), serde_json::to_vec(&json!({
         "schema":2,"phase":"complete","loop":"alpha","template_dir":home.join("template"),
         "socket_dir":sockets,"stub_sha256":"0".repeat(64),"service_sha256":crate::build::sha256(&service).expect("service digest"),
@@ -172,7 +172,7 @@ fn service_startup_uses_show_only_registry_entry() {
         .expect("pinned socket location");
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut stream = loop {
-        if let Ok(stream) = UnixStream::connect(slot.address()) {
+        if let Ok(stream) = FixtureClient::connect(slot.address()) {
             break stream;
         }
         assert!(
@@ -182,13 +182,12 @@ fn service_startup_uses_show_only_registry_entry() {
         );
         std::thread::sleep(Duration::from_millis(10));
     };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("bounded service reply");
     // A reply proves the real accept loop ran after socket finalization; existence
     // or a successful connect alone would also observe an unfinished startup.
-    super::frame_write(&mut stream, &json!({"schema":2,"type":"request"})).expect("request");
-    let reply = super::frame_read(&mut stream).expect("listening service reply");
+    stream
+        .send(&json!({"schema":2,"type":"request"}))
+        .expect("request");
+    let reply = stream.answer();
     assert_eq!(reply["reason"], "door-request-refusal", "{reply}");
     assert_eq!(
         fs::read_to_string(entry.with_extension("argv")).expect("entry arguments"),

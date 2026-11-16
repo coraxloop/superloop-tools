@@ -1,6 +1,8 @@
 //! The custody owner's two-phase request protocol. Preview is pure; commit
 //! compares its complete preimage while holding the permission journal lock.
 
+use std::collections::BTreeMap;
+
 use request_core::{Collection, Error, Request, transaction::Transaction};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -52,6 +54,12 @@ fn merge(collection: &mut Collection, records: Vec<Request>) -> Result<(), Error
         requests: records,
     };
     supplied.validate(&kinds())?;
+    let mut positions = collection
+        .requests
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.id.clone(), index))
+        .collect::<BTreeMap<_, _>>();
     for request in supplied.requests {
         if request.kind == "gateway-proposal" {
             let filed = Request::filed(
@@ -67,7 +75,10 @@ fn merge(collection: &mut Collection, records: Vec<Request>) -> Result<(), Error
                     "gateway filing cannot supply a decision or service state",
                 ));
             }
-            if let Some(old) = collection.requests.iter().find(|row| row.id == request.id) {
+            if let Some(old) = positions
+                .get(&request.id)
+                .map(|index| collection.requests.get(*index).expect("indexed row"))
+            {
                 if old.body != request.body
                     || old.worker != request.worker
                     || old.run != request.run
@@ -76,7 +87,8 @@ fn merge(collection: &mut Collection, records: Vec<Request>) -> Result<(), Error
                     return Err(Error::new("requests-conflict", &request.id));
                 }
             } else {
-                collection.file(request, &kinds())?;
+                positions.insert(request.id.clone(), collection.requests.len());
+                collection.requests.push(request);
             }
             continue;
         }
@@ -86,10 +98,9 @@ fn merge(collection: &mut Collection, records: Vec<Request>) -> Result<(), Error
         ) {
             return Err(failure("custody owner supplied a foreign kind"));
         }
-        if let Some(old) = collection
-            .requests
-            .iter_mut()
-            .find(|row| row.id == request.id)
+        if let Some(old) = positions
+            .get(&request.id)
+            .map(|index| collection.requests.get_mut(*index).expect("indexed row"))
         {
             let mut comparison = request.clone();
             comparison.body = old.body.clone();
@@ -99,7 +110,8 @@ fn merge(collection: &mut Collection, records: Vec<Request>) -> Result<(), Error
             }
             *old = request;
         } else {
-            collection.file(request, &kinds())?;
+            positions.insert(request.id.clone(), collection.requests.len());
+            collection.requests.push(request);
         }
     }
     Ok(())
@@ -204,16 +216,16 @@ fn apply(collection: &mut Collection, action: &str, input: &OwnerInput) -> Resul
 }
 
 fn publication(next: &Collection, candidate: &Collection) -> Result<Collection, Error> {
+    let sources = by_id(next);
     let mut comparison = candidate.clone();
     for row in &mut comparison.requests {
         if matches!(
             row.kind.as_str(),
             "door-before-effect" | "door-after-effect"
         ) {
-            let source = next
-                .requests
-                .iter()
-                .find(|source| source.id == row.id)
+            let source = sources
+                .get(row.id.as_str())
+                .copied()
                 .ok_or_else(|| Error::new("requests-conflict", &row.id))?;
             if row.body.get("source_id") != source.body.get("source_id") {
                 return Err(Error::new("requests-conflict", &row.id));
@@ -237,12 +249,13 @@ fn gateway_authority(
     before: &Collection,
     next: &Collection,
 ) -> Result<(), Error> {
+    let sources = by_id(before);
     for row in next
         .requests
         .iter()
         .filter(|row| row.kind == "gateway-proposal")
     {
-        let old = before.requests.iter().find(|old| old.id == row.id);
+        let old = sources.get(row.id.as_str()).copied();
         let judgement_changed = old.is_some_and(|old| {
             (matches!(action, "triage" | "review" | "adjudicate") && old != row)
                 || old.decision != row.decision
@@ -258,6 +271,69 @@ fn gateway_authority(
                 || row.body.get("loop_name").and_then(Value::as_str) != caller.loop_name())
         {
             return Err(Error::new("requests-authority", &row.id));
+        }
+    }
+    Ok(())
+}
+
+// Callers supply collections admitted by the collection reader or evaluator.
+fn by_id(collection: &Collection) -> BTreeMap<&str, &Request> {
+    collection
+        .requests
+        .iter()
+        .map(|row| (row.id.as_str(), row))
+        .collect()
+}
+
+fn permission_authority(
+    journal: &Journal,
+    caller: &CallerRole,
+    before: &Collection,
+    next: &Collection,
+) -> Result<(), Error> {
+    let sources = by_id(before);
+    // Permission records stay behind the established caller and scope checks,
+    // even when a door-owning process transports the transaction.
+    for row in next
+        .requests
+        .iter()
+        .filter(|row| row.kind == "permission-case")
+    {
+        if sources.get(row.id.as_str()).copied() != Some(row)
+            && (!caller.is_orchestrator()
+                || caller
+                    .entry()
+                    .and_then(crate::role::RegistryEntry::state_root)
+                    != journal.registered_root.as_deref()
+                || row.body.get("scope").and_then(Value::as_str) != Some("loop")
+                || row.body.get("loop_name").and_then(Value::as_str) != caller.loop_name())
+        {
+            return Err(Error::new("requests-authority", &row.id));
+        }
+    }
+    Ok(())
+}
+
+fn append_dispositions(
+    published: &mut Vec<u8>,
+    saved: &Collection,
+    next: &Collection,
+    caller: &CallerRole,
+) -> Result<(), Error> {
+    let sources = by_id(saved);
+    for row in next
+        .requests
+        .iter()
+        .filter(|row| row.kind == "permission-case" && row.decision.is_some())
+    {
+        if sources
+            .get(row.id.as_str())
+            .is_some_and(|old| old.decision.is_none())
+        {
+            published.extend(
+                serde_json::to_vec(&super::requests::disposition(row, caller)?).map_err(failure)?,
+            );
+            published.push(b'\n');
         }
     }
     Ok(())
@@ -339,25 +415,7 @@ impl Journal {
             next = publication(&next, candidate)?;
         }
         gateway_authority(self, caller, action, &before, &next)?;
-        // Permission records stay behind the established caller and scope checks,
-        // even when a door-owning process transports the transaction.
-        for row in next
-            .requests
-            .iter()
-            .filter(|row| row.kind == "permission-case")
-        {
-            if before.requests.iter().find(|old| old.id == row.id) != Some(row)
-                && (!caller.is_orchestrator()
-                    || caller
-                        .entry()
-                        .and_then(crate::role::RegistryEntry::state_root)
-                        != self.registered_root.as_deref()
-                    || row.body.get("scope").and_then(Value::as_str) != Some("loop")
-                    || row.body.get("loop_name").and_then(Value::as_str) != caller.loop_name())
-            {
-                return Err(Error::new("requests-authority", &row.id));
-            }
-        }
+        permission_authority(self, caller, &before, &next)?;
         if commit {
             if matches!(action, "status" | "list") {
                 return Err(failure("read command cannot commit"));
@@ -366,23 +424,7 @@ impl Journal {
                 return Ok(json!({"schema":1,"before":before,"collection":next,"result":result}));
             }
             let mut published = super::requests::publication_base(bytes)?;
-            for row in next
-                .requests
-                .iter()
-                .filter(|row| row.kind == "permission-case" && row.decision.is_some())
-            {
-                if saved
-                    .requests
-                    .iter()
-                    .any(|old| old.id == row.id && old.decision.is_none())
-                {
-                    published.extend(
-                        serde_json::to_vec(&super::requests::disposition(row, caller)?)
-                            .map_err(failure)?,
-                    );
-                    published.push(b'\n');
-                }
-            }
+            append_dispositions(&mut published, &saved, &next, caller)?;
             published.extend(
                 serde_json::to_vec(&json!({"schema":SNAPSHOT_SCHEMA,"collection":next}))
                     .map_err(failure)?,
@@ -401,3 +443,7 @@ impl Journal {
         Ok(json!({"schema":1,"before":before,"collection":next,"result":result}))
     }
 }
+
+#[cfg(test)]
+#[path = "owner_index_tests.rs"]
+mod index_tests;

@@ -296,8 +296,7 @@ pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
     let reservation_name = format!(".reservation-{}.json", request.run);
     let reservation = read_bytes(&runs, &reservation_name, owner)?
         .ok_or_else(|| refusal("reservation vanished"))?;
-    if serde_json::from_slice::<Value>(&reservation)
-        .map_err(|_| refusal("reservation malformed"))?
+    if crate::placement::reservation_bytes(&reservation, |_| refusal("reservation malformed"))?
         != record
     {
         return Err(refusal("reservation changed during absence proof"));

@@ -93,26 +93,33 @@ pub(super) fn collection(bytes: &[u8]) -> Result<Collection, Error> {
         }
     }
     let kinds = kinds();
+    let mut positions = saved
+        .requests
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.id.clone(), index))
+        .collect::<BTreeMap<_, _>>();
     for (event_id, source) in &sources {
         let id = request_core::request_id(event_id.as_bytes());
-        if !saved.requests.iter().any(|request| request.id == id) {
-            saved.file(
-                Request::filed(
-                    id.clone(),
-                    "permission-case".to_owned(),
-                    source.clone(),
-                    source["role"].as_str().unwrap_or("unknown").to_owned(),
-                    event_id.clone(),
-                    timestamp(&source["recorded_at"])?,
-                ),
-                &kinds,
-            )?;
-        }
-        let request = saved
-            .requests
-            .iter_mut()
-            .find(|request| request.id == id)
-            .ok_or_else(|| failure("source admission failed"))?;
+        let index = if let Some(index) = positions.get(&id) {
+            *index
+        } else {
+            let request = Request::filed(
+                id.clone(),
+                "permission-case".to_owned(),
+                source.clone(),
+                source["role"].as_str().unwrap_or("unknown").to_owned(),
+                event_id.clone(),
+                timestamp(&source["recorded_at"])?,
+            );
+            let mut admitted = Collection::default();
+            admitted.file(request, &kinds)?;
+            let index = saved.requests.len();
+            positions.insert(id, index);
+            saved.requests.extend(admitted.requests);
+            index
+        };
+        let request = saved.requests.get_mut(index).expect("indexed source");
         if request.body != *source {
             return Err(failure("collection source changed"));
         }
@@ -323,3 +330,7 @@ impl Journal {
         Ok(directory)
     }
 }
+
+#[cfg(test)]
+#[path = "requests_index_tests.rs"]
+mod index_tests;

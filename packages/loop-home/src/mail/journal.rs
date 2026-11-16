@@ -352,6 +352,8 @@ struct ReservationPins {
 pub struct Journal {
     root: File,
     records: File,
+    usage: store::Usage,
+    preparations: std::cell::RefCell<Option<super::preparation_index::Index>>,
     _lock: Flock<File>,
     state: State,
     checkpoint: Checkpoint,
@@ -359,6 +361,29 @@ pub struct Journal {
 }
 
 impl Journal {
+    pub(super) fn write_private<T: serde::Serialize>(
+        &self,
+        parent: &File,
+        name: &str,
+        value: &T,
+        replace: bool,
+    ) -> Result<()> {
+        self.usage.write(&self.root, parent, name, value, replace)
+    }
+    pub(super) fn remove_private(&self, parent: &File, name: &str) -> Result<()> {
+        self.usage.remove(&self.root, parent, name)
+    }
+    pub(super) fn journal_bytes(&self) -> Result<u64> {
+        self.usage.total(&self.root)
+    }
+    pub(super) fn remeasure(&self) -> Result<()> {
+        self.usage.remeasure(&self.root)
+    }
+
+    pub(super) fn activity<T: serde::Serialize>(&self, value: &T) -> Result<()> {
+        self.write_private(&self.root, "activity.toml", value, true)
+    }
+
     /// Initialize an empty, service-private journal. This is explicit provisioning.
     ///
     /// # Errors
@@ -409,14 +434,19 @@ impl Journal {
             },
             false,
         )?;
-        Ok(Self {
+        let journal = Self {
             root,
             records,
             _lock: lock,
             state,
             checkpoint,
             uncommitted: BTreeMap::new(),
-        })
+            usage: store::Usage::default(),
+            preparations: std::cell::RefCell::new(None),
+        };
+        journal.remeasure()?;
+        *journal.preparations.borrow_mut() = Some(super::preparation_index::Index::default());
+        Ok(journal)
     }
 
     /// Open existing recovery state, reconcile checkpoint deletion, and validate
@@ -475,9 +505,11 @@ impl Journal {
             state,
             checkpoint,
             uncommitted: BTreeMap::new(),
+            usage: store::Usage::default(),
+            preparations: std::cell::RefCell::new(None),
         };
         {
-            let _admission = reservation_admission(&journal.root)?;
+            let _admission = journal.usage.admit(&journal.root)?;
             journal.clean_scratch()?;
             journal.finish_compaction()?;
         }
@@ -492,6 +524,7 @@ impl Journal {
             }
         }
         journal.reservation_pins()?;
+        journal.remeasure()?;
         Ok(journal)
     }
 
@@ -527,7 +560,7 @@ impl Journal {
     /// # Errors
     /// Refuses an empty reference, missing record, capacity or unsafe storage.
     pub fn pin_reservation(&mut self, reference: &str, delivery: Option<Instant>) -> Result<()> {
-        let _admission = reservation_admission(&self.root)?;
+        let _admission = self.usage.admit(&self.root)?;
         if reference.is_empty() {
             return Err(MailError::Invalid("empty reservation reference"));
         }
@@ -542,7 +575,7 @@ impl Journal {
         if store::encode(&pins)?.len() as u64 > RESERVATION_PINS_MAX_BYTES {
             return Err(MailError::Capacity);
         }
-        store::write(&self.root, &self.root, "reservation-pins.toml", &pins, true)
+        self.write_private(&self.root, "reservation-pins.toml", &pins, true)
     }
 
     fn clean_scratch(&mut self) -> Result<()> {
@@ -570,6 +603,7 @@ impl Journal {
                                 || target.starts_with("prepare-")
                                 || target.starts_with("refusal-")
                                 || target == "reservation-pins.toml"
+                                || target == "activity.toml"
                             {
                                 let _intent: toml::Value = store::read(
                                     directory,
@@ -583,7 +617,7 @@ impl Journal {
                             } else if target != "state.toml" && target != "checkpoint.toml" {
                                 return Err(MailError::Invalid("unknown root replacement scratch"));
                             }
-                            store::remove(directory, &name)?;
+                            self.remove_private(directory, &name)?;
                         }
                         Err(MailError::Io(error))
                             if records && error.kind() == io::ErrorKind::NotFound =>
@@ -607,7 +641,8 @@ impl Journal {
                                 && (target.starts_with("cleanup-")
                                     || target.starts_with("prepare-")
                                     || target.starts_with("refusal-")
-                                    || target == "reservation-pins.toml")
+                                    || target == "reservation-pins.toml"
+                                    || target == "activity.toml")
                                 && error.kind() == io::ErrorKind::NotFound =>
                         {
                             // The adapter performs no restoration until this intent's
@@ -621,7 +656,7 @@ impl Journal {
                                     RECORD_MAX_BYTES
                                 },
                             )?;
-                            store::remove(directory, &name)?;
+                            self.remove_private(directory, &name)?;
                         }
                         Err(error) => return Err(error),
                     }
@@ -657,7 +692,8 @@ impl Journal {
         if record.outgoing != outgoing || record.bytes != bytes || record.digest != payload_digest {
             return Err(MailError::Invalid("source reconciliation mismatch"));
         }
-        store::remove(&self.records, &format!(".{instant}.toml.replace"))?;
+        self.preparations.borrow_mut().take();
+        self.remove_private(&self.records, &format!(".{instant}.toml.replace"))?;
         self.uncommitted.remove(instant);
         Ok(())
     }
@@ -717,7 +753,7 @@ impl Journal {
                     .map_or_else(|| now.clone(), |prior| prior.max(now.clone())),
             ),
         };
-        store::write(&self.root, &self.root, "state.toml", &next, true)?;
+        self.write_private(&self.root, "state.toml", &next, true)?;
         self.state = next;
         Ok(now)
     }
@@ -731,7 +767,8 @@ impl Journal {
     /// Refuses backpressure without evicting pinned evidence or pending payloads.
     pub fn capacity(&self, staging_bytes: u64) -> Result<()> {
         let scratch = 3 * RECORD_MAX_BYTES + 3 * SUMMARY_MAX_BYTES + RESERVATION_PINS_MAX_BYTES;
-        if store::size(&self.root)?
+        if self
+            .journal_bytes()?
             .checked_add(scratch)
             .is_none_or(|n| n > JOURNAL_MAX_BYTES)
             || staging_bytes
@@ -759,15 +796,9 @@ impl Journal {
         }
         let mut consumed = self.state.clone();
         consumed.acceptance_available = false;
-        store::write(&self.root, &self.root, "state.toml", &consumed, true)?;
+        self.write_private(&self.root, "state.toml", &consumed, true)?;
         self.state = consumed;
-        store::write(
-            &self.root,
-            &self.records,
-            &format!("{}.toml", record.delivery),
-            record,
-            false,
-        )
+        self.write_record(record, false)
     }
 
     /// Read one exact protected delivery record.
@@ -789,7 +820,10 @@ impl Journal {
     /// # Errors
     /// Refuses unknown entries or corrupt records rather than silently skipping them.
     pub fn records(&self) -> Result<Vec<Record>> {
-        store::names(&self.records)?
+        #[cfg(test)]
+        RECORD_SCANS.with(|count| count.set(count.get() + 1));
+        self.preparations.borrow_mut().take();
+        let records = store::names(&self.records)?
             .into_iter()
             .filter(|name| {
                 !self
@@ -804,18 +838,61 @@ impl Journal {
                 )?;
                 self.record(&instant)
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        let mut index = super::preparation_index::Index::default();
+        for record in &records {
+            index.record(record, true);
+        }
+        for record in self.uncommitted.values() {
+            index.reserve_paths(record);
+        }
+        *self.preparations.borrow_mut() = Some(index);
+        Ok(records)
     }
 
     fn replace(&self, record: &Record) -> Result<()> {
         record.validate()?;
-        store::write(
-            &self.root,
+        self.write_record(record, true)
+    }
+
+    fn write_record(&self, record: &Record, replace: bool) -> Result<()> {
+        let result = self.write_private(
             &self.records,
             &format!("{}.toml", record.delivery),
             record,
-            true,
+            replace,
+        );
+        if result.is_ok() {
+            if let Some(index) = self.preparations.borrow_mut().as_mut() {
+                index.record(record, !replace);
+            }
+        } else {
+            self.preparations.borrow_mut().take();
+        }
+        result
+    }
+    fn preparation_view<T>(
+        &self,
+        query: impl FnOnce(&mut super::preparation_index::Index) -> Result<T>,
+    ) -> Result<T> {
+        if self.preparations.borrow().is_none() {
+            self.records()?;
+        }
+        query(
+            self.preparations
+                .borrow_mut()
+                .as_mut()
+                .ok_or(MailError::Invalid("preparation index unavailable"))?,
         )
+    }
+    pub(super) fn preparation_pending(&self, sender: &str, outgoing: &str) -> Result<bool> {
+        self.preparation_view(|index| Ok(index.pending(sender, outgoing)))
+    }
+    pub(super) fn temporary_reserved(&self, path: &std::path::Path) -> Result<bool> {
+        self.preparation_view(|index| index.reserved(path))
+    }
+    pub(super) fn preparation_serial(&self) -> Result<u128> {
+        self.preparation_view(super::preparation_index::Index::next_serial)
     }
 
     /// Measure terminal age from the latest known instant, including on rollback.
@@ -972,7 +1049,7 @@ impl Journal {
         if store::encode(&next)?.len() as u64 > SUMMARY_MAX_BYTES {
             return Err(MailError::Capacity);
         }
-        store::write(&self.root, &self.root, "checkpoint.toml", &next, true)?;
+        self.write_private(&self.root, "checkpoint.toml", &next, true)?;
         self.checkpoint = next;
         Ok(())
     }
@@ -985,7 +1062,16 @@ impl Journal {
                     if digest(&bytes) != removal.digest {
                         return Err(MailError::Invalid("compaction record changed"));
                     }
-                    store::remove(&self.records, &name)?;
+                    let record = self.record(&removal.delivery)?;
+                    let result = self.remove_private(&self.records, &name);
+                    if result.is_ok() {
+                        if let Some(index) = self.preparations.borrow_mut().as_mut() {
+                            index.remove(&record);
+                        }
+                    } else {
+                        self.preparations.borrow_mut().take();
+                    }
+                    result?;
                 }
                 Err(MailError::Io(error)) if error.kind() == io::ErrorKind::NotFound => (),
                 Err(error) => return Err(error),
@@ -1013,7 +1099,7 @@ impl Journal {
         project: impl FnOnce(&[Record]) -> Result<Pins>,
     ) -> Result<u64> {
         let _span = tracing::debug_span!("mail.prune", now = %now).entered();
-        let _admission = reservation_admission(&self.root)?;
+        let _admission = self.usage.admit(&self.root)?;
         let live_reservations = self.reservation_pins()?;
         self.finish_compaction()?;
         if self
@@ -1027,7 +1113,7 @@ impl Journal {
         }
         let mut observed = self.state.clone();
         observed.greatest_observed = Some(now.clone());
-        store::write(&self.root, &self.root, "state.toml", &observed, true)?;
+        self.write_private(&self.root, "state.toml", &observed, true)?;
         self.state = observed;
         let mut removed = 0;
         let records = self.records()?;
@@ -1309,3 +1395,6 @@ impl From<crate::anchor::Error> for MailError {
         Self::Entry(error.to_string())
     }
 }
+
+#[cfg(test)]
+thread_local! { pub(super) static RECORD_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }

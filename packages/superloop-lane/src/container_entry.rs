@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io::Write as _;
 use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -850,6 +851,28 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
             "rootless namespace owner is required",
         ));
     }
+    let (args, choice) = match args.split_last() {
+        Some((flag, body)) if matches!(flag.as_str(), "--fresh-thread" | "--resume-thread") => (
+            body,
+            Some(crate::launch::rounds::ThreadChoice::parse(flag)?),
+        ),
+        _ => (args, None),
+    };
+    let (args, preflight) = match args {
+        [body @ .., flag, step, budget_flag, seconds]
+            if flag == "--preflight-round" && budget_flag == "--budget" =>
+        {
+            crate::launch::letters::valid_step(step)?;
+            let budget = seconds.parse::<u64>().map_err(|_| {
+                refusal("anchor-declaration: operation=container-helper purpose=budget")
+            })?;
+            (body, Some((step.as_str(), budget)))
+        }
+        _ => (args, None),
+    };
+    if choice.is_some() && preflight.is_none() {
+        return Err(refusal("thread choice requires preflight"));
+    }
     let [
         command,
         driver_flag,
@@ -911,6 +934,21 @@ pub fn serve(args: &[String]) -> Result<i32, LaneError> {
     )?;
     EXECUTABLE.with(|active| *active.borrow_mut() = Some(support));
     let _executable = ExecutableGuard;
+    if let Some((step, budget)) = preflight {
+        let record =
+            crate::container_helper::prospective_round(Path::new(run), step, budget, choice)?;
+        bind_reserved_program(
+            Path::new(home),
+            &manifest.loop_name,
+            crate::container_helper::run_identity_record(Path::new(run), &record)?,
+            podman,
+        )?;
+        let report =
+            crate::container_helper::preflight_round(Path::new(run), record, step, budget)?;
+        writeln!(std::io::stdout().lock(), "{report}")
+            .map_err(|error| LaneError::operation("helper-preflight", error.to_string()))?;
+        return Ok(0);
+    }
     bind_reserved_program(
         Path::new(home),
         &manifest.loop_name,

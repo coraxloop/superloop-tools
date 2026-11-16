@@ -1,9 +1,14 @@
 /// Entered-loop sign-in and rubric custody predicates shared by command callers.
 pub const SIGN_IN_POLICY: &str = include_str!("runner/sign_in_policy.py");
 
+/// Vendor program admission shared by metadata and attempted execution.
+pub const PROGRAM_POLICY: &str = include_str!("runner/program_policy.py");
+
 /// Tool-free bounded door profile; callers own invocation and process custody.
 pub const DOOR_AGENT_PROGRAM: &str = concat!(
     include_str!("runner/sign_in_policy.py"),
+    "\n",
+    include_str!("runner/program_policy.py"),
     "\n",
     include_str!("runner/agent_runner.py")
 );

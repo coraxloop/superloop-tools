@@ -4,7 +4,18 @@ use super::*;
 use sha2::{Digest as _, Sha256};
 
 const JOURNAL: &str = "door-rewrite.json";
-const PLAN_LIMIT: usize = 64 * 1_048_576;
+pub(super) const PLAN_LIMIT: usize = 256 * 1_048_576;
+
+fn check_plan_size(bytes: usize) -> Result<(), LaneError> {
+    let bound = PLAN_LIMIT / 2;
+    if bytes > bound {
+        return Err(problem(
+            "requests-rewrite-refusal",
+            format!("plan exceeds bound: bytes={bytes} bound={bound}"),
+        ));
+    }
+    Ok(())
+}
 
 fn digest(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
@@ -67,7 +78,7 @@ pub(super) fn convert_record(before: &Value) -> Result<RequestRecord, LaneError>
     RequestRecord::decode(row)
 }
 
-fn convert(before: &Value) -> Result<Value, LaneError> {
+fn convert(before: &Value, custody: &str) -> Result<Value, LaneError> {
     let mut after = before.clone();
     let rows = after["requests"]
         .as_array_mut()
@@ -77,6 +88,15 @@ fn convert(before: &Value) -> Result<Value, LaneError> {
     }
     let bytes = serde_json::to_vec(&after)
         .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
+    if bytes.len() > MAX_RUN_BYTES {
+        return Err(problem(
+            "requests-rewrite-refusal",
+            format!(
+                "custody={custody}/{RUN_FILE} converted bytes={} exceeds limit={MAX_RUN_BYTES}",
+                bytes.len()
+            ),
+        ));
+    }
     let run = after["run"]
         .as_str()
         .ok_or_else(|| problem("requests-rewrite-refusal", "run absent"))?;
@@ -129,7 +149,7 @@ impl Store {
         json!({"state":state,"reason":reason,"shapes":shapes,"limit":limit,
             "rebuild":if limit.is_null() {json!(format!("requests rebuild-index {}", self.loop_name))} else {Value::Null},
             "remedy":if limit.is_null() {Value::Null} else {json!("index capacity exhausted; rebuilding unchanged custody cannot reduce this limit")},
-            "precondition":"stop the door service before rebuilding; schema six only; older records require requests rewrite with the service stopped"})
+            "precondition":"stop the door service before rebuilding; schemas six and seven; older records require requests rewrite with the service stopped"})
     }
 
     /// Rebuild derived labels without migrating or changing request custody.
@@ -177,7 +197,7 @@ impl Store {
                 format!("stop the door service: {error}"),
             )
         })?;
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("rebuild_index_stopped")?;
         self.write_learned(&json!({"unavailable":true,"reason":"index rebuild incomplete"}))?;
         let mut directory = Dir::openat(
             &self.runs,
@@ -221,7 +241,7 @@ impl Store {
                 .filter(|run| crate::valid_run_name(run))
                 .ok_or_else(|| problem("requests-learned-index", "invalid custody run"))?;
             let (_, mut rows) = decode_run(Some(&bytes), run)?;
-            self.channel_project(&mut rows, collection.as_ref())?;
+            self.channel_project(&mut rows, collection.as_deref())?;
             for row in rows {
                 if row.value()["loop"] != self.loop_name
                     || row.value()["worker_uid"] == self.owner
@@ -286,7 +306,7 @@ impl Store {
             checked_dir(&custody, self.owner)?;
             let before: Value = serde_json::from_slice(&bytes)
                 .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
-            let after = convert(&before)?;
+            let after = convert(&before, &name)?;
             if after["requests"]
                 .as_array()
                 .is_some_and(|rows| rows.iter().any(|row| row["loop"] != self.loop_name))
@@ -306,10 +326,18 @@ impl Store {
     /// List the whole conversion or apply exactly its supplied digest.
     ///
     /// # Errors
-    /// Refuses changed evidence, unsafe custody, or an oversized migration plan.
-    #[allow(clippy::too_many_lines)]
+    /// Refuses changed evidence, unsafe custody, an oversized plan or oversized helper input.
     pub fn rewrite(&self, expected: Option<&str>) -> Result<Value, LaneError> {
-        let _lock = self.lock(true)?;
+        self.rewrite_with_channel_cap(expected, request_core::OWNER_INPUT_CAP)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn rewrite_with_channel_cap(
+        &self,
+        expected: Option<&str>,
+        cap: u64,
+    ) -> Result<Value, LaneError> {
+        let _lock = self.write_lock("rewrite_with_channel_cap")?;
         let saved = read_leaf(&self.state, JOURNAL, self.owner, PLAN_LIMIT)?;
         let mut journal: Value = saved
             .as_deref()
@@ -354,7 +382,10 @@ impl Store {
             .as_array_mut()
             .ok_or_else(|| problem("requests-rewrite-refusal", "journal files absent"))?
         {
-            file["after"] = convert(&file["before"])?;
+            let custody = file["custody"]
+                .as_str()
+                .ok_or_else(|| problem("requests-rewrite-refusal", "custody absent"))?;
+            file["after"] = convert(&file["before"], custody)?;
             let changed = file["before"] != file["after"];
             file.as_object_mut()
                 .ok_or_else(|| {
@@ -364,9 +395,8 @@ impl Store {
         }
         let bytes = serde_json::to_vec(&plan)
             .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
-        if bytes.len() > PLAN_LIMIT / 2 {
-            return Err(problem("requests-rewrite-refusal", "plan exceeds bound"));
-        }
+        check_plan_size(bytes.len())?;
+        let channel_input = self.rewrite_channel_input(&plan["channel"], cap)?;
         let plan_digest = digest(&bytes);
         if expected.is_none() {
             return Ok(
@@ -446,7 +476,7 @@ impl Store {
                 .map_err(|e| problem("requests-rewrite-refusal", e.to_string()))?;
             replace_leaf(&custody, RUN_FILE, &target, self.owner, MAX_RUN_BYTES)?;
         }
-        self.rewrite_channel_apply(&plan["channel"])?;
+        self.rewrite_channel_apply(&plan["channel"], channel_input)?;
         self.repair_shapes(&self.all_runs(None)?)?;
         let mut learned = json!({"schema":1,"groups":{}});
         let mut indexed = HashSet::new();
@@ -516,6 +546,172 @@ mod tests {
         row["schema"] = json!(3);
         std::fs::write(&path, serde_json::to_vec(&value).expect("bytes")).expect("old record");
         path
+    }
+
+    fn boundary_custody(fixture: &Fixture, target: usize) -> Vec<u8> {
+        let path = old_file(fixture);
+        let mut file: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("file")).expect("JSON");
+        file["requests"] = Value::Array(
+            (0..4)
+                .map(|index| {
+                    let mut row =
+                        waiting("R", &format!("{index:x}"), 3000, Mode::Audit).into_value();
+                    row["matched_rule"] = json!({"class":"git","operation":"git-upload",
+                "shape_key":"git:upload","request_ids":[]});
+                    row
+                })
+                .collect(),
+        );
+        for index in 0..4 {
+            let remaining = target - serde_json::to_vec(&file).expect("size").len();
+            let count = ((remaining + 1) / 163).min(16_384);
+            file["requests"][index]["matched_rule"]["request_ids"] =
+                json!(vec!["x".repeat(160); count]);
+        }
+        let padding = target - serde_json::to_vec(&file).expect("size").len();
+        let reason = file["requests"][3]["would_do"]["reason"]
+            .as_str()
+            .expect("reason");
+        file["requests"][3]["would_do"]["reason"] =
+            json!(format!("{reason}{}", "x".repeat(padding)));
+        assert_eq!(
+            serde_json::to_vec(&file).expect("target size").len(),
+            target
+        );
+        for row in file["requests"].as_array_mut().expect("rows") {
+            RequestRecord::decode(row.clone()).expect("valid target record");
+            row["schema"] = json!(4);
+            row.as_object_mut()
+                .expect("row")
+                .remove("agent_observations");
+        }
+        let before = serde_json::to_vec(&file).expect("historical bytes");
+        assert!(before.len() <= MAX_RUN_BYTES);
+        std::fs::write(path, &before).expect("historical custody");
+        before
+    }
+
+    /// ´test:unit:rewrite-checks-converted-custody-byte-bound-before-publication´
+    #[test]
+    fn rewrite_checks_converted_custody_byte_bound_before_publication() {
+        for excess in [1, 0] {
+            let fixture = Fixture::new();
+            let before = boundary_custody(&fixture, MAX_RUN_BYTES + excess);
+            let path = fixture.home.join("runs/.launch-R/door-requests.json");
+            let store = fixture.store();
+            if excess == 1 {
+                for expected in [None, Some("older-preview")] {
+                    let result = store.rewrite(expected);
+                    assert!(
+                        result.is_err(),
+                        "converted custody bound precedes publication"
+                    );
+                    let error = result.expect_err("converted custody bound");
+                    assert_eq!(error.status, 2);
+                    assert_eq!(error.kind, "requests-rewrite-refusal");
+                    assert_eq!(
+                        error.detail,
+                        format!(
+                            "custody=.launch-R/{RUN_FILE} converted bytes={} exceeds limit={MAX_RUN_BYTES}",
+                            MAX_RUN_BYTES + 1
+                        )
+                    );
+                    assert_eq!(std::fs::read(&path).expect("unchanged custody"), before);
+                    assert!(
+                        read_leaf(&store.state, JOURNAL, store.owner, PLAN_LIMIT)
+                            .expect("no pending journal")
+                            .is_none()
+                    );
+                }
+            } else {
+                let preview = store.rewrite(None).expect("inclusive custody bound");
+                let approved = preview["preview_sha256"]
+                    .as_str()
+                    .expect("digest")
+                    .to_owned();
+                drop(preview);
+                let applied = store
+                    .rewrite(Some(&approved))
+                    .expect("apply at custody bound");
+                assert_eq!(applied["complete"], true);
+                drop(applied);
+                assert_eq!(
+                    std::fs::metadata(&path).expect("target").len(),
+                    MAX_RUN_BYTES as u64
+                );
+                assert_eq!(store.rewrite(None).expect("repeat")["changed"], 0);
+            }
+        }
+    }
+
+    /// ´test:unit:rewrite-plan-bound-reports-measured-bytes´
+    #[test]
+    fn rewrite_plan_bound_reports_measured_bytes() {
+        let bound = 128 * 1_048_576;
+        check_plan_size(bound).expect("inclusive plan bound");
+        let error = check_plan_size(bound + 1).expect_err("oversized plan");
+        assert_eq!(error.kind, "requests-rewrite-refusal");
+        assert_eq!(
+            error.detail,
+            "plan exceeds bound: bytes=134217729 bound=134217728"
+        );
+    }
+
+    fn large_historical_custody(fixture: &Fixture) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = old_file(fixture);
+        let mut file: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("file")).expect("JSON");
+        let mut row = waiting("R", "1a", 3000, Mode::Audit).into_value();
+        row["matched_rule"] = json!({"class":"git","operation":"git-upload",
+            "shape_key":"git:upload","request_ids":vec![format!("R:{}", "a".repeat(158)); 13_000]});
+        row["schema"] = json!(5);
+        file["requests"] = Value::Array(
+            (0..3)
+                .map(|index| {
+                    let mut record = row.clone();
+                    record["id"] = json!(format!("R:{index:x}"));
+                    record
+                })
+                .collect(),
+        );
+        let bytes = serde_json::to_vec(&file).expect("historical bytes");
+        assert!(bytes.len() < MAX_RUN_BYTES);
+        std::fs::write(&path, &bytes).expect("large custody");
+        for suffix in ["a", "b"] {
+            let retired = fixture.home.join(format!("runs/.retired-R-{suffix}"));
+            std::fs::create_dir(&retired).expect("retired directory");
+            std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o700))
+                .expect("private custody");
+            std::fs::copy(&path, retired.join(RUN_FILE)).expect("retired custody");
+        }
+    }
+
+    /// ´test:unit:rewrite-converts-plan-above-old-bound´
+    #[test]
+    fn rewrite_converts_plan_above_old_bound() {
+        let fixture = Fixture::new();
+        large_historical_custody(&fixture);
+        let store = fixture.store();
+        let preview = store.rewrite(None).expect("preview above old bound");
+        let bytes = serde_json::to_vec(&preview["plan"]).expect("plan bytes");
+        assert!(bytes.len() > 32 * 1_048_576);
+        assert_eq!(preview["changed"], 9);
+        let approved = preview["preview_sha256"]
+            .as_str()
+            .expect("digest")
+            .to_owned();
+        assert_eq!(approved, digest(&bytes));
+        drop(bytes);
+        drop(preview);
+        let applied = store
+            .rewrite(Some(&approved))
+            .expect("apply above old bound");
+        assert_eq!(applied["complete"], true);
+        assert_eq!(applied["changed"], 9);
+        drop(applied);
+        assert_eq!(store.rewrite(None).expect("repeat preview")["changed"], 0);
     }
 
     /// ´test:unit:rewrite-binds-plan-and-preserves-historical-evidence´

@@ -7,6 +7,11 @@ pkg_loop_home_rust = files(
   'src/ancestor_owners.py',
   'src/app.rs',
   'src/custody.rs',
+  'src/door_entry.rs',
+  'src/door_entry/identity.rs',
+  'src/door_entry/consumer.py',
+  'src/door_frame.rs',
+  'src/door_frame/tests.rs',
   'src/driver_launch.rs',
   'src/ensure.rs',
   'src/error.rs',
@@ -37,7 +42,11 @@ pkg_loop_home_rust = files(
   'src/mail/directory.rs',
   'src/mail/refusal.rs',
   'src/mail/service.rs',
+  'src/mail/activity.rs',
+  'src/mail/notify.rs',
+  'src/mail/retry.rs',
   'src/mail/service_tests.rs',
+  'src/mail/service_runtime_tests.rs',
   'src/mail/command.rs',
   'src/mail/entry_anchors.rs',
 
@@ -45,6 +54,7 @@ pkg_loop_home_rust = files(
   'src/mail/journal.rs',
   'src/mail/journal_tests.rs',
   'src/mail/store.rs',
+  'src/mail/preparation_index.rs',
   'src/mail/publication.rs',
   'src/mail/publication_tests.rs',
   'src/mail/names.rs',
@@ -52,11 +62,13 @@ pkg_loop_home_rust = files(
   'src/registry.rs',
   'src/runner.rs',
   'src/runner/agent_runner.py',
+  'src/runner/program_policy.py',
   'src/runner/sign_in_policy.py',
   'src/runner/signals.rs',
   'src/tests/mod.rs',
   'src/verify.rs',
   'src/workers_settings.rs',
+  'tests/door_entry.rs',
   'tests/reply_custody.rs',
   'tests/support/bounded.rs',
 )
@@ -104,8 +116,9 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"payload","path":"packages/loop-home/src/ancestor_owners.py","form":"python","sha256":"86432698c5cf7e3322fc262c97b3d77a545ab3e3f94c7c622260e786a66fdb20","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"host or namespace receiver","version_authority":"packages/loop-home/Cargo.toml","contract":"UID-map foundation with verified procfs reads; legacy caller migration is separate","calls":[]}
-{"kind":"payload","path":"packages/loop-home/src/runner/agent_runner.py","form":"python","sha256":"61c7f2413afe77949f3d331ecb22c59056070ea0abd596793c90f6e279cc12ea","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Run the configured Codex executable with tool-free exec arguments and record bounded result evidence","calls":[{"callee":"external:configured-codex-agent","selector":"program argument","anchor":"subprocess.Popen(argv","contract":"Pinned agent path receives tool-free Codex exec JSON arguments with bounded streams and process-group cleanup","lookup":"configured-external","execution_host":"entered loop"}]}
-{"kind":"payload","path":"packages/loop-home/src/runner/sign_in_policy.py","form":"python","sha256":"0cddefbb2a477d5934c27a1cf35bf30a37378323fbd49f5899b023314d4fc4bb","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Shared credential custody predicate embedded in metadata and agent programs","calls":[]}
+{"kind":"payload","path":"packages/loop-home/src/runner/agent_runner.py","form":"python","sha256":"6651429f2c3a93f5aa89a2e7127743719f788fefeb25970d6df63bbde910100f","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Run the configured Codex executable with tool-free exec arguments and record bounded result evidence","calls":[{"callee":"external:configured-codex-agent","selector":"program argument","anchor":"subprocess.Popen(argv","contract":"Pinned agent path receives tool-free Codex exec JSON arguments with bounded streams and process-group cleanup","lookup":"configured-external","execution_host":"entered loop"}]}
+{"kind":"payload","path":"packages/loop-home/src/runner/program_policy.py","form":"python","sha256":"6606a879ecba33ab3e4cc44ed8500fa8eabca01e72f3b252a91ed17a22630050","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Admit vendor executable ownership, mode and link-free ancestry under the loop identity","calls":[]}
+{"kind":"payload","path":"packages/loop-home/src/runner/sign_in_policy.py","form":"python","sha256":"dd9122bc5602a69311a34abc278db96d11e79e19dc8cf71b4ca05c657b09bfb6","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Shared credential custody predicate embedded in metadata and agent programs","calls":[]}
 ''']
 
 dependency_ledger += ['''
@@ -140,10 +153,12 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:& path#2","caller":"loop-home","owner":"LOOPHOME","selector":"& path","callee":"external:anchor-fixture-executable","lookup":"configured-external","setting":"anchor_fixture_image","contract":"Refuse an unsupported script without invoking an unpinned interpreter by pathname"}
 {"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:& image#1","caller":"loop-home","owner":"LOOPHOME","selector":"& image","callee":"external:anchor-fixture-executable","lookup":"configured-external","setting":"anchor_fixture_image","contract":"Prepare held execution under descriptor exhaustion without spawning a child"}
 {"kind":"call","site":"packages/loop-home/src/anchor/tests.rs:std :: env :: current_exe () . expect (\"test executable\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Isolate descriptor exhaustion and stdin replacement in the same test binary"}
+{"kind":"call","site":"packages/loop-home/src/door_frame/tests.rs:std :: env :: current_exe () . expect (\"door frame test executable\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"door frame test executable\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Bounded isolated override probes require a positive selected test count"}
 ''']
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/mail/configuration_tests.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Rootless inventory fixture enters the real test binary with the received configuration and storage descriptors, then drops to the reserved service identity"}
+{"kind":"call","site":"packages/loop-home/src/mail/service_runtime_tests.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Rootless service fixture reenters this test binary, provisions only its marked temporary home, then drops to the reserved service identity"}
 ''']
 
 dependency_ledger += ['''
@@ -158,4 +173,15 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Install the principal mailbox fixture's exact named service ACL inside the test namespace"}
 {"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#2","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Bounded snapshot of all fixture lifetime repair surfaces before and after receiving refusals"}
 {"kind":"call","site":"packages/loop-home/tests/reply_custody.rs:\"/usr/bin/python3\"#3","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:python3","lookup":"configured-external","contract":"Pipe-controlled namespace fault injector and admission lock holder, killed and reaped after the service identity drop"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/door_entry.rs:\"/usr/bin/setpriv\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/setpriv\"","callee":"external:/usr/bin/setpriv","lookup":"configured-external","contract":"Execute the held identity program with the registry uid, cleared groups and no new privileges"}
+{"kind":"call","site":"packages/loop-home/src/door_entry.rs:\"/usr/bin/python3\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/python3\"","callee":"external:/usr/bin/python3","lookup":"configured-external","contract":"Trusted bootstrap consumes only the admitted sealed host invocation after the loop identity transition"}
+{"kind":"call","site":"packages/loop-home/tests/door_entry.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Bounded namespace fixture and removal of only the parent-created root with event-driven cancellation"}
+{"kind":"payload","path":"packages/loop-home/src/door_entry/consumer.py","form":"python","sha256":"7d0bbf45c93fbafe8b9b4f992676ed83876944e01f28f33114c9b775c55bb88f","owner":"loop-home","interpreter":"Python 3 standard library","execution_host":"entered loop","version_authority":"packages/loop-home/Cargo.toml","contract":"Execute the sealed host-authored door consumer with receiver-derived loop identity and separate request input","calls":[]}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/loop-home/src/mail/service_runtime_tests.rs:std :: env :: current_exe () . expect (\"test image\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"test image\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Pipe-controlled namespace-root helper repairs only its marked source while the service fixture uses its separate reserved identity; EOF ends and reaps the helper"}
 ''']

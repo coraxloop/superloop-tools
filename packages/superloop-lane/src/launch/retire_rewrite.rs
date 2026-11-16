@@ -235,9 +235,10 @@ pub(super) fn run(
     eligible(owner_home, root, request, &current)?;
     let bytes = absences::read_bytes(&path)?.ok_or_else(|| refusal("reservation vanished"))?;
     let prior = absences::read_bytes(&journal_path)?
-        .map(|bytes| serde_json::from_slice::<Value>(&bytes))
-        .transpose()
-        .map_err(|error| refusal(format!("journal: {error}")))?;
+        .map(|bytes| {
+            crate::placement::journal_bytes(&bytes, |error| refusal(format!("journal: {error}")))
+        })
+        .transpose()?;
     let resuming = prior
         .as_ref()
         .is_some_and(|journal| journal["phase"] == "pending");

@@ -9,6 +9,11 @@ use serde_json::{Value, json};
 
 use super::{LaneError, RequestRecord, Store, problem, read_leaf, replace_leaf};
 use client::Client;
+use std::sync::Arc;
+
+#[cfg(test)]
+#[path = "view_tests.rs"]
+mod view_tests;
 
 #[cfg(test)]
 pub(super) fn with_test_client<T>(
@@ -20,6 +25,15 @@ pub(super) fn with_test_client<T>(
 }
 
 const BINDING: &str = "requests-channel.json";
+
+fn lock_path(action: &str) -> &'static str {
+    match action {
+        "triage" => "collection_triage",
+        "review" => "collection_review",
+        "adjudicate" => "collection_adjudicate",
+        _ => "collection_write",
+    }
+}
 
 fn core(error: impl std::fmt::Display) -> LaneError {
     problem("requests-channel-refusal", error.to_string())
@@ -209,6 +223,36 @@ fn envelope(
     json!({"schema":1,"records":doors,"document":document,"id":id,"pending":pending,"now_ns":now,"expected":null,"publication":null})
 }
 
+fn project_changes(
+    before: &Collection,
+    next: &mut Collection,
+    at: &str,
+) -> Result<Vec<RequestRecord>, LaneError> {
+    let sources = before
+        .requests
+        .iter()
+        .map(|row| (row.id.as_str(), row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut changed = Vec::new();
+    for row in &mut next.requests {
+        if row.kind.starts_with("door-") {
+            let old = sources
+                .get(row.id.as_str())
+                .copied()
+                .ok_or_else(|| core("preview source disappeared"))?;
+            if old != row {
+                let record = project(&source(old)?, row, at)?;
+                row.body["record"] = record.value().clone();
+                if old.decision != row.decision {
+                    changed.push(record);
+                }
+            }
+        }
+    }
+    next.validate(&kinds()).map_err(core)?;
+    Ok(changed)
+}
+
 impl Store {
     pub(super) fn channel_bound(&self) -> Result<bool, LaneError> {
         Ok(self.bound_client()?.is_some())
@@ -282,14 +326,13 @@ impl Store {
         Ok(())
     }
 
-    pub(super) fn rewrite_channel_apply(&self, plan: &Value) -> Result<(), LaneError> {
-        self.rewrite_channel_check(plan)?;
+    pub(super) fn rewrite_channel_input(
+        &self,
+        plan: &Value,
+        cap: u64,
+    ) -> Result<Vec<u8>, LaneError> {
         if plan.is_null() || plan["changed"] == 0 {
-            return Ok(());
-        }
-        let client = Client::decode(&plan["binding"], &self.loop_name)?;
-        if client.call("--owner-read", "", &self.loop_name, None)? == plan["after"] {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let _validated = decode(plan["after"].clone())?;
         let mut input = envelope(
@@ -301,15 +344,41 @@ impl Store {
         );
         input["expected"] = plan["before"].clone();
         input["publication"] = plan["after"].clone();
-        let result = client.call(
-            "--owner-commit",
-            "rewrite-door",
-            &self.loop_name,
-            Some(&input),
-        )?;
+        let bytes = serde_json::to_vec(&input).map_err(core)?;
+        if bytes.len() as u64 > cap {
+            return Err(problem(
+                "requests-rewrite-refusal",
+                format!(
+                    "collection={} commit input bytes={} exceeds cap={cap}",
+                    self.loop_name,
+                    bytes.len()
+                ),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub(super) fn rewrite_channel_apply(
+        &self,
+        plan: &Value,
+        input: Vec<u8>,
+    ) -> Result<(), LaneError> {
+        self.rewrite_channel_check(plan)?;
+        if plan.is_null() || plan["changed"] == 0 {
+            return Ok(());
+        }
+        let client = Client::decode(&plan["binding"], &self.loop_name)?;
+        if client.call("--owner-read", "", &self.loop_name, None)? == plan["after"] {
+            return Ok(());
+        }
+        if let Some(key) = self.channel_view_key() {
+            super::view::replace(key, None);
+        }
+        let result = client.call_bytes("--owner-commit", "rewrite-door", &self.loop_name, input)?;
         if result["collection"] != plan["after"] {
             return Err(core("rewrite channel publication differs"));
         }
+        self.channel_committed(decode(result["collection"].clone())?);
         Ok(())
     }
 
@@ -377,9 +446,50 @@ impl Store {
             .transpose()
     }
 
-    pub(super) fn channel_read(&self) -> Result<Option<Collection>, LaneError> {
+    fn channel_view_key(&self) -> Option<(u64, u64)> {
+        let stat = nix::sys::stat::fstatat(
+            self.state_dir(),
+            super::LOCK_FILE,
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .ok()?;
+        Some((stat.st_dev, stat.st_ino))
+    }
+
+    // Only door-row questions may use this view. Permission and gateway answers
+    // and every publication preimage still come from the helper's live evaluation.
+    fn channel_owner_read(&self, client: &Client) -> Result<Arc<Collection>, LaneError> {
+        let key = self.channel_view_key();
+        if let Some(collection) = key.and_then(super::view::get) {
+            return Ok(collection);
+        }
+        let collection = Arc::new(decode(client.call(
+            "--owner-read",
+            "",
+            &self.loop_name,
+            None,
+        )?)?);
+        if let Some(key) = key {
+            super::view::replace(key, Some(collection.clone()));
+        }
+        #[cfg(test)]
+        view_tests::after_read(client);
+        Ok(collection)
+    }
+
+    fn channel_committed(&self, collection: Collection) -> Arc<Collection> {
+        let collection = Arc::new(collection);
+        if let Some(key) = self.channel_view_key() {
+            super::view::replace(key, Some(collection.clone()));
+            #[cfg(test)]
+            view_tests::after_commit(self);
+        }
+        collection
+    }
+
+    pub(super) fn channel_read(&self) -> Result<Option<Arc<Collection>>, LaneError> {
         self.bound_client()?
-            .map(|client| decode(client.call("--owner-read", "", &self.loop_name, None)?))
+            .map(|client| self.channel_owner_read(&client))
             .transpose()
     }
 
@@ -392,11 +502,8 @@ impl Store {
             return Ok(());
         };
         for record in rows {
-            if let Some(row) = collection
-                .requests
-                .iter()
-                .find(|row| row.id == common_id(&self.loop_name, record.id()))
-            {
+            let key = common_id(&self.loop_name, record.id());
+            if let Some(row) = collection.requests.iter().find(|row| row.id == key) {
                 *record = project(record, row, "unrecorded")?;
             }
         }
@@ -443,7 +550,7 @@ impl Store {
     ) -> Result<Value, LaneError> {
         let changing = !matches!(action, "status" | "list");
         let guard = if changing {
-            Some(self.lock(true)?)
+            Some(self.write_lock(lock_path(action))?)
         } else {
             if read_leaf(self.state_dir(), super::LOCK_FILE, self.owner, 4096)?.is_none() {
                 self.list_with_status()?;
@@ -454,8 +561,11 @@ impl Store {
                 Some(self.lock(false)?)
             }
         };
+        if let Some(id) = id {
+            super::hold::request(id);
+        }
         let client = self.bound_client()?.map_or_else(Client::configured, Ok)?;
-        let collection = decode(client.call("--owner-read", "", &self.loop_name, None)?)?;
+        let collection = self.channel_owner_read(&client)?;
         let doors = if guard.is_some() {
             self.channel_doors(&collection)?
         } else {
@@ -470,24 +580,7 @@ impl Store {
             return Ok(preview["result"].clone());
         }
         let at = request_core::utc_time(now);
-        let mut changed = Vec::new();
-        for row in &mut next.requests {
-            if row.kind.starts_with("door-") {
-                let old = before
-                    .requests
-                    .iter()
-                    .find(|old| old.id == row.id)
-                    .ok_or_else(|| core("preview source disappeared"))?;
-                if old != row {
-                    let record = project(&source(old)?, row, &at)?;
-                    row.body["record"] = record.value().clone();
-                    if old.decision != row.decision {
-                        changed.push(record);
-                    }
-                }
-            }
-        }
-        next.validate(&kinds()).map_err(core)?;
+        let changed = project_changes(&before, &mut next, &at)?;
         self.preflight_correction_modes(&changed)?;
         let prior_index = if changed.is_empty() {
             Value::Null
@@ -512,12 +605,16 @@ impl Store {
         }
         input["expected"] = serde_json::to_value(&before).map_err(core)?;
         input["publication"] = serde_json::to_value(&next).map_err(core)?;
+        if let Some(key) = self.channel_view_key() {
+            super::view::replace(key, None);
+        }
         let committed = client.call("--owner-commit", action, &self.loop_name, Some(&input))?;
         if decode(committed["collection"].clone())? != next {
             return Err(core(
                 "committed helper reply differs; inspect durable state before retry",
             ));
         }
+        let next = self.channel_committed(next);
         self.channel_mirror_report(&next);
         if !changed.is_empty() {
             self.channel_maintenance(&changed, prior_index, &before);
@@ -605,6 +702,7 @@ impl Store {
     }
 
     fn channel_mirror(&self, collection: &Collection) -> Result<(), LaneError> {
+        let _phase = super::hold::phase(super::hold::Phase::Mirror);
         let runs = collection
             .requests
             .iter()
@@ -674,10 +772,14 @@ impl Store {
         next.validate(&kinds()).map_err(core)?;
         input["expected"] = preview["before"].clone();
         input["publication"] = serde_json::to_value(&next).map_err(core)?;
+        if let Some(key) = self.channel_view_key() {
+            super::view::replace(key, None);
+        }
         let committed = client.call("--owner-commit", action, &self.loop_name, Some(&input))?;
         if decode(committed["collection"].clone())? != next {
             return Err(core("service publication reply differs"));
         }
+        let next = self.channel_committed(next);
         self.channel_mirror_report(&next);
         Ok(committed["result"].clone())
     }
@@ -687,11 +789,12 @@ impl Store {
     /// # Errors
     /// Refuses a conflicting claim, changed source or unavailable helper.
     pub fn claim_request(&self, source_id: &str) -> Result<bool, LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("claim_request")?;
+        super::hold::request(source_id);
         let Some(client) = self.bound_client()? else {
             return Ok(true);
         };
-        let collection = decode(client.call("--owner-read", "", &self.loop_name, None)?)?;
+        let collection = self.channel_owner_read(&client)?;
         let id = common_id(&self.loop_name, source_id);
         if !collection.requests.iter().any(|row| row.id == id) {
             return Ok(true);
@@ -715,7 +818,7 @@ impl Store {
         let Some(client) = self.bound_client()? else {
             return Ok(None);
         };
-        let collection = decode(client.call("--owner-read", "", &self.loop_name, None)?)?;
+        let collection = self.channel_owner_read(&client)?;
         let id = common_id(&self.loop_name, source_id);
         let Some(row) = collection.requests.iter().find(|row| row.id == id) else {
             return Ok(None);
@@ -772,6 +875,184 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn linear_project_changes(
+        before: &Collection,
+        next: &mut Collection,
+        at: &str,
+    ) -> Result<Vec<RequestRecord>, LaneError> {
+        let mut changed = Vec::new();
+        for row in &mut next.requests {
+            if row.kind.starts_with("door-") {
+                let old = before
+                    .requests
+                    .iter()
+                    .find(|old| old.id == row.id)
+                    .ok_or_else(|| core("preview source disappeared"))?;
+                if old != row {
+                    let record = project(&source(old)?, row, at)?;
+                    row.body["record"] = record.value().clone();
+                    if old.decision != row.decision {
+                        changed.push(record);
+                    }
+                }
+            }
+        }
+        next.validate(&kinds()).map_err(core)?;
+        Ok(changed)
+    }
+
+    /// ´test:unit:channel-index-projects-shuffled-collections-identically´
+    #[test]
+    fn channel_index_projects_shuffled_collections_identically() {
+        for seed in 0..32 {
+            let rows = (1..9)
+                .map(|n| {
+                    imported(
+                        &crate::requests::tests::waiting(
+                            "R",
+                            &format!("{n:08x}"),
+                            3000,
+                            crate::requests::Mode::Audit,
+                        ),
+                        "alpha",
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let mut before = Collection {
+                schema: 1,
+                revision: 1,
+                requests: rows,
+            };
+            before.requests.rotate_left(seed % 8);
+            if seed % 2 == 1 {
+                before.requests.reverse();
+            }
+            before.validate(&kinds()).unwrap();
+            for variant in 0..4 {
+                let mut next = before.clone();
+                for row in next.requests.iter_mut().take(4) {
+                    row.state = State::ServicePending;
+                    row.decision_state = Some(State::TriageDecided);
+                    row.decision = Some(Decision {
+                        answer: json!({"outcome":"allow"}),
+                        reason: "fixture".into(),
+                    });
+                }
+                next.requests.rotate_left((seed + 3) % 8);
+                if variant == 1 {
+                    next.requests[2].id = "f".repeat(64);
+                }
+                if variant == 2 {
+                    next.requests[3].body["record"]["worker_uid"] = json!(3001);
+                }
+                if variant == 3 {
+                    next.requests[0].state = State::Marked;
+                    next.requests[0].decision = None;
+                    next.requests[0].decision_state = None;
+                }
+                next.validate(&kinds()).unwrap();
+                let mut expected = next.clone();
+                let encode = |result: Result<Vec<RequestRecord>, LaneError>| {
+                    result
+                        .map(|rows| {
+                            rows.into_iter()
+                                .map(RequestRecord::into_value)
+                                .collect::<Vec<_>>()
+                        })
+                        .map_err(|e| (e.kind, e.detail))
+                };
+                assert_eq!(
+                    encode(project_changes(&before, &mut next, "2")),
+                    encode(linear_project_changes(&before, &mut expected, "2")),
+                    "{seed}/{variant}"
+                );
+                assert_eq!(
+                    serde_json::to_vec(&next).unwrap(),
+                    serde_json::to_vec(&expected).unwrap()
+                );
+            }
+        }
+    }
+
+    /// ´test:unit:channel-projection-hoist-preserves-records-and-first-match´
+    #[test]
+    fn channel_projection_hoist_preserves_records_and_first_match() {
+        use crate::requests::{Mode, tests::waiting};
+        let fixture = super::super::tests::Fixture::new();
+        let store = fixture.store();
+        for count in [0, 1, 17, super::super::MAX_RUNS] {
+            let mut records: Vec<_> = (0..count.max(1))
+                .map(|n| waiting(&format!("N{n}"), "1a", 3000, Mode::Audit))
+                .collect();
+            // Repeated inputs must each be projected, without a cache between them.
+            records.push(records[0].clone());
+            let mut collection = Collection::default();
+            for record in records.iter().take(count).rev() {
+                let mut row = imported(record, "alpha").expect("common record");
+                row.state = State::Marked;
+                collection.requests.push(row);
+            }
+            for selected in [None, Some(&collection)] {
+                assert_projection_equivalent(&store, &records, selected);
+            }
+            if count != 0 {
+                let mut actual = records.clone();
+                store
+                    .channel_project(&mut actual, Some(&collection))
+                    .unwrap();
+                assert_eq!(actual[0].value()["state"], "marked", "late match {count}");
+                // Duplicate common IDs cannot pass collection admission. At this
+                // internal seam, distinguish first-match from last-match lookup.
+                let duplicate = imported(&records[0], "alpha").unwrap();
+                collection.requests.push(duplicate);
+                assert_projection_equivalent(&store, &records, Some(&collection));
+                collection.requests.reverse();
+                assert_projection_equivalent(&store, &records, Some(&collection));
+                let mut reversed = records.clone();
+                store
+                    .channel_project(&mut reversed, Some(&collection))
+                    .unwrap();
+                assert_eq!(
+                    reversed[0].value(),
+                    records[0].value(),
+                    "first match {count}"
+                );
+            }
+        }
+    }
+
+    fn assert_projection_equivalent(
+        store: &Store,
+        records: &[RequestRecord],
+        collection: Option<&Collection>,
+    ) {
+        let mut before = records.to_vec();
+        if let Some(collection) = collection {
+            for record in &mut before {
+                if let Some(row) = collection
+                    .requests
+                    .iter()
+                    .find(|row| row.id == common_id(&store.loop_name, record.id()))
+                {
+                    *record = project(record, row, "unrecorded").expect("old projection");
+                }
+            }
+        }
+        let mut after = records.to_vec();
+        store
+            .channel_project(&mut after, collection)
+            .expect("new projection");
+        let bytes = |rows: &[RequestRecord]| {
+            serde_json::to_vec(&rows.iter().map(RequestRecord::value).collect::<Vec<_>>()).unwrap()
+        };
+        assert_eq!(
+            bytes(&before),
+            bytes(&after),
+            "complete projected record bytes"
+        );
+    }
 
     /// ´test:unit:base-agent-outcomes-decode-through-run-and-door-body´
     #[test]

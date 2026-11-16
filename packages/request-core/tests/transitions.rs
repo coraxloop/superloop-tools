@@ -232,3 +232,46 @@ fn stored_service_decisions_cannot_skip_the_required_result() {
     malformed.requests[1].decision_state = Some(State::Adjudicated);
     assert!(malformed.validate(&kinds()).is_err());
 }
+
+/// Pin source provenance, not equality of independently copied numeric limits.
+/// ´test:integration:request-owner-input-cap-has-one-source´
+#[test]
+fn request_owner_input_cap_has_one_source() {
+    let packages = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace packages");
+    assert_eq!(request_core::OWNER_INPUT_CAP, 67_108_864);
+    for path in [
+        "permission-triage/src/bin/requests-helper.rs",
+        "lane-gateway/src/channel.rs",
+        "superloop-lane/src/requests/channel_client.rs",
+    ] {
+        let source = std::fs::read_to_string(packages.join(path)).expect("transport source");
+        let compact: String = source.split_whitespace().collect();
+        assert!(
+            compact.contains("userequest_core::OWNER_INPUT_CAPasCAP;"),
+            "{path}: owner input cap must be imported from request-core"
+        );
+        assert!(
+            compact.contains("ifbytes.len()asu64>CAP{"),
+            "{path}: input comparison must use the imported cap"
+        );
+        assert!(
+            !compact.contains("constCAP:"),
+            "{path}: no local cap declaration"
+        );
+        if path.starts_with("permission-triage/") {
+            assert!(
+                compact.contains(".take(CAP+1)"),
+                "{path}: bounded reader must use the imported cap"
+            );
+        }
+    }
+    let source = std::fs::read_to_string(packages.join("superloop-lane/src/requests/rewrite.rs"))
+        .expect("rewrite source");
+    let compact: String = source.split_whitespace().collect();
+    assert!(
+        compact.contains("self.rewrite_with_channel_cap(expected,request_core::OWNER_INPUT_CAP)"),
+        "rewrite preflight must receive the request-core cap"
+    );
+}

@@ -211,7 +211,7 @@ fn markup_is_the_one_value_printed_unescaped() {
     let rendered = templates::environment()
         .render_str(
             "{{ markup }}|{{ text }}",
-            minijinja::context! { markup => &markup, text => markup.as_str() },
+            minijinja::context! { markup => minijinja::value::Serde(&markup), text => markup.as_str() },
         )
         .expect("render");
     assert_eq!(

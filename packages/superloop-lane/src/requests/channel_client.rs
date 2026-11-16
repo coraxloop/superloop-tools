@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::error::LaneError;
 
-const CAP: u64 = 64 * 1024 * 1024;
+use request_core::OWNER_INPUT_CAP as CAP;
 
 fn failure(detail: impl Into<String>) -> LaneError {
     LaneError::input("requests-helper-refusal", detail)
@@ -84,6 +84,27 @@ impl Client {
         loop_name: &str,
         input: Option<&Value>,
     ) -> Result<Value, LaneError> {
+        let bytes = input
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|error| failure(error.to_string()))?
+            .unwrap_or_default();
+        self.call_bytes(phase, action, loop_name, bytes)
+    }
+
+    pub(super) fn call_bytes(
+        &self,
+        phase: &str,
+        action: &str,
+        loop_name: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Value, LaneError> {
+        let _observation = super::store::hold::phase(match phase {
+            "--owner-read" => super::store::hold::Phase::HelperRead,
+            "--owner-preview" => super::store::hold::Phase::HelperPreview,
+            "--owner-commit" => super::store::hold::Phase::HelperCommit,
+            _ => super::store::hold::Phase::HelperOther,
+        });
         let mut command = Command::new(&self.helper);
         command.arg(phase);
         if phase != "--owner-read" {
@@ -97,11 +118,6 @@ impl Client {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let bytes = input
-            .map(serde_json::to_vec)
-            .transpose()
-            .map_err(|error| failure(error.to_string()))?
-            .unwrap_or_default();
         if bytes.len() as u64 > CAP {
             return Err(failure("owner input exceeds cap"));
         }

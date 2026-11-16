@@ -23,8 +23,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::new_at(std::path::Path::new("/tmp"))
+    }
+
+    fn new_at(parent: &std::path::Path) -> Self {
         // Tiny custody records need private ancestors; builds retain the node target root.
-        let home = tempfile::tempdir_in("/tmp").expect("private fixture");
+        let home = tempfile::tempdir_in(parent).expect("private fixture");
         let runs = home.path().join("runs");
         for path in [
             home.path().to_path_buf(),
@@ -553,4 +557,43 @@ fn requests_entry_requires_one_account_for_door_and_permission_custody() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+/// ´test:integration:requests-entry-reports-bounded-private-lock-holds´
+#[test]
+fn requests_entry_reports_bounded_private_lock_holds() {
+    let fixture = Fixture::new_at(&temporary_root::temporary_root());
+    let id = fixture.file("R");
+    let secret = "recognisable request content must not enter the lock journal";
+    let output = fixture.invoke(
+        &["triage", "alpha"],
+        Some(&json!({"schema":1,"items":[{"id":id,"decision":{
+            "answer":{"outcome":"allow"},"reason":secret}}]})),
+    );
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 evidence");
+    let lines = stderr.lines().filter_map(|line| {
+        line.strip_prefix("door-request-lock ")
+            .map(|json| (line, json))
+    });
+    let mut releases = 0;
+    for (line, json) in lines {
+        let value: Value = serde_json::from_str(json).expect("lock JSON");
+        if value["outcome"] != "released" {
+            continue;
+        }
+        releases += 1;
+        assert!(line.len() < 4096, "bounded line");
+        assert!(!line.contains(secret), "request content is private");
+        assert!(
+            !line.contains(&fixture.home.path().display().to_string()),
+            "no home path"
+        );
+        assert_eq!(value["path"], "collection_triage");
+        assert!(value["wait_ms"].is_u64());
+        assert!(value["hold_ms"].is_u64());
+        assert_eq!(value["phases"]["helper_preview"]["calls"], 1);
+        assert_eq!(value["phases"]["helper_commit"]["calls"], 1);
+    }
+    assert_eq!(releases, 1, "one released line per exclusive hold");
 }

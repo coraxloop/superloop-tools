@@ -12,8 +12,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use permission_triage::rubric::{GENERAL_RUBRIC_DIGEST, sha256_digest};
 use permission_triage::{Journal, MAX_JOURNAL_RECORD_BYTES, load_registry, request_digest};
@@ -906,24 +905,17 @@ fn a_zombie_lock_holder_is_dead_for_stale_recovery() -> Result<(), Box<dyn std::
         .args(["-c", "exit 0"])
         .spawn_serialized()?;
     let zombie_pid = zombie.id();
-    let started = Instant::now();
-    loop {
-        let stat = fs::read_to_string(format!("/proc/{zombie_pid}/stat"))?;
-        let state = stat
-            .rsplit_once(") ")
-            .and_then(|(_, suffix)| suffix.bytes().next());
-        if state == Some(b'Z') {
-            break;
-        }
-        // WAIT: the spawned shell has to exit and stay unreaped before the state reads Z, which a
-        // loaded machine defers; the window costs nothing once the transition happens.
-        if started.elapsed() >= Duration::from_secs(10) {
-            zombie.kill()?;
-            zombie.wait()?;
-            return Err(std::io::Error::other("fixture child did not become a zombie").into());
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
+    // Wait for the shell to exit without reaping it. The kernel event, not a short wall window,
+    // establishes the zombie state that the lock recovery must recognise.
+    nix::sys::wait::waitid(
+        nix::sys::wait::Id::Pid(nix::unistd::Pid::from_raw(i32::try_from(zombie_pid)?)),
+        nix::sys::wait::WaitPidFlag::WEXITED | nix::sys::wait::WaitPidFlag::WNOWAIT,
+    )?;
+    let stat = fs::read_to_string(format!("/proc/{zombie_pid}/stat"))?;
+    let state = stat
+        .rsplit_once(") ")
+        .and_then(|(_, fields)| fields.split_whitespace().next());
+    assert_eq!(state, Some("Z"), "the unreaped holder must be a zombie");
     let lock = root.join("escalations.lock");
     fs::write(&lock, format!("{zombie_pid}\n"))?;
     fs::set_permissions(&lock, fs::Permissions::from_mode(0o600))?;

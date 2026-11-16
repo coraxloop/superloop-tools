@@ -1,6 +1,8 @@
 //! Prepare a clean owner-controlled checkout from one complete preserved checkpoint.
 
 use super::*;
+use nix::sys::memfd::{MFdFlags, memfd_create};
+use std::io::{Seek as _, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::path::Component;
 use std::process::Stdio;
@@ -293,8 +295,9 @@ pub(super) fn read_record_bound(
         .take(MAX_RESERVATION_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| LaneError::input("checkout-record", error.to_string()))?;
-    let record: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| LaneError::input("checkout-record", error.to_string()))?;
+    let record = crate::placement::reservation_bytes(&bytes, |error| {
+        LaneError::input("checkout-record", error.to_string())
+    })?;
     if record["schema"] != 1 || record["worker_uid"].as_u64().is_none() {
         return Err(LaneError::input(
             "checkout-record",
@@ -815,6 +818,197 @@ fn git(mut command: Command, directory: &OwnedFd, step: &str) -> Result<Vec<u8>,
     Ok(output.stdout)
 }
 
+const PACK_STDERR_TAIL_BYTES: u64 = 4096;
+
+fn pack_stderr_tail(file: &File) -> String {
+    let read = (|| -> std::io::Result<Vec<u8>> {
+        let mut reader = file.try_clone()?;
+        let length = reader.metadata()?.len();
+        reader.seek(SeekFrom::Start(
+            length.saturating_sub(PACK_STDERR_TAIL_BYTES),
+        ))?;
+        let mut tail = Vec::new();
+        reader.take(PACK_STDERR_TAIL_BYTES).read_to_end(&mut tail)?;
+        Ok(tail)
+    })();
+    match read {
+        Ok(bytes) => bytes
+            .iter()
+            .map(|byte| {
+                if byte.is_ascii_graphic() || *byte == b' ' {
+                    char::from(*byte)
+                } else {
+                    ' '
+                }
+            })
+            .collect::<String>()
+            .trim()
+            .to_owned(),
+        Err(error) => format!("stderr read failed: {error}"),
+    }
+}
+
+fn pack_transfer_detail(
+    cause: &str,
+    source_status: Option<std::process::ExitStatus>,
+    receiver_status: Option<std::process::ExitStatus>,
+    source_stderr: &File,
+    receiver_stderr: &File,
+) -> String {
+    let status = |value: Option<std::process::ExitStatus>| {
+        value.map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
+    };
+    format!(
+        "{cause}; pack-objects {pack_status}; index-pack {index_status}; pack-objects stderr: {pack_stderr}; index-pack stderr: {index_stderr}",
+        pack_status = status(source_status),
+        pack_stderr = pack_stderr_tail(source_stderr),
+        index_status = status(receiver_status),
+        index_stderr = pack_stderr_tail(receiver_stderr),
+    )
+}
+
+fn pack_transfer_cause(absent: Option<&str>, copied: &std::io::Result<u64>) -> String {
+    absent.map_or_else(
+        || {
+            copied.as_ref().map_or_else(
+                |error| format!("preserved pack copy failed: {error}"),
+                |_| "preserved pack transfer failed".to_owned(),
+            )
+        },
+        str::to_owned,
+    )
+}
+
+fn copy_pack_stream(
+    source: &mut impl std::io::Read,
+    receiver: &mut impl std::io::Write,
+) -> std::io::Result<u64> {
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = loop {
+            match source.read(&mut buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                result => break result?,
+            }
+        };
+        if read == 0 {
+            return Ok(bytes);
+        }
+        let mut written = 0;
+        while written < read {
+            match receiver.write(&buffer[written..read]) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        bytes += read as u64;
+    }
+}
+
+fn transfer_pack(mut pack: Command, mut index: Command) -> Result<(), LaneError> {
+    let source_stderr = memfd_create("checkout-pack-stderr", MFdFlags::MFD_CLOEXEC)
+        .map(File::from)
+        .map_err(|error| LaneError::operation("checkout-git", format!("pack stderr: {error}")))?;
+    let receiver_stderr = memfd_create("checkout-index-stderr", MFdFlags::MFD_CLOEXEC)
+        .map(File::from)
+        .map_err(|error| LaneError::operation("checkout-git", format!("index stderr: {error}")))?;
+    pack.stderr(Stdio::from(source_stderr.try_clone().map_err(|error| {
+        LaneError::operation("checkout-git", format!("pack stderr: {error}"))
+    })?));
+    index.stderr(Stdio::from(receiver_stderr.try_clone().map_err(
+        |error| LaneError::operation("checkout-git", format!("index stderr: {error}")),
+    )?));
+    let mut source = pack.spawn().map_err(|error| {
+        LaneError::operation(
+            "checkout-git",
+            pack_transfer_detail(
+                &format!("pack preserved bare: {error}"),
+                None,
+                None,
+                &source_stderr,
+                &receiver_stderr,
+            ),
+        )
+    })?;
+    let mut receiver = index.spawn().map_err(|error| {
+        drop(source.kill());
+        let status = source.wait().ok();
+        LaneError::operation(
+            "checkout-git",
+            pack_transfer_detail(
+                &format!("index preserved pack: {error}"),
+                status,
+                None,
+                &source_stderr,
+                &receiver_stderr,
+            ),
+        )
+    })?;
+    let absent_stream = if source.stdout.is_none() {
+        Some("pack stream is absent")
+    } else if receiver.stdin.is_none() {
+        Some("index stream is absent")
+    } else {
+        None
+    };
+    let copied = if absent_stream.is_none() {
+        copy_pack_stream(
+            source.stdout.as_mut().expect("checked pack stream"),
+            receiver.stdin.as_mut().expect("checked index stream"),
+        )
+    } else {
+        Err(std::io::Error::other("pack or index stream is absent"))
+    };
+    drop(receiver.stdin.take());
+    if copied.is_err() {
+        drop(source.kill());
+        drop(receiver.kill());
+    }
+    let source_status = source.wait();
+    let receiver_status = receiver.wait();
+    if absent_stream.is_none()
+        && copied.is_ok()
+        && source_status
+            .as_ref()
+            .is_ok_and(std::process::ExitStatus::success)
+        && receiver_status
+            .as_ref()
+            .is_ok_and(std::process::ExitStatus::success)
+    {
+        return Ok(());
+    }
+    let cause = pack_transfer_cause(absent_stream, &copied);
+    let detail = pack_transfer_detail(
+        &cause,
+        source_status.as_ref().ok().copied(),
+        receiver_status.as_ref().ok().copied(),
+        &source_stderr,
+        &receiver_stderr,
+    );
+    if let Err(error) = source_status {
+        return Err(LaneError::operation(
+            "checkout-git",
+            format!("pack wait: {error}; {detail}"),
+        ));
+    }
+    if let Err(error) = receiver_status {
+        return Err(LaneError::operation(
+            "checkout-git",
+            format!("index wait: {error}; {detail}"),
+        ));
+    }
+    if let Some(absent) = absent_stream {
+        return Err(LaneError::operation(
+            "checkout-git",
+            format!("{absent}; {detail}"),
+        ));
+    }
+    Err(LaneError::input("checkout-git", detail))
+}
+
 #[allow(clippy::too_many_lines)]
 fn clone_checkout(
     bare: &OwnedFd,
@@ -837,8 +1031,7 @@ fn clone_checkout(
     .env_clear()
     .env("GIT_CONFIG_NOSYSTEM", "1")
     .env("GIT_CONFIG_GLOBAL", "/dev/null")
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+    .stdout(Stdio::piped());
     bind_git(&mut pack, bare)?;
     let mut index = Command::new("/usr/bin/git");
     index
@@ -847,44 +1040,9 @@ fn clone_checkout(
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::null());
     bind_git(&mut index, target)?;
-    let mut source = pack.spawn().map_err(|error| {
-        LaneError::operation("checkout-git", format!("pack preserved bare: {error}"))
-    })?;
-    let mut receiver = index.spawn().map_err(|error| {
-        drop(source.kill());
-        drop(source.wait());
-        LaneError::operation("checkout-git", format!("index preserved pack: {error}"))
-    })?;
-    let copied = std::io::copy(
-        source
-            .stdout
-            .as_mut()
-            .ok_or_else(|| LaneError::operation("checkout-git", "pack stream is absent"))?,
-        receiver
-            .stdin
-            .as_mut()
-            .ok_or_else(|| LaneError::operation("checkout-git", "index stream is absent"))?,
-    );
-    drop(receiver.stdin.take());
-    if copied.is_err() {
-        drop(source.kill());
-        drop(receiver.kill());
-    }
-    let source_status = source
-        .wait()
-        .map_err(|error| LaneError::operation("checkout-git", format!("pack wait: {error}")))?;
-    let receiver_status = receiver
-        .wait()
-        .map_err(|error| LaneError::operation("checkout-git", format!("index wait: {error}")))?;
-    if copied.is_err() || !source_status.success() || !receiver_status.success() {
-        return Err(LaneError::input(
-            "checkout-git",
-            "preserved pack transfer failed",
-        ));
-    }
+    transfer_pack(pack, index)?;
     let mut checkout = Command::new("/usr/bin/git");
     checkout
         .args(["checkout", "-q", "-B"])
@@ -1261,13 +1419,388 @@ pub(super) fn private_run_with_plan(
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckoutRequest, clone_checkout, destination_allowed, target_at};
+    use super::{
+        CheckoutRequest, clone_checkout, copy_pack_stream, destination_allowed, target_at,
+        transfer_pack,
+    };
     use crate::launch::checkpoint::verify_preserved_copy;
     use serde_json::{Value, json};
     use std::fs;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::path::Path;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
+
+    fn synthetic_commands(pack_script: &str, index_script: &str) -> (Command, Command) {
+        let mut pack = Command::new("/usr/bin/python3");
+        pack.args(["-c", pack_script]).stdout(Stdio::piped());
+        let mut index = Command::new("/usr/bin/python3");
+        index
+            .args(["-c", index_script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null());
+        (pack, index)
+    }
+
+    fn synthetic_transfer(
+        pack_script: &str,
+        index_script: &str,
+    ) -> Result<(), crate::error::LaneError> {
+        let (pack, index) = synthetic_commands(pack_script, index_script);
+        transfer_pack(pack, index)
+    }
+
+    /// ´test:unit:checkout-stream-retries-interrupted-io´
+    #[test]
+    fn checkout_stream_retries_interrupted_io() {
+        struct Reader {
+            remaining: std::io::Cursor<&'static [u8]>,
+            interrupted: bool,
+        }
+        impl std::io::Read for Reader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if !std::mem::replace(&mut self.interrupted, true) {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                std::io::Read::read(&mut self.remaining, buffer)
+            }
+        }
+        struct Writer {
+            bytes: Vec<u8>,
+            interrupted: bool,
+        }
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if !std::mem::replace(&mut self.interrupted, true) {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                let count = bytes.len().min(2);
+                self.bytes.extend_from_slice(&bytes[..count]);
+                Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut reader = Reader {
+            remaining: std::io::Cursor::new(b"pack"),
+            interrupted: false,
+        };
+        let mut writer = Writer {
+            bytes: Vec::new(),
+            interrupted: false,
+        };
+        assert_eq!(copy_pack_stream(&mut reader, &mut writer).expect("copy"), 4);
+        assert_eq!(writer.bytes, b"pack");
+    }
+
+    /// ´test:unit:checkout-pack-failure-names-own-stderr´
+    #[test]
+    fn checkout_pack_failure_names_own_stderr() {
+        let error = synthetic_transfer(
+            "import sys; print('pack object missing', file=sys.stderr); sys.exit(41)",
+            "import sys; sys.stdin.buffer.read()",
+        )
+        .expect_err("packing failure");
+        assert_eq!(error.kind, "checkout-git");
+        assert!(error.detail.contains("pack-objects exit status: 41"));
+        assert!(
+            error
+                .detail
+                .contains("pack-objects stderr: pack object missing")
+        );
+        assert!(error.detail.contains("index-pack exit status: 0"));
+    }
+
+    /// ´test:unit:checkout-index-failure-names-own-stderr´
+    #[test]
+    fn checkout_index_failure_names_own_stderr() {
+        let error = synthetic_transfer(
+            "import sys; sys.stdout.buffer.write(b'pack bytes')",
+            "import sys; sys.stdin.buffer.read(); print('index pack corrupt', file=sys.stderr); sys.exit(42)",
+        )
+        .expect_err("indexing failure");
+        assert_eq!(error.kind, "checkout-git");
+        assert!(error.detail.contains("pack-objects exit status: 0"));
+        assert!(error.detail.contains("index-pack exit status: 42"));
+        assert!(
+            error
+                .detail
+                .contains("index-pack stderr: index pack corrupt")
+        );
+    }
+
+    /// ´test:unit:checkout-pack-stderr-flood-stays-bounded´
+    #[test]
+    fn checkout_pack_stderr_flood_stays_bounded() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(synthetic_transfer(
+                    "import sys; sys.stderr.buffer.write(b'x' * (4 * 1024 * 1024) + b'\\npack flood tail\\n'); sys.exit(43)",
+                    "import sys; sys.stdin.buffer.read()",
+                ))
+                .expect("flood result receiver");
+        });
+        let error = receiver
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("pack stderr flood blocked the transfer")
+            .expect_err("flooding pack failure");
+        worker.join().expect("flood transfer thread");
+        assert!(error.detail.contains("pack flood tail"));
+        assert!(
+            error.detail.len() <= 4500,
+            "refusal bytes: {}",
+            error.detail.len()
+        );
+        assert!(!error.detail.bytes().any(|byte| byte.is_ascii_control()));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(synthetic_transfer(
+                    "import sys; sys.stdout.buffer.write(b'pack')",
+                    "import sys; sys.stderr.buffer.write(b'x' * (4 * 1024 * 1024) + b'\\nindex flood tail\\n'); sys.exit(44)",
+                ))
+                .expect("index flood result receiver");
+        });
+        let error = receiver
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("index stderr flood blocked the transfer")
+            .expect_err("flooding index failure");
+        worker.join().expect("index flood transfer thread");
+        assert!(error.detail.contains("index flood tail"));
+        assert!(
+            error.detail.len() <= 4500,
+            "refusal bytes: {}",
+            error.detail.len()
+        );
+        assert!(!error.detail.bytes().any(|byte| byte.is_ascii_control()));
+    }
+
+    /// ´test:unit:checkout-pack-transfer-needs-no-temporary-directory´
+    #[test]
+    fn checkout_pack_transfer_needs_no_temporary_directory() {
+        const CHILD: &str = "SUPERLOOP_CHECKOUT_MEMFD_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            synthetic_transfer(
+                "import sys; sys.stdout.buffer.write(b'pack')",
+                "import sys; sys.stdin.buffer.read()",
+            )
+            .expect("successful transfer without temporary directory");
+            let error = synthetic_transfer(
+                "import sys; print('pack failure', file=sys.stderr); sys.exit(41)",
+                "import sys; sys.stdin.buffer.read()",
+            )
+            .expect_err("failing transfer without temporary directory");
+            assert!(error.detail.contains("pack-objects exit status: 41"));
+            assert!(error.detail.contains("pack-objects stderr: pack failure"));
+            return;
+        }
+        let scratch = tempfile::tempdir().expect("scratch directory");
+        let absent = scratch.path().join("absent");
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "launch::checkout::tests::checkout_pack_transfer_needs_no_temporary_directory",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("TMPDIR", &absent)
+            .output()
+            .expect("isolated transfer fixture");
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child test must execute"
+        );
+    }
+
+    /// ´test:unit:checkout-recorded-transfer-names-both-exits´
+    #[test]
+    fn checkout_recorded_transfer_names_both_exits() {
+        let error = synthetic_transfer(
+            "import sys; sys.stderr.buffer.write(b'p' * 4096); sys.stdout.buffer.write(b'pack'); sys.exit(41)",
+            "import sys; sys.stdin.buffer.read(); print('index failed', file=sys.stderr); sys.exit(42)",
+        )
+        .expect_err("both Git commands failed");
+        let recorded = super::detail_bytes(&error.detail);
+        assert!(recorded.contains("pack-objects exit status: 41"));
+        assert!(
+            recorded.contains("index-pack exit status: 42"),
+            "{recorded}"
+        );
+        assert!(
+            serde_json::to_string(&recorded)
+                .expect("serialized detail")
+                .len()
+                <= 256
+        );
+    }
+
+    /// ´test:unit:checkout-transfer-spawn-failures-name-command-status´
+    #[test]
+    fn checkout_transfer_spawn_failures_name_command_status() {
+        let scratch = tempfile::tempdir().expect("scratch directory");
+        let absent = scratch.path().join("absent");
+        let (mut pack, index) = synthetic_commands("pass", "pass");
+        pack.current_dir(&absent);
+        let error = transfer_pack(pack, index).expect_err("packing spawn failure");
+        assert!(error.detail.contains("pack preserved bare:"));
+        assert!(error.detail.contains("pack-objects unavailable"));
+        assert!(error.detail.contains("index-pack unavailable"));
+
+        let (mut pack, mut index) =
+            synthetic_commands("import sys; sys.stdin.buffer.read()", "pass");
+        pack.stdin(Stdio::piped());
+        index.current_dir(&absent);
+        let error = transfer_pack(pack, index).expect_err("indexing spawn failure");
+        assert!(error.detail.contains("index preserved pack:"));
+        assert!(error.detail.contains("index-pack unavailable"));
+        assert!(!error.detail.contains("pack-objects unavailable"));
+    }
+
+    /// ´test:unit:checkout-transfer-copy-failure-keeps-status-and-stderr´
+    #[test]
+    fn checkout_transfer_copy_failure_keeps_status_and_stderr() {
+        let scratch = tempfile::tempdir().expect("scratch directory");
+        let rendezvous = scratch.path().join("index-closed");
+        nix::unistd::mkfifo(
+            &rendezvous,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("rendezvous pipe");
+        let rendezvous = rendezvous.to_str().expect("UTF-8 fixture path");
+        let pack_script = format!(
+            r"import os,pathlib,select,sys
+p=pathlib.Path({rendezvous:?})
+with p.open('rb') as gate:
+    pid=int(gate.read())
+fd=os.pidfd_open(pid)
+poll=select.poll()
+poll.register(fd, select.POLLIN)
+poll.poll()
+os.close(fd)
+sys.stdout.buffer.write(b'x' * (4 * 1024 * 1024))"
+        );
+        let index_script = format!(
+            r"import os,pathlib
+os.close(0)
+with pathlib.Path({rendezvous:?}).open('wb') as gate:
+    gate.write(str(os.getpid()).encode())
+os.write(2,b'index closed input\n')
+os._exit(0)"
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(synthetic_transfer(&pack_script, &index_script))
+                .expect("copy refusal receiver");
+        });
+        let error = receiver
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("copy refusal rendezvous hung")
+            .expect_err("copy into a closed index pipe");
+        worker.join().expect("copy refusal thread");
+        assert!(error.detail.contains("preserved pack copy failed:"));
+        assert!(error.detail.contains("index-pack exit status: 0"));
+        assert!(
+            error
+                .detail
+                .contains("index-pack stderr: index closed input")
+        );
+    }
+
+    /// ´test:unit:checkout-transfer-complete-before-index-close´
+    #[test]
+    fn checkout_transfer_complete_before_index_close() {
+        let scratch = tempfile::tempdir().expect("scratch directory");
+        let rendezvous = scratch.path().join("index-exit");
+        nix::unistd::mkfifo(
+            &rendezvous,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("rendezvous pipe");
+        let rendezvous = rendezvous.to_str().expect("UTF-8 fixture path");
+        let pack_script = format!(
+            "import pathlib,sys; p=pathlib.Path({rendezvous:?}); gate=p.open('rb'); sys.stdout.buffer.write(b'x' * (1024 * 1024)); sys.stdout.buffer.flush(); gate.read(); gate.close()"
+        );
+        let index_script = format!(
+            "import os,pathlib,sys; p=pathlib.Path({rendezvous:?}); gate=p.open('wb'); data=sys.stdin.buffer.read(1024 * 1024); assert len(data)==1024 * 1024, len(data); os._exit(0)"
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(synthetic_transfer(&pack_script, &index_script))
+                .expect("transfer result receiver");
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("transfer rendezvous hung");
+        worker.join().expect("transfer thread");
+        result.expect("complete transfer must not be refused");
+    }
+
+    /// ´test:unit:checkout-transfer-eof-with-live-packer´
+    #[test]
+    fn checkout_transfer_eof_with_live_packer() {
+        let scratch = tempfile::tempdir().expect("scratch directory");
+        let rendezvous = scratch.path().join("index-exit");
+        nix::unistd::mkfifo(
+            &rendezvous,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("rendezvous pipe");
+        let rendezvous = rendezvous.to_str().expect("UTF-8 fixture path");
+        let pack_script = format!(
+            "import os,pathlib,sys,time; p=pathlib.Path({rendezvous:?}); gate=p.open('rb'); sys.stdout.buffer.write(b'x' * (1024 * 1024)); sys.stdout.buffer.flush(); gate.read(); gate.close(); os.close(1); time.sleep(2); os._exit(0)"
+        );
+        let index_script = format!(
+            "import os,pathlib,sys; p=pathlib.Path({rendezvous:?}); gate=p.open('wb'); data=sys.stdin.buffer.read(1024 * 1024); assert len(data)==1024 * 1024, len(data); os._exit(0)"
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(synthetic_transfer(&pack_script, &index_script))
+                .expect("transfer result receiver");
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("live packer rendezvous hung");
+        worker.join().expect("transfer thread");
+        result.expect("a completed pack with a live packer must succeed");
+    }
+
+    /// ´test:unit:checkout-transfer-missing-streams-name-the-absent-end´
+    #[test]
+    fn checkout_transfer_missing_streams_name_the_absent_end() {
+        let (mut pack, index) = synthetic_commands("pass", "pass");
+        pack.stdout(Stdio::null());
+        let error = transfer_pack(pack, index).expect_err("missing packing stdout");
+        assert!(error.detail.contains("pack stream is absent"));
+        assert!(!error.detail.contains("pack-objects unavailable"));
+        assert!(!error.detail.contains("index-pack unavailable"));
+
+        let (pack, mut index) = synthetic_commands("pass", "pass");
+        index.stdin(Stdio::null());
+        let error = transfer_pack(pack, index).expect_err("missing indexing stdin");
+        assert!(error.detail.contains("index stream is absent"));
+        assert!(!error.detail.contains("pack-objects unavailable"));
+        assert!(!error.detail.contains("index-pack unavailable"));
+    }
+
+    /// # Panics
+    /// Panics if the fixture Git config cannot be read or updated.
+    fn disable_auto_maintenance(config: &Path) {
+        let mut bytes = fs::read(config).expect("fixture Git config");
+        bytes.extend_from_slice(b"\n[maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n");
+        fs::write(config, bytes).expect("disable automatic Git maintenance");
+    }
 
     fn mode(path: &Path, value: u32) {
         fs::set_permissions(path, fs::Permissions::from_mode(value)).expect("fixture mode");
@@ -1420,10 +1953,12 @@ mod tests {
         git(Command::new("/usr/bin/git")
             .args(["init", "-q", "--bare"])
             .arg(&bare));
+        disable_auto_maintenance(&bare.join("config"));
         mode(&bare, 0o700);
         mode(&bare.join("config"), 0o600);
         let work = fixture.path().join("work");
         git(Command::new("/usr/bin/git").args(["init", "-q"]).arg(&work));
+        disable_auto_maintenance(&work.join(".git/config"));
         fs::write(work.join("note"), b"preserved commit\n").expect("note");
         git(Command::new("/usr/bin/git")
             .arg("-C")
@@ -1598,6 +2133,7 @@ mod tests {
         super::publish_record(&root_fd, "R", &record, first).expect("pending before clone");
         let error = super::clone_checkout(&source, &target, "R", &"1".repeat(40))
             .expect_err("bad source interrupts clone");
+        assert!(error.detail.contains("pack-objects stderr: fatal:"));
         assert!(destination.join(".git").exists());
         super::record_failure(
             &root_fd,

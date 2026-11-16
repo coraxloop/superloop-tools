@@ -8,6 +8,9 @@ pub mod transaction;
 pub use model::{Collection, Decision, Kind, Request, State};
 pub use review::{Review, now_ns, utc_time};
 
+/// Inclusive byte limit for request-owner transport input.
+pub const OWNER_INPUT_CAP: u64 = 64 * 1024 * 1024;
+
 /// A named request refusal, without implicit authority or recovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Error {

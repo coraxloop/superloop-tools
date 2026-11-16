@@ -80,6 +80,9 @@ pattern = "docs/public/unpublished-labels.toml"
 pattern = "docs/spec/build-contracts.md"
 
 [[include.rows]]
+pattern = "docs/spec/collection-journal.md"
+
+[[include.rows]]
 pattern = "docs/spec/command-contracts.md"
 
 [[include.rows]]
@@ -455,6 +458,9 @@ pattern = "packages/loop-home/src/runner.rs"
 pattern = "packages/loop-home/src/runner/agent_runner.py"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/runner/program_policy.py"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/runner/sign_in_policy.py"
 
 [[include.rows]]
@@ -656,7 +662,10 @@ pattern = "packages/pulldown-cmark-to-cmark/meson.build"
 pattern = "packages/pulldown-cmark-to-cmark/src/lib.rs"
 
 [[include.rows]]
-pattern = "packages/pulldown-cmark-to-cmark/src/source_range.rs"
+pattern = "packages/pulldown-cmark-to-cmark/src/render.rs"
+
+[[include.rows]]
+pattern = "packages/pulldown-cmark-to-cmark/src/state.rs"
 
 [[include.rows]]
 pattern = "packages/pulldown-cmark-to-cmark/src/text_modifications.rs"
@@ -1745,6 +1754,9 @@ pattern = "packages/superloop-lane/src/door.rs"
 pattern = "packages/superloop-lane/src/door/agent.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/door/agent/usage.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/door/agent_exercise.rs"
 
 [[include.rows]]
@@ -2021,6 +2033,12 @@ pattern = "packages/superloop-lane/src/launch/rotation.rs"
 pattern = "packages/superloop-lane/src/launch/rounds.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/launch/thread_files.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/launch/workspace.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/seed.rs"
 
 [[include.rows]]
@@ -2051,6 +2069,9 @@ pattern = "packages/superloop-lane/src/requests.rs"
 pattern = "packages/superloop-lane/src/requests/channel.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/requests/view_tests.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/requests/channel_client.rs"
 
 [[include.rows]]
@@ -2078,7 +2099,19 @@ pattern = "packages/superloop-lane/src/requests/rewrite.rs"
 pattern = "packages/superloop-lane/src/requests/store.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/requests/store/hold.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/store/queue.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/store/view.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/requests/store/snapshot.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/store/publication_tests.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/requests/test_helper.rs"
@@ -2636,6 +2669,9 @@ pattern = "packages/superloop-lane/tests/reply_entry.rs"
 pattern = "packages/superloop-lane/tests/requests_entry.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/tests/resume_host.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/tests/retire_node_entry.rs"
 
 [[include.rows]]
@@ -2649,6 +2685,27 @@ pattern = "packages/superloop-lane/tests/support/entry.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/support/registry_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/resume_host_driver.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/resume_host_fault.c"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/resume_host_fixture.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/resume_host_install.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/resume_host_refusals.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/resume_host_retained.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/support/resume_host_scope.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/tests/support/report_custody.c"
@@ -3297,6 +3354,9 @@ pattern = "packages/loop-home/src/mail/journal_tests.rs"
 pattern = "packages/loop-home/src/mail/store.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/mail/preparation_index.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/mail/publication.rs"
 
 [[include.rows]]
@@ -3318,7 +3378,16 @@ pattern = "packages/loop-home/src/mail/directory.rs"
 pattern = "packages/loop-home/src/mail/refusal.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/mail/notify.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/retry.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/mail/service.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/mail/activity.rs"
 
 [[include.rows]]
 pattern = "packages/loop-home/src/mail/command.rs"
@@ -3333,7 +3402,13 @@ pattern = "packages/superloop/data/superloop-mail.service.in"
 pattern = "packages/loop-home/src/mail/service_tests.rs"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/mail/service_runtime_tests.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/mail/configuration_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop/tests/mail_scan.py"
 
 [[include.rows]]
 pattern = "packages/superloop/tests/mail_custody.py"
@@ -3408,6 +3483,24 @@ pattern = "packages/loop-home/src/mail/migration_cutover.rs"
 pattern = "packages/superloop/tests/mail_migration.py"
 
 [[include.rows]]
+pattern = "packages/loop-home/src/door_entry.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/door_entry/identity.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/door_entry/consumer.py"
+
+[[include.rows]]
+pattern = "packages/loop-home/tests/door_entry.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/door_frame.rs"
+
+[[include.rows]]
+pattern = "packages/loop-home/src/door_frame/tests.rs"
+
+[[include.rows]]
 pattern = "packages/loop-home/src/anchor.rs"
 
 [[include.rows]]
@@ -3454,3 +3547,240 @@ pattern = "packages/superloop-capture-admit/src/manifest.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-capture-admit/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/workspace.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/workspace/classification.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/workspace/evidence.rs"
+
+[[include.rows]]
+pattern = "packages/execute-command/src/workspace/tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/requests/workspace_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/workspace_executor.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/workspace_executor_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/record.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/receipt.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/process.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/observe.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/identity.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/tests/subprocess_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/Cargo.toml"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/README.md"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/meson.build"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/placement.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/placement/reader.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/placement/tests.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/journal/owner_index_tests.rs"
+
+[[include.rows]]
+pattern = "packages/permission-triage/src/journal/requests_index_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/lib.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/fixture.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/fixture_main.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/tests/fixture_contract.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/observation_cli.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/fixture_cli.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/placement/commands.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/placement/commands_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/placement_entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/policy.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/measure.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/state.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/store.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/test_support.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/channel.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/child_status.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/inventory.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/handoff_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/handoff.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/inventory_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/confinement.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/fifo.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/startup.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/process_pin.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/keeper.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/driver.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/driver_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/release.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/completion_client.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/completion_client_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/completion.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/completion_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/release_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/keeper_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control_actions.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control_action_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control_client.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control_client_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/manager.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/manager_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/tests/support/manager_native.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/tests/support/startup_native.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/tests/support/confinement_probe.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/sealer.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/sealer_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/tests/support/sealer_native.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/campaign.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/campaign_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control_client_actions.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control_client_action_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/observation.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/tests/support/campaign_evidence.rs"

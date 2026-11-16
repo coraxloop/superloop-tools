@@ -1981,27 +1981,41 @@ else:
             .write(true)
             .open(&stub)
             .expect("held fixture writer");
+        let (waiting, observed) = std::sync::mpsc::sync_channel(1);
         let server = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(120);
+            // Model six seconds of scheduling delay without sleeping. The
+            // client cannot connect before the first WouldBlock observation;
+            // restoring the old five-second bound therefore refuses here.
+            let now = || Instant::now() + Duration::from_secs(6);
+            let mut waiting = Some(waiting);
             for _ in 0..4 {
                 let (mut peer, _) = loop {
                     match listener.accept() {
                         Ok(connection) => break connection,
                         Err(error)
                             if error.kind() == std::io::ErrorKind::WouldBlock
-                                && Instant::now() < deadline =>
+                                && now() < deadline =>
                         {
+                            if let Some(waiting) = waiting.take() {
+                                waiting.send(()).expect("accept readiness");
+                            }
                             thread::sleep(Duration::from_millis(5));
                         }
                         Err(error) => panic!("fixture peer: {error}"),
                     }
                 };
+                peer.set_read_timeout(Some(deadline.saturating_duration_since(now())))
+                    .expect("fixture frame hang bound");
                 let mut size = [0_u8; 4];
                 peer.read_exact(&mut size).expect("frame header");
                 let mut request = vec![0; u32::from_be_bytes(size) as usize];
                 peer.read_exact(&mut request).expect("request frame");
             }
         });
+        observed
+            .recv_timeout(Duration::from_secs(120))
+            .expect("accept loop ready");
         assert_eq!(PROBE.matches("[STUB, *words]").count(), 1);
         let patched = PROBE
             .replace("[STUB, *words]", "[\"/usr/bin/python3\", STUB, *words]")
@@ -2021,7 +2035,28 @@ else:
         ] {
             let reference = format!("refs/heads/lane/{run}");
             let output = Command::new("/usr/bin/python3")
-                .args(["-c", &patched])
+                // This case proves attribution and canaries, not deadlines.
+                // The controlled-clock sibling pins the production caps. Give
+                // each real fixture operation a generous hang bound instead.
+                .args([
+                    "-c",
+                    r"
+import sys, time, types
+probe = {'__name__': 'fixture'}
+exec(sys.argv[1], probe)
+clock = [0.0]
+hang = time.monotonic() + 120
+def remaining(_deadline, cap):
+    left = hang - time.monotonic()
+    if left <= 0: raise TimeoutError('fixture hang bound')
+    return min(cap, left) if cap < 1 else left
+probe['time'] = types.SimpleNamespace(
+    monotonic=lambda: clock[0], sleep=lambda delay: clock.__setitem__(0, clock[0] + delay))
+probe['remaining'] = remaining
+probe['main']()
+",
+                    &patched,
+                ])
                 .env("SUPERLOOP_DOOR_SCOPE", "work")
                 .env("SUPERLOOP_DOOR_RUN", run)
                 .env("SUPERLOOP_DOOR_REF", &reference)

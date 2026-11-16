@@ -58,6 +58,8 @@ pub mod rounds;
 pub(crate) mod seed;
 pub mod settle;
 pub mod steering;
+mod thread_files;
+pub(crate) mod workspace;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeclaredSource {
@@ -142,9 +144,11 @@ pub struct LaunchRequest {
     pub run: String,
     pub letter: PathBuf,
     pub round: Option<String>,
+    pub thread_choice: Option<rounds::ThreadChoice>,
     pub budget: u64,
     pub dry_run: bool,
     pub expect_digest: Option<String>,
+    pub compute_workspace: Option<String>,
     pub observe: bool,
     pub podman_bin: PathBuf,
     pub proxy_bin: Option<PathBuf>,
@@ -256,11 +260,12 @@ impl LaunchRequest {
         let [loop_name, run, rest @ ..] = args else {
             return Err(LaneError::input(
                 "usage",
-                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--observe] [--proxy-bin FILE]",
+                "launch LOOP RUN {--letter FILE|--round STEP} [--budget SECONDS] (per round, default 3600 seconds, not inherited from dispatch) [--fresh-thread|--resume-thread] [--backend {codex|claude}] [--model MODEL] [--effort EFFORT] [--door-scope {work|review}] [--dry-run] [--expect-digest HEX] [--compute-workspace JSON] [--observe] [--proxy-bin FILE]",
             ));
         };
         let mut letter = None;
         let mut round = None;
+        let mut thread_choice = None;
         let mut budget = None;
         let mut dry_run = false;
         let mut observe = false;
@@ -271,13 +276,32 @@ impl LaunchRequest {
         let mut effort = None;
         let mut door_scope = None;
         let mut expect_digest = None;
+        let mut compute_workspace = None;
         let mut index = 0;
         while index < rest.len() {
             match rest[index].as_str() {
                 "--dry-run" if !dry_run => dry_run = true,
                 "--observe" if !observe => observe = true,
-                "--letter" | "--round" | "--budget" | "--podman-bin" | "--proxy-bin"
-                | "--model" | "--effort" | "--door-scope" | "--expect-digest" | "--backend" => {
+                "--fresh-thread" | "--resume-thread" => {
+                    let choice = rounds::ThreadChoice::parse(&rest[index])?;
+                    if thread_choice.replace(choice).is_some() {
+                        return Err(LaneError::input(
+                            "round-choice",
+                            "choose exactly one of --fresh-thread and --resume-thread",
+                        ));
+                    }
+                }
+                "--letter"
+                | "--round"
+                | "--budget"
+                | "--podman-bin"
+                | "--proxy-bin"
+                | "--model"
+                | "--effort"
+                | "--door-scope"
+                | "--expect-digest"
+                | "--backend"
+                | "--compute-workspace" => {
                     let option = rest[index].as_str();
                     let value = rest.get(index + 1).ok_or_else(|| {
                         LaneError::input("usage", format!("{option} needs a value"))
@@ -292,6 +316,7 @@ impl LaunchRequest {
                         "--backend" => &mut backend,
                         "--door-scope" => &mut door_scope,
                         "--expect-digest" => &mut expect_digest,
+                        "--compute-workspace" => &mut compute_workspace,
                         _ => &mut effort,
                     };
                     if slot.replace(value.clone()).is_some() {
@@ -323,6 +348,12 @@ impl LaunchRequest {
                 "select exactly one of --letter and --round",
             ));
         }
+        if thread_choice.is_some() && round.is_none() {
+            return Err(LaneError::input(
+                "round-choice",
+                "thread choice requires --round",
+            ));
+        }
         if let Some(step) = round.as_deref() {
             letters::valid_step(step)?;
             if model.is_some()
@@ -330,6 +361,7 @@ impl LaunchRequest {
                 || observe
                 || door_scope.is_some()
                 || backend.is_some()
+                || compute_workspace.is_some()
             {
                 return Err(LaneError::input(
                     "round-selection",
@@ -355,9 +387,11 @@ impl LaunchRequest {
             run: run.clone(),
             letter: letter.map_or_else(PathBuf::new, PathBuf::from),
             round,
+            thread_choice,
             budget,
             dry_run,
             expect_digest,
+            compute_workspace,
             observe,
             podman_bin: podman_bin.map_or_else(|| PathBuf::from("/usr/bin/podman"), PathBuf::from),
             proxy_bin: proxy_bin.map(PathBuf::from),
@@ -1223,6 +1257,13 @@ pub(crate) fn read_reservation(path: &Path) -> Result<Option<Value>, LaneError> 
 }
 
 fn read_reservation_checked(path: &Path, check_node: bool) -> Result<Option<Value>, LaneError> {
+    Ok(read_reservation_raw(path, check_node)?.map(|(record, _)| record))
+}
+
+fn read_reservation_raw(
+    path: &Path,
+    check_node: bool,
+) -> Result<Option<(Value, Vec<u8>)>, LaneError> {
     let opened = if home::private_is_active() {
         let parent = path
             .parent()
@@ -1246,14 +1287,22 @@ fn read_reservation_checked(path: &Path, check_node: bool) -> Result<Option<Valu
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)
     };
-    read_reservation_file(opened, path, check_node)
+    read_reservation_file_raw(opened, path, check_node)
 }
 
-fn read_reservation_file(
+pub(crate) fn read_reservation_file(
     opened: std::io::Result<File>,
     path: &Path,
     check_node: bool,
 ) -> Result<Option<Value>, LaneError> {
+    Ok(read_reservation_file_raw(opened, path, check_node)?.map(|(record, _)| record))
+}
+
+fn read_reservation_file_raw(
+    opened: std::io::Result<File>,
+    path: &Path,
+    check_node: bool,
+) -> Result<Option<(Value, Vec<u8>)>, LaneError> {
     let file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1281,8 +1330,9 @@ fn read_reservation_file(
     file.take(MAX_RESERVATION_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| LaneError::input("uid-table", format!("{}: {error}", path.display())))?;
-    let record: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| LaneError::input("uid-table", format!("{}: {error}", path.display())))?;
+    let record = crate::placement::reservation_bytes(&bytes, |error| {
+        LaneError::input("uid-table", format!("{}: {error}", path.display()))
+    })?;
     if record["schema"] != 1
         || ![
             "preparing",
@@ -1306,12 +1356,47 @@ fn read_reservation_file(
     retire::absences::validate(&record)?;
     retire::rewrite::validate(&record)?;
     repin_door::validate(&record)?;
-    Ok(Some(record))
+    let workspace = crate::plan::workspace_snapshot(&record["plan"])?;
+    if workspace.as_ref().is_some_and(|snapshot| {
+        record["loop"] != snapshot.grant.loop_name || record["run"] != snapshot.grant.run
+    }) {
+        return Err(LaneError::input(
+            "door-workspace-context-differs",
+            "reservation and workspace identities differ",
+        ));
+    }
+    Ok(Some((record, bytes)))
 }
 
 pub(crate) fn publish_reservation(path: &Path, record: &Value) -> Result<(), LaneError> {
     let bytes = serde_json::to_vec(record)
         .map_err(|error| LaneError::operation("uid-table", error.to_string()))?;
+    let attempt = record
+        .get("round_rollback")
+        .map(|_| rounds::rollback::nonce(record))
+        .transpose()?;
+    publish_reservation_bytes_named(path, &bytes, attempt)
+}
+
+#[cfg(test)]
+fn publish_reservation_bytes(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {
+    publish_reservation_bytes_named(path, bytes, None)
+}
+
+fn publish_reservation_bytes_named(
+    path: &Path,
+    bytes: &[u8],
+    attempt: Option<&str>,
+) -> Result<(), LaneError> {
+    publish_reservation_bytes_at(path, bytes, attempt, None)
+}
+
+fn publish_reservation_bytes_at(
+    path: &Path,
+    bytes: &[u8],
+    attempt: Option<&str>,
+    held: Option<&OwnedFd>,
+) -> Result<(), LaneError> {
     let size = u64::try_from(bytes.len())
         .map_err(|error| LaneError::input("reservation-size", error.to_string()))?;
     if size > MAX_RESERVATION_BYTES {
@@ -1322,29 +1407,34 @@ pub(crate) fn publish_reservation(path: &Path, record: &Value) -> Result<(), Lan
             ),
         ));
     }
-    if !home::private_is_active() {
-        build::publish(path, &bytes)?;
-        return fs::File::open(
-            path.parent()
-                .ok_or_else(|| LaneError::operation("uid-table", "reservation has no parent"))?,
-        )
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            LaneError::operation("uid-table", format!("{}: {error}", path.display()))
-        });
-    }
     let parent_path = path
         .parent()
         .ok_or_else(|| LaneError::operation("uid-table", "reservation has no parent"))?;
-    let parent = home::pin_parent(parent_path, Uid::effective().as_raw())?;
+    let parent: OwnedFd = if let Some(directory) = held {
+        nix::unistd::dup(directory)
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?
+    } else if home::private_is_active() {
+        home::pin_parent(parent_path, Uid::effective().as_raw())?
+    } else {
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent_path)
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?
+            .into()
+    };
     let name = path
         .file_name()
         .ok_or_else(|| LaneError::operation("uid-table", "reservation has no name"))?;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| LaneError::operation("uid-table", error.to_string()))?
-        .as_nanos();
-    let temporary = format!(".reservation-{}-{nanos}.tmp", std::process::id());
+    let temporary = if let Some(nonce) = attempt {
+        format!(".reservation-{nonce}.tmp")
+    } else {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?
+            .as_nanos();
+        format!(".reservation-{}-{nanos}.tmp", std::process::id())
+    };
     let output = openat2(
         &parent,
         temporary.as_str(),
@@ -1355,20 +1445,36 @@ pub(crate) fn publish_reservation(path: &Path, record: &Value) -> Result<(), Lan
     )
     .map_err(|error| LaneError::operation("uid-table", format!("{}: {error}", path.display())))?;
     let mut file = fs::File::from(output);
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| {
-            LaneError::operation("uid-table", format!("{}: {error}", path.display()))
-        })?;
-    renameat(&parent, temporary.as_str(), &parent, name).map_err(|error| {
-        LaneError::operation("uid-table", format!("{}: {error}", path.display()))
-    })?;
-    fs::File::from(
-        nix::unistd::dup(&parent)
-            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?,
-    )
-    .sync_all()
-    .map_err(|error| LaneError::operation("uid-table", format!("{}: {error}", path.display())))
+    let result = (|| {
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?;
+        renameat(&parent, temporary.as_str(), &parent, name)
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))?;
+        nix::unistd::fsync(&parent)
+            .map_err(|error| LaneError::operation("uid-table", error.to_string()))
+    })();
+    if result.is_err() {
+        let held = file.metadata();
+        let named = nix::sys::stat::fstatat(
+            &parent,
+            temporary.as_str(),
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        );
+        if held.as_ref().is_ok_and(|held| {
+            named
+                .as_ref()
+                .is_ok_and(|named| held.dev() == named.st_dev && held.ino() == named.st_ino)
+        }) {
+            let _removed = nix::unistd::unlinkat(
+                &parent,
+                temporary.as_str(),
+                nix::unistd::UnlinkatFlags::NoRemoveDir,
+            );
+            let _synced = nix::unistd::fsync(&parent);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1924,6 +2030,24 @@ fn private_argv(
         "--backend".into(),
         backend.name().into(),
     ];
+    if let Some(declaration) = &request.compute_workspace {
+        let digest = match request.expect_digest.as_ref() {
+            Some(digest) => digest.clone(),
+            None if request.dry_run => workspace::declaration_digest(declaration)?,
+            None => {
+                return Err(LaneError::input(
+                    "workspace-digest",
+                    "private preparation requires the reviewed grant digest",
+                ));
+            }
+        };
+        argv.extend([
+            "--compute-workspace".into(),
+            declaration.clone(),
+            "--workspace-digest".into(),
+            digest,
+        ]);
+    }
     if let Some(source) = &request.rotation_source {
         argv.extend(["--rotation-sha256".into(), source.digest.clone()]);
     }
@@ -2026,7 +2150,7 @@ fn entry_argv_round(
     let (source, prompt) = if step == "dispatch" && mail.is_none() {
         (
             plan.home.join("brief.txt"),
-            "Read /home/worker/brief.txt.".to_owned(),
+            crate::FIRST_DISPATCH_PROMPT.to_owned(),
         )
     } else {
         let binding = mail.ok_or_else(|| {
@@ -2064,10 +2188,14 @@ fn entry_argv_round(
 }
 
 fn planned_step_dir(plan: &Plan, step: &str) -> Result<PathBuf, LaneError> {
+    planned_step_dir_at(&plan.driver_dir, step)
+}
+
+fn planned_step_dir_at(driver_dir: &Path, step: &str) -> Result<PathBuf, LaneError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| LaneError::operation("round-directory", error.to_string()))?;
-    Ok(plan.driver_dir.join(format!(
+    Ok(driver_dir.join(format!(
         "{}-{}-{}-{step}",
         now.as_secs(),
         now.subsec_nanos(),
@@ -3254,9 +3382,6 @@ fn interrupted_settlement_success(current: &Value, evidence: &Value) -> bool {
         && evidence["attempts"]
             .as_array()
             .is_some_and(|items| items.iter().all(|item| item["error_free"] == true));
-    let socket = current["observer_end"]["socket"]["state"]
-        .as_str()
-        .unwrap_or_default();
     let completed_attempt = attempts_clean
         && last_status == Some(0)
         && current["driver_end"]["state"] == "completed"
@@ -3271,12 +3396,11 @@ fn interrupted_settlement_success(current: &Value, evidence: &Value) -> bool {
         && current["helper_end"]["successful"] != false
         && current["readback_end"] == "completed"
         && current["observation_end"] == "completed"
-        && ["stopped", "not-started"].contains(
-            &current["observer_end"]["state"]
-                .as_str()
-                .unwrap_or_default(),
+        && settlement_observer_ready(
+            &current["observer_end"],
+            current["observer_state"].as_str().unwrap_or_default(),
+            current["settlement_uncertain"] == true,
         )
-        && ["removed", "absent", "not-applicable"].contains(&socket)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -3782,6 +3906,7 @@ fn run_with_program(
             proxy_state,
             on_failure,
             lane_bin,
+            Duration::from_secs(90),
         );
     }
     let started = Instant::now();
@@ -3799,6 +3924,20 @@ fn run_with_program(
         &request.run,
         (0, 0),
         request.backend,
+    )?;
+    let prior_workspace = read_reservation(&reservation_path(
+        plan.driver_dir
+            .parent()
+            .ok_or_else(|| LaneError::input("runs-root", "run has no parent"))?,
+        &request.run,
+    ))?;
+    workspace::retain_or_declare(
+        &mut plan,
+        &settings,
+        request.compute_workspace.as_deref(),
+        request.expect_digest.as_deref(),
+        request.dry_run,
+        prior_workspace.as_ref(),
     )?;
     let selected_backend = crate::settings::BoxBackend::from_plan(&plan.document)?;
     let entry = settings
@@ -3971,6 +4110,7 @@ fn run_with_program(
                 LaneError::input("launch-reservation", "started worker UID is invalid")
             })?;
         select_worker_identity(&mut plan, owner_home, &request.loop_name, selected_uid)?;
+        plan.retain_workspace(&saved["plan"])?;
         plan.retain_attempt_wall(&saved["plan"])?;
         let preview = interrupted_recovery_preview(
             &saved,
@@ -4000,7 +4140,7 @@ fn run_with_program(
             |record| reaping::reap_interrupted_scope(record, owner_home),
         );
     }
-    if request.expect_digest.is_some() {
+    if request.expect_digest.is_some() && request.compute_workspace.is_none() {
         return Err(LaneError::input(
             "settlement-digest",
             "--expect-digest applies only to interrupted recovery",
@@ -4111,9 +4251,12 @@ fn run_with_program(
             None,
         )?;
         let helper_preview = json!({"program":request.podman_bin,"argv":helper_argv(&exe_word, &plan.driver_dir, owner_home, &root)?,"anchor_manifest":{"state":"bound-on-launch","transport":"rights","purposes":crate::container_entry::helper_purposes(selected_backend)}});
-        return Ok(
-            json!({"schema":1,"command":"launch","dry_run":true,"observe":request.observe,"enforcing":!request.observe,"plan":preview_plan,"proxy_service":proxy_service,"box_gate":box_gate,"box_probe":box_probe,"bound_source_matrix":bound_source_matrix,"bound_source_probe_identity":"launcher host identity runs rootless Podman with --userns=host; worker and fixed sibling UIDs are selected inside separate probe containers","dead_preparation":dry_recovery,"checks_performed":checks,"checks_on_launch":checks_on_launch,"driver_sha256":driver_sha256,"driver_contract":driver_contract,"entry_interface":entry_version,"selection":{"backend":selected_backend.name(),"worker_uid":worker_uid,"model":selection.record(),"method":"in-process read-only runs-root snapshot under shared lock"},"children_executed":[build::image_inspect_preview(&request.podman_bin, image, owner_home)?],"hash_checks_executed":hash_checks,"prepare_argv":prepare_preview,"setup_argv":setup_preview,"helper_argv":helper_preview,"invocation":{"program":entry,"argv":launch_argv},"environment":environment,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()}),
-        );
+        let mut report = json!({"schema":1,"command":"launch","dry_run":true,"observe":request.observe,"enforcing":!request.observe,"plan":preview_plan,"proxy_service":proxy_service,"box_gate":box_gate,"box_probe":box_probe,"bound_source_matrix":bound_source_matrix,"bound_source_probe_identity":"launcher host identity runs rootless Podman with --userns=host; worker and fixed sibling UIDs are selected inside separate probe containers","dead_preparation":dry_recovery,"checks_performed":checks,"checks_on_launch":checks_on_launch,"driver_sha256":driver_sha256,"driver_contract":driver_contract,"entry_interface":entry_version,"selection":{"backend":selected_backend.name(),"worker_uid":worker_uid,"model":selection.record(),"method":"in-process read-only runs-root snapshot under shared lock"},"children_executed":[build::image_inspect_preview(&request.podman_bin, image, owner_home)?],"hash_checks_executed":hash_checks,"prepare_argv":prepare_preview,"setup_argv":setup_preview,"helper_argv":helper_preview,"invocation":{"program":entry,"argv":launch_argv},"environment":environment,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()});
+        if let Some(declaration) = &request.compute_workspace {
+            report["workspace_declaration_digest"] =
+                json!(workspace::declaration_digest(declaration)?);
+        }
+        return Ok(report);
     }
     let _preparation_lease = lock_run_preparation(&root, &request.run, caller.0)?;
     if let Some(mut old) = read_reservation(&reservation)? {
@@ -4445,35 +4588,16 @@ fn run_with_program(
         persist_settlement_field(
             &reservation,
             "helper_end",
-            helper_parent_end(
-                helper.id(),
-                helper_parent_start,
-                status,
-                helper_stop.as_ref().err(),
-            ),
+            helper_stopped_end(helper.id(), helper_parent_start, status, &helper_stop),
         )?;
     }
-    let observer_stop = if let Some((child, _)) = proxy.as_mut() {
-        Some(stop_observer(child)?)
-    } else {
-        None
-    };
-    helper_stop_with_stderr(helper_stop, &mut helper, helper_stderr)?;
-    let observer_end = if let Some((child, slot)) = proxy.as_mut() {
-        let mut end = observer_stop.unwrap_or_default();
-        end["pid"] = json!(child.id());
-        end["start"] = record["observer_start"].clone();
-        end["socket"] = json!({"state":"pending"});
-        persist_settlement_field(&reservation, "observer_end", end.clone())?;
-        end["socket"] = observer_socket_disposition(slot, caller.0);
-        persist_settlement_field(&reservation, "observer_end", end.clone())?;
-        end
-    } else {
-        json!({"state":"not-started","socket":{"state":"not-applicable"}})
-    };
-    if !request.observe {
-        persist_settlement_field(&reservation, "observer_end", observer_end.clone())?;
-    }
+    let observer_end = finish_dispatch_observer(
+        &reservation,
+        &mut proxy,
+        &record["observer_start"],
+        caller.0,
+        || helper_stop_with_stderr(helper_stop.map(|_| ()), &mut helper, helper_stderr),
+    )?;
     let observed = if request.observe {
         let argv = vec![
             "unshare".into(),
@@ -4590,6 +4714,11 @@ fn run_with_program(
             .and_then(|rounds| rounds.last_mut())
             .ok_or_else(|| LaneError::input("round-record", "active round is absent"))?;
         round["phase"] = json!("failed");
+        if round["settlement_error"].is_null()
+            && let Err(error) = &settlement
+        {
+            round["settlement_error"] = json!(error.line());
+        }
         if let Some(line) = reaping.as_ref().err().map(LaneError::line).or_else(|| {
             reaping.as_ref().ok().and_then(|report| {
                 reaping::reaping_verdict(report)
@@ -4611,6 +4740,34 @@ fn run_with_program(
     );
     let round_dir = report::round_dir(&plan, &record, None)?;
     publish_reservation(&reservation, &record)?;
+    let report: Result<Value, LaneError> = (|| {
+        let settlement_report = report::settlement_result(
+            &settlement,
+            &request.loop_name,
+            &request.run,
+            record["active_round"]
+                .as_str()
+                .ok_or_else(|| LaneError::input("launch-report", "active round is absent"))?,
+        )?;
+        let output = result.as_ref().map_or_else(LaneError::line, Clone::clone);
+        let publication = report::credential_publication(&record)?;
+        Ok(
+            json!({"schema":1,"command":"launch","dry_run":false,"observe":request.observe,"enforcing":!request.observe,"observed":observed.as_ref().ok(),"home":plan.home,"driver_dir":plan.driver_dir,"round_dir":round_dir,"preparation":preparation.trim_end(),"driver_report":output.trim_end(),"settlement":settlement_report,"credential_publication":publication,"evidence":"driver directory outside home","wall_seconds":started.elapsed().as_secs_f64()}),
+        )
+    })();
+    let report = if settlement.is_err() {
+        let report = report?;
+        report::finish_with_fallback(
+            &verified_runs,
+            &request.run,
+            None,
+            report.clone(),
+            on_failure,
+        )?;
+        Ok(report)
+    } else {
+        report
+    };
     if !socket_good {
         return Err(LaneError::operation(
             "observer-socket",
@@ -4625,12 +4782,10 @@ fn run_with_program(
     }
     step_directory?;
     reaping::reaping_verdict(&reaping?)?;
-    let output = result?;
-    let observed = observed?;
-    let settlement = settlement_document(&settlement?)?;
-    let publication = report::credential_publication(&record)?;
-    let report = json!({"schema":1,"command":"launch","dry_run":false,"observe":request.observe,"enforcing":!request.observe,"observed":observed,"home":plan.home,"driver_dir":plan.driver_dir,"round_dir":round_dir,"preparation":preparation.trim_end(),"driver_report":output.trim_end(),"settlement":settlement,"credential_publication":publication,"evidence":"driver directory outside home","wall_seconds":started.elapsed().as_secs_f64()});
-    report::finish_with_fallback(&verified_runs, &request.run, None, report, on_failure)
+    result?;
+    observed?;
+    settlement?;
+    report::finish_with_fallback(&verified_runs, &request.run, None, report?, on_failure)
 }
 
 fn record_failed_pre_driver(
@@ -4757,6 +4912,30 @@ pub(super) fn verify_settlement_driver_dir(root: &Path, loop_uid: u32) -> Result
     Ok(())
 }
 
+// First-dispatch stop accounting must survive a subsequent helper-stop refusal.
+fn finish_dispatch_observer(
+    reservation: &Path,
+    proxy: &mut Option<(Child, crate::SocketSlot)>,
+    start: &Value,
+    owner: u32,
+    helper_result: impl FnOnce() -> Result<(), LaneError>,
+) -> Result<Value, LaneError> {
+    let end = if let Some((child, slot)) = proxy.as_mut() {
+        let mut end = stop_observer(child)?;
+        end["pid"] = json!(child.id());
+        end["start"] = start.clone();
+        end["socket"] = json!({"state":"pending"});
+        persist_settlement_field(reservation, "observer_end", end.clone())?;
+        end["socket"] = observer_socket_disposition(slot, owner);
+        end
+    } else {
+        json!({"state":"not-started","socket":{"state":"not-applicable"}})
+    };
+    persist_settlement_field(reservation, "observer_end", end.clone())?;
+    helper_result()?;
+    Ok(end)
+}
+
 pub(super) fn settlement_observer_ready(
     observer_end: &Value,
     observer_state: &str,
@@ -4815,8 +4994,10 @@ fn record_readback_with_owner(
         .as_str()
         .ok_or_else(|| LaneError::input("round-record", "active round is absent"))?;
     letters::valid_step(step)?;
-    let delivery = saved["mail_replies"].as_array().and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
-        .ok_or_else(|| LaneError::input("readback", "reply has no verified mail binding; bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT before settlement"))?;
+    let delivery = saved["mail_replies"]
+        .as_array()
+        .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
+        .ok_or_else(|| LaneError::input("readback", steering::MISSING_REPLY_BINDING))?;
     let mut readback = inspect_readback(
         &plan.driver_dir.join(format!("reply-{step}.txt")),
         recorded_loop_uid(&saved)?,
@@ -5955,6 +6136,73 @@ fn helper_argv(
     ])
 }
 
+pub(super) fn preflight_helper_round(
+    request: &LaunchRequest,
+    plan: &Plan,
+    environment: &BTreeMap<String, String>,
+    (owner_home, verified_home): (&Path, &OwnedFd),
+    (runs_root, verified_runs): (&Path, &OwnedFd),
+    lane_bin: &Path,
+) -> Result<Value, LaneError> {
+    let bundle = crate::container_entry::pin(
+        &request.loop_name,
+        (owner_home, verified_home),
+        (runs_root, verified_runs),
+        lane_bin,
+        &request.podman_bin,
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+    )?;
+    let exe = crate::pinned::owner_executable_word(lane_bin, Uid::effective().as_raw())?;
+    let mut words = vec![crate::pinned::path_word(
+        &request.podman_bin,
+        "container-program",
+    )?];
+    words.extend(helper_argv(&exe, &plan.driver_dir, owner_home, runs_root)?);
+    words.extend([
+        "--anchor-manifest".into(),
+        bundle.manifest,
+        "--preflight-round".into(),
+        request
+            .round
+            .clone()
+            .ok_or_else(|| LaneError::input("round-step", "round absent"))?,
+        "--budget".into(),
+        request.budget.to_string(),
+    ]);
+    if let Some(choice) = request.thread_choice {
+        words.push(choice.flag().into());
+    }
+    let (sender, input) = UnixStream::pair()
+        .map_err(|error| LaneError::operation("helper-preflight", error.to_string()))?;
+    loop_home::anchor::transport::send(&sender, &bundle.descriptors).map_err(|error| {
+        LaneError::input(
+            "container-anchor",
+            error.context("container-helper", "rights").to_string(),
+        )
+    })?;
+    let command = loop_home::CommandSpec {
+        label: "helper-preflight".into(),
+        argv: words,
+        io: loop_home::IoMode::Capture,
+        descriptors: loop_home::CommandDescriptors::default().with_input(input.into()),
+    };
+    let output =
+        build::run_checked_command(&command, environment, owner_home, 60, "helper-preflight")?;
+    let report: Value = serde_json::from_str(&output)
+        .map_err(|error| LaneError::input("helper-preflight", error.to_string()))?;
+    if report["state"] != "passed"
+        || report["step"].as_str() != request.round.as_deref()
+        || report["budget_seconds"] != request.budget
+        || report["changed"] != false
+    {
+        return Err(LaneError::input(
+            "helper-preflight",
+            "private preflight report differs",
+        ));
+    }
+    Ok(report)
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn start_helper_with_program(
     request: &LaunchRequest,
@@ -5965,6 +6213,33 @@ fn start_helper_with_program(
     runs_root: &Path,
     verified_runs: &OwnedFd,
     lane_bin: &Path,
+    record_parent: impl FnMut(u32, u64) -> Result<(), LaneError>,
+) -> Result<(Child, u64, JoinHandle<Vec<u8>>), LaneError> {
+    start_helper_observed(
+        request,
+        plan,
+        owner_home,
+        environment,
+        verified_home,
+        runs_root,
+        verified_runs,
+        lane_bin,
+        &mut build::LiveChild::untracked(),
+        record_parent,
+    )
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn start_helper_observed(
+    request: &LaunchRequest,
+    plan: &Plan,
+    owner_home: &Path,
+    environment: &BTreeMap<String, String>,
+    verified_home: &OwnedFd,
+    runs_root: &Path,
+    verified_runs: &OwnedFd,
+    lane_bin: &Path,
+    live: &mut build::LiveChild,
     mut record_parent: impl FnMut(u32, u64) -> Result<(), LaneError>,
 ) -> Result<(Child, u64, JoinHandle<Vec<u8>>), LaneError> {
     let reservation = reservation_path(runs_root, &request.run);
@@ -5986,6 +6261,21 @@ fn start_helper_with_program(
                 .ok_or_else(|| LaneError::input("socket-path", "control name absent"))?,
         )
         .map_err(|error| LaneError::input("socket-path", error.to_string()))?;
+        if live.is_tracked()
+            && (socket_slot
+                .metadata()
+                .map_err(|error| LaneError::input("helper-socket", error.to_string()))?
+                .is_some()
+                || control_slot
+                    .metadata()
+                    .map_err(|error| LaneError::input("helper-socket", error.to_string()))?
+                    .is_some())
+        {
+            return Err(LaneError::input(
+                "helper-socket",
+                "resumed helper socket already exists",
+            ));
+        }
         crate::pinned::owner_executable(&request.podman_bin, Uid::effective().as_raw())?;
         let (transfer, private_stdin) = UnixStream::pair()
             .map_err(|error| LaneError::operation("helper-start", error.to_string()))?;
@@ -6022,6 +6312,7 @@ fn start_helper_with_program(
             return Err(retain_startup_refusal(error, saved.map(|_| ())));
         }
     };
+    live.started(child.id());
     // Measure before any wait reaps the parent: even an exited child retains its tick.
     let parent_start = crate::container_helper::process_start(child.id());
     let startup = (|| {
@@ -6049,6 +6340,7 @@ fn start_helper_with_program(
                     tail.drain(..tail.len() - 4096);
                 }
             }
+            helper_control_warnings(&tail, &mut std::io::stderr().lock());
             tail
         });
         loop_home::anchor::transport::send(&transfer, &bundle.descriptors).map_err(|error| {
@@ -6099,6 +6391,9 @@ fn start_helper_with_program(
     match startup {
         Ok((start, stderr)) => Ok((child, start, stderr)),
         Err(error) => {
+            if live.is_tracked() {
+                let _stop = stop_observer(&mut child);
+            }
             drop(child.kill());
             let saved = (|| {
                 let status = child.wait().map_err(|wait| {
@@ -6153,6 +6448,30 @@ fn helper_parent_end(
     json!({"state":"completed","successful":detail.is_none() && status.success(),"parent_pid":parent_pid,"parent_start":parent_start,"status":status.to_string(),"detail":detail.map(LaneError::line)})
 }
 
+fn helper_stopped_end(
+    parent_pid: u32,
+    parent_start: u64,
+    status: std::process::ExitStatus,
+    stopped: &Result<Option<LaneError>, LaneError>,
+) -> Value {
+    let mut end = helper_parent_end(parent_pid, parent_start, status, stopped.as_ref().err());
+    if let Ok(Some(handshake)) = stopped {
+        end["detail"] = json!(handshake.line());
+    }
+    end
+}
+
+// The bounded stderr reader reports shutdown warnings even when its successful
+// result is not joined by the host. Other helper output stays on the error path.
+fn helper_control_warnings(bytes: &[u8], output: &mut impl std::io::Write) {
+    for line in String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|line| line.starts_with(crate::container_helper::QUEUED_CONTROL_WARNING))
+    {
+        let _logged = writeln!(output, "{line}");
+    }
+}
+
 fn helper_stop_with_stderr(
     result: Result<(), LaneError>,
     helper: &mut Child,
@@ -6170,13 +6489,26 @@ fn helper_stop_with_stderr(
     Ok(())
 }
 
-fn stop_helper(child: &mut Child, plan: &Plan, verified_runs: &OwnedFd) -> Result<(), LaneError> {
+fn stop_helper(
+    child: &mut Child,
+    plan: &Plan,
+    verified_runs: &OwnedFd,
+) -> Result<Option<LaneError>, LaneError> {
+    stop_helper_with_bound(child, plan, verified_runs, Duration::from_secs(90))
+}
+
+fn stop_helper_with_bound(
+    child: &mut Child,
+    plan: &Plan,
+    verified_runs: &OwnedFd,
+    stop_bound: Duration,
+) -> Result<Option<LaneError>, LaneError> {
     if let Some(status) = child
         .try_wait()
         .map_err(|error| LaneError::operation("helper-stop", error.to_string()))?
     {
         return if status.success() {
-            Ok(())
+            Ok(None)
         } else {
             Err(LaneError::operation(
                 "helper-stop",
@@ -6184,6 +6516,11 @@ fn stop_helper(child: &mut Child, plan: &Plan, verified_runs: &OwnedFd) -> Resul
             ))
         };
     }
+    let handshake = helper_stop_handshake(plan, verified_runs);
+    wait_helper_after_stop(child, handshake, Instant::now() + stop_bound, stop_bound)
+}
+
+fn helper_stop_handshake(plan: &Plan, verified_runs: &OwnedFd) -> Result<(), LaneError> {
     let control = crate::container_helper::control_socket_path(&plan.driver_dir)?;
     let slot = crate::SocketSlot::beneath(
         verified_runs,
@@ -6211,7 +6548,32 @@ fn stop_helper(child: &mut Child, plan: &Plan, verified_runs: &OwnedFd) -> Resul
             "helper did not acknowledge cancellation",
         ));
     }
-    let deadline = Instant::now() + Duration::from_secs(90);
+    Ok(())
+}
+
+fn wait_helper_after_stop(
+    child: &mut Child,
+    handshake: Result<(), LaneError>,
+    deadline: Instant,
+    bound: Duration,
+) -> Result<Option<LaneError>, LaneError> {
+    let waited = wait_helper_exit(child, deadline, bound);
+    match (handshake, waited) {
+        (handshake, Ok(())) => Ok(handshake.err()),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(mut handshake), Err(wait)) => {
+            handshake.detail.push_str("; helper exit: ");
+            handshake.detail.push_str(&wait.line());
+            Err(handshake)
+        }
+    }
+}
+
+fn wait_helper_exit(
+    child: &mut Child,
+    deadline: Instant,
+    bound: Duration,
+) -> Result<(), LaneError> {
     loop {
         if let Some(status) = child
             .try_wait()
@@ -6229,7 +6591,10 @@ fn stop_helper(child: &mut Child, plan: &Plan, verified_runs: &OwnedFd) -> Resul
         if Instant::now() >= deadline {
             return Err(LaneError::operation(
                 "helper-stop",
-                "helper did not finish bounded container cancellation within 90 seconds",
+                format!(
+                    "helper did not finish bounded container cancellation within {} seconds",
+                    bound.as_secs_f64()
+                ),
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -6352,6 +6717,7 @@ pub fn private_make(
     door_scope: crate::door::Scope,
     custody: &crate::runtime_entry::Custody,
     backend: crate::settings::BoxBackend,
+    workspace_declaration: Option<(&str, &str)>,
 ) -> Result<Value, LaneError> {
     let (mut plan, settings) =
         crate::load_launch_plan(owner_home, loop_name, run, (0, 0), Some(backend))?;
@@ -6362,6 +6728,16 @@ pub fn private_make(
         .ok_or_else(|| LaneError::input("runs-root", "run has no parent"))?
         .to_path_buf();
     let _lock = lock_runs_root(&root, true, 0)?;
+    let prior_workspace = read_reservation(&reservation_path(&root, run))?;
+    workspace::retain_or_declare(
+        &mut plan,
+        &settings,
+        workspace_declaration.map(|(text, _)| text),
+        workspace_declaration.map(|(_, digest)| digest),
+        false,
+        prior_workspace.as_ref(),
+    )?;
+
     let (base, count) = worker_range(owner_home, loop_name)?;
     exercise_resources::verify_worker_block(base, count)?;
     let reserved = custody.reserved_uids(owner_home, loop_name)?;
@@ -6440,9 +6816,6 @@ pub fn private_make(
             "reserved worker identity differs",
         ));
     }
-    custody
-        .create_birth(owner_home, loop_name, &birth, "reserve")
-        .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
     let mut next = initial_reservation(
         &plan,
         loop_name,
@@ -6458,22 +6831,31 @@ pub fn private_make(
     next["mail_birth"] = serde_json::to_value(&birth)
         .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
     let prior = prior_birth;
-    let retired = if let Some(record) = prior {
-        replace_preparation_with(
-            &record,
-            &mut next,
-            &reservation,
-            &root,
-            &plan.driver_dir,
-            &plan.home,
-            &observation_path(&plan, run)?,
-            run,
-            crate::container_helper::process_presence,
-        )?
-    } else {
-        publish_reservation(&reservation, &next)?;
-        Vec::new()
-    };
+    let retired = workspace::reserve_before_publish(
+        || {
+            custody
+                .create_birth(owner_home, loop_name, &birth, "reserve")
+                .map_err(|error| LaneError::input("mail-birth", error.to_string()))
+        },
+        || {
+            if let Some(record) = prior {
+                replace_preparation_with(
+                    &record,
+                    &mut next,
+                    &reservation,
+                    &root,
+                    &plan.driver_dir,
+                    &plan.home,
+                    &observation_path(&plan, run)?,
+                    run,
+                    crate::container_helper::process_presence,
+                )
+            } else {
+                publish_reservation(&reservation, &next)?;
+                Ok(Vec::new())
+            }
+        },
+    )?;
     let mut result =
         match home::make_home_in_namespace(&plan, &settings, &bytes, owner_home, loop_name) {
             Ok(report) => report,
@@ -6598,13 +6980,13 @@ fn refreshed_client_environment(
     Ok(refreshed)
 }
 
-fn prepare_client_environment(
+fn client_environment_bytes(
     driver_dir: &Path,
     runs_root: &OwnedFd,
     runtime_dir: &OwnedFd,
     loop_uid: u32,
     initial: bool,
-) -> Result<(), LaneError> {
+) -> Result<Vec<u8>, LaneError> {
     let owner = Uid::effective().as_raw();
     let stat =
         fstat(runs_root).map_err(|error| LaneError::input("runtime-client", error.to_string()))?;
@@ -6644,14 +7026,46 @@ fn prepare_client_environment(
             .map_err(|error| LaneError::input("runtime-client", error.to_string()))?;
         refreshed_client_environment(&bytes, stat.st_dev, stat.st_ino)?
     };
-    let temporary = format!(
-        ".runtime.env-{}-{}",
-        std::process::id(),
-        letters::unix_ns()?
-    );
+    Ok(bytes)
+}
+
+fn prepare_client_environment(
+    driver_dir: &Path,
+    runs_root: &OwnedFd,
+    runtime_dir: &OwnedFd,
+    loop_uid: u32,
+    initial: bool,
+) -> Result<(), LaneError> {
+    let bytes = client_environment_bytes(driver_dir, runs_root, runtime_dir, loop_uid, initial)?;
+    publish_client_environment(runtime_dir, loop_uid, &bytes)
+}
+
+fn publish_client_environment(
+    runtime_dir: &OwnedFd,
+    loop_uid: u32,
+    bytes: &[u8],
+) -> Result<(), LaneError> {
+    publish_client_environment_named(runtime_dir, loop_uid, bytes, None)
+}
+
+fn publish_client_environment_named(
+    runtime_dir: &OwnedFd,
+    loop_uid: u32,
+    bytes: &[u8],
+    temporary: Option<String>,
+) -> Result<(), LaneError> {
+    let owner = Uid::effective().as_raw();
+    let temporary = match temporary {
+        Some(temporary) => temporary,
+        None => format!(
+            ".runtime.env-{}-{}",
+            std::process::id(),
+            letters::unix_ns()?
+        ),
+    };
     let mut file = create_runtime_file(runtime_dir, &temporary, 0o440)?;
     let result = (|| {
-        file.write_all(&bytes)
+        file.write_all(bytes)
             .map_err(|error| LaneError::operation("runtime-client", error.to_string()))?;
         fchownat(
             &file,
@@ -6751,7 +7165,12 @@ pub(crate) fn pinned_plan_from_record_admitted(
     let letter = record["letter_source"]
         .as_str()
         .ok_or_else(|| LaneError::input("letter-model", "recorded letter source is absent"))?;
-    let bytes = if let Some(expected) = record["rotation_source_sha256"].as_str() {
+    let bytes = if record["active_round"]
+        .as_str()
+        .is_some_and(|step| step != "dispatch")
+    {
+        steering::retained_letter(&plan, record)?
+    } else if let Some(expected) = record["rotation_source_sha256"].as_str() {
         let inbox = plan.home.join("brief.txt");
         let bytes = home::read_letter(&inbox, Uid::effective().as_raw())?;
         let actual = build::sha256_bytes(&bytes, owner_home)?;
@@ -6783,6 +7202,7 @@ pub(crate) fn pinned_plan_from_record_admitted(
         ));
     }
     plan.select_launch_model(&record["model_selection"])?;
+    plan.retain_workspace(&record["plan"])?;
     plan.retain_attempt_wall(&record["plan"])?;
     compare_pinned_plan(&record["plan"], &plan.document)?;
     Ok((plan, settings))
@@ -7438,6 +7858,15 @@ mod tests {
         .expect_err("helper refusal");
         assert_eq!(error.kind, "helper-stop");
         assert!(error.detail.contains("helper-pin: fixture refusal"));
+        let mut warnings = Vec::new();
+        super::helper_control_warnings(
+            b"other diagnostic\nhelper-control queued peer: injected EOF\nignored\n",
+            &mut warnings,
+        );
+        assert_eq!(
+            warnings, b"helper-control queued peer: injected EOF\n",
+            "successful helper warnings reach the host diagnostic stream"
+        );
     }
 
     /// # Panics
@@ -8034,7 +8463,7 @@ mod tests {
     /// ´test:unit:interrupted-completion-requires-successful-process-ends´
     #[test]
     fn interrupted_completion_requires_successful_process_ends() {
-        let mut record = json!({"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"readback_end":"completed","observation_end":"completed","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}}});
+        let mut record = json!({"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"readback_end":"completed","observation_end":"completed","observer_state":"not-started","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}}});
         let evidence = json!({"state":"complete","attempts":[{"status":0,"error_free":true}]});
         assert!(super::interrupted_settlement_success(&record, &evidence));
         for end in ["driver_end", "helper_end"] {
@@ -8042,6 +8471,223 @@ mod tests {
             assert!(!super::interrupted_settlement_success(&record, &evidence));
             record[end]["successful"] = json!(true);
             assert!(super::interrupted_settlement_success(&record, &evidence));
+        }
+        let scope = json!({"unit":"superloop-lane-run-proof.service",
+            "cgroup":"/user.slice/superloop-lane-run-proof.service/work",
+            "device":1,"inode":2,"proxy_unit":"proxy.service","proxy_invocation":"fixture"});
+        let collected = json!({"launcher_pid":321,"launcher_start":88,
+            "driver_entry_pid":322,"driver_entry_start":89,"helper_pid":323,"helper_start":90,
+            "helper_parent_pid":325,"helper_parent_start":92,"observer_pid":324,"observer_start":91,
+            "run_scope":scope,"observer_state":"running",
+            "observer_end":{"state":"absent-on-recovery","socket":{"state":"removed"}},
+            "reaping_recovery":{"state":"collected","scope":scope,
+                "cgroup":scope["cgroup"],"presence":"all-absent",
+                "container_payload":{"state":"absent","by":"loop-and-run-label"},
+                "identities":{"launcher":[321,88],"driver":[322,89],"helper":[323,90],
+                    "helper_parent":[325,92],"observer":[324,91]}}});
+        for (key, value) in collected.as_object().expect("proof record") {
+            record[key] = value.clone();
+        }
+        record["observer_state"] = json!("ended");
+        assert!(super::reaping::recovery_verdict(&record).is_ok());
+        assert!(
+            !super::interrupted_settlement_success(&record, &evidence),
+            "collected scope cannot turn absent observer into stopped"
+        );
+        record["observer_end"]["state"] = json!("stopped");
+        assert!(super::interrupted_settlement_success(&record, &evidence));
+        record["settlement_uncertain"] = json!(true);
+        assert!(
+            !super::interrupted_settlement_success(&record, &evidence),
+            "uncertain observer still refuses interrupted completion"
+        );
+    }
+
+    /// ´test:unit:dispatch-observer-end-precedes-helper-stop-refusal´
+    #[test]
+    fn dispatch_observer_end_precedes_helper_stop_refusal() {
+        struct Observer(Option<(std::process::Child, crate::SocketSlot)>);
+        impl Drop for Observer {
+            fn drop(&mut self) {
+                if let Some((child, _)) = self.0.as_mut() {
+                    drop(child.kill());
+                    drop(child.wait());
+                }
+            }
+        }
+        for exited in [false, true] {
+            let root = tempfile::tempdir().expect("private runs root");
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("mode");
+            let path = root.path().join(".reservation-R.json");
+            let record = json!({"schema":1,"worker_uid":3000,"loop":"alpha","run":"R","phase":"started","active_round":"dispatch",
+                "observer_state":"running","settlement_uncertain":false});
+            super::publish_reservation(&path, &record).expect("active first dispatch");
+            let slot = crate::SocketSlot::new(
+                fs::File::open(root.path()).expect("directory").into(),
+                "observer".as_ref(),
+            )
+            .expect("observer slot");
+            let _listener = std::os::unix::net::UnixListener::bind(slot.address()).expect("socket");
+            let mut child = if exited {
+                std::process::Command::new("/usr/bin/true")
+            } else {
+                let mut command = std::process::Command::new("/usr/bin/sleep");
+                command.arg("infinity");
+                command
+            };
+            let mut child = child
+                .process_group(0)
+                .spawn()
+                .expect("real observer process");
+            if exited {
+                child.wait().expect("observer died during dispatch");
+            }
+            let mut proxy = Observer(Some((child, slot)));
+            let error = super::finish_dispatch_observer(
+                &path,
+                &mut proxy.0,
+                &json!(42),
+                nix::unistd::Uid::effective().as_raw(),
+                || {
+                    Err(super::LaneError::operation(
+                        "helper-stop",
+                        "injected stop refusal",
+                    ))
+                },
+            )
+            .expect_err("original helper refusal");
+            assert_eq!(error.detail, "injected stop refusal");
+            let saved = super::read_reservation(&path)
+                .expect("read")
+                .expect("record");
+            assert_eq!(
+                saved["observer_end"]["state"],
+                if exited {
+                    "failed-before-stop"
+                } else {
+                    "stopped"
+                }
+            );
+            assert_eq!(saved["observer_end"]["socket"]["state"], "removed");
+            assert_eq!(saved["observer_state"], "ended");
+            assert_eq!(
+                super::settlement_observer_ready(&saved["observer_end"], "ended", false),
+                !exited
+            );
+            assert!(!super::settlement_observer_ready(
+                &saved["observer_end"],
+                "ended",
+                true
+            ));
+            let mut absent = saved["observer_end"].clone();
+            absent["state"] = json!("absent-on-recovery");
+            assert!(
+                !super::settlement_observer_ready(&absent, "ended", false),
+                "absence cannot prove a requested stop"
+            );
+        }
+    }
+
+    /// ´test:unit:helper-stop-waits-for-exit-after-handshake-failure´
+    #[test]
+    fn helper_stop_waits_for_exit_after_handshake_failure() {
+        use std::io::Read as _;
+        use std::time::{Duration, Instant};
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                drop(self.0.kill());
+                drop(self.0.wait());
+            }
+        }
+        for (handshake_ok, exit) in [
+            (true, Some(0)),
+            (false, Some(0)),
+            (false, Some(7)),
+            (false, None),
+        ] {
+            let mut child = OwnedChild(
+                std::process::Command::new("/bin/sh")
+                    .args(["-c", "printf R; read code; exit \"$code\""])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("exact helper child"),
+            );
+            let mut ready = [0];
+            child
+                .0
+                .stdout
+                .take()
+                .expect("ready pipe")
+                .read_exact(&mut ready)
+                .expect("child ready");
+            assert_eq!(ready, *b"R");
+            if let Some(code) = exit {
+                writeln!(child.0.stdin.as_mut().expect("release pipe"), "{code}").expect("release");
+            }
+            let handshake = if handshake_ok {
+                Ok(())
+            } else {
+                Err(crate::error::LaneError::operation(
+                    "helper-stop",
+                    "injected connection reset",
+                ))
+            };
+            let deadline = if exit.is_some() {
+                Instant::now() + Duration::from_secs(180)
+            } else {
+                Instant::now()
+            };
+            let result = super::wait_helper_after_stop(
+                &mut child.0,
+                handshake,
+                deadline,
+                Duration::from_secs(90),
+            );
+            match exit {
+                Some(0) => {
+                    assert!(
+                        result.is_ok(),
+                        "successful exact exit overrides failed handshake: {result:?}"
+                    );
+                    let status = child.0.try_wait().expect("waited").expect("reaped");
+                    assert!(status.success());
+                    let end = super::helper_stopped_end(child.0.id(), 1, status, &result);
+                    assert_eq!(
+                        end["successful"], true,
+                        "handshake detail is not an exit failure"
+                    );
+                    if handshake_ok {
+                        assert!(end["detail"].is_null());
+                    } else {
+                        assert_eq!(
+                            end["detail"], "helper-stop: injected connection reset",
+                            "successful helper end keeps failed handshake detail"
+                        );
+                    }
+                }
+                Some(_) => {
+                    let error = result.expect_err("nonzero exit refuses");
+                    assert!(
+                        error.detail.contains("injected connection reset"),
+                        "{error}"
+                    );
+                    assert!(
+                        error.detail.contains("helper exited exit status: 7"),
+                        "{error}"
+                    );
+                }
+                None => {
+                    let error = result.expect_err("live child is not success");
+                    assert!(
+                        error.detail.contains("injected connection reset"),
+                        "{error}"
+                    );
+                    assert!(error.detail.contains("within 90 seconds"), "{error}");
+                    assert!(child.0.try_wait().expect("still live").is_none());
+                }
+            }
         }
     }
 

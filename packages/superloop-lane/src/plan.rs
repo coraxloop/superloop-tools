@@ -23,6 +23,33 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// Retain the validated workspace declaration and optional placement facts.
+    ///
+    /// # Errors
+    /// Refuses a malformed snapshot or one bound to another rebuilt loop/run.
+    pub(crate) fn retain_workspace(&mut self, protected: &Value) -> Result<(), LaneError> {
+        if let Some(snapshot) = workspace_snapshot(protected)? {
+            if self.document["loop"] != snapshot.grant.loop_name
+                || self.document["run"] != snapshot.grant.run
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "rebuilt plan and workspace identities differ",
+                ));
+            }
+            self.document["compute_workspace"] = protected["compute_workspace"].clone();
+            if let Some(placement) = protected.get("compute_placement") {
+                self.document["compute_placement"] = placement.clone();
+            } else if let Some(document) = self.document.as_object_mut() {
+                document.remove("compute_placement");
+            }
+        } else if let Some(document) = self.document.as_object_mut() {
+            document.remove("compute_workspace");
+            document.remove("compute_placement");
+        }
+        Ok(())
+    }
+
     /// Retain the protected plan's optional attempt wall when rebuilding runtime pins.
     ///
     /// # Errors
@@ -239,6 +266,27 @@ pub(crate) fn registry_with_ready(
     timeout: Duration,
     ready: impl FnOnce() -> Result<(), LaneError>,
 ) -> Result<Value, LaneError> {
+    registry_capture(settings, loop_name, timeout, ready, |_, _, _| {})
+}
+
+#[cfg(test)]
+pub(crate) fn registry_with_progress(
+    settings: &Settings,
+    loop_name: &str,
+    timeout: Duration,
+    progress: impl FnMut(bool, bool, bool),
+) -> Result<Value, LaneError> {
+    registry_capture(settings, loop_name, timeout, || Ok(()), progress)
+}
+
+#[allow(clippy::too_many_lines)]
+fn registry_capture(
+    settings: &Settings,
+    loop_name: &str,
+    timeout: Duration,
+    ready: impl FnOnce() -> Result<(), LaneError>,
+    mut progress: impl FnMut(bool, bool, bool),
+) -> Result<Value, LaneError> {
     let entry_bin = settings.entry_bin.as_ref().ok_or_else(|| {
         LaneError::input("missing-setting", "entry_bin is absent in workers.toml")
     })?;
@@ -309,6 +357,11 @@ pub(crate) fn registry_with_ready(
                 }
             }
         }
+        progress(
+            status.is_some(),
+            stdout_bytes.is_some(),
+            stderr_bytes.is_some(),
+        );
         if status.is_some() && stdout_bytes.is_some() && stderr_bytes.is_some() {
             break;
         }
@@ -424,7 +477,7 @@ pub(crate) fn door_pin(
             "door generation shape differs",
         ));
     }
-    let _agent = crate::door::config::runner(&record["agent"], owner_home, loop_name)?;
+    let _agent = crate::door::config::runner(&record["agent"], owner_home, loop_name, None)?;
     let recorded_group = record["host_door_gid"]
         .as_u64()
         .and_then(|value| u32::try_from(value).ok())
@@ -652,6 +705,7 @@ fn check_claude_command(document: &Value, words: &[&str]) -> Result<(), LaneErro
 /// Refuses a missing or expanded runtime confinement option or writable mount.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
+    let _workspace = workspace_snapshot(document)?;
     let backend = crate::settings::BoxBackend::from_plan(document)?;
     let argv = document["runtime_argv"]
         .as_array()
@@ -2241,15 +2295,97 @@ impl Plan {
     }
 }
 
+/// Validate the optional W1 snapshot without adding it to any existing plan writer.
+pub(crate) fn workspace_snapshot(
+    document: &Value,
+) -> Result<Option<execute_command::workspace::GrantSnapshot>, LaneError> {
+    let grant = document
+        .get("compute_workspace")
+        .map(|value| {
+            execute_command::workspace::GrantSnapshot::decode(
+                value.clone(),
+                document["loop"].as_str().unwrap_or_default(),
+                document["run"].as_str().unwrap_or_default(),
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))
+        })
+        .transpose()?;
+    let _placement = crate::placement::snapshot(document, grant.as_ref())?;
+    Ok(grant)
+}
+
+/// Fictional owner declaration used only by reader/reconstruction regressions.
+/// # Panics
+/// Panics only if the static fixture violates the workspace grant contract.
+#[cfg(test)]
+pub(crate) fn fixture_workspace_snapshot() -> Value {
+    let grant = execute_command::workspace::Grant::decode(json!({"schema":1,"loop":"alpha","run":"R","node":"fixture-node","workspace":"/work/R","baseline_env":[["PATH","/usr/bin"]],"resources":{},"shells":["/bin/sh"],"quick_policy_digest":"a".repeat(64),"blacklist_digest":"b".repeat(64),"executor_protocol":1})).expect("fictional grant");
+    json!({"digest":grant.digest().expect("grant digest"),"grant":grant})
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// ´test:unit:workspace-retention-validates-before-changing-the-plan´
+    #[test]
+    fn workspace_retention_validates_before_changing_the_plan() {
+        let mut plan = super::Plan {
+            home: "/fixture".into(),
+            driver_dir: "/fixture/run".into(),
+            letter: "/fixture/letter".into(),
+            document: serde_json::json!({"loop":"alpha","run":"R"}),
+        };
+        let protected = serde_json::json!({"loop":"alpha","run":"R","compute_workspace":super::fixture_workspace_snapshot()});
+        plan.retain_workspace(&protected).expect("retained");
+        assert_eq!(plan.document, protected);
+        let mut bad = protected.clone();
+        bad["compute_workspace"]["grant"]["workspace"] = serde_json::json!("/other");
+        assert_eq!(
+            plan.retain_workspace(&bad).expect_err("changed grant").kind,
+            "door-workspace-context-differs"
+        );
+        assert_eq!(plan.document, protected);
+        plan.retain_workspace(&serde_json::json!({"loop":"alpha","run":"R"}))
+            .expect("absent declaration");
+        assert!(plan.document.get("compute_workspace").is_none());
+    }
+
+    use std::fs;
     use std::io;
     use std::os::unix::ffi::OsStringExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
 
     use serde_json::{Value, json};
 
     use super::Plan;
+
+    /// ´test:unit:workspace-plan-and-reservation-read-snapshot-before-writer´
+    #[test]
+    fn workspace_plan_and_reservation_read_snapshot_before_writer() {
+        let mut plan = json!({"loop":"alpha","run":"R","compute_workspace":super::fixture_workspace_snapshot()});
+        assert!(crate::plan::workspace_snapshot(&plan).unwrap().is_some());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("reservation.json");
+        let mut reservation = json!({"schema":1,"phase":"preparing","worker_uid":3000,"loop":"alpha","run":"R","plan":plan});
+        fs::write(&path, serde_json::to_vec(&reservation).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            crate::launch::read_reservation(&path).unwrap().unwrap(),
+            reservation
+        );
+        plan["compute_workspace"]["grant"]["workspace"] = json!("/foreign");
+        assert_eq!(
+            crate::plan::workspace_snapshot(&plan).unwrap_err().kind,
+            "door-workspace-context-differs"
+        );
+        reservation["run"] = json!("S");
+        fs::write(&path, serde_json::to_vec(&reservation).unwrap()).unwrap();
+        assert_eq!(
+            crate::launch::read_reservation(&path).unwrap_err().kind,
+            "door-workspace-context-differs"
+        );
+    }
 
     /// ´test:unit:registry-capture-names-reader-failure´
     #[test]

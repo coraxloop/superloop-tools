@@ -5,6 +5,8 @@
 //! | Test | Area | Claim |
 //! |------|------|-------|
 //! | [`code_span_pipes_preserve_every_cell`] | fmt | Code-span pipes are cell text, so formatting retains all four columns and both literal pipe spellings without rewriting their code spans. |
+//! | [`writer_refusals_name_a_location_and_recovery`] | fmt | A writer refusal identifies its category, source start and recovery action; an ambiguous table row names its line and retains the refused source. |
+//! | [`refusal_locations_cross_overlay_slots`] | fmt | Refusals after one or more overlay slots retain original lines and byte offsets, including CRLF padding and a multibyte prefix, in both modes. |
 //! | [`check_reports_an_unformatted_file_without_writing_it`] | fmt | Formatter check mode reports every path that would change, exits with the linter's findings status, and leaves the named file byte-for-byte alone. |
 //! | [`check_continues_after_a_guard_rejection`] | fmt | Formatter check mode records a guard rejection for one file and still reports a later file that would reflow, so one unsafe source does not hide the rest of the requested paths. |
 //! | [`records_every_non_guard_failure_in_check_and_write_modes`] | fmt | Both formatter modes record an unreadable file and invalid UTF-8 independently while retaining a good file's result; write mode formats that good file over the same tree. |
@@ -35,6 +37,16 @@ fn code_span_pipes_preserve_every_cell() {
         ("`dispatch|report`", ""),
         ("`dispatch\\|report`", ""),
         ("``a`|b``", ""),
+        ("`\\|` *label*", ""),
+        ("`\\|` **label**", ""),
+        ("*label* `\\|`", ""),
+        ("`a \\| b` *label*", ""),
+        ("`\\|`", ""),
+        ("\\| *label*", ""),
+        ("``a \\| b`` **label**", ""),
+        ("`a|b` *label*", ""),
+        ("**label** `a|b`", ""),
+        ("``a`|b`` *label*", ""),
         ("`dispatch|report`", "|404|stray ` tick|OPEN|linter|\n"),
     ] {
         let before = format!(
@@ -95,6 +107,115 @@ fn code_span_pipes_preserve_every_cell() {
                 fs::read_to_string(&path).expect("read refused table"),
                 before
             );
+        }
+    }
+}
+
+/// A writer refusal identifies its category, source start and recovery action;
+/// an ambiguous table row names its line and retains the refused source.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the production formatter violates the contract.
+///
+/// ´claim:fmt:writer-refusals-name-a-location-and-recovery´
+/// ´test:integration:writer-refusals-name-a-location-and-recovery´
+#[test]
+fn writer_refusals_name_a_location_and_recovery() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let path = root.path().join("refused.md");
+    for (source, kind, location, action) in [
+        (
+            "Before.\n\n*[^a]*\n\n[^a]: note\n",
+            "serialization_failure",
+            "block starting at line 3",
+            "report this block with the formatter version",
+        ),
+        (
+            "Before.\n\n|a|b|\n|-|-|\n|a|b|c|\n",
+            "source_parse_failure",
+            "row at line 5",
+            "make the row match the header's column count",
+        ),
+    ] {
+        fs::write(&path, source).expect("write fixture");
+        for args in [vec!["fmt", "--check"], vec!["fmt"]] {
+            let output = Command::new(env!("CARGO_BIN_EXE_superloop-lint"))
+                .args(args)
+                .arg(&path)
+                .output()
+                .expect("production formatter");
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report");
+            assert_eq!(output.status.code(), Some(3), "{report}");
+            assert_eq!(report["files_rejected"], 1, "{report}");
+            let rejection = &report["rejected"][0];
+            assert_eq!(rejection["kind"], kind, "{report}");
+            let cause = rejection["cause"].as_str().expect("cause");
+            assert!(
+                cause.contains(location) && cause.contains(action),
+                "{cause}"
+            );
+            if kind == "serialization_failure" {
+                assert_eq!(
+                    rejection["input_range"],
+                    serde_json::json!({"start":9,"end":9})
+                );
+            }
+            assert_eq!(fs::read_to_string(&path).expect("read fixture"), source);
+        }
+    }
+}
+
+/// Refusals after one or more overlay slots retain original lines and byte
+/// offsets, including CRLF padding and a multibyte prefix, in both modes.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the production formatter loses the location.
+///
+/// ´claim:fmt:refusal-locations-cross-overlay-slots´
+/// ´test:integration:refusal-locations-cross-overlay-slots´
+#[test]
+fn refusal_locations_cross_overlay_slots() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let path = root.path().join("slots.md");
+    for (prefix, first_line) in [
+        ("Préface.\n{{overlay:body:test:first}}\n\n", 4),
+        (
+            "Préface.\n{{overlay:body:test:first}}\n\nMiddle.\n{{overlay:body:test:second}}\n\n",
+            7,
+        ),
+    ] {
+        for suffix in ["", "\n{{overlay:body:test:last}}\nAfter.\n"] {
+            for newline in ["\n", "\r\n"] {
+                let source =
+                    format!("{prefix}*[^a]*\n\n[^a]: note\n{suffix}").replace('\n', newline);
+                let start = prefix.replace('\n', newline).len();
+                fs::write(&path, &source).expect("write fixture");
+                for args in [vec!["fmt", "--check"], vec!["fmt"]] {
+                    let output = Command::new(env!("CARGO_BIN_EXE_superloop-lint"))
+                        .args(args)
+                        .arg(&path)
+                        .output()
+                        .expect("production formatter");
+                    let report: serde_json::Value =
+                        serde_json::from_slice(&output.stdout).expect("report");
+                    assert_eq!(output.status.code(), Some(3), "{report}");
+                    assert_eq!(report["files_rejected"], 1, "{report}");
+                    let rejection = &report["rejected"][0];
+                    assert_eq!(rejection["kind"], "serialization_failure", "{report}");
+                    assert!(
+                        rejection["cause"]
+                            .as_str()
+                            .expect("cause")
+                            .contains(&format!("block starting at line {first_line}:")),
+                        "{report}"
+                    );
+                    assert_eq!(
+                        rejection["input_range"],
+                        serde_json::json!({"start":start,"end":start})
+                    );
+                    assert_eq!(fs::read_to_string(&path).expect("read fixture"), source);
+                }
+            }
         }
     }
 }
@@ -169,7 +290,8 @@ fn check_continues_after_a_guard_rejection() {
     let root = tempfile::tempdir().expect("temporary directory");
     let rejected = root.path().join("guard-rejected.md");
     let reflowable = root.path().join("reflowable.md");
-    let rejected_before = "A \\&copy; literal.\n";
+    // Upstream now preserves escaped entities; a multiline reference still changes its ID.
+    let rejected_before = "A [the\nparser].\n\n[the parser]: https://example.com\n";
     let reflowable_before = "A paragraph that is\nhard wrapped.\n";
     fs::write(&rejected, rejected_before).expect("write rejected fixture");
     fs::write(&reflowable, reflowable_before).expect("write reflowable fixture");
@@ -202,12 +324,12 @@ fn check_continues_after_a_guard_rejection() {
         rejected.to_string_lossy().as_ref()
     );
     assert_eq!(report["rejected"][0]["kind"], "integrity_guard");
-    assert_eq!(report["rejected"][0]["event_index"], 1);
+    assert_eq!(report["rejected"][0]["event_index"], 2);
     assert!(
         report["rejected"][0]["difference"]
             .as_str()
             .expect("difference")
-            .contains("text differs"),
+            .contains("attribute differs"),
         "the rejection names what differs"
     );
     assert_eq!(
@@ -503,7 +625,8 @@ fn write_mode_records_a_rejection_and_formats_the_remaining_file() {
     let root = tempfile::tempdir().expect("temporary directory");
     let rejected = root.path().join("00-guard-rejected.md");
     let reflowable = root.path().join("01-hard-wrapped.md");
-    let rejected_before = "A \\&copy; literal.\n";
+    // Upstream now preserves escaped entities; a multiline reference still changes its ID.
+    let rejected_before = "A [the\nparser].\n\n[the parser]: https://example.com\n";
     let reflowable_before = "A paragraph that is\nhard wrapped.\n";
     fs::write(&rejected, rejected_before).expect("write rejected fixture");
     fs::write(&reflowable, reflowable_before).expect("write reflowable fixture");

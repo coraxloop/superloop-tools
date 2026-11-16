@@ -157,7 +157,7 @@ fn rotation_selection(args: &[String]) -> Result<Selection<'_>, LaneError> {
 
 fn inspect_selection(args: &[String]) -> Result<Selection<'_>, LaneError> {
     let mode = "inspect-round";
-    let (home, _) = super::rounds::parse_private_inspect(args).map_err(|error| {
+    let (home, _, _) = super::rounds::parse_private_inspect(args).map_err(|error| {
         if error.kind == "verified-prefix" {
             error
         } else {
@@ -431,8 +431,14 @@ fn dispatch(selection: &Selection<'_>, body: &[String]) -> Result<serde_json::Va
         return super::rotation::private_handover(home, scope, run, root, identity);
     }
     if mode == "inspect-round" {
-        let (home, evidence) = super::rounds::parse_private_inspect(body)?;
-        return super::rounds::private_inspect(home, selection.scope, selection.run, evidence);
+        let (home, evidence, rollback) = super::rounds::parse_private_inspect(body)?;
+        return super::rounds::private_inspect_action(
+            home,
+            selection.scope,
+            selection.run,
+            evidence,
+            rollback,
+        );
     }
     if mode == "mark-imported" {
         let (request, home) = super::imports::parse_private_argv(body)?;

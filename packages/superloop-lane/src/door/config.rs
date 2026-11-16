@@ -97,6 +97,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Value, LaneError> {
             "model",
             "effort",
             "cap_ms",
+            "agent_expected_tokens",
             "executable",
             "compute_deadlines",
         ]
@@ -143,8 +144,16 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Value, LaneError> {
         .map_or(Some(30_000), toml::Value::as_integer)
         .filter(|cap| (2_001..=120_000).contains(cap))
         .ok_or_else(|| refusal("cap_ms must be 2001..120000"))?;
+    let expected = table
+        .get("agent_expected_tokens")
+        .map_or_else(
+            || i64::try_from(super::agent::usage::DEFAULT_EXPECTED_TOKENS).ok(),
+            toml::Value::as_integer,
+        )
+        .filter(|value| (1..=i64::from(u32::MAX)).contains(value))
+        .ok_or_else(|| refusal("agent_expected_tokens must be 1..4294967295"))?;
     let mut result = json!({"rubric_root":instance,"rubric_path":instance.join("permissions/door.md"),
-        "executable":executable,"model":model,"effort":effort,"cap_ms":cap_ms});
+        "executable":executable,"model":model,"effort":effort,"cap_ms":cap_ms,"agent_expected_tokens":expected});
     if let Some(forms) = table.get("compute_deadlines") {
         result["compute_deadlines"] =
             serde_json::to_value(forms).map_err(|error| refusal(error.to_string()))?;
@@ -161,8 +170,9 @@ pub fn runner(
     value: &Value,
     owner_home: &Path,
     loop_name: &str,
+    loop_uid: Option<u32>,
 ) -> Result<super::agent::CodexRunner, LaneError> {
-    const KEYS: [&str; 9] = [
+    const KEYS: [&str; 10] = [
         "source",
         "rubric_root",
         "rubric_path",
@@ -170,6 +180,7 @@ pub fn runner(
         "model",
         "effort",
         "cap_ms",
+        "agent_expected_tokens",
         "entry",
         "loop_home",
     ];
@@ -192,10 +203,16 @@ pub fn runner(
     for key in ["source", "rubric_root", "loop_home"] {
         let _validated = path(key)?;
     }
+    let expected = value["agent_expected_tokens"]
+        .as_u64()
+        .filter(|value| (1..=u64::from(u32::MAX)).contains(value))
+        .ok_or_else(|| refusal("installed agent_expected_tokens must be 1..4294967295"))?;
     Ok(super::agent::CodexRunner {
+        usage_monitor: std::sync::Arc::new(super::agent::usage::Monitor::new(expected)),
         entry: path("entry")?,
         owner_home: owner_home.into(),
         loop_name: loop_name.into(),
+        loop_uid,
         executable: path("executable")?,
         rubric_path: path("rubric_path")?,
         model: value["model"]
@@ -220,6 +237,61 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
 
+    /// ´test:unit:agent-token-expectation-source-and-generation-are-closed´
+    #[test]
+    fn agent_token_expectation_source_and_generation_are_closed() {
+        let prefix = "rubric_root = '/fixture'\nexecutable = '/fixture/codex'\nmodel = 'fixture'\n";
+        let mut value = parse(prefix.as_bytes()).expect("default source");
+        assert_eq!(value["agent_expected_tokens"], 16_384);
+        for text in ["0", "-1", "4294967296", "1.5", "true", "'bad'"] {
+            let error = parse(format!("{prefix}agent_expected_tokens = {text}\n").as_bytes())
+                .expect_err("invalid source");
+            assert_eq!(error.kind, "door-agent-configuration");
+            assert!(error.detail.contains("agent_expected_tokens"));
+        }
+        value["source"] = json!("/fixture/door.toml");
+        value["entry"] = json!("/fixture/entry");
+        value["loop_home"] = json!("/fixture/home");
+        for expected in [1, 16_384, u64::from(u32::MAX)] {
+            let source = parse(format!("{prefix}agent_expected_tokens = {expected}\n").as_bytes())
+                .expect("valid source");
+            assert_eq!(source["agent_expected_tokens"], expected);
+            value["agent_expected_tokens"] = json!(expected);
+            assert_eq!(
+                runner(&value, Path::new("/fixture"), "fixture", Some(41001))
+                    .expect("valid generation")
+                    .usage_monitor
+                    .expected,
+                expected
+            );
+        }
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(4_294_967_296_u64),
+            json!(1.5),
+            json!(true),
+            json!("bad"),
+        ] {
+            let mut invalid = value.clone();
+            invalid["agent_expected_tokens"] = bad;
+            let error = runner(&invalid, Path::new("/fixture"), "fixture", Some(41001))
+                .expect_err("invalid generation");
+            assert_eq!(error.kind, "door-agent-configuration");
+            assert!(error.detail.contains("agent_expected_tokens"));
+        }
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("agent_expected_tokens");
+        assert!(
+            runner(&value, Path::new("/fixture"), "fixture", Some(41001))
+                .expect_err("old generation")
+                .detail
+                .contains("shape differs")
+        );
+    }
+
     /// ´test:unit:configuration-bounds-exact-compute-deadline-forms´
     #[test]
     fn configuration_bounds_exact_compute_deadline_forms() {
@@ -238,11 +310,13 @@ mod tests {
         value["source"] = json!("/fixture/door.toml");
         value["entry"] = json!("/fixture/entry");
         value["loop_home"] = json!("/fixture/loop");
-        runner(&value, Path::new("/fixture"), "fixture").expect("installed configuration");
+        runner(&value, Path::new("/fixture"), "fixture", Some(41001))
+            .expect("installed configuration");
         for bound in [1_800_001, 86_400_000] {
             let mut valid = value.clone();
             valid["compute_deadlines"][0]["deadline_ms"] = json!(bound);
-            runner(&valid, Path::new("/fixture"), "fixture").expect("inclusive registered range");
+            runner(&valid, Path::new("/fixture"), "fixture", Some(41001))
+                .expect("inclusive registered range");
         }
         let form = value["compute_deadlines"][0].clone();
         for invalid in [
@@ -256,8 +330,13 @@ mod tests {
         ] {
             let mut invalid_value = value.clone();
             invalid_value["compute_deadlines"] = invalid;
-            let error = runner(&invalid_value, Path::new("/fixture"), "fixture")
-                .expect_err("invalid policy");
+            let error = runner(
+                &invalid_value,
+                Path::new("/fixture"),
+                "fixture",
+                Some(41001),
+            )
+            .expect_err("invalid policy");
             assert_eq!(error.kind, "door-agent-configuration");
             assert!(error.detail.contains("compute_deadlines"));
         }
@@ -271,7 +350,7 @@ mod tests {
         ] {
             let mut invalid = value.clone();
             invalid["compute_deadlines"][0]["deadline_ms"] = bound;
-            assert!(runner(&invalid, Path::new("/fixture"), "fixture").is_err());
+            assert!(runner(&invalid, Path::new("/fixture"), "fixture", Some(41001)).is_err());
         }
         assert!(
             compute_deadlines(&parse(prefix.as_bytes()).expect("ordinary config"))
@@ -299,15 +378,15 @@ mod tests {
         assert_eq!(value["effort"], "medium");
         let mut invalid = value.clone();
         invalid["effort"] = json!("ultra");
-        assert!(runner(&invalid, &fixture.home, "alpha").is_err());
+        assert!(runner(&invalid, &fixture.home, "alpha", Some(41001)).is_err());
         invalid
             .as_object_mut()
             .expect("agent object")
             .remove("effort");
-        assert!(runner(&invalid, &fixture.home, "alpha").is_err());
+        assert!(runner(&invalid, &fixture.home, "alpha", Some(41001)).is_err());
         assert_eq!(value["rubric_path"], "/instance/permissions/door.md");
         assert_eq!(
-            runner(&value, &fixture.home, "alpha")
+            runner(&value, &fixture.home, "alpha", Some(41001))
                 .expect("runner")
                 .model,
             "configured-model"
@@ -316,7 +395,7 @@ mod tests {
         let mut stale = value.clone();
         stale["sign_in"] = json!({});
         assert!(
-            runner(&stale, &fixture.home, "alpha")
+            runner(&stale, &fixture.home, "alpha", Some(41001))
                 .expect_err("stale block")
                 .to_string()
                 .contains("run install-door")
@@ -337,7 +416,7 @@ mod tests {
             std::fs::write(&path, format!("{text}effort = '{effort}'\n")).expect("effort");
             let value = read(&fixture.home, "alpha", Some(&entry)).expect("closed effort set");
             assert_eq!(
-                runner(&value, &fixture.home, "alpha")
+                runner(&value, &fixture.home, "alpha", Some(41001))
                     .expect("installed effort")
                     .effort,
                 effort

@@ -6,18 +6,22 @@
 pub mod instant;
 pub mod journal;
 mod names;
+mod preparation_index;
 pub mod publication;
 mod store;
 
 pub use names::{Address, NameError, Outgoing, valid_identity_name};
 
 pub mod acl;
+mod activity;
 pub mod command;
 pub mod configuration;
 mod directory;
 mod entry_anchors;
 mod io;
+mod notify;
 mod refusal;
+mod retry;
 mod service;
 
 pub mod configuration_store;

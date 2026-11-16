@@ -48,6 +48,8 @@ pub(super) fn search_child(parent: &File, path: &Path) -> Result<File> {
     )?))
 }
 pub(super) fn names(directory: &File) -> Result<Vec<OsString>> {
+    #[cfg(test)]
+    NAME_SCANS.with(|count| count.set(count.get() + 1));
     let descriptor = child(directory, Path::new("."), true)?;
     let mut stream = nix::dir::Dir::from_fd(descriptor.into())?;
     let mut names = Vec::new();
@@ -84,3 +86,6 @@ pub(super) fn bounded(file: &File, limit: u64) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+
+#[cfg(test)]
+thread_local! { pub(super) static NAME_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }

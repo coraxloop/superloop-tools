@@ -83,11 +83,14 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
     }
     #[cfg(test)]
     {
-        spawn_with_retry(command, std::time::Duration::from_millis(500), || {
+        spawn_with_retry(command, SPAWN_RETRY_HANG, || {
             std::thread::sleep(std::time::Duration::from_millis(2));
         })
     }
 }
+
+#[cfg(test)]
+const SPAWN_RETRY_HANG: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[cfg(test)]
 /// Capture a fixture command after the bounded executable retry.
@@ -146,7 +149,7 @@ fn spawn_with_retry(
 
 #[cfg(test)]
 mod tests {
-    use super::spawn_with_retry;
+    use super::{SPAWN_RETRY_HANG, spawn_with_retry};
     use std::fs::{self, OpenOptions};
     use std::io::{Read as _, Write as _};
     use std::os::fd::AsRawFd as _;
@@ -201,12 +204,11 @@ mod tests {
         let mut held_writer = Some(writer);
         let mut command = Command::new(&program);
         let mut retries = 0;
-        let mut child =
-            spawn_with_retry(&mut command, std::time::Duration::from_millis(50), || {
-                retries += 1;
-                drop(held_writer.take());
-            })
-            .expect("text file busy is transient");
+        let mut child = spawn_with_retry(&mut command, SPAWN_RETRY_HANG, || {
+            retries += 1;
+            drop(held_writer.take());
+        })
+        .expect("text file busy is transient");
         assert!(child.wait().expect("child status").success());
         assert_eq!(retries, 1);
         let mut missing = Command::new(fixture.path().join("absent"));
@@ -287,8 +289,8 @@ mod tests {
 
         let error = spawn_with_retry(
             &mut Command::new(&program),
-            std::time::Duration::from_millis(15),
-            || std::thread::sleep(std::time::Duration::from_millis(2)),
+            std::time::Duration::ZERO,
+            || panic!("expired retry must not wait"),
         )
         .expect_err("inherited writer keeps exec busy");
         assert_eq!(
@@ -296,21 +298,17 @@ mod tests {
             "fixture-exec-busy: ETXTBSY exceeded wall bound"
         );
         let mut released = false;
-        let mut child = spawn_with_retry(
-            &mut Command::new(&program),
-            std::time::Duration::from_millis(500),
-            || {
-                if !released {
-                    parent.write_all(b"x").expect("release forked child");
-                    let mut status = 0;
-                    // SAFETY: pid names this fixture's child and status is writable.
-                    let waited = unsafe { nix::libc::waitpid(pid, &raw mut status, 0) };
-                    assert_eq!(waited, pid);
-                    assert_eq!(status, 0);
-                    released = true;
-                }
-            },
-        )
+        let mut child = spawn_with_retry(&mut Command::new(&program), SPAWN_RETRY_HANG, || {
+            if !released {
+                parent.write_all(b"x").expect("release forked child");
+                let mut status = 0;
+                // SAFETY: pid names this fixture's child and status is writable.
+                let waited = unsafe { nix::libc::waitpid(pid, &raw mut status, 0) };
+                assert_eq!(waited, pid);
+                assert_eq!(status, 0);
+                released = true;
+            }
+        })
         .expect("retry after inherited writer closes");
         assert!(released);
         assert!(child.wait().expect("script status").success());

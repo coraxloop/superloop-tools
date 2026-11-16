@@ -45,6 +45,16 @@ fn interrupted_fixture(completed_driver: bool, report_step: &str, successful: bo
         .expect("record");
     record["phase"] = json!("started");
     record["active_round"] = json!("work");
+    // A resumed reservation names its retained mail, not the original inbox leaf.
+    let letter =
+        fs::read(record["letter_source"].as_str().expect("original letter")).expect("letter bytes");
+    let run = Path::new(record["plan"]["driver_dir"].as_str().expect("run"));
+    directory(run, 0o700);
+    let retained = run.join("mail-work.txt");
+    file(&retained, &letter, 0o600);
+    record["letter_source"] = json!(retained);
+    record["mail"] = json!([{"step":"work","worker_uid":record["worker_uid"],
+        "bytes":letter.len(),"evidence_digest":hash(&letter)}]);
     record["driver_end"] = if completed_driver {
         json!({"state":"completed","successful":successful})
     } else {
@@ -641,7 +651,7 @@ impl Fixture {
             b"{\"node_root\":\"/srv/loops/loop-a\",\"alias\":\"fixture\"}",
             0o600,
         );
-        file(&h.join(".config/loops/registry.toml"), format!("namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{ name = \"alpha\", uid = 41001, launch = \"src\", runs_root = \"{}\" }}]\n", root.display()).as_bytes(), 0o600);
+        file(&h.join(".config/loops/registry.toml"), format!("namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{ name = \"alpha\", uid = {}, launch = \"src\", runs_root = \"{}\" }}]\n", Uid::effective().as_raw(), root.display()).as_bytes(), 0o600);
         file(
             &h.join(".config/loops/allocations.toml"),
             b"mail_uid = 61000\n[alpha]\nuids = { base = 3000, count = 2 }\nmail_gids = { base = 43000, count = 3 }\n",
@@ -1695,4 +1705,58 @@ fn door_repin_history_requires_interrupted_evidence_shape() {
             );
         }
     }
+}
+
+fn add_workspace(fixture: &Fixture) -> (Value, Vec<u8>) {
+    let mut record = read_reservation(&fixture.path)
+        .expect("read")
+        .expect("reservation");
+    record["plan"]["compute_workspace"] = crate::tests::published_workspace();
+    record["plan"]["compute_placement"] = crate::tests::published_placement();
+    publish_reservation(&fixture.path, &record)
+        .expect("production-written declaration in lifecycle fixture");
+    (record, fs::read(&fixture.path).expect("original bytes"))
+}
+
+/// ´test:unit:workspace-reservation-survives-pinned-read-and-door-repin-preview´
+#[test]
+fn workspace_reservation_survives_pinned_read_and_door_repin_preview() {
+    let fixture = Fixture::new(3000);
+    let (record, bytes) = add_workspace(&fixture);
+    let (plan, _) = super::super::pinned_plan_from_record(
+        fixture.home.path(),
+        "alpha",
+        "R",
+        &fixture.runtime,
+        &record,
+    )
+    .expect("pinned reconstruction");
+    assert_eq!(
+        plan.document["compute_placement"],
+        record["plan"]["compute_placement"]
+    );
+    assert_eq!(
+        plan.document["compute_workspace"],
+        record["plan"]["compute_workspace"]
+    );
+    fixture.install_b();
+    run(fixture.home.path(), &Fixture::request(None)).expect("repin reconstruction");
+    assert_eq!(fs::read(&fixture.path).expect("read-only preview"), bytes);
+}
+
+/// ´test:unit:workspace-reservation-survives-round-resume-reconstruction´
+#[test]
+fn workspace_reservation_survives_round_resume_reconstruction() {
+    let fixture = interrupted_fixture(false, "dispatch", true);
+    let (record, bytes) = add_workspace(&fixture);
+    let preview = fixture.resume(true).expect("round resume reconstruction");
+    assert_eq!(
+        preview["plan"]["compute_placement"],
+        record["plan"]["compute_placement"]
+    );
+    assert_eq!(
+        preview["plan"]["compute_workspace"],
+        record["plan"]["compute_workspace"]
+    );
+    assert_eq!(fs::read(&fixture.path).expect("read-only preview"), bytes);
 }

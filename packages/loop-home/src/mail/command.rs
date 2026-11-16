@@ -13,7 +13,6 @@ use std::ffi::OsString;
 use std::os::unix::{fs::MetadataExt as _, process::CommandExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -228,10 +227,11 @@ fn run(arguments: &[OsString], report: &mut dyn std::io::Write) -> Result<()> {
     for failure in service.scan()? {
         writeln!(report, "{failure}")?;
     }
+    service.publish_activity();
     Ok(())
 }
 
-fn anchored_serve(arguments: &[OsString], report: &mut dyn std::io::Write) -> Result<()> {
+fn anchored_serve(arguments: &[OsString], _report: &mut dyn std::io::Write) -> Result<()> {
     if let [_, flag, home] = arguments
         && flag == "--check-ancestry"
     {
@@ -264,11 +264,20 @@ fn anchored_serve(arguments: &[OsString], report: &mut dyn std::io::Write) -> Re
         &entered.configuration.registry,
         Some(entered.anchor),
     )?;
+    let mut notifications = super::notify::Notifications::new();
+    let mut failures = service.scan_watching(&mut notifications)?;
     loop {
-        for failure in service.scan()? {
-            writeln!(report, "{failure}")?;
+        for failure in failures {
+            tracing::debug!(reason = %failure, "mail scan condition");
         }
-        std::thread::sleep(Duration::from_millis(250));
+        failures = match service.wait_for_change(&mut notifications)? {
+            super::service::Wake::Scan => service.scan_watching(&mut notifications)?,
+            super::service::Wake::Senders(senders) => {
+                service.scan_selected(&mut notifications, senders)?
+            }
+            super::service::Wake::Maintenance => service.maintain(&mut notifications)?,
+            super::service::Wake::Retry => service.retry_due(),
+        };
     }
 }
 

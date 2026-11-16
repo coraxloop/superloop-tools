@@ -5,7 +5,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`the_repository_snapshot_loads_as_one_exact_surface`] | declarations | The repository exposes exactly the fixed and parameter declaration documents, while the imports directory belongs to the registry loader; every envelope parses independently, and the atomic loader accepts their joined snapshot with 35 partitions, 62 may-cite rows and three list rows. The declared environment relation is also the exact relation the imported generic snapshot publishes, with the generic title genres held as extensions. |
+//! | [`the_repository_snapshot_loads_as_one_exact_surface`] | declarations | The repository exposes exactly the fixed and parameter declaration documents, while the imports directory belongs to the registry loader; every envelope parses independently, and the atomic loader accepts their joined snapshot with 36 partitions, 65 may-cite rows and three list rows. The declared environment relation is also the exact relation the imported generic snapshot publishes, with the generic title genres held as extensions. |
 
 //! Repository declaration-loading integration tests.
 
@@ -65,7 +65,7 @@ fn relation_pairs(relation: &KindRelation, extensions: bool) -> BTreeSet<(String
 /// The repository exposes exactly the fixed and parameter declaration documents,
 /// while the imports directory belongs to the registry loader; every envelope
 /// parses independently, and the atomic loader accepts their joined snapshot
-/// with 35 partitions, 62 may-cite rows and three list rows.
+/// with 36 partitions, 65 may-cite rows and three list rows.
 /// The declared environment relation is also the exact relation the imported
 /// generic snapshot publishes, with the generic title genres held as extensions.
 ///
@@ -126,9 +126,9 @@ fn the_repository_snapshot_loads_as_one_exact_surface() {
         "public contracts must resolve without private labels"
     );
 
-    assert_eq!(snapshot.owners().len(), 29 + snapshot.imports().len());
-    assert_eq!(snapshot.partitions().len(), 35);
-    assert_eq!(snapshot.may_cite().len(), 62);
+    assert_eq!(snapshot.owners().len(), 30 + snapshot.imports().len());
+    assert_eq!(snapshot.partitions().len(), 36);
+    assert_eq!(snapshot.may_cite().len(), 65);
     assert_eq!(snapshot.environments().len(), 349);
     assert_eq!(snapshot.environment_extensions().len(), 9);
     let list_keys = snapshot.list_keys();
@@ -137,8 +137,8 @@ fn the_repository_snapshot_loads_as_one_exact_surface() {
         Pair::singleton("LANEGATEWAY", "projection.test-matrices-current"),
     ];
 
-    assert_eq!(snapshot.policies().len(), 311);
-    assert_eq!(list_keys.len(), 311);
+    assert_eq!(snapshot.policies().len(), 322);
+    assert_eq!(list_keys.len(), 322);
     for pair in gateway_projections {
         assert!(snapshot.policies().contains(&pair));
         assert!(list_keys.contains(&pair));

@@ -22,6 +22,7 @@ pub mod install_door;
 pub mod install_private;
 pub mod launch;
 mod pinned;
+pub mod placement;
 pub mod plan;
 pub mod prepare;
 pub mod repair;
@@ -34,12 +35,16 @@ pub mod sign_in;
 pub mod signin_home;
 pub mod vendor_net;
 pub mod worker_launch;
+pub mod workspace_executor;
 
 use std::path::{Path, PathBuf};
 
 use error::LaneError;
 use plan::Plan;
 use settings::Settings;
+
+pub(crate) const FIRST_DISPATCH_PROMPT: &str =
+    "Read /home/worker/brief.txt and carry out the work it describes, reporting as the brief asks.";
 
 /// Match the entry's portable run-name grammar.
 #[must_use]

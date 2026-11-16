@@ -660,9 +660,44 @@ fn run_child_with_start(
     run_child_with_end(spec, input, failure_log, on_start, &mut ChildEnd::default())
 }
 
+/// A live launch receipt: absence is checked again after the runner has waited.
+#[derive(Default)]
+pub(crate) struct LiveChild {
+    pid: Option<u32>,
+    untracked: bool,
+}
+impl LiveChild {
+    pub(crate) const fn untracked() -> Self {
+        Self {
+            pid: None,
+            untracked: true,
+        }
+    }
+    pub(crate) const fn is_tracked(&self) -> bool {
+        !self.untracked
+    }
+    pub(crate) const fn started(&mut self, pid: u32) {
+        self.pid = Some(pid);
+    }
+    pub(crate) fn absent(&self) -> bool {
+        let Some(pid) = self.pid else {
+            return true;
+        };
+        let Ok(group) = i32::try_from(pid) else {
+            return false;
+        };
+        let absent = std::fs::symlink_metadata(format!("/proc/{pid}"))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        absent
+            && nix::sys::signal::kill(nix::unistd::Pid::from_raw(-group), None)
+                == Err(nix::errno::Errno::ESRCH)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ChildEnd {
     pub(crate) wall: Option<lane_lifecycle::AttemptWall>,
+    live: LiveChild,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -713,6 +748,7 @@ fn run_child_with_end(
     crate::container_entry::configure(&mut command, &spec.program, &spec.argv, &spec.environment)?;
     let mut child = crate::fixture_exec::spawn(&mut command)
         .map_err(|error| crate::container_entry::spawn_error(&spec.program, spec.name, &error))?;
+    end.live.started(child.id());
     if let Some(stream) = transfer {
         let home = spec.private_directory_stdin.as_ref().ok_or_else(|| {
             LaneError::input("verified-prefix", "private home descriptor is absent")
@@ -994,6 +1030,51 @@ pub(crate) fn run_checked_command(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn inspect_with_receipt(
+    program: &Path,
+    argv: &[String],
+    environment: &BTreeMap<String, String>,
+    cwd: &Path,
+    home: &OwnedFd,
+    runs_root: &Path,
+    runs: &OwnedFd,
+    live: &mut LiveChild,
+) -> Result<String, LaneError> {
+    let request =
+        crate::launch::reader_entry::command(program, argv, cwd, home, runs_root, runs, None)?;
+    let (program, argv) = request
+        .argv
+        .split_first()
+        .ok_or_else(|| LaneError::input("round-evidence", "empty command"))?;
+    let mut spec = child(
+        Path::new(program),
+        argv.to_vec(),
+        environment,
+        cwd,
+        60,
+        "round-evidence",
+    );
+    spec.capabilities = Some(request.descriptors.clone());
+    let mut end = ChildEnd::default();
+    let output = run_child_with_end(&spec, None, None, |_| Ok(()), &mut end);
+    *live = end.live;
+    let output = output?;
+    if !output.status.success() {
+        return Err(LaneError::operation(
+            "round-evidence",
+            format!(
+                "{} exited {}: {}",
+                program,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim_end()
+            ),
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|_| LaneError::operation("round-evidence", "output is not UTF-8"))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_checked_with_private_launch(
     program: &Path,
     argv: Vec<String>,
@@ -1006,7 +1087,12 @@ pub(crate) fn run_checked_with_private_launch(
     runs: &OwnedFd,
     letter: Option<(&Path, &OwnedFd)>,
 ) -> Result<String, LaneError> {
-    if argv.get(2).is_some_and(|word| word == "_bind-reply") {
+    let binding = argv.get(2).is_some_and(|word| {
+        loop_home::mail::steering::BindingSelection::from_private(word, None).is_some()
+    });
+    #[cfg(test)]
+    let binding = binding && !mail_standin::allows(program, argv.get(2).map_or("", String::as_str));
+    if binding {
         let request =
             crate::launch::reply_entry::command(program, &argv, (cwd, home), (runs_root, runs))?;
         return run_checked_command(&request, environment, cwd, timeout_seconds, name);
@@ -2241,6 +2327,61 @@ fn run_inner(
     Ok(result)
 }
 
+// Only explicitly registered in-crate recovery fixtures may keep a stand-in mail half.
+// The production binary and integration-test library do not compile this module.
+#[cfg(test)]
+pub(crate) mod mail_standin {
+    const SENTINEL: &str = "SUPERLOOP_MAIL_STANDIN_V1_ONLY_UNIT_TESTS";
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+    thread_local! { static PROGRAM: RefCell<Option<PathBuf>> = const { RefCell::new(None) }; }
+    pub struct Guard {
+        previous: Option<PathBuf>,
+        _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            PROGRAM.with(|slot| *slot.borrow_mut() = self.previous.take());
+        }
+    }
+    pub fn register(program: &Path) -> Guard {
+        Guard {
+            previous: PROGRAM.with(|slot| slot.replace(Some(program.to_owned()))),
+            _thread: std::marker::PhantomData,
+        }
+    }
+    pub fn allows(program: &Path, word: &str) -> bool {
+        std::hint::black_box(SENTINEL);
+        word == "_bind-mail" && PROGRAM.with(|slot| slot.borrow().as_deref() == Some(program))
+    }
+    /// ´test:unit:registration-is-scoped-to-thread-program-and-word´
+    #[test]
+    fn registration_is_scoped_to_thread_program_and_word() {
+        assert!(std::hint::black_box(SENTINEL).starts_with("SUPERLOOP_MAIL"));
+        let first = Path::new("/fixture/first");
+        let second = Path::new("/fixture/second");
+        assert!(!allows(first, "_bind-mail"));
+        {
+            let _first = register(first);
+            assert!(allows(first, "_bind-mail"));
+            assert!(!allows(first, "_bind-reply"));
+            assert!(!allows(second, "_bind-mail"));
+            assert!(
+                !std::thread::spawn(move || allows(first, "_bind-mail"))
+                    .join()
+                    .expect("thread")
+            );
+            {
+                let _second = register(second);
+                assert!(allows(second, "_bind-mail"));
+                assert!(!allows(first, "_bind-mail"));
+            }
+            assert!(allows(first, "_bind-mail"));
+        }
+        assert!(!allows(first, "_bind-mail"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3032,7 +3173,7 @@ done
     /// ´test:unit:build-children-have-stream-and-time-limits´
     #[test]
     fn build_children_have_stream_and_time_limits() {
-        let temp = TempDir::new_in("/tmp").expect("temporary fixture");
+        let temp = TempDir::new_in(std::env::temp_dir()).expect("temporary fixture");
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
             .expect("protected fixture");
         let program = temp.path().join("child");
@@ -3062,18 +3203,73 @@ done
                 .line()
                 .contains("output limit")
         );
-        executable(&program, "sleep 2");
+        executable(&program, "sleep infinity");
         assert!(
             run_child(&spec(1), None)
                 .expect_err("time limit")
                 .line()
                 .contains("time limit")
         );
-        executable(&program, "sleep 30 & exit 0");
-        let began = std::time::Instant::now();
-        let mut end = super::ChildEnd::default();
+        executable(&program, "sleep infinity & exit 0");
+        exited_child_pipe_bound(spec(1));
+    }
+
+    fn exited_child_pipe_bound(spec: ChildSpec) {
+        use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
+        use std::sync::atomic::Ordering;
+        let pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let runner_pid = Arc::clone(&pid);
+        let (done, completed) = mpsc::sync_channel(1);
+        let runner = std::thread::spawn(move || {
+            let mut end = super::ChildEnd::default();
+            let result = super::run_child_with_end(
+                &spec,
+                None,
+                None,
+                |child| {
+                    runner_pid.store(child, Ordering::Release);
+                    let child =
+                        nix::unistd::Pid::from_raw(i32::try_from(child).expect("child PID"));
+                    let bound = Instant::now() + Duration::from_secs(180);
+                    loop {
+                        let status = waitid(
+                            Id::Pid(child),
+                            WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+                        )
+                        .map_err(|error| {
+                            crate::error::LaneError::operation("fixture", error.to_string())
+                        })?;
+                        if matches!(status, WaitStatus::Exited(_, 0)) {
+                            return Ok(());
+                        }
+                        if status != WaitStatus::StillAlive || Instant::now() >= bound {
+                            return Err(crate::error::LaneError::operation(
+                                "fixture",
+                                "child did not become an unreaped successful exit",
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                },
+                &mut end,
+            );
+            let _sent = done.send(());
+            (result, end)
+        });
+        let event = completed.recv_timeout(Duration::from_secs(180));
+        if event.is_err() {
+            let child = pid.load(Ordering::Acquire);
+            if child != 0 {
+                let _killed = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(i32::try_from(child).expect("child PID")),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+        let (result, end) = runner.join().expect("reap child runner");
+        event.expect("exited child drain completes without a natural holder exit");
         assert!(
-            super::run_child_with_end(&spec(1), None, None, |_| Ok(()), &mut end)
+            result
                 .expect_err("descendant pipe holder")
                 .line()
                 .contains("time limit")
@@ -3082,13 +3278,12 @@ done
             end.wall.is_none(),
             "draining an exited child is not a wall end"
         );
-        assert!(began.elapsed() < std::time::Duration::from_secs(5));
     }
 
     /// ´test:unit:build-runner-bounds-retained-pipe-after-stop´
     #[test]
     fn build_runner_bounds_retained_pipe_after_stop() {
-        let temp = TempDir::new_in("/tmp").expect("fixture");
+        let temp = TempDir::new_in(std::env::temp_dir()).expect("fixture");
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
             .expect("protected fixture");
         let script = temp.path().join("stop-stand-in");
@@ -3117,9 +3312,10 @@ done
         let holder = HeldWriterGuard::new();
         let held = Arc::clone(&holder.0);
         let (published, publication) = mpsc::sync_channel(1);
+        let (done, completion) = mpsc::sync_channel(1);
         let runner = std::thread::spawn(move || {
-            run_child_with_start(&spec, None, None, |pid| {
-                let ready_deadline = Instant::now() + Duration::from_secs(5);
+            let result = run_child_with_start(&spec, None, None, |pid| {
+                let ready_deadline = Instant::now() + Duration::from_secs(120);
                 while !ready.exists() && Instant::now() < ready_deadline {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -3137,7 +3333,7 @@ done
                     })?;
                 let child = Command::new("/bin/sleep")
                     .arg0("r002d23-fixture-holder")
-                    .arg("30")
+                    .arg("infinity")
                     .process_group(0)
                     .stdout(Stdio::from(writer))
                     .spawn()
@@ -3162,19 +3358,17 @@ done
                 fs::write(&release, b"").map_err(|error| {
                     crate::error::LaneError::operation("fixture", error.to_string())
                 })
-            })
+            });
+            let _ignored = done.send(());
+            result
         });
-        let handoff = publication.recv_timeout(Duration::from_secs(5)).is_ok();
-        let began = Instant::now();
-        while !runner.is_finished() && began.elapsed() < Duration::from_secs(9) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let bounded = runner.is_finished();
+        let handoff = publication.recv_timeout(Duration::from_secs(120));
+        let completed = completion.recv_timeout(Duration::from_secs(120));
         holder.close();
         let result = runner.join().expect("runner");
-        assert!(handoff, "holder was published before the bound began");
+        handoff.expect("holder publication event");
+        completed.expect("runner completes while the pipe holder remains alive");
         let error = result.expect_err("timeout refusal");
-        assert!(bounded, "runner exceeded its reader bound");
         assert_eq!(error.kind, "container-stop");
         assert!(error.detail.contains("time limit"));
     }

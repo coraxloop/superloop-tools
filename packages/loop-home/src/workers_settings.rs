@@ -344,7 +344,11 @@ pub fn validate_workers_settings(source: &str, path: &Path) -> Result<toml::Tabl
         "retention",
         "attempt_wall_seconds",
         "context_threshold",
+        "workspace_policy",
     ];
+    if let Some(value) = table.get("workspace_policy") {
+        validate_workspace_policy(value)?;
+    }
     if let Some(error) = retired_setting(table) {
         return Err(error);
     }
@@ -527,4 +531,59 @@ pub fn validate_workers_grant(
         ));
     }
     Ok(())
+}
+
+/// A loop publishes policy identities, not per-run workspace configuration.
+fn validate_workspace_policy(value: &toml::Value) -> Result<(), LoopError> {
+    let table = value
+        .as_table()
+        .filter(|table| table.len() == 2)
+        .ok_or_else(|| {
+            refusal(
+                "bad-setting",
+                "workspace_policy requires exactly quick_policy_digest and blacklist_digest",
+            )
+        })?;
+    for key in ["quick_policy_digest", "blacklist_digest"] {
+        if table
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .is_none_or(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        {
+            return Err(refusal(
+                "bad-setting",
+                "workspace_policy requires lowercase SHA-256 digests",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod workspace_policy_tests {
+    use super::*;
+    /// ´claim:loophome:workspace-policy-reader-requires-both-published-digests´
+    /// ´test:unit:workspace-policy-reader-requires-both-published-digests´
+    #[test]
+    fn workspace_policy_reader_requires_both_published_digests() {
+        let source = format!(
+            "workspace_policy = {{ quick_policy_digest = {:?}, blacklist_digest = {:?} }}",
+            "a".repeat(64),
+            "b".repeat(64)
+        );
+        validate_workers_settings(&source, Path::new("/fixture/workers.toml"))
+            .expect("published identities");
+        for bad in [
+            source.replace(&"a".repeat(64), "short"),
+            source.replace("blacklist_digest", "other_digest"),
+            source.replace("quick_policy_digest", "extra = 1, quick_policy_digest"),
+        ] {
+            assert!(validate_workers_settings(&bad, Path::new("/fixture/workers.toml")).is_err());
+        }
+    }
 }

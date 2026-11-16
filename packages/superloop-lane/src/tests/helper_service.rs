@@ -1,8 +1,8 @@
 //! Production helper service acceptance under the rootless namespace.
 
 use std::fs;
-use std::io::Write as _;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::io::{Read as _, Write as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -526,4 +526,977 @@ pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
         String::from_utf8_lossy(&cleanup.stderr)
     );
     writeln!(std::io::stdout().lock(), "HELPER-SERVICE-MEASURED").expect("service marker");
+}
+
+/// ´test:crate:built-helper-resume-retains-mail-custody´
+#[test]
+fn built_helper_resume_retains_mail_custody() {
+    built_round_fixture(false, false);
+}
+
+/// ´test:crate:built-round-rollback-cleanup-retains-custody´
+#[test]
+fn built_round_rollback_cleanup_retains_custody() {
+    built_round_fixture(true, false);
+}
+
+/// ´test:crate:built-failed-round-choices-preflight-under-custody´
+#[test]
+fn built_failed_round_choices_preflight_under_custody() {
+    built_round_fixture(false, true);
+}
+
+fn built_round_fixture(rollback: bool, choices: bool) {
+    let workspace = super::published_workspace();
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "tests::launch::proxy_refresh_preserves_live_helper_pins",
+            "--nocapture",
+        ])
+        .env("SUPERLOOP_ROUND_PROOF", "1")
+        .env("SUPERLOOP_CHOICE_PROOF", if choices { "1" } else { "0" })
+        .env("SUPERLOOP_ROLLBACK_PROOF", if rollback { "1" } else { "0" })
+        .env("SUPERLOOP_ROUND_WORKSPACE", workspace.to_string())
+        .env(
+            "SUPERLOOP_ROUND_PLACEMENT",
+            super::published_placement().to_string(),
+        )
+        .env("SUPERLOOP_REFRESH_PROOF", "1")
+        .env("_CONTAINERS_USERNS_CONFIGURED", "1")
+        .env(
+            "_CONTAINERS_ROOTLESS_UID",
+            nix::unistd::Uid::effective().as_raw().to_string(),
+        )
+        .output()
+        .expect("round fixture");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8_lossy(&output.stdout);
+    if choices {
+        assert!(
+            output.contains("FAILED-ROUND-CHOICES-PREFLIGHT"),
+            "{output}"
+        );
+    }
+    if rollback {
+        assert!(output.contains("ROLLBACK-PRIVATE-CLEANUP"), "{output}");
+    }
+    for marker in [
+        "FIRST-HELPER-READY",
+        "RESUMED-HELPER-READY",
+        "PREVIOUS-SOURCES-NOT-READ",
+        "ROUND-PREFLIGHT-READONLY",
+        "PUBLICATION-PREFLIGHT-READONLY",
+        "INSPECTION-REFUSALS-READONLY",
+    ] {
+        assert!(output.contains(marker), "{output}");
+    }
+}
+
+fn built_helper(home: &Path, runs: &Path, podman: &Path, preflight: bool) -> FixtureChild {
+    built_helper_choice(home, runs, podman, preflight, None)
+}
+
+fn built_helper_choice(
+    home: &Path,
+    runs: &Path,
+    podman: &Path,
+    preflight: bool,
+    choice: Option<&str>,
+) -> FixtureChild {
+    let binary = std::env::current_exe()
+        .expect("test image")
+        .ancestors()
+        .map(|path| path.join("superloop-lane"))
+        .find(|path| path.is_file())
+        .expect("build package binary before acceptance");
+    let own = fs::File::open(home).expect("home").into();
+    let storage = fs::File::open(runs).expect("runs").into();
+    let bundle = crate::container_entry::pin(
+        "alpha",
+        (home, &own),
+        (runs, &storage),
+        &binary,
+        podman,
+        crate::settings::BoxBackend::Codex,
+    )
+    .expect("held bundle");
+    let mut args = vec![
+        "_container-helper".to_owned(),
+        "--run-dir".into(),
+        runs.join("R").display().to_string(),
+        "--owner-home".into(),
+        home.display().to_string(),
+        "--verified-home-fd".into(),
+        "0".into(),
+        "--verified-runs-root".into(),
+        runs.display().to_string(),
+        "--verified-runs-root-fd".into(),
+        "1".into(),
+        "--anchor-manifest".into(),
+        bundle.manifest,
+    ];
+    if preflight {
+        args.extend([
+            "--preflight-round".into(),
+            "review".into(),
+            "--budget".into(),
+            "3600".into(),
+        ]);
+    }
+    if let Some(choice) = choice {
+        args.push(choice.into());
+    }
+    let (sender, input) = UnixStream::pair().expect("rights");
+    let child = Command::new("/usr/bin/podman")
+        .env_remove("_CONTAINERS_USERNS_CONFIGURED")
+        .env_remove("_CONTAINERS_ROOTLESS_UID")
+        .arg("unshare")
+        .arg(binary)
+        .args(args)
+        .env("HOME", home)
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(input)))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("built helper");
+    let child = FixtureChild(Some(child));
+    loop_home::anchor::transport::send(&sender, &bundle.descriptors).expect("send held bundle");
+    child
+}
+
+fn ready_and_stop(mut child: FixtureChild, runs: &Path, marker: &str) {
+    let control = crate::container_helper::control_socket_path(&runs.join("R")).expect("control");
+    let socket = crate::container_helper::socket_path(&runs.join("R")).expect("client");
+    let start = Instant::now();
+    while !control.exists() || !socket.exists() {
+        if child
+            .0
+            .as_mut()
+            .expect("child")
+            .try_wait()
+            .expect("status")
+            .is_some()
+        {
+            let output = child.finish();
+            panic!(
+                "{marker}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(45),
+            "{marker}: readiness deadline"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut stream = UnixStream::connect(&control).expect("control connect");
+    stream.write_all(b"C").expect("cancel helper");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("ack bound");
+    let mut ack = [0];
+    stream.read_exact(&mut ack).expect("cancel acknowledgement");
+    assert_eq!(&ack, b"K");
+    drop(stream);
+    let output = child.finish();
+    assert!(
+        output.status.success(),
+        "{marker}: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !control.exists() && !socket.exists(),
+        "helper removed its sockets"
+    );
+    writeln!(std::io::stdout().lock(), "{marker}").expect("readiness marker");
+}
+
+struct RoundOwner<'a> {
+    home: &'a Path,
+    run: PathBuf,
+    identity: (u64, u64),
+    template_directories: [fs::File; 3],
+}
+impl Drop for RoundOwner<'_> {
+    fn drop(&mut self) {
+        // TempDir cannot unlink children of the fixture's read-only templates.
+        // These descriptors were opened while creating this fixture, not from output.
+        for directory in &self.template_directories {
+            directory
+                .set_permissions(fs::Permissions::from_mode(0o700))
+                .expect("restore fixture directory write permission");
+        }
+        let input =
+            json!({"run":self.run,"device":self.identity.0,"inode":self.identity.1}).to_string();
+        let output = namespace_python(
+            self.home,
+            r"
+import os,json,sys
+v=json.loads(sys.argv[2]);fd=os.open(v['run'],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+s=os.fstat(fd)
+assert (s.st_dev,s.st_ino)==(v['device'],v['inode'])
+for name in ['mail-review.txt','launch']:
+ try: os.chown(name,0,0,dir_fd=fd,follow_symlinks=False)
+ except FileNotFoundError: pass
+try:
+ child=os.open('fixture-dispatch',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+except FileNotFoundError: pass
+else:
+ for name in ['events.jsonl','.event-start']:
+  try: os.chown(name,0,0,dir_fd=child,follow_symlinks=False)
+  except FileNotFoundError: pass
+ os.fchown(child,0,0);os.close(child)
+os.fchown(fd,0,0)
+",
+            &input,
+        )
+        .expect("restore mapped fixture owner");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn template_directories(home: &Path) -> [fs::File; 3] {
+    let template = home
+        .join(".var/loops/alpha/runner-templates/codex")
+        .join("a".repeat(64));
+    ["", "bin", "libexec"].map(|name| {
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(template.join(name))
+            .expect("created template directory");
+        let metadata = directory.metadata().expect("held template metadata");
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.uid(), nix::unistd::Uid::effective().as_raw());
+        directory
+    })
+}
+
+/// Publish the fixture reservation with the supplied grant and placement.
+///
+/// # Panics
+/// Panics if either declaration is absent or malformed, or publication fails.
+fn publish_declared(runs: &Path, record: &mut Value) {
+    record["plan"]["compute_workspace"] = serde_json::from_str(
+        &std::env::var("SUPERLOOP_ROUND_WORKSPACE").expect("production declaration supplied"),
+    )
+    .expect("grant");
+    record["plan"]["compute_placement"] = serde_json::from_str(
+        &std::env::var("SUPERLOOP_ROUND_PLACEMENT").expect("placement supplied"),
+    )
+    .unwrap();
+    crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
+        .expect("declaration retained for helper");
+}
+
+/// # Panics
+/// Panics if the built helper refuses the correctly provisioned synthetic rounds.
+pub(super) fn rounds_acceptance(home: &Path, runs: &Path, podman: &Path) {
+    let mut record = prepare(home, runs, podman);
+    publish_declared(runs, &mut record);
+    let _worker = MappedWorker {
+        home: home.to_path_buf(),
+        worker: record["plan"]["home"].as_str().expect("worker").into(),
+    };
+    let run = runs.join("R");
+    let metadata = fs::metadata(&run).expect("run");
+    let _owner = RoundOwner {
+        home,
+        run: run.clone(),
+        identity: (metadata.dev(), metadata.ino()),
+        template_directories: template_directories(home),
+    };
+    let uid = crate::plan::loop_uid(&record["plan"]).expect("loop uid");
+    let input = json!({"run":run,"uid":uid}).to_string();
+    let output = namespace_python(
+        home,
+        r"
+import os,json,sys
+v=json.loads(sys.argv[2]);os.chown(v['run'],v['uid'],v['uid']);os.chmod(v['run'],0o700)
+s=os.stat(v['run']);p=os.stat(os.path.dirname(v['run']))
+assert s.st_uid==v['uid'] and p.st_uid==0 and s.st_uid!=p.st_uid
+assert s.st_mode&0o7777==0o700 and p.st_mode&0o7777==0o711
+d=os.path.join(v['run'],'launch');os.makedirs(d,exist_ok=True)
+os.chmod(d,0o700);os.chown(d,v['uid'],v['uid'])
+f=os.path.join(d,'runtime.env')
+with open(f,'wb') as out: out.write(b'SUPERLOOP_CLIENT_ROOT_DEV=1\0SUPERLOOP_CLIENT_ROOT_INO=2\0')
+os.chown(f,0,v['uid']);os.chmod(f,0o440)
+",
+        &input,
+    )
+    .expect("two uid layout");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ready_and_stop(
+        built_helper(home, runs, podman, false),
+        runs,
+        "FIRST-HELPER-READY",
+    );
+    record["phase"] = json!("settled");
+    record["thread_id"] = json!("fixture-thread");
+    record["rounds"][0]["phase"] = json!("settled");
+    record["rounds"][0]["driver_dir"] = json!(run.join("fixture-dispatch"));
+    let bytes = b"Continue the synthetic round.\n";
+    let path = run.join("mail-review.txt");
+    let input = json!({"run":run,"uid":uid,"text":String::from_utf8_lossy(bytes)}).to_string();
+    let output = namespace_python(
+        home,
+        r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);p=Path(v['run'])/'mail-review.txt'
+p.write_text(v['text']);p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
+",
+        &input,
+    )
+    .expect("retained mail");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    record["mail"] = json!([{"step":"review","worker_uid":record["worker_uid"],"bytes":bytes.len(),
+        "evidence_digest":crate::build::sha256_bytes(bytes,home).expect("digest")}]);
+    let reservation = runs.join(".reservation-R.json");
+    crate::launch::publish_reservation(&reservation, &record).expect("settled binding");
+    let settled = record.clone();
+    check_previous_sources(home, runs, podman, &settled);
+    record["phase"] = json!("preparing");
+    record["active_round"] = json!("review");
+    record["letter_source"] = json!(path);
+    record["rounds"]
+        .as_array_mut()
+        .expect("rounds")
+        .push(json!({"step":"review","phase":"preparing"}));
+    crate::launch::publish_reservation(&reservation, &record).expect("resume input");
+    ready_and_stop(
+        built_helper(home, runs, podman, false),
+        runs,
+        "RESUMED-HELPER-READY",
+    );
+    if std::env::var("SUPERLOOP_CHOICE_PROOF").as_deref() == Ok("1") {
+        check_failed_choice_previews(home, runs, podman, &settled);
+    }
+    check_round_previews(home, runs, podman, &settled, uid);
+    check_publication_previews(home, runs, podman, &settled, uid);
+    check_built_inspection(home, runs, &settled, uid);
+    if std::env::var("SUPERLOOP_ROLLBACK_PROOF").as_deref() == Ok("1") {
+        check_rollback_cleanup(home, runs, podman, &settled, uid);
+    }
+}
+
+fn check_previous_sources(home: &Path, runs: &Path, podman: &Path, settled: &Value) {
+    let dispatch = PathBuf::from(settled["letter_source"].as_str().expect("dispatch source"));
+    let original = fs::read(&dispatch).expect("fixture dispatch letter");
+    let reservation = runs.join(".reservation-R.json");
+    for case in ["dispatch-altered", "dispatch-removed", "rotation", "later"] {
+        let mut prior = settled.clone();
+        if case == "dispatch-altered" {
+            fs::write(&dispatch, b"Model: deliberately-invalid\nEffort: invalid\n")
+                .expect("alter fixture dispatch");
+        } else if case == "dispatch-removed" {
+            fs::remove_file(&dispatch).expect("remove fixture dispatch");
+        } else if case == "rotation" {
+            prior["rotation_source_sha256"] = json!("f".repeat(64));
+            let brief =
+                Path::new(prior["plan"]["home"].as_str().expect("worker home")).join("brief.txt");
+            assert!(!brief.exists(), "preceding rotation brief is absent");
+            prior["letter_source"] = json!(brief);
+        } else {
+            prior["active_round"] = json!("previous");
+            let mut previous = prior["rounds"][0].clone();
+            previous["step"] = json!("previous");
+            prior["rounds"]
+                .as_array_mut()
+                .expect("prior rounds")
+                .push(previous);
+            let mut previous_binding = prior["mail"][0].clone();
+            previous_binding["step"] = json!("previous");
+            prior["mail"]
+                .as_array_mut()
+                .expect("mail history")
+                .push(previous_binding);
+            prior["letter_source"] = json!(runs.join("R/mail-previous.txt"));
+        }
+        crate::launch::publish_reservation(&reservation, &prior).expect("prior reservation");
+        let before = publication_inventory(home, runs);
+        let output = built_helper(home, runs, podman, true).finish();
+        assert!(
+            output.status.success(),
+            "{case} preview: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).expect("real preflight report");
+        assert_eq!(report["state"], "passed", "{case}: {report}");
+        assert_eq!(
+            publication_inventory(home, runs),
+            before,
+            "{case}: read only"
+        );
+        let mut next =
+            crate::launch::rounds::preflight_record(&runs.join("R"), &prior, "review", 3600, None)
+                .expect("prospective record");
+        assert_eq!(
+            next["plan"]["compute_placement"],
+            settled["plan"]["compute_placement"]
+        );
+        next["launcher_pid"] = settled["launcher_pid"].clone();
+        next["launcher_start"] = settled["launcher_start"].clone();
+        assert_eq!(
+            next["plan"]["compute_workspace"],
+            settled["plan"]["compute_workspace"]
+        );
+        crate::launch::publish_reservation(&reservation, &next).expect("published next round");
+        ready_and_stop(built_helper(home, runs, podman, false), runs, case);
+    }
+    fs::write(&dispatch, original).expect("restore fixture dispatch");
+    crate::launch::publish_reservation(&reservation, settled).expect("restore settled fixture");
+    writeln!(std::io::stdout().lock(), "PREVIOUS-SOURCES-NOT-READ").expect("source marker");
+}
+
+fn check_preflight_report(bytes: &[u8], record: &Value) {
+    let preview: Value = serde_json::from_slice(bytes).expect("preview JSON");
+    assert_eq!(preview["state"], "passed");
+    assert!(
+        preview["checked"]
+            .as_array()
+            .expect("checked inputs")
+            .contains(&json!(
+                "saved runtime environment and unoccupied final round-request name"
+            )),
+        "preflight limits occupancy claim to final name: {preview}"
+    );
+    assert!(
+        preview["not_checked"]
+            .as_array()
+            .expect("unchecked window")
+            .contains(&json!(
+                "every step after the preparing reservation is published"
+            )),
+        "preflight names whole publication window: {preview}"
+    );
+    assert!(
+        preview["not_checked"]
+            .as_array()
+            .expect("unchecked inputs")
+            .contains(&json!(
+                "busy lease, scope admission and preparing-record size before publication"
+            )),
+        "preflight leaves final preparing-record size to apply: {preview}"
+    );
+    assert!(
+        record["plan"]["compute_workspace"].is_object(),
+        "real declaration reaches helper preflight"
+    );
+}
+
+fn check_round_previews(home: &Path, runs: &Path, podman: &Path, record: &Value, uid: u32) {
+    let run = runs.join("R");
+    let reservation = runs.join(".reservation-R.json");
+    let bytes = b"Continue the synthetic round.\n";
+    crate::launch::publish_reservation(&reservation, record).expect("settled before preview");
+    let before = fs::read(&reservation).expect("before preview");
+    let credential = runs.join(".launch-R/credential-refresh.json");
+    let evidence = (
+        fs::metadata(&credential).expect("evidence inode").ino(),
+        fs::read(&credential).expect("evidence bytes"),
+    );
+    let output = built_helper(home, runs, podman, true).finish();
+    assert!(
+        output.status.success(),
+        "preview: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    check_preflight_report(&output.stdout, record);
+    assert_eq!(fs::read(&reservation).expect("after preview"), before);
+    assert!(!run.join("round-launch-review.json").exists());
+    writeln!(std::io::stdout().lock(), "ROUND-PREFLIGHT-READONLY").expect("preview marker");
+    assert_eq!(
+        (
+            fs::metadata(&credential).expect("same inode").ino(),
+            fs::read(&credential).expect("same evidence")
+        ),
+        evidence
+    );
+    for (change, text) in [
+        (
+            "bytes",
+            "retained evidence differs from active mail binding",
+        ),
+        ("owner", "evidence custody differs"),
+        ("directory-owner", "loop directory uid"),
+    ] {
+        let input = json!({"run":run,"uid":uid,"change":change}).to_string();
+        let output = namespace_python(
+            home,
+            r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);p=Path(v['run'])/'mail-review.txt'
+if v['change']=='bytes': p.write_text('changed synthetic letter')
+elif v['change']=='directory-owner': os.chown(p.parent,3001,3001)
+else: os.chown(p,3001,3001)
+",
+            &input,
+        )
+        .expect("change retained source");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let inventory = publication_inventory(home, runs);
+        let output = built_helper(home, runs, podman, true).finish();
+        assert_eq!(
+            publication_inventory(home, runs),
+            inventory,
+            "bad {change}: no writes"
+        );
+        assert_eq!(output.status.code(), Some(2), "bad {change} preview passed");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(text),
+            "{change}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read(&reservation).expect("refused preview unchanged"),
+            before
+        );
+        let input = json!({"run":run,"uid":uid,"text":String::from_utf8_lossy(bytes)}).to_string();
+        let output = namespace_python(
+            home,
+            r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);p=Path(v['run'])/'mail-review.txt'
+p.write_text(v['text']);os.chown(p,v['uid'],v['uid']);os.chown(p.parent,v['uid'],v['uid'])
+",
+            &input,
+        )
+        .expect("restore retained source");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn check_publication_previews(home: &Path, runs: &Path, podman: &Path, record: &Value, uid: u32) {
+    let reservation = runs.join(".reservation-R.json");
+    for (case, expected) in [
+        ("binding", "active mail binding absent"),
+        ("runtime", "saved client environment is invalid"),
+        (
+            "runtime-owner",
+            "saved client environment has foreign ownership",
+        ),
+        ("occupied", "round-launch-review.json already exists"),
+        ("state", "preflight requires an unused settled round"),
+    ] {
+        let mut input = record.clone();
+        if case == "binding" {
+            input["mail"] = json!([]);
+        }
+        if case == "state" {
+            input["phase"] = json!("failed");
+        }
+        crate::launch::publish_reservation(&reservation, &input).expect("case reservation");
+        let setup = json!({"run":runs.join("R"),"uid":uid,"case":case}).to_string();
+        let prepared = namespace_python(
+            home,
+            r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);d=Path(v['run']);p=d/'launch/runtime.env'
+p.write_bytes(b'SUPERLOOP_CLIENT_ROOT_DEV=1\0SUPERLOOP_CLIENT_ROOT_INO=2\0')
+os.chown(p,0,v['uid']);p.chmod(0o440)
+if v['case']=='runtime': p.write_bytes(b'invalid')
+if v['case']=='runtime-owner': os.chown(p,v['uid'],v['uid'])
+if v['case']=='occupied': (d/'round-launch-review.json').write_bytes(b'existing request')
+",
+            &setup,
+        )
+        .expect("prepare publication refusal");
+        assert!(prepared.status.success(), "{prepared:?}");
+        let before = publication_inventory(home, runs);
+        let output = built_helper(home, runs, podman, true).finish();
+        assert_eq!(output.status.code(), Some(2), "{case}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{case}: {output:?}"
+        );
+        assert_eq!(
+            publication_inventory(home, runs),
+            before,
+            "{case}: no publication on refusal"
+        );
+        if case == "occupied" {
+            let removed = namespace_python(
+                home,
+                r"
+import os,sys
+os.unlink(os.path.join(sys.argv[2],'R/round-launch-review.json'))
+",
+                runs.to_str().expect("runs"),
+            )
+            .expect("remove fixture request");
+            assert!(removed.status.success(), "{removed:?}");
+        }
+    }
+    crate::launch::publish_reservation(&reservation, record).expect("restore settled record");
+    writeln!(std::io::stdout().lock(), "PUBLICATION-PREFLIGHT-READONLY").expect("marker");
+}
+
+fn publication_inventory(home: &Path, runs: &Path) -> Vec<u8> {
+    let output = namespace_python(
+        home,
+        r"
+import os,sys,json,hashlib,stat
+from pathlib import Path
+root=Path(sys.argv[2]);rows=[]
+for directory,dirs,files in os.walk(root,followlinks=False):
+ for name in sorted(dirs+files):
+  p=Path(directory)/name;s=p.lstat();payload=None
+  if stat.S_ISREG(s.st_mode): payload=hashlib.sha256(p.read_bytes()).hexdigest()
+  elif stat.S_ISLNK(s.st_mode): payload=os.readlink(p)
+  rows.append((str(p.relative_to(root)),s.st_dev,s.st_ino,s.st_uid,s.st_gid,s.st_mode,payload))
+print(json.dumps(sorted(rows)))
+",
+        runs.to_str().expect("runs"),
+    )
+    .expect("whole run inventory");
+    assert!(output.status.success(), "{output:?}");
+    output.stdout
+}
+
+fn check_built_inspection(home: &Path, runs: &Path, seed: &Value, uid: u32) {
+    let setup = json!({"run":runs.join("R"),"uid":uid}).to_string();
+    let output = namespace_python(
+        home,
+        r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);r=Path(v['run']);d=r/'fixture-dispatch';d.mkdir()
+d.chmod(0o700);os.chown(d,v['uid'],v['uid'])
+p=d/'events.jsonl'
+p.write_text(json.dumps({'type':'thread.started','thread_id':'fixture-thread'})+'\n')
+p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
+p=d/'.event-start';p.write_bytes(b'0\n');p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
+p=r/'launch/runtime.env'
+p.write_bytes(b'SUPERLOOP_CLIENT_ROOT_DEV=1\0SUPERLOOP_CLIENT_ROOT_INO=2\0')
+os.chown(p,0,v['uid']);p.chmod(0o440)
+",
+        &setup,
+    )
+    .expect("inspection history");
+    assert!(output.status.success(), "{output:?}");
+    let reservation = runs.join(".reservation-R.json");
+    for (case, expected) in [
+        ("binding", "round request lacks its delivery binding"),
+        ("occupied", "round-launch-review.json already exists"),
+    ] {
+        let mut record = seed.clone();
+        record["phase"] = json!("preparing");
+        record["active_round"] = json!("review");
+        record["rounds"]
+            .as_array_mut()
+            .expect("rounds")
+            .push(json!({"step":"review","budget_seconds":3600}));
+        if case == "binding" {
+            record["mail"] = json!([]);
+        }
+        crate::launch::publish_reservation(&reservation, &record).expect("inspect record");
+        if case == "occupied" {
+            let output = namespace_python(
+                home,
+                r"
+import pathlib,sys
+(pathlib.Path(sys.argv[2])/'R/round-launch-review.json').write_bytes(b'retained request')
+",
+                runs.to_str().expect("runs"),
+            )
+            .expect("occupied request");
+            assert!(output.status.success(), "{output:?}");
+        }
+        let before = publication_inventory(home, runs);
+        let error = built_inspection(home, runs).expect_err("inspection refuses input");
+        assert!(error.detail.contains(expected), "{case}: {error:?}");
+        assert_eq!(
+            publication_inventory(home, runs),
+            before,
+            "{case}: built inspection must not publish before validation"
+        );
+    }
+    writeln!(std::io::stdout().lock(), "INSPECTION-REFUSALS-READONLY").expect("marker");
+}
+
+fn built_inspection(home: &Path, runs: &Path) -> Result<String, crate::error::LaneError> {
+    built_inspection_action(home, runs, &["--record", "review", "--budget", "3600"])
+}
+
+fn built_inspection_action(
+    home: &Path,
+    runs: &Path,
+    action: &[&str],
+) -> Result<String, crate::error::LaneError> {
+    let binary = std::env::current_exe()
+        .expect("test image")
+        .ancestors()
+        .map(|path| path.join("superloop-lane"))
+        .find(|path| path.is_file())
+        .expect("built lane");
+    let own = fs::File::open(home).expect("home").into();
+    let storage = fs::File::open(runs).expect("runs").into();
+    let mut args = vec![
+        "unshare".into(),
+        binary.display().to_string(),
+        "_inspect-round".into(),
+        "alpha".into(),
+        "R".into(),
+        "--owner-home".into(),
+        home.display().to_string(),
+    ];
+    args.extend(action.iter().map(|word| (*word).to_owned()));
+    let mut receipt = crate::build::LiveChild::default();
+    let result = crate::build::inspect_with_receipt(
+        Path::new("/usr/bin/podman"),
+        &args,
+        &crate::launch::launch_environment(home)?,
+        home,
+        &own,
+        runs,
+        &storage,
+        &mut receipt,
+    );
+    assert!(
+        receipt.absent(),
+        "private inspector waited for its process group"
+    );
+    result
+}
+
+fn rollback_request(home: &Path, runs: &Path, uid: u32, text: &str) {
+    let input = json!({"run":runs.join("R"),"uid":uid,"text":text}).to_string();
+    let output = namespace_python(
+        home,
+        r"
+import os,json,sys
+from pathlib import Path
+v=json.loads(sys.argv[2]);p=Path(v['run'])/'round-launch-review.json'
+p.write_text(v['text']);p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
+",
+        &input,
+    )
+    .expect("own mapped request");
+    assert!(output.status.success(), "{output:?}");
+}
+
+fn rollback_record(seed: &Value, runs: &Path, nonce: &str, request: &str) -> Value {
+    let before = serde_json::to_string_pretty(seed).expect("raw settled bytes");
+    let mut record = seed.clone();
+    record["phase"] = json!("preparing");
+    record["active_round"] = json!("review");
+    record["letter_source"] = json!(runs.join("R/mail-review.txt"));
+    record["rounds"]
+        .as_array_mut()
+        .expect("rounds")
+        .push(json!({"step":"review","phase":"preparing","budget_seconds":3600}));
+    let original: Vec<Value> = [
+        crate::container_helper::socket_path(&runs.join("R")).expect("socket"),
+        crate::container_helper::control_socket_path(&runs.join("R")).expect("control"),
+    ]
+    .iter()
+    .map(|path| json!({"name":path.file_name().and_then(|name| name.to_str()),"identity":null}))
+    .collect();
+    let handle = execute_command::rubric::sha256_digest(before.as_bytes());
+    record["round_rollback"] = json!({"schema":1,"nonce":nonce,"before":before,
+        "before_bytes":before.len(),"before_sha256_prefix":&handle[..16],
+        "request":request,"sockets":[],"sockets_before":original});
+    record
+}
+
+fn check_rollback_cleanup(home: &Path, runs: &Path, podman: &Path, seed: &Value, uid: u32) {
+    let nonce = "a".repeat(64);
+    let reservation = runs.join(".reservation-R.json");
+    let request = format!(
+        "{}\n",
+        json!({"schema":1,"step":"review","budget_seconds":3600,
+        "mail":seed["mail"][0],"thread_id":seed["thread_id"],"home":seed["plan"]["home"],
+        "worker_uid":seed["worker_uid"]})
+    );
+    let inventory = rollback_inventory(home, runs);
+    let mut record = rollback_record(seed, runs, &nonce, &request);
+    crate::launch::publish_reservation(&reservation, &record).expect("attempt");
+    rollback_request(home, runs, uid, &"x".repeat(request.len()));
+    let before = publication_inventory(home, runs);
+    let error = built_inspection_action(home, runs, &["--rollback", &nonce])
+        .expect_err("replacement is retained");
+    assert!(error.detail.contains("request bytes differ"), "{error:?}");
+    assert_eq!(
+        publication_inventory(home, runs),
+        before,
+        "refusal changes nothing"
+    );
+    rollback_request(home, runs, uid, &request);
+    record["dispatch_intent"] = json!({"nonce":nonce});
+    crate::launch::publish_reservation(&reservation, &record).expect("intent");
+    let before = publication_inventory(home, runs);
+    let error = built_inspection_action(home, runs, &["--rollback", &nonce])
+        .expect_err("intent cannot roll back");
+    assert!(error.detail.contains("dispatch-intent"), "{error:?}");
+    assert_eq!(
+        publication_inventory(home, runs),
+        before,
+        "intent preserved"
+    );
+    record
+        .as_object_mut()
+        .expect("record")
+        .remove("dispatch_intent");
+    check_rollback_socket(home, runs, &mut record, &nonce);
+    crate::launch::publish_reservation(&reservation, &record).expect("retry attempt");
+    let output = built_inspection_action(home, runs, &["--rollback", &nonce])
+        .expect("real received-custody cleanup");
+    let report: Value = serde_json::from_str(&output).expect("real cleanup report");
+    assert_eq!(report["state"], "cleaned");
+    assert_eq!(report["nonce"], nonce);
+    let cleaned = publication_inventory(home, runs);
+    assert!(!String::from_utf8_lossy(&cleaned).contains("round-launch-review.json"));
+    assert_eq!(
+        fs::read(&reservation).expect("preparing remains"),
+        serde_json::to_vec(&record).expect("unchanged preparing")
+    );
+    check_rollback_helper(home, runs, podman, &nonce);
+    assert_eq!(
+        rollback_inventory(home, runs),
+        inventory,
+        "no stray attempt files"
+    );
+    writeln!(std::io::stdout().lock(), "ROLLBACK-PRIVATE-CLEANUP").expect("marker");
+}
+
+fn check_rollback_socket(home: &Path, runs: &Path, record: &mut Value, nonce: &str) {
+    let socket = crate::container_helper::socket_path(&runs.join("R")).expect("socket");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("fixture socket");
+    let identity = fs::symlink_metadata(&socket).expect("socket identity");
+    record["round_rollback"]["sockets"] = json!([{
+        "name":socket.file_name().and_then(|name| name.to_str()),
+        "device":identity.dev(),"inode":identity.ino()+1}]);
+    let reservation = runs.join(".reservation-R.json");
+    crate::launch::publish_reservation(&reservation, record).expect("socket attempt");
+    let before = publication_inventory(home, runs);
+    let error = built_inspection_action(home, runs, &["--rollback", nonce])
+        .expect_err("replacement socket retained");
+    assert!(
+        error.detail.contains("replacement socket retained"),
+        "{error:?}"
+    );
+    assert_eq!(
+        publication_inventory(home, runs),
+        before,
+        "replacement untouched"
+    );
+    record["round_rollback"]["sockets"][0]["inode"] = json!(identity.ino());
+    drop(listener);
+}
+
+fn check_rollback_helper(home: &Path, runs: &Path, podman: &Path, nonce: &str) {
+    built_inspection(home, runs).expect("same private inspection can publish after cleanup");
+    ready_and_stop(
+        built_helper(home, runs, podman, false),
+        runs,
+        "ROLLBACK-HELPER-RETRY",
+    );
+    let reservation = runs.join(".reservation-R.json");
+    let record: Value =
+        serde_json::from_slice(&fs::read(&reservation).expect("registered sockets"))
+            .expect("record");
+    assert_eq!(record["round_rollback"]["nonce"], nonce);
+    assert_eq!(
+        record["round_rollback"]["sockets"]
+            .as_array()
+            .expect("receipts")
+            .len(),
+        2,
+        "real helper registered both held socket identities"
+    );
+    let output = built_inspection_action(home, runs, &["--rollback", nonce])
+        .expect("cleanup real published request after helper stop");
+    let report: Value = serde_json::from_str(&output).expect("cleanup receipt");
+    assert_eq!(report["state"], "cleaned");
+    let inventory = publication_inventory(home, runs);
+    assert!(!String::from_utf8_lossy(&inventory).contains("round-launch-review.json"));
+}
+
+fn rollback_inventory(home: &Path, runs: &Path) -> Value {
+    let bytes = publication_inventory(home, runs);
+    let mut inventory: Value = serde_json::from_slice(&bytes).expect("inventory rows");
+    inventory.as_array_mut().expect("rows").retain(|row| {
+        ![
+            ".reservation-R.json",
+            "R/round-launch-review.json",
+            "R/launch/runtime.env",
+            ".launch-R/credential-refresh.json",
+        ]
+        .iter()
+        .any(|name| row[0] == *name)
+    });
+    inventory
+}
+
+fn check_failed_choice_previews(home: &Path, runs: &Path, podman: &Path, settled: &Value) {
+    let reservation = runs.join(".reservation-R.json");
+    let mut failed = settled.clone();
+    failed["readback_end"] = json!("completed");
+    failed["driver_end"] = json!({"state":"completed","successful":false});
+    failed["helper_end"] = json!({"state":"completed"});
+    failed["rounds"][0]["phase"] = json!("failed");
+    failed["rounds"][0]["reply"] = Value::Null;
+    failed["rounds"][0]["settle_attempts"] = json!([{"phase":"complete"}]);
+    failed["rounds"][0]["thread"] = json!({"id":"fixture-thread","provenance":"observed"});
+    crate::launch::publish_reservation(&reservation, &failed).expect("failed settlement");
+    let before = publication_inventory(home, runs);
+    let refused = built_helper(home, runs, podman, true).finish();
+    assert!(!refused.status.success(), "choice required by real entry");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("round-choice"));
+    assert_eq!(
+        publication_inventory(home, runs),
+        before,
+        "missing choice writes nothing"
+    );
+    for flag in ["--fresh-thread", "--resume-thread"] {
+        let output = built_helper_choice(home, runs, podman, true, Some(flag)).finish();
+        assert!(
+            output.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).expect("production report");
+        assert_eq!(report["state"], "passed");
+        assert_eq!(
+            publication_inventory(home, runs),
+            before,
+            "chosen preview writes nothing"
+        );
+    }
+    crate::launch::publish_reservation(&reservation, settled).expect("restore settled fixture");
+    writeln!(std::io::stdout().lock(), "FAILED-ROUND-CHOICES-PREFLIGHT").expect("marker");
 }

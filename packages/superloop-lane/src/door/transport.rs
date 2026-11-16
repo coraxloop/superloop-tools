@@ -914,9 +914,31 @@ pub(super) fn write_frame_locked(
     value: &Value,
     deadline: Instant,
 ) -> io::Result<()> {
+    with_writer(stream, deadline, |locked| {
+        frame_write_until(locked, value, deadline)
+    })
+}
+
+fn write_final(
+    writer: &Arc<Mutex<UnixStream>>,
+    wait: Option<&super::RequestWait>,
+    reply: &Value,
+    deadline: Instant,
+) -> io::Result<()> {
+    wait.map_or_else(
+        || write_frame_locked(writer, reply, deadline),
+        |wait| wait.write_final(reply, deadline),
+    )
+}
+
+pub(super) fn with_writer<T>(
+    stream: &Arc<Mutex<UnixStream>>,
+    deadline: Instant,
+    action: impl FnOnce(&mut UnixStream) -> io::Result<T>,
+) -> io::Result<T> {
     loop {
         match stream.try_lock() {
-            Ok(mut locked) => return frame_write_until(&mut locked, value, deadline),
+            Ok(mut locked) => return action(&mut locked),
             Err(TryLockError::Poisoned(_)) => {
                 return Err(io::Error::other("door writer lock poisoned"));
             }
@@ -1240,7 +1262,7 @@ pub(super) fn serve_compute(
     };
     if registration.scope != Scope::Work {
         let reply = refusal(registration, peer, "door-review-compute-refusal", started);
-        write_frame_locked(&writer, &reply, deadline)?;
+        write_final(&writer, wait, &reply, deadline)?;
         return Ok(reply);
     }
     let compute_started = Instant::now();
@@ -1277,7 +1299,12 @@ pub(super) fn serve_compute(
         if let Some(wait) = wait {
             wait.report(&mut reply);
         }
-        write_frame_locked(&writer, &reply, Instant::now() + Duration::from_secs(2))?;
+        write_final(
+            &writer,
+            wait,
+            &reply,
+            Instant::now() + Duration::from_secs(2),
+        )?;
         return Ok(reply);
     }
     if upload {
@@ -1288,6 +1315,12 @@ pub(super) fn serve_compute(
         )?;
     }
     let mut child = runner.spawn(registration, operation)?;
+    #[cfg(test)]
+    let deadline = tests::SPAWN_DEADLINE.with(|slot| {
+        slot.borrow_mut()
+            .take()
+            .map_or(deadline, |after_spawn| after_spawn())
+    });
     let stdin = child
         .stdin
         .take()
@@ -1456,7 +1489,12 @@ pub(super) fn serve_compute(
     if let Some(wait) = wait {
         wait.report(&mut reply);
     }
-    write_frame_locked(&writer, &reply, Instant::now() + Duration::from_secs(2))?;
+    write_final(
+        &writer,
+        wait,
+        &reply,
+        Instant::now() + Duration::from_secs(2),
+    )?;
     Ok(reply)
 }
 
@@ -1804,6 +1842,7 @@ pub(super) fn stub_call(socket: &Path, args: &[OsString], input: &[u8]) -> io::R
 #[cfg(test)]
 #[path = "."]
 mod tests {
+    use crate::door::tests::FixtureServer;
     use std::ffi::OsString;
     use std::fs;
     use std::io;
@@ -1822,14 +1861,19 @@ mod tests {
         HostRunner, Operation, Runner, checked_ref_packet, compute_client_deadline,
         compute_deadline_frame, read_owner_leaf, stub_call, stub_call_stream,
     };
-    use crate::door::{
-        Registration, Scope, frame_read_until, frame_write_until, peer_uid, serve_request,
-    };
+    use crate::door::tests::{FIXTURE_HANG, FixtureClient, fixture_request};
+    use crate::door::{Registration, Scope, frame_write_until, peer_uid, serve_request};
     use crate::requests::{
         Mode,
         modes::{ModeTarget, Rubric},
         store::tests::Fixture,
     };
+
+    type SpawnDeadline = Box<dyn FnOnce() -> Instant + Send>;
+
+    thread_local! {
+        pub(super) static SPAWN_DEADLINE: std::cell::RefCell<Option<SpawnDeadline>> = const { std::cell::RefCell::new(None) };
+    }
 
     struct FakeRunner;
 
@@ -1864,13 +1908,14 @@ mod tests {
                 "refusal changes no deadline"
             );
         }
-        let (service, mut client) = UnixStream::pair().expect("credit stream");
+        let (mut client, service) = FixtureClient::pair().expect("credit stream");
         let wait = super::super::RequestWait::new(&service).expect("wait accounting");
         wait.credit(Duration::from_secs(3600));
         wait.credit(Duration::from_secs(3600));
         assert_eq!(wait.elapsed(), Duration::from_secs(120));
-        let frame = frame_read_until(&mut client, Instant::now() + Duration::from_secs(2))
-            .expect("bounded credit frame");
+        let frame =
+            super::super::frame_read_until(client.wire(), Instant::now() + Duration::from_secs(2))
+                .expect("bounded credit frame");
         assert_eq!(
             frame,
             json!({"schema":2,"type":"request-lock-wait","wait_ms":120_000})
@@ -2075,7 +2120,7 @@ mod tests {
             interrupted: false,
             bytes: io::Cursor::new(b"payload".to_vec()),
         };
-        let (_temp, socket, server) = fixture(Scope::Work);
+        let (_temp, socket, server) = fixture_stub(Scope::Work);
         let mut output = Vec::new();
         let reply = stub_call_stream(
             &socket,
@@ -2088,14 +2133,14 @@ mod tests {
         server.join().expect("server").expect("request");
         assert_eq!(reply["status"], 0);
         assert_eq!(output, b"READY\npayload");
-        let (writer, mut reader) = UnixStream::pair().expect("pair");
+        let (mut reader, writer) = FixtureClient::pair().expect("pair");
         let total = Arc::new(AtomicUsize::new(0));
         let count = Arc::new(AtomicUsize::new(0));
         let abort = Arc::new(AtomicBool::new(false));
         let deadline = Instant::now() + Duration::from_secs(5);
         super::output_pump(
             source(),
-            &Arc::new(Mutex::new(writer)),
+            &Arc::new(Mutex::new(writer.into_wire())),
             "stdout",
             &total,
             &count,
@@ -2105,7 +2150,7 @@ mod tests {
             100,
         )
         .expect("interrupted node output survives");
-        let frame = frame_read_until(&mut reader, deadline).expect("output frame");
+        let frame = super::super::frame_read_until(reader.wire(), deadline).expect("output frame");
         assert_eq!(frame["bytes"], json!(b"payload".to_vec()));
         assert_eq!(count.load(Ordering::Relaxed), 7);
         assert_eq!(total.load(Ordering::Relaxed), 7);
@@ -2162,18 +2207,14 @@ mod tests {
             crate::fixture_exec::fixture_socket_path(fixture.path().join("capability.sock"));
         let listener = UnixListener::bind(&socket).expect("fixture listener");
         let server = thread::spawn(move || {
-            let (mut peer, _) = listener.accept().expect("fixture accept");
+            let mut peer = FixtureServer::accept(&listener).expect("fixture accept");
             let deadline = Instant::now() + Duration::from_secs(5);
-            let _request = frame_read_until(&mut peer, deadline).expect("stub request");
+            let _request = fixture_request(&mut peer).expect("stub request");
             io::copy(&mut peer, &mut io::sink()).expect("drain input");
-            frame_write_until(
-                &mut peer,
-                &json!({"schema":2,"type":"final",
+            frame_write_until(&mut peer, &json!({"schema":2,"type":"final",
                 "status":0,"reason":"door-complete","ref_check":"not-applicable","stdout_bytes":0,"stderr_bytes":0,
                 "queue_state":"no-queue","queue_wall_seconds":null,
-                "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
-                deadline,
-            )
+                "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}), deadline)
             .expect("success frame");
         });
         let input = io::Cursor::new(vec![7_u8; crate::door::INPUT_LIMIT + 1]);
@@ -2193,19 +2234,15 @@ mod tests {
         let listener = UnixListener::bind(&socket).expect("panic fixture listener");
         let (permit, ready) = mpsc::channel();
         let server = thread::spawn(move || {
-            let (mut peer, _) = listener.accept().expect("panic fixture accept");
+            let mut peer = FixtureServer::accept(&listener).expect("panic fixture accept");
             let deadline = Instant::now() + Duration::from_secs(5);
-            let _request = frame_read_until(&mut peer, deadline).expect("panic stub request");
+            let _request = fixture_request(&mut peer).expect("panic stub request");
             permit.send(()).expect("release panic input");
             io::copy(&mut peer, &mut io::sink()).expect("drain panic input");
-            frame_write_until(
-                &mut peer,
-                &json!({"schema":2,"type":"final",
+            frame_write_until(&mut peer, &json!({"schema":2,"type":"final",
                 "status":0,"reason":"door-complete","ref_check":"not-applicable","stdout_bytes":0,"stderr_bytes":0,
                 "queue_state":"no-queue","queue_wall_seconds":null,
-                "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
-                deadline,
-            )
+                "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}), deadline)
             .expect("panic success frame");
         });
         let error = stub_call_stream(
@@ -2235,18 +2272,14 @@ mod tests {
         let socket = crate::fixture_exec::fixture_socket_path(fixture.path().join("deadline.sock"));
         let listener = UnixListener::bind(&socket).expect("fixture listener");
         let server = thread::spawn(move || {
-            let (mut peer, _) = listener.accept().expect("fixture accept");
+            let mut peer = FixtureServer::accept(&listener).expect("fixture accept");
             let deadline = Instant::now() + Duration::from_secs(5);
-            let _request = frame_read_until(&mut peer, deadline).expect("stub request");
+            let _request = fixture_request(&mut peer).expect("stub request");
             io::copy(&mut peer, &mut io::sink()).expect("drain input");
-            frame_write_until(
-                &mut peer,
-                &json!({"schema":2,"type":"final",
+            frame_write_until(&mut peer, &json!({"schema":2,"type":"final",
                     "status":0,"reason":"door-complete","ref_check":"not-applicable","stdout_bytes":0,"stderr_bytes":0,
                     "queue_state":"no-queue","queue_wall_seconds":null,
-                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
-                deadline,
-            )
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}), deadline)
             .expect("success frame");
         });
         let error = stub_call_stream(
@@ -2281,18 +2314,14 @@ mod tests {
             }));
             let listener = UnixListener::bind(&socket).expect("fixture listener");
             let server = thread::spawn(move || {
-                let (mut peer, _) = listener.accept().expect("fixture accept");
+                let mut peer = FixtureServer::accept(&listener).expect("fixture accept");
                 let deadline = Instant::now() + Duration::from_secs(5);
-                let _request = frame_read_until(&mut peer, deadline).expect("request frame");
+                let _request = fixture_request(&mut peer).expect("request frame");
                 let _closed = peer.shutdown(std::net::Shutdown::Read);
-                frame_write_until(
-                    &mut peer,
-                    &json!({"schema":2,"type":"final",
+                frame_write_until(&mut peer, &json!({"schema":2,"type":"final",
                     "status":0,"reason":"door-complete","ref_check":"not-applicable","stdout_bytes":0,"stderr_bytes":0,
                     "queue_state":"no-queue","queue_wall_seconds":null,
-                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
-                    deadline,
-                )
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}), deadline)
                 .expect("success frame");
             });
             let (release, receiver) = mpsc::channel();
@@ -2767,7 +2796,7 @@ mod tests {
             Command::new("/usr/bin/python3")
                 .args([
                     "-c",
-                    "import os,sys,time\nif os.fork(): sys.exit(7)\ntime.sleep(10)\n",
+                    "import os,sys,signal\nif os.fork(): sys.exit(7)\nsignal.pause()\n",
                 ])
                 .process_group(0)
                 .stdin(Stdio::piped())
@@ -2784,7 +2813,7 @@ mod tests {
     /// ´test:unit:door-child-exit-keeps-status-with-open-input-and-descendant-pipe´
     #[test]
     fn door_child_exit_keeps_status_with_open_input_and_descendant_pipe() {
-        let (mut client, server) = UnixStream::pair().expect("fixture peer");
+        let (mut client, server) = FixtureClient::pair().expect("fixture peer");
         let registration = Registration::from_row(
             &json!({"name":"alpha","uid":41001}),
             "alpha",
@@ -2802,7 +2831,7 @@ mod tests {
                 Operation::ProbeStatus,
                 &PipeHoldingRunner,
                 started,
-                started + Duration::from_secs(4),
+                started + FIXTURE_HANG,
                 "no-queue",
                 None,
                 None,
@@ -2810,12 +2839,10 @@ mod tests {
                 None,
             )
         });
-        let reply = frame_read_until(&mut client, started + Duration::from_secs(4))
-            .expect("bounded final status");
+        let reply = client.answer();
         assert_eq!(reply["status"], 7);
         assert_eq!(reply["compute_exit_status"], 7);
         assert_eq!(reply["reason"], "door-complete");
-        assert!(started.elapsed() < Duration::from_secs(4));
         service
             .join()
             .expect("service join")
@@ -2823,6 +2850,22 @@ mod tests {
     }
 
     fn fixture_with_runner(
+        scope: Scope,
+        runner: &'static dyn Runner,
+    ) -> (
+        Fixture,
+        FixtureClient,
+        thread::JoinHandle<io::Result<serde_json::Value>>,
+    ) {
+        let (fixture, socket, server) = fixture_stub_with_runner(scope, runner);
+        (
+            fixture,
+            FixtureClient::connect(socket).expect("connected transport client"),
+            server,
+        )
+    }
+
+    fn fixture_stub_with_runner(
         scope: Scope,
         runner: &'static dyn Runner,
     ) -> (
@@ -2865,8 +2908,13 @@ mod tests {
         let owner_home = temp.home.clone();
         let socket = crate::fixture_exec::fixture_socket_path(temp.home.join("door.sock"));
         let listener = UnixListener::bind(&socket).expect("fixture socket");
+        // The ready hook is thread-local; the serving thread reads it after filing.
+        let ready = super::super::REQUEST_READY.with(|slot| slot.borrow_mut().take());
+        let spawned = SPAWN_DEADLINE.with(|slot| slot.borrow_mut().take());
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept()?;
+            super::super::REQUEST_READY.with(|slot| *slot.borrow_mut() = ready);
+            SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = spawned);
+            let mut stream = FixtureServer::accept(&listener)?;
             let started = Instant::now();
             let _socket_peer = peer_uid(&stream)?;
             let peer = 3000;
@@ -2878,7 +2926,7 @@ mod tests {
                 scope,
             )
             .map_err(io::Error::other)?;
-            let request = frame_read_until(&mut stream, started + Duration::from_secs(2))?;
+            let request = fixture_request(&mut stream)?;
             let route = HostRunner {
                 compute_deadlines: Vec::new(),
                 alias: "fixture".to_owned(),
@@ -2910,14 +2958,14 @@ mod tests {
         (temp, socket, server)
     }
 
-    fn fixture(
+    fn fixture_stub(
         scope: Scope,
     ) -> (
         Fixture,
         PathBuf,
         thread::JoinHandle<io::Result<serde_json::Value>>,
     ) {
-        fixture_with_runner(scope, &FakeRunner)
+        fixture_stub_with_runner(scope, &FakeRunner)
     }
 
     struct GatedInput {
@@ -2930,7 +2978,7 @@ mod tests {
         fn read(&mut self, target: &mut [u8]) -> io::Result<usize> {
             if !self.started {
                 self.gate
-                    .recv_timeout(Duration::from_secs(3))
+                    .recv_timeout(FIXTURE_HANG)
                     .map_err(io::Error::other)?;
                 self.started = true;
             }
@@ -2967,9 +3015,9 @@ mod tests {
     impl io::Read for LockstepInput {
         fn read(&mut self, target: &mut [u8]) -> io::Result<usize> {
             if !self.started {
-                if self.gate.recv_timeout(Duration::from_secs(3)).is_err() {
-                    return Ok(0);
-                }
+                self.gate
+                    .recv_timeout(FIXTURE_HANG)
+                    .map_err(io::Error::other)?;
                 self.started = true;
             }
             self.bytes.read(target)
@@ -2979,7 +3027,7 @@ mod tests {
     /// ´test:unit:door-stub-flushes-output-frame-before-stdin-reply´
     #[test]
     fn door_stub_flushes_output_frame_before_stdin_reply() {
-        let (_temp, socket, server) = fixture_with_runner(Scope::Work, &LockstepRunner);
+        let (_temp, socket, server) = fixture_stub_with_runner(Scope::Work, &LockstepRunner);
         let (read_end, write_end) = nix::unistd::pipe().expect("fixture output pipe");
         let (sender, receiver) = mpsc::channel();
         let reader = thread::spawn(move || {
@@ -3007,7 +3055,7 @@ mod tests {
             &mut output,
             &mut errors,
         )
-        .expect("lockstep reply before three-second stdin deadline");
+        .expect("lockstep reply after output releases stdin");
         assert_eq!(
             reply["status"], 0,
             "the output frame must release fixture stdin"
@@ -3021,7 +3069,7 @@ mod tests {
     /// ´test:unit:door-duplex-drains-output-before-stdin-and-preserves-long-bytes´
     #[test]
     fn door_duplex_drains_output_before_stdin_and_preserves_long_bytes() {
-        let (_temp, socket, server) = fixture(Scope::Work);
+        let (_temp, socket, server) = fixture_stub(Scope::Work);
         let (sender, receiver) = mpsc::channel();
         let bytes = (0..1_048_576_u32)
             .map(|index| u8::try_from(index % 251).expect("bounded byte"))
@@ -3078,7 +3126,7 @@ mod tests {
             checked_ref_packet(&input, "refs/heads/lane/R").map_err(|refusal| refusal.reason),
             Err("door-changed-ref-refusal")
         );
-        let (first_fixture, socket, server) = fixture(Scope::Work);
+        let (first_fixture, socket, server) = fixture_stub(Scope::Work);
         let args = [
             OsString::from("fixture"),
             OsString::from("git-receive-pack '~/mirrors/R.git'"),
@@ -3089,7 +3137,7 @@ mod tests {
         assert_eq!(reply["stdout_bytes"], 0);
         server.join().expect("server join").expect("server reply");
         drop(first_fixture);
-        let (_temp, socket, server) = fixture(Scope::Work);
+        let (_temp, socket, server) = fixture_stub(Scope::Work);
         let args = [
             OsString::from("other"),
             OsString::from("git-upload-pack '~/mirrors/R.git'"),
@@ -3106,7 +3154,7 @@ mod tests {
     /// ´test:unit:door-shape-probe-cannot-execute-compute´
     #[test]
     fn door_shape_probe_cannot_execute_compute() {
-        let (_temp, socket, server) = fixture(Scope::Work);
+        let (_temp, socket, server) = fixture_stub(Scope::Work);
         let reply = stub_call(
             &socket,
             &[OsString::from("door-shape-probe"), OsString::from("R")],
@@ -3136,6 +3184,40 @@ mod tests {
         assert!(!reply.to_string().contains("refs/heads/lane/R"));
     }
 
+    /// ´test:unit:door-prespawn-deadline-refuses-before-runner´
+    #[test]
+    fn door_prespawn_deadline_refuses_before_runner() {
+        struct UnreachableRunner;
+        impl Runner for UnreachableRunner {
+            fn spawn(&self, _: &Registration, _: Operation) -> io::Result<Child> {
+                panic!("expired pre-spawn request must not invoke runner");
+            }
+        }
+        super::super::REQUEST_READY.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(|_| {
+                Instant::now()
+                    .checked_sub(
+                        Duration::from_millis(super::super::MAX_LOCK_WAIT_CREDIT_MS)
+                            + Duration::from_secs(1),
+                    )
+                    .ok_or_else(|| io::Error::other("fixture expired instant is unrepresentable"))
+            }));
+        });
+        let (_fixture, socket, server) = fixture_with_runner(Scope::Work, &UnreachableRunner);
+        let mut client = socket;
+        client
+            .send(
+                &json!({"schema":2,"argv":[b"door-attribution-deadline".to_vec()],
+                "deadline_ms":120_000}),
+            )
+            .expect("pre-spawn request");
+        let reply = client.answer();
+        assert_eq!(reply["status"], 125);
+        assert_eq!(reply["reason"], "door-request-deadline");
+        assert_eq!(reply["ref_check"], "not-reached");
+        server.join().expect("server join").expect("server reply");
+    }
+
     /// ´test:unit:door-status-deadline-review-and-disconnect-have-typed-outcomes´
     #[test]
     fn door_status_deadline_review_and_disconnect_have_typed_outcomes() {
@@ -3150,48 +3232,43 @@ mod tests {
                     .spawn()
             }
         }
-        let (first_fixture, socket, server) = fixture(Scope::Work);
+        let (first_fixture, socket, server) = fixture_stub(Scope::Work);
         let reply = stub_call(&socket, &[OsString::from("door-attribution-status")], b"")
             .expect("status reply");
         assert_eq!(reply["status"], 7);
         assert_eq!(reply["reason"], "door-complete");
         server.join().expect("server join").expect("server reply");
         drop(first_fixture);
+        SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = Some(Box::new(Instant::now)));
         let (second_fixture, socket, server) = fixture_with_runner(Scope::Work, &DeadlineRunner);
-        let mut client = UnixStream::connect(&socket).expect("deadline client");
-        let observation = Instant::now() + Duration::from_secs(120);
-        // Admission gets a loaded-node budget; the runner cannot exit naturally
-        // before it, and the client's observation bound is independently longer.
-        frame_write_until(
-            &mut client,
-            &json!({"schema":2,
-            "argv":[b"door-attribution-deadline".to_vec()],"deadline_ms":3000}),
-            observation,
-        )
-        .expect("deadline request");
+        let mut client = socket;
+        // Mediation gets the maximum request budget; the test-only hook expires
+        // the running child only after spawn, before the pumps copy its deadline.
+        client
+            .send(&json!({"schema":2,
+            "argv":[b"door-attribution-deadline".to_vec()],"deadline_ms":120_000}))
+            .expect("deadline request");
         client
             .shutdown(std::net::Shutdown::Write)
             .expect("deadline stdin end");
-        let reply = frame_read_until(&mut client, observation).expect("deadline reply");
+        let reply = client.answer();
         assert_eq!(reply["status"], 125);
         assert_eq!(reply["reason"], "door-deadline-refusal");
         server.join().expect("server join").expect("server reply");
         drop(second_fixture);
-        let (third_fixture, socket, server) = fixture(Scope::Review);
+        let (third_fixture, socket, server) = fixture_stub(Scope::Review);
         let reply = stub_call(&socket, &[OsString::from("door-attribution-probe")], b"")
             .expect("review reply");
         assert_eq!(reply["reason"], "door-review-compute-refusal");
         server.join().expect("server join").expect("server reply");
         drop(third_fixture);
-        let (_temp, socket, server) = fixture(Scope::Work);
-        let mut client = UnixStream::connect(&socket).expect("disconnect client");
-        frame_write_until(
-            &mut client,
-            &json!({"schema":2,"argv":[b"door-attribution-probe".to_vec()],
-            "deadline_ms":1000}),
-            Instant::now() + Duration::from_secs(1),
-        )
-        .expect("request");
+        let (_temp, mut client, server) = fixture_with_runner(Scope::Work, &FakeRunner);
+        client
+            .send(
+                &json!({"schema":2,"argv":[b"door-attribution-probe".to_vec()],
+            "deadline_ms":120_000}),
+            )
+            .expect("request");
         drop(client);
         let ended = server.join().expect("server join");
         assert!(

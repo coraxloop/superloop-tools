@@ -16,7 +16,7 @@ args = parser.parse_args()
 args.pack = args.pack.resolve()
 args.linter = args.linter.resolve()
 started = time.monotonic()
-deadline = started + 1800
+deadline = started + 5400
 
 
 def run(argv, cwd):

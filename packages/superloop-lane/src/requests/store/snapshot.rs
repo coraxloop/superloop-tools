@@ -108,6 +108,7 @@ impl Store {
     }
 
     pub(super) fn invalidate_snapshot(&self) -> Result<(), LaneError> {
+        let _phase = super::hold::phase(super::hold::Phase::Withdraw);
         if let Some(directory) = self.policy_directory(false, false)? {
             match unlinkat(&directory, "snapshot.json", UnlinkatFlags::NoRemoveDir) {
                 Ok(()) | Err(Errno::ENOENT) => {}
@@ -147,7 +148,7 @@ impl Store {
     /// # Errors
     /// Refuses unsafe tiers, unreadable sources or incomplete publication.
     pub fn publish_snapshot(&self) -> Result<Value, LaneError> {
-        let _lock = self.lock(true)?;
+        let _lock = self.write_lock("publish_snapshot")?;
         self.invalidate_snapshot()?;
         self.publish_snapshot_locked(true)
             .inspect_err(|_| self.withdraw_snapshot_for_write())
@@ -193,6 +194,9 @@ impl Store {
     }
 
     pub(super) fn publish_snapshot_locked(&self, required: bool) -> Result<Value, LaneError> {
+        let _phase = super::hold::phase(super::hold::Phase::Policy);
+        #[cfg(test)]
+        super::publication_tests::begin_publication()?;
         let Some(directory) = self.policy_directory(required, true)? else {
             return Ok(json!({"published":false,"reason":"policy tier is not provisioned"}));
         };
@@ -202,15 +206,7 @@ impl Store {
         };
         let ledger = self.read_modes()?;
         let modes = ledger.value();
-        let mut effective = serde_json::Map::new();
-        for class in modes["classes"].as_array().into_iter().flatten() {
-            let name = class["class"]
-                .as_str()
-                .ok_or_else(|| problem("door-mode-record-refusal", "class absent"))?;
-            if ledger.current(&ModeTarget::Loop).is_some() {
-                effective.insert(name.to_owned(), current.effective_locked(&ledger, name)?);
-            }
-        }
+        let effective = current.snapshot_effective(&ledger, &modes)?;
         let configuration = read_leaf(self.state_dir(), "door.toml", self.owner, 65_536)?;
         let door = read_leaf(
             self.state_dir(),
@@ -273,12 +269,46 @@ impl Store {
             .map_err(|error| problem("execute-command-snapshot-custody", error.to_string()))?;
         nix::fcntl::renameat(&directory, temporary.as_str(), &directory, "snapshot.json")
             .map_err(|error| problem("execute-command-snapshot-custody", error.to_string()))?;
+        #[cfg(test)]
+        super::publication_tests::directory_sync(&directory)?;
         File::from(directory)
             .sync_all()
             .map_err(|error| problem("execute-command-snapshot-custody", error.to_string()))?;
         Ok(
             json!({"published":true,"path":self.loop_root.join("policy/snapshot.json"),"sha256":execute_command::rubric::sha256_digest(&bytes),"written_at":stamp}),
         )
+    }
+
+    fn snapshot_effective(
+        &self,
+        ledger: &ModeLedger,
+        modes: &Value,
+    ) -> Result<serde_json::Map<String, Value>, LaneError> {
+        let mut effective = serde_json::Map::new();
+        // All classes share one inventory, and audit-only publications need none.
+        let mut runs = None;
+        for class in modes["classes"].as_array().into_iter().flatten() {
+            let name = class["class"]
+                .as_str()
+                .ok_or_else(|| problem("door-mode-record-refusal", "class absent"))?;
+            if ledger.current(&ModeTarget::Loop).is_some() {
+                let value = self.base_effective(ledger, name)?;
+                if value["mode"] != "audit" && runs.is_none() {
+                    runs = Some(self.all_runs(None)?);
+                }
+                effective.insert(
+                    name.to_owned(),
+                    Self::effective_from_runs(
+                        ledger,
+                        name,
+                        value,
+                        runs.as_deref().unwrap_or_default(),
+                        self.floor,
+                    )?,
+                );
+            }
+        }
+        Ok(effective)
     }
 
     fn current_snapshot_store(&self) -> Result<Self, LaneError> {

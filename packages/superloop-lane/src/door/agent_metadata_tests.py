@@ -6,20 +6,21 @@ from types import SimpleNamespace
 
 scope = {'__name__': 'fixture'}
 exec(sys.argv[1], scope)
-execute = scope['executable_usable']
-for uid, gid, groups, mode, owner, group, expected in [
-        (1001, 1001, [], 0o100, 1001, 1002, True),
-        (1001, 1001, [], 0o010, 1001, 1001, False),
-        (1001, 1001, [], 0o010, 1002, 1001, True),
-        (1001, 1001, [1002], 0o010, 1003, 1002, True),
-        (1001, 1001, [], 0o001, 1002, 1003, True),
-        (1001, 1001, [], 0o010, 1002, 1003, False),
-        (0, 0, [], 0o600, 1001, 1001, False),
-        (0, 0, [], 0o001, 1001, 1001, True)]:
-    info = SimpleNamespace(st_uid=owner, st_gid=group, st_mode=stat.S_IFREG | mode)
-    assert execute(info, uid, gid, groups) is expected
-
 root = sys.argv[2]
+program = root + '/program'
+with open(program, 'w') as file:
+    file.write('inert executable')
+os.chmod(program, 0o500)
+scope['admit_program'](program, os.geteuid())
+for mode, check in [(0o400, 'program-executable'), (0o4500, 'program-set-id')]:
+    os.chmod(program, mode)
+    try:
+        scope['admit_program'](program, os.geteuid())
+    except scope['RubricFailure'] as error:
+        assert error.evidence['check'] == check, error.evidence
+    else:
+        raise AssertionError('program custody admitted ' + str(mode))
+os.chmod(program, 0o500)
 for file_uid, directory_uid, expected in [
         (1001, 1001, True), (1002, 1001, False),
         (1001, 1002, False), (1002, 1002, False),

@@ -1,4 +1,4 @@
-//! Resume a recorded thread on its reserved home and settle each reply of record.
+//! Choose continuation after failed rounds and settle each reply of record.
 
 use std::fs::OpenOptions;
 use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use super::{
     LaunchRequest, admission, entry_argv_round, launch_environment, lock_mailbox,
     lock_run_preparation, persist_settlement_field, publish_reservation, read_reservation,
-    reservation_path, start_helper_with_program, stop_helper,
+    reservation_path,
 };
 use crate::error::LaneError;
 use crate::plan::Plan;
@@ -33,48 +33,56 @@ fn held_round_directory(path: &Path, loop_uid: u32) -> Result<std::fs::File, Lan
     home::pin_loop_round(&root, path, Uid::effective().as_raw(), loop_uid).map(std::fs::File::from)
 }
 
-fn thread_evidence(dir: &Path, loop_uid: u32) -> Result<(std::fs::File, usize, usize), LaneError> {
+fn thread_evidence(
+    dir: &Path,
+    loop_uid: u32,
+) -> Result<Option<(std::fs::File, usize, usize)>, LaneError> {
     let path = dir.join("events.jsonl");
     let pinned = if home::private_is_active() {
         Some(held_round_directory(dir, loop_uid)?)
     } else {
         None
     };
-    let file = pinned
-        .as_ref()
-        .map_or_else(
-            || {
-                OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                    .open(&path)
-            },
-            |directory| {
-                nix::fcntl::openat2(
-                    directory,
-                    "events.jsonl",
-                    nix::fcntl::OpenHow::new()
-                        .flags(
-                            nix::fcntl::OFlag::O_RDONLY
-                                | nix::fcntl::OFlag::O_CLOEXEC
-                                | nix::fcntl::OFlag::O_NONBLOCK,
-                        )
-                        .resolve(
-                            nix::fcntl::ResolveFlag::RESOLVE_BENEATH
-                                | nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS,
-                        ),
-                )
-                .map(std::fs::File::from)
-                .map_err(std::io::Error::from)
-            },
-        )
-        .map_err(|error| {
-            LaneError::input("round-thread", format!("{}: {error}", path.display()))
-        })?;
+    let opened = pinned.as_ref().map_or_else(
+        || {
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&path)
+        },
+        |directory| {
+            nix::fcntl::openat2(
+                directory,
+                "events.jsonl",
+                nix::fcntl::OpenHow::new()
+                    .flags(
+                        nix::fcntl::OFlag::O_RDONLY
+                            | nix::fcntl::OFlag::O_CLOEXEC
+                            | nix::fcntl::OFlag::O_NONBLOCK,
+                    )
+                    .resolve(
+                        nix::fcntl::ResolveFlag::RESOLVE_BENEATH
+                            | nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS,
+                    ),
+            )
+            .map(std::fs::File::from)
+            .map_err(std::io::Error::from)
+        },
+    );
     let parent = pinned
         .as_ref()
         .map_or_else(|| std::fs::symlink_metadata(dir), std::fs::File::metadata)
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(LaneError::input(
+                "round-thread",
+                format!("{}: {error}", path.display()),
+            ));
+        }
+    };
     let meta = file
         .metadata()
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
@@ -96,7 +104,7 @@ fn thread_evidence(dir: &Path, loop_uid: u32) -> Result<(std::fs::File, usize, u
             .last()
             .ok_or_else(|| LaneError::input("round-thread", "step event boundary is absent"))?
     };
-    Ok((file, size, start))
+    Ok(Some((file, size, start)))
 }
 
 fn step_event_thread(
@@ -104,7 +112,25 @@ fn step_event_thread(
     dir: &Path,
     loop_uid: u32,
 ) -> Result<String, LaneError> {
-    let (mut file, size, start) = thread_evidence(dir, loop_uid)?;
+    observed_step_thread(backend, dir, loop_uid)?.ok_or_else(|| {
+        LaneError::input(
+            "round-thread",
+            match backend {
+                crate::settings::BoxBackend::Codex => "step has no thread.started event",
+                crate::settings::BoxBackend::Claude => "step has no system.init event",
+            },
+        )
+    })
+}
+
+fn observed_step_thread(
+    backend: crate::settings::BoxBackend,
+    dir: &Path,
+    loop_uid: u32,
+) -> Result<Option<String>, LaneError> {
+    let Some((mut file, size, start)) = thread_evidence(dir, loop_uid)? else {
+        return Ok(None);
+    };
     file.seek(SeekFrom::Start(start as u64))
         .map_err(|error| LaneError::input("round-thread", error.to_string()))?;
     let mut reader = BufReader::new(file.take((size - start) as u64));
@@ -128,30 +154,61 @@ fn step_event_thread(
         }
         line.clear();
     }
-    observed.ok_or_else(|| {
-        LaneError::input(
-            "round-thread",
-            match backend {
-                crate::settings::BoxBackend::Codex => "step has no thread.started event",
-                crate::settings::BoxBackend::Claude => "step has no system.init event",
-            },
-        )
-    })
+    Ok(observed)
 }
 
-fn recovered_threadless_round(round: &Value) -> bool {
-    round["phase"] == "failed"
-        && round["ended_by"] == "by-report"
-        && round.get("reply").is_some_and(Value::is_null)
+/// Preserve observed identity first, then the actual requested resume, never a prior fresh thread.
+pub(super) fn failed_thread(
+    plan: &Plan,
+    record: &Value,
+    round: &Value,
+) -> Result<Value, LaneError> {
+    let directory = recorded_step_dir(plan, record, round)?;
+    let observed = observed_step_thread(
+        crate::settings::BoxBackend::from_plan(&plan.document)?,
+        &directory,
+        round_evidence_uid(plan)?,
+    )?;
+    if let Some(id) = observed {
+        return Ok(json!({"id":id,"provenance":"observed"}));
+    }
+    let requested = round.get("requested_thread").unwrap_or_else(|| {
+        if round["step"] != "dispatch" && round["fresh_thread"] != true {
+            &record["thread_id"]
+        } else {
+            &Value::Null
+        }
+    });
+    if !requested.is_null()
+        && !requested
+            .as_str()
+            .is_some_and(crate::container_helper::valid_thread)
+    {
+        return Err(LaneError::input(
+            "round-thread",
+            "requested thread is malformed",
+        ));
+    }
+    Ok(
+        json!({"id":requested,"provenance":if requested.is_string() { "requested" } else { "absent" }}),
+    )
+}
+
+/// A completed settlement without a reply owes a thread decision, regardless of end reason.
+pub(crate) fn failed_without_reply(round: &Value) -> bool {
+    round["phase"] == "failed" && round["reply"].is_null()
+}
+
+fn finalized_failed_round(round: &Value) -> bool {
+    failed_without_reply(round)
         && round["settle_attempts"]
             .as_array()
             .and_then(|rows| rows.last())
             .is_some_and(|attempt| attempt["phase"] == "complete")
 }
 
-pub(crate) fn threadless_continuation(record: &Value) -> bool {
+pub(crate) fn failed_continuation(record: &Value) -> bool {
     record["phase"] == "settled"
-        && record["thread_id"].is_null()
         && record["readback_end"] == "completed"
         && record["rounds"]
             .as_array()
@@ -159,31 +216,128 @@ pub(crate) fn threadless_continuation(record: &Value) -> bool {
             .is_some_and(|round| {
                 round["step"].is_string()
                     && round["step"] == record["active_round"]
-                    && recovered_threadless_round(round)
+                    && finalized_failed_round(round)
             })
         && (super::reaping::recovery_verdict(record).is_ok()
             || super::settle::completed_failed_round(record))
 }
 
+/// Explicit selection after a finalized round without a reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadChoice {
+    Fresh,
+    Resume,
+}
+
+impl ThreadChoice {
+    pub(crate) fn parse(flag: &str) -> Result<Self, LaneError> {
+        match flag {
+            "--fresh-thread" => Ok(Self::Fresh),
+            "--resume-thread" => Ok(Self::Resume),
+            _ => Err(LaneError::input("round-choice", "unknown thread choice")),
+        }
+    }
+    pub(crate) const fn flag(self) -> &'static str {
+        match self {
+            Self::Fresh => "--fresh-thread",
+            Self::Resume => "--resume-thread",
+        }
+    }
+}
+
+fn recorded_choice_thread(record: &Value) -> &Value {
+    record["rounds"]
+        .as_array()
+        .and_then(|rows| rows.last())
+        .and_then(|round| round.get("thread"))
+        .map_or(&record["thread_id"], |thread| &thread["id"])
+}
+
+fn require_thread_choice(record: &Value, choice: Option<ThreadChoice>) -> Result<bool, LaneError> {
+    if !failed_continuation(record) {
+        if choice.is_some() {
+            return Err(LaneError::input(
+                "round-choice",
+                "no failed-round choice is owed; omit --fresh-thread and --resume-thread",
+            ));
+        }
+        return Ok(false);
+    }
+    let identity = recorded_choice_thread(record);
+    if !identity.is_null()
+        && !identity
+            .as_str()
+            .is_some_and(crate::container_helper::valid_thread)
+    {
+        return Err(LaneError::input(
+            "round-thread",
+            "recorded thread is malformed",
+        ));
+    }
+    let thread = identity.as_str();
+    let step = record["active_round"].as_str().unwrap_or("absent");
+    match choice {
+        Some(ThreadChoice::Fresh) => Ok(true),
+        Some(ThreadChoice::Resume) if thread.is_some() => Ok(false),
+        Some(ThreadChoice::Resume) => Err(LaneError::input(
+            "round-choice",
+            format!(
+                "failed round {step}: --resume-thread unavailable: no recorded thread; choose --fresh-thread"
+            ),
+        )),
+        None => Err(LaneError::input(
+            "round-choice",
+            format!(
+                "failed round {step}: recorded thread {}; choose --fresh-thread or --resume-thread{}",
+                thread.unwrap_or("absent"),
+                if thread.is_none() {
+                    "; only --fresh-thread is available"
+                } else {
+                    ""
+                }
+            ),
+        )),
+    }
+}
+
+fn choice_preview(
+    record: &Value,
+    choice: Option<ThreadChoice>,
+    files: &Value,
+    step: &str,
+) -> Value {
+    if !failed_continuation(record) {
+        return Value::Null;
+    }
+    let round = record["rounds"].as_array().and_then(|rows| rows.last());
+    let letter = record["mail"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["step"] == step))
+        .and_then(|row| row.get("inbox_name"));
+    json!({"next_round":step,"fresh_letter":letter,"failed_round":record["active_round"],"recorded_thread":recorded_choice_thread(record),
+        "provenance":round.map(|round| &round["thread"]["provenance"]),
+        "selection":choice.map(ThreadChoice::flag),"thread_files":files,
+        "fresh_prompt":"the new round's bound letter; no old thread conversation (ordinary vendor startup instructions still apply)",
+        "choice_owed":true,"consumed":false})
+}
+
 pub(crate) fn fresh_thread_round(record: &Value) -> bool {
-    record["thread_id"].is_null()
-        && matches!(
-            record["phase"].as_str(),
-            Some("preparing" | "started" | "failed")
-        )
-        && record["rounds"]
-            .as_array()
-            .and_then(|rows| rows.split_last())
-            .is_some_and(|(round, prior)| {
-                prior.last().is_some_and(recovered_threadless_round)
-                    && round["fresh_thread"] == true
-                    && round["step"] == record["active_round"]
-                    && round["step"] != "dispatch"
-                    && matches!(
-                        round["phase"].as_str(),
-                        Some("running" | "awaiting-settlement" | "failed")
-                    )
-            })
+    matches!(
+        record["phase"].as_str(),
+        Some("preparing" | "started" | "failed")
+    ) && record["rounds"]
+        .as_array()
+        .and_then(|rows| rows.split_last())
+        .is_some_and(|(round, prior)| {
+            prior.last().is_some_and(finalized_failed_round)
+                && round["fresh_thread"] == true
+                && round["step"] == record["active_round"]
+                && round["step"] != "dispatch"
+                && matches!(
+                    round["phase"].as_str(),
+                    Some("running" | "awaiting-settlement" | "failed")
+                )
+        })
 }
 
 fn prior_round_dir(record: &Value) -> Result<&Path, LaneError> {
@@ -222,7 +376,7 @@ fn named_step_dir(plan: &Plan, record: &Value, step: &str) -> Result<PathBuf, La
     let path = PathBuf::from(directory);
     let fresh = index > 0
         && rounds[index]["fresh_thread"] == true
-        && recovered_threadless_round(&rounds[index - 1]);
+        && finalized_failed_round(&rounds[index - 1]);
     let expected = if index == 0 || fresh {
         let name = path
             .file_name()
@@ -361,7 +515,10 @@ pub(super) fn recovery_thread(
         &directory,
         round_evidence_uid(plan)?,
     )?;
-    if let Some(expected) = record["thread_id"].as_str() {
+    if let Some(expected) = record["thread_id"]
+        .as_str()
+        .filter(|_| !fresh_thread_round(record))
+    {
         if expected != actual {
             return Err(LaneError::input(
                 "round-thread",
@@ -502,7 +659,23 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
             "home, driver directory or worker UID differs from reservation",
         ));
     }
-    if threadless_continuation(record) || fresh_thread_round(record) {
+    if fresh_thread_round(record) {
+        return Ok(());
+    }
+    if failed_continuation(record) {
+        let round = record["rounds"]
+            .as_array()
+            .and_then(|rows| rows.last())
+            .ok_or_else(|| LaneError::input("round-record", "last round absent"))?;
+        let observed = failed_thread(plan, record, round)?;
+        if round.get("thread").is_some_and(|saved| saved != &observed)
+            || (observed["id"].is_string() && record["thread_id"] != observed["id"])
+        {
+            return Err(LaneError::input(
+                "round-thread",
+                "failed thread evidence differs from settlement",
+            ));
+        }
         return Ok(());
     }
     let saved = record["thread_id"]
@@ -514,14 +687,21 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
             rounds
                 .iter()
                 .rev()
-                .find(|round| round["phase"] == "settled")
+                .find(|round| round["phase"] == "settled" || finalized_failed_round(round))
         })
         .ok_or_else(|| LaneError::input("round-record", "settled round is absent"))?;
-    let actual = step_event_thread(
-        crate::settings::BoxBackend::from_plan(&plan.document)?,
-        &recorded_step_dir(plan, record, round)?,
-        round_evidence_uid(plan)?,
-    )?;
+    let actual = if finalized_failed_round(round) {
+        failed_thread(plan, record, round)?["id"]
+            .as_str()
+            .ok_or_else(|| LaneError::input("round-thread", "failed round has no thread"))?
+            .to_owned()
+    } else {
+        step_event_thread(
+            crate::settings::BoxBackend::from_plan(&plan.document)?,
+            &recorded_step_dir(plan, record, round)?,
+            round_evidence_uid(plan)?,
+        )?
+    };
     if actual != saved {
         return Err(LaneError::input(
             "round-thread",
@@ -531,7 +711,7 @@ pub(super) fn check_identity(plan: &Plan, record: &Value) -> Result<(), LaneErro
     Ok(())
 }
 
-type InspectionSelection<'a> = (&'a Path, Option<(&'a str, u64)>);
+type InspectionSelection<'a> = (&'a Path, Option<(&'a str, u64)>, Option<&'a str>);
 
 /// Parse the operation body before receiving round inspection custody.
 /// # Errors
@@ -560,8 +740,23 @@ pub(super) fn parse_private_inspect(args: &[String]) -> Result<InspectionSelecti
             "private launch has duplicate or non-absolute owner home",
         ));
     }
+    let mut rollback_nonce = None;
     let evidence = match rest {
         [] => None,
+        [option, nonce] if option == "--rollback" => {
+            if nonce.len() != 64
+                || !nonce
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(LaneError::input(
+                    "round-private",
+                    "rollback nonce malformed",
+                ));
+            }
+            rollback_nonce = Some(nonce.as_str());
+            None
+        }
         [record_option, step, budget_option, seconds]
             if record_option == "--record" && budget_option == "--budget" =>
         {
@@ -580,7 +775,7 @@ pub(super) fn parse_private_inspect(args: &[String]) -> Result<InspectionSelecti
             ));
         }
     };
-    Ok((home, evidence))
+    Ok((home, evidence, rollback_nonce))
 }
 
 /// Check the driver thread from the namespace that owns the protected directory.
@@ -594,11 +789,24 @@ pub fn private_inspect(
     run: &str,
     evidence: Option<(&str, u64)>,
 ) -> Result<Value, LaneError> {
+    private_inspect_action(owner_home, loop_name, run, evidence, None)
+}
+
+pub(crate) fn private_inspect_action(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    evidence: Option<(&str, u64)>,
+    rollback_nonce: Option<&str>,
+) -> Result<Value, LaneError> {
     if !Uid::effective().is_root() {
         return Err(LaneError::input(
             "namespace-owner",
             "rootless namespace root is required",
         ));
+    }
+    if let Some(nonce) = rollback_nonce {
+        return rollback::private_cleanup(loop_name, run, nonce);
     }
     inspect_current_round(owner_home, loop_name, run, evidence)
 }
@@ -609,12 +817,17 @@ pub(super) fn inspect_current_round(
     run: &str,
     evidence: Option<(&str, u64)>,
 ) -> Result<Value, LaneError> {
-    let (plan, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
+    let (mut plan, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
     let root = plan
         .driver_dir
         .parent()
         .ok_or_else(|| LaneError::input("round-home", "runs root is absent"))?;
     let record = inspection_record(root, run)?;
+    let worker = record["worker_uid"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| LaneError::input("round-record", "worker UID is absent"))?;
+    plan.select_worker_uid(worker)?;
     check_identity(&plan, &record)?;
     inspect_loaded_round(&plan, &record, evidence)
 }
@@ -646,26 +859,62 @@ fn inspect_loaded_round(
         let loop_uid = crate::plan::loop_uid(&plan.document)?;
         let (runs_root, runtime_dir) =
             super::pin_runtime_dir(&plan.driver_dir, Uid::effective().as_raw(), loop_uid)?;
-        super::prepare_client_environment(
+        let request = prepare_round_request(plan, record, step, budget)?;
+        let bytes = super::client_environment_bytes(
             &plan.driver_dir,
             &runs_root,
             &runtime_dir,
             loop_uid,
             false,
         )?;
-        publish_round_request(plan, record, step, budget)?;
+        let temporary = record
+            .get("round_rollback")
+            .map(|_| rollback::nonce(record))
+            .transpose()?
+            .map(|nonce| format!(".runtime.env-{nonce}"));
+        super::publish_client_environment_named(&runtime_dir, loop_uid, &bytes, temporary)?;
+        request.publish()?;
     }
+    let thread_files = if failed_continuation(record) {
+        super::thread_files::inspect(plan, recorded_choice_thread(record).as_str())?
+    } else {
+        Value::Null
+    };
     Ok(
-        json!({"schema":1,"command":"inspect-round","thread_id":record["thread_id"],"home":plan.home,"worker_uid":record["worker_uid"]}),
+        json!({"schema":1,"command":"inspect-round","thread_files":thread_files,"thread_id":record["thread_id"],"home":plan.home,"worker_uid":record["worker_uid"]}),
     )
 }
 
+#[cfg(test)]
 pub(super) fn publish_round_request(
     plan: &Plan,
     record: &Value,
     step: &str,
     budget: u64,
 ) -> Result<(), LaneError> {
+    prepare_round_request(plan, record, step, budget)?.publish()
+}
+
+fn request_text(plan: &Plan, record: &Value, step: &str, budget: u64) -> Result<String, LaneError> {
+    let binding = record["mail"]
+        .as_array()
+        .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
+        .ok_or_else(|| {
+            LaneError::input("mail-delivery", "round request lacks its delivery binding")
+        })?;
+    Ok(json!({
+        "schema":1,"step":step,"budget_seconds":budget,"mail":binding,
+        "thread_id":if fresh_thread_round(record) { Value::Null } else { record["thread_id"].clone() },"home":plan.home,"worker_uid":record["worker_uid"]
+    })
+    .to_string())
+}
+
+fn prepare_round_request(
+    plan: &Plan,
+    record: &Value,
+    step: &str,
+    budget: u64,
+) -> Result<PreparedRoundRequest, LaneError> {
     let directory = if home::private_is_active() {
         held_round_directory(&plan.driver_dir, crate::plan::loop_uid(&plan.document)?)?
     } else {
@@ -684,53 +933,119 @@ pub(super) fn publish_round_request(
         .metadata()
         .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
     let name = format!("round-launch-{step}.json");
-    let temporary = format!(".round-launch-{step}-{}.tmp", std::process::id());
+    let temporary = if record.get("round_rollback").is_some() {
+        format!(".round-launch-{step}-{}.tmp", rollback::nonce(record)?)
+    } else {
+        format!(".round-launch-{step}-{}.tmp", std::process::id())
+    };
     let path = plan.driver_dir.join(&temporary);
-    let mut file = nix::fcntl::openat(
-        &directory,
-        temporary.as_str(),
-        nix::fcntl::OFlag::O_WRONLY
-            | nix::fcntl::OFlag::O_CREAT
-            | nix::fcntl::OFlag::O_EXCL
-            | nix::fcntl::OFlag::O_NOFOLLOW
-            | nix::fcntl::OFlag::O_CLOEXEC,
-        nix::sys::stat::Mode::from_bits_truncate(0o600),
-    )
-    .map(std::fs::File::from)
-    .map_err(std::io::Error::from)
-    .map_err(|error| {
-        LaneError::operation("round-evidence", format!("{}: {error}", path.display()))
-    })?;
-    let binding = record["mail"]
-        .as_array()
-        .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step))
-        .ok_or_else(|| {
-            LaneError::input("mail-delivery", "round request lacks its delivery binding")
+    let body = request_text(plan, record, step, budget)?;
+    for leaf in [&name, &temporary] {
+        match nix::sys::stat::fstatat(
+            &directory,
+            leaf.as_str(),
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Err(nix::errno::Errno::ENOENT) => {}
+            Ok(_) => {
+                return Err(LaneError::input(
+                    "round-evidence",
+                    format!("{leaf} already exists"),
+                ));
+            }
+            Err(error) => return Err(LaneError::input("round-evidence", error.to_string())),
+        }
+    }
+    Ok(PreparedRoundRequest {
+        directory,
+        name,
+        temporary,
+        path,
+        parent,
+        bytes: body.into_bytes(),
+    })
+}
+
+struct PreparedRoundRequest {
+    directory: std::fs::File,
+    name: String,
+    temporary: String,
+    path: PathBuf,
+    parent: std::fs::Metadata,
+    bytes: Vec<u8>,
+}
+
+impl PreparedRoundRequest {
+    fn publish(self) -> Result<(), LaneError> {
+        let Self {
+            directory,
+            name,
+            temporary,
+            path,
+            parent,
+            bytes,
+        } = self;
+        let mut file = nix::fcntl::openat(
+            &directory,
+            temporary.as_str(),
+            nix::fcntl::OFlag::O_WRONLY
+                | nix::fcntl::OFlag::O_CREAT
+                | nix::fcntl::OFlag::O_EXCL
+                | nix::fcntl::OFlag::O_NOFOLLOW
+                | nix::fcntl::OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .map(std::fs::File::from)
+        .map_err(std::io::Error::from)
+        .map_err(|error| {
+            LaneError::operation("round-evidence", format!("{}: {error}", path.display()))
         })?;
-    let body = json!({"schema":1,"step":step,"budget_seconds":budget,"mail":binding,"thread_id":record["thread_id"],"home":plan.home,"worker_uid":record["worker_uid"]});
-    file.write_all(body.to_string().as_bytes())
-        .and_then(|()| file.write_all(b"\n"))
-        .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    fchown(
-        &file,
-        Some(Uid::from_raw(parent.uid())),
-        Some(Gid::from_raw(parent.gid())),
-    )
-    .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    file.sync_all()
-        .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    renameat2(
-        &directory,
-        temporary.as_str(),
-        &directory,
-        name.as_str(),
-        RenameFlags::RENAME_NOREPLACE,
-    )
-    .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    directory
-        .sync_all()
-        .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
-    Ok(())
+        let result = (|| {
+            file.write_all(&bytes)
+                .and_then(|()| file.write_all(b"\n"))
+                .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+            fchown(
+                &file,
+                Some(Uid::from_raw(parent.uid())),
+                Some(Gid::from_raw(parent.gid())),
+            )
+            .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+            file.sync_all()
+                .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+            renameat2(
+                &directory,
+                temporary.as_str(),
+                &directory,
+                name.as_str(),
+                RenameFlags::RENAME_NOREPLACE,
+            )
+            .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+            directory
+                .sync_all()
+                .map_err(|error| LaneError::operation("round-evidence", error.to_string()))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let held = file.metadata();
+            let named = nix::sys::stat::fstatat(
+                &directory,
+                temporary.as_str(),
+                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+            );
+            if held.as_ref().is_ok_and(|held| {
+                named
+                    .as_ref()
+                    .is_ok_and(|named| held.dev() == named.st_dev && held.ino() == named.st_ino)
+            }) {
+                let _removed = nix::unistd::unlinkat(
+                    &directory,
+                    temporary.as_str(),
+                    nix::unistd::UnlinkatFlags::NoRemoveDir,
+                );
+            }
+        }
+        result
+    }
 }
 
 /// Record the reply and each acknowledged in-round letter after the child ends.
@@ -808,7 +1123,8 @@ pub(super) fn record_settlement_with_recovery(
             && (round["settlement_error"].is_string()
                 || record["readback_end"]
                     .as_str()
-                    .is_some_and(|end| end.contains("settle-evidence:"))))
+                    .is_some_and(|end| end.contains("settle-evidence:"))
+                || super::settle::driver_failed_after_readback(&record)))
     {
         return Err(LaneError::input(
             "round-record",
@@ -826,7 +1142,10 @@ pub(super) fn record_settlement_with_recovery(
             &step_dir?,
             round_evidence_uid(plan)?,
         )?;
-        if let Some(saved) = record["thread_id"].as_str() {
+        if let Some(saved) = record["thread_id"]
+            .as_str()
+            .filter(|_| round["fresh_thread"] != true)
+        {
             if saved != actual {
                 return Err(LaneError::input(
                     "round-thread",
@@ -962,7 +1281,7 @@ pub(super) fn continuation_argv(
         .as_deref()
         .ok_or_else(|| LaneError::input("round-step", "round is absent"))?;
     let thread = record["thread_id"].as_str();
-    let fresh = threadless_continuation(record);
+    let fresh = require_thread_choice(record, request.thread_choice)?;
     let directory = if fresh {
         super::planned_step_dir(plan, step)?
     } else {
@@ -979,7 +1298,9 @@ pub(super) fn continuation_argv(
         step,
         request.budget,
         fresh.then_some(directory.as_path()),
-        thread.map(|thread| (thread, directory.as_path(), selection)),
+        thread
+            .filter(|_| !fresh)
+            .map(|thread| (thread, directory.as_path(), selection)),
         record["mail"]
             .as_array()
             .and_then(|bindings| bindings.iter().find(|binding| binding["step"] == step)),
@@ -1010,19 +1331,95 @@ pub(super) fn continuation_round(
         .as_deref()
         .ok_or_else(|| LaneError::input("round-step", "round is absent"))?;
     let mut round = json!({"step":step,"budget_seconds":request.budget,"mail":letter,"phase":"running","driver_dir":directory,"ended_by":null,"in_round_letters":[]});
-    if threadless_continuation(record) {
+    if require_thread_choice(record, request.thread_choice)? {
         round["fresh_thread"] = json!(true);
     }
+    round["thread_choice"] = json!(if request.thread_choice == Some(ThreadChoice::Fresh) {
+        "fresh"
+    } else {
+        "resume"
+    });
+    round["requested_thread"] = if request.thread_choice == Some(ThreadChoice::Fresh) {
+        Value::Null
+    } else {
+        record["thread_id"].clone()
+    };
     Ok(round)
 }
 
-/// Preview or run the next round on the same worker, starting a thread after recovery if needed.
+/// Reconstruct the next round without publishing any reservation field.
+pub(crate) fn preflight_record(
+    run_dir: &Path,
+    record: &Value,
+    step: &str,
+    budget: u64,
+    choice: Option<ThreadChoice>,
+) -> Result<Value, LaneError> {
+    let mut request = LaunchRequest::parse(&[
+        record["loop"]
+            .as_str()
+            .ok_or_else(|| LaneError::input("round-record", "loop is absent"))?
+            .into(),
+        record["run"]
+            .as_str()
+            .ok_or_else(|| LaneError::input("round-record", "run is absent"))?
+            .into(),
+        "--round".into(),
+        step.into(),
+        "--budget".into(),
+        budget.to_string(),
+    ])?;
+    request.thread_choice = choice;
+    let binding = record["mail"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["step"] == step))
+        .ok_or_else(|| LaneError::input("mail-delivery", "active mail binding absent"))?;
+    let directory = if require_thread_choice(record, choice)? {
+        super::planned_step_dir_at(run_dir, step)?
+    } else {
+        prior_round_dir(record)?.to_path_buf()
+    };
+    let round = continuation_round(record, &request, &directory, binding)?;
+    let mut next = record.clone();
+    next["rounds"]
+        .as_array_mut()
+        .ok_or_else(|| LaneError::input("round-state", "rounds absent"))?
+        .push(round);
+    next["phase"] = json!("preparing");
+    next["active_round"] = json!(step);
+    next["letter_source"] = json!(super::steering::evidence_at(run_dir, step));
+    Ok(next)
+}
+
+/// Validate publication inputs against the prospective reservation only.
+pub(crate) fn validate_preflight_record(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    podman: &Path,
+    record: &Value,
+    step: &str,
+    budget: u64,
+) -> Result<(), LaneError> {
+    let (plan, _) = super::pinned_plan_from_record(owner_home, loop_name, run, podman, record)?;
+    let _letter = super::steering::retained_letter(&plan, record)?;
+    let loop_uid = crate::plan::loop_uid(&plan.document)?;
+    let (runs, runtime) =
+        super::pin_runtime_dir(&plan.driver_dir, Uid::effective().as_raw(), loop_uid)?;
+    let _request = prepare_round_request(&plan, record, step, budget)?;
+    let _environment =
+        super::client_environment_bytes(&plan.driver_dir, &runs, &runtime, loop_uid, false)?;
+    Ok(())
+}
+
+/// Preview or run the next round, honoring explicit failed-round thread choices.
 ///
 /// # Errors
 ///
-/// Refuses a missing letter, unsettled run, changed identity or failed driver.
-#[allow(clippy::too_many_lines)]
-pub(super) fn resume_with_host_root(
+/// Refuses a missing choice or letter, unsettled run, changed identity or failed driver.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[doc(hidden)]
+pub fn resume_with_host_root(
     owner_home: &Path,
     request: &LaunchRequest,
     host_root: &Path,
@@ -1030,6 +1427,7 @@ pub(super) fn resume_with_host_root(
     proxy_state: impl FnMut(&str) -> Result<(String, String), LaneError>,
     on_failure: &mut dyn FnMut(&Value),
     lane_bin: &Path,
+    stop_bound: std::time::Duration,
 ) -> Result<Value, LaneError> {
     resume_with_program(
         owner_home,
@@ -1041,6 +1439,7 @@ pub(super) fn resume_with_host_root(
         crate::container_helper::process_presence,
         |record| super::reaping::reap_interrupted_scope(record, owner_home),
         lane_bin,
+        stop_bound,
     )
 }
 
@@ -1050,7 +1449,13 @@ pub(super) fn interrupted_round(record: &Value, step: &str) -> bool {
         && record["rounds"].as_array().is_some_and(|rounds| {
             rounds.len() > 1
                 && rounds.last().is_some_and(|round| {
-                    round["step"] == step && round["phase"] == "running" && step != "dispatch"
+                    round["step"] == step
+                        && step != "dispatch"
+                        && (round["phase"] == "running"
+                            || (round["phase"] == "awaiting-settlement"
+                                && record["driver_end"]["state"] == "completed"
+                                && record["driver_end"]["successful"] == true
+                                && record["helper_end"]["successful"] != false))
                 })
         })
 }
@@ -1079,6 +1484,7 @@ pub(super) fn resume_with_evidence(
         presence,
         reap,
         &exe,
+        std::time::Duration::from_secs(90),
     )
 }
 
@@ -1093,6 +1499,7 @@ fn resume_with_program(
     mut presence: impl FnMut(u32, u64) -> crate::container_helper::ProcessPresence,
     reap: impl FnOnce(&Value) -> Result<Value, LaneError>,
     lane_bin: &Path,
+    stop_bound: std::time::Duration,
 ) -> Result<Value, LaneError> {
     if request.backend.is_some() {
         return Err(LaneError::input(
@@ -1137,9 +1544,16 @@ fn resume_with_program(
         plan.observe_vendor()?;
     }
     plan.select_launch_model(&before_reconciliation["model_selection"])?;
+    plan.retain_workspace(&before_reconciliation["plan"])?;
     plan.retain_attempt_wall(&before_reconciliation["plan"])?;
     super::compare_pinned_plan(&before_reconciliation["plan"], &plan.document)?;
     if recovering {
+        if request.thread_choice.is_some() {
+            return Err(LaneError::input(
+                "round-choice",
+                "interrupted recovery starts no next round; omit --fresh-thread and --resume-thread",
+            ));
+        }
         let runs = home::verify_host_launch_root(host_root, owner_home, &root, caller, root_uid)?;
         super::report::require_unoccupied(
             &runs,
@@ -1206,6 +1620,13 @@ fn resume_with_program(
             ),
         ));
     }
+    let choice_result = require_thread_choice(&record, request.thread_choice);
+    if let Err(error) = &choice_result
+        && (!request.dry_run || request.thread_choice.is_some())
+    {
+        return Err(LaneError::input(error.kind, error.detail.clone()));
+    }
+    let fresh = choice_result.as_ref().copied().unwrap_or(false);
     super::compare_pinned_plan(&record["plan"], &plan.document)?;
     // The entry probe precedes the private mail binding, so a mismatched pair
     // refuses before any child touches the run (´req:superlooplane:entry-version-before-reservation´).
@@ -1243,7 +1664,7 @@ fn resume_with_program(
         &record,
         step,
         delivery,
-        request.dry_run,
+        true,
         (host_root, root_uid, lane_bin),
     )?;
     if &verified != entry {
@@ -1299,8 +1720,28 @@ fn resume_with_program(
             "private thread differs from reservation",
         ));
     }
-    let thread = inspected["thread_id"].as_str();
+    let thread_choice = choice_preview(
+        &record,
+        request.thread_choice,
+        &inspected["thread_files"],
+        step,
+    );
+    if let Err(error) = choice_result {
+        return Err(LaneError::input(
+            error.kind,
+            format!("{}; preview={thread_choice}", error.detail),
+        ));
+    }
+    let thread = inspected["thread_id"].as_str().filter(|_| !fresh);
     let (prior_dir, argv) = continuation_argv(&plan, &record, driver, request, &selection)?;
+    let helper_preflight = super::preflight_helper_round(
+        request,
+        &plan,
+        &environment,
+        (owner_home, &verified_home),
+        (&root, &verified_runs),
+        lane_bin,
+    )?;
     if request.dry_run {
         let saved_box = plan.document["runtime_argv"]
             .as_array()
@@ -1323,16 +1764,22 @@ fn resume_with_program(
             },
         )?;
         return Ok(
-            json!({"schema":1,"command":"launch","dry_run":true,"round":step,"budget_seconds":request.budget,"letter":letter_name,"letter_reconciliation_preview":letter_reconciliation,"proxy_service":proxy_service,"thread_id":thread,"home":plan.home,"worker_uid":worker,"invocation":{"program":entry_program,"argv":argv},"box_command":box_command,"changed":false,"wall_seconds":began.elapsed().as_secs_f64()}),
+            json!({"schema":1,"command":"launch","dry_run":true,"round":step,
+                "budget_seconds":request.budget,"letter":letter_name,
+                "letter_reconciliation_preview":letter_reconciliation,
+                "helper_preflight":helper_preflight,"proxy_service":proxy_service,"thread_choice":thread_choice,
+                "thread_id":thread,"home":plan.home,"worker_uid":worker,
+                "invocation":{"program":entry_program,"argv":argv},"box_command":box_command,
+                "changed":false,"wall_seconds":began.elapsed().as_secs_f64()}),
         );
     }
     let _lease = lock_run_preparation(&root, &request.run, caller)?;
     if !cfg!(test) {
         super::reaping::ensure_scoped_new_launch()?;
     }
-    {
+    let (nonce, published) = {
         let _mailbox = lock_mailbox(&root, &request.run, caller)?;
-        let mut saved = read_reservation(&path)?
+        let (mut saved, before) = super::read_reservation_raw(&path, true)?
             .ok_or_else(|| LaneError::input("round-record", "reservation vanished"))?;
         ensure_not_rotated(&saved, &request.run)?;
         if saved != record {
@@ -1357,8 +1804,16 @@ fn resume_with_program(
         }
         clear_round_evidence(&mut saved)?;
         saved["helper_spawn_state"] = json!("not-started");
-        publish_reservation(&path, &saved)?;
-    }
+        let request_bytes = format!("{}\n", request_text(&plan, &saved, step, request.budget)?);
+        let nonce = rollback::prepare(&mut saved, &before, &request_bytes)?;
+        rollback::snapshot_sockets(&mut saved, &plan)?;
+        let published = publish_reservation(&path, &saved);
+        let published = match rollback::publication(&path, &before, published) {
+            rollback::Publication::Unchanged(error) => return Err(error),
+            rollback::Publication::Attempt(result) => result,
+        };
+        (nonce, published)
+    };
     let inspect_record = vec![
         "unshare".into(),
         exe_word.clone(),
@@ -1366,82 +1821,112 @@ fn resume_with_program(
         request.loop_name.clone(),
         request.run.clone(),
         "--owner-home".into(),
-        crate::pinned::path_word(owner_home, "owner-home")?,
+        owner_home.display().to_string(),
         "--record".into(),
         step.into(),
         "--budget".into(),
         request.budget.to_string(),
     ];
-    let recorded = build::run_checked_with_private_launch(
+    let host = rollback::Host {
+        path: &path,
+        nonce: &nonce,
+        program: &podman,
+        environment: &environment,
+        owner_home,
+        home: &verified_home,
+        root: &root,
+        runs: &verified_runs,
+        argv: vec![
+            "unshare".into(),
+            exe_word.clone(),
+            "_inspect-round".into(),
+            request.loop_name.clone(),
+            request.run.clone(),
+            "--owner-home".into(),
+            owner_home.display().to_string(),
+            "--rollback".into(),
+            nonce.clone(),
+        ],
+    };
+    let mut inspector = build::LiveChild::default();
+    let mut helper_receipt = build::LiveChild::default();
+    if let Err(error) = published {
+        return Err(host.refuse(error, (&inspector, &helper_receipt)));
+    }
+    let recorded = build::inspect_with_receipt(
         &podman,
-        inspect_record,
+        &inspect_record,
         &environment,
         owner_home,
-        60,
-        "round-evidence",
         &verified_home,
         &root,
         &verified_runs,
-        None,
+        &mut inspector,
     );
     if let Err(error) = recorded {
-        let saved = super::record_failed_pre_driver(&path, &mut None, &error, caller, false);
-        return Err(super::retain_startup_refusal(error, saved));
+        return Err(host.refuse(error, (&inspector, &helper_receipt)));
     }
-    persist_settlement_field(&path, "helper_spawn_state", json!("starting"))?;
-    let (mut helper, helper_start, helper_stderr) = start_helper_with_program(
-        request,
-        &plan,
-        owner_home,
-        &environment,
-        &verified_home,
-        &root,
-        &verified_runs,
-        lane_bin,
-        |pid, start| {
-            let mut saved = read_reservation(&path)?.ok_or_else(|| {
-                LaneError::input(
-                    "helper-start",
-                    "reservation vanished before parent identity",
-                )
-            })?;
-            saved["helper_parent_pid"] = json!(pid);
-            saved["helper_parent_start"] = json!(start);
-            saved["helper_spawn_state"] = json!("running");
-            publish_reservation(&path, &saved)
-        },
-    )
-    .map_err(|error| {
-        // Preserve a failed startup even when no driver directory was created.
-        let saved = super::record_failed_pre_driver(&path, &mut None, &error, caller, false);
-        super::retain_startup_refusal(error, saved)
-    })?;
-    let mut driver_started = false;
-    let mut child_end = build::ChildEnd::default();
-    let result = (|| {
+    let started = (|| {
+        persist_settlement_field(&path, "helper_spawn_state", json!("starting"))?;
+        super::start_helper_observed(
+            request,
+            &plan,
+            owner_home,
+            &environment,
+            &verified_home,
+            &root,
+            &verified_runs,
+            lane_bin,
+            &mut helper_receipt,
+            |pid, start| record_helper_parent(&path, pid, start),
+        )
+    })();
+    let (mut helper, helper_start, helper_stderr) = match started {
+        Ok(started) => started,
+        Err(error) => return Err(host.refuse(error, (&inspector, &helper_receipt))),
+    };
+    let intent = (|| {
         let record = read_reservation(&path)?.ok_or_else(|| {
             LaneError::input("helper-session", "protected run reservation is absent")
         })?;
-        build::run_checked_with_pid(
-            entry_program,
-            argv,
-            &environment,
-            owner_home,
-            crate::container_helper::host_launch_bound(&record)?,
-            "driver-launch",
-            &mut child_end,
-            |pid| {
-                persist_settlement_field(&path, "driver_entry_pid", json!(pid))?;
-                persist_settlement_field(
-                    &path,
-                    "driver_entry_start",
-                    json!(crate::container_helper::process_start(pid)?),
-                )?;
-                driver_started = true;
-                Ok(())
-            },
-        )
+        let bound = crate::container_helper::host_launch_bound(&record)?;
+        rollback::intent(&path, &nonce)?;
+        Ok(bound)
     })();
+    let launch_bound = match intent {
+        Ok(bound) => bound,
+        Err(error) => {
+            let _cancel =
+                super::stop_helper_with_bound(&mut helper, &plan, &verified_runs, stop_bound);
+            let _stop = super::stop_observer(&mut helper);
+            if helper_receipt.absent() {
+                let _stderr = helper_stderr.join();
+            }
+            return Err(host.refuse(error, (&inspector, &helper_receipt)));
+        }
+    };
+    let mut driver_started = false;
+    let mut child_end = build::ChildEnd::default();
+    let result = build::run_checked_with_pid(
+        entry_program,
+        argv,
+        &environment,
+        owner_home,
+        launch_bound,
+        "driver-launch",
+        &mut child_end,
+        |pid| {
+            persist_settlement_field(&path, "driver_entry_pid", json!(pid))?;
+            persist_settlement_field(
+                &path,
+                "driver_entry_start",
+                json!(crate::container_helper::process_start(pid)?),
+            )?;
+            driver_started = true;
+            rollback::dispatched(&path, &nonce)?;
+            Ok(())
+        },
+    );
     let step_directory = result.as_ref().map_or(Ok(()), |output| {
         record_step_directory(&plan, &request.run, step, output)
     });
@@ -1450,7 +1935,7 @@ fn resume_with_program(
         "driver_end",
         super::driver_completion(&result, driver_started, &child_end),
     )?;
-    let helper_stop = stop_helper(&mut helper, &plan, &verified_runs);
+    let helper_stop = super::stop_helper_with_bound(&mut helper, &plan, &verified_runs, stop_bound);
     if let Some(status) = helper
         .try_wait()
         .map_err(|error| LaneError::operation("helper-stop", error.to_string()))?
@@ -1458,15 +1943,10 @@ fn resume_with_program(
         persist_settlement_field(
             &path,
             "helper_end",
-            super::helper_parent_end(
-                helper.id(),
-                helper_start,
-                status,
-                helper_stop.as_ref().err(),
-            ),
+            super::helper_stopped_end(helper.id(), helper_start, status, &helper_stop),
         )?;
     }
-    super::helper_stop_with_stderr(helper_stop, &mut helper, helper_stderr)?;
+    super::helper_stop_with_stderr(helper_stop.map(|_| ()), &mut helper, helper_stderr)?;
     let settle = vec![
         "unshare".into(),
         exe_word,
@@ -1524,6 +2004,11 @@ fn resume_with_program(
                 .and_then(|rounds| rounds.last_mut())
                 .ok_or_else(|| LaneError::input("round-record", "active round is absent"))?;
             round["phase"] = json!("failed");
+            if round["settlement_error"].is_null()
+                && let Err(error) = &settlement
+            {
+                round["settlement_error"] = json!(error.line());
+            }
             if let Some(line) = reaping.as_ref().err().map(LaneError::line).or_else(|| {
                 reaping.as_ref().ok().and_then(|report| {
                     super::reaping::reaping_verdict(report)
@@ -1539,19 +2024,1206 @@ fn resume_with_program(
         publish_reservation(&path, &saved)?;
         (round_dir, saved["thread_id"].clone(), saved)
     };
+    let report: Result<Value, LaneError> = (|| {
+        let settlement_report =
+            super::report::settlement_result(&settlement, &request.loop_name, &request.run, step)?;
+        let driver_report = result.as_ref().map_or_else(LaneError::line, Clone::clone);
+        let publication = super::report::credential_publication(&publication)?;
+        Ok(
+            json!({"schema":1,"command":"launch","dry_run":false,"round":step,"round_dir":round_dir,"budget_seconds":request.budget,"letter":letter_name,"letter_reconciliation":letter_reconciliation,"thread_id":thread,"driver_report":driver_report,"settlement":settlement_report,"credential_publication":publication,"wall_seconds":began.elapsed().as_secs_f64()}),
+        )
+    })();
+    let report = if settlement.is_err() {
+        let report = report?;
+        super::report::finish_with_fallback(
+            &verified_runs,
+            &request.run,
+            Some(step),
+            report.clone(),
+            on_failure,
+        )?;
+        Ok(report)
+    } else {
+        report
+    };
     step_directory?;
     super::reaping::reaping_verdict(&reaping?)?;
-    let driver_report = result?;
-    let settlement = super::settlement_document(&settlement?)?;
-    let publication = super::report::credential_publication(&publication)?;
-    let report = json!({"schema":1,"command":"launch","dry_run":false,"round":step,"round_dir":round_dir,"budget_seconds":request.budget,"letter":letter_name,"letter_reconciliation":letter_reconciliation,"thread_id":thread,"driver_report":driver_report,"settlement":settlement,"credential_publication":publication,"wall_seconds":began.elapsed().as_secs_f64()});
+    result?;
+    settlement?;
     super::report::finish_with_fallback(
         &verified_runs,
         &request.run,
         Some(step),
-        report,
+        report?,
         on_failure,
     )
+}
+
+fn record_helper_parent(path: &Path, pid: u32, start: u64) -> Result<(), LaneError> {
+    let root = path
+        .parent()
+        .ok_or_else(|| LaneError::input("helper-start", "root absent"))?;
+    let run = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix(".reservation-"))
+        .and_then(|s| s.strip_suffix(".json"))
+        .ok_or_else(|| LaneError::input("helper-start", "reservation name differs"))?;
+    let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
+    let mut saved = read_reservation(path)?.ok_or_else(|| {
+        LaneError::input(
+            "helper-start",
+            "reservation vanished before parent identity",
+        )
+    })?;
+    saved["helper_parent_pid"] = json!(pid);
+    saved["helper_parent_start"] = json!(start);
+    saved["helper_spawn_state"] = json!("running");
+    publish_reservation(path, &saved)
+}
+
+/// Live-only rollback. Crash recovery deliberately does not consume this record yet.
+pub(crate) mod rollback {
+    use super::*;
+    use std::fmt::Write as _;
+    use std::os::fd::OwnedFd;
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn refusal(detail: impl ToString) -> LaneError {
+        LaneError::operation("round-rollback", detail.to_string())
+    }
+    pub(super) enum Publication {
+        Unchanged(LaneError),
+        Attempt(Result<(), LaneError>),
+    }
+
+    // Called under the mailbox lock. An fsync failure can follow rename, so an
+    // error alone cannot prove that publication left the reservation untouched.
+    pub(super) fn publication(
+        path: &Path,
+        before: &[u8],
+        result: Result<(), LaneError>,
+    ) -> Publication {
+        match result {
+            Err(mut error)
+                if super::super::read_reservation_raw(path, true)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|(_, bytes)| bytes == before) =>
+            {
+                error
+                    .detail
+                    .push_str("; unchanged: preparing reservation was not published");
+                Publication::Unchanged(error)
+            }
+            result => Publication::Attempt(result),
+        }
+    }
+
+    pub fn nonce(record: &Value) -> Result<&str, LaneError> {
+        let value = record["round_rollback"]["nonce"]
+            .as_str()
+            .ok_or_else(|| refusal("attempt nonce absent"))?;
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(refusal("attempt nonce malformed"));
+        }
+        Ok(value)
+    }
+    /// The owner-protected raw bytes are authoritative. This is a consistency handle,
+    /// not authentication: sixteen leading SHA-256 hex digits, following the default
+    /// handle-size calculation in docs/spec/digests.md, for at most one million attempts.
+    fn before_handle(bytes: &[u8]) -> String {
+        execute_command::rubric::sha256_digest(bytes)[..16].to_owned()
+    }
+
+    pub(super) fn prepare(
+        saved: &mut Value,
+        before: &[u8],
+        request: &str,
+    ) -> Result<String, LaneError> {
+        let mut random = [0_u8; 32];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(&mut random))
+            .map_err(refusal)?;
+        let mut nonce = String::with_capacity(64);
+        for byte in random {
+            let _written = write!(nonce, "{byte:02x}");
+        }
+        let text = std::str::from_utf8(before).map_err(refusal)?;
+        saved["round_rollback"] = json!({"schema":1,"nonce":nonce,"before":text,
+            "before_bytes":before.len(),"before_sha256_prefix":before_handle(before),
+            "request":request,"sockets":[]});
+        saved
+            .as_object_mut()
+            .ok_or_else(|| refusal("reservation is not an object"))?
+            .remove("dispatch_intent");
+        // The existing publisher repeats this before its first temporary/write.
+        let size = serde_json::to_vec(saved).map_err(refusal)?.len();
+        if u64::try_from(size).map_err(refusal)? > super::super::MAX_RESERVATION_BYTES {
+            return Err(refusal(format!(
+                "preparing reservation is {size} bytes; limit is {} bytes",
+                super::super::MAX_RESERVATION_BYTES
+            )));
+        }
+        Ok(nonce)
+    }
+    fn before(record: &Value, expected: &str) -> Result<Vec<u8>, LaneError> {
+        if nonce(record)? != expected || record["round_rollback"]["schema"] != 1 {
+            return Err(refusal("attempt differs"));
+        }
+        if record.get("dispatch_intent").is_some() {
+            return Err(refusal("dispatch-intent"));
+        }
+        if record["phase"] != "preparing" {
+            return Err(refusal("reservation-state"));
+        }
+        let rollback = &record["round_rollback"];
+        let bytes = rollback["before"]
+            .as_str()
+            .ok_or_else(|| refusal("before-image absent"))?
+            .as_bytes();
+        if rollback["before_bytes"] != bytes.len()
+            || rollback["before_sha256_prefix"] != before_handle(bytes)
+            || u64::try_from(bytes.len()).map_err(refusal)? > super::super::MAX_RESERVATION_BYTES
+        {
+            return Err(refusal("before-image differs"));
+        }
+        let prior = crate::placement::reservation_bytes(bytes, refusal)?;
+        if prior["phase"] != "settled"
+            || prior["loop"] != record["loop"]
+            || prior["run"] != record["run"]
+            || prior["worker_uid"] != record["worker_uid"]
+        {
+            return Err(refusal("before-image identity or phase differs"));
+        }
+        Ok(bytes.to_vec())
+    }
+    pub(super) fn intent(path: &Path, expected: &str) -> Result<(), LaneError> {
+        let root = path
+            .parent()
+            .ok_or_else(|| refusal("reservation parent absent"))?;
+        let record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        let run = record["run"]
+            .as_str()
+            .ok_or_else(|| refusal("run absent"))?;
+        let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
+        let mut record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        let _before = before(&record, expected)?;
+        record["dispatch_intent"] = json!({"nonce":expected});
+        publish_reservation(path, &record)
+    }
+    pub(super) fn dispatched(path: &Path, expected: &str) -> Result<(), LaneError> {
+        let record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        let root = path
+            .parent()
+            .ok_or_else(|| refusal("reservation parent absent"))?;
+        let run = record["run"]
+            .as_str()
+            .ok_or_else(|| refusal("run absent"))?;
+        let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
+        let mut record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        if record["dispatch_intent"]["nonce"] != expected
+            || record["driver_entry_pid"].as_u64().is_none()
+        {
+            return Err(refusal("dispatch receipt differs"));
+        }
+        let fields = record
+            .as_object_mut()
+            .ok_or_else(|| refusal("reservation malformed"))?;
+        fields.remove("round_rollback");
+        fields.remove("dispatch_intent");
+        publish_reservation(path, &record)
+    }
+    pub fn sockets(path: &Path, identities: Value) -> Result<(), LaneError> {
+        let record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        if record.get("round_rollback").is_none() {
+            return Ok(());
+        }
+        let root = path
+            .parent()
+            .ok_or_else(|| refusal("reservation parent absent"))?;
+        let run = record["run"]
+            .as_str()
+            .ok_or_else(|| refusal("run absent"))?;
+        let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
+        let mut record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        if record.get("round_rollback").is_none() || record.get("dispatch_intent").is_some() {
+            return Ok(());
+        }
+        let _before = before(&record, nonce(&record)?)?;
+        if record["helper_pid"] != std::process::id() {
+            return Err(refusal("helper identity differs"));
+        }
+        record["round_rollback"]["sockets"] = identities;
+        publish_reservation(path, &record)
+    }
+    #[cfg(test)]
+    fn finish(
+        primary: LaneError,
+        path: &Path,
+        expected: &str,
+        receipts: (&build::LiveChild, &build::LiveChild),
+        cleanup: impl FnOnce() -> Result<(), LaneError>,
+    ) -> LaneError {
+        let root = std::fs::File::open(path.parent().expect("root"))
+            .expect("held root")
+            .into();
+        finish_at(primary, path, expected, receipts, &root, cleanup)
+    }
+
+    fn finish_at(
+        mut primary: LaneError,
+        path: &Path,
+        expected: &str,
+        receipts: (&build::LiveChild, &build::LiveChild),
+        held: &OwnedFd,
+        cleanup: impl FnOnce() -> Result<(), LaneError>,
+    ) -> LaneError {
+        let result = restore(path, expected, receipts, &primary.line(), held, cleanup);
+        match result {
+            Ok(()) => {
+                let _written = write!(primary.detail, "; rollback: restored");
+            }
+            Err(error) => {
+                let _written = write!(primary.detail, "; retained: {}", error.line());
+            }
+        }
+        primary
+    }
+    fn refusal_evidence(
+        path: &Path,
+        expected: &str,
+        reason: &str,
+        held: &OwnedFd,
+    ) -> Result<(), LaneError> {
+        let run = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_prefix(".reservation-"))
+            .and_then(|s| s.strip_suffix(".json"))
+            .ok_or_else(|| refusal("reservation name differs"))?;
+        nonce(&json!({"round_rollback":{"nonce":expected}}))?;
+        let evidence = path.with_file_name(format!(".round-refusal-{run}-{expected}.json"));
+        let bytes = serde_json::to_vec(&json!({"schema":1,"nonce":expected,
+            "state":"live-refusal","reason":reason}))
+        .map_err(refusal)?;
+        super::super::publish_reservation_bytes_at(&evidence, &bytes, None, Some(held))
+    }
+
+    fn restore(
+        path: &Path,
+        expected: &str,
+        receipts: (&build::LiveChild, &build::LiveChild),
+        reason: &str,
+        held: &OwnedFd,
+        cleanup: impl FnOnce() -> Result<(), LaneError>,
+    ) -> Result<(), LaneError> {
+        // Record the primary refusal even when absence or the embedded record refuses.
+        refusal_evidence(path, expected, reason, held)?;
+        if !receipts.0.absent() || !receipts.1.absent() {
+            return Err(refusal("process-absence"));
+        }
+        let record = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        let bytes = before(&record, expected)?;
+        let root = path
+            .parent()
+            .ok_or_else(|| refusal("reservation parent absent"))?;
+        let run = record["run"]
+            .as_str()
+            .ok_or_else(|| refusal("run absent"))?;
+        cleanup()?;
+        let _lock = lock_mailbox(root, run, Uid::effective().as_raw())?;
+        let current = read_reservation(path)?.ok_or_else(|| refusal("reservation absent"))?;
+        if before(&current, expected)? != bytes {
+            return Err(refusal("before-image changed"));
+        }
+        if !receipts.0.absent() || !receipts.1.absent() {
+            return Err(refusal("process-absence"));
+        }
+        super::super::publish_reservation_bytes_at(path, &bytes, None, Some(held))
+    }
+
+    pub(super) struct Host<'a> {
+        pub(super) path: &'a Path,
+        pub(super) nonce: &'a str,
+        pub(super) program: &'a Path,
+        pub(super) environment: &'a std::collections::BTreeMap<String, String>,
+        pub(super) owner_home: &'a Path,
+        pub(super) home: &'a OwnedFd,
+        pub(super) root: &'a Path,
+        pub(super) runs: &'a OwnedFd,
+        pub(super) argv: Vec<String>,
+    }
+    impl Host<'_> {
+        fn quiescent(&self) -> Result<(), LaneError> {
+            let record =
+                read_reservation(self.path)?.ok_or_else(|| refusal("reservation absent"))?;
+            let _before = before(&record, self.nonce)?;
+            let loop_name = record["loop"]
+                .as_str()
+                .ok_or_else(|| refusal("loop absent"))?;
+            let run = record["run"]
+                .as_str()
+                .ok_or_else(|| refusal("run absent"))?;
+            if !super::super::container_absent_for_run(
+                self.program,
+                self.owner_home,
+                loop_name,
+                run,
+            )? {
+                return Err(refusal("container-payload-present"));
+            }
+            let _scope = super::super::reaping::retirement_scope(&record)?;
+            Ok(())
+        }
+        pub(super) fn refuse(
+            &self,
+            error: LaneError,
+            receipts: (&build::LiveChild, &build::LiveChild),
+        ) -> LaneError {
+            finish_at(error, self.path, self.nonce, receipts, self.runs, || {
+                self.quiescent()?;
+                let mut receipt = build::LiveChild::default();
+                let output = build::inspect_with_receipt(
+                    self.program,
+                    &self.argv,
+                    self.environment,
+                    self.owner_home,
+                    self.home,
+                    self.root,
+                    self.runs,
+                    &mut receipt,
+                )?;
+                if !receipt.absent() {
+                    return Err(refusal("cleanup-process-absence"));
+                }
+                let report: Value = serde_json::from_str(&output).map_err(refusal)?;
+                if report["state"] != "cleaned" || report["nonce"] != self.nonce {
+                    return Err(refusal("cleanup receipt differs"));
+                }
+                self.quiescent()
+            })
+        }
+    }
+    pub(super) fn snapshot_sockets(record: &mut Value, plan: &Plan) -> Result<(), LaneError> {
+        let mut rows = Vec::new();
+        for path in [
+            crate::container_helper::socket_path(&plan.driver_dir)?,
+            crate::container_helper::control_socket_path(&plan.driver_dir)?,
+        ] {
+            let slot = crate::SocketSlot::pinned(&path, Uid::effective().as_raw())?;
+            let identity = slot
+                .metadata()
+                .map_err(refusal)?
+                .map(|m| json!([m.st_dev, m.st_ino]));
+            rows.push(
+                json!({"name":path.file_name().and_then(|name| name.to_str()),"identity":identity}),
+            );
+        }
+        record["round_rollback"]["sockets_before"] = json!(rows);
+        Ok(())
+    }
+    fn check_unowned_sockets(record: &Value, root: &Path, driver: &Path) -> Result<(), LaneError> {
+        let original = record["round_rollback"]["sockets_before"]
+            .as_array()
+            .ok_or_else(|| refusal("original socket receipts absent"))?;
+        let owned = record["round_rollback"]["sockets"]
+            .as_array()
+            .ok_or_else(|| refusal("socket receipts absent"))?;
+        for path in [
+            crate::container_helper::socket_path(driver)?,
+            crate::container_helper::control_socket_path(driver)?,
+        ] {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| refusal("socket name absent"))?;
+            if owned.iter().any(|row| row["name"] == name) {
+                continue;
+            }
+            let prior = original
+                .iter()
+                .find(|row| row["name"] == name)
+                .ok_or_else(|| refusal("original socket receipt absent"))?;
+            let slot = crate::SocketSlot::pinned(&root.join(name), Uid::effective().as_raw())?;
+            let identity = slot
+                .metadata()
+                .map_err(refusal)?
+                .map(|m| json!([m.st_dev, m.st_ino]));
+            if prior["identity"] != json!(identity) {
+                return Err(refusal("unowned socket changed"));
+            }
+        }
+        Ok(())
+    }
+
+    struct Leaf {
+        directory: std::fs::File,
+        name: String,
+        identity: (u64, u64),
+    }
+    fn request_leaf(
+        directory: &std::fs::File,
+        name: String,
+        expected: &[u8],
+        owner: u32,
+    ) -> Result<Option<Leaf>, LaneError> {
+        let fd = match nix::fcntl::openat(
+            directory,
+            name.as_str(),
+            nix::fcntl::OFlag::O_RDONLY
+                | nix::fcntl::OFlag::O_NOFOLLOW
+                | nix::fcntl::OFlag::O_NONBLOCK,
+            nix::sys::stat::Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(nix::errno::Errno::ENOENT) => return Ok(None),
+            Err(error) => return Err(refusal(error)),
+        };
+        let mut file = std::fs::File::from(fd);
+        let meta = file.metadata().map_err(refusal)?;
+        if !meta.is_file()
+            || meta.uid() != owner
+            || meta.mode() & 0o7777 != 0o600
+            || meta.nlink() != 1
+            || meta.len() != u64::try_from(expected.len()).map_err(refusal)?
+        {
+            return Err(refusal(format!("request custody differs: {name}")));
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::by_ref(&mut file)
+            .take(super::super::MAX_RESERVATION_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(refusal)?;
+        if bytes != expected {
+            return Err(refusal(format!("request bytes differ: {name}")));
+        }
+        Ok(Some(Leaf {
+            directory: directory.try_clone().map_err(refusal)?,
+            name,
+            identity: (meta.dev(), meta.ino()),
+        }))
+    }
+    impl Leaf {
+        fn remove(self) -> Result<(), LaneError> {
+            let stat = nix::sys::stat::fstatat(
+                &self.directory,
+                self.name.as_str(),
+                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+            )
+            .map_err(refusal)?;
+            if (stat.st_dev, stat.st_ino) != self.identity {
+                return Err(refusal("replacement retained"));
+            }
+            nix::unistd::unlinkat(
+                &self.directory,
+                self.name.as_str(),
+                nix::unistd::UnlinkatFlags::NoRemoveDir,
+            )
+            .map_err(refusal)?;
+            self.directory.sync_all().map_err(refusal)
+        }
+    }
+    pub(super) fn private_cleanup(
+        loop_name: &str,
+        run: &str,
+        expected: &str,
+    ) -> Result<Value, LaneError> {
+        let root = home::private_runs_path().ok_or_else(|| refusal("runs custody absent"))?;
+        let _lock = lock_mailbox(&root, run, Uid::effective().as_raw())?;
+        let path = reservation_path(&root, run);
+        let record = read_reservation(&path)?.ok_or_else(|| refusal("reservation absent"))?;
+        let _before = before(&record, expected)?;
+        let root_directory = home::pin_parent(&root, Uid::effective().as_raw())?;
+        let temporary = format!(".reservation-{expected}.tmp");
+        match nix::sys::stat::fstatat(
+            &root_directory,
+            temporary.as_str(),
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Err(nix::errno::Errno::ENOENT) => {}
+            _ => return Err(refusal("reservation temporary retained")),
+        }
+        if record["loop"] != loop_name || record["run"] != run {
+            return Err(refusal("run identity differs"));
+        }
+        let driver = root.join(run);
+        if record["plan"]["driver_dir"] != driver.display().to_string() {
+            return Err(refusal("driver directory differs"));
+        }
+        let step = record["active_round"]
+            .as_str()
+            .ok_or_else(|| refusal("step absent"))?;
+        super::super::letters::valid_step(step)?;
+        let owner = crate::plan::loop_uid(&record["plan"])?;
+        let directory = held_round_directory(&driver, owner)?;
+        let request = record["round_rollback"]["request"]
+            .as_str()
+            .ok_or_else(|| refusal("request absent"))?;
+        let mut leaves = Vec::new();
+        for name in [
+            format!("round-launch-{step}.json"),
+            format!(".round-launch-{step}-{expected}.tmp"),
+        ] {
+            if let Some(leaf) = request_leaf(&directory, name, request.as_bytes(), owner)? {
+                leaves.push(leaf);
+            }
+        }
+        let (_, runtime) =
+            super::super::pin_runtime_dir(&driver, Uid::effective().as_raw(), owner)?;
+        let temporary = format!(".runtime.env-{expected}");
+        match nix::sys::stat::fstatat(
+            &runtime,
+            temporary.as_str(),
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Err(nix::errno::Errno::ENOENT) => {}
+            _ => return Err(refusal("environment temporary retained")),
+        }
+        check_unowned_sockets(&record, &root, &driver)?;
+        let mut sockets = Vec::new();
+        for row in record["round_rollback"]["sockets"]
+            .as_array()
+            .ok_or_else(|| refusal("socket receipts absent"))?
+        {
+            let name = row["name"]
+                .as_str()
+                .ok_or_else(|| refusal("socket name absent"))?;
+            let allowed = [
+                crate::container_helper::socket_path(&driver)?,
+                crate::container_helper::control_socket_path(&driver)?,
+            ];
+            if !allowed
+                .iter()
+                .any(|p| p.file_name().is_some_and(|n| n == name))
+            {
+                return Err(refusal("socket name differs"));
+            }
+            let slot = crate::SocketSlot::pinned(&root.join(name), Uid::effective().as_raw())?;
+            if let Some(meta) = slot.metadata().map_err(refusal)? {
+                if row["device"] != meta.st_dev
+                    || row["inode"] != meta.st_ino
+                    || meta.st_mode & libc::S_IFMT != libc::S_IFSOCK
+                {
+                    return Err(refusal("replacement socket retained"));
+                }
+                sockets.push((slot, (meta.st_dev, meta.st_ino)));
+            }
+        }
+        for leaf in leaves {
+            leaf.remove()?;
+        }
+        for (slot, identity) in sockets {
+            if slot
+                .metadata()
+                .map_err(refusal)?
+                .is_none_or(|m| (m.st_dev, m.st_ino) != identity)
+            {
+                return Err(refusal("replacement socket retained"));
+            }
+            slot.remove().map_err(refusal)?;
+        }
+        directory.sync_all().map_err(refusal)?;
+        nix::unistd::fsync(&runtime).map_err(refusal)?;
+        nix::unistd::fsync(&root_directory).map_err(refusal)?;
+        Ok(json!({"schema":1,"state":"cleaned","nonce":expected}))
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::process::CommandExt as _;
+
+        fn fixture() -> (tempfile::TempDir, PathBuf, Vec<u8>, String) {
+            let root = tempfile::tempdir().expect("caller temporary root");
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("root mode");
+            let path = reservation_path(root.path(), "R");
+            let record = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R",
+                "worker_uid":3000,"active_round":"dispatch","rounds":[]});
+            let bytes = format!(
+                "{}\n\n",
+                serde_json::to_string_pretty(&record).expect("pretty before")
+            )
+            .into_bytes();
+            super::super::super::publish_reservation_bytes(&path, &bytes).expect("before");
+            let mut next = record;
+            next["phase"] = json!("preparing");
+            next["active_round"] = json!("review");
+            next["rounds"] = json!([{"step":"review","phase":"running"}]);
+            let nonce = prepare(&mut next, &bytes, "expected\n").expect("before-image");
+            publish_reservation(&path, &next).expect("preparing");
+            (root, path, bytes, nonce)
+        }
+        /// A live refusal preserves the published placement and exact settled bytes.
+        ///
+        /// # Panics
+        /// Panics if preparation or restoration changes the placed plan.
+        /// ´test:unit:live-round-rollback-restores-placed-reservation´
+        #[test]
+        fn live_round_rollback_restores_placed_reservation() {
+            let (_root, path, _, _) = fixture();
+            let placed = json!({"loop":"alpha","run":"R",
+                "compute_workspace":crate::tests::published_workspace(),
+                "compute_placement":crate::tests::published_placement()});
+            let record = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R",
+                "worker_uid":3000,"active_round":"dispatch","rounds":[],"plan":placed});
+            let bytes = format!(
+                "{}\n\n",
+                serde_json::to_string_pretty(&record).expect("pretty placed before")
+            )
+            .into_bytes();
+            super::super::super::publish_reservation_bytes(&path, &bytes).expect("placed before");
+            let (mut next, raw) = super::super::super::read_reservation_raw(&path, true)
+                .expect("placed raw read")
+                .expect("placed record");
+            assert_eq!(raw, bytes, "raw placed reservation preserved");
+            next["phase"] = json!("preparing");
+            next["active_round"] = json!("review");
+            next["rounds"] = json!([{"step":"review","phase":"running"}]);
+            let nonce = prepare(&mut next, &raw, "expected\n").expect("placed prepare");
+            publish_reservation(&path, &next).expect("placed preparing");
+            assert_eq!(
+                read_reservation(&path)
+                    .expect("preparing read")
+                    .expect("record")["plan"],
+                placed,
+                "preparing retains placed plan"
+            );
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || Ok(()));
+            assert!(error.detail.ends_with("rollback: restored"), "{error}");
+            assert_eq!(
+                fs::read(&path).expect("restored bytes"),
+                bytes,
+                "placed before-image exact"
+            );
+            assert_eq!(
+                read_reservation(&path)
+                    .expect("restored read")
+                    .expect("record")["plan"],
+                placed,
+                "restoration retains placed plan"
+            );
+        }
+
+        /// A live refusal restores the choice along with the exact settled bytes.
+        ///
+        /// # Panics
+        /// Panics if rollback consumes the failed-round choice.
+        /// ´test:unit:failed-round-choice-survives-live-rollback´
+        #[test]
+        fn failed_round_choice_survives_live_rollback() {
+            for choice in [
+                super::super::ThreadChoice::Fresh,
+                super::super::ThreadChoice::Resume,
+            ] {
+                let (root, path, _, _) = fixture();
+                let mut before = super::super::choice_tests::record();
+                before["rounds"][0]["driver_dir"] = json!(root.path().join("R/prior-dispatch"));
+                before["plan"] = json!({"loop":"alpha","run":"R",
+                    "compute_workspace":crate::tests::published_workspace(),
+                    "compute_placement":crate::tests::published_placement()});
+                let bytes = format!(
+                    "{}\n\n",
+                    serde_json::to_string_pretty(&before).expect("before")
+                )
+                .into_bytes();
+                let mut next = super::super::preflight_record(
+                    &root.path().join("R"),
+                    &before,
+                    "review",
+                    3600,
+                    Some(choice),
+                )
+                .expect("chosen prospective record");
+                assert_eq!(
+                    next["plan"], before["plan"],
+                    "chosen preflight retains placed plan"
+                );
+                let plan = Plan {
+                    home: root.path().join("home"),
+                    driver_dir: root.path().join("R"),
+                    letter: PathBuf::new(),
+                    document: json!({"backend":"codex"}),
+                };
+                let expected = format!(
+                    "{}\n",
+                    super::super::request_text(&plan, &next, "review", 3600).expect("request")
+                );
+                let nonce = prepare(&mut next, &bytes, &expected).expect("prepare");
+                assert_eq!(next["round_rollback"]["request"], expected);
+                assert!(
+                    !super::super::failed_continuation(&next),
+                    "preparing belongs to recovery"
+                );
+                let emitted = format!(
+                    "{}\n",
+                    super::super::request_text(&plan, &next, "review", 3600)
+                        .expect("private request")
+                );
+                assert_eq!(emitted, expected, "preflight and cleanup request agree");
+                publish_reservation(&path, &next).expect("preparing");
+                let absent = build::LiveChild::default();
+                let error = finish(primary(), &path, &nonce, (&absent, &absent), || Ok(()));
+                assert!(error.detail.ends_with("rollback: restored"), "{error}");
+                assert_eq!(fs::read(&path).expect("restored"), bytes);
+                let saved = read_reservation(&path).expect("read").expect("saved");
+                assert_eq!(
+                    saved["plan"], before["plan"],
+                    "chosen rollback retains placed plan"
+                );
+                assert_eq!(
+                    super::super::require_thread_choice(&saved, None)
+                        .expect_err("choice remains owed")
+                        .kind,
+                    "round-choice"
+                );
+            }
+        }
+
+        /// Raw resume reads keep legacy bytes but refuse placement-path duplicates.
+        /// ´test:unit:live-round-raw-reader-preserves-placement-floor´
+        #[test]
+        fn live_round_raw_reader_preserves_placement_floor() {
+            let (_root, path, _, _) = fixture();
+            let legacy =
+                br#"{"schema":1,"phase":"settled","worker_uid":3000,"legacy":1,"legacy":2}"#;
+            super::super::super::publish_reservation_bytes(&path, legacy).expect("legacy");
+            let (record, raw) = super::super::super::read_reservation_raw(&path, true)
+                .expect("legacy read")
+                .expect("present");
+            assert_eq!(raw, legacy);
+            assert_eq!(
+                record,
+                serde_json::from_slice::<Value>(legacy).expect("legacy parser")
+            );
+            let duplicate = concat!(
+                r#"{"schema":1,"phase":"settled","worker_uid":3000,"#,
+                r#""plan":{"compute_placement":null},"plan":{}}"#
+            )
+            .as_bytes();
+            super::super::super::publish_reservation_bytes(&path, duplicate)
+                .expect("duplicate bytes");
+            let error = super::super::super::read_reservation_raw(&path, true)
+                .expect_err("raw reader preserves placement floor");
+            assert!(
+                error.detail.contains("duplicate key on placement path"),
+                "{error}"
+            );
+        }
+
+        /// The embedded raw before-image has the same placement reader floor.
+        /// ´test:unit:live-round-before-image-preserves-placement-floor´
+        #[test]
+        fn live_round_before_image_preserves_placement_floor() {
+            let (_root, path, bytes, nonce) = fixture();
+            let mut record = read_reservation(&path).expect("read").expect("record");
+            assert_eq!(before(&record, &nonce).expect("legacy before-image"), bytes);
+            let duplicate = concat!(
+                r#"{"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"#,
+                r#""plan":{"compute_placement":null,"compute_placement":null}}"#
+            )
+            .as_bytes();
+            let nonce = prepare(&mut record, duplicate, "expected\n").expect("duplicate embedded");
+            publish_reservation(&path, &record).expect("outer reservation accepts opaque before");
+            let error =
+                before(&record, &nonce).expect_err("embedded reader preserves placement floor");
+            assert!(
+                error.detail.contains("duplicate key on placement path"),
+                "{error}"
+            );
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || {
+                panic!("no cleanup")
+            });
+            assert!(error.detail.contains("retained:"));
+            let evidence = path.with_file_name(format!(".round-refusal-R-{nonce}.json"));
+            assert!(
+                fs::read_to_string(evidence)
+                    .expect("before-image refusal is durable")
+                    .contains("original refusal")
+            );
+        }
+
+        fn kernel_holder_key(locks: &str, pid: u32, inode: u64) -> Option<&str> {
+            let pid = pid.to_string();
+            let inode = format!(":{inode}");
+            locks.lines().find_map(|line| {
+                let words = line.split_whitespace().collect::<Vec<_>>();
+                if words.get(1) == Some(&"FLOCK") && words.get(4) == Some(&pid.as_str()) {
+                    words.get(5).copied().filter(|word| word.ends_with(&inode))
+                } else {
+                    None
+                }
+            })
+        }
+
+        /// ´test:unit:mailbox-waiter-uses-kernel-holder-device´
+        #[test]
+        fn mailbox_waiter_uses_kernel_holder_device() {
+            let locks = "1: FLOCK ADVISORY WRITE 12 00:3d:99 0 EOF\n\
+                         2: -> FLOCK ADVISORY WRITE 42 00:17:99 0 EOF\n\
+                         3: FLOCK ADVISORY WRITE 42 00:24:99 0 EOF\n";
+            assert_eq!(
+                kernel_holder_key(locks, 42, 99),
+                Some("00:24:99"),
+                "kernel holder, not stat device, foreign holder or waiter"
+            );
+            assert_eq!(kernel_holder_key(locks, 42, 100), None);
+            assert_eq!(kernel_holder_key(locks, 43, 99), None);
+        }
+
+        /// A parent callback waits for the helper publisher and preserves its identity.
+        /// ´test:unit:live-round-parent-publication-takes-mailbox-lock´
+        #[test]
+        fn live_round_parent_publication_takes_mailbox_lock() {
+            use std::sync::mpsc;
+            use std::time::Duration;
+            let (root, path, _, nonce) = fixture();
+            let lock =
+                lock_mailbox(root.path(), "R", Uid::effective().as_raw()).expect("helper lock");
+            let temporary = root.path().join(format!(".reservation-{nonce}.tmp"));
+            fs::write(&temporary, b"helper publication in progress").expect("occupied temporary");
+            let (entered, observed) = mpsc::channel();
+            let (done, completion) = mpsc::channel();
+            let callback_path = path.clone();
+            let callback = std::thread::spawn(move || {
+                entered.send(()).expect("entered");
+                let result = super::super::record_helper_parent(&callback_path, 91, 92);
+                done.send(result).expect("completion");
+            });
+            observed
+                .recv_timeout(Duration::from_secs(30))
+                .expect("callback entry event");
+            let metadata = lock.metadata().expect("held lock identity");
+            let locks = fs::read_to_string("/proc/locks").expect("kernel holder census");
+            let key = kernel_holder_key(&locks, std::process::id(), metadata.ino())
+                .expect("this process's kernel holder identity");
+            let deadline = std::time::Instant::now() + Duration::from_secs(180);
+            let blocked = loop {
+                let locks = fs::read_to_string("/proc/locks").expect("kernel lock census");
+                if locks.lines().any(|line| {
+                    line.contains("->") && line.split_whitespace().any(|word| word == key)
+                }) {
+                    break true;
+                }
+                if !matches!(completion.try_recv(), Err(mpsc::TryRecvError::Empty))
+                    || std::time::Instant::now() >= deadline
+                {
+                    break false;
+                }
+                std::thread::yield_now();
+            };
+            fs::remove_file(temporary).expect("helper completed temporary");
+            let mut record = read_reservation(&path).expect("read").expect("record");
+            record["helper_pid"] = json!(93);
+            publish_reservation(&path, &record).expect("helper identity publication");
+            drop(lock);
+            callback.join().expect("callback joined");
+            assert!(
+                blocked,
+                "callback must be a kernel-recorded waiter on the held mailbox lock"
+            );
+            completion
+                .recv_timeout(Duration::from_secs(30))
+                .expect("callback complete event")
+                .expect("callback publishes after helper");
+            let record = read_reservation(&path).expect("read").expect("record");
+            assert_eq!(record["helper_pid"], 93, "helper update kept");
+            assert_eq!(record["helper_parent_pid"], 91);
+            assert_eq!(record["helper_parent_start"], 92);
+        }
+
+        /// Publication errors distinguish exact unchanged bytes from uncertain writes.
+        /// ´test:unit:round-preparing-publication-refuses-without-retaining-unchanged-run´
+        #[test]
+        fn round_preparing_publication_refuses_without_retaining_unchanged_run() {
+            let (root, path, before, nonce) = fixture();
+            let preparing = fs::read(&path).expect("preparing bytes");
+            let record = read_reservation(&path).expect("read").expect("record");
+            super::super::super::publish_reservation_bytes(&path, &before).expect("settled");
+            let temporary = root.path().join(format!(".reservation-{nonce}.tmp"));
+            fs::write(&temporary, b"occupied").expect("occupied own temporary");
+            let result = publish_reservation(&path, &record);
+            let Publication::Unchanged(error) = publication(&path, &before, result) else {
+                panic!("unchanged publication is not retained");
+            };
+            assert_eq!(error.kind, "uid-table");
+            assert!(
+                error
+                    .detail
+                    .ends_with("unchanged: preparing reservation was not published")
+            );
+            assert_eq!(fs::read(&path).expect("unchanged"), before);
+            assert_eq!(fs::read(&temporary).expect("other publisher"), b"occupied");
+            fs::remove_file(temporary).expect("remove own obstruction");
+            super::super::super::publish_reservation_bytes(&path, &preparing).expect("renamed");
+            assert!(
+                matches!(
+                    publication(&path, &before, Err(primary())),
+                    Publication::Attempt(Err(_))
+                ),
+                "post-rename error must still take rollback"
+            );
+            fs::remove_file(&path).expect("simulate unavailable readback");
+            assert!(
+                matches!(
+                    publication(&path, &before, Err(primary())),
+                    Publication::Attempt(Err(_))
+                ),
+                "unknown readback must retain through rollback"
+            );
+        }
+
+        fn primary() -> LaneError {
+            LaneError::input("injected-refusal", "original refusal")
+        }
+
+        /// ´test:unit:live-round-rollback-restores-exact-bytes-last´
+        #[test]
+        fn live_round_rollback_restores_exact_bytes_last() {
+            let (_root, path, bytes, nonce) = fixture();
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || {
+                assert_eq!(
+                    read_reservation(&path)?.expect("during cleanup")["phase"],
+                    "preparing",
+                    "reservation must remain preparing until cleanup completes"
+                );
+                Ok(())
+            });
+            assert_eq!(error.kind, "injected-refusal");
+            assert_eq!(error.status, 2, "original refusal status retained");
+            assert!(error.detail.starts_with("original refusal;"));
+            assert!(error.detail.ends_with("rollback: restored"), "{error}");
+            assert_eq!(
+                fs::read(&path).expect("restored"),
+                bytes,
+                "exact before-image restored"
+            );
+            let record = read_reservation(&path).expect("read").expect("present");
+            assert_eq!(record["rounds"], json!([]), "round name reusable");
+            assert!(record.get("round_rollback").is_none());
+        }
+
+        /// ´test:unit:live-round-rollback-waits-for-process-absence´
+        #[test]
+        fn live_round_rollback_waits_for_process_absence() {
+            let (_root, path, bytes, nonce) = fixture();
+            let preparing = fs::read(&path).expect("preparing");
+            let mut child = std::process::Command::new("/usr/bin/sleep")
+                .arg("infinity")
+                .process_group(0)
+                .spawn()
+                .expect("live attempt process");
+            let mut live = build::LiveChild::default();
+            live.started(child.id());
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&live, &absent), || {
+                Err(refusal("cleanup ran before process absence"))
+            });
+            child.kill().expect("stop fixture child");
+            child.wait().expect("wait fixture child");
+            let evidence = path.with_file_name(format!(".round-refusal-R-{nonce}.json"));
+            let evidence: Value = serde_json::from_slice(
+                &fs::read(evidence).expect("durable refusal before absence"),
+            )
+            .expect("evidence");
+            assert!(
+                evidence["reason"]
+                    .as_str()
+                    .expect("reason")
+                    .contains("original refusal")
+            );
+            assert!(
+                error
+                    .detail
+                    .contains("retained: round-rollback: process-absence"),
+                "{error}"
+            );
+            assert_eq!(
+                fs::read(&path).expect("retained"),
+                preparing,
+                "reservation remains preparing while process exists"
+            );
+            let error = finish(primary(), &path, &nonce, (&live, &absent), || Ok(()));
+            assert!(error.detail.ends_with("rollback: restored"), "{error}");
+            assert_eq!(fs::read(path).expect("retry after wait"), bytes);
+        }
+
+        /// ´test:unit:live-round-rollback-retains-replaced-request´
+        #[test]
+        fn live_round_rollback_retains_replaced_request() {
+            let (root, path, _, nonce) = fixture();
+            let preparing = fs::read(&path).expect("preparing");
+            let request = root.path().join("round-launch-review.json");
+            fs::write(&request, b"replaced\n").expect("replacement");
+            fs::set_permissions(&request, fs::Permissions::from_mode(0o600)).expect("request mode");
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || {
+                let directory = fs::File::open(root.path()).expect("held root");
+                if let Some(leaf) = request_leaf(
+                    &directory,
+                    "round-launch-review.json".into(),
+                    b"expected\n",
+                    Uid::effective().as_raw(),
+                )? {
+                    leaf.remove()?;
+                }
+                Ok(())
+            });
+            assert!(error.detail.contains("request bytes differ"), "{error}");
+            assert_eq!(
+                fs::read(&request).expect("replacement retained"),
+                b"replaced\n"
+            );
+            assert_eq!(fs::read(path).expect("reservation retained"), preparing);
+        }
+
+        /// ´test:unit:live-round-rollback-refuses-after-dispatch-intent´
+        #[test]
+        fn live_round_rollback_refuses_after_dispatch_intent() {
+            let (_root, path, _, nonce) = fixture();
+            intent(&path, &nonce).expect("intent before spawn");
+            let intended = fs::read(&path).expect("intent bytes");
+            let absent = build::LiveChild::default();
+            let error = finish(primary(), &path, &nonce, (&absent, &absent), || Ok(()));
+            assert!(
+                error
+                    .detail
+                    .contains("retained: round-rollback: dispatch-intent"),
+                "{error}"
+            );
+            assert_eq!(
+                fs::read(&path).expect("intent retained"),
+                intended,
+                "post-intent never restored"
+            );
+            let mut record = read_reservation(&path).expect("read").expect("record");
+            record["driver_entry_pid"] = json!(42);
+            publish_reservation(&path, &record).expect("driver receipt");
+            dispatched(&path, &nonce).expect("receipt consumes rollback boundary");
+            let record = read_reservation(&path).expect("read").expect("record");
+            assert!(
+                record.get("dispatch_intent").is_none(),
+                "intent removed after receipt"
+            );
+            assert!(record.get("round_rollback").is_none());
+        }
+
+        /// ´test:unit:live-round-rollback-checks-scope-and-container-absence´
+        #[test]
+        fn live_round_rollback_checks_scope_and_container_absence() {
+            let (root, path, _, nonce) = fixture();
+            let mut record = read_reservation(&path).expect("record").expect("present");
+            let scope = super::super::super::reaping::RetirementScopeFixture::new(&mut record);
+            publish_reservation(&path, &record).expect("protected scope identity");
+            let home = fs::File::open(root.path()).expect("home").into();
+            let runs = fs::File::open(root.path()).expect("runs").into();
+            let environment = std::collections::BTreeMap::new();
+            // These programs model only the container inventory. Scope reads use the
+            // existing explicit test cgroup root, not a claim about kernel containment.
+            let mut host = Host {
+                path: &path,
+                nonce: &nonce,
+                program: Path::new("/usr/bin/true"),
+                environment: &environment,
+                owner_home: root.path(),
+                home: &home,
+                root: root.path(),
+                runs: &runs,
+                argv: Vec::new(),
+            };
+            host.quiescent().expect("empty inventory and scope");
+            fs::write(scope.path.join("cgroup.events"), "populated 1\n").expect("live scope");
+            let error = host.quiescent().expect_err("populated scope retained");
+            assert_eq!(error.kind, "retire-busy");
+            fs::write(scope.path.join("cgroup.events"), "populated 0\n").expect("empty scope");
+            host.program = Path::new("/usr/bin/printf");
+            let error = host.quiescent().expect_err("container inventory retained");
+            assert!(
+                error.detail.contains("container-payload-present"),
+                "{error}"
+            );
+            host.program = Path::new("/usr/bin/true");
+            record["run_scope"]["inode"] = json!(1);
+            publish_reservation(&path, &record).expect("changed scope identity");
+            let error = host.quiescent().expect_err("replacement scope retained");
+            assert_eq!(error.kind, "run-scope-record");
+        }
+
+        /// ´test:unit:live-round-reservation-failure-removes-own-temporary´
+        #[test]
+        fn live_round_reservation_failure_removes_own_temporary() {
+            let root = tempfile::tempdir().expect("supplied temporary root");
+            let path = root.path().join("occupied");
+            fs::create_dir(&path).expect("refuse rename into directory");
+            let error = super::super::super::publish_reservation_bytes_named(
+                &path,
+                b"{}",
+                Some(&"a".repeat(64)),
+            )
+            .expect_err("rename refusal");
+            assert_eq!(error.kind, "uid-table");
+            let entries: Vec<_> = fs::read_dir(root.path())
+                .expect("inventory")
+                .map(|entry| entry.expect("entry").file_name())
+                .collect();
+            assert_eq!(
+                entries,
+                [std::ffi::OsString::from("occupied")],
+                "failed reservation writer removes only its own temporary"
+            );
+        }
+
+        /// ´test:unit:live-round-restoration-keeps-the-held-root´
+        #[test]
+        fn live_round_restoration_keeps_the_held_root() {
+            let root = tempfile::tempdir().expect("caller temporary root");
+            let named = root.path().join("runs");
+            let moved = root.path().join("held-runs");
+            fs::create_dir(&named).expect("root");
+            let held = fs::File::open(&named).expect("hold root").into();
+            fs::rename(&named, &moved).expect("move own root");
+            fs::create_dir(&named).expect("replacement root");
+            let path = named.join(".reservation-R.json");
+            fs::write(&path, b"replacement sentinel").expect("replacement");
+            super::super::super::publish_reservation_bytes_at(
+                &path,
+                b"original bytes",
+                None,
+                Some(&held),
+            )
+            .expect("held restoration");
+            assert_eq!(
+                fs::read(&path).expect("replacement retained"),
+                b"replacement sentinel",
+                "restoration never reopens the runs pathname"
+            );
+            assert_eq!(
+                fs::read(moved.join(".reservation-R.json")).expect("held record"),
+                b"original bytes"
+            );
+        }
+
+        /// ´test:unit:live-round-before-image-keeps-reservation-bound´
+        #[test]
+        fn live_round_before_image_keeps_reservation_bound() {
+            let (_root, path, bytes, _) = fixture();
+            let unchanged = fs::read(&path).expect("before refusal");
+            let mut record: Value = serde_json::from_slice(&bytes).expect("prior");
+            record["padding"] = json!("x".repeat(3 * 1024 * 1024));
+            let before = serde_json::to_vec(&record).expect("bounded prior");
+            let error = prepare(&mut record, &before, "expected\n").expect_err("whole record cap");
+            assert!(error.detail.contains("limit is 4194304 bytes"), "{error}");
+            assert_eq!(fs::read(path).expect("no publication"), unchanged);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1567,6 +3239,54 @@ mod tests {
     use std::io::Write as _;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::path::{Path, PathBuf};
+
+    /// ´test:unit:awaiting-round-recovery-requires-completed-driver´
+    #[test]
+    fn awaiting_round_recovery_requires_completed_driver() {
+        let good = json!({"phase":"started","active_round":"review",
+            "driver_end":{"state":"completed","successful":true},
+            "rounds":[{"step":"dispatch","phase":"settled"},
+                {"step":"review","phase":"awaiting-settlement"}]});
+        assert!(super::interrupted_round(&good, "review"));
+        for end in [
+            serde_json::Value::Null,
+            json!({"state":"running"}),
+            json!({"state":"not-started"}),
+        ] {
+            let mut record = good.clone();
+            record["driver_end"] = end;
+            assert!(!super::interrupted_round(&record, "review"), "{record}");
+        }
+        let mut record = good.clone();
+        record["driver_end"]["successful"] = json!(false);
+        assert!(
+            !super::interrupted_round(&record, "review"),
+            "unsuccessful driver is not the stop race"
+        );
+        record["driver_end"]["successful"] = serde_json::Value::Null;
+        assert!(
+            !super::interrupted_round(&record, "review"),
+            "driver success must be recorded"
+        );
+        record = good.clone();
+        record["helper_end"] = json!({"state":"completed","successful":false});
+        assert!(
+            !super::interrupted_round(&record, "review"),
+            "unsuccessful helper is not the stop race"
+        );
+        record["helper_end"]["successful"] = json!(true);
+        assert!(super::interrupted_round(&record, "review"));
+        assert!(!super::interrupted_round(&good, "other"));
+        record["phase"] = json!("settled");
+        assert!(!super::interrupted_round(&record, "review"));
+        record = good;
+        record["active_round"] = json!("dispatch");
+        record["rounds"] = json!([{"step":"dispatch","phase":"awaiting-settlement"}]);
+        assert!(
+            !super::interrupted_round(&record, "dispatch"),
+            "first dispatch uses its own recovery"
+        );
+    }
 
     fn client_environment_fixture() -> (tempfile::TempDir, Plan) {
         let fixture = tempfile::tempdir().expect("fixture");
@@ -1680,6 +3400,121 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// ´test:unit:round-inspection-validates-before-publication´
+    #[test]
+    fn round_inspection_validates_before_publication() {
+        let (_fixture, plan) = client_environment_fixture();
+        let runtime = plan.driver_dir.join("launch/runtime.env");
+        let before = fs::read(&runtime).expect("environment");
+        let metadata = fs::metadata(&runtime).expect("environment inode");
+        let mut record = json!({"phase":"preparing","active_round":"review",
+            "thread_id":"thread","worker_uid":0,
+            "rounds":[{"step":"review","budget_seconds":900}],"mail":[]});
+        let names = || {
+            let mut names = fs::read_dir(&plan.driver_dir)
+                .expect("run entries")
+                .map(|entry| entry.expect("entry").file_name())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let original = names();
+        let error = inspect_loaded_round(&plan, &record, Some(("review", 900)))
+            .expect_err("missing binding before environment write");
+        assert_eq!(error.kind, "mail-delivery");
+        assert_eq!(fs::read(&runtime).expect("unchanged bytes"), before);
+        assert_eq!(
+            fs::metadata(&runtime).expect("unchanged inode").ino(),
+            metadata.ino()
+        );
+        assert_eq!(names(), original, "no round request temporary");
+        record["mail"] = json!([{"step":"review"}]);
+        let request = plan.driver_dir.join("round-launch-review.json");
+        fs::write(&request, b"retained request").expect("existing request");
+        let original = names();
+        let error = inspect_loaded_round(&plan, &record, Some(("review", 900)))
+            .expect_err("occupied request before environment write");
+        assert_eq!(error.kind, "round-evidence");
+        assert!(
+            error
+                .detail
+                .contains("round-launch-review.json already exists")
+        );
+        assert_eq!(
+            fs::read(&request).expect("retained request"),
+            b"retained request"
+        );
+        assert_eq!(fs::read(&runtime).expect("unchanged bytes"), before);
+        assert_eq!(
+            fs::metadata(&runtime).expect("unchanged inode").ino(),
+            metadata.ino()
+        );
+        assert_eq!(names(), original, "no temporary on occupied destination");
+        fs::remove_file(&request).expect("remove fixture destination");
+        let temporary = plan
+            .driver_dir
+            .join(format!(".round-launch-review-{}.tmp", std::process::id()));
+        fs::write(&temporary, b"retained temporary").expect("occupied exact temporary");
+        let original = names();
+        let error = inspect_loaded_round(&plan, &record, Some(("review", 900)))
+            .expect_err("occupied temporary before environment write");
+        assert_eq!(error.kind, "round-evidence");
+        assert!(error.detail.contains("already exists"));
+        assert_eq!(
+            fs::read(&temporary).expect("retained temporary"),
+            b"retained temporary"
+        );
+        assert_eq!(
+            fs::metadata(&runtime).expect("unchanged inode").ino(),
+            metadata.ino()
+        );
+        assert_eq!(names(), original, "only exact temporary considered");
+    }
+
+    /// ´test:unit:round-request-failure-removes-only-its-temporary´
+    #[test]
+    fn round_request_failure_removes_only_its_temporary() {
+        let (_fixture, plan) = client_environment_fixture();
+        let record = json!({"mail":[{"step":"review"}],"thread_id":"thread-1", "worker_uid":0});
+        let prepared =
+            super::prepare_round_request(&plan, &record, "review", 900).expect("prepared");
+        let temporary = plan.driver_dir.join(&prepared.temporary);
+        let destination = plan.driver_dir.join(&prepared.name);
+        fs::write(&destination, b"foreign request").expect("race destination");
+        let error = prepared
+            .publish()
+            .expect_err("rename refuses occupied name");
+        assert_eq!(error.kind, "round-evidence");
+        assert!(
+            !temporary.exists(),
+            "failed publication removes its own temporary"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("retained destination"),
+            b"foreign request"
+        );
+        fs::remove_file(&destination).expect("fixture destination");
+        let prepared =
+            super::prepare_round_request(&plan, &record, "review", 900).expect("retry prepared");
+        fs::write(&temporary, b"foreign temporary").expect("race temporary");
+        prepared.publish().expect_err("exclusive creation refuses");
+        assert_eq!(
+            fs::read(&temporary).expect("foreign temporary retained"),
+            b"foreign temporary"
+        );
+        assert!(!destination.exists(), "refusal publishes no request");
+        fs::remove_file(&temporary).expect("fixture temporary");
+        super::prepare_round_request(&plan, &record, "review", 900)
+            .expect("same step reusable")
+            .publish()
+            .expect("retry publishes");
+        assert!(!temporary.exists());
+        let request: serde_json::Value =
+            serde_json::from_slice(&fs::read(destination).expect("published"))
+                .expect("request JSON");
+        assert_eq!(request["step"], "review");
     }
 
     /// # Panics
@@ -2234,7 +4069,16 @@ mod tests {
                 "settle_attempts":[{"phase":"complete"}]}]
         });
         let request = super::LaunchRequest::parse(
-            &["alpha", "R", "--round", "review", "--budget", "900"].map(str::to_owned),
+            &[
+                "alpha",
+                "R",
+                "--round",
+                "review",
+                "--budget",
+                "900",
+                "--fresh-thread",
+            ]
+            .map(str::to_owned),
         )
         .expect("round request");
         let selection = super::super::LaunchModel::select(
@@ -2961,5 +4805,271 @@ mod generation_tests {
         }
         assert_eq!(saved["phase"], "preparing");
         assert_eq!(saved["active_round"], "next");
+    }
+}
+
+#[cfg(test)]
+mod choice_tests {
+    use super::*;
+
+    pub(super) fn record() -> Value {
+        json!({"schema":1,"loop":"alpha","run":"R","worker_uid":3000,
+            "phase":"settled","active_round":"dispatch","readback_end":"completed",
+            "thread_id":"old-thread","driver_end":{"state":"completed","successful":false},
+            "helper_end":{"state":"completed"},"rounds":[{"step":"dispatch","phase":"failed",
+                "driver_dir":"/fixture/R/prior-dispatch","reply":null,"ended_by":"by-budget",
+                "thread":{"id":"old-thread","provenance":"observed"},
+                "settle_attempts":[{"phase":"complete"}]}],
+            "mail":[{"step":"review","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter","evidence_digest":"a".repeat(64)}]})
+    }
+
+    /// Every finalized failed outcome needs the loop's choice, with absence explicit.
+    ///
+    /// # Panics
+    /// Panics if choice admission silently chooses or ignores an argument.
+    /// ´test:unit:failed-round-choice-is-explicit´
+    #[test]
+    fn failed_round_choice_is_explicit() {
+        let mut saved = record();
+        for end in [json!("by-budget"), json!("by-report"), Value::Null] {
+            saved["rounds"][0]["ended_by"] = end;
+            let error = require_thread_choice(&saved, None).expect_err("no automatic choice");
+            for word in [
+                "dispatch",
+                "old-thread",
+                "--fresh-thread",
+                "--resume-thread",
+            ] {
+                assert!(error.detail.contains(word), "{error}");
+            }
+            assert!(require_thread_choice(&saved, Some(ThreadChoice::Fresh)).expect("fresh"));
+            assert!(!require_thread_choice(&saved, Some(ThreadChoice::Resume)).expect("resume"));
+        }
+        saved["rounds"][0]["thread"] = json!({"id":null,"provenance":"absent"});
+        assert!(
+            require_thread_choice(&saved, None)
+                .expect_err("explicit absence")
+                .detail
+                .contains("only --fresh-thread")
+        );
+        assert!(
+            require_thread_choice(&saved, Some(ThreadChoice::Resume))
+                .expect_err("no recorded thread")
+                .detail
+                .contains("no recorded thread")
+        );
+        assert!(require_thread_choice(&saved, Some(ThreadChoice::Fresh)).expect("only fresh"));
+        saved["rounds"][0]["phase"] = json!("settled");
+        saved["rounds"][0]["reply"] = json!({"bytes":1});
+        for choice in [ThreadChoice::Fresh, ThreadChoice::Resume] {
+            assert_eq!(
+                require_thread_choice(&saved, Some(choice))
+                    .expect_err("choice not owed")
+                    .kind,
+                "round-choice"
+            );
+        }
+        assert!(!require_thread_choice(&saved, None).expect("ordinary resume"));
+    }
+
+    /// Choice admission consults only finalized settled rounds, not retained attempts.
+    /// ´test:unit:failed-round-choice-ignores-attempt-evidence´
+    #[test]
+    fn failed_round_choice_ignores_attempt_evidence() {
+        let mut saved = record();
+        saved["dispatch_intent"] = json!({"nonce":"old"});
+        assert!(
+            require_thread_choice(&saved, None).is_err(),
+            "settled failure still owes choice"
+        );
+        saved["phase"] = json!("preparing");
+        assert!(
+            !failed_continuation(&saved),
+            "retained attempt is not finalized"
+        );
+        assert!(!require_thread_choice(&saved, None).expect("no choice for interrupted recovery"));
+        assert!(require_thread_choice(&saved, Some(ThreadChoice::Fresh)).is_err());
+        saved["phase"] = json!("settled");
+        saved["rounds"][0]["phase"] = json!("settled");
+        saved["rounds"][0]["reply"] = json!({"bytes":1});
+        assert!(!require_thread_choice(&saved, None).expect("intent cannot create failed choice"));
+    }
+
+    /// The enclosing settled phase is required even with a completed failed row.
+    /// ´test:unit:failed-round-choice-requires-settled-reservation´
+    #[test]
+    fn failed_round_choice_requires_settled_reservation() {
+        let mut saved = record();
+        assert!(failed_continuation(&saved), "settled failed control");
+        for phase in ["failed", "preparing", "started", "retired"] {
+            saved["phase"] = json!(phase);
+            assert!(
+                !failed_continuation(&saved),
+                "outer {phase} cannot owe a choice"
+            );
+            assert!(!require_thread_choice(&saved, None).expect("no choice gate"));
+            assert_eq!(
+                require_thread_choice(&saved, Some(ThreadChoice::Fresh))
+                    .expect_err("choice unavailable outside settlement")
+                    .kind,
+                "round-choice"
+            );
+        }
+        saved["phase"] = json!("settled");
+        assert!(failed_continuation(&saved), "row was never changed");
+    }
+
+    /// A fresh request retains the old reservation identity until its own event is read.
+    ///
+    /// # Panics
+    /// Panics if settlement uses a prior thread or changes it without a start event.
+    /// ´test:unit:failed-round-fresh-thread-changes-only-with-own-start´
+    #[test]
+    fn failed_round_fresh_thread_changes_only_with_own_start() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for backend in ["codex", "claude"] {
+            let root = tempfile::tempdir().expect("fixture");
+            let plan = Plan {
+                home: root.path().join("home"),
+                driver_dir: root.path().join("R"),
+                letter: PathBuf::new(),
+                document: json!({"backend":backend}),
+            };
+            let directory = plan.driver_dir.join("new-review");
+            std::fs::create_dir_all(&directory).expect("directory");
+            std::fs::write(directory.join(".event-start"), b"0\n").expect("boundary");
+            std::fs::write(directory.join("events.jsonl"), b"").expect("before start");
+            let report = directory.join("run-report.txt");
+            std::fs::write(
+                &report,
+                format!(
+                    "RUN-REPORT lane=review exit=0 verdict=ok dir={}\n",
+                    directory.display()
+                ),
+            )
+            .expect("report");
+            std::fs::set_permissions(&report, std::fs::Permissions::from_mode(0o600))
+                .expect("report mode");
+            let mut saved = record();
+            saved["rounds"][0]["driver_dir"] = json!(plan.driver_dir.join("prior-dispatch"));
+            let request = LaunchRequest::parse(
+                &["alpha", "R", "--round", "review", "--fresh-thread"].map(str::to_owned),
+            )
+            .expect("request");
+            let round =
+                continuation_round(&saved, &request, &directory, &saved["mail"][0]).expect("next");
+            saved["rounds"].as_array_mut().expect("rounds").push(round);
+            saved["rounds"][1]["phase"] = json!("awaiting-settlement");
+            saved["phase"] = json!("started");
+            saved["active_round"] = json!("review");
+            let path = reservation_path(root.path(), "R");
+            publish_reservation(&path, &saved).expect("new round");
+            let reply = json!({"bytes":1});
+            record_settlement_with_recovery(&plan, "R", &reply, false).expect_err("no start yet");
+            assert_eq!(
+                read_reservation(&path).expect("read").expect("saved")["thread_id"],
+                "old-thread"
+            );
+            let event = if backend == "codex" {
+                json!({"type":"thread.started","thread_id":"new-thread"})
+            } else {
+                json!({"type":"system","subtype":"init","session_id":"new-thread"})
+            };
+            std::fs::write(directory.join("events.jsonl"), format!("{event}\n"))
+                .expect("own event");
+            assert_eq!(
+                recovery_thread(&plan, &saved, &saved["rounds"][1])
+                    .expect("fresh recovery reads own start"),
+                "new-thread"
+            );
+            publish_reservation(&path, &saved).expect("settlement input");
+            record_settlement_with_recovery(&plan, "R", &reply, false).expect("own thread settles");
+            assert_eq!(
+                read_reservation(&path).expect("read").expect("saved")["thread_id"],
+                "new-thread"
+            );
+        }
+    }
+
+    /// The selected request and prospective record agree without erasing the old thread.
+    ///
+    /// # Panics
+    /// Panics if fresh and resume can be confused or previews consume the choice.
+    /// ´test:unit:failed-round-choice-controls-request-and-preview´
+    #[test]
+    fn failed_round_choice_controls_request_and_preview() {
+        let root = tempfile::tempdir().expect("fixture");
+        let plan = Plan {
+            home: root.path().join("home"),
+            driver_dir: root.path().join("R"),
+            letter: PathBuf::new(),
+            document: json!({"backend":"codex"}),
+        };
+        let mut saved = record();
+        saved["rounds"][0]["driver_dir"] = json!(plan.driver_dir.join("prior-dispatch"));
+        let before = serde_json::to_vec(&saved).expect("before");
+        for (flag, expected) in [
+            ("--fresh-thread", Value::Null),
+            ("--resume-thread", json!("old-thread")),
+        ] {
+            let request =
+                LaunchRequest::parse(&["alpha", "R", "--round", "review", flag].map(str::to_owned))
+                    .expect("choice");
+            let next = preflight_record(
+                &plan.driver_dir,
+                &saved,
+                "review",
+                3600,
+                request.thread_choice,
+            )
+            .expect("prospective");
+            assert_eq!(
+                next["thread_id"], "old-thread",
+                "fresh must not erase prior thread"
+            );
+            let text: Value =
+                serde_json::from_str(&request_text(&plan, &next, "review", 3600).expect("request"))
+                    .expect("json");
+            assert_eq!(text["thread_id"], expected, "chosen request thread");
+            let preview = choice_preview(
+                &saved,
+                request.thread_choice,
+                &json!({"present":true}),
+                "review",
+            );
+            assert_eq!(preview["selection"], flag);
+            assert_eq!(preview["recorded_thread"], "old-thread");
+            assert_eq!(preview["consumed"], false);
+            assert!(
+                preview["fresh_prompt"]
+                    .as_str()
+                    .expect("prompt")
+                    .contains("no old thread")
+            );
+        }
+        let refusal = choice_preview(&saved, None, &json!({"present":false}), "review");
+        assert!(refusal["selection"].is_null());
+        assert_eq!(refusal["fresh_letter"], saved["mail"][0]["inbox_name"]);
+        assert_eq!(refusal["next_round"], "review");
+        assert_eq!(refusal["thread_files"]["present"], false);
+        assert_eq!(serde_json::to_vec(&saved).expect("after"), before);
+        for words in [
+            vec!["alpha", "R", "--letter", "letter", "--fresh-thread"],
+            vec![
+                "alpha",
+                "R",
+                "--round",
+                "review",
+                "--fresh-thread",
+                "--resume-thread",
+            ],
+        ] {
+            assert_eq!(
+                LaunchRequest::parse(&words.into_iter().map(str::to_owned).collect::<Vec<_>>())
+                    .expect_err("inapplicable choice")
+                    .kind,
+                "round-choice"
+            );
+        }
     }
 }

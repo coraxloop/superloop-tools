@@ -7,7 +7,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use crate::home::{MAX_LETTER, make_home_pinned, read_letter};
-use crate::plan::{Plan, box_gate, registry_with_timeout, verify_box_attestation};
+use crate::plan::{Plan, box_gate, verify_box_attestation};
 use crate::settings::{Resources, Settings};
 use crate::{load_plan, valid_run_name};
 
@@ -18,6 +18,7 @@ mod launch;
 mod prepare;
 mod reader_custody;
 mod runtime_preparation;
+pub use runtime_preparation::{published_placement, published_workspace};
 
 fn gate_fixture() -> serde_json::Value {
     Plan::build(
@@ -1181,16 +1182,16 @@ fn registry_capture_refuses_both_overflows_and_timeout() {
 /// ´test:crate:registry-capture-waits-for-child-and-both-streams-under-load´
 #[test]
 fn registry_capture_waits_for_child_and_both_streams_under_load() {
-    let temp = TempDir::new_in("/tmp").expect("temporary fixture");
-    let entry = fixture_script(
+    let temp = tempfile::tempdir().expect("temporary fixture under supplied root");
+    let row = registry_handoff(
         temp.path(),
         "late-output",
-        "printf '%s\\n' \"$0\" \"$@\" > \"$0.argv\"; printf '{\"part\":\"first\",\"late\":'; sleep 0.15; printf 'true}'; printf 'last stderr bytes' >&2",
-    );
-    let started = std::time::Instant::now();
-    let row = registry_with_timeout(&fixture_settings(&entry), "alpha", Duration::from_secs(5))
-        .expect("complete stdout after pause");
+        [true, false, false],
+        "printf '%s\\n' \"$0\" \"$@\" > \"$0.argv\"; printf '{\"part\":\"first\",\"late\":'; (read -r release < \"$0.release\"; printf 'true}'; printf 'last stderr bytes' >&2) & exit 0",
+    )
+    .expect("complete stdout after pipe release");
     assert_eq!(row["late"], true);
+    let entry = temp.path().join("late-output");
     assert_eq!(
         fs::read_to_string(temp.path().join("late-output.argv"))
             .expect("entry argument vector")
@@ -1198,29 +1199,101 @@ fn registry_capture_waits_for_child_and_both_streams_under_load() {
             .collect::<Vec<_>>(),
         [entry.to_str().expect("entry path"), "show", "alpha"]
     );
-    assert!(started.elapsed() >= Duration::from_millis(100));
 
-    let entry = fixture_script(
+    let error = registry_handoff(
         temp.path(),
         "late-exit",
-        "printf '{\"part\":true}'; exec 1>&-; exec 2>&-; sleep 0.15",
+        [false, true, true],
+        "printf '{\"part\":true}'; exec 1>&-; exec 2>&-; read -r release < \"$0.release\"; exit 7",
+    )
+    .expect_err("complete JSON and closed streams do not replace child status");
+    assert_eq!(error.kind, "registry-command");
+    assert!(
+        error.detail.contains("exited exit status: 7"),
+        "child completion status is required: {error}"
     );
-    let started = std::time::Instant::now();
-    let row = registry_with_timeout(&fixture_settings(&entry), "alpha", Duration::from_secs(5))
-        .expect("child exit after streams close");
-    assert_eq!(row["part"], true);
-    assert!(started.elapsed() >= Duration::from_millis(100));
 
-    let entry = fixture_script(
+    let error = registry_handoff(
         temp.path(),
         "late-error",
-        "printf '{\"part\":true}'; sleep 0.15; printf 'late stderr detail' >&2; exit 7",
-    );
-    let error = registry_with_timeout(&fixture_settings(&entry), "alpha", Duration::from_secs(5))
-        .expect_err("late stderr and exit status");
+        [true, true, false],
+        "(exec 1>&-; read -r release < \"$0.release\"; printf 'late stderr detail' >&2) & printf '{\"part\":true}'; exit 7",
+    )
+    .expect_err("pipe holder's stderr survives the direct child's exit");
     assert_eq!(error.kind, "registry-command");
-    assert!(error.detail.contains("late stderr detail"));
-    assert!(error.detail.contains("exited exit status: 7"));
+    assert!(
+        error.detail.contains("late stderr detail"),
+        "retained stderr must be collected: {error}"
+    );
+    assert!(error.detail.contains("exited exit status: 7"), "{error}");
+}
+
+#[allow(clippy::exit)]
+fn registry_handoff(
+    root: &Path,
+    name: &str,
+    expected: [bool; 3],
+    body: &str,
+) -> Result<serde_json::Value, crate::error::LaneError> {
+    use std::io::Write as _;
+    enum Event {
+        Waiting,
+        Complete(Result<serde_json::Value, crate::error::LaneError>),
+    }
+    let entry = fixture_script(root, name, body);
+    let open = |suffix: &str| {
+        let path = root.join(format!("{name}.{suffix}"));
+        nix::unistd::mkfifo(
+            &path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("handoff FIFO");
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("FIFO keeper")
+    };
+    let mut release = open("release");
+    let (sent, received) = std::sync::mpsc::channel();
+    let runner = std::thread::spawn(move || {
+        let mut observed = false;
+        let result = crate::plan::registry_with_progress(
+            &fixture_settings(&entry),
+            "alpha",
+            Duration::from_secs(180),
+            |status, stdout, stderr| {
+                if !observed && [status, stdout, stderr] == expected {
+                    sent.send(Event::Waiting).expect("waiting observer");
+                    observed = true;
+                }
+            },
+        );
+        let _sent = sent.send(Event::Complete(result));
+    });
+    let first = received.recv_timeout(Duration::from_secs(180));
+    release
+        .write_all(b"go\n")
+        .expect("release child or pipe holder");
+    let waiting = matches!(first, Ok(Event::Waiting));
+    let completed = if waiting {
+        received.recv_timeout(Duration::from_secs(180))
+    } else {
+        first
+    };
+    let Ok(Event::Complete(result)) = completed else {
+        let _reported = writeln!(
+            std::io::stderr(),
+            "registry completion exceeded distant hang guard"
+        );
+        std::process::exit(125);
+    };
+    runner.join().expect("registry runner joined");
+    assert!(
+        waiting,
+        "collector must observe the gated child or stream before completion"
+    );
+    result
 }
 
 /// ´test:crate:mount-argv-matches-document-and-comma-paths-refuse´

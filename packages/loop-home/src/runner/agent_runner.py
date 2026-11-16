@@ -67,7 +67,179 @@ def emit(value):
     RESULT = value
 
 
+def stream_class(data, complete=True):
+    """Classify bounded bytes without retaining their contents as evidence."""
+    if not complete:
+        return "truncated"
+    if not data:
+        return "empty"
+    try:
+        events = [json.loads(line) for line in data.splitlines()]
+    except (ValueError, UnicodeError):
+        return "non-jsonl"
+    if any(not isinstance(event, dict) for event in events):
+        return "jsonl-non-object"
+    if any(event.get("type") == "item.completed"
+           and isinstance(event.get("item"), dict)
+           and event["item"].get("type") == "agent_message" for event in events):
+        return "jsonl-agent-message"
+    if any(set(event) == {"verdict", "scope", "reason"} for event in events):
+        return "verdict-object"
+    return "jsonl-object"
+
+
+def plain_stderr(data):
+    """A JSON object, array or string may carry an answer in a mixed stream."""
+    for line in data.splitlines():
+        try:
+            value = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        if isinstance(value, (dict, list, str)):
+            return False
+    return True
+
+
+def drain_stderr(fd, tail, deadline):
+    """Drain a nonblocking pipe without treating an open empty pipe as EOF."""
+    while time.monotonic() < deadline:
+        try:
+            chunk = os.read(fd, 8192)
+        except BlockingIOError:
+            return False, False
+        if not chunk:
+            return True, False
+        tail.append(chunk)
+    return False, True
+
+
+def refusal_stderr(status, tail, eof, cut):
+    """Only a complete plain stream is safe on an invalid-output refusal."""
+    complete = tail.total == len(tail.data)
+    suppress = (status == "invalid-output"
+                and (not eof or cut or not complete or not plain_stderr(bytes(tail.data))))
+    return ("", "") if suppress else (tail.text(), tail.first_line())
+
+
+def parse_answer(output, evidence):
+    """Read Codex exec --json events; diagnostics contain no vendor text."""
+    messages = []
+    observed_model = None
+    evidence["parse_class"] = "empty" if not output else "malformed-jsonl"
+    evidence["message_count"] = 0
+    evidence["completed_turns"] = 0
+    evidence["failed_turns"] = 0
+    evidence["error_events"] = 0
+    for line in output.splitlines():
+        evidence["parse_class"] = "malformed-jsonl"
+        event = json.loads(line)
+        evidence["parse_class"] = "non-object-event"
+        if not isinstance(event, dict):
+            raise ValueError("event object required")
+        if event.get("type") == "turn.completed":
+            evidence["completed_turns"] += 1
+        elif event.get("type") == "turn.failed":
+            evidence["failed_turns"] += 1
+        elif event.get("type") == "error":
+            evidence["error_events"] += 1
+        # A configured model is not an observation; ordinary CLI events may
+        # contain no response model, in which case it remains null.
+        if event.get("type") == "response.completed":
+            evidence["parse_class"] = "invalid-model-metadata"
+            response = event.get("response")
+            if not isinstance(response, dict):
+                raise ValueError("response metadata object required")
+            reported = response.get("model")
+            if reported is not None:
+                if (not isinstance(reported, str) or not reported.strip()
+                        or len(reported.encode("utf-8")) > 256):
+                    raise ValueError("invalid response model identifier")
+                if observed_model is not None and observed_model != reported:
+                    raise ValueError("conflicting response model identifiers")
+                observed_model = reported
+        evidence["parse_class"] = "invalid-item"
+        item = event.get("item", {})
+        if not isinstance(item, dict):
+            raise ValueError("item object required")
+        if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+            messages.append(item.get("text"))
+            evidence["message_count"] = len(messages)
+        evidence["parse_class"] = "unexpected-item"
+        if item and item.get("type") not in ("agent_message", "reasoning"):
+            raise ValueError("unexpected tool event")
+    evidence["parse_class"] = (
+        ("empty" if not output else "no-message") if not messages else "multiple-messages")
+    if len(messages) != 1:
+        raise ValueError("one final message required")
+    evidence["parse_class"] = "non-text-message"
+    if not isinstance(messages[0], str):
+        raise ValueError("text message required")
+    evidence["parse_class"] = "invalid-text-encoding"
+    evidence["message_bytes"] = len(messages[0].encode("utf-8"))
+    evidence["parse_class"] = "message"
+    return messages[0], observed_model
+
+
+def usage_record(output, vendor_code, started, interrupted=False):
+    """Vendor accounting is independent of answer parsing and wrapper cleanup."""
+    result = {"status": "not-started" if not started else "unknown",
+              "reason": "not-started" if not started else "missing-usage",
+              "turns": 0, "input_tokens": None, "cached_input_tokens": None,
+              "output_tokens": None}
+    if not started:
+        return result
+    if len(output) > 65536:
+        result["reason"] = "stream-cut"
+        return result
+    totals = [0, 0, 0]
+    malformed = False
+    failed = False
+    keys = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+            "output_tokens", "reasoning_output_tokens")
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError("event shape")
+            if event.get("type") in ("turn.failed", "error"):
+                failed = True
+            if event.get("type") != "turn.completed":
+                continue
+            usage = event.get("usage")
+            if (not isinstance(usage, dict)
+                    or any(type(usage.get(key)) is not int
+                           or not 0 <= usage[key] <= 18446744073709551615 for key in keys)
+                    or usage["cached_input_tokens"] > usage["input_tokens"]
+                    or usage["cache_write_input_tokens"] > usage["input_tokens"]
+                    or usage["reasoning_output_tokens"] > usage["output_tokens"]):
+                raise ValueError("usage shape")
+            values = [usage["input_tokens"], usage["cached_input_tokens"], usage["output_tokens"]]
+            combined = [a + b for a, b in zip(totals, values)]
+            if any(value > 18446744073709551615 for value in combined):
+                result["reason"] = "counter-overflow"
+                return result
+            totals = combined
+            result["turns"] += 1
+        except (ValueError, UnicodeError):
+            malformed = True
+            break
+    if failed or (vendor_code is not None and vendor_code != 0):
+        result["reason"] = "vendor-failure"
+        return result
+    if result["turns"]:
+        result.update(zip(("input_tokens", "cached_input_tokens", "output_tokens"), totals))
+        result["status"] = "partial" if malformed or interrupted or vendor_code is None else "complete"
+        result["reason"] = ("malformed-event" if malformed else "interrupted"
+                            if interrupted or vendor_code is None else "complete")
+    elif malformed:
+        result["reason"] = "malformed-event"
+    elif interrupted:
+        result["reason"] = "interrupted"
+    return result
+
+
 def main():
+    EVIDENCE["usage"] = usage_record(b"", None, False)
     signal.signal(signal.SIGTERM, cancel)
     parent = os.getppid()
     if ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
@@ -76,7 +248,8 @@ def main():
     if os.getppid() != parent:
         raise Cancelled()
     started = time.monotonic()
-    program, model, effort, budget, rubric_path, deadline, loop_name, service_uid = sys.argv[1:]
+    program, model, effort, budget, rubric_path, deadline, loop_name, expected_uid = sys.argv[1:]
+    expected_uid = int(expected_uid)
     remaining = min(int(budget) / 1000, float(deadline) - time.time())
     end = started + remaining - 2.0
     if remaining <= 2.0:
@@ -88,6 +261,8 @@ def main():
         return
     document = json.loads(prompt)
     try:
+        if os.geteuid() != expected_uid or os.getuid() != expected_uid:
+            raise RubricFailure("entry-uid", rubric_path)
         if rubric_path == "snapshot-input":
             # The direct adapter has pinned the owner snapshot and checked this
             # source digest. This argv-selected transport never reads request text.
@@ -96,7 +271,7 @@ def main():
                 raise RubricFailure("snapshot-input", rubric_path)
             rubric_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         else:
-            text, rubric_digest = read_rubric(rubric_path, os.getuid(), int(service_uid))
+            text, rubric_digest = read_rubric(rubric_path, expected_uid)
     except RubricFailure as error:
         EVIDENCE["rubric_failure"] = error.evidence
         emit({"service_status": "failure", "reason": "door-rubric-unavailable"})
@@ -128,10 +303,18 @@ def main():
     if not own_sign_in:
         emit({"service_status": "failure", "reason": "door-agent-sign-in-unavailable", "remedy": "superloop-lane door-sign-in " + loop_name, "rubric_digest": rubric_digest})
         return
+    try:
+        admit_program(program, expected_uid)
+    except RubricFailure as error:
+        EVIDENCE["program_failure"] = error.evidence
+        emit({"service_status": "failure", "reason": "door-agent-program-custody"})
+        return
     root = os.path.join(os.environ["TMPDIR"], "door-agent")
     call = None
     auth_link = None
     process = None
+    output = bytearray()
+    stdout_eof = False
     stage = "setup"
     stderr_tail = StderrTail()
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
@@ -182,6 +365,8 @@ def main():
         if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
             raise OSError("subreaper unavailable")
         stage = "spawn"
+        # Cancellation during Popen cannot prove that no vendor was started.
+        EVIDENCE["usage"] = usage_record(b"", None, True, True)
         process = subprocess.Popen(argv, cwd=cwd, env=environment,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, start_new_session=True)
@@ -194,6 +379,7 @@ def main():
         selector.register(process.stdout, selectors.EVENT_READ)
         selector.register(process.stderr, selectors.EVENT_READ)
         output = bytearray()
+        EVIDENCE["answer"] = {"parse_class": "not-parsed"}
         offset = 0
         status = None
         while selector.get_map():
@@ -215,6 +401,8 @@ def main():
                         stderr_tail.append(chunk)
                     else:
                         output.extend(chunk)
+                        if not chunk:
+                            stdout_eof = True
                     if not chunk:
                         selector.unregister(key.fileobj)
                     if len(output) > 65536:
@@ -223,6 +411,8 @@ def main():
             if status:
                 break
         selector.close()
+        EVIDENCE["answer"]["stdout_bytes"] = len(output)
+        EVIDENCE["answer"]["stdout_class"] = stream_class(output, len(output) <= 65536)
         wait_remaining = max(0, end - time.monotonic())
         if status is None:
             try:
@@ -233,35 +423,8 @@ def main():
         if status:
             emit({"service_status": status, "reason": "door-agent-" + status, "rubric_digest": rubric_digest})
         else:
-            messages = []
-            observed_model = None
-            for line in output.splitlines():
-                event = json.loads(line)
-                if not isinstance(event, dict):
-                    raise ValueError("event object required")
-                # A CLI selection/header is not a measurement. Most CLI
-                # versions expose no response model at all: retain null then.
-                if event.get("type") == "response.completed":
-                    response = event.get("response")
-                    if not isinstance(response, dict):
-                        raise ValueError("response metadata object required")
-                    reported = response.get("model")
-                    if reported is not None:
-                        if not isinstance(reported, str) or not reported.strip() or len(reported.encode("utf-8")) > 256:
-                            raise ValueError("invalid response model identifier")
-                        if observed_model is not None and observed_model != reported:
-                            raise ValueError("conflicting response model identifiers")
-                        observed_model = reported
-                item = event.get("item", {})
-                if not isinstance(item, dict):
-                    raise ValueError("item object required")
-                if event.get("type") == "item.completed" and item.get("type") == "agent_message":
-                    messages.append(item.get("text"))
-                if item and item.get("type") not in ("agent_message", "reasoning"):
-                    raise ValueError("unexpected tool event")
-            if len(messages) != 1 or not isinstance(messages[0], str):
-                raise ValueError("one final message required")
-            emit({"text": messages[0], "model": observed_model, "rubric_digest": rubric_digest})
+            text, observed_model = parse_answer(output, EVIDENCE["answer"])
+            emit({"text": text, "model": observed_model, "rubric_digest": rubric_digest})
     except Cancelled:
         emit({"service_status": "timeout", "reason": "door-agent-cancelled", "rubric_digest": rubric_digest})
     except (ValueError, KeyError):
@@ -272,9 +435,14 @@ def main():
                                     else errno.errorcode.get(error.errno, "UNRECOGNIZED_ERRNO"))
         emit({"service_status": "failure", "reason": "door-agent-runner-failure", "rubric_digest": rubric_digest})
         if process is None:
+            EVIDENCE["usage"] = usage_record(b"", None, False)
             RESULT["agent_runner_stderr_tail"] = "runner " + stage + ": " + EVIDENCE["runner_errno"]
             RESULT["agent_runner_first_line"] = RESULT["agent_runner_stderr_tail"]
     finally:
+        if process is not None:
+            vendor_code = process.poll()
+            EVIDENCE["usage"] = usage_record(
+                output, vendor_code, True, not stdout_eof or vendor_code is None)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
         if process is not None:
@@ -316,22 +484,25 @@ def main():
             EVIDENCE["private_directory_removed"] = not os.path.exists(call)
         if process is not None:
             # Never wait for an escaped descendant retaining the pipe.
-            while time.monotonic() < cleanup_end:
-                try:
-                    chunk = os.read(process.stderr.fileno(), 8192)
-                except BlockingIOError:
-                    break
-                if not chunk:
-                    break
-                stderr_tail.append(chunk)
-            else:
+            stderr_eof, stderr_cleanup_cut = drain_stderr(
+                process.stderr.fileno(), stderr_tail, cleanup_end)
+            stderr_stream = bytes(stderr_tail.data)
+            stderr_complete = stderr_tail.total == len(stderr_stream)
+            if stderr_cleanup_cut:
                 stderr_tail.append(b'\n[stderr end cut: cleanup deadline]\n')
+            if "answer" in EVIDENCE:
+                EVIDENCE["answer"]["stderr_bytes"] = stderr_tail.total
+                EVIDENCE["answer"]["stderr_class"] = stream_class(
+                    stderr_stream, stderr_complete)
             code = process.returncode
             RESULT["agent_runner_exit"] = (
                 None if code is None else {"code": code} if code >= 0 else {"signal": -code})
             if RESULT.get("service_status") is not None:
-                RESULT["agent_runner_stderr_tail"] = stderr_tail.text()
-                RESULT["agent_runner_first_line"] = stderr_tail.first_line()
+                tail, first = refusal_stderr(
+                    RESULT["service_status"], stderr_tail, stderr_eof, stderr_cleanup_cut)
+                RESULT["agent_runner_stderr_tail"] = tail
+                RESULT["agent_runner_first_line"] = first
+
 
 
 if __name__ == "__main__":

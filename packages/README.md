@@ -13,6 +13,7 @@ The manifest census checks this complete member table against the package rows i
 |`lane-lifecycle`|1|`lane-lifecycle`|
 |`superloop-gate-submit`|2|`superloop-gate-submit`|
 |`superloop-capture-admit`|2|`superloop-capture-admit`|
+|`superloop-credential-custody`|2|`credential-custody`|
 |`superloop-lint`|2|`superloop-lint`|
 |`loop-home`|1|`loop-home`|
 |`permission-triage`|3|`requests`|

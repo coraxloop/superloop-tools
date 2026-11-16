@@ -11,7 +11,7 @@ use loop_home::mail::{
     instant::Instant,
     journal,
     publication::{self, Durability, Endpoint},
-    steering::{ReplyCustody, ReplySession},
+    steering::{BindingCustody, BindingSelection, ReplyCustody, ReplySession},
     worker_provision,
 };
 use std::fs::{self, File};
@@ -33,9 +33,12 @@ const BODY: &[u8] = b"reply bytes\0\xff\n";
 pub(crate) struct Fixture(pub(crate) PathBuf);
 impl Fixture {
     pub(crate) fn new() -> Self {
+        Self::at(&std::env::temp_dir(), "mail-reply")
+    }
+    fn at(root: &Path, prefix: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "mail-reply-{}-{}",
+        let path = root.join(format!(
+            "{prefix}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -68,27 +71,35 @@ impl Drop for Fixture {
     }
 }
 pub(crate) fn child_command(home: &Path, phase: &str) -> std::process::Command {
+    let reference = phase
+        .starts_with("inbound-path-")
+        .then(|| std::env::var_os("LOOP_HOME_PATH_REFERENCE"))
+        .flatten();
+    let entry = reference.map_or_else(
+        || std::env::current_exe().expect("test image"),
+        PathBuf::from,
+    );
+    assert!(entry.is_absolute(), "absolute pathname reference image");
     let mut command = std::process::Command::new("/usr/bin/podman");
+    command.arg("unshare");
+    if phase.starts_with("inbound-path-") || phase == "inbound-legacy-entry" {
+        command.args(["/usr/bin/unshare", "--mount", "--propagation", "private"]);
+    }
     command
-        .args(["unshare"])
-        .arg(std::env::current_exe().expect("test image"))
+        .arg(entry)
         .env(PHASE, phase)
         .env(HOME, home)
         .env_remove("_CONTAINERS_USERNS_CONFIGURED")
         .env_remove("_CONTAINERS_ROOTLESS_UID");
     command
 }
-fn child_home() -> PathBuf {
+pub(crate) fn child_home() -> PathBuf {
     let home = PathBuf::from(std::env::var_os(HOME).expect("fixture home"));
     assert!(home.is_absolute());
-    assert_eq!(home.parent(), Some(std::env::temp_dir().as_path()));
-    assert!(
-        home.file_name()
-            .expect("name")
-            .to_str()
-            .expect("UTF8")
-            .starts_with("mail-reply-")
-    );
+    let name = home.file_name().expect("name").to_str().expect("UTF8");
+    let temporary = std::env::temp_dir();
+    assert!(name.starts_with("mail-reply-") || name.starts_with("mail-inbound-"));
+    assert_eq!(home.parent(), Some(temporary.as_path()));
     assert!(
         !fs::symlink_metadata(&home)
             .expect("home")
@@ -377,6 +388,7 @@ fn fixture_anchors(
     home: &Path,
     manifest: &Manifest,
     fds: Vec<std::os::fd::OwnedFd>,
+    root_mode: u32,
 ) -> (anchor::Configuration, Vec<Anchor>) {
     let receiver = Receiver::current().expect("receiver");
     let configuration = receiver
@@ -384,7 +396,7 @@ fn fixture_anchors(
             manifest,
             &fds,
             anchor::Entry {
-                operation: "mail-binding",
+                operation: &manifest.operation,
                 loop_name: "alpha",
                 transport: Transport::Rights,
             },
@@ -392,14 +404,18 @@ fn fixture_anchors(
             false,
         )
         .expect("configuration");
+    let mut policies = requirements();
+    for policy in &mut policies[..2] {
+        policy.policy.mode = ModePolicy::Exact(root_mode);
+    }
     let anchors = receiver
         .validate(
             manifest,
             fds,
-            "mail-binding",
+            &manifest.operation,
             "alpha",
             Transport::Rights,
-            &requirements(),
+            &policies,
         )
         .expect("capabilities");
     (configuration, anchors)
@@ -411,13 +427,33 @@ fn package_seed(
     configuration: &anchor::Configuration,
     storage: &Arc<Anchor>,
     journal: &Arc<Anchor>,
+    reply: bool,
 ) {
     let row = configuration.registry.row("alpha", home).expect("row");
     let driver = home.join("runs/R");
     fs::create_dir(&driver).expect("driver directory");
     owned(&driver, 64000, 0o700);
     let _session = custody.enter(identity, false).expect("service");
-    let (_writer, instant) = delivery(storage, journal, &row);
+    let body = if identity.reservation == "superloop-lane:R" {
+        b"Continue the synthetic round.\n".as_slice()
+    } else {
+        BODY
+    };
+    let (_writer, instant) = delivery_for_name(
+        storage,
+        journal,
+        &row,
+        reply,
+        (
+            &identity.name,
+            configuration
+                .allocations
+                .mail_group("alpha", Some(identity.uid))
+                .expect("allocated worker mail group"),
+        ),
+        body,
+        false,
+    );
     writeln!(std::io::stdout().lock(), "PACKAGE-DELIVERY {instant}").expect("seed result");
 }
 
@@ -442,7 +478,50 @@ fn complete_birth(
     }
 }
 
+fn fixture_identity(case: &str) -> Identity {
+    if case.starts_with("package-canonical-") {
+        Identity::for_reservation(64010, "superloop-lane:R".into())
+    } else {
+        Identity {
+            uid: 64010,
+            name: "worker".into(),
+            reservation: "reply-fixture".into(),
+        }
+    }
+}
+fn package_reply_child(home: &Path) {
+    let (manifest, fds) = receive();
+    let receiver = Receiver::current().expect("receiver");
+    let custody = ReplyCustody::receive(&receiver, &manifest, duplicate(&fds), "alpha")
+        .expect("reply custody");
+    let (configuration, mut anchors) = fixture_anchors(home, &manifest, fds, 0o711);
+    let journal = Arc::new(anchors.pop().expect("journal"));
+    let storage = Arc::new(anchors.remove(4));
+    let identity = fixture_identity("package-canonical-reply");
+    let row = configuration.registry.row("alpha", home).expect("row");
+    let _session = custody.enter(&identity, false).expect("service");
+    let (_journal, instant) = delivery_for_name(
+        &storage,
+        &journal,
+        &row,
+        true,
+        (
+            &identity.name,
+            configuration
+                .allocations
+                .mail_group("alpha", Some(identity.uid))
+                .expect("allocated worker mail group"),
+        ),
+        b"Synthetic completed reply.\n",
+        true,
+    );
+    writeln!(std::io::stdout().lock(), "PACKAGE-DELIVERY {instant}").expect("reply result");
+}
 fn child(home: &Path, case: &str) {
+    if case == "package-canonical-reply" {
+        package_reply_child(home);
+        return;
+    }
     let (manifest, fds) = receive();
     let receiver = Receiver::current().expect("receiver");
     if case == "declarations" {
@@ -450,17 +529,13 @@ fn child(home: &Path, case: &str) {
         return;
     }
     let custody = ReplyCustody::receive(&receiver, &manifest, duplicate(&fds), "alpha");
-    let (configuration, mut anchors) = fixture_anchors(home, &manifest, fds);
+    let (configuration, mut anchors) = fixture_anchors(home, &manifest, fds, 0o700);
     let journal = Arc::new(anchors.pop().expect("journal"));
     let executor = anchors.pop().expect("executor");
     let private = Arc::new(anchors.pop().expect("private"));
     let storage = Arc::new(anchors.pop().expect("storage"));
     let _config = anchors.pop().expect("config");
-    let identity = Identity {
-        uid: 64010,
-        name: "worker".into(),
-        reservation: "reply-fixture".into(),
-    };
+    let identity = fixture_identity(case);
     if case.starts_with("override-") {
         lifetime_override(
             home,
@@ -477,7 +552,10 @@ fn child(home: &Path, case: &str) {
         &configuration,
         (&storage, &private, &executor),
     );
-    if case == "package-seed" {
+    if matches!(
+        case,
+        "package-seed" | "package-inbound-seed" | "package-canonical-inbound-seed"
+    ) {
         package_seed(
             home,
             custody.expect("custody"),
@@ -485,6 +563,7 @@ fn child(home: &Path, case: &str) {
             &configuration,
             &storage,
             &journal,
+            case == "package-seed",
         );
         return;
     }
@@ -653,8 +732,40 @@ fn delivery(
     journal_anchor: &Anchor,
     row: &loop_home::LoopRecord,
 ) -> (journal::Journal, Instant) {
-    let mut journal =
-        journal::Journal::create(beneath(journal_anchor, ".")).expect("journal create");
+    delivery_for(storage, journal_anchor, row, true)
+}
+fn delivery_for(
+    storage: &Arc<Anchor>,
+    journal_anchor: &Anchor,
+    row: &loop_home::LoopRecord,
+    reply: bool,
+) -> (journal::Journal, Instant) {
+    delivery_for_name(
+        storage,
+        journal_anchor,
+        row,
+        reply,
+        ("worker", 64021),
+        BODY,
+        false,
+    )
+}
+fn delivery_for_name(
+    storage: &Arc<Anchor>,
+    journal_anchor: &Anchor,
+    row: &loop_home::LoopRecord,
+    reply: bool,
+    worker: (&str, u32),
+    body: &[u8],
+    append: bool,
+) -> (journal::Journal, Instant) {
+    let (worker, group) = worker;
+    let address = format!("alpha+{worker}");
+    let mut journal = if append {
+        journal::Journal::open(beneath(journal_anchor, ".")).expect("retained journal")
+    } else {
+        journal::Journal::create(beneath(journal_anchor, ".")).expect("journal create")
+    };
     let durable = Durability {
         crash_consistent_rename: true,
         durable_sync: true,
@@ -662,21 +773,34 @@ fn delivery(
     let sender = Endpoint::open_shared_beneath(
         storage,
         row,
-        Address::parse("alpha+worker").expect("sender"),
-        64021,
+        Address::parse(if reply { &address } else { "alpha" }).expect("sender"),
+        if reply { group } else { 64020 },
         durable,
     )
     .expect("sender endpoint");
     let recipient = Endpoint::open_shared_beneath(
         storage,
         row,
-        Address::parse("alpha").expect("recipient"),
-        64020,
+        Address::parse(if reply { "alpha" } else { &address }).expect("recipient"),
+        if reply { 64020 } else { group },
         durable,
     )
     .expect("recipient endpoint");
-    let staging = beneath(storage, "workers/worker/.mail-staging");
-    let outgoing = "alpha.01.letter";
+    let worker_staging = format!("workers/{worker}/.mail-staging");
+    let staging = beneath(
+        storage,
+        if reply {
+            &worker_staging
+        } else {
+            ".mail-staging"
+        },
+    );
+    let outgoing_name = format!("{address}.01.letter");
+    let outgoing = if reply {
+        "alpha.01.letter"
+    } else {
+        &outgoing_name
+    };
     let fd = nix::fcntl::openat(
         &staging,
         outgoing,
@@ -687,8 +811,13 @@ fn delivery(
         nix::sys::stat::Mode::from_bits_truncate(0o600),
     )
     .expect("fixture source");
-    File::from(fd).write_all(BODY).expect("source bytes");
-    let now = Instant::parse("2026-01-01T00:00:00.001Z").expect("instant");
+    File::from(fd).write_all(body).expect("source bytes");
+    let now = Instant::parse(if append {
+        "2026-01-01T00:00:00.002Z"
+    } else {
+        "2026-01-01T00:00:00.001Z"
+    })
+    .expect("instant");
     let record = publication::prepare(&journal, &sender, &recipient, outgoing)
         .expect("prepare")
         .accept(
@@ -795,6 +924,10 @@ fn changed_payload(session: &ReplySession, storage: &Anchor, record: &journal::R
 fn reply_session_retains_custody() {
     if let Ok(phase) = std::env::var(PHASE) {
         let home = child_home();
+        if phase.starts_with("inbound-") {
+            inbound_child(&home, &phase);
+            return;
+        }
         if phase == "seed" {
             seed(&home);
         } else {
@@ -814,7 +947,10 @@ fn reply_session_retains_custody() {
                     "admission-bind",
                     "admission-verify",
                     "admission-acl",
-                    "package-seed"
+                    "package-seed",
+                    "package-inbound-seed",
+                    "package-canonical-inbound-seed",
+                    "package-canonical-reply"
                 ]
                 .contains(&phase.as_str()),
                 "unsupported fixture phase {phase}"
@@ -843,6 +979,12 @@ fn reply_session_retains_custody() {
         writeln!(std::io::stdout().lock(), "reply custody case {case} passed")
             .expect("case result");
     }
+    inbound_parent();
+    writeln!(
+        std::io::stdout().lock(),
+        "reply custody case inbound-continuity passed"
+    )
+    .expect("inbound result");
 }
 
 const TEST_NAME: &str = "reply_session_retains_custody";
@@ -1467,5 +1609,291 @@ fn replace_received_paths(home: &Path) {
     ] {
         fs::rename(home.join(from), home.join(to)).expect("retain original");
         fs::write(home.join(from), b"replacement").expect("substitute pathname");
+    }
+}
+
+fn inbound_selection(phase: &str) -> BindingSelection {
+    if phase == "inbound-reply-mismatch" {
+        BindingSelection::Reply
+    } else if phase.contains("verify") || phase == "inbound-unborn" {
+        BindingSelection::InboundVerify
+    } else {
+        BindingSelection::InboundBind
+    }
+}
+fn inbound_command(home: &Path, phase: &str) -> std::process::Output {
+    let mut command = child_command(home, phase);
+    if phase == "seed" || phase == "inbound-state" || phase.starts_with("inbound-path-") {
+        return command
+            .fixture_output("inbound reference", Duration::from_secs(60))
+            .expect("bounded reference");
+    }
+    let selection = inbound_selection(phase);
+    let entry = std::env::current_exe().expect("entry");
+    let home_fd = File::open(home).expect("home");
+    let runs = home.join("runs");
+    let runs_fd = File::open(&runs).expect("runs");
+    let pins = loop_home::mail::reply_entry::pins_for(
+        (home, &home_fd.into()),
+        (&runs, &runs_fd.into()),
+        &entry,
+        "alpha",
+        selection,
+    )
+    .expect("selected composer");
+    let manifest = Manifest {
+        version: 1,
+        operation: selection.operation().into(),
+        loop_name: "alpha".into(),
+        transport: Transport::Rights,
+        records: pins.iter().map(anchor::HostPin::record).collect(),
+    };
+    let (sender, input) = std::os::unix::net::UnixStream::pair().expect("rights");
+    anchor::transport::send(
+        &sender,
+        &pins
+            .into_iter()
+            .map(anchor::HostPin::into_fd)
+            .collect::<Vec<_>>(),
+    )
+    .expect("selected transfer");
+    command
+        .env(
+            "LOOP_HOME_REPLY_MANIFEST",
+            serde_json::to_string(&manifest).expect("frame"),
+        )
+        .stdin(std::os::fd::OwnedFd::from(input))
+        .fixture_spawn("inbound entry", Duration::from_secs(60))
+        .expect("bounded entry")
+        .wait()
+        .expect("inbound output")
+}
+fn inbound_run(home: &Path, phase: &str) -> Vec<u8> {
+    let output = inbound_command(home, phase);
+    assert!(output.status.success(), "{phase}: {output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("reply custody passed"),
+        "{phase}: {output:?}"
+    );
+    output.stdout
+}
+fn inbound_parent() {
+    // The legacy pathname reference must traverse every ancestor as the service identity.
+    // Own this exact create_dir result; the existing bounded parent cleanup removes it.
+    let fixture = Fixture::at(&std::env::temp_dir(), "mail-inbound");
+    let home = &fixture.0;
+    configuration(home);
+    let seed = inbound_command(home, "seed");
+    assert!(seed.status.success(), "{seed:?}");
+    let state = inbound_run(home, "inbound-state");
+    inbound_run(home, "inbound-unborn");
+    inbound_run(home, "inbound-mismatch");
+    assert_eq!(inbound_run(home, "inbound-state"), state, "before repair");
+    inbound_run(home, "inbound-seed");
+    let path_binding = inbound_run(home, "inbound-path-bind");
+    let before = inbound_run(home, "inbound-state");
+    assert_eq!(inbound_run(home, "inbound-verify-path"), path_binding);
+    inbound_run(home, "inbound-verify-missing");
+    assert_eq!(
+        inbound_run(home, "inbound-state"),
+        before,
+        "verify-only snapshot"
+    );
+    let held_binding = inbound_run(home, "inbound-bind");
+    assert_eq!(inbound_run(home, "inbound-path-verify"), held_binding);
+    assert_eq!(
+        path_binding, held_binding,
+        "both routes preserve the complete record and bytes"
+    );
+    inbound_run(home, "inbound-reply-mismatch");
+    assert_eq!(inbound_run(home, "inbound-replaced"), path_binding);
+}
+// Only the legacy reference enters this private mount namespace. Keep the stored
+// absolute home name, but replace its unsearchable ancestors with empty directories.
+// All fixture data remains on the parent's disk-backed filesystem through the bind.
+pub(crate) fn searchable_reference(home: &Path) {
+    use nix::mount::{MsFlags, mount};
+    use std::os::fd::AsRawFd as _;
+    let held = File::open(home).expect("hold parent-created home before overlay");
+    let mut ancestors: Vec<_> = home.ancestors().skip(1).collect();
+    ancestors.reverse();
+    let blocked = ancestors.into_iter().find(|path| {
+        fs::metadata(path)
+            .expect("reference ancestor status")
+            .mode()
+            & 0o001
+            == 0
+    });
+    let Some(blocked) = blocked else { return };
+    assert_ne!(blocked, Path::new("/"), "reference root must be searchable");
+    mount(
+        Some("tmpfs"),
+        blocked,
+        Some("tmpfs"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        Some("mode=0755,size=1m"),
+    )
+    .expect("private searchable ancestor overlay");
+    fs::create_dir_all(home).expect("private namespace mountpoint");
+    for ancestor in home.ancestors().take_while(|path| *path != blocked) {
+        fs::set_permissions(ancestor, fs::Permissions::from_mode(0o755))
+            .expect("searchable namespace-only ancestor");
+    }
+    let source = format!("/proc/self/fd/{}", held.as_raw_fd());
+    mount(
+        Some(source.as_str()),
+        home,
+        None::<&str>,
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .expect("bind original fixture beneath searchable namespace ancestors");
+}
+fn inbound_child(home: &Path, phase: &str) {
+    let identity = Identity {
+        uid: 64010,
+        name: "worker".into(),
+        reservation: "reply-fixture".into(),
+    };
+    let instant = Instant::parse("2026-01-01T00:00:00.001Z").expect("instant");
+    if phase == "inbound-state" {
+        std::io::stdout()
+            .write_all(&repair_state(home))
+            .expect("state");
+        return;
+    }
+    if phase.starts_with("inbound-path-") {
+        searchable_reference(home);
+        let result = if phase == "inbound-path-bind" {
+            loop_home::mail::steering::bind(home, "alpha", &identity, "path", &instant)
+        } else {
+            loop_home::mail::steering::verify(home, "alpha", &identity, "held", &instant)
+        }
+        .expect("pathname reference");
+        inbound_result(&result);
+        return;
+    }
+    let (manifest, fds) = receive();
+    let receiver = Receiver::current().expect("receiver");
+    if phase == "inbound-mismatch" {
+        inbound_mismatches(home, &manifest, &fds, &receiver, &identity);
+        return;
+    }
+    let selection = inbound_selection(phase);
+    let custody =
+        BindingCustody::receive(&receiver, &manifest, duplicate(&fds), "alpha", selection)
+            .expect("selected receipt");
+    if phase == "inbound-unborn" {
+        let error = custody
+            .enter(&identity)
+            .err()
+            .expect("verification cannot repair");
+        assert!(
+            matches!(&error, journal::MailError::Io(cause)
+            if cause.kind() == std::io::ErrorKind::NotFound),
+            "{error}"
+        );
+        assert_eq!(nix::unistd::Uid::effective().as_raw(), 0);
+        assert!(!home.join(".var/loops/alpha/.mail-births").exists());
+        return;
+    }
+    if phase == "inbound-seed" {
+        inbound_seed(home, &manifest, fds, custody, &identity);
+        return;
+    }
+    if phase == "inbound-replaced" {
+        replace_received_paths(home);
+    }
+    let session = custody.enter(&identity).expect("selected entry");
+    assert_eq!(session.selection(), selection);
+    let step = if phase == "inbound-verify-path" {
+        "path"
+    } else {
+        "held"
+    };
+    if phase == "inbound-verify-missing" || phase == "inbound-reply-mismatch" {
+        let error = session
+            .resolve("absent", &instant)
+            .expect_err("selected refusal");
+        let expected = if selection.verify_only() {
+            "reservation"
+        } else {
+            "delivery principals differ"
+        };
+        assert!(error.to_string().contains(expected), "{error}");
+    } else {
+        inbound_result(&session.resolve(step, &instant).expect("selected delivery"));
+    }
+}
+fn inbound_result(result: &(journal::Record, Vec<u8>)) {
+    assert_eq!(result.1, BODY);
+    assert_eq!(result.0.sender, "alpha");
+    assert_eq!(result.0.recipient, "alpha+worker");
+    writeln!(
+        std::io::stdout().lock(),
+        "{}",
+        serde_json::to_string(result).expect("record and bytes")
+    )
+    .expect("continuity result");
+}
+fn inbound_seed(
+    home: &Path,
+    manifest: &Manifest,
+    fds: Vec<std::os::fd::OwnedFd>,
+    custody: BindingCustody,
+    identity: &Identity,
+) {
+    let (configuration, mut anchors) = fixture_anchors(home, manifest, fds, 0o700);
+    let journal = Arc::new(anchors.pop().expect("journal"));
+    let executor = anchors.pop().expect("executor");
+    let private = anchors.pop().expect("private");
+    let storage = Arc::new(anchors.pop().expect("storage"));
+    complete_birth(
+        home,
+        identity,
+        &configuration,
+        (&storage, &private, &executor),
+    );
+    for name in ["", ".config", ".config/loops"] {
+        loop_home::mail::acl::install(
+            &File::open(home.join(name)).expect("directory"),
+            64001,
+            true,
+        )
+        .expect("reference search grant");
+    }
+    for name in ["registry.toml", "allocations.toml", "mail-service.toml"] {
+        loop_home::mail::acl::install(
+            &File::open(home.join(".config/loops").join(name)).expect("file"),
+            64001,
+            false,
+        )
+        .expect("reference read grant");
+    }
+    // The pathname endpoint opens the loops root for reading; held endpoints
+    // start below it. Supply the reference route's non-writable listing root.
+    fs::set_permissions(home.join(".var/loops"), fs::Permissions::from_mode(0o755))
+        .expect("reference listing root");
+    let row = configuration.registry.row("alpha", home).expect("row");
+    let _session = custody.enter(identity).expect("seed session");
+    let (_writer, _) = delivery_for(&storage, &journal, &row, false);
+}
+fn inbound_mismatches(
+    home: &Path,
+    manifest: &Manifest,
+    fds: &[std::os::fd::OwnedFd],
+    receiver: &Receiver,
+    identity: &Identity,
+) {
+    for selection in [BindingSelection::Reply, BindingSelection::InboundVerify] {
+        let before = repair_state(home);
+        let error = BindingCustody::receive(receiver, manifest, duplicate(fds), "alpha", selection)
+            .and_then(|custody| custody.enter(identity))
+            .err()
+            .expect("operation mismatch");
+        assert!(error.to_string().contains("anchor-declaration"), "{error}");
+        assert!(error.to_string().contains(selection.operation()), "{error}");
+        assert_eq!(nix::unistd::Uid::effective().as_raw(), 0);
+        assert_eq!(repair_state(home), before);
     }
 }

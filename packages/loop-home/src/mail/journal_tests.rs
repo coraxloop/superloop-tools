@@ -458,9 +458,15 @@ fn journal_capacity_includes_scratch_and_never_evicts_pins() {
         - RESERVATION_PINS_MAX_BYTES;
     file.set_len(room).expect("inclusive capacity fixture");
     journal
+        .remeasure()
+        .expect("observe fixture-only outside writer");
+    journal
         .capacity(0)
         .expect("inclusive journal cap reserves all scratch");
     file.set_len(room + 1).expect("one byte over capacity");
+    journal
+        .remeasure()
+        .expect("observe fixture-only outside writer");
     assert!(matches!(journal.capacity(0), Err(MailError::Capacity)));
     assert_eq!(
         journal
@@ -705,6 +711,9 @@ fn journal_record_growth_preserves_compaction_scratch() {
     padding
         .set_len(JOURNAL_MAX_BYTES - current - 2 * SUMMARY_MAX_BYTES)
         .expect("reserve only compaction scratch");
+    journal
+        .remeasure()
+        .expect("observe fixture-only outside writer");
     let terminal = journal.record(&first()).expect("terminal");
     assert!(matches!(
         journal.replace(&terminal),
@@ -1090,4 +1099,248 @@ fn journal_reservation_binding_retains_custody() {
         );
     }
     fs::set_permissions(&retained, fs::Permissions::from_mode(0o700)).expect("restore mode");
+}
+
+/// ´claim:loophome:journal-running-bytes-follow-writes-and-compaction´
+/// ´test:unit:journal-running-bytes-follow-writes-and-compaction´
+#[test]
+fn journal_running_bytes_follow_writes_and_compaction() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    store::SIZE_SCANS.with(|count| count.set(0));
+    let item = accept(&mut journal);
+    complete(&mut journal, &item);
+    journal.capacity(0).expect("capacity");
+    assert_eq!(
+        store::SIZE_SCANS.with(std::cell::Cell::get),
+        0,
+        "writes and admission do not census retained history"
+    );
+    assert_eq!(
+        journal.journal_bytes().expect("running bytes"),
+        store::size(&journal.root).expect("independent census")
+    );
+    journal.prune(&later(), &Pins::default()).expect("compact");
+    assert_eq!(
+        journal.journal_bytes().expect("after deletion"),
+        store::size(&journal.root).expect("independent census")
+    );
+    drop(journal);
+    let journal = fixture.open();
+    assert_eq!(
+        journal.journal_bytes().expect("restart"),
+        store::size(&journal.root).expect("independent census")
+    );
+}
+
+/// ´claim:loophome:journal-running-bytes-count-interrupted-replacements´
+/// ´test:unit:journal-running-bytes-count-interrupted-replacements´
+#[test]
+fn journal_running_bytes_count_interrupted_replacements() {
+    for boundary in 1..=4 {
+        let fixture = Fixture::new();
+        let mut journal = fixture.create();
+        let item = accept(&mut journal);
+        store::INTERRUPT.with(|selected| selected.set(boundary));
+        assert!(
+            journal
+                .discard(&first(), &present(&item), "restore source")
+                .is_err()
+        );
+        assert_eq!(
+            journal.journal_bytes().expect("account even on error"),
+            store::size(&journal.root).expect("committed and scratch bytes")
+        );
+        drop(journal);
+        let journal = fixture.open();
+        assert_eq!(
+            journal.journal_bytes().expect("after recovery"),
+            store::size(&journal.root).expect("cleaned census")
+        );
+    }
+}
+
+/// ´claim:loophome:journal-running-bytes-observe-external-reservations-under-lock´
+/// ´test:unit:journal-running-bytes-observe-external-reservations-under-lock´
+#[test]
+fn journal_running_bytes_observe_external_reservations_under_lock() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    accept(&mut journal);
+    let admission = journal.usage.admit(&journal.root).expect("hold exclusion");
+    assert!(
+        Flock::lock(
+            store::open(&journal.root, ".", true).expect("independent description"),
+            FlockArg::LockExclusiveNonblock
+        )
+        .is_err()
+    );
+    journal.capacity(0).expect("nested writer accounting");
+    drop(admission);
+    for add in [true, false] {
+        let admission = reservation_admission(&journal.root).expect("outside writer lock");
+        let mut pins = journal.read_reservation_pins().expect("pins");
+        if add {
+            pins.deliveries
+                .insert("synthetic:reservation".into(), first());
+        } else {
+            pins.deliveries.clear();
+        }
+        store::write(
+            &journal.root,
+            &journal.root,
+            "reservation-pins.toml",
+            &pins,
+            true,
+        )
+        .expect("outside reservation writer");
+        drop(admission);
+        store::SIZE_SCANS.with(|count| count.set(0));
+        let accounted = journal.journal_bytes().expect("outside delta");
+        assert_eq!(store::SIZE_SCANS.with(std::cell::Cell::get), 0);
+        assert_eq!(
+            accounted,
+            store::size(&journal.root).expect("independent census")
+        );
+    }
+}
+
+/// ´claim:loophome:journal-preparation-index-follows-durable-lifecycle´
+/// ´test:unit:journal-preparation-index-follows-durable-lifecycle´
+#[test]
+fn journal_preparation_index_follows_durable_lifecycle() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    let mut item = record(&journal.reserve(first()).expect("reserve"));
+    item.recipient_temporary.path = "/fixture/.mail-staging/payload-999999".into();
+    journal.accept(&item).expect("accept");
+    RECORD_SCANS.with(|count| count.set(0));
+    assert!(
+        journal
+            .preparation_pending(&item.sender, &item.outgoing)
+            .expect("pending")
+    );
+    assert!(
+        journal
+            .temporary_reserved(std::path::Path::new(&item.recipient_temporary.path))
+            .expect("reserved")
+    );
+    assert_eq!(
+        journal.preparation_serial().expect("constant-time cursor"),
+        1_000_000
+    );
+    complete(&mut journal, &item);
+    assert!(
+        !journal
+            .preparation_pending(&item.sender, &item.outgoing)
+            .expect("terminal")
+    );
+    assert!(
+        journal
+            .temporary_reserved(std::path::Path::new(&item.recipient_temporary.path))
+            .expect("retained")
+    );
+    assert_eq!(
+        RECORD_SCANS.with(std::cell::Cell::get),
+        0,
+        "ordinary queries and transitions never read history"
+    );
+    drop(journal);
+    let mut journal = fixture.open();
+    assert!(
+        !journal
+            .preparation_pending(&item.sender, &item.outgoing)
+            .expect("rebuilt terminal")
+    );
+    assert_eq!(
+        journal.preparation_serial().expect("rebuilt cursor"),
+        1_000_000
+    );
+    assert_eq!(journal.prune(&later(), &Pins::default()).expect("prune"), 1);
+    assert!(
+        !journal
+            .temporary_reserved(std::path::Path::new(&item.recipient_temporary.path))
+            .expect("removed")
+    );
+}
+
+/// ´claim:loophome:journal-preparation-index-invalidates-on-interrupted-write´
+/// ´test:unit:journal-preparation-index-invalidates-on-interrupted-write´
+#[test]
+fn journal_preparation_index_invalidates_on_interrupted_write() {
+    for boundary in 1..=4 {
+        let fixture = Fixture::new();
+        let mut journal = fixture.create();
+        let item = accept(&mut journal);
+        journal
+            .discard(&first(), &present(&item), "restore source")
+            .expect("discard");
+        store::INTERRUPT.with(|selected| selected.set(boundary));
+        assert!(journal.finish_discard(&first(), first()).is_err());
+        let result = journal.preparation_pending(&item.sender, &item.outgoing);
+        if boundary < 3 {
+            assert!(result.is_err(), "unresolved scratch refuses a rebuild");
+        } else {
+            assert!(
+                !result.expect("terminal rename is visible"),
+                "failed sync cannot leave a stale pending index"
+            );
+        }
+        drop(journal);
+        let journal = fixture.open();
+        assert_eq!(
+            journal
+                .preparation_pending(&item.sender, &item.outgoing)
+                .expect("recovered index"),
+            journal
+                .record(&first())
+                .expect("durable state")
+                .completed
+                .is_none()
+        );
+    }
+}
+
+/// ´claim:loophome:journal-preparation-index-retains-shared-paths´
+/// ´test:unit:journal-preparation-index-retains-shared-paths´
+#[test]
+fn journal_preparation_index_retains_shared_paths() {
+    let fixture = Fixture::new();
+    let mut journal = fixture.create();
+    let old = accept(&mut journal);
+    complete(&mut journal, &old);
+    let newer = record(
+        &journal
+            .reserve(instant("2026-01-01T00:00:00.001Z"))
+            .expect("later reservation"),
+    );
+    journal.accept(&newer).expect("second accepted record");
+    assert_eq!(
+        journal
+            .prune(&later(), &Pins::default())
+            .expect("prune old"),
+        1
+    );
+    assert!(
+        journal
+            .temporary_reserved(std::path::Path::new(&newer.recipient_temporary.path))
+            .expect("remaining reference")
+    );
+    assert!(
+        journal
+            .preparation_pending(&newer.sender, &newer.outgoing)
+            .expect("remaining incomplete source")
+    );
+    complete(&mut journal, &newer);
+    assert_eq!(
+        journal
+            .prune(&instant("2026-03-10T00:00:00.000Z"), &Pins::default())
+            .expect("prune second"),
+        1
+    );
+    assert!(
+        !journal
+            .temporary_reserved(std::path::Path::new(&newer.recipient_temporary.path))
+            .expect("last reference removed")
+    );
 }

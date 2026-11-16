@@ -1889,14 +1889,19 @@ mod tests {
                 .expect("active box");
             let run =
                 || crate::launch::exercise::run_case(&fixture.home, "alpha", "R", "door-enforce");
-            let report = crate::door::with_fixture_cat_runner(|| {
-                if wrong_probe {
-                    crate::door::with_wrong_floor_probe(run)
-                } else {
-                    run()
-                }
-            })
-            .expect("busy enforce report");
+            let (result, clock) =
+                crate::door::with_fixture_admission_clock(std::time::Duration::ZERO, || {
+                    crate::door::with_fixture_cat_runner(|| {
+                        if wrong_probe {
+                            crate::door::with_wrong_floor_probe(run)
+                        } else {
+                            run()
+                        }
+                    })
+                });
+            let report = result.expect("busy enforce report");
+            assert_eq!(clock.waited(), std::time::Duration::from_secs(30));
+            assert_eq!(clock.attempts(), 1, "one refused fixture attempt");
             let evidence = &report["evidence"]["fixture"];
             assert_eq!(
                 evidence["fixture_error_kind"],
@@ -2089,15 +2094,15 @@ mod tests {
                 .expect("admission file");
             let _held = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
                 .expect("active box");
-            let started = std::time::Instant::now();
-            let report = crate::door::with_fixture_cat_runner(|| {
-                crate::launch::exercise::run_case(&fixture.home, "alpha", "R", case)
-            })
-            .expect("busy exercise report");
-            assert!(
-                started.elapsed() >= std::time::Duration::from_secs(2),
-                "retry bound was not exercised"
-            );
+            let (result, clock) =
+                crate::door::with_fixture_admission_clock(std::time::Duration::ZERO, || {
+                    crate::door::with_fixture_cat_runner(|| {
+                        crate::launch::exercise::run_case(&fixture.home, "alpha", "R", case)
+                    })
+                });
+            let report = result.expect("busy exercise report");
+            assert_eq!(clock.waited(), std::time::Duration::from_secs(30));
+            assert_eq!(clock.attempts(), 1, "one refused fixture attempt");
             assert_eq!(report["verdict"], "unmeasured", "{case}: {report}");
             assert!(
                 report["reasons"]

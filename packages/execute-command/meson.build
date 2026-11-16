@@ -1,5 +1,9 @@
 pkg_execute_command_rust = files(
   'src/lib.rs',
+  'src/workspace/tests.rs',
+  'src/workspace/evidence.rs',
+  'src/workspace/classification.rs',
+  'src/workspace.rs',
   'src/request.rs',
   'src/checks.rs',
   'src/checks/hygiene.rs',

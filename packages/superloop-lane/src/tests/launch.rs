@@ -1263,6 +1263,9 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
     plan.select_launch_model(&selection).expect("model");
     plan.observe_vendor().expect("observing recovery");
     assert_eq!(plan.document["attempt_wall_seconds"], 12);
+    let workspace = super::published_workspace();
+    plan.document["compute_workspace"] = workspace.clone();
+    plan.document["compute_placement"] = super::published_placement();
     let path = plan
         .driver_dir
         .parent()
@@ -1293,6 +1296,10 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
         .expect("socket mode");
     }
     let preview = run(home, request).expect("dead dispatch retains pinned wall");
+    assert_eq!(
+        preview["plan"]["compute_placement"],
+        record["plan"]["compute_placement"]
+    );
     assert_eq!(preview["plan"]["attempt_wall_seconds"], 12);
     assert_eq!(
         preview["interrupted_settlement"]["state"],
@@ -1332,6 +1339,7 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
         json!([container])
     );
     assert!(exited["interrupted_settlement"]["preview_sha256"].is_string());
+    assert_eq!(exited["plan"]["compute_workspace"], workspace);
     assert_eq!(
         crate::launch::read_reservation(&path)
             .expect("read")
@@ -1492,7 +1500,7 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     let stub_digest = sha256(&template.join("libexec/ssh")).expect("stub digest");
     fs::write(
         &door_generation,
-        serde_json::to_vec(&json!({"schema":2,"agent":{"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"entry":"/fixture/entry","loop_home":"/fixture/home"},"phase":"complete","loop":"alpha","template_dir":template,"socket_dir":sockets,"stub_sha256":stub_digest,"service_sha256":sha256(&custody.join("door-service")).expect("service digest"),"unit_dir":custody.join("units"),"registered":["ssh"],"host_door_gid":nix::unistd::Gid::effective().as_raw()})).expect("door generation"),
+        serde_json::to_vec(&json!({"schema":2,"agent":{"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":"/fixture/entry","loop_home":"/fixture/home"},"phase":"complete","loop":"alpha","template_dir":template,"socket_dir":sockets,"stub_sha256":stub_digest,"service_sha256":sha256(&custody.join("door-service")).expect("service digest"),"unit_dir":custody.join("units"),"registered":["ssh"],"host_door_gid":nix::unistd::Gid::effective().as_raw()})).expect("door generation"),
     )
     .expect("door generation file");
     fs::set_permissions(&door_generation, fs::Permissions::from_mode(0o600))
@@ -1503,9 +1511,11 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
         run: "R".into(),
         letter,
         round: None,
+        thread_choice: None,
         budget: 3600,
         dry_run: true,
         expect_digest: None,
+        compute_workspace: None,
         observe: false,
         podman_bin: podman,
         proxy_bin: Some(home.join("proxy-fixture")),
@@ -1717,6 +1727,26 @@ exit 2
     assert_eq!(preview["proxy_service"]["verdict"], "not-applicable");
     assert_eq!(preview["plan"]["door"]["stub_sha256"], stub_digest);
     assert_eq!(preview["selection"]["backend"], "codex");
+    let declared = json!({"grant":crate::plan::fixture_workspace_snapshot()["grant"],"baseline_environment_is_public":true}).to_string();
+    fs::write(&settings,format!("{source}workspace_policy = {{ quick_policy_digest = {:?}, blacklist_digest = {:?} }}\n", "a".repeat(64),"b".repeat(64))).expect("published policy identities");
+    request.compute_workspace = Some(declared);
+    let declared_preview = run(home, &request).expect("workspace preview");
+    assert_eq!(
+        declared_preview["plan"]["compute_workspace"],
+        crate::plan::fixture_workspace_snapshot()
+    );
+    assert!(
+        !runs.join(".reservation-R.json").exists(),
+        "preview publishes no grant"
+    );
+    assert_eq!(
+        fs::read(&allocations).unwrap(),
+        allocation_before,
+        "preview allocates no identity"
+    );
+    request.compute_workspace = None;
+    fs::write(&settings, &source).expect("restore legacy configuration");
+
     request.backend = Some(BoxBackend::Codex);
     let explicit = run(home, &request).expect("explicit Codex preview");
     assert_eq!(explicit["plan"], preview["plan"]);
@@ -2128,7 +2158,9 @@ exit 2
             .as_array()
             .expect("entry words")
             .last(),
-        Some(&serde_json::json!("Read /home/worker/brief.txt."))
+        Some(&serde_json::json!(
+            "Read /home/worker/brief.txt and carry out the work it describes, reporting as the brief asks."
+        ))
     );
     assert_eq!(
         preview["selection"]["method"],
@@ -2136,7 +2168,7 @@ exit 2
     );
     assert_eq!(
         fs::read_to_string(home.join("container-calls")).expect("named image probes"),
-        "called\n".repeat(23)
+        "called\n".repeat(24)
     );
     let build_report = custody.join("image-build.json");
     let original_report = fs::read(&build_report).expect("pinned build report");
@@ -2291,7 +2323,11 @@ fn proxy_refresh_preserves_live_helper_pins() {
         );
         return;
     }
-    let fixture = TempDir::new_in("/tmp").expect("fixture");
+    let fixture = if std::env::var_os("SUPERLOOP_ROUND_PROOF").is_some() {
+        tempfile::tempdir().expect("supplied temporary root")
+    } else {
+        tempfile::TempDir::new_in("/tmp").expect("fixture")
+    };
     fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
         .expect("host ancestor mode");
     let home_dir = fixture.path().join("home");
@@ -2440,7 +2476,7 @@ fn proxy_refresh_preserves_live_helper_pins() {
     let stub_digest = sha256(&template.join("libexec/ssh")).expect("stub digest");
     fs::write(
         &door_generation,
-        serde_json::to_vec(&json!({"schema":2,"agent":{"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"entry":"/fixture/entry","loop_home":"/fixture/home"},"phase":"complete","loop":"alpha","template_dir":template,"socket_dir":sockets,"stub_sha256":stub_digest,"service_sha256":sha256(&custody.join("door-service")).expect("service digest"),"unit_dir":custody.join("units"),"registered":["ssh"],"host_door_gid":nix::unistd::Gid::effective().as_raw()})).expect("door generation"),
+        serde_json::to_vec(&json!({"schema":2,"agent":{"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":"/fixture/entry","loop_home":"/fixture/home"},"phase":"complete","loop":"alpha","template_dir":template,"socket_dir":sockets,"stub_sha256":stub_digest,"service_sha256":sha256(&custody.join("door-service")).expect("service digest"),"unit_dir":custody.join("units"),"registered":["ssh"],"host_door_gid":nix::unistd::Gid::effective().as_raw()})).expect("door generation"),
     )
     .expect("door generation file");
     fs::set_permissions(&door_generation, fs::Permissions::from_mode(0o600))
@@ -2496,9 +2532,11 @@ fn proxy_refresh_preserves_live_helper_pins() {
         run: "R".into(),
         letter: letter.clone(),
         round: None,
+        thread_choice: None,
         budget: 3600,
         dry_run: true,
         expect_digest: None,
+        compute_workspace: None,
         observe: true,
         podman_bin: podman.clone(),
         proxy_bin: Some(home.join("proxy-fixture")),
@@ -2638,12 +2676,25 @@ fn proxy_refresh_preserves_live_helper_pins() {
         super::reader_custody::exercise(home, &runs, &podman);
         return;
     }
-    if std::env::var_os("SUPERLOOP_CREATION_PROOF").is_some() {
+    if std::env::var_os("SUPERLOOP_CREATION_PROOF").is_some()
+        || std::env::var_os("SUPERLOOP_WORKSPACE_CREATION_PROOF").is_some()
+    {
         super::runtime_preparation::exercise_creation(home, &runs, &podman);
         return;
     }
     if std::env::var_os("SUPERLOOP_RUNTIME_PROOF").is_some() {
         super::runtime_preparation::exercise(home, &runs, &podman);
+        return;
+    }
+    if std::env::var_os("SUPERLOOP_ROUND_PROOF").is_some() {
+        let root = fixture.path().to_path_buf();
+        super::helper_service::rounds_acceptance(home, &runs, &podman);
+        drop(fixture);
+        assert!(
+            !root.exists(),
+            "resumed helper fixture root removed: {}",
+            root.display()
+        );
         return;
     }
     if std::env::var_os("SUPERLOOP_SERVICE_PROOF").is_some() {
@@ -3307,7 +3358,10 @@ else:
             );
         }
         if before_spawn {
-            saved = resume_pre_spawn_failure(home, &request, lane_bin, &path, &saved);
+            check_resumed_pre_spawn_retention(home, &request, lane_bin, &path, &saved);
+            // The retained resume is not a recovered first dispatch. Restore this
+            // fixture's original failed dispatch for its separate retirement check.
+            crate::launch::publish_reservation(&path, &saved).expect("first-dispatch fixture");
             // This fixture models private verification without provisioning a mailbox.
             // Its synthetic binding must not turn the unborn retirement case into
             // a namespace-root retirement rehearsal.
@@ -3335,13 +3389,14 @@ else:
 }
 
 #[allow(clippy::too_many_lines)]
-fn resume_pre_spawn_failure(
+fn check_resumed_pre_spawn_retention(
     home: &std::path::Path,
     request: &LaunchRequest,
     lane_bin: &std::path::Path,
     path: &std::path::Path,
     seed: &serde_json::Value,
-) -> serde_json::Value {
+) {
+    let _mail_standin = crate::build::mail_standin::register(&request.podman_bin);
     let worker_home = std::path::Path::new(seed["plan"]["home"].as_str().expect("worker home"));
     let inbox = worker_home.join(".local/inbox");
     fs::create_dir_all(&inbox).expect("retained home inbox");
@@ -3359,8 +3414,7 @@ fn resume_pre_spawn_failure(
     fs::write(inbox.join("next.md"), letter).expect("placed next letter");
     fs::set_permissions(inbox.join("next.md"), fs::Permissions::from_mode(0o600))
         .expect("private letter");
-    let mut final_record = seed.clone();
-    for failure in ["inspect-save", "inspect", "spawn"] {
+    for failure in ["inspect", "spawn"] {
         let mut saved = seed.clone();
         // Public previews enrich the plan; private reservations pin only the plan itself.
         for key in ["declared_sources", "reservation_census"] {
@@ -3396,7 +3450,12 @@ import json, pathlib, sys
 home = pathlib.Path.cwd()
 f = json.loads((home / 'resume-window.json').read_text())
 if '_bind-mail' in sys.argv:
+    assert '--verify-only' in sys.argv, 'resume must not republish retained mail'
     print(json.dumps(f['binding']))
+elif '--preflight-round' in sys.argv:
+    print(json.dumps({'state':'passed',
+        'step':sys.argv[sys.argv.index('--preflight-round')+1],
+        'budget_seconds':int(sys.argv[sys.argv.index('--budget')+1]),'changed':False}))
 elif '_inspect-round' in sys.argv:
     if '--record' in sys.argv:
         if f['failure'].startswith('inspect'):
@@ -3421,9 +3480,7 @@ else:
             .map(String::from),
         )
         .expect("resume form");
-        if failure == "inspect-save" {
-            crate::launch::fixture_before_pre_driver_save(pad_pre_driver_save, None);
-        }
+        let before = fs::read(path).expect("settled bytes before resume");
         let error = crate::launch::fixture_run_with_program(home, &resumed, lane_bin)
             .expect_err("resumed round fails before spawn");
         fs::set_permissions(lane_bin, fs::Permissions::from_mode(0o700)).expect("restore lane");
@@ -3436,33 +3493,25 @@ else:
             },
             "{error:?}"
         );
-        final_record = crate::launch::read_reservation(path)
+        let retained = crate::launch::read_reservation(path)
             .expect("reader")
-            .expect("failed round");
-        if failure == "inspect-save" {
-            assert!(
-                error
-                    .detail
-                    .contains("failure record save: reservation-size:")
-            );
-            assert_eq!(final_record["phase"], "preparing");
-            assert_eq!(final_record["rounds"][0]["phase"], "settled");
-            assert_eq!(
-                fs::metadata(path).expect("retained reservation").len(),
-                crate::launch::MAX_RESERVATION_BYTES
-            );
-            continue;
-        }
-        assert_eq!(final_record["phase"], "failed");
-        assert_eq!(final_record["helper_spawn_state"], "not-started");
-        assert_eq!(final_record["helper_end"]["state"], "not-started");
-        assert_eq!(final_record["driver_end"]["state"], "not-started");
-        assert!(final_record["helper_parent_pid"].is_null());
-        assert!(final_record["helper_parent_start"].is_null());
-        assert_eq!(final_record["rounds"][1]["phase"], "failed");
-        assert_eq!(final_record["rounds"][0]["phase"], "settled");
+            .expect("retained round");
+        // This fixture models verification, not the namespace cleanup/absence proof.
+        assert!(error.detail.contains("; retained: "), "{error}");
+        assert_eq!(retained["phase"], "preparing");
+        assert_eq!(
+            retained["round_rollback"]["before"],
+            String::from_utf8(before).expect("JSON")
+        );
+        assert!(retained.get("dispatch_intent").is_none());
+        assert_eq!(retained["helper_spawn_state"], "not-started", "{error}");
+        assert!(retained["helper_end"].is_null());
+        assert!(retained["driver_end"].is_null());
+        assert!(retained["helper_parent_pid"].is_null());
+        assert!(retained["helper_parent_start"].is_null());
+        assert_eq!(retained["rounds"][1]["phase"], "running");
+        assert_eq!(retained["rounds"][0]["phase"], "settled");
     }
-    final_record
 }
 
 const GENERATION_CONTENTION_NOTE: &str = "preparing-or-starting names are candidates whose generation hold may already be released; a possible unnamed holder has an unpublished reservation or launcher identity, or is another install, refresh or repair, including a preview, holding the generation lock";
@@ -3492,9 +3541,11 @@ fn refresh_during_changing_launch(
         run: "T".into(),
         letter: launch.letter.clone(),
         round: None,
+        thread_choice: None,
         budget: launch.budget,
         dry_run: true,
         expect_digest: None,
+        compute_workspace: None,
         observe: false,
         podman_bin: launch.podman_bin.clone(),
         proxy_bin: launch.proxy_bin.clone(),

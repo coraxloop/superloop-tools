@@ -107,6 +107,8 @@ pub(super) fn names(parent: &File) -> Result<Vec<String>> {
 }
 
 pub(super) fn size(parent: &File) -> Result<u64> {
+    #[cfg(test)]
+    SIZE_SCANS.with(|count| count.set(count.get() + 1));
     let mut total = 0u64;
     for name in names(parent)? {
         let file = open(parent, &name, name == "deliveries")?;
@@ -127,6 +129,15 @@ pub(super) fn write<T: Serialize>(
     value: &T,
     replace: bool,
 ) -> Result<()> {
+    write_at_size(size(root)?, parent, name, value, replace)
+}
+fn write_at_size<T: Serialize>(
+    total: u64,
+    parent: &File,
+    name: &str,
+    value: &T,
+    replace: bool,
+) -> Result<()> {
     let data = encode(value)?;
     // Record growth must leave enough space to compact safely even at capacity.
     // State and checkpoint writes consume that reserved metadata scratch.
@@ -136,7 +147,7 @@ pub(super) fn write<T: Serialize>(
         } else {
             0
         };
-    if size(root)?
+    if total
         .checked_add(data.len() as u64 + compaction_scratch)
         .is_none_or(|n| n > JOURNAL_MAX_BYTES)
     {
@@ -188,4 +199,114 @@ fn interruption(boundary: u8) -> Result<()> {
         return Err(MailError::Invalid("injected metadata interruption"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! { pub(super) static SIZE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+/// Running byte accounting belongs to the exclusive journal writer. The root
+/// admission lock additionally serializes outside reservation updates.
+#[derive(Default)]
+pub(super) struct Usage {
+    total: std::cell::Cell<Option<u64>>,
+    external: std::cell::Cell<u64>,
+    admission: std::rc::Rc<std::cell::RefCell<Option<nix::fcntl::Flock<File>>>>,
+}
+pub(super) struct Admission(
+    Option<std::rc::Rc<std::cell::RefCell<Option<nix::fcntl::Flock<File>>>>>,
+);
+impl Drop for Admission {
+    fn drop(&mut self) {
+        if let Some(held) = &self.0 {
+            held.borrow_mut().take();
+        }
+    }
+}
+impl Usage {
+    pub fn admit(&self, root: &File) -> Result<Admission> {
+        if self.admission.borrow().is_some() {
+            return Ok(Admission(None));
+        }
+        let lock =
+            nix::fcntl::Flock::lock(open(root, ".", true)?, nix::fcntl::FlockArg::LockExclusive)
+                .map_err(|(_, error)| MailError::from(error))?;
+        *self.admission.borrow_mut() = Some(lock);
+        Ok(Admission(Some(std::rc::Rc::clone(&self.admission))))
+    }
+    pub fn remeasure(&self, root: &File) -> Result<()> {
+        let _admission = self.admit(root)?;
+        self.total.set(None);
+        let total = size(root)?;
+        self.external.set(external_size(root)?);
+        self.total.set(Some(total));
+        Ok(())
+    }
+    pub fn total(&self, root: &File) -> Result<u64> {
+        let _admission = self.admit(root)?;
+        if self.total.get().is_none() {
+            self.remeasure(root)?;
+        }
+        let external = external_size(root)?;
+        let total = self
+            .total
+            .get()
+            .ok_or(MailError::Capacity)?
+            .checked_sub(self.external.get())
+            .and_then(|n| n.checked_add(external))
+            .ok_or(MailError::Capacity)?;
+        self.external.set(external);
+        self.total.set(Some(total));
+        Ok(total)
+    }
+    pub fn write<T: Serialize>(
+        &self,
+        root: &File,
+        parent: &File,
+        name: &str,
+        value: &T,
+        replace: bool,
+    ) -> Result<()> {
+        let _admission = self.admit(root)?;
+        let total = self.total(root)?;
+        let before = replacement_size(parent, name)?;
+        let result = write_at_size(total, parent, name, value, replace);
+        let accounted = self.changed(root, parent, name, before);
+        result.and(accounted)
+    }
+    pub fn remove(&self, root: &File, parent: &File, name: &str) -> Result<()> {
+        let _admission = self.admit(root)?;
+        self.total(root)?;
+        let before = replacement_size(parent, name)?;
+        let result = remove(parent, name);
+        let accounted = self.changed(root, parent, name, before);
+        result.and(accounted)
+    }
+    fn changed(&self, root: &File, parent: &File, name: &str, before: u64) -> Result<()> {
+        let previous = self.total.take().ok_or(MailError::Capacity)?;
+        let after = replacement_size(parent, name)?;
+        let total = previous
+            .checked_sub(before)
+            .and_then(|n| n.checked_add(after))
+            .ok_or(MailError::Capacity)?;
+        if name == "reservation-pins.toml" || name == ".reservation-pins.toml.replace" {
+            self.external.set(external_size(root)?);
+        }
+        self.total.set(Some(total));
+        Ok(())
+    }
+}
+fn object_size(parent: &File, name: &str) -> Result<u64> {
+    match open(parent, name, false) {
+        Ok(file) => Ok(file.metadata()?.len()),
+        Err(MailError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+fn replacement_size(parent: &File, name: &str) -> Result<u64> {
+    object_size(parent, name)?
+        .checked_add(object_size(parent, &format!(".{name}.replace"))?)
+        .ok_or(MailError::Capacity)
+}
+fn external_size(root: &File) -> Result<u64> {
+    replacement_size(root, "reservation-pins.toml")
 }

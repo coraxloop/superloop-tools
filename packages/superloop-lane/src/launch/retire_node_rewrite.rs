@@ -293,7 +293,7 @@ fn resume_plan(
         previous = Some(name);
         let bytes = absences::read_bytes(path)?.ok_or_else(|| refusal("reservation vanished"))?;
         let mut before: Value =
-            serde_json::from_slice(&bytes).map_err(|error| refusal(error.to_string()))?;
+            crate::placement::reservation_bytes(&bytes, |error| refusal(error.to_string()))?;
         if absences::hash(&bytes) != row["before_sha256"] {
             validate(&before)?;
             let original = before["node_retirement_rewrite"]["original"].clone();
@@ -328,9 +328,8 @@ fn resume_plan(
 
 fn read_journal(path: &Path) -> Result<Option<Value>, LaneError> {
     let prior = absences::read_bytes(path)?
-        .map(|bytes| serde_json::from_slice::<Value>(&bytes))
-        .transpose()
-        .map_err(|error| refusal(error.to_string()))?;
+        .map(|bytes| crate::placement::journal_bytes(&bytes, |error| refusal(error.to_string())))
+        .transpose()?;
     if let Some(journal) = &prior {
         let digest = node::digest(&journal["plan"]);
         if !["pending", "complete"].contains(&journal["phase"].as_str().unwrap_or_default())

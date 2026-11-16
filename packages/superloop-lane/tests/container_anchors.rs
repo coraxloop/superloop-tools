@@ -933,7 +933,7 @@ fn runtime_hash_configuration(home: &Path) {
         home.join("sockets").display(),
         "a".repeat(64)
     );
-    let generation = json!({"schema":2,"phase":"complete","loop":"alpha","template_dir":template,"socket_dir":home.join("sockets"),"stub_sha256":"0".repeat(64),"service_sha256":"0".repeat(64),"unit_dir":settings.join("units"),"registered":["ssh"],"host_door_gid":0,"agent":{"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/rubric.md","executable":"/usr/bin/true","model":"fixture","effort":"medium","cap_ms":30000,"entry":"/usr/bin/true","loop_home":home.join(".var/loops/alpha")}});
+    let generation = json!({"schema":2,"phase":"complete","loop":"alpha","template_dir":template,"socket_dir":home.join("sockets"),"stub_sha256":"0".repeat(64),"service_sha256":"0".repeat(64),"unit_dir":settings.join("units"),"registered":["ssh"],"host_door_gid":0,"agent":{"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/rubric.md","executable":"/usr/bin/true","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":"/usr/bin/true","loop_home":home.join(".var/loops/alpha")}});
     for (name, bytes) in [
         ("workers.toml", source.into_bytes()),
         (

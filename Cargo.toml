@@ -4,13 +4,14 @@
 
 [workspace]
 members = [
+    "packages/superloop-credential-custody",
     "packages/execute-command",
     "packages/superloop",
     "packages/superloop-runtime", "packages/superloop-claude-desktop", "packages/superloop-node-status", "packages/superloop-steward", "packages/superloop-correspondence", "packages/build-sync", "packages/superloop-chat-export", "packages/superloop-cli-common", "packages/superloop-execwrap", "packages/lane-gateway", "packages/lane-lifecycle", "packages/superloop-capture-admit", "packages/superloop-gate-submit", "packages/superloop-lint", "packages/loop-home", "packages/permission-triage", "packages/superloop-pack", "packages/pulldown-cmark-to-cmark", "packages/superloop-install", "packages/superloop-run-report", "packages/run-worker", "packages/staff-provision", "packages/superloop-lane", "packages/session-core", "packages/superloop-claude-hook", "packages/request-core"]
 resolver = "3"
 
 [workspace.package]
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -32,8 +33,8 @@ loop-home = { path = "packages/loop-home" }
 # contexts passed through serde. builtins stays off because the templates
 # receive values the program has already counted, cut and summarised; debug
 # stays off because the templates are compiled into the binary and tested.
-minijinja = { version = "2", default-features = false, features = ["macros", "multi_template", "serde"] }
-nix = { version = "0.31", features = ["process", "signal", "fs", "term", "dir", "user", "mount"] }
+minijinja = { version = "3", default-features = false, features = ["macros", "multi_template", "serde"] }
+nix = { version = "0.32", features = ["process", "signal", "fs", "term", "dir", "user", "mount"] }
 # Graph features include serde-1 for state serialization; dot_parser and
 # rayon stay off. Consumers use DiGraph, NodeIndex, Direction and visit.
 petgraph = { version = "0.8", features = ["serde-1"] }
@@ -53,6 +54,7 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
+unicase = "2.6"
 
 [workspace.lints.rust]
 deprecated_safe = { level = "deny", priority = -1 }

@@ -1,10 +1,12 @@
 """Receive a bound canonical derivative as the entered loop UID, never emit it."""
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import signal
 import stat
+import struct
 import sys
 import uuid
 
@@ -14,6 +16,31 @@ def metadata(fd, path):
     return dict(path=path, exists=True, owner_uid=info.st_uid,
                 mode=format(stat.S_IMODE(info.st_mode), '04o'),
                 loop_uid=os.geteuid())
+
+
+def private_home_mode(fd, mode):
+    # Match the owner-authorized mail traversal shape, not arbitrary group access.
+    try:
+        os.getxattr(fd, 'system.posix_acl_default')
+    except OSError as error:
+        if error.errno != errno.ENODATA:
+            return False
+    else:
+        return False
+    try:
+        access = os.getxattr(fd, 'system.posix_acl_access')
+    except OSError as error:
+        return error.errno == errno.ENODATA and mode == 0o700
+    if len(access) != 44:
+        return False
+    service = struct.unpack_from('<I', access, 16)[0]
+    undefined = 2**32 - 1
+    expected = struct.pack('<I', 2) + b''.join(
+        struct.pack('<HHI', tag, permissions, identity)
+        for tag, permissions, identity in [
+            (1, 7, undefined), (2, 1, service), (4, 0, undefined),
+            (16, 1, undefined), (32, 0, undefined)])
+    return mode == 0o710 and access == expected
 
 
 def directory(path):
@@ -30,7 +57,7 @@ def directory(path):
         os.close(parent)
         parent = child
         info = os.fstat(parent)
-        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        if info.st_uid != os.geteuid() or not private_home_mode(parent, stat.S_IMODE(info.st_mode)):
             raise ValueError('door-sign-in-private-home-owner-mode')
         return parent
     except BaseException:

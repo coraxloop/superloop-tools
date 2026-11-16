@@ -185,7 +185,7 @@ fn fixture() -> Fixture {
     let stub_digest = sha256(&template.join("libexec/ssh")).expect("stub digest");
     fs::write(
         &door_generation,
-        serde_json::to_vec(&json!({"schema":2,"agent":{"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"entry":"/fixture/entry","loop_home":"/fixture/home"},"phase":"complete","loop":"alpha","template_dir":template,"socket_dir":sockets,"stub_sha256":stub_digest,"service_sha256":sha256(&custody.join("door-service")).expect("service digest"),"unit_dir":custody.join("units"),"registered":["ssh"],"host_door_gid":nix::unistd::Gid::effective().as_raw()})).expect("door generation"),
+        serde_json::to_vec(&json!({"schema":2,"agent":{"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":"/fixture/entry","loop_home":"/fixture/home"},"phase":"complete","loop":"alpha","template_dir":template,"socket_dir":sockets,"stub_sha256":stub_digest,"service_sha256":sha256(&custody.join("door-service")).expect("service digest"),"unit_dir":custody.join("units"),"registered":["ssh"],"host_door_gid":nix::unistd::Gid::effective().as_raw()})).expect("door generation"),
     )
     .expect("door generation file");
     fs::set_permissions(&door_generation, fs::Permissions::from_mode(0o600))
@@ -198,9 +198,13 @@ fn fixture() -> Fixture {
     let (mut plan, _) = superloop_lane::load_plan(home, "alpha", "R", (0, 0)).expect("plan");
     plan.select_container_program(&podman)
         .expect("container program");
-    plan.select_worker_uid(3000).expect("worker");
+    assert_ne!(
+        plan.document["worker_uid"], 3001,
+        "dispatch fixture uses a non-base worker"
+    );
+    plan.select_worker_uid(3001).expect("worker");
     let birth =
-        loop_home::mail::birth::Identity::for_reservation(3000, format!("superloop-lane:{}", "R"));
+        loop_home::mail::birth::Identity::for_reservation(3001, format!("superloop-lane:{}", "R"));
     plan.select_mailbox(
         &home
             .join(".var/loops/alpha/workers")
@@ -221,7 +225,7 @@ fn fixture() -> Fixture {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("retained mode");
     }
     let reservation = runs.join(".reservation-R.json");
-    let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3000,"plan":plan.document,"model_selection":selection,"letter_source":letter,"active_round":"dispatch","launcher_pid":dead_pid::DEAD_LOCK_PID,"launcher_start":1,"driver_entry_pid":dead_pid::DEAD_LOCK_PID + 1,"driver_entry_start":1,"helper_pid":dead_pid::DEAD_LOCK_PID + 2,"helper_start":1,"helper_parent_pid":dead_pid::DEAD_LOCK_PID + 3,"helper_parent_start":1,"observer_state":"not-started","settlement_uncertain":false,"rounds":[{"step":"dispatch","phase":"failed","settlement_error":"settle-evidence: reply absent"}],"mail":[],"mail_replies":[],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture"}});
+    let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3001,"plan":plan.document,"model_selection":selection,"letter_source":letter,"active_round":"dispatch","launcher_pid":dead_pid::DEAD_LOCK_PID,"launcher_start":1,"driver_entry_pid":dead_pid::DEAD_LOCK_PID + 1,"driver_entry_start":1,"helper_pid":dead_pid::DEAD_LOCK_PID + 2,"helper_start":1,"helper_parent_pid":dead_pid::DEAD_LOCK_PID + 3,"helper_parent_start":1,"observer_state":"not-started","settlement_uncertain":false,"rounds":[{"step":"dispatch","phase":"failed","settlement_error":"settle-evidence: reply absent"}],"mail":[],"mail_replies":[],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture"}});
     fs::write(&reservation, serde_json::to_vec(&record).expect("JSON")).expect("reservation");
     fs::set_permissions(&reservation, fs::Permissions::from_mode(0o600)).expect("record mode");
     let mailbox = runs.join(".letter-R.lock");
@@ -839,6 +843,34 @@ fn failed_driver_dispatch_refuses_present_process_and_container() {
     }
     assert_eq!(
         fs::read(&fixture.reservation).expect("unchanged container record"),
+        before
+    );
+}
+
+/// ´test:integration:resumed-launch-validates-before-reconciliation´
+#[test]
+fn resumed_launch_validates_before_reconciliation() {
+    let fixture = fixture();
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&fixture.reservation).expect("reservation"))
+            .expect("record");
+    record["phase"] = json!("preparing");
+    record["run_scope"] = json!({"unit":"invalid-scope"});
+    fs::write(
+        &fixture.reservation,
+        serde_json::to_vec(&record).expect("record bytes"),
+    )
+    .expect("preparing record");
+    let before = fs::read(&fixture.reservation).expect("before refusal");
+    let output = fixture.invoke(&["launch", "alpha", "R", "--round", "review", "--budget", "0"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("round-budget: budget must be 1 through 10800 seconds"),
+        "{output:?}"
+    );
+    assert_eq!(
+        fs::read(&fixture.reservation).expect("after refusal"),
         before
     );
 }

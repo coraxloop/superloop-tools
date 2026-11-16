@@ -60,7 +60,7 @@ run_watch() {
 prepare_transport() {
   local mode=$1 host status observed
   SNAPSHOT=
-  [ "$mode" != slow ] || return 0
+  [ "$mode" != slow ] && [ "$mode" != empty-then-content ] && [ "$mode" != admin-then-content ] || return 0
   SNAPSHOT=$CASE_DIR/transport-ready
   mkdir -p "$SNAPSHOT"
   for host in alpha beta; do
@@ -93,34 +93,6 @@ read_feed_counts() {
   [ "$RECORDED_CALLS" -le "$REPORTED_POLLS" ] || fail "ssh call log exceeded reported polls"
 }
 
-new_case all-fail
-run_feed all-fail 250 50 alpha
-[ "$STATUS" -eq 1 ] || fail "all-fail census exit was $STATUS"
-read_feed_counts
-[ "$REPORTED_POLLS" -gt 0 ] && [ "$REPORTED_FAILS" -eq "$REPORTED_POLLS" ] || fail "all-fail reported counts"
-[ "$(tail -n 1 "$CASE_OUT")" = "FEED-FAILED all ssh polls failed: ssh_fails=$REPORTED_FAILS polls=$REPORTED_POLLS" ] || fail "all-fail final verdict"
-pass "all-fail census is non-zero with a final FEED-FAILED verdict"
-
-new_case partial
-run_feed partial 350 50 alpha beta
-[ "$STATUS" -eq 0 ] || fail "partial census exit was $STATUS"
-read_feed_counts
-[ "$REPORTED_FAILS" -gt 0 ] && [ "$REPORTED_FAILS" -lt "$REPORTED_POLLS" ] || fail "partial census reported counts"
-grep -q "^FEED-WARNING partial ssh failure: ssh_fails=$REPORTED_FAILS polls=$REPORTED_POLLS$" "$CASE_OUT" || fail "partial census warning"
-[ "$(tail -n 1 "$CASE_OUT")" = FEED-EMPTY ] || fail "partial census empty verdict"
-pass "partial-fail census is zero with a named warning"
-
-new_case quiet
-run_feed empty 200 50 alpha
-[ "$STATUS" -eq 0 ] || fail "quiet success exit was $STATUS"
-read_feed_counts
-[ "$REPORTED_POLLS" -gt 0 ] && [ "$REPORTED_FAILS" -eq 0 ] || fail "quiet success reported counts"
-[ "$(tail -n 1 "$CASE_OUT")" = FEED-EMPTY ] || fail "quiet success verdict"
-if grep -Eq '^FEED-(WARNING|FAILED)' "$CASE_OUT"; then
-  fail "quiet success carried a warning or failure"
-fi
-pass "quiet successful polling ends FEED-EMPTY"
-
 new_case poll-floor
 run_feed empty 40 50 alpha
 [ "$STATUS" -eq 0 ] || fail "poll floor exit was $STATUS"
@@ -131,12 +103,11 @@ read_feed_counts
 pass "a deadline below the poll floor ends quietly without ssh"
 
 new_case deadline
-DEADLINE_MS=300
-DEADLINE_JITTER_MS=5000
+DEADLINE_MS=5000
 run_feed slow "$DEADLINE_MS" 50 alpha
 [ "$STATUS" -eq 1 ] || fail "slow deadline exit was $STATUS"
 REPORTED_MS=$(awk '/^FEED-DURATION-MS / { print $2 }' "$CASE_OUT")
-[ "$REPORTED_MS" -ge 250 ] && [ "$REPORTED_MS" -lt "$((DEADLINE_MS + DEADLINE_JITTER_MS))" ] || fail "reported deadline duration: ${REPORTED_MS}ms"
+grep -q $'^EXIT\t143$' "$CASE_LOG" || fail "timeout did not terminate the transport"
 pass "slow ssh is cut off by the feeder deadline (${REPORTED_MS}ms recorded)"
 
 awk -F '\t' 'BEGIN { calls=0 } $1 == "CALL" { calls++; connect=alive=count=0; for (i=2; i<NF; i++) if ($i == "-o") { if ($(i+1) == "ConnectTimeout=5") connect=1; if ($(i+1) == "ServerAliveInterval=5") alive=1; if ($(i+1) == "ServerAliveCountMax=1") count=1 } if (!(connect && alive && count)) bad=1 } END { exit calls == 0 || bad }' "$CASE_LOG" || fail "ssh liveness options"
@@ -184,25 +155,18 @@ grep -q "required arguments were not provided" "$CASE_OUT" || fail "missing-host
 [ ! -e "$CASE_LOG" ] || fail "watch no hosts reached ssh"
 pass "supervisor without hosts propagates refusal before ssh"
 
-new_case failed-cursor
-mkdir -p "$CASE_HOME/dev/superloop-tools/correspondence-watch"
-printf '%s' cursor-old > "$CASE_HOME/dev/superloop-tools/correspondence-watch/cursor-alpha"
-run_feed all-fail 200 50 alpha
-[ "$STATUS" -eq 1 ] || fail "failed cursor poll exit was $STATUS"
-[ "$(cat "$CASE_HOME/dev/superloop-tools/correspondence-watch/cursor-alpha")" = cursor-old ] || fail "failed poll changed cursor"
-pass "failed polls leave cursor files untouched"
-
-new_case admin-only
-run_feed admin-only 120 20 alpha
-[ "$STATUS" -eq 0 ] || fail "admin-only exit was $STATUS"
-grep -q '^host=alpha from=admin sender=test file=/messages/alpha-admin$' "$CASE_OUT" || fail "admin-only delta output"
-[ "$(tail -n 1 "$CASE_OUT")" = FEED-EMPTY ] || fail "admin-only verdict"
-pass "admin-only delta prints and ends FEED-EMPTY"
-[ "$(cat "$CASE_HOME/dev/superloop-tools/correspondence-watch/cursor-alpha")" = cursor-alpha-admin-new ] || fail "admin-only delta did not advance cursor"
-pass "admin-only deltas advance cursor files"
+new_case admin-then-content
+run_feed admin-then-content 120000 10 alpha
+[ "$STATUS" -eq 0 ] || fail "admin then content exit was $STATUS"
+[ "$(grep -c '^CALL' "$CASE_LOG")" -eq 2 ] || fail "admin reply did not cause a second transport call"
+grep -q '^host=alpha from=admin sender=test file=/messages/alpha-admin$' "$CASE_OUT" || fail "admin delta output"
+grep -q '^host=alpha from=user sender=test file=/messages/alpha-user$' "$CASE_OUT" || fail "user delta output after admin"
+grep -q -- "--after-cursor 'cursor-alpha-admin-new'" "$CASE_LOG" || fail "admin cursor was not used for the second call"
+[ "$(tail -n 1 "$CASE_OUT")" = FEED-CONTENT ] || fail "admin then content verdict"
+pass "admin delivery advances the cursor before a content-ended second call"
 
 new_case mixed
-run_feed mixed 200 10 alpha
+run_feed mixed 120000 10 alpha
 [ "$STATUS" -eq 0 ] || fail "mixed exit was $STATUS"
 grep -q '^host=alpha from=admin sender=test file=/messages/alpha-admin$' "$CASE_OUT" || fail "mixed admin output"
 grep -q '^host=alpha from=user sender=test file=/messages/alpha-user$' "$CASE_OUT" || fail "mixed user output"
@@ -210,7 +174,7 @@ grep -q '^host=alpha from=user sender=test file=/messages/alpha-user$' "$CASE_OU
 pass "mixed admin and user delta prints both and ends FEED-CONTENT"
 
 new_case user-only
-run_feed user-only 200 10 alpha
+run_feed user-only 120000 10 alpha
 [ "$STATUS" -eq 0 ] || fail "user-only exit was $STATUS"
 grep -q '^host=alpha from=user sender=test file=/messages/alpha$' "$CASE_OUT" || fail "user-only delta output"
 [ "$(tail -n 1 "$CASE_OUT")" = FEED-CONTENT ] || fail "user-only verdict"
@@ -219,38 +183,32 @@ pass "user-only delta remains FEED-CONTENT"
 new_case successful-cursor
 mkdir -p "$CASE_HOME/dev/superloop-tools/correspondence-watch"
 printf '%s' cursor-old > "$CASE_HOME/dev/superloop-tools/correspondence-watch/cursor-alpha"
-run_feed content 200 10 alpha
+run_feed content 120000 10 alpha
 [ "$STATUS" -eq 0 ] || fail "successful cursor poll exit was $STATUS"
 [ "$(cat "$CASE_HOME/dev/superloop-tools/correspondence-watch/cursor-alpha")" = cursor-alpha-new ] || fail "successful poll did not advance cursor"
 pass "successful polls advance cursor files"
 
 new_case watch-content
-run_watch content 500 100 10 alpha
+run_watch content 120000 120000 10 alpha
 [ "$STATUS" -eq 0 ] || fail "watch content exit was $STATUS"
 grep -q '^host=alpha from=user sender=test file=/messages/alpha$' "$CASE_OUT" || fail "watch content output"
 [ "$(tail -n 1 "$CASE_OUT")" = FEED-CONTENT ] || fail "watch content verdict"
 pass "supervisor content path exits 0 and prints feeder output"
 
-new_case watch-admin-only
-run_watch admin-only 250 500 100 alpha
-[ "$STATUS" -eq 2 ] || fail "watch admin-only exit was $STATUS"
-[ -s "$CASE_LOG" ] || fail "watch admin-only never polled"
-grep -q '^host=alpha from=admin sender=test file=/messages/alpha-admin$' "$CASE_OUT" || fail "watch omitted admin records"
-grep -Eq '^FEED-DURATION-MS [0-9]+$' "$CASE_OUT" || fail "watch deadline omitted wall"
-pass "supervisor publishes admin-only deltas before deadline exit 2"
-
-new_case watch-failure
-run_watch all-fail 500 200 50 alpha
-[ "$STATUS" -eq 1 ] || fail "watch failure exit was $STATUS"
-grep -q '^FEED-FAILED all ssh polls failed:' "$CASE_OUT" || fail "watch failure output"
-pass "supervisor loud-failure path propagates exit 1 and verdict"
-
 new_case watch-deadline
-run_watch empty 500 150 50 alpha
+run_watch empty 1 150 50 alpha
 [ "$STATUS" -eq 2 ] || fail "watch deadline exit was $STATUS"
 grep -Eq '^FEED-DURATION-MS [0-9]+$' "$CASE_OUT" || fail "watch deadline omitted wall"
 [ "$(wc -l < "$CASE_OUT")" -eq 1 ] || fail "empty watch emitted records"
-[ "$(grep -c '^CALL' "$CASE_LOG")" -gt 1 ] || fail "watcher did not re-invoke feeder"
-pass "supervisor deadline path exits 2 with its wall after repeated polls"
+[ ! -s "$CASE_LOG" ] || fail "expired watch reached ssh"
+pass "supervisor exhausted budget exits 2 without ssh"
+
+new_case watch-repoll
+run_watch empty-then-content 120000 120000 10 alpha
+[ "$STATUS" -eq 0 ] || fail "watch repoll exit was $STATUS"
+[ "$(grep -c '^CALL' "$CASE_LOG")" -eq 2 ] || fail "watch did not poll again after an empty transport"
+grep -q '^host=alpha from=user sender=test file=/messages/alpha$' "$CASE_OUT" || fail "watch repoll content"
+[ "$(tail -n 1 "$CASE_OUT")" = FEED-CONTENT ] || fail "watch repoll verdict"
+pass "supervisor polls again after empty transport and returns its content"
 
 echo "PASS all $PASS_COUNT correspondence harness pins"

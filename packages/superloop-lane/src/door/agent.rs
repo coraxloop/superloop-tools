@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 /// Time reserved for termination, reaping and private-directory removal.
+pub mod usage;
+
 pub const CLEANUP_RESERVE: Duration = Duration::from_secs(2);
 
 /// Maximum UTF-8 bytes of a recorded stderr tail, including its cut marker.
@@ -330,6 +332,10 @@ impl RunnerOutcome {
 /// The production runner and exercise runner share the same bounded interface.
 pub trait AgentRunner: Send + Sync {
     fn judge(&self, input: &[u8], budget: Duration) -> RunnerOutcome;
+
+    fn judge_request(&self, input: &[u8], budget: Duration, _identity: &Value) -> RunnerOutcome {
+        self.judge(input, budget)
+    }
 }
 
 /// Decode the existing door profile through the shared judgement validator.
@@ -346,11 +352,14 @@ pub struct CodexRunner {
     pub entry: PathBuf,
     pub owner_home: PathBuf,
     pub loop_name: String,
+    /// None validates configuration only and cannot execute an entry.
+    pub loop_uid: Option<u32>,
     pub executable: PathBuf,
     pub model: String,
     pub effort: String,
     pub cap_ms: u64,
     pub rubric_path: PathBuf,
+    pub usage_monitor: std::sync::Arc<usage::Monitor>,
 }
 
 /// Check the rubric through the registered entry without invoking Codex or reading sign-in bytes.
@@ -376,14 +385,13 @@ pub fn check_rubric(
             .arg(format!("{}{}", loop_home::runner::SIGN_IN_POLICY, concat!(
                 "\nimport json, sys\n",
                 "try:\n",
-                " text, digest = read_rubric(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]))\n",
+                " text, digest = read_rubric(sys.argv[1], int(sys.argv[2]))\n",
                 " print(json.dumps({'rubric_digest': digest, 'rubric_failure': None}))\n",
                 "except RubricFailure as error:\n",
                 " print(json.dumps({'rubric_digest': None, 'rubric_failure': error.evidence}))\n",
             )))
             .arg(rubric_path)
             .arg(loop_uid.to_string())
-            .arg(nix::unistd::Uid::effective().to_string())
             .env_clear()
             .env("HOME", owner_home)
             .env("PATH", "/usr/bin:/bin")
@@ -423,12 +431,45 @@ pub fn check_rubric(
 
 impl AgentRunner for CodexRunner {
     fn judge(&self, input: &[u8], budget: Duration) -> RunnerOutcome {
-        self.judge_with_clock(input, budget, Instant::now)
+        let mut result = self.judge_with_clock(input, budget, Instant::now);
+        if result.observations.get("usage").is_none() {
+            if !result.observations.is_object() {
+                result.observations = json!({});
+            }
+            result.observations["usage"] = usage::Usage::absent(false).value();
+        }
+        result
+    }
+
+    fn judge_request(&self, input: &[u8], budget: Duration, identity: &Value) -> RunnerOutcome {
+        let settings = json!({"model":self.model,"effort":self.effort,
+            "agent_expected_tokens":self.usage_monitor.expected});
+        usage::journal(identity, "start", &json!({"settings":settings}), false);
+        let result = self.judge(input, budget);
+        let usage = usage::Usage::read(&result.observations["usage"]);
+        let (accounting, alarms) = self.usage_monitor.observe(&usage);
+        usage::journal(
+            identity,
+            "finish",
+            &json!({"settings":settings,"usage":usage,
+            "accounting":accounting}),
+            false,
+        );
+        for alarm in alarms {
+            let excess = alarm.kind.is_excess();
+            usage::journal(
+                identity,
+                if excess { "excess" } else { "cleared" },
+                &json!({"settings":settings,"alarm":usage::alarm_value(&alarm, &usage)}),
+                excess,
+            );
+        }
+        result
     }
 }
 
 impl CodexRunner {
-    fn judge_with_clock(
+    pub(super) fn judge_with_clock(
         &self,
         input: &[u8],
         remaining: Duration,
@@ -445,6 +486,9 @@ impl CodexRunner {
         if input.len() > 262_144 {
             return RunnerOutcome::referral("failure", "door-agent-input-limit", started);
         }
+        let Some(loop_uid) = self.loop_uid else {
+            return RunnerOutcome::referral("failure", "door-agent-loop-uid-unmeasured", started);
+        };
         // The entered CLI may rotate its private derivative. Hold the same owner
         // lock as placement and box publication until the CLI and cleanup finish.
         // Refuse contention immediately rather than spending the request budget waiting.
@@ -462,7 +506,7 @@ impl CodexRunner {
                 );
             }
         };
-        self.call(input, budget, started, now)
+        self.call(input, budget, started, now, loop_uid)
     }
 }
 
@@ -474,6 +518,7 @@ impl CodexRunner {
         budget: Duration,
         started: Instant,
         now: impl Fn() -> Instant,
+        loop_uid: u32,
     ) -> RunnerOutcome {
         use std::io::{Read as _, Write as _};
         use std::os::unix::process::CommandExt as _;
@@ -506,7 +551,7 @@ impl CodexRunner {
                 .to_string(),
             )
             .arg(&self.loop_name)
-            .arg(nix::unistd::Uid::effective().to_string())
+            .arg(loop_uid.to_string())
             .env_clear()
             .env("HOME", &self.owner_home)
             .env("PATH", "/usr/bin:/bin")
@@ -622,7 +667,17 @@ impl CodexRunner {
         drop(stderr);
         let mut result =
             Self::decode_output(&output, timed_out || termination_sent, success, started);
-        let envelope = serde_json::from_slice::<Value>(&output).ok();
+        let envelope = (output.len() <= 65_536)
+            .then(|| serde_json::from_slice::<Value>(&output).ok())
+            .flatten();
+        let usage = envelope.as_ref().map_or_else(
+            || usage::Usage::absent(true),
+            |value| usage::Usage::read(&value["runner_evidence"]["usage"]),
+        );
+        if !result.observations.is_object() {
+            result.observations = json!({});
+        }
+        result.observations["usage"] = usage.value();
         // A valid envelope reports the configured executable. Otherwise the
         // observed termination belongs to the entry/Python wrapper itself.
         if !success
@@ -755,6 +810,8 @@ fn nonblocking(fd: &impl std::os::fd::AsFd) -> std::io::Result<()> {
 pub(super) mod tests {
     use super::*;
 
+    pub const FIXTURE_HANG_MS: u64 = 120_000;
+
     /// ´test:unit:judgement-binding-matches-recorded-source´
     #[test]
     fn judgement_binding_matches_recorded_source() {
@@ -816,9 +873,8 @@ pub(super) mod tests {
 
     pub fn fixture(script: &str) -> (tempfile::TempDir, CodexRunner, DoorInput) {
         use std::os::unix::fs::PermissionsExt as _;
-        // Small executable fixtures need protected ancestors; node TMPDIR's
-        // workspace parents intentionally permit the shared staff group.
-        let root = tempfile::TempDir::new_in("/tmp").expect("runner fixture");
+        // Vendor admission requires non-writable ancestors, including the temporary root.
+        let root = tempfile::TempDir::new().expect("runner fixture");
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
             .expect("protected fixture root");
         let canonical = root.path().join(".config/loops/alpha/lanes/codex");
@@ -866,13 +922,17 @@ pub(super) mod tests {
         let executable = root.path().join("codex");
         crate::fixture_exec::write_executable(&executable, script.as_bytes()).expect("fake CLI");
         let runner = CodexRunner {
+            usage_monitor: std::sync::Arc::new(crate::door::agent::usage::Monitor::new(
+                crate::door::agent::usage::DEFAULT_EXPECTED_TOKENS,
+            )),
             entry,
             owner_home: root.path().into(),
             loop_name: "alpha".into(),
+            loop_uid: Some(nix::unistd::Uid::effective().as_raw()),
             executable,
             model: "configured-not-observed".into(),
             effort: "high".into(),
-            cap_ms: 3000,
+            cap_ms: FIXTURE_HANG_MS,
             rubric_path: rubric,
         };
         let input = DoorInput {
@@ -884,6 +944,344 @@ pub(super) mod tests {
         (root, runner, input)
     }
 
+    /// The stub speaks the documented `codex exec --json` JSONL event grammar.
+    /// ´test:unit:agent-answer-diagnostics-distinguish-streams-without-content´
+    #[test]
+    fn agent_answer_diagnostics_distinguish_streams_without_content() {
+        let verdict = json!({"verdict":"refer","scope":"estate","reason":"private-answer"});
+        let message = json!({"type":"item.completed","item":{"type":"agent_message",
+            "text":verdict.to_string()}})
+        .to_string();
+        let events = format!(
+            "{{\"type\":\"thread.started\",\"thread_id\":\"fixture\"}}\n\
+            {message}\n\
+            {{\"type\":\"turn.completed\",\"usage\":{{}}}}\n"
+        );
+        let multiple = format!("{message}\n{message}\n");
+        let blank =
+            json!({"type":"item.completed","item":{"type":"agent_message","text":""}}).to_string();
+        let failed = "{\"type\":\"turn.failed\",\"error\":{\"message\":\"private-answer\"}}\n\
+            {\"type\":\"error\",\"message\":\"private-answer\"}\n";
+        for (stdout, stderr, class, status, turns) in [
+            (events.as_str(), "", "message", "verdict", (1, 0, 0)),
+            ("", "", "empty", "invalid-output", (0, 0, 0)),
+            (
+                "private-answer",
+                "",
+                "malformed-jsonl",
+                "invalid-output",
+                (0, 0, 0),
+            ),
+            ("", events.as_str(), "empty", "invalid-output", (0, 0, 0)),
+            (
+                "{\"type\":\"turn.completed\"}\n",
+                "",
+                "no-message",
+                "invalid-output",
+                (1, 0, 0),
+            ),
+            (
+                multiple.as_str(),
+                "",
+                "multiple-messages",
+                "invalid-output",
+                (0, 0, 0),
+            ),
+            (blank.as_str(), "", "message", "invalid-output", (0, 0, 0)),
+            (
+                "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\"}}",
+                "",
+                "unexpected-item",
+                "invalid-output",
+                (0, 0, 0),
+            ),
+            (
+                "",
+                "usage limit reached\n",
+                "empty",
+                "invalid-output",
+                (0, 0, 0),
+            ),
+            (failed, "", "no-message", "invalid-output", (0, 1, 1)),
+        ] {
+            let script = format!(
+                "#!/usr/bin/python3\n\
+                import json,sys\n\
+                assert sys.argv[1:3] == ['exec','--json']\n\
+                assert sys.argv[-1] == '-'\n\
+                json.load(sys.stdin)\n\
+                sys.stdout.write({})\n\
+                sys.stderr.write({})\n",
+                json!(stdout),
+                json!(stderr)
+            );
+            let (_root, mut runner, input) = fixture(&script);
+            runner.cap_ms = 120_000;
+            let outcome = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+            assert_eq!(
+                outcome.status, status,
+                "{class}: {:?}",
+                outcome.observations
+            );
+            let answer = &outcome.observations["answer"];
+            assert_eq!(answer["parse_class"], class, "{stdout:?} {stderr:?}");
+            assert_eq!(answer["stdout_bytes"], stdout.len());
+            assert_eq!(answer["stderr_bytes"], stderr.len());
+            assert_eq!(answer["completed_turns"], turns.0);
+            assert_eq!(answer["failed_turns"], turns.1);
+            assert_eq!(answer["error_events"], turns.2);
+            assert_eq!(
+                outcome.runner_exit.as_ref().map(RunnerExit::value),
+                Some(json!({"code":0}))
+            );
+            assert!(!answer.to_string().contains("private-answer"));
+            if !stderr.is_empty() {
+                if stderr == events {
+                    assert_eq!(answer["stderr_class"], "jsonl-agent-message");
+                    assert_eq!(outcome.runner_stderr_tail.as_deref(), Some(""));
+                    assert_eq!(outcome.runner_first_line, "");
+                } else {
+                    assert_eq!(answer["stderr_class"], "non-jsonl");
+                    assert_eq!(outcome.runner_stderr_tail.as_deref(), Some(stderr));
+                    assert_eq!(outcome.runner_first_line, "usage limit reached");
+                }
+            }
+        }
+    }
+
+    /// ´test:unit:agent-invalid-output-stderr-keeps-only-complete-plain-text´
+    #[test]
+    fn agent_invalid_output_stderr_keeps_only_complete_plain_text() {
+        let message = json!({"type":"item.completed","item":{"type":"agent_message",
+            "text":"private-answer"}})
+        .to_string();
+        let long = format!(
+            "{}\n{message}\n",
+            json!({"type":"reasoning","padding":"x".repeat(4200)})
+        );
+        let mixed = format!("warning from vendor\n{message}\n");
+        let other = "{\"type\":\"delta\",\"text\":\"private-answer\"}\n";
+        for (name, stderr, class, tail, first) in [
+            ("long-answer", long.as_str(), "truncated", "", ""),
+            ("mixed-answer", mixed.as_str(), "non-jsonl", "", ""),
+            ("other-json", other, "jsonl-object", "", ""),
+            (
+                "usage-limit",
+                "usage limit reached\n",
+                "non-jsonl",
+                "usage limit reached\n",
+                "usage limit reached",
+            ),
+        ] {
+            let script = format!(
+                "#!/usr/bin/python3\nimport json,sys\njson.load(sys.stdin)\nsys.stderr.write({})\n",
+                json!(stderr)
+            );
+            let (_root, mut runner, input) = fixture(&script);
+            runner.cap_ms = 120_000;
+            let outcome = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+            assert_eq!(outcome.status, "invalid-output", "{name}");
+            let answer = &outcome.observations["answer"];
+            assert_eq!(answer["stderr_class"], class, "{name}");
+            assert_eq!(answer["stderr_bytes"], stderr.len(), "{name}");
+            assert_eq!(outcome.runner_stderr_tail.as_deref(), Some(tail), "{name}");
+            assert_eq!(outcome.runner_first_line, first, "{name}");
+            if name != "usage-limit" {
+                assert!(!format!("{outcome:?}").contains("private-answer"), "{name}");
+            }
+        }
+    }
+
+    // The captured completed-turn line in driver/codex/mod.rs, without alteration.
+    const USAGE_TURN: &str = r#"{"type":"turn.completed","usage":{"input_tokens":17338944,"cached_input_tokens":17018496,"cache_write_input_tokens":0,"output_tokens":65375,"reasoning_output_tokens":26970}}"#;
+
+    /// ´test:unit:agent-usage-collector-distinguishes-vendor-exits´
+    #[test]
+    fn agent_usage_collector_distinguishes_vendor_exits() {
+        let script = format!(
+            r#"#!/usr/bin/python3
+import json, sys
+json.load(sys.stdin)
+ns = {{"__name__": "usage_fixture"}}
+exec({}, ns)
+f = ns["usage_record"]
+turn = {}.encode()
+assert f(turn, 0, True)["status"] == "complete"
+r = f(turn + b"\n" + turn, 0, True)
+assert (r["input_tokens"], r["cached_input_tokens"], r["output_tokens"], r["turns"]) == (34677888, 34036992, 130750, 2)
+for data, code, started, interrupted, status, reason in [
+    (b"", None, False, False, "not-started", "not-started"),
+    (b"", 0, True, False, "unknown", "missing-usage"),
+    (turn, None, True, True, "partial", "interrupted"),
+    (b"", None, True, True, "unknown", "interrupted"),
+    (turn + b"\n{{", 0, True, False, "partial", "malformed-event"),
+    (turn, 1, True, False, "unknown", "vendor-failure"),
+    (turn + b'\n{{"type":"turn.failed"}}', 0, True, False, "unknown", "vendor-failure"),
+    (turn + b'x' * 65536, 0, True, False, "unknown", "stream-cut")]:
+    r = f(data, code, started, interrupted)
+    assert (r["status"], r["reason"]) == (status, reason), r
+    if status in ("unknown", "not-started"):
+        assert all(r[key] is None for key in ("input_tokens", "cached_input_tokens", "output_tokens"))
+for key in json.loads(turn)["usage"]:
+    event = json.loads(turn)
+    del event["usage"][key]
+    assert f(json.dumps(event).encode(), 0, True)["reason"] == "malformed-event", key
+for key, value in [("input_tokens", True), ("cached_input_tokens", 999999999), ("cache_write_input_tokens", -1), ("output_tokens", 1.5), ("reasoning_output_tokens", 999999999)]:
+    event = json.loads(turn); event["usage"][key] = value
+    assert f(json.dumps(event).encode(), 0, True)["reason"] == "malformed-event", key
+print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":json.dumps({{"verdict":"refer","scope":"estate","reason":"usage checked"}})}}}}))
+"#,
+            json!(loop_home::runner::DOOR_AGENT_PROGRAM),
+            json!(USAGE_TURN)
+        );
+        let (_root, runner, input) = fixture(&script);
+        let result = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+        assert_eq!(result.status, "verdict", "{result:?}");
+        assert_eq!(result.reason, "usage checked");
+        assert_eq!(result.observations["usage"]["status"], "unknown");
+    }
+
+    /// ´test:unit:agent-usage-complete-survives-cleanup-refusal´
+    #[test]
+    fn agent_usage_complete_survives_cleanup_refusal() {
+        for tamper in [false, true] {
+            let script = format!(
+                r#"#!/usr/bin/python3
+import json, os, sys
+json.load(sys.stdin)
+if {}:
+    os.unlink(os.path.join(os.environ["CODEX_HOME"], "auth.json"))
+print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":json.dumps({{"verdict":"refer","scope":"estate","reason":"usage checked"}})}}}}))
+print({})
+"#,
+                if tamper { "True" } else { "False" },
+                json!(USAGE_TURN)
+            );
+            let (_root, mut runner, input) = fixture(&script);
+            runner.cap_ms = 120_000;
+            let result = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+            assert_eq!(
+                result.status,
+                if tamper { "failure" } else { "verdict" },
+                "{result:?}"
+            );
+            if tamper {
+                assert_eq!(result.reason, "door-agent-sign-in-link-replaced");
+            }
+            assert_eq!(result.observations["usage"]["status"], "complete");
+            assert_eq!(result.observations["usage"]["input_tokens"], 17_338_944);
+            assert_eq!(
+                result.observations["usage"]["cached_input_tokens"],
+                17_018_496
+            );
+            assert_eq!(result.observations["usage"]["output_tokens"], 65_375);
+        }
+    }
+
+    /// ´test:unit:agent-usage-survives-the-existing-request-record-write´
+    #[test]
+    fn agent_usage_survives_the_existing_request_record_write() {
+        let script = format!(
+            "#!/usr/bin/python3\nimport json,sys\njson.load(sys.stdin)\nprint({})\n",
+            json!(USAGE_TURN)
+        );
+        let [record, observation] = recorded_runner(&script, false);
+        assert_eq!(record["agent_status"], "invalid-output");
+        assert_eq!(
+            record["agent_observations"]["usage"],
+            observation["observations"]["usage"]
+        );
+        assert_eq!(record["agent_observations"]["usage"]["status"], "complete");
+        assert_eq!(
+            record["agent_observations"]["usage"]["input_tokens"],
+            17_338_944
+        );
+        let [record, _] = recorded_runner("#!/usr/bin/python3\nraise SystemExit(7)\n", true);
+        assert_eq!(record["agent_observations"]["usage"]["status"], "unknown");
+        assert!(record["agent_observations"]["usage"]["input_tokens"].is_null());
+    }
+
+    /// ´test:unit:agent-usage-request-journal-preserves-verdict´
+    #[test]
+    fn agent_usage_request_journal_preserves_verdict() {
+        let script = format!(
+            r#"#!/usr/bin/python3
+import json, sys
+json.load(sys.stdin)
+print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":json.dumps({{"verdict":"refer","scope":"estate","reason":"usage checked"}})}}}}))
+print({})
+"#,
+            json!(USAGE_TURN)
+        );
+        let (_root, mut runner, input) = fixture(&script);
+        runner.usage_monitor = std::sync::Arc::new(usage::Monitor::new(1));
+        let result = runner.judge_request(
+            &input.encode().expect("input"),
+            Duration::from_secs(120),
+            &json!({"loop":"alpha","run":"R","request_id":"1a"}),
+        );
+        assert_eq!(result.status, "verdict", "{result:?}");
+        assert_eq!(result.verdict, "refer");
+        assert_eq!(result.scope, "estate");
+        assert_eq!(result.reason, "usage checked");
+        assert_eq!(result.observations["usage"]["status"], "complete");
+        assert_eq!(result.observations["usage"]["input_tokens"], 17_338_944);
+    }
+
+    fn drain_seam_case(expired: bool) {
+        let script = format!(
+            r#"#!/usr/bin/python3
+import json, os, sys, types
+json.load(sys.stdin)
+ns = {{"__name__": "drain_fixture"}}
+exec({}, ns)
+ns["time"] = types.SimpleNamespace(monotonic=lambda: 10.0)
+r, w = os.pipe()
+os.set_blocking(r, False)
+tail = ns["StderrTail"]()
+if {}:
+    os.write(w, b"private-answer")
+    deadline = 9.0
+else:
+    tail.append(b"partial vendor line")
+    deadline = 11.0
+eof, cut = ns["drain_stderr"](r, tail, deadline)
+assert not eof
+assert cut == {}
+assert ns["refusal_stderr"]("invalid-output", tail, eof, cut) == ("", "")
+os.close(w)
+eof, cut = ns["drain_stderr"](r, tail, 11.0)
+assert eof and not cut
+assert ns["refusal_stderr"]("invalid-output", tail, eof, cut) == (tail.text(), tail.first_line())
+os.close(r)
+for value in [b'"private-answer"', b'["private-answer"]']:
+    assert not ns["plain_stderr"](value)
+assert ns["plain_stderr"](b"usage limit reached")
+print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":json.dumps({{"verdict":"refer","scope":"estate","reason":"drain checked"}})}}}}))
+"#,
+            json!(loop_home::runner::DOOR_AGENT_PROGRAM),
+            if expired { "True" } else { "False" },
+            if expired { "True" } else { "False" },
+        );
+        let (_root, mut runner, input) = fixture(&script);
+        runner.cap_ms = 120_000;
+        let result = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+        assert_eq!(result.status, "verdict", "{result:?}");
+        assert_eq!(result.reason, "drain checked");
+    }
+
+    /// ´test:unit:agent-stderr-drain-deadline-blanks-open-pipe´
+    #[test]
+    fn agent_stderr_drain_deadline_blanks_open_pipe() {
+        drain_seam_case(true);
+    }
+
+    /// ´test:unit:agent-stderr-drain-empty-open-pipe-is-not-eof´
+    #[test]
+    fn agent_stderr_drain_empty_open_pipe_is_not_eof() {
+        drain_seam_case(false);
+    }
+
     /// ´test:unit:door-runner-holds-refresh-lock-through-cli-and-refuses-contention´
     #[test]
     fn door_runner_holds_refresh_lock_through_cli_and_refuses_contention() {
@@ -892,7 +1290,7 @@ pub(super) mod tests {
         let guard = crate::credential::lock(root.path(), "alpha").expect("box helper lock");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.reason, "door-agent-refresh-busy");
         drop(guard);
@@ -907,7 +1305,7 @@ pub(super) mod tests {
             .expect("lock-observing CLI");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.status, "verdict", "{result:?}");
         let released_guard =
@@ -917,7 +1315,7 @@ pub(super) mod tests {
         std::os::unix::fs::symlink(&runner.rubric_path, &lock).expect("unsafe lock link");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.reason, "door-agent-refresh-lock");
     }
@@ -957,7 +1355,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         let listing = std::fs::read_dir(root.path());
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
             .expect("restore fixture cleanup access");
@@ -984,7 +1382,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
             .expect("selection-only fixture");
         let unreported = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(unreported.status, "verdict");
         assert!(
@@ -996,7 +1394,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         std::os::unix::fs::symlink("/not-a-loop-sign-in", &auth).expect("external source fixture");
         let refused = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert!(refused.reason.eq("door-agent-sign-in-unavailable"));
         assert_eq!(refused.verdict, "refer");
@@ -1079,7 +1477,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         std::fs::remove_file(&runner.rubric_path).expect("absent rubric");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.reason, "door-rubric-unavailable");
         assert_eq!(result.verdict, "refer");
@@ -1094,14 +1492,14 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
 
     fn recorded_runner(script: &str, outer: bool) -> [Value; 2] {
         let (_root, mut runner, input) = fixture(script);
-        runner.cap_ms = 10000;
+        runner.cap_ms = FIXTURE_HANG_MS;
         if outer {
             crate::fixture_exec::write_executable(&runner.entry, script.as_bytes())
                 .expect("outer runner fixture");
         }
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(10),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         let mut record =
             crate::requests::tests::waiting("R", "1a", 3000, crate::requests::Mode::Audit)
@@ -1110,7 +1508,7 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         let record = crate::requests::RequestRecord::decode(record)
             .expect("recorded runner result")
             .into_value();
-        [record, result.exercise_observation(10000, None)]
+        [record, result.exercise_observation(FIXTURE_HANG_MS, None)]
     }
 
     /// The PATH-alias warning is derived from the recorded hrestore probe of
@@ -1136,11 +1534,11 @@ else:
 sys.exit(7)
 ";
         let (root, mut runner, input) = fixture(script);
-        runner.cap_ms = 10000;
+        runner.cap_ms = FIXTURE_HANG_MS;
         for _ in 0..2 {
             let result = runner.judge(
                 &input.encode().expect("bounded fixture input"),
-                Duration::from_secs(10),
+                Duration::from_millis(FIXTURE_HANG_MS),
             );
             assert_eq!(result.status, "failure", "{result:?}");
             assert!(matches!(result.runner_exit, Some(RunnerExit::Code(7))));
@@ -1225,16 +1623,18 @@ sys.exit(7)
     fn agent_spawn_failure_records_errno() {
         use std::os::unix::fs::PermissionsExt as _;
         for missing in [true, false] {
-            let (_root, runner, input) = fixture("#!/bin/sh\nexit 0\n");
-            if missing {
-                std::fs::remove_file(&runner.executable).expect("remove program");
-            } else {
-                std::fs::set_permissions(
-                    &runner.executable,
-                    std::fs::Permissions::from_mode(0o600),
-                )
-                .expect("remove execute permission");
+            let (root, runner, input) = fixture("#!/bin/sh\nexit 0\n");
+            let interpreter = root.path().join("interpreter");
+            if !missing {
+                std::fs::write(&interpreter, b"not executable").expect("interpreter fixture");
+                std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o600))
+                    .expect("interpreter mode");
             }
+            crate::fixture_exec::write_executable(
+                &runner.executable,
+                format!("#!{}\n", interpreter.display()).as_bytes(),
+            )
+            .expect("admitted program with refused interpreter");
             let result = runner.judge(
                 &input.encode().expect("bounded fixture input"),
                 Duration::from_secs(5),
@@ -1341,12 +1741,12 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
     /// ´test:unit:agent-input-limit-and-refresh-link-replacement´
     #[test]
     fn agent_input_limit_and_refresh_link_replacement() {
-        let (_root, runner, mut input) = fixture(
+        let (_root, mut runner, mut input) = fixture(
             "#!/usr/bin/python3\nimport os\np = os.environ['CODEX_HOME'] + '/auth.json'\nos.unlink(p)\nwith open(p, 'w') as f: f.write('synthetic replacement')\n",
         );
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.status, "failure");
         assert_eq!(result.reason, "door-agent-sign-in-link-replaced");
@@ -1356,10 +1756,16 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
             input.encode().expect_err("bounded prompt encoder").0,
             "door-agent-input-limit"
         );
-        let result = runner.judge(&vec![b'x'; 262_145], Duration::from_secs(3));
+        let result = runner.judge(&vec![b'x'; 262_145], Duration::from_millis(FIXTURE_HANG_MS));
         assert_eq!(result.reason, "door-agent-input-limit");
         assert_eq!(result.verdict, "refer");
-        assert!(result.observations.is_null() || result.observations == json!({}));
+        assert_eq!(
+            result.observations,
+            json!({"usage":usage::Usage::absent(false)})
+        );
+        runner.loop_uid = None;
+        let result = runner.judge(b"{}", Duration::from_millis(FIXTURE_HANG_MS));
+        assert_eq!(result.reason, "door-agent-loop-uid-unmeasured");
     }
 
     /// ´test:unit:agent-pre-link-failure-is-not-a-custody-observation´
@@ -1385,7 +1791,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
                 .expect("injected entry");
             let result = runner.judge(
                 &input.encode().expect("bounded fixture input"),
-                Duration::from_secs(3),
+                Duration::from_millis(FIXTURE_HANG_MS),
             );
             assert_eq!(result.status, status);
             assert_eq!(result.reason, reason);
@@ -1409,7 +1815,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
         .expect("distinct mapped owner");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
-            Duration::from_secs(3),
+            Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert!(result.reason.eq("door-agent-sign-in-unavailable"));
         assert_eq!(result.observations["sign_in_absent"], false);
@@ -1430,12 +1836,24 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
             .expect("descendant fixture");
         runner.cap_ms = 30_000;
         let started = Instant::now();
-        let result = runner.judge(
+        let result = runner.judge_with_clock(
             &input.encode().expect("bounded fixture input"),
             Duration::from_millis(2600),
+            || {
+                if started.elapsed() < Duration::from_secs(120) {
+                    started
+                } else {
+                    started + Duration::from_secs(121)
+                }
+            },
         );
         assert_eq!(result.status, "timeout", "{result:?}");
-        assert!(started.elapsed() < Duration::from_millis(2600));
+        assert!(started.elapsed() < Duration::from_secs(120), "runner hang");
+        let logical: f64 = std::fs::read_to_string(root.path().join("logical-elapsed"))
+            .expect("observed logical time")
+            .parse()
+            .expect("seconds");
+        assert!(logical < 2.6, "logical elapsed {logical}: {result:?}");
         assert_eq!(result.observations["children_reaped"], true);
         assert_eq!(result.observations["private_directory_removed"], true);
         let pid = std::fs::read_to_string(marker).expect("descendant started");

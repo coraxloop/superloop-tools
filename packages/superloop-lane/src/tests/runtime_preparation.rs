@@ -2,6 +2,7 @@
 use super::helper_service;
 use loop_home::CommandSpec;
 use serde_json::Value;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -19,7 +20,7 @@ fn runtime_preparation_executes_received_podman() {
 
 /// # Panics
 /// Panics if the production namespace fixture fails or omits its measured marker.
-pub(super) fn proof(flag: &str, marker: &str) {
+pub(super) fn proof(flag: &str, marker: &str) -> String {
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
@@ -44,6 +45,39 @@ pub(super) fn proof(flag: &str, marker: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(stdout.contains(marker), "{stdout}");
+    stdout.into_owned()
+}
+
+/// Read the grant measured from production native creation, not a fixture member.
+///
+/// # Panics
+/// Panics if the writer or its read-back does not produce the exact declaration.
+pub fn published_plan() -> Value {
+    static SNAPSHOT: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    SNAPSHOT
+        .get_or_init(|| {
+            let output = proof(
+                "SUPERLOOP_WORKSPACE_CREATION_PROOF",
+                "WORKSPACE-DECLARATION ",
+            );
+            let row = output
+                .lines()
+                .find_map(|line| line.strip_prefix("WORKSPACE-DECLARATION "))
+                .expect("production grant marker");
+            serde_json::from_str(row).expect("production grant")
+        })
+        .clone()
+}
+
+/// Measured grant from the production creation fixture.
+#[must_use]
+pub fn published_workspace() -> Value {
+    published_plan()["compute_workspace"].clone()
+}
+/// Measured placement from the same production publication.
+#[must_use]
+pub fn published_placement() -> Value {
+    published_plan()["compute_placement"].clone()
 }
 
 pub(super) struct MappedStorage(pub(super) PathBuf, pub(super) String);
@@ -57,8 +91,11 @@ impl Drop for MappedStorage {
     }
 }
 
+const BUILD_BINARY: &str = "cargo build --locked -p superloop-lane --bin superloop-lane";
+
 /// # Panics
-/// Panics if the package binary built beside Cargo's unit test executable is absent.
+/// Panics if the package binary built beside Cargo's unit test executable is absent, or if a
+/// source Cargo recorded for it is missing or changed after it was built.
 pub(super) fn binary() -> PathBuf {
     let image = std::env::current_exe().expect("test executable");
     // The nearest ancestor holding the binary is its profile directory, the gate's custom one too.
@@ -71,7 +108,75 @@ pub(super) fn binary() -> PathBuf {
         binary.is_file(),
         "unmeasured runtime entry: build the package binary before the focused library test"
     );
+    if let Err(stale) = current_binary(&binary) {
+        panic!(
+            "stale runtime entry {}: {stale}; run `{BUILD_BINARY}` in this profile first",
+            binary.display()
+        );
+    }
     binary
+}
+
+/// Refuse a binary older than any source in the record Cargo writes beside it, since a focused
+/// library run rebuilds only the test executable and leaves the binary it launches as it was.
+fn current_binary(binary: &Path) -> Result<(), String> {
+    let record = binary.with_extension("d");
+    let text = fs::read_to_string(&record)
+        .map_err(|error| format!("no Cargo source record {}: {error}", record.display()))?;
+    let built = fs::metadata(binary)
+        .and_then(|meta| meta.modified())
+        .map_err(|error| format!("unreadable build time: {error}"))?;
+    for line in text.lines() {
+        let Some((_, sources)) = line.split_once(": ") else {
+            continue;
+        };
+        // Cargo escapes a space inside a recorded path with a backslash.
+        let escaped = sources.replace("\\ ", "\0");
+        for source in escaped.split(' ').filter(|name| !name.is_empty()) {
+            let source = PathBuf::from(source.replace('\0', " "));
+            let changed = fs::metadata(&source).and_then(|meta| meta.modified());
+            match changed {
+                Ok(changed) if changed <= built => {}
+                Ok(_) => return Err(format!("{} changed after it was built", source.display())),
+                Err(error) => return Err(format!("recorded source {}: {error}", source.display())),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// # Panics
+/// Panics if the runtime entry check accepts a binary older than a recorded source, or refuses
+/// one built after all of them.
+/// ´test:crate:focused-library-binary-refuses-stale-sources´
+#[test]
+fn focused_library_binary_refuses_stale_sources() {
+    let scratch = tempfile::tempdir().expect("scratch directory");
+    let binary = scratch.path().join("superloop-lane");
+    let folder = scratch.path().join("lane src");
+    fs::create_dir(&folder).expect("source folder");
+    let source = folder.join("checkout.rs");
+    let at = |path: &Path, seconds: u64| {
+        let file = fs::File::create(path).expect("fixture file");
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        file.set_modified(time).expect("fixture time");
+    };
+    at(&binary, 2_000);
+    let refusal = current_binary(&binary).expect_err("no record");
+    assert!(refusal.contains("no Cargo source record"), "{refusal}");
+    let escaped = source.display().to_string().replace(' ', "\\ ");
+    let record = format!("{}: {escaped}\n", binary.display());
+    let record_path = binary.with_extension("d");
+    fs::write(&record_path, record).expect("source record");
+    at(&source, 1_000);
+    current_binary(&binary).expect("binary built after its sources");
+    at(&source, 3_000);
+    let refusal = current_binary(&binary).expect_err("stale binary");
+    let expected = format!("{} changed after it was built", source.display());
+    assert!(refusal.contains(&expected), "{refusal}");
+    fs::remove_file(&source).expect("remove source");
+    let refusal = current_binary(&binary).expect_err("missing source");
+    assert!(refusal.contains("recorded source"), "{refusal}");
 }
 
 /// # Panics
@@ -227,6 +332,17 @@ fn native_creation_completes_reserve_and_finish() {
 }
 
 /// # Panics
+/// Panics if the real private writer loses the reviewed workspace binding.
+/// ´test:crate:workspace-native-creation-publishes-the-reviewed-grant´
+#[test]
+fn workspace_native_creation_publishes_the_reviewed_grant() {
+    proof(
+        "SUPERLOOP_WORKSPACE_CREATION_PROOF",
+        "NATIVE-CREATION-MEASURED",
+    );
+}
+
+/// # Panics
 /// Panics if a production creation receipt, binding or placed home disagrees with its reservation.
 pub(super) fn exercise_creation(home: &Path, runs: &Path, program: &Path) {
     let record = helper_service::prepare(home, runs, program);
@@ -258,7 +374,7 @@ shutil.rmtree(sys.argv[2])
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mut request = creation_request(home, runs, program);
+    let (mut request, expected_workspace) = workspace_creation_request(home, runs, program, worker);
     request.argv[0] = "/usr/bin/podman".into();
     let output = run(&request);
     assert!(
@@ -290,6 +406,8 @@ worker=Path(sys.argv[2]);assert (worker/'brief.txt').read_bytes()==(home/'scratc
 auth=json.loads((worker/'.codex/auth.json').read_text());assert auth['tokens']['refresh_token']==''
 assert (root/'workers'/identity['name']/'mail').is_dir()
 print('NATIVE-CREATION-MEASURED')
+assert json.loads((Path(record['plan']['driver_dir'])/'plan.json').read_text()) == record['plan']
+print(json.dumps({k:record['plan'].get(k) for k in ['compute_workspace','compute_placement']}))
 ",
         worker,
     )
@@ -300,13 +418,123 @@ print('NATIVE-CREATION-MEASURED')
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let measured: Value = serde_json::from_str(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .expect("measured plan"),
+    )
+    .expect("grant observation");
+    assert_eq!(
+        measured["compute_workspace"], expected_workspace["compute_workspace"],
+        "native writer retains exactly the reviewed grant"
+    );
+    assert_eq!(
+        measured["compute_placement"],
+        expected_workspace["compute_placement"]
+    );
+    writeln!(std::io::stdout().lock(), "WORKSPACE-DECLARATION {measured}")
+        .expect("production grant marker");
     std::io::Write::write_all(&mut std::io::stdout().lock(), &output.stdout)
         .expect("measurement marker");
 }
 
 /// # Panics
+/// Panics if the stale private apply publishes an identity or the fixture cannot prepare policy.
+fn workspace_creation_request(
+    home: &Path,
+    runs: &Path,
+    program: &Path,
+    worker: &str,
+) -> (CommandSpec, Value) {
+    let expected_workspace = if std::env::var_os("SUPERLOOP_WORKSPACE_CREATION_PROOF").is_some() {
+        creation_declaration(home)
+    } else {
+        Value::Null
+    };
+    let declaration =
+        (!expected_workspace.is_null()).then(|| expected_workspace["declaration"].to_string());
+    if let Some(declaration) = declaration.as_deref() {
+        let mut stale = creation_request(home, runs, program, Some((declaration, &"0".repeat(64))));
+        stale.argv[0] = "/usr/bin/podman".into();
+        let refused = run(&stale);
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("workspace-digest"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        let unchanged = helper_service::namespace_python(home,"import sys\nfrom pathlib import Path\nh=Path(sys.argv[1]);assert not (h/'.var/loops/alpha/runs/.reservation-R.json').exists();assert not Path(sys.argv[2]).exists();assert not list((h/'.var/loops/alpha/.mail-births').glob('*.toml'))",worker).expect("stale act leaves no identity");
+        assert!(
+            unchanged.status.success(),
+            "{}",
+            String::from_utf8_lossy(&unchanged.stderr)
+        );
+    }
+    let request = creation_request(
+        home,
+        runs,
+        program,
+        declaration
+            .as_deref()
+            .map(|text| (text, expected_workspace["digest"].as_str().unwrap())),
+    );
+    (request, expected_workspace)
+}
+
+/// # Panics
+/// Panics if the owner's real placement writer cannot prepare the fixture declaration.
+fn creation_declaration(home: &Path) -> Value {
+    let settings = home.join(".config/loops/alpha/workers.toml");
+    let mut source = fs::read_to_string(&settings).expect("existing settings");
+    write!(
+        source,
+        "\nworkspace_policy = {{ quick_policy_digest = {:?}, blacklist_digest = {:?} }}\n",
+        "a".repeat(64),
+        "b".repeat(64)
+    )
+    .expect("policy text");
+    fs::write(settings, source).expect("owner policy identities");
+    let parent = home.join("placement-parent");
+    fs::create_dir(&parent).expect("placement parent");
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).expect("private parent");
+    let mut grant = crate::plan::fixture_workspace_snapshot()["grant"].clone();
+    grant["workspace"] = serde_json::json!(parent.join("R"));
+    for (key, child) in [
+        ("CARGO_TARGET_DIR", "target"),
+        ("CARGO_HOME", "cargo"),
+        ("TMPDIR", "tmp"),
+    ] {
+        grant["baseline_env"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!([key, parent.join("R").join(child)]));
+    }
+    let input =
+        serde_json::json!({"grant":grant,"baseline_environment_is_public":true}).to_string();
+    let preview = crate::placement::commands::prepare(&parent, &input, None, true)
+        .expect("placement preview");
+    let result = crate::placement::commands::prepare(
+        &parent,
+        &input,
+        preview["preview_sha256"].as_str(),
+        false,
+    )
+    .expect("owner placement writer");
+    let declaration = result["declaration"].clone();
+    let snapshot =
+        crate::launch::workspace::declaration(&declaration.to_string()).expect("declared grant");
+    serde_json::json!({"compute_workspace":snapshot,"compute_placement":declaration["compute_placement"],"declaration":declaration,"digest":result["workspace_declaration_digest"]})
+}
+
+/// # Panics
 /// Panics if the production creation bundle cannot pin the fixture inputs.
-fn creation_request(home: &Path, runs: &Path, program: &Path) -> CommandSpec {
+fn creation_request(
+    home: &Path,
+    runs: &Path,
+    program: &Path,
+    workspace: Option<(&str, &str)>,
+) -> CommandSpec {
     let image = binary();
     let letter = home.join("scratchpad/first-letter");
     let held_home = fs::File::open(home).expect("home descriptor").into();
@@ -315,7 +543,7 @@ fn creation_request(home: &Path, runs: &Path, program: &Path) -> CommandSpec {
     let held_letter = fs::File::open(letter_dir)
         .expect("letter descriptor")
         .into();
-    let argv = vec![
+    let mut argv = vec![
         "unshare".into(),
         image.display().to_string(),
         "_make-home".into(),
@@ -343,6 +571,17 @@ fn creation_request(home: &Path, runs: &Path, program: &Path) -> CommandSpec {
         "codex".into(),
         "--observe".into(),
     ];
+    if let Some((declaration, digest)) = workspace {
+        argv.splice(
+            argv.len() - 1..argv.len() - 1,
+            [
+                "--compute-workspace".into(),
+                declaration.into(),
+                "--workspace-digest".into(),
+                digest.into(),
+            ],
+        );
+    }
     crate::creation_entry::command(
         program,
         &argv,

@@ -7,7 +7,7 @@ use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -125,10 +125,11 @@ pub(crate) struct RequestWait {
     micros: AtomicU64,
     cap_ms: u64,
     announced: std::sync::Mutex<u64>,
+    final_sent: AtomicBool,
 }
 
 impl RequestWait {
-    fn new(stream: &UnixStream) -> io::Result<Self> {
+    pub(crate) fn new(stream: &UnixStream) -> io::Result<Self> {
         let cap_ms = MAX_LOCK_WAIT_CREDIT_MS;
         #[cfg(test)]
         let cap_ms = WAIT_CREDIT_CAP
@@ -139,7 +140,12 @@ impl RequestWait {
             micros: AtomicU64::new(0),
             cap_ms,
             announced: std::sync::Mutex::new(0),
+            final_sent: AtomicBool::new(false),
         })
+    }
+
+    pub(crate) const fn maximum_credit(&self) -> Duration {
+        Duration::from_millis(self.cap_ms)
     }
 
     pub(crate) fn elapsed(&self) -> Duration {
@@ -172,11 +178,19 @@ impl RequestWait {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if total.saturating_sub(*announced) >= 50 {
             let frame = json!({"schema":2,"type":"request-lock-wait","wait_ms":total});
-            let _sent = transport::write_frame_locked(
-                &self.writer,
-                &frame,
-                Instant::now() + Duration::from_secs(2),
-            );
+            #[cfg(test)]
+            BEFORE_CREDIT_WRITE.with(|slot| {
+                if let Some(action) = slot.borrow_mut().take() {
+                    action();
+                }
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let _sent = transport::with_writer(&self.writer, deadline, |stream| {
+                if self.final_sent.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                frame_write_until(stream, &frame, deadline)
+            });
             *announced = total;
             // A fixture may release its holder only after the progress frame.
             #[cfg(test)]
@@ -191,6 +205,15 @@ impl RequestWait {
         }
     }
 
+    fn write_final(&self, reply: &Value, deadline: Instant) -> io::Result<()> {
+        transport::with_writer(&self.writer, deadline, |stream| {
+            frame_write_until(stream, reply, deadline)?;
+            // credit checks this flag under this same writer lock.
+            self.final_sent.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+    }
+
     fn report(&self, reply: &mut Value) {
         let waited = self.micros.load(Ordering::Relaxed) / 1000;
         let credit = waited.min(self.cap_ms);
@@ -200,6 +223,23 @@ impl RequestWait {
         if let Some(requested) = reply["request_deadline_ms"].as_u64() {
             reply["effective_deadline_ms"] = json!(requested.saturating_add(credit));
         }
+    }
+}
+
+trait AdmissionClock {
+    fn now(&self) -> Instant;
+    fn sleep(&self, duration: Duration);
+}
+
+struct RealAdmissionClock;
+
+impl AdmissionClock for RealAdmissionClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        thread::sleep(duration);
     }
 }
 
@@ -216,14 +256,43 @@ impl RequestGuard {
         operation: Option<transport::Operation>,
         started: Instant,
     ) -> io::Result<(Option<Self>, Duration)> {
-        let began = Instant::now();
+        #[cfg(test)]
+        if let Some(clock) = ADMISSION_CLOCK.with(|slot| slot.borrow().clone()) {
+            return Self::acquire_wait_with_clock(
+                home,
+                registration,
+                request,
+                operation,
+                started,
+                clock.as_ref(),
+            );
+        }
+        Self::acquire_wait_with_clock(
+            home,
+            registration,
+            request,
+            operation,
+            started,
+            &RealAdmissionClock,
+        )
+    }
+
+    fn acquire_wait_with_clock(
+        home: &Path,
+        registration: &Registration,
+        request: &Value,
+        operation: Option<transport::Operation>,
+        started: Instant,
+        clock: &dyn AdmissionClock,
+    ) -> io::Result<(Option<Self>, Duration)> {
+        let began = clock.now();
         let remaining = Duration::from_millis(request["deadline_ms"].as_u64().unwrap_or(0))
-            .saturating_sub(started.elapsed())
+            .saturating_sub(clock.now().saturating_duration_since(started))
             .saturating_sub(ADMISSION_REPLY_MARGIN);
         let budget = remaining.min(ADMISSION_WAIT);
         loop {
             if let Some(guard) = Self::acquire_operation(home, registration, operation)? {
-                return Ok((Some(guard), began.elapsed()));
+                return Ok((Some(guard), clock.now().saturating_duration_since(began)));
             }
             #[cfg(test)]
             ADMISSION_CONTENDED.with(|slot| {
@@ -231,9 +300,9 @@ impl RequestGuard {
                     action();
                 }
             });
-            let remaining = budget.saturating_sub(began.elapsed());
+            let remaining = budget.saturating_sub(clock.now().saturating_duration_since(began));
             if remaining.is_zero() {
-                return Ok((None, began.elapsed()));
+                return Ok((None, clock.now().saturating_duration_since(began)));
             }
             #[cfg(test)]
             if remaining <= ADMISSION_POLL {
@@ -243,7 +312,7 @@ impl RequestGuard {
                     }
                 });
             }
-            thread::sleep(remaining.min(ADMISSION_POLL));
+            clock.sleep(remaining.min(ADMISSION_POLL));
         }
     }
 
@@ -331,14 +400,124 @@ impl RequestGuard {
 
 #[cfg(test)]
 thread_local! {
+    static BEFORE_CREDIT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_ALLOW_ADMISSION_RELEASE: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+    static ADMISSION_CLOCK: std::cell::RefCell<Option<std::rc::Rc<dyn AdmissionClock>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_LAST_POLL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static FIXTURE_ADMISSION_CLOCK: std::cell::RefCell<Option<Arc<FixtureAdmissionClock>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct FixtureAdmissionClock {
+    now: std::sync::Mutex<Instant>,
+    slept_ms: AtomicU64,
+    attempts: AtomicUsize,
+}
+
+#[cfg(test)]
+impl FixtureAdmissionClock {
+    pub(crate) fn waited(&self) -> Duration {
+        Duration::from_millis(self.slept_ms.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+impl AdmissionClock for Arc<FixtureAdmissionClock> {
+    fn now(&self) -> Instant {
+        *self
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn sleep(&self, duration: Duration) {
+        let mut now = self
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *now += duration;
+        drop(now);
+        self.slept_ms.fetch_add(
+            u64::try_from(duration.as_millis()).expect("bounded admission poll"),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+#[cfg(test)]
+struct FixtureClockRestore(Option<Arc<FixtureAdmissionClock>>, Option<Duration>);
+
+#[cfg(test)]
+impl Drop for FixtureClockRestore {
+    fn drop(&mut self) {
+        FIXTURE_ADMISSION_CLOCK.with(|slot| {
+            slot.replace(self.0.take());
+        });
+        EXERCISE_RETRY_HANG.with(|slot| slot.set(self.1.take()));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_fixture_admission_clock<T>(
+    retry_window: Duration,
+    f: impl FnOnce() -> T,
+) -> (T, Arc<FixtureAdmissionClock>) {
+    let clock = Arc::new(FixtureAdmissionClock {
+        now: std::sync::Mutex::new(Instant::now()),
+        slept_ms: AtomicU64::new(0),
+        attempts: AtomicUsize::new(0),
+    });
+    let prior_clock = FIXTURE_ADMISSION_CLOCK.with(|slot| slot.replace(Some(Arc::clone(&clock))));
+    let prior_retry = EXERCISE_RETRY_HANG.with(|slot| slot.replace(Some(retry_window)));
+    let _restore = FixtureClockRestore(prior_clock, prior_retry);
+    (f(), clock)
 }
 
 const RETRY_AFTER_SECONDS: u64 = 30;
+fn post_reply_failure(store: &Store, run: &str, id: &str, phase: &str, kind: &str) {
+    post_reply_event(id, phase, kind);
+    if let Err(error) = store.record_incomplete(run, id, kind) {
+        post_reply_event(id, "incomplete-marker", error.kind);
+    }
+}
+
+fn recover_after_success(
+    store: &Store,
+    run: &str,
+    reply: &Value,
+    admission: &mut Option<RequestGuard>,
+) {
+    // Every caller has delivered its final reply. Recovery must not retain admission.
+    drop(admission.take());
+    if reply["status"] == 0 {
+        // The current request's lease is still held, so only older abandoned work is recovered.
+        if let Err(error) = store.recover_if_unpublished(run) {
+            post_reply_event("", "recovery-after-request", error.kind);
+        }
+    }
+}
+
+fn recover_at_start(home: &Path, loop_name: &str) {
+    if let Err(error) =
+        Store::open(home, loop_name, true).and_then(|store| store.recover_unpublished(None))
+    {
+        post_reply_event("", "recovery-at-start", error.kind);
+    }
+}
+
+pub(crate) fn post_reply_event(id: &str, phase: &str, kind: &str) {
+    let event = json!({"request_id":id,"phase":phase,"kind":kind});
+    let _logged = writeln!(io::stderr().lock(), "door-post-reply-failure {event}");
+}
+
 fn admission_window() -> String {
     format!(
-        "the door waited for admission held through effect and agent publication, possibly after the final reply; retry after {RETRY_AFTER_SECONDS} seconds"
+        "the door waited for admission held through the durable effect and final reply; allow-mode agent publication may finish after admission is released; retry after {RETRY_AFTER_SECONDS} seconds"
     )
 }
 
@@ -909,6 +1088,7 @@ fn peer_disconnected(stream: &UnixStream) -> io::Result<bool> {
     Ok(descriptor.revents & (libc::POLLHUP | libc::POLLERR) != 0)
 }
 
+#[cfg_attr(test, derive(Debug))]
 #[derive(Clone, Copy)]
 enum Answer {
     Allow(f64),
@@ -1293,8 +1473,8 @@ fn serve_request_with_agent(
         transport::argument_bytes(request).and_then(|args| route.allowed(&args, registration))
     });
     // Claim the authenticated box before any preflight or intent record write,
-    // and retain it through the final effect publication and reply.
-    let (_request_guard, admission_error) = if let Some(home) =
+    // and retain it through the durable effect and sent final reply.
+    let (mut request_guard, admission_error) = if let Some(home) =
         owner_home.filter(|_| peer == registration.worker_uid)
     {
         match RequestGuard::acquire_wait(home, registration, request, admission_operation, started)
@@ -1522,14 +1702,15 @@ fn serve_request_with_agent(
         shape_record: history,
         rubric: String::new(),
     };
-    let judge = |source: &Value| {
+    let judge = |source: &Value, id: &str| {
         let mut result = agent.map_or_else(
             || agent::RunnerOutcome::referral("failure", "door-agent-unconfigured", Instant::now()),
             |runner| match input.encode() {
-                Ok(bytes) => runner.judge(
+                Ok(bytes) => runner.judge_request(
                     &bytes,
                     wait.deadline(deadline)
                         .saturating_duration_since(Instant::now()),
+                    &json!({"loop":registration.loop_name,"run":registration.run,"request_id":id}),
                 ),
                 Err(error) => agent::RunnerOutcome::referral("failure", error.0, Instant::now()),
             },
@@ -1583,6 +1764,7 @@ fn serve_request_with_agent(
         frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
     }
+    let _publication_activity = store.publication_activity(&id).map_err(io::Error::other)?;
     #[cfg(test)]
     REQUEST_FILED.with(|slot| {
         if let Some(sender) = slot.borrow_mut().take() {
@@ -1598,7 +1780,7 @@ fn serve_request_with_agent(
     if synchronous_agent {
         // The intent is durable before any vendor call, including audit.
         // record_agent merges under the store lock before publishing waiting.
-        let (result, _verdict) = judge(&binding_source);
+        let (result, _verdict) = judge(&binding_source, &id);
         if let Err(error) = store.record_agent(
             &id,
             &result,
@@ -1616,8 +1798,7 @@ fn serve_request_with_agent(
         }
         would_do = json!({"decision":result.verdict,"reason":result.reason});
     }
-    let decided_enforce =
-        mode == "enforce" && matches!(would_do["decision"].as_str(), Some("allow" | "refuse"));
+    let decided_enforce = crate::requests::decided_enforce(mode, &would_do["decision"]);
     let immediate = mode == "allow" || decided_enforce;
     if decided_enforce && would_do["decision"] == "refuse" {
         let mut reply = transport::refusal(registration, peer, "door-rubric-refusal", started);
@@ -1642,7 +1823,7 @@ fn serve_request_with_agent(
             // the transport can execute and return its final frame immediately.
             return thread::scope(|scope| {
                 let agent_task = scope.spawn(|| {
-                    let (result, _) = judge(&binding_source);
+                    let (result, _) = judge(&binding_source, &id);
                     store.record_agent(
                         &id,
                         &result,
@@ -1669,23 +1850,69 @@ fn serve_request_with_agent(
                     Some(&complete),
                     Some(&wait),
                 );
-                let judgement = agent_task
-                    .join()
-                    .map_err(|_| io::Error::other("door-agent-task-panicked"))?;
-                if let Err(error) = judgement {
-                    let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
-                    return Err(io::Error::other(error));
-                }
                 if outcome.is_ok() {
-                    store.publish_waiting(&id).map_err(io::Error::other)?;
-                } else {
-                    let _recorded = store.record_incomplete(
-                        &registration.run,
-                        &id,
-                        "allow transport incomplete",
-                    );
+                    drop(request_guard.take());
+                    #[cfg(test)]
+                    AFTER_ALLOW_ADMISSION_RELEASE.with(|slot| {
+                        if let Some(sender) = slot.borrow_mut().take() {
+                            let _sent = sender.send(());
+                        }
+                    });
                 }
-                outcome.map(|reply| (reply, Vec::new()))
+                let judgement = agent_task.join();
+                match outcome {
+                    Ok(reply) => {
+                        match judgement {
+                            Err(_) => post_reply_failure(
+                                &store,
+                                &registration.run,
+                                &id,
+                                "agent-join",
+                                "door-agent-task-panicked",
+                            ),
+                            Ok(Err(error)) => post_reply_failure(
+                                &store,
+                                &registration.run,
+                                &id,
+                                "agent-record",
+                                error.kind,
+                            ),
+                            Ok(Ok(_)) => {
+                                if let Err(error) = store.publish_after_reply(&id) {
+                                    post_reply_failure(
+                                        &store,
+                                        &registration.run,
+                                        &id,
+                                        "waiting-publication",
+                                        error.kind,
+                                    );
+                                }
+                            }
+                        }
+                        recover_after_success(
+                            &store,
+                            &registration.run,
+                            &reply,
+                            &mut request_guard,
+                        );
+                        Ok((reply, Vec::new()))
+                    }
+                    Err(error) => {
+                        let judgement =
+                            judgement.map_err(|_| io::Error::other("door-agent-task-panicked"))?;
+                        if let Err(error) = judgement {
+                            let _recorded =
+                                store.record_incomplete(&registration.run, &id, error.kind);
+                            return Err(io::Error::other(error));
+                        }
+                        let _recorded = store.record_incomplete(
+                            &registration.run,
+                            &id,
+                            "allow transport incomplete",
+                        );
+                        Err(error)
+                    }
+                }
             });
         }
         let complete = |reply: &Value| {
@@ -1722,7 +1949,10 @@ fn serve_request_with_agent(
             let _recorded =
                 store.record_incomplete(&registration.run, &id, "allow transport incomplete");
         }
-        return result.map(|reply| (reply, Vec::new()));
+        return result.map(|reply| {
+            recover_after_success(&store, &registration.run, &reply, &mut request_guard);
+            (reply, Vec::new())
+        });
     }
     let answer = wait_answer(&store, &id, stream, deadline);
     match answer {
@@ -1752,7 +1982,10 @@ fn serve_request_with_agent(
                 let _recorded =
                     store.record_incomplete(&registration.run, &id, "audit transport incomplete");
             }
-            result.map(|reply| (reply, Vec::new()))
+            result.map(|reply| {
+                recover_after_success(&store, &registration.run, &reply, &mut request_guard);
+                (reply, Vec::new())
+            })
         }
         Answer::ReadFailure(wall) => {
             let mut reply = queue_reply(
@@ -2138,7 +2371,7 @@ fn completed_door_group(generation: &Value, loop_name: &str) -> Result<u32, Lane
             "completed door generation shape differs",
         ));
     }
-    let _agent = config::runner(&generation["agent"], Path::new("/"), loop_name)?;
+    let _agent = config::runner(&generation["agent"], Path::new("/"), loop_name, None)?;
     generation["host_door_gid"]
         .as_u64()
         .and_then(|value| u32::try_from(value).ok())
@@ -2218,11 +2451,18 @@ fn run_service_with_snapshot(
     if let Err(error) = publish(&owner_home, loop_name) {
         Store::report_snapshot_failure(&error);
     }
+    settings.validate_grant(&owner_home, loop_name)?;
+    let row = crate::plan::registry(&settings, loop_name)?;
+    let loop_uid = row["uid"]
+        .as_u64()
+        .and_then(|uid| u32::try_from(uid).ok())
+        .ok_or_else(|| LaneError::input("door-registration", "row uid is absent"))?;
     let compute_deadlines = Arc::new(config::compute_deadlines(&generation["agent"])?);
     let agent_runner = Arc::new(config::runner(
         &generation["agent"],
         &owner_home,
         loop_name,
+        Some(loop_uid),
     )?);
     writeln!(
         io::stderr().lock(),
@@ -2235,8 +2475,6 @@ fn run_service_with_snapshot(
         )
     )
     .map_err(|error| LaneError::operation("door-agent-journal", error.to_string()))?;
-    settings.validate_grant(&owner_home, loop_name)?;
-    let row = crate::plan::registry(&settings, loop_name)?;
     let runs_root = Path::new(
         row["runs_root"]
             .as_str()
@@ -2276,6 +2514,7 @@ fn run_service_with_snapshot(
         .as_u64()
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| LaneError::input("door-registration", "row uid is absent"))?;
+    recover_at_start(&owner_home, loop_name);
     let mut peer_map = None;
     let (listener, _bound_socket) = bind_socket_slot(&slot, |listener, before| {
         peer_map = Some(socket_group_child(
@@ -3095,6 +3334,30 @@ fn fixture_mode_call(
 
 const EXERCISE_ADMISSION_REFUSAL: &str = "exercise-door-admission-unmeasured";
 
+// The exercise retries a refused fixture admission for two seconds.
+const EXERCISE_RETRY_WINDOW: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
+thread_local! {
+    static EXERCISE_RETRY_OBSERVED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+    // A test that releases admission on the observed refusal widens its own window to a
+    // hang bound; a test that holds admission throughout keeps the deployed window, so
+    // its refusal arrives after one refused attempt.
+    static EXERCISE_RETRY_HANG: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(not(test))]
+const fn exercise_retry_window() -> Duration {
+    EXERCISE_RETRY_WINDOW
+}
+
+#[cfg(test)]
+fn exercise_retry_window() -> Duration {
+    EXERCISE_RETRY_HANG.with(|hang| hang.get().unwrap_or(EXERCISE_RETRY_WINDOW))
+}
+
 pub(crate) fn exercise_admission_unmeasured(kind: &str) -> bool {
     matches!(kind, EXERCISE_ADMISSION_REFUSAL | "door-mode-floor-refusal")
 }
@@ -3109,7 +3372,7 @@ fn fixture_agent_call(
     runner_override: Option<Arc<dyn transport::Runner>>,
     agent: Option<Arc<dyn agent::AgentRunner>>,
 ) -> Result<Value, LaneError> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + exercise_retry_window();
     loop {
         let result = fixture_agent_call_once(
             owner_home,
@@ -3122,6 +3385,12 @@ fn fixture_agent_call(
         );
         match result {
             Err(error) if error.kind == EXERCISE_ADMISSION_REFUSAL && Instant::now() < deadline => {
+                #[cfg(test)]
+                EXERCISE_RETRY_OBSERVED.with(|slot| {
+                    if let Some(observed) = slot.borrow_mut().take() {
+                        observed();
+                    }
+                });
                 thread::sleep(
                     Duration::from_millis(50)
                         .min(deadline.saturating_duration_since(Instant::now())),
@@ -3145,6 +3414,12 @@ fn fixture_agent_call_once(
     use nix::fcntl::{OFlag, OpenHow, ResolveFlag, openat2};
     use nix::sys::stat::{Mode, fchmod, mkdirat};
     use std::ffi::OsString;
+    #[cfg(test)]
+    FIXTURE_ADMISSION_CLOCK.with(|slot| {
+        if let Some(clock) = slot.borrow().as_ref() {
+            clock.attempts.fetch_add(1, Ordering::Relaxed);
+        }
+    });
     // This fixture uses the ordinary Git/probe request's 120-second budget.
     let deadline = Instant::now() + Duration::from_secs(120);
     let owner = nix::unistd::Uid::effective().as_raw();
@@ -3224,7 +3499,13 @@ fn fixture_agent_call_once(
         Store::open(owner_home, &registration.loop_name, true)?.with_reader_deadline(deadline);
     #[cfg(test)]
     let fault = FIXTURE_HELPER_FAULT.with(|selected| *selected.borrow());
+    #[cfg(test)]
+    let admission_clock = FIXTURE_ADMISSION_CLOCK.with(|slot| slot.borrow().clone());
     let server = thread::spawn(move || -> io::Result<(Value, u32)> {
+        #[cfg(test)]
+        if let Some(clock) = admission_clock {
+            ADMISSION_CLOCK.with(|slot| *slot.borrow_mut() = Some(std::rc::Rc::new(clock)));
+        }
         let (mut stream, _) = listener.accept()?;
         let socket_peer_uid = peer_uid(&stream)?;
         if socket_peer_uid != owner {
@@ -3402,9 +3683,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        MAX_PEERS, Registration, Scope, admit_peer, completed_door_group, frame_read,
-        frame_read_until, frame_write, frame_write_until, peer_uid, serve_one_for_peer,
-        serve_request, serve_socket, stub_call,
+        MAX_PEERS, Registration, Scope, admit_peer, completed_door_group, frame_write, peer_uid,
+        serve_one_for_peer, serve_request, serve_socket, stub_call,
     };
     use crate::door::transport::{HostRunner, Operation, Runner};
     use crate::requests::{
@@ -3456,8 +3736,8 @@ mod tests {
                     nix::unistd::Uid::effective().as_raw(),
                 )
                 .expect("private fixture namespace");
-                let (mut stream, _) = listener.accept().expect("peer");
-                let request = frame_read(&mut stream).expect("request");
+                let mut stream = FixtureServer::accept(&listener).expect("peer");
+                let request = fixture_request(&mut stream).expect("request");
                 let registration = Registration::from_row(
                     &json!({"name":"alpha","uid":41001}),
                     "alpha",
@@ -3516,7 +3796,7 @@ mod tests {
             "door-generation-upgrade-required"
         );
         generation["schema"] = json!(2);
-        generation["agent"] = json!({"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"entry":"/fixture/entry","loop_home":"/fixture/home"});
+        generation["agent"] = json!({"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":"/fixture/entry","loop_home":"/fixture/home"});
         assert_eq!(
             completed_door_group(&generation, "alpha").expect("group"),
             41001
@@ -3998,12 +4278,46 @@ mod tests {
         rubric: Rubric,
         deadline_ms: u64,
         cap: Option<usize>,
-    ) -> (PathBuf, thread::JoinHandle<io::Result<serde_json::Value>>) {
+    ) -> (
+        FixtureClient,
+        thread::JoinHandle<io::Result<serde_json::Value>>,
+    ) {
         fixture_service_with(fixture, runner, rubric, deadline_ms, cap, None, true)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn fixture_service_with(
+        fixture: &Fixture,
+        runner: CountingRunner,
+        rubric: Rubric,
+        deadline_ms: u64,
+        cap: Option<usize>,
+        fault: Option<FixtureFault>,
+        registered: bool,
+    ) -> (
+        FixtureClient,
+        thread::JoinHandle<io::Result<serde_json::Value>>,
+    ) {
+        let (socket, server) =
+            fixture_stub_service_with(fixture, runner, rubric, deadline_ms, cap, fault, registered);
+        (
+            FixtureClient::connect(socket).expect("connected fixture client"),
+            server,
+        )
+    }
+
+    fn fixture_stub_service(
+        fixture: &Fixture,
+        runner: CountingRunner,
+        rubric: Rubric,
+        deadline_ms: u64,
+        cap: Option<usize>,
+    ) -> (PathBuf, thread::JoinHandle<io::Result<serde_json::Value>>) {
+        fixture_stub_service_with(fixture, runner, rubric, deadline_ms, cap, None, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fixture_stub_service_with(
         fixture: &Fixture,
         runner: CountingRunner,
         rubric: Rubric,
@@ -4021,16 +4335,18 @@ mod tests {
         let store = fixture.store();
         let filed = super::REQUEST_FILED.with(|slot| slot.borrow_mut().take());
         let ready = super::REQUEST_READY.with(|slot| slot.borrow_mut().take());
+        let writer_wait = crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.get();
         let server = thread::spawn(move || {
             super::REQUEST_FILED.with(|slot| *slot.borrow_mut() = filed);
             super::REQUEST_READY.with(|slot| *slot.borrow_mut() = ready);
+            crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(writer_wait);
             fixture_file_cap(cap);
             fixture_fault(fault);
-            let (mut stream, _) = listener.accept()?;
+            let mut stream = FixtureServer::accept(&listener)?;
             let started = Instant::now();
             let _socket_peer = peer_uid(&stream)?;
             let peer = 3000;
-            let request = frame_read_until(&mut stream, started + Duration::from_secs(2))?;
+            let request = fixture_request(&mut stream)?;
             let registration = Registration::from_row(
                 &json!({"name":"alpha","uid":41001}),
                 "alpha",
@@ -4102,15 +4418,7 @@ mod tests {
                 });
                 // Drop before scope joins even when a client assertion panics.
                 let _finish_watch = FinishWatch(&finished);
-                let read_reply = |client: &mut UnixStream| {
-                    let until = Instant::now() + Duration::from_secs(5);
-                    loop {
-                        let frame = frame_read_until(client, until).expect("reply or credit");
-                        if frame["type"] != "request-lock-wait" {
-                            break frame;
-                        }
-                    }
-                };
+                let read_reply = FixtureClient::answer;
                 for _ in 0..2 {
                     let observed = Arc::clone(&observed);
                     // Keep the watcher live while the receive is waiting. Only
@@ -4134,14 +4442,11 @@ mod tests {
                     let (runner, _, _) = counting_runner(&fixture);
                     let (socket, server) =
                         fixture_service(&fixture, runner, rubric(Some("allow")), 300, None);
-                    let mut client = UnixStream::connect(&socket).expect("fixture receive");
-                    frame_write_until(
-                        &mut client,
-                        &json!({"schema":2,"argv":[b"fixture".to_vec(),
-                            b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":300}),
-                        Instant::now() + Duration::from_secs(2),
-                    )
-                    .expect("receive request");
+                    let mut client = socket;
+                    client
+                        .send(&json!({"schema":2,"argv":[b"fixture".to_vec(),
+                            b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":300}))
+                        .expect("receive request");
                     client.shutdown(Shutdown::Write).expect("receive end");
                     let _reply = read_reply(&mut client);
                     server
@@ -4151,7 +4456,7 @@ mod tests {
                 }
                 let (runner, _, _) = counting_runner(&fixture);
                 let (socket, server) = fixture_service(&fixture, runner, rubric(None), 2000, None);
-                let mut echo = send_probe(&socket, 2000);
+                let mut echo = send_probe(socket, 2000);
                 let echo_frame = read_reply(&mut echo);
                 assert_eq!(
                     echo_frame["queue_state"],
@@ -4235,14 +4540,10 @@ mod tests {
         }
     }
 
-    fn send_probe(socket: &std::path::Path, deadline_ms: u64) -> UnixStream {
-        let mut client = UnixStream::connect(socket).expect("fixture connect");
-        frame_write_until(
-            &mut client,
-            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":deadline_ms}),
-            Instant::now() + Duration::from_secs(2),
-        )
-        .expect("fixture request");
+    fn send_probe(mut client: FixtureClient, deadline_ms: u64) -> FixtureClient {
+        client
+            .send(&json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":deadline_ms}))
+            .expect("fixture request");
         client.shutdown(Shutdown::Write).expect("request end");
         client
     }
@@ -4387,7 +4688,8 @@ mod tests {
             }));
         });
         let (runner, calls, _) = counting_runner(&fixture);
-        let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 5000, None);
+        let (socket, server) =
+            fixture_stub_service(&fixture, runner, rubric(Some("allow")), 5000, None);
         let (mut input, stub_input) = UnixStream::pair().expect("controlled input");
         let (output_tx, output_rx) = std::sync::mpsc::channel();
         let client = thread::spawn(move || {
@@ -4552,7 +4854,7 @@ mod tests {
         )
         .expect("registration");
         let held = store.fixture_exclusive_lock().expect("sibling holder");
-        let (mut server, mut worker) = UnixStream::pair().expect("worker connection");
+        let (mut worker, mut server) = FixtureClient::pair().expect("worker connection");
         let started = Instant::now();
         crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE
             .with(|bound| bound.set(Some(Duration::from_millis(30))));
@@ -4572,8 +4874,9 @@ mod tests {
         .expect("named admission lock deadline reply");
         crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(None));
         let mut observed_credit = 0;
+        // Wire reads are intentional: every credited amount is part of this assertion.
         let delivered = loop {
-            let frame = frame_read(&mut worker).expect("worker frame");
+            let frame = super::frame_read(worker.wire()).expect("worker frame");
             if frame["type"] != "request-lock-wait" {
                 break frame;
             }
@@ -4621,7 +4924,7 @@ mod tests {
             "waited_seconds":1.001,"retry_after_seconds":30});
         assert_eq!(
             super::final_line(&["fixture".into(), "git status --short".into()], &reply),
-            Some("door-request-concurrent: waited=1.001s retry_after=30s; the door waited for admission held through effect and agent publication, possibly after the final reply; retry after 30 seconds".to_owned())
+            Some("door-request-concurrent: waited=1.001s retry_after=30s; the door waited for admission held through the durable effect and final reply; allow-mode agent publication may finish after admission is released; retry after 30 seconds".to_owned())
         );
     }
 
@@ -4636,7 +4939,7 @@ mod tests {
         let (runner, _, _) = counting_runner(fixture);
         let (socket, server) =
             fixture_service(fixture, runner, fixture_class_rubric(decision), 2000, None);
-        let mut client = send_probe(&socket, 2000);
+        let mut client = send_probe(socket, 2000);
         // Rendezvous after the production store write releases its lock. Keep
         // the former 100 x 10 ms wait bound without polling unrelated records.
         let id = request
@@ -4645,7 +4948,7 @@ mod tests {
         if let Some(treatment) = answer {
             label(&store, &id, treatment);
         }
-        let _reply = frame_read(&mut client).expect("fixture final frame");
+        let _reply = client.answer();
         server.join().expect("fixture service").expect("reply");
         id
     }
@@ -4703,7 +5006,7 @@ mod tests {
     fn referral_client(
         fixture: &Fixture,
     ) -> (
-        UnixStream,
+        FixtureServer,
         serde_json::Value,
         thread::JoinHandle<serde_json::Value>,
     ) {
@@ -4720,8 +5023,8 @@ mod tests {
             )
             .expect("stub retains the final referral refusal")
         });
-        let (mut stream, _) = listener.accept().expect("client connection");
-        let request = frame_read(&mut stream).expect("stub request");
+        let mut stream = FixtureServer::accept(&listener).expect("client connection");
+        let request = fixture_request(&mut stream).expect("stub request");
         (stream, request, client)
     }
 
@@ -4875,7 +5178,7 @@ mod tests {
                 Scope::Work,
             )
             .expect("registration");
-            let (mut stream, mut peer) = UnixStream::pair().expect("socket pair");
+            let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
             let (runner, calls, _) = counting_runner(&fixture);
             let route = route_for(&fixture.home);
             let (reply, _) = super::serve_request_with_agent(
@@ -4897,7 +5200,7 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(reply["reason"], "door-request-record-refusal");
             assert_eq!(reply["request_id"], rows[0].id());
-            assert_eq!(fixture_final_frame(&mut peer), reply);
+            assert_eq!(peer.answer(), as_sent(&reply));
             assert!(rows[0].value()["agent_status"].is_null());
             assert!(rows[0].value()["state"].is_null());
             assert_incomplete(&fixture, rows[0].id());
@@ -4948,7 +5251,7 @@ mod tests {
         let agent = Agent(AtomicUsize::new(0));
         let mut observed_ids = std::collections::HashSet::from([seed_id.clone()]);
         for iteration in 0..24 {
-            let (mut stream, mut peer) = UnixStream::pair().expect("socket pair");
+            let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
             peer.shutdown(std::net::Shutdown::Write)
                 .expect("empty input");
             let (reply, _) = super::serve_request_with_agent(
@@ -4966,7 +5269,7 @@ mod tests {
                 Instant::now(),
             )
             .expect("learned request");
-            let frame = fixture_final_frame(&mut peer);
+            let frame = peer.answer();
             assert_eq!(frame["would_do"], reply["would_do"]);
             assert_eq!(frame["reason"], "door-complete");
             assert_eq!(frame["status"], 0);
@@ -4991,24 +5294,269 @@ mod tests {
         }
     }
 
-    // Keep one bounded read window across all request-lock credit frames.
-    fn fixture_final_frame(client: &mut UnixStream) -> Value {
-        let until = Instant::now() + Duration::from_secs(5);
-        loop {
-            let frame = frame_read_until(client, until).expect("reply or lock-wait credit");
-            if frame["type"] != "request-lock-wait" {
-                return frame;
+    // Common fixture hang bound, not a scheduling/performance assertion.
+    pub(super) const FIXTURE_HANG: Duration = Duration::from_secs(120);
+
+    // Observe the credit without consuming it: the final-reader mutation must
+    // still encounter this very frame after the writer is released.
+    #[allow(unsafe_code)] // MSG_PEEK has no stable UnixStream wrapper.
+    fn fixture_peek_frame(client: &mut FixtureClient, mut partial: impl FnMut()) -> Value {
+        let client = client.wire();
+        let until = Instant::now() + FIXTURE_HANG;
+        let mut peek = |bytes: &mut [u8]| loop {
+            client
+                .set_read_timeout(Some(until.saturating_duration_since(Instant::now())))
+                .expect("fixture peek deadline");
+            // SAFETY: the live socket and writable slice remain borrowed for recv.
+            let received = unsafe {
+                libc::recv(
+                    client.as_raw_fd(),
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                    libc::MSG_PEEK | libc::MSG_WAITALL,
+                )
+            };
+            if received < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                panic!("fixture credit peek: {error}");
             }
-            assert_eq!(frame["schema"], 2);
-            assert!(frame["wait_ms"].as_u64().is_some_and(|wait| wait > 0));
+            let received = usize::try_from(received).expect("received bytes");
+            assert!(received > 0, "fixture credit closed before its frame");
+            if received == bytes.len() {
+                break;
+            }
+            assert!(Instant::now() < until, "fixture partial credit deadline");
+            partial();
+            thread::yield_now();
+        };
+        let mut header = [0; 4];
+        peek(&mut header);
+        let length = usize::try_from(u32::from_be_bytes(header)).expect("frame length");
+        assert!(length <= super::FRAME_LIMIT);
+        let mut bytes = vec![0; 4 + length];
+        peek(&mut bytes);
+        serde_json::from_slice(&bytes[4..]).expect("fixture credit JSON")
+    }
+
+    fn fixture_fragmented_credit() {
+        let (mut client, mut writer) = FixtureClient::pair().expect("fragmented frame pair");
+        let body = br#"{"type":"request-lock-wait","wait_ms":50}"#;
+        let (partial, observed) = std::sync::mpsc::sync_channel(1);
+        let server = thread::spawn(move || {
+            writer
+                .write_all(&u32::try_from(body.len()).expect("length").to_be_bytes())
+                .expect("frame header");
+            observed.recv_timeout(FIXTURE_HANG).expect("partial peek");
+            writer.write_all(body).expect("frame body");
+        });
+        let mut partial = Some(partial);
+        let frame = fixture_peek_frame(&mut client, || {
+            if let Some(partial) = partial.take() {
+                partial.send(()).expect("release fragmented body");
+            }
+        });
+        assert_eq!(frame["type"], "request-lock-wait");
+        server.join().expect("fragmented writer");
+    }
+
+    pub(super) use fixture_client::{Client as FixtureClient, Server as FixtureServer};
+
+    // Server fixtures consume requests, never answers. Keep the raw reader here.
+    pub(super) fn fixture_request(stream: &mut FixtureServer) -> io::Result<Value> {
+        super::frame_read_until(stream, Instant::now() + FIXTURE_HANG)
+    }
+
+    // Own the socket: no Read, Deref, or implicit conversion to UnixStream.
+    // Ordinary tests use send/answer/event; wire assertions must opt in by name.
+    mod fixture_client {
+        use super::{FIXTURE_HANG, Instant, UnixStream, Value, io};
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::path::Path;
+
+        pub struct Client {
+            stream: UnixStream,
+            output: [usize; 2],
         }
+
+        #[derive(Debug)]
+        pub struct Server {
+            stream: UnixStream,
+        }
+
+        impl Server {
+            pub(crate) fn connect_reverse(path: impl AsRef<Path>) -> io::Result<Self> {
+                UnixStream::connect(path).map(|stream| Self { stream })
+            }
+            pub(crate) fn into_wire(self) -> UnixStream {
+                self.stream
+            }
+            pub(crate) fn wire(&mut self) -> &mut UnixStream {
+                &mut self.stream
+            }
+            pub(crate) fn accept(listener: &std::os::unix::net::UnixListener) -> io::Result<Self> {
+                listener.accept().map(|(stream, _)| Self { stream })
+            }
+        }
+
+        impl std::ops::Deref for Server {
+            type Target = UnixStream;
+            fn deref(&self) -> &Self::Target {
+                &self.stream
+            }
+        }
+
+        impl std::ops::DerefMut for Server {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.stream
+            }
+        }
+
+        impl std::io::Read for Server {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                std::io::Read::read(&mut self.stream, bytes)
+            }
+        }
+
+        impl Write for Server {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.stream.write(bytes)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.stream.flush()
+            }
+        }
+
+        impl Client {
+            pub(crate) fn new(stream: UnixStream) -> Self {
+                Self {
+                    stream,
+                    output: [0, 0],
+                }
+            }
+
+            pub(crate) fn pair() -> io::Result<(Self, Server)> {
+                UnixStream::pair().map(|(client, stream)| (Self::new(client), Server { stream }))
+            }
+
+            pub(crate) fn connect(path: impl AsRef<Path>) -> io::Result<Self> {
+                UnixStream::connect(path).map(Self::new)
+            }
+
+            pub(crate) fn send(&mut self, request: &Value) -> io::Result<()> {
+                crate::door::frame_write_until(
+                    &mut self.stream,
+                    request,
+                    Instant::now() + FIXTURE_HANG,
+                )
+            }
+
+            pub(crate) fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+                self.stream.shutdown(how)
+            }
+
+            pub(crate) fn answer(&mut self) -> Value {
+                self.event("final")
+            }
+
+            pub(crate) fn wire(&mut self) -> &mut UnixStream {
+                &mut self.stream
+            }
+
+            pub(crate) fn event(&mut self, expected: &str) -> Value {
+                let until = Instant::now() + FIXTURE_HANG;
+                loop {
+                    let frame = crate::door::frame_read_until(&mut self.stream, until)
+                        .expect("fixture protocol frame");
+                    let kind = frame["type"].as_str();
+                    if expected == "final" && frame.get("status").is_some() {
+                        assert!(frame["status"].as_i64().is_some(), "final status: {frame}");
+                        assert!(
+                            kind.is_none() || kind == Some("final"),
+                            "final type: {frame}"
+                        );
+                        assert_eq!(
+                            frame["stdout_bytes"], self.output[0],
+                            "stdout count: {frame}"
+                        );
+                        assert_eq!(
+                            frame["stderr_bytes"], self.output[1],
+                            "stderr count: {frame}"
+                        );
+                        return frame;
+                    }
+                    if matches!(kind, Some("stdout" | "stderr")) {
+                        let bytes = frame["bytes"].as_array().expect("output bytes");
+                        assert!(
+                            bytes
+                                .iter()
+                                .all(|byte| byte.as_u64().is_some_and(|n| n <= 255)),
+                            "output byte: {frame}"
+                        );
+                        let index = usize::from(kind == Some("stderr"));
+                        self.output[index] = self.output[index]
+                            .checked_add(bytes.len())
+                            .expect("output count");
+                    }
+                    if kind == Some("request-lock-wait") {
+                        assert_eq!(frame["schema"], 2);
+                        assert!(frame["wait_ms"].as_u64().is_some_and(|wait| wait > 0));
+                    }
+                    if kind == Some(expected) {
+                        assert_ne!(expected, "final", "final frame lacks status: {frame}");
+                        return frame;
+                    }
+                    assert!(
+                        kind == Some("request-lock-wait")
+                            || (expected == "final"
+                                && matches!(
+                                    kind,
+                                    Some("compute-deadline" | "stdout" | "stderr" | "limits")
+                                )),
+                        "expected {expected}, received {frame}"
+                    );
+                }
+            }
+        }
+
+        impl Write for Client {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.stream.write(bytes)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.stream.flush()
+            }
+        }
+    }
+
+    // A reply as its peer decodes it. Frames are `serde_json::to_vec`, and the default
+    // parser can land one unit in the last place away from a printed float measurement.
+    fn as_sent(reply: &Value) -> Value {
+        let bytes = serde_json::to_vec(reply).expect("encode reply");
+        serde_json::from_slice(&bytes).expect("decode reply")
     }
 
     /// ´test:unit:door-final-reply-follows-lock-wait-credits´
     #[test]
     fn door_final_reply_follows_lock_wait_credits() {
-        for credits in [0, 1, 3] {
-            let (mut writer, mut reader) = UnixStream::pair().expect("reply channel");
+        for (credits, damaged) in [
+            (0, None),
+            (1, None),
+            (3, None),
+            (1, Some("stdout_bytes")),
+            (1, Some("stderr_bytes")),
+        ] {
+            let (mut reader, mut writer) = FixtureClient::pair().expect("reply channel");
+            let request = json!({"schema":2,"argv":[],"deadline_ms":120_000});
+            reader.send(&request).expect("request");
+            assert_eq!(
+                fixture_request(&mut writer).expect("server request"),
+                request
+            );
             for wait_ms in 1..=credits {
                 frame_write(
                     &mut writer,
@@ -5016,12 +5564,32 @@ mod tests {
                 )
                 .expect("credit frame");
             }
-            let reply = super::connection_refusal(
+            for kind in ["compute-deadline", "limits"] {
+                frame_write(&mut writer, &json!({"schema":2,"type":kind})).expect("announcement");
+            }
+            for (kind, bytes) in [("stdout", vec![65]), ("stderr", vec![66, 67])] {
+                frame_write(&mut writer, &json!({"schema":2,"type":kind,"bytes":bytes}))
+                    .expect("output");
+            }
+            let mut reply = super::connection_refusal(
                 &io::Error::other("synthetic framing case"),
                 Instant::now(),
             );
+            reply["stdout_bytes"] = json!(1);
+            reply["stderr_bytes"] = json!(2);
+            if let Some(field) = damaged {
+                reply[field] = json!(99);
+            }
             super::frame_write_no_drain(&mut writer, &reply).expect("final reply");
-            assert_eq!(fixture_final_frame(&mut reader), reply);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reader.answer()));
+            if damaged.is_some() {
+                assert!(
+                    result.is_err(),
+                    "answer must reject differing output counts"
+                );
+            } else {
+                assert_eq!(result.expect("valid answer"), as_sent(&reply));
+            }
         }
     }
 
@@ -5032,7 +5600,7 @@ mod tests {
         let store = fixture.store();
         let (runner, calls, states) = counting_runner(&fixture);
         let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 2000, None);
-        let mut client = send_probe(&socket, 2000);
+        let mut client = send_probe(socket, 2000);
         let id = wait_filed(&store);
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert_eq!(
@@ -5044,7 +5612,7 @@ mod tests {
         assert_eq!(first["class"]["setter"], "door-service");
         assert_eq!(first["class"]["floor"], "audit");
         label(&store, &id, "allow");
-        let final_frame = fixture_final_frame(&mut client);
+        let final_frame = client.answer();
         assert_eq!(final_frame["queue_state"], "answered");
         assert!(
             final_frame["queue_wall_seconds"]
@@ -5065,14 +5633,26 @@ mod tests {
     /// ´test:unit:door-allow-effect-precedes-waiting-and-label´
     #[test]
     fn door_allow_effect_precedes_waiting_and_label() {
+        fixture_fragmented_credit();
         let fixture = Fixture::new();
         fixture.set_floor("allow");
         let store = fixture.store();
         set_fixture_mode(&store, crate::requests::Mode::Allow);
         let (runner, calls, states) = counting_runner(&fixture);
-        let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 2000, None);
-        let mut client = send_probe(&socket, 2000);
-        let final_frame = frame_read(&mut client).expect("final frame");
+        crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(Some(FIXTURE_HANG));
+        let (socket, server) =
+            fixture_service(&fixture, runner, rubric(Some("allow")), 120_000, None);
+        crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(None);
+        let held = store
+            .fixture_exclusive_lock()
+            .expect("held admission writer");
+        let mut client = send_probe(socket, 120_000);
+        let progress = fixture_peek_frame(&mut client, || {});
+        assert_eq!(progress["type"], "request-lock-wait");
+        assert!(progress["wait_ms"].as_u64().is_some_and(|wait| wait >= 50));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "effect before admission");
+        drop(held);
+        let final_frame = client.answer();
         server.join().expect("service").expect("reply");
         assert_eq!(final_frame["queue_state"], "no-queue");
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
@@ -5099,13 +5679,13 @@ mod tests {
             set_fixture_mode(&store, crate::requests::Mode::Enforce);
             let (runner, calls, _states) = counting_runner(&fixture);
             let (socket, server) = fixture_service(&fixture, runner, rubric(decision), 2000, None);
-            let mut client = send_probe(&socket, 2000);
+            let mut client = send_probe(socket, 2000);
             if decision.is_none() {
                 let id = wait_filed(&store);
                 assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
                 label(&store, &id, "allow");
             }
-            let final_frame = fixture_final_frame(&mut client);
+            let final_frame = client.answer();
             server.join().expect("service").expect("reply");
             assert_eq!(final_frame["reason"], expected);
             assert_eq!(
@@ -5196,12 +5776,12 @@ mod tests {
             let deadline_ms = if disconnect { 2000 } else { 120 };
             let (socket, server) =
                 fixture_service(&fixture, runner, rubric(None), deadline_ms, None);
-            let mut client = send_probe(&socket, deadline_ms);
+            let mut client = send_probe(socket, deadline_ms);
             let id = wait_filed(&store);
             if disconnect {
                 drop(client);
             } else {
-                let final_frame = fixture_final_frame(&mut client);
+                let final_frame = client.answer();
                 assert_eq!(final_frame["reason"], "door-request-deadline");
                 assert_eq!(final_frame["queue_state"], "deadline");
             }
@@ -5233,8 +5813,8 @@ mod tests {
             }
             let (runner, calls, _states) = counting_runner(&fixture);
             let (socket, server) = fixture_service(&fixture, runner, rubric(None), 2000, Some(0));
-            let mut client = send_probe(&socket, 2000);
-            let final_frame = frame_read(&mut client).expect("full store frame");
+            let mut client = send_probe(socket, 2000);
+            let final_frame = client.answer();
             server.join().expect("service").expect("reply");
             assert_eq!(
                 final_frame["reason"],
@@ -5269,10 +5849,10 @@ mod tests {
         let store = fixture.store();
         let (runner, calls, _) = counting_runner(&fixture);
         let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 2000, None);
-        let mut client = send_probe(&socket, 2000);
+        let mut client = send_probe(socket, 2000);
         let id = wait_filed(&store);
         label(&store, &id, "refuse");
-        let reply = fixture_final_frame(&mut client);
+        let reply = client.answer();
         server.join().expect("service").expect("refusal");
         assert_eq!(reply["reason"], "door-adjudicated-refusal");
         assert_eq!(reply["queue_state"], "refused");
@@ -5314,12 +5894,12 @@ mod tests {
                 Some(fault),
                 true,
             );
-            let mut client = send_probe(&socket, 2000);
+            let mut client = send_probe(socket, 2000);
             let id = wait_filed(&store);
             if !allow {
                 label(&store, &id, "allow");
             }
-            let reply = fixture_final_frame(&mut client);
+            let reply = client.answer();
             server.join().expect("service").expect("incomplete reply");
             assert_eq!(reply["status"], 125);
             assert_eq!(reply["reason"], "door-record-incomplete");
@@ -5352,8 +5932,8 @@ mod tests {
                 Some(fault),
                 true,
             );
-            let mut client = send_probe(&socket, 2000);
-            let reply = fixture_final_frame(&mut client);
+            let mut client = send_probe(socket, 2000);
+            let reply = client.answer();
             server.join().expect("service").expect("reply");
             assert_eq!(reply["reason"], "door-record-incomplete");
             assert_eq!(reply["status"], 125);
@@ -5406,8 +5986,8 @@ mod tests {
                 fault,
                 registered,
             );
-            let mut client = send_probe(&socket, 2000);
-            let reply = frame_read(&mut client).expect("typed refusal");
+            let mut client = send_probe(socket, 2000);
+            let reply = client.answer();
             server.join().expect("service").expect("refusal");
             assert_eq!(reply["reason"], expected);
             assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
@@ -5447,7 +6027,7 @@ mod tests {
                 Some(fault),
                 true,
             );
-            let mut client = send_probe(&socket, deadline_ms);
+            let mut client = send_probe(socket, deadline_ms);
             let id = wait_filed(&store);
             if answer == "refuse" {
                 label(&store, &id, "refuse");
@@ -5455,7 +6035,7 @@ mod tests {
             if answer == "disconnect" {
                 drop(client);
             } else {
-                let reply = fixture_final_frame(&mut client);
+                let reply = client.answer();
                 assert_eq!(
                     reply["reason"],
                     if answer == "read" {
@@ -5480,7 +6060,7 @@ mod tests {
             let fixture = Fixture::new();
             let store = fixture.store();
             let (runner, calls, _) = counting_runner(&fixture);
-            let (socket, server) = fixture_service(&fixture, runner, rubric(None), 2000, None);
+            let (socket, server) = fixture_stub_service(&fixture, runner, rubric(None), 2000, None);
             let labeler = answered.then(|| {
                 thread::spawn(move || {
                     let id = wait_filed(&store);
@@ -5520,7 +6100,7 @@ mod tests {
         let fixture = Fixture::new();
         let store = fixture.store();
         let (runner, calls, _) = counting_runner(&fixture);
-        let (socket, server) = fixture_service(&fixture, runner, rubric(None), 2000, None);
+        let (socket, server) = fixture_stub_service(&fixture, runner, rubric(None), 2000, None);
         let labeler = thread::spawn(move || {
             let id = wait_filed(&store);
             label(&store, &id, "refuse");
@@ -5610,7 +6190,7 @@ mod tests {
                             read_tx.send(()).expect("reader reached polling boundary");
                             resume_rx
                                 .recv_timeout(Duration::from_secs(120))
-                                .expect("rendezvous released readers before writer admission");
+                                .expect("writer published before readers resume");
                         }));
                     });
                     let started = Instant::now();
@@ -5625,34 +6205,37 @@ mod tests {
             }
             drop(read_tx);
             // All sixteen readers actually read the sized run, then rendezvous
-            // outside waiting_request. Resume them before the write so their
-            // sized-run polls and backoff contend with writer admission.
+            // outside waiting_request. Keep them parked until the writer has
+            // published: none may retain a store lock across this boundary.
             for _ in 0..16 {
                 read_rx
                     .recv_timeout(Duration::from_secs(120))
                     .expect("every reader reached polling boundary");
             }
-            for waiter in resume {
-                waiter
-                    .send(())
-                    .expect("resume readers before writer admission");
-            }
             let started = Instant::now();
-            store
-                .triage(
-                    "R",
-                    &[json!({"id":"R:1","action":"adjudicate",
+            crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(Some(Duration::ZERO));
+            let publication = store.triage(
+                "R",
+                &[json!({"id":"R:1","action":"adjudicate",
             "treatment":"allow","reason":"sized fixture answer"})],
-                    "fixture owner",
-                    &super::now_nanos().to_string(),
-                )
-                .expect("writer admits answer");
+                "fixture owner",
+                &super::now_nanos().to_string(),
+            );
+            crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(None);
+            publication.expect("parked readers released the writer lock");
             let writer_wall = started.elapsed();
-            let longest = waiters
+            let longest = resume
                 .into_iter()
-                .map(|waiter| {
+                .zip(waiters)
+                .map(|(release, waiter)| {
+                    release
+                        .send(())
+                        .expect("answer published before reader resumes");
                     let (answer, wall) = waiter.join().expect("waiter");
-                    assert!(matches!(answer, super::Answer::Allow(_)));
+                    assert!(
+                        matches!(answer, super::Answer::Allow(_)),
+                        "waiter returned {answer:?}"
+                    );
                     wall
                 })
                 .max()
@@ -5664,7 +6247,6 @@ mod tests {
                 writer_wall.as_millis(),
                 longest.as_millis()
             );
-            assert!(writer_wall < Duration::from_secs(15));
             drop(peers);
         }
     }
@@ -5760,7 +6342,7 @@ mod tests {
             let (runner, _, _) = counting_runner(&fixture);
             let (socket, server) =
                 fixture_service(&fixture, runner, rubric(Some("allow")), 2000, None);
-            let mut client = send_probe(&socket, 2000);
+            let mut client = send_probe(socket, 2000);
             let id = (0..100)
                 .find_map(|_| {
                     let rows = store.list().expect("records").0;
@@ -5773,7 +6355,10 @@ mod tests {
                 })
                 .expect("new request");
             label(&store, &id, treatment);
-            let _reply = frame_read(&mut client).expect("final frame");
+            assert_eq!(
+                client.answer()["status"],
+                if treatment == "allow" { 0 } else { 125 }
+            );
             server.join().expect("service").expect("reply");
         }
         let records = store
@@ -5812,8 +6397,8 @@ mod tests {
         set_fixture_mode(&store, crate::requests::Mode::Allow);
         let (runner, _, _) = counting_runner(&fixture);
         let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 2000, None);
-        let mut client = send_probe(&socket, 2000);
-        let _reply = frame_read(&mut client).expect("allow frame");
+        let mut client = send_probe(socket, 2000);
+        let _reply = client.answer();
         server.join().expect("service").expect("allow");
         let id = store.list().expect("allow record").0[0].id().to_owned();
         label(&store, &id, "allow");
@@ -6078,13 +6663,13 @@ mod tests {
         let mut grants = Vec::new();
         let mut peers = Vec::new();
         for _ in 0..MAX_PEERS {
-            let (client, mut server) = UnixStream::pair().expect("fixture peer");
+            let (client, mut server) = FixtureClient::pair().expect("fixture peer");
             grants.push(admit_peer(&active, &mut server).expect("slot"));
             peers.push((client, server));
         }
-        let (mut client, mut server) = UnixStream::pair().expect("overflow peer");
+        let (mut client, mut server) = FixtureClient::pair().expect("overflow peer");
         assert!(admit_peer(&active, &mut server).is_none());
-        let reply = frame_read(&mut client).expect("typed capacity reply");
+        let reply = client.answer();
         assert_eq!(reply["reason"], "door-capacity-refusal");
         assert_eq!(reply["queue_state"], "no-queue");
         assert_eq!(reply["peer_limit"], 16);
@@ -6114,7 +6699,7 @@ mod tests {
         assert_eq!(active.load(std::sync::atomic::Ordering::Relaxed), MAX_PEERS);
         drop(grants.pop().expect("one released slot"));
         assert_eq!(active.load(Ordering::Relaxed), MAX_PEERS - 1);
-        let (mut next, mut next_server) = UnixStream::pair().expect("next peer");
+        let (mut next, mut next_server) = FixtureClient::pair().expect("next peer");
         let grant = admit_peer(&active, &mut next_server).expect("released slot");
         assert_eq!(active.load(Ordering::Relaxed), MAX_PEERS);
         let registration = Registration::from_row(
@@ -6125,13 +6710,10 @@ mod tests {
             Scope::Work,
         )
         .expect("fixture registration");
-        frame_write(&mut next, &json!({"schema":2,"argv":[],"deadline_ms":1000}))
+        next.send(&json!({"schema":2,"argv":[],"deadline_ms":1000}))
             .expect("next request");
         serve_one_for_peer(&mut next_server, &registration, 3000).expect("next answer");
-        assert_eq!(
-            frame_read(&mut next).expect("next final")["reason"],
-            "door-compute-unregistered"
-        );
+        assert_eq!(next.answer()["reason"], "door-compute-unregistered");
         drop(grant);
         drop(grants);
         drop(peers);
@@ -6225,7 +6807,7 @@ mod tests {
         )
         .expect_err("host-view UID is outside the recorded block");
         assert_eq!(old_refusal.detail, "peer is outside the allocated block");
-        let (mut client, mut server) = UnixStream::pair().expect("host socket peer");
+        let (mut client, mut server) = FixtureClient::pair().expect("host socket peer");
         let worker = super::mapped_peer_uid(&server, &map).expect("mapped socket peer");
         assert_ne!(host_peer, worker);
         assert_eq!(worker, 3001);
@@ -6239,17 +6821,17 @@ mod tests {
             host_peer,
         )
         .expect("recorded review grant");
-        frame_write(
-            &mut client,
-            &json!({"schema":2,"argv":[b"door-shape-probe".to_vec(), b"migration-1".to_vec()],
+        client
+            .send(
+                &json!({"schema":2,"argv":[b"door-shape-probe".to_vec(), b"migration-1".to_vec()],
                 "deadline_ms":1000}),
-        )
-        .expect("probe request");
+            )
+            .expect("probe request");
         serve_one_for_peer(&mut server, &registration, worker).expect("review refusal");
-        let announced = frame_read(&mut client).expect("compute-shaped probe announcement");
+        let announced = client.event("compute-deadline");
         assert_eq!(announced["type"], "compute-deadline");
         assert_eq!(announced["request_deadline_ms"], 1000);
-        let reply = frame_read(&mut client).expect("typed reply");
+        let reply = client.answer();
         assert_eq!(reply["reason"], "door-review-compute-refusal");
         assert_eq!(reply["peer_uid"], 3001);
     }
@@ -6356,20 +6938,21 @@ mod tests {
             ),
             (3001, json!({"schema":1,"argv":[]}), "door-peer-refusal"),
         ] {
-            let (mut client, mut server) = UnixStream::pair().expect("fixture pair");
-            frame_write(&mut client, &request).expect("request");
+            let (mut client, mut server) = FixtureClient::pair().expect("fixture pair");
+            client.send(&request).expect("request");
             let (response, _) =
                 serve_one_for_peer(&mut server, &registration, peer).expect("served");
             assert_eq!(response["reason"], reason);
             assert_eq!(response["peer_uid"], peer);
-            assert_eq!(frame_read(&mut client).expect("reply"), response);
+            assert_eq!(client.answer(), as_sent(&response));
         }
     }
 
     /// ´test:unit:door-frame-deadline-bounds-a-trickling-peer´
     #[test]
     fn door_frame_deadline_bounds_a_trickling_peer() {
-        let (mut client, mut server) = UnixStream::pair().expect("fixture pair");
+        let (mut client, server) = FixtureClient::pair().expect("fixture pair");
+        let (read_done, hold_writer) = std::sync::mpsc::channel();
         let writer = thread::spawn(move || {
             client
                 .write_all(&32_u32.to_be_bytes())
@@ -6380,11 +6963,16 @@ mod tests {
                     break;
                 }
             }
+            hold_writer
+                .recv_timeout(Duration::from_secs(120))
+                .expect("reader returned before writer closes");
         });
         let deadline = Instant::now() + std::time::Duration::from_millis(40);
-        let error =
-            super::frame_read_until(&mut server, deadline).expect_err("whole frame deadline");
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        let mut reader = server;
+        let result = super::frame_read_until(reader.wire(), deadline);
+        read_done.send(()).expect("release writer after read");
         writer.join().expect("bounded writer");
+        let error = result.expect_err("whole frame deadline");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 }

@@ -463,7 +463,7 @@ pub(crate) struct PageContext<'a> {
 ///
 /// Returns the error of a value that cannot be written as JSON.
 pub(crate) fn keyed(context: &impl Serialize) -> io::Result<(String, minijinja::Value)> {
-    let value = minijinja::Value::from_serialize(context);
+    let value = minijinja::Value::from(minijinja::value::Serde(context));
     let mut key = Fields::new("superloop-chat-export page key");
     key.field(&serde_json::to_vec(&value).map_err(other)?);
     Ok((hex(&key.finish()), value))
@@ -1287,10 +1287,10 @@ fn index_files(
         title => heads.title(),
         assets => "",
         loops => "../index.html",
-        conversations => conversations,
+        conversations => minijinja::value::Serde(conversations),
         agents => agents.len(),
         unattached_count => unattached.len(),
-        unattached => unattached,
+        unattached => minijinja::value::Serde(unattached),
     };
     files.push(("index.html".to_owned(), render("index.html", &index)?));
     for (number, _) in tree.conversations.iter().enumerate() {
@@ -1301,7 +1301,7 @@ fn index_files(
             loop_name => settings.name,
             assets => relative(&path, ""),
             target => "_top",
-            conversation => conversation,
+            conversation => minijinja::value::Serde(conversation),
         };
         files.push((path, render("pages.html", &list)?));
     }
@@ -1433,7 +1433,9 @@ pub fn write_loops_index(
         .collect();
     let html = environment
         .get_template("loops.html")
-        .and_then(|template| template.render(minijinja::context! { loops => loops }))
+        .and_then(|template| {
+            template.render(minijinja::context! { loops => minijinja::value::Serde(loops) })
+        })
         .map_err(other)?;
     write_root_files(
         chats,

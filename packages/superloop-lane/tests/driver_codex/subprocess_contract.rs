@@ -1107,6 +1107,7 @@ fn suspend_recovery_reuses_the_saved_step_and_enforces_both_bounds() {
         ("suspend-attempt-wall", 900, 1, 60, 1, 0, false),
         ("suspend-killed", 900, 1, 60, 1, 0, false),
     ] {
+        let case = format!("{mode} gap={gap} awake={awake} budget={budget}");
         let harness = Harness::new(mode);
         let clock = harness.repo().join("clock");
         fs::write(&clock, "0:0").expect("initial paired clock");
@@ -1127,7 +1128,7 @@ fn suspend_recovery_reuses_the_saved_step_and_enforces_both_bounds() {
                 OsStr::new("saved duty"),
             ],
         );
-        assert_eq!(result.status.success(), success, "{mode}: {result:?}");
+        assert_eq!(result.status.success(), success, "{case}: {result:?}");
         let run_dir = if mode == "suspend-attempt-wall" {
             harness.repo().join("runs/box/20260828T120000Z-lane")
         } else {
@@ -1138,46 +1139,57 @@ fn suspend_recovery_reuses_the_saved_step_and_enforces_both_bounds() {
             mode,
             "suspend-terminated" | "suspend-attempt-wall" | "suspend-killed"
         ) {
-            assert!(report.contains("suspend_gap=900s"), "{mode}: {report}");
+            assert!(report.contains("suspend_gap=900s"), "{case}: {report}");
         }
         if mode == "suspend-attempt-wall" {
-            assert!(report.contains("cause=attempt-wall"), "{report}");
+            assert!(report.contains("cause=attempt-wall"), "{case}: {report}");
         }
         assert_eq!(
             fs::read_to_string(harness.root().join("ack"))
                 .expect("invocation count")
                 .trim(),
-            calls.to_string()
+            calls.to_string(),
+            "{case}: invocation count"
         );
         assert_eq!(
             harness.read("stdin"),
-            fs::read(run_dir.join("brief.txt")).expect("saved brief")
+            fs::read(run_dir.join("brief.txt")).expect("saved brief"),
+            "{case}: saved brief"
         );
         assert_eq!(
             fs::read_to_string(run_dir.join(".step-name"))
                 .expect("step identity")
                 .trim(),
-            "lane"
+            "lane",
+            "{case}: saved step"
         );
-        assert!(!run_dir.join("steps/lane").exists());
+        assert!(
+            !run_dir.join("steps/lane").exists(),
+            "{case}: archived saved step"
+        );
         let record = run_dir.join("suspend-resumes-lane.txt");
         if resumes == 0 {
-            assert!(!record.exists());
-            assert!(!report.contains("suspend_resumes="));
+            assert!(
+                !record.exists(),
+                "{case}: unexpected resume record at {}",
+                record.display()
+            );
+            assert!(!report.contains("suspend_resumes="), "{case}: {report}");
         } else {
             assert!(
                 report.contains(&format!("suspend_resumes={resumes}")),
-                "{report}"
+                "{case}: {report}"
             );
             assert_eq!(
                 fs::read_to_string(record)
                     .expect("recovery evidence")
                     .lines()
                     .count(),
-                resumes
+                resumes,
+                "{case}: resume count"
             );
             let argv = String::from_utf8(harness.read("argv")).expect("resume argv");
-            assert!(argv.contains("resume\nsession-1\n"), "{argv}");
+            assert!(argv.contains("resume\nsession-1\n"), "{case}: {argv}");
         }
     }
 }

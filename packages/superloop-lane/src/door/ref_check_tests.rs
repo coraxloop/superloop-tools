@@ -20,7 +20,7 @@ fn receive_args() -> [OsString; 2] {
 /// ´test:unit:door-receive-matched-packet-records-admitted-and-stdin-bytes´
 #[test]
 fn door_receive_matched_packet_records_admitted_and_stdin_bytes() {
-    let (temp, socket, server) = fixture(Scope::Work);
+    let (temp, socket, server) = fixture_stub(Scope::Work);
     let reply = stub_call(&socket, &receive_args(), &receive_packet("refs/heads/lane/R"))
         .expect("matched receive");
     assert_eq!(reply["reason"], "door-complete");
@@ -37,7 +37,7 @@ fn door_receive_matched_packet_records_admitted_and_stdin_bytes() {
 /// ´test:unit:door-receive-changed-packet-records-refused-and-stdin-bytes´
 #[test]
 fn door_receive_changed_packet_records_refused_and_stdin_bytes() {
-    let (temp, socket, server) = fixture(Scope::Work);
+    let (temp, socket, server) = fixture_stub(Scope::Work);
     let reply = stub_call(&socket, &receive_args(), &receive_packet("refs/heads/lane/S"))
         .expect("changed receive");
     assert_eq!(reply["reason"], "door-changed-ref-refusal");
@@ -54,7 +54,7 @@ fn door_receive_changed_packet_records_refused_and_stdin_bytes() {
 /// ´test:unit:door-receive-flush-without-ref-records-no-ref´
 #[test]
 fn door_receive_flush_without_ref_records_no_ref() {
-    let (temp, socket, server) = fixture(Scope::Work);
+    let (temp, socket, server) = fixture_stub(Scope::Work);
     let reply = stub_call(&socket, &receive_args(), b"0000").expect("no-op receive");
     assert_eq!(reply["reason"], "door-complete");
     assert_eq!(reply["ref_check"], "no-ref");
@@ -68,38 +68,67 @@ fn door_receive_flush_without_ref_records_no_ref() {
 fn door_receive_deadline_before_packet_records_not_reached() {
     use std::io::Write as _;
 
-    // This exercises a real socket timeout. Allow five seconds for the request
-    // to reach packet reception: the old 100 ms budget also covered durable
-    // mediation writes and could expire before compute on a loaded node.
-    const RECEIVE_DEADLINE_MS: u64 = 5000;
-    let (temp, socket, server) = fixture(Scope::Work);
-    let started = Instant::now();
-    let mut client = UnixStream::connect(&socket).expect("receive client");
-    let deadline = Instant::now() + Duration::from_secs(120);
-    frame_write_until(
-        &mut client,
-        &json!({"schema":2,"argv":[b"fixture".to_vec(),
-            b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":RECEIVE_DEADLINE_MS}),
-        deadline,
-    )
+    const RECEIVE_DEADLINE_MS: u64 = 120_000;
+    super::super::REQUEST_READY.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(|_| {
+            Ok(Instant::now() + Duration::from_millis(RECEIVE_DEADLINE_MS))
+        }));
+    });
+    SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = Some(Box::new(Instant::now)));
+    let (temp, mut client, server) = fixture_with_runner(Scope::Work, &FakeRunner);
+    client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(),
+            b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":RECEIVE_DEADLINE_MS}))
     .expect("receive request");
     client.write_all(b"000a").expect("incomplete packet");
-    let reply = frame_read_until(&mut client, deadline).expect("deadline reply");
-    assert!(started.elapsed() >= Duration::from_millis(RECEIVE_DEADLINE_MS));
+    let reply = client.answer();
     assert_eq!(reply["ref_check"], "not-reached");
-    assert!(matches!(
-        reply["reason"].as_str(),
-        Some("door-deadline-refusal" | "door-git-packet-refusal")
-    ), "packet-phase refusal: {reply}");
+    assert!(
+        matches!(
+            reply["reason"].as_str(),
+            Some("door-deadline-refusal" | "door-git-packet-refusal")
+        ),
+        "packet-phase refusal: {reply}"
+    );
     server.join().expect("server join").expect("server reply");
     let records = temp.store().list_run("R").expect("request records");
     assert_eq!(records[0].value()["effect"]["ref_check"], "not-reached");
 }
 
+/// ´test:unit:door-input-pump-deadline-before-packet-keeps-ref-not-reached´
+#[test]
+fn door_input_pump_deadline_before_packet_keeps_ref_not_reached() {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let (socket, mut peer) = UnixStream::pair().expect("input pair");
+    peer.write_all(b"000a").expect("partial receive packet");
+    let count = Arc::new(AtomicUsize::new(0));
+    let ref_check = Arc::new(AtomicU8::new(super::REF_NOT_REACHED));
+    let ref_packet = Arc::new(Mutex::new(None));
+    let abort = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let result = super::input_pump(
+        socket,
+        Vec::new(),
+        Some("refs/heads/lane/R"),
+        &count,
+        &ref_check,
+        &ref_packet,
+        &abort,
+        &stopped,
+        Instant::now() + Duration::from_millis(40),
+    );
+    assert_eq!(result, Err("door-deadline-refusal"));
+    assert_eq!(ref_check.load(Ordering::Relaxed), super::REF_NOT_REACHED);
+    assert!(abort.load(Ordering::Relaxed));
+    assert!(ref_packet.lock().expect("packet state").is_none());
+}
+
 /// ´test:unit:door-upload-records-not-applicable-ref-check´
 #[test]
 fn door_upload_records_not_applicable_ref_check() {
-    let (temp, socket, server) = fixture(Scope::Work);
+    let (temp, socket, server) = fixture_stub(Scope::Work);
     let args = [
         OsString::from("fixture"),
         OsString::from("git-upload-pack '~/mirrors/R.git'"),
