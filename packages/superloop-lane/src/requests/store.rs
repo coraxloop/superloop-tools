@@ -380,6 +380,14 @@ fn lock_retry_sleep(bound: Duration, ticket: Option<&queue::Ticket<'_>>) {
     }
 }
 
+pub(super) fn wait_now() -> Instant {
+    lock_retry_now()
+}
+
+pub(super) fn wait_pause(bound: Duration) {
+    lock_retry_sleep(bound, None);
+}
+
 #[cfg(test)]
 fn after_reader_records() {
     AFTER_READER_RECORDS.with(|hook| {
@@ -6002,11 +6010,16 @@ pub(crate) mod tests {
         .expect("read wall report");
         assert_eq!(rows.len(), 1);
 
-        let started = Instant::now();
-        let waited = fixture
-            .command(&["wait", "alpha", "--run", "R"], b"")
-            .expect("immediate wait");
-        assert!(started.elapsed() < Duration::from_secs(2));
+        let (waited, clock) = super::with_fixture_lock_clock(|| {
+            fixture
+                .command(&["wait", "alpha", "--run", "R"], b"")
+                .expect("immediate wait")
+        });
+        assert_eq!(
+            clock.waited.get(),
+            Duration::ZERO,
+            "immediate request wait credits no pause"
+        );
         assert_eq!(waited["requests"].as_array().expect("rows").len(), 1);
         assert_eq!(waited["requests"][0]["run"], "R");
         assert_eq!(waited["shape_record"], "current");
@@ -6041,8 +6054,10 @@ pub(crate) mod tests {
         let mut input = &b""[..];
         let mut output = Vec::new();
         let started = Instant::now();
-        let error = crate::requests::commands::run(&fixture.home, &args, &mut input, &mut output)
-            .expect_err("timeout refusal");
+        let (error, clock) = super::with_fixture_lock_clock(|| {
+            crate::requests::commands::run(&fixture.home, &args, &mut input, &mut output)
+                .expect_err("timeout refusal")
+        });
         let wall = started.elapsed();
         writeln!(
             std::io::stderr(),
@@ -6054,8 +6069,11 @@ pub(crate) mod tests {
         assert_eq!(error.status, 1);
         assert_eq!(error.detail, "no waiting requests before timeout");
         assert_eq!(output, Vec::<u8>::new());
-        assert!(wall >= Duration::from_secs(1));
-        assert!(wall < Duration::from_secs(3));
+        assert_eq!(
+            clock.waited.get(),
+            Duration::from_secs(1),
+            "request wait consumes exactly its timeout credit"
+        );
     }
 
     /// # Panics

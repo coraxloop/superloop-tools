@@ -2,7 +2,7 @@
 
 use std::io;
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -137,7 +137,7 @@ fn run_wait(
     output: &mut impl io::Write,
 ) -> Result<(), LaneError> {
     let (state, run, timeout) = wait_options(args)?;
-    let deadline = Instant::now() + timeout;
+    let deadline = super::store::wait_now() + timeout;
     let store = Store::open(owner_home, loop_name, false)?.with_reader_deadline(deadline);
     let mut completed_reads = 0_usize;
     let mut last_contention = String::new();
@@ -180,7 +180,7 @@ fn run_wait(
             }
             Err(error) => return Err(error.into_error()),
         }
-        let now = Instant::now();
+        let now = super::store::wait_now();
         if now >= deadline {
             return Err(LaneError::operation(
                 "requests-wait-timeout",
@@ -205,7 +205,7 @@ fn run_wait(
         }) {
             continue;
         }
-        std::thread::sleep(pause.min(deadline - now));
+        super::store::wait_pause(pause.min(deadline - now));
     }
 }
 

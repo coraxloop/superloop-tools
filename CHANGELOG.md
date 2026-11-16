@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Correspondence subprocess checks now give executable readiness a distant hang guard and use publication itself to prove cursor-lock ownership. Unexpected child results name their exit status and stderr with a bounded stdout tail, and the slow SSH fixture stays beyond its five-second cutoff. The installed client is unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``; ``rule:conformance:ordering-and-timing-evidence``).
 
+- Request-wait regressions use the store’s existing logical clock: an immediate result credits no pause and timeout credits exactly the requested second. Installed wait deadlines and pauses are unchanged (``test:unit:requests-wait-immediate-run-and-usage``; ``test:unit:requests-wait-timeout-has-no-rows-and-a-refusal``).
+
 - Claude-home lock coverage checks the five-second budget in exact logical 25 ms steps; public command cases keep the full-budget lower bound and a distant hang guard, without a scheduler upper-bound verdict. Installed lock limits are unchanged (``test:unit:claude-directory-lock-refuses-with-path-within-bound``; ``test:integration:claude-preparation-preview-and-apply-refuse-locked-loop``; ``test:integration:claude-move-preview-refuses-locked-loop``).
 
 - Door transport tests decide disconnect, receive expiry, child exit and input release from their events, with distant hang guards instead of short fixture windows. Installed programs and door deployment are unchanged (`prob:gates:elapsed-time-assertions-are-censused-and-rewritten`).
