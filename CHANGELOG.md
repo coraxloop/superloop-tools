@@ -112,6 +112,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Door class, full-store and mode-exercise fixtures consume lock-wait progress before reading their final reply. This removes first-frame assumptions from these tests without changing installed doors (``prob:gates:load-sensitive-tests-made-deterministic``).
 
+- Three permission-triage topology assertions now share the same implemented-roster fixture result, avoiding two duplicate 345-trial probes while retaining each status, stderr and verdict check. Installed topology behavior is unchanged (``test:integration:disabled-table-rows-are-candidates-and-do-not-block``; ``test:integration:fix-implemented-roster-reaches-ready``).
+
 - The topology ceiling fixture now gives its version preflight a distant test-only hang guard while keeping the 20 ms trial ceiling, so a delayed process start cannot turn censored-trial evidence into an infrastructure exit. Deployed topology ceilings and verdicts are unchanged (``test:integration:bite-two-generated-counts-and-censored-latency-survive-failure``).
 
 - The correspondence harness now checks admin-only feed delivery and an empty watch's deadline separately, so a 250 ms watch window cannot turn node scheduling delay into a failed combined case. The deployed poll and watch behavior is unchanged (``test:integration:release-harness-keeps-all-correspondence-pins``).

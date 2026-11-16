@@ -1984,7 +1984,7 @@ fn every_fake_harness_mode_is_driven_by_a_test() {
 /// ´test:integration:disabled-table-rows-are-candidates-and-do-not-block´
 #[test]
 fn disabled_table_rows_are_candidates_and_do_not_block() {
-    let (_directory, output, value) = run_roster_mode("topology-auto-executed", "implemented");
+    let (output, value) = implemented_roster();
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(value["selected_topology"], "bypass");
     assert_eq!(value["deployment_blocked"], true);
@@ -3558,14 +3558,18 @@ fn topology_command_usage_exits_two() {
     );
 }
 
-fn bite_two_good_verdict() -> &'static Value {
-    static VERDICT: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    VERDICT.get_or_init(|| {
+fn implemented_roster() -> &'static (Output, Value) {
+    static PROBE: std::sync::OnceLock<(Output, Value)> = std::sync::OnceLock::new();
+    PROBE.get_or_init(|| {
         let (_directory, output, verdict) =
             run_roster_mode("topology-auto-executed", "implemented");
         assert_eq!(output.status.code(), Some(0), "{}", verdict["reasons"]);
-        verdict
+        (output, verdict)
     })
+}
+
+fn bite_two_good_verdict() -> &'static Value {
+    &implemented_roster().1
 }
 
 fn required_rows<'a>(verdict: &'a Value, phase: &str) -> &'a [Value] {
@@ -3991,7 +3995,7 @@ fn fix_failure_keeps_independent_injections_running() {
 /// ´test:integration:fix-implemented-roster-reaches-ready´
 #[test]
 fn fix_implemented_roster_reaches_ready() {
-    let (_directory, output, verdict) = run_roster_mode("topology-auto-executed", "implemented");
+    let (output, verdict) = implemented_roster();
     assert_eq!(
         output.status.code(),
         Some(0),
