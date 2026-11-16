@@ -136,7 +136,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Door class, full-store and mode-exercise fixtures consume lock-wait progress before reading their final reply. This removes first-frame assumptions from these tests without changing installed doors (``prob:gates:load-sensitive-tests-made-deterministic``).
 
-- Meson lint, release, Cargo and slow-suite limits now leave headroom for loaded runs and end hangs rather than refusing healthy checks. Installed commands are unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
+- Meson lint, release, Cargo and slow-suite limits now leave headroom for loaded runs and end hangs rather than refusing healthy checks. Installed commands are unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``; ``prob:build:release-linter-check-timeout-from-measured-wall``).
 
 - The steward overlap harness now waits for its fixture's entered event under a distant guard; delayed scheduling no longer reports a missing lock holder. Installed steward behavior is unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
 
