@@ -1007,6 +1007,7 @@ fn periodic_scope_loss(
         (owner, runs, &runs.join("R")),
         Arc::clone(&cancelled),
         admission,
+        crate::settings::BoxBackend::Claude,
         move |cancelled: &std::sync::atomic::AtomicBool| {
             pass.send(()).expect("pass-complete event");
             match resume.recv_timeout(Duration::from_secs(30)) {

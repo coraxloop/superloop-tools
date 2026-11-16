@@ -2226,6 +2226,7 @@ pub(crate) fn fixture_authority_with_wait<W>(
     paths: (&Path, &Path, &Path),
     cancelled: Arc<AtomicBool>,
     admission: &RuntimeAdmission,
+    backend: BoxBackend,
     wait: W,
 ) -> Result<std::thread::JoinHandle<Result<(), LaneError>>, LaneError>
 where
@@ -2236,11 +2237,11 @@ where
         "alpha".into(),
         paths.1.to_path_buf(),
         paths.2.to_path_buf(),
-        BoxBackend::Claude,
+        backend,
         cancelled,
         (
             crate::credential::service_endpoint(),
-            CredentialThreadCustody::capture_admitted(BoxBackend::Claude, admission)?,
+            CredentialThreadCustody::capture_admitted(backend, admission)?,
             wait,
         ),
     )
