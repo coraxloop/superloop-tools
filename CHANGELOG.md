@@ -86,6 +86,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Door transport tests decide disconnect, receive expiry, child exit and input release from their events, with distant hang guards instead of short fixture windows. Installed programs and door deployment are unchanged (`prob:gates:elapsed-time-assertions-are-censused-and-rewritten`).
 
+- A repeated late `bind-reply` names the settlement recovery only for the active failed round. Repeating an earlier round’s binding after a later failure keeps the ordinary phase refusal, instead of suggesting a recovery that cannot admit that step (``claim:superlooplane:late-reply-recovery-keeps-delivered-replies``).
+
 - Door transport tests distinguish pre-spawn refusal from running-child expiry by a test-only spawn hook, without a node-speed verdict; deployed deadlines are unchanged (`[ORCHESTRATION-rule:conformance:ordering-and-timing-evidence]`).
 
 - Door transport deadline fixtures consume lock-wait progress before checking the final reply, using the shared bounded frame reader; deployed behavior is unchanged (`[ORCHESTRATION-rule:conformance:ordering-and-timing-evidence]`).

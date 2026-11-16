@@ -531,6 +531,7 @@ fn settle_late_reply(fixture: &host::Host, failed: &serde_json::Value) {
     let saved: serde_json::Value = serde_json::from_slice(&fixture.reservation()).expect("settled");
     assert_eq!(saved["phase"], "settled");
     assert_eq!(saved["rounds"][1]["phase"], "settled");
+    earlier_bound_reply_refuses_without_recovery_remedy(fixture, &fixture.reservation());
     assert_eq!(
         saved["driver_end"], failed["driver_end"],
         "settlement preserves driver failure"
@@ -547,6 +548,44 @@ fn settle_late_reply(fixture: &host::Host, failed: &serde_json::Value) {
         .next_launch(false, true)
         .expect("late reply owes no thread choice");
     assert_eq!(next["helper_preflight"]["state"], "passed");
+}
+
+fn earlier_bound_reply_refuses_without_recovery_remedy(fixture: &host::Host, bound: &[u8]) {
+    let mut changed: serde_json::Value = serde_json::from_slice(bound).expect("bound record");
+    changed["phase"] = serde_json::json!("failed");
+    assert_eq!(changed["rounds"][1]["phase"], "settled");
+    changed["active_round"] = serde_json::json!("later");
+    changed["rounds"]
+        .as_array_mut()
+        .expect("rounds")
+        .push(serde_json::json!({"step":"later", "phase":"failed", "reply":null}));
+    let path = fixture.home().join("runs/.reservation-R.json");
+    host::write(
+        path.clone(),
+        serde_json::to_vec(&changed).expect("later failure"),
+        0o600,
+    );
+    let before = fixture.reservation();
+    let inventory = fixture.inventory();
+    let error = fixture
+        .bind_reply_for("review")
+        .expect_err("earlier binding is not active recovery");
+    assert_eq!(error.kind, "mail-delivery");
+    assert_eq!(
+        error.detail, "binding requires a started or settled reservation",
+        "earlier bound step must not advertise active-round settlement"
+    );
+    assert_eq!(
+        fixture.reservation(),
+        before,
+        "earlier-step refusal preserves record"
+    );
+    assert_eq!(
+        fixture.inventory(),
+        inventory,
+        "earlier-step refusal preserves files"
+    );
+    host::write(path, bound, 0o600);
 }
 
 fn late_reply_refusals(fixture: &host::Host, failed: &serde_json::Value) {

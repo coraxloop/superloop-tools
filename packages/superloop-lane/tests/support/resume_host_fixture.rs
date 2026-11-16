@@ -91,6 +91,13 @@ impl Host {
     pub(super) fn bind_reply(&self) -> Result<Value, superloop_lane::error::LaneError> {
         let record: Value = serde_json::from_slice(&self.reservation()).expect("active record");
         let step = record["active_round"].as_str().expect("active step");
+        self.bind_reply_for(step)
+    }
+    pub(super) fn bind_reply_for(
+        &self,
+        step: &str,
+    ) -> Result<Value, superloop_lane::error::LaneError> {
+        let record: Value = serde_json::from_slice(&self.reservation()).expect("active record");
         if !self.home.join("late-reply").exists()
             && record["mail_replies"].as_array().is_none_or(Vec::is_empty)
         {

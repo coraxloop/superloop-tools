@@ -178,6 +178,7 @@ pub fn run_from(
     {
         if reply
             && record["phase"] == "failed"
+            && record["active_round"] == request.step
             && record["mail_replies"]
                 .as_array()
                 .is_some_and(|rows| rows.iter().any(|row| row["step"] == request.step))
