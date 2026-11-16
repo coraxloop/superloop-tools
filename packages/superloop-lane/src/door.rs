@@ -5341,7 +5341,7 @@ mod tests {
     }
 
     // Keep one bounded read window across all request-lock credit frames.
-    fn fixture_final_frame(client: &mut UnixStream) -> Value {
+    pub(super) fn fixture_final_frame(client: &mut UnixStream) -> Value {
         let until = Instant::now() + FIXTURE_HANG;
         loop {
             let frame = frame_read_until(client, until).expect("reply or lock-wait credit");

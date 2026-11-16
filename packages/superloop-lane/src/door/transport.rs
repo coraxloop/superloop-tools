@@ -1854,6 +1854,7 @@ mod tests {
         HostRunner, Operation, Runner, checked_ref_packet, compute_client_deadline,
         compute_deadline_frame, read_owner_leaf, stub_call, stub_call_stream,
     };
+    use crate::door::tests::fixture_final_frame;
     use crate::door::{
         Registration, Scope, frame_read_until, frame_write_until, peer_uid, serve_request,
     };
@@ -3207,7 +3208,7 @@ mod tests {
         client
             .shutdown(std::net::Shutdown::Write)
             .expect("deadline stdin end");
-        let reply = frame_read_until(&mut client, observation).expect("deadline reply");
+        let reply = fixture_final_frame(&mut client);
         assert_eq!(reply["status"], 125);
         assert_eq!(reply["reason"], "door-deadline-refusal");
         server.join().expect("server join").expect("server reply");

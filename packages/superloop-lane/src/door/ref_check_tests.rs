@@ -85,7 +85,7 @@ fn door_receive_deadline_before_packet_records_not_reached() {
     )
     .expect("receive request");
     client.write_all(b"000a").expect("incomplete packet");
-    let reply = frame_read_until(&mut client, deadline).expect("deadline reply");
+    let reply = fixture_final_frame(&mut client);
     assert_eq!(reply["ref_check"], "not-reached");
     assert!(
         matches!(
