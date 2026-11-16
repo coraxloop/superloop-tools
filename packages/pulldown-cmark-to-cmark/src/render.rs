@@ -13,6 +13,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     fmt::{self, Write},
+    ops::Range,
 };
 use unicase::UniCase;
 
@@ -253,6 +254,7 @@ pub struct Renderer {
     reference_labels: HashSet<UniCase<CowStr<'static>>>,
     literal_labels: HashSet<UniCase<CowStr<'static>>>,
     list_label: Option<String>,
+    retained_table_code: Vec<(Range<usize>, Event<'static>)>,
 }
 
 impl Renderer {
@@ -272,6 +274,7 @@ impl Renderer {
             reference_labels: HashSet::new(),
             literal_labels: HashSet::new(),
             list_label: None,
+            retained_table_code: Vec::new(),
         }
     }
 
@@ -349,6 +352,8 @@ impl Renderer {
                 events,
                 &reference_labels,
                 self.validation_options(),
+                &original.retained_table_code,
+                true,
             ) {
                 *self = original;
                 return Ok((output, definitions));
@@ -491,12 +496,18 @@ impl Renderer {
         let mut candidate = self.clone();
         let output = candidate.render_block(events, next, options, source_spelling, delimiters)?;
         let definitions = candidate.reference_definitions()?;
+        // Source-spelling trials still parse the authored table separators.
+        // Only the synthesized fallback protects unescaped code pipes too:
+        // otherwise a previously failing source trial could also retain text
+        // the formatter escaped before, such as a stray backtick in the table.
         if events_match(
             &output,
             &definitions,
             events,
             previous_labels,
             self.validation_options(),
+            &candidate.retained_table_code,
+            !source_spelling,
         ) {
             Ok(Some((candidate, output, definitions)))
         } else {
@@ -527,6 +538,7 @@ impl Renderer {
         source_spelling: bool,
         delimiters: Delimiters,
     ) -> Result<String, Error> {
+        self.retained_table_code.clear();
         let run_delimiters = delimiters != Delimiters::PREFERRED;
         // Match containers once; all lookahead stays inside this buffered block.
         let mut ends = vec![events.len(); events.len()];
@@ -745,7 +757,16 @@ impl Renderer {
                         .as_deref()
                         .filter(|source| code_source_matches(source, event))
                     {
+                        let start = self.output.text.len();
                         self.output.write_str(source)?;
+                        let end = self.output.text.len();
+                        if self.in_table()
+                            && source.contains('|')
+                            && &self.output.text[start..end] == source
+                        {
+                            self.retained_table_code
+                                .push((start..end, event.clone().into_static()));
+                        }
                         self.last = Last::Inline;
                         i += 1;
                         continue;
@@ -2134,25 +2155,43 @@ fn events_match(
     expected: &[BufferedEvent],
     previous_labels: &HashSet<UniCase<CowStr<'static>>>,
     parser_options: ParserOptions,
+    retained_table_code: &[(Range<usize>, Event<'static>)],
+    protect_pipes: bool,
 ) -> bool {
     use pulldown_cmark::{BrokenLink, utils::TextMergeStream};
     // Leading blank lines disable metadata recognition, so only prefix a
     // separator when this block actually has reference definitions.
-    let markdown = if definitions.is_empty() {
+    let mut markdown = if definitions.is_empty() {
         Cow::Borrowed(output)
     } else {
         Cow::Owned(format!("{definitions}\n\n{output}"))
     };
-    // The caller's table adaptation retains literal code spelling, including
-    // the backslash in a code-span pipe. The table parser removes that escape.
-    // Reconcile only exact retained code spellings, using the same check as
-    // the renderer; all surrounding events still undergo block validation.
-    let retained_code: HashMap<_, _> = expected
+    // The caller's table adaptation treats code-span pipes as literal code,
+    // including their backslashes. Protect only the exact spans the renderer
+    // retained after checking their source/event shape. Masking keeps offsets
+    // stable and stops the table parser from splitting cells or eating escapes;
+    // only a code event at the same complete range regains its original value.
+    // Every surrounding event is still validated against the rendered block.
+    let prefix = if definitions.is_empty() {
+        0
+    } else {
+        definitions.len() + 2
+    };
+    let retained_code: HashMap<_, _> = retained_table_code
         .iter()
-        .filter(|event| matches!(event.event, Event::Code(_)))
-        .filter_map(|event| {
-            let source = event.source.as_deref()?;
-            code_source_matches(source, &event.event).then_some((source, &event.event))
+        .map(|(range, event)| {
+            let range = range.start + prefix..range.end + prefix;
+            if protect_pipes {
+                let pipes: Vec<_> = markdown[range.clone()]
+                    .bytes()
+                    .enumerate()
+                    .filter_map(|(offset, byte)| (byte == b'|').then_some(range.start + offset))
+                    .collect();
+                for at in pipes {
+                    markdown.to_mut().replace_range(at..=at, "x");
+                }
+            }
+            (range, event)
         })
         .collect();
     let mut expected: Vec<_> =
@@ -2186,7 +2225,7 @@ fn events_match(
                 Event::Start(Tag::Table(_)) => in_table = true,
                 Event::End(TagEnd::Table) => in_table = false,
                 Event::Code(_) if in_table => {
-                    if let Some(retained) = retained_code.get(&markdown[range]) {
+                    if let Some(retained) = retained_code.get(&range) {
                         return (*retained).clone();
                     }
                 }

@@ -96,7 +96,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Claude-home lock coverage checks the five-second budget in exact logical 25 ms steps; public command cases keep the full-budget lower bound and a distant hang guard, without a scheduler upper-bound verdict. Installed lock limits are unchanged (``test:unit:claude-directory-lock-refuses-with-path-within-bound``; ``test:integration:claude-preparation-preview-and-apply-refuse-locked-loop``; ``test:integration:claude-move-preview-refuses-locked-loop``).
 
-- The Markdown writer validates retained code-span spelling inside table cells consistently with its renderer, so an escaped pipe beside emphasis or bold does not trigger a false serialization refusal. Exact source/event matching and validation of the surrounding block remain required. Serialization refusals name the starting line of the buffered block, including after overlay slots (`prin:publictools:well-made-and-good-to-use`).
+- The Markdown writer validates retained code-span spelling inside table cells consistently with its renderer, so a literal or escaped pipe beside emphasis or bold does not trigger a false serialization refusal. Exact source/event matching and validation of the surrounding block remain required. Serialization refusals name the starting line of the buffered block, including after overlay slots (`prin:publictools:well-made-and-good-to-use`).
 
 - Door transport tests decide disconnect, receive expiry, child exit and input release from their events, with distant hang guards instead of short fixture windows. Installed programs and door deployment are unchanged (`prob:gates:elapsed-time-assertions-are-censused-and-rewritten`).
 

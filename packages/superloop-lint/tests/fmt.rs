@@ -42,6 +42,9 @@ fn code_span_pipes_preserve_every_cell() {
         ("`\\|`", ""),
         ("\\| *label*", ""),
         ("``a \\| b`` **label**", ""),
+        ("`a|b` *label*", ""),
+        ("**label** `a|b`", ""),
+        ("``a`|b`` *label*", ""),
         ("`dispatch|report`", "|404|stray ` tick|OPEN|linter|\n"),
     ] {
         let before = format!(

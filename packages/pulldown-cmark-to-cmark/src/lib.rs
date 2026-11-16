@@ -534,6 +534,45 @@ mod tests {
                 }
             }
         }
+        for (code, label, definitions) in [
+            ("`a|b`", "*label*", ""),
+            ("``a`|b``", "**label**", ""),
+            (
+                "`a|b`",
+                "*[label][ref]*",
+                "\n\n[ref]: https://example.invalid",
+            ),
+        ] {
+            assert_literal_table_code(code, label, definitions);
+        }
+    }
+
+    fn assert_literal_table_code(code: &str, label: &str, definitions: &str) {
+        let source = format!("|a|b|\n|-|-|\n|{code} {label}|c|{definitions}");
+        // Match the caller's table-code adaptation without changing offsets.
+        let protected = source.replacen(code, &code.replace('|', "x"), 1);
+        let events = Parser::new_ext(&protected, ParseOptions::ENABLE_TABLES)
+            .into_offset_iter()
+            .map(|(event, range)| {
+                let event = if matches!(event, Event::Code(_)) {
+                    Parser::new(&source[range.clone()])
+                        .find(|event| matches!(event, Event::Code(_)))
+                        .expect("the retained spelling is a code span")
+                } else {
+                    event
+                };
+                (event, Some(range))
+            });
+        let mut output = String::new();
+        cmark_with_source_range_and_options(
+            events,
+            &source,
+            &mut output,
+            ParseOptions::ENABLE_TABLES,
+            SerializeOptions::default(),
+        )
+        .expect("serialize literal table pipes beside emphasis and references");
+        assert_eq!(output, source);
     }
 
     fn assert_round_trip(input: &str, parse_options: ParseOptions) {
