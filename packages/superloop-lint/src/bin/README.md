@@ -13,4 +13,7 @@ The `superloop-lint` binary accepts these commands; each corpus command reads on
 
 **Table (Unit test matrix)**
 
-No unit tests in this folder.
+|Test|Area|Claim|
+|----|----|-----|
+|(`test:unit:panic-and-terminal-records-keep-identity`)|identity|Panic and terminal refusal records retain the process identity without exposing a panic payload.|
+|(`test:unit:unavailable-running-image-is-named-without-refusing`)|identity|A missing running-image handle is a named absence, never an execution prerequisite.|

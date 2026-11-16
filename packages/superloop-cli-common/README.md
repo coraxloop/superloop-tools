@@ -117,6 +117,8 @@ The crate is a single flat module; `publication` is private and its published it
 - Constructors: `new`, `help`, `version`, `usage_error`, `tty_refusal`, `panic`, `status`, `diagnostic`. `usage_error` fixes its own message; the caller supplies only the clap error class.
 - `enum ControlPlaneRecordKind { Help, Version, UsageError, TtyRefusal, Panic, Status, Diagnostic }` and the matching `enum ControlPlaneFields` payloads; `enum StandardStream { Stdout, Stderr }`.
 - `emit_control_plane_record(&ControlPlaneRecord) -> io::Result<()>` — one JSON line on stderr under a process-wide write lock. Does not depend on `tracing`, so it is usable before a subscriber exists.
+- `register_build_identity(BuildIdentity) -> bool` — installs immutable process publication metadata once, before argument parsing. Opted-in commands carry it on control records, tracing diagnostics, direct and build results. The shared version constructor derives its readable message from that identity for both the sole `--version` route and clap's `-V` route. Commands that do not register identity retain their existing representation.
+- `publication_json(&report) -> serde_json::Result<Vec<u8>>` — encodes the same identity envelope for responses that must be published identically as a file and stdout. Identity precedes the report's fields, preserving a final elapsed-time member.
 - `struct CliExit { record, exit }` — a record paired with the class to exit under; `new`, `exit_code`.
 
 ### Argument parsing · `sec:clicommon:argument-parsing`

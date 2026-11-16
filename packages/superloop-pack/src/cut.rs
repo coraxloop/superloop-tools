@@ -883,6 +883,10 @@ struct UnpublishedLabels {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CitationSites {
+    // This reader consumes citations, not an artifact pin. Retain the declared
+    // identity shape without making executable readability a corpus condition.
+    #[serde(rename = "identity")]
+    _identity: Option<superloop_cli_common::BuildIdentity>,
     namespace: String,
     version: [u64; 3],
     sites: Vec<CitationSite>,

@@ -2,6 +2,8 @@
 
 The estate's label-calculus linter for repository prose and source code.
 
+Every result and stderr record names the running build in `identity`, including informational results and refusals before a normal report exists. Both `--version` and `-V` emit one JSON version record on stderr with a readable message and the same identity. The artifact measurement comes from the running image, not a neighbouring build record; execute-only installs retain their commands and report a null digest with reason `unreadable`. Platforms without a running-image handle report `no-running-image-handle`. Unverified source provenance is explicitly unknown. The public envelope is defined in ``docs/spec/output.md``; adding identity changes neither clean calculations nor exit statuses.
+
 Copyright (c) 2026 Torrust project contributors. Licensed under GPL-3.0-or-later; see [LICENSE-CODE](../../LICENSE-CODE).
 
 Declare the repository carrier explicitly at top level in `.linter/owners.toml` with `root_owner = "OWNER"`, replacing `OWNER` with a name registered in `owners`. A root-files partition alone does not declare the carrier; paths outside every partition use this explicit root owner for label attribution while partition coverage still reports them. Assembly publication checks use `assembly.publications-current`.

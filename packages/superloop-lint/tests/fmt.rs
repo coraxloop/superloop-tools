@@ -5,6 +5,8 @@
 //! | Test | Area | Claim |
 //! |------|------|-------|
 //! | [`construct_fixtures_have_stable_bytes`] | fmt | Public Markdown constructs retain their expected bytes and are idempotent. |
+//! | [`build_identity_survives_versions_results_and_refusals`] | identity | Both version spellings, findings, clean reports and startup refusals identify the same executable bytes without consulting a sidecar. |
+//! | [`execute_only_linter_keeps_judging_with_named_digest_absence`] | identity | Execute-only installs retain version and formatter access while naming the unreadable image instead of taking either command away from their reader. |
 //! | [`code_span_pipes_preserve_every_cell`] | fmt | Code-span pipes are cell text, so formatting retains all four columns and both literal pipe spellings without rewriting their code spans. |
 //! | [`table_refusals_name_a_location_and_recovery`] | fmt | Ambiguous table refusals identify their category, source range and recovery action; an ambiguous table row names its line and retains the refused source. |
 //! | [`refusal_locations_cross_overlay_slots`] | fmt | Refusals after one or more overlay slots retain original lines and byte offsets, including CRLF padding and a multibyte prefix, in both modes. |
@@ -62,6 +64,151 @@ fn construct_fixtures_have_stable_bytes() {
             assert_eq!(report["files_changed"], usize::from(index == 0 && source != expected), "{report}");
             assert_eq!(fs::read_to_string(&path).expect("read construct"), expected);
         }
+    }
+}
+
+/// Both version spellings, findings, clean reports and startup refusals identify
+/// the same executable bytes without consulting a sidecar.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a publication loses its measured identity.
+///
+/// ´claim:identity:build-identity-survives-versions-results-and-refusals´
+/// ´test:integration:build-identity-survives-versions-results-and-refusals´
+#[test]
+fn build_identity_survives_versions_results_and_refusals() {
+    use sha2::{Digest, Sha256};
+    let binary = env!("CARGO_BIN_EXE_superloop-lint");
+    let digest: String = Sha256::digest(fs::read(binary).expect("binary bytes"))
+        .iter()
+        .flat_map(|byte| {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 15)]),
+            ]
+        })
+        .collect();
+    let root = tempfile::tempdir().expect("fixture");
+    let path = root.path().join("clean.md");
+    fs::write(&path, "A paragraph.\n").expect("source");
+    let mut held = None;
+    for arguments in [
+        vec!["--version"],
+        vec!["-V"],
+        vec!["--help"],
+        vec!["--invalid"],
+        vec!["fmt", "--check", path.to_str().expect("path")],
+        vec!["check", "--root", root.path().to_str().expect("root")],
+    ] {
+        let output = Command::new(binary)
+            .args(&arguments)
+            .output()
+            .expect("linter");
+        let records = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .chain(output.stderr.split(|byte| *byte == b'\n'))
+            .filter(|line| !line.is_empty());
+        let mut count = 0;
+        for line in records {
+            let value: serde_json::Value = serde_json::from_slice(line).expect("JSON record");
+            let identity = &value["identity"];
+            assert_eq!(
+                identity["artifact_sha256"], digest,
+                "{arguments:?}: {value}"
+            );
+            assert_eq!(identity["digest_absence"], serde_json::Value::Null);
+            assert_eq!(identity["version"], env!("CARGO_PKG_VERSION"));
+            if let Some(previous) = &held {
+                assert_eq!(identity, previous);
+            } else {
+                held = Some(identity.clone());
+            }
+            if arguments == ["--version"] || arguments == ["-V"] {
+                assert_eq!(
+                    value["fields"]["version"],
+                    concat!("superloop-lint ", env!("CARGO_PKG_VERSION"))
+                );
+                assert!(
+                    value["message"]
+                        .as_str()
+                        .expect("message")
+                        .contains(&digest)
+                );
+                assert_eq!(output.stdout, b"");
+                assert!(output.status.success());
+            }
+            count += 1;
+        }
+        assert!(count > 0, "{arguments:?}");
+    }
+    fs::write(&path, "A paragraph that is\nhard wrapped.\n").expect("unformatted");
+    let output = Command::new(binary)
+        .args(["fmt", "--check"])
+        .arg(&path)
+        .output()
+        .expect("finding");
+    assert_eq!(output.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("finding report");
+    assert_eq!(Some(report["identity"].clone()), held);
+}
+
+/// Execute-only installs retain version and formatter access while naming the
+/// unreadable image instead of taking either command away from their reader.
+///
+/// # Panics
+/// Panics only if fixture IO fails or execute-only publication loses its identity.
+///
+/// ´claim:identity:execute-only-linter-keeps-judging-with-named-digest-absence´
+/// ´test:integration:execute-only-linter-keeps-judging-with-named-digest-absence´
+#[test]
+fn execute_only_linter_keeps_judging_with_named_digest_absence() {
+    const COPY: &str = "SUPERLOOP_IDENTITY_COPY_FIXTURE";
+    if let Some(path) = std::env::var_os(COPY) {
+        fs::copy(env!("CARGO_BIN_EXE_superloop-lint"), &path).expect("copy");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o111)).expect("execute only");
+        return;
+    }
+    let root = tempfile::tempdir().expect("fixture");
+    let binary = root.path().join("linter");
+    // A separate, reaped writer prevents parallel test spawns from inheriting
+    // a writable image descriptor and making the later exec fail with ETXTBSY.
+    let copied = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "execute_only_linter_keeps_judging_with_named_digest_absence",
+        ])
+        .env(COPY, &binary)
+        .output()
+        .expect("isolated copy writer");
+    assert!(copied.status.success(), "{copied:?}");
+    if fs::File::open(&binary).is_ok() {
+        return;
+    } // Privileged accounts can still read mode 0111.
+    let path = root.path().join("source.md");
+    fs::write(&path, "A paragraph.\n").expect("source");
+    for arguments in [
+        vec!["--version"],
+        vec!["-V"],
+        vec!["fmt", "--check", path.to_str().expect("path")],
+    ] {
+        let output = Command::new(&binary)
+            .args(arguments)
+            .output()
+            .expect("linter");
+        assert!(output.status.success(), "{output:?}");
+        let bytes = if output.stdout.is_empty() {
+            &output.stderr
+        } else {
+            &output.stdout
+        };
+        let record: serde_json::Value = serde_json::from_slice(bytes).expect("record");
+        assert_eq!(
+            record["identity"]["artifact_sha256"],
+            serde_json::Value::Null
+        );
+        assert_eq!(record["identity"]["digest_absence"], "unreadable");
     }
 }
 

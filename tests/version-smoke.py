@@ -100,9 +100,31 @@ def main():
             raise ValueError("record schema must be an integer")
     except (ValueError, UnicodeDecodeError) as error:
         failures.append(str(error))
+    if command == "superloop-lint" and isinstance(record, dict):
+        identity = record.get("identity", {})
+        if not isinstance(identity, dict):
+            identity = {}
+        measured = hashlib.sha256(args.binary.read_bytes()).hexdigest()
+        artifact = identity.get("artifact_sha256")
+        absence = identity.get("digest_absence")
+        measurement_valid = ((artifact == measured and absence is None)
+                             or (artifact is None and absence in
+                                 ("unreadable", "no-running-image-handle")))
+        required = {"schema", "repository", "version", "source_commit", "source_state",
+                    "release_tag", "artifact_sha256", "digest_absence"}
+        if (set(identity) != required or identity.get("schema") != 1
+                or identity.get("repository") != "superloop-tools"
+                or identity.get("version") != version
+                or not measurement_valid):
+            failures.append("linter identity differs from the measured executable")
+        expected["identity"] = identity
+        source = identity.get("source_commit") or "unknown"
+        artifact = identity.get("artifact_sha256") or identity.get("digest_absence")
+        expected["message"] = (f"{version_text} superloop-tools@{source} "
+                               f"{identity.get('source_state')} sha256:{artifact}")
     if record != expected:
         failures.append("version record does not match manifest identity and compiled commit")
-    print(json.dumps({
+    summary = {
         "binary": binary,
         "exit": result.returncode,
         "stdout_bytes": len(result.stdout),
@@ -112,7 +134,12 @@ def main():
         "commit": args.commit,
         "wall_seconds": round(wall, 6),
         "failures": failures,
-    }, separators=(",", ":")), flush=True)
+    }
+    if command == "superloop-lint" and isinstance(record, dict):
+        # Keep absence visible to artifact-admission readers. This version
+        # conformance check does not add their requirement for a measured image.
+        summary["identity"] = record.get("identity")
+    print(json.dumps(summary, separators=(",", ":")), flush=True)
     return int(bool(failures))
 
 

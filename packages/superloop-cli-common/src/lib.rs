@@ -9,7 +9,7 @@ use std::future::Future;
 use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
 
 use clap::{CommandFactory, Parser};
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,93 @@ static PANIC_REPORTED: AtomicBool = AtomicBool::new(false);
 // location but no payload.
 static PANIC_PAYLOAD_REPORTING_ENABLED: AtomicBool = AtomicBool::new(false);
 static STDERR_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Immutable source claim and measurement of the executable that ran.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BuildIdentity {
+    /// Identity protocol version.
+    pub schema: u32,
+    /// Public source repository name.
+    pub repository: String,
+    /// Package version compiled into the executable.
+    pub version: String,
+    /// Verified public source commit, when known.
+    pub source_commit: Option<String>,
+    /// Release, candidate, dirty, or unknown source state.
+    pub source_state: String,
+    /// Explicitly verified release tag, only for a release.
+    pub release_tag: Option<String>,
+    /// Full running-image digest for comparison with an independently held release
+    /// artifact or approved pin. A supplier controlling candidate installation
+    /// bytes cannot replace that trusted reference; comparison detects substitution.
+    /// This observation cannot authenticate a deliberately dishonest executable
+    /// (see ``spec:output:linter-build-identity`` in ``docs/spec/output.md``).
+    pub artifact_sha256: Option<String>,
+    /// Stable reason when the running image could not be measured.
+    pub digest_absence: Option<String>,
+}
+
+static BUILD_IDENTITY: OnceLock<BuildIdentity> = OnceLock::new();
+
+/// Register process-wide publication identity before parsing arguments.
+/// Returns false if an identity was already registered; it cannot be replaced.
+#[must_use]
+pub fn register_build_identity(identity: BuildIdentity) -> bool {
+    BUILD_IDENTITY.set(identity).is_ok()
+}
+
+struct Identified<'a, T> {
+    identity: Option<&'static BuildIdentity>,
+    report: &'a T,
+}
+
+impl<T: Serialize> Serialize for Identified<'_, T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Envelope<'a, T> {
+            identity: &'a BuildIdentity,
+            #[serde(flatten)]
+            report: &'a T,
+        }
+        match self.identity {
+            Some(identity) => Envelope {
+                identity,
+                report: self.report,
+            }
+            .serialize(serializer),
+            None => self.report.serialize(serializer),
+        }
+    }
+}
+
+fn identified<T>(report: &T) -> Identified<'_, T> {
+    Identified {
+        identity: BUILD_IDENTITY.get(),
+        report,
+    }
+}
+
+/// Encode a result with the registered build identity, preserving field order.
+/// Use this for a response published both as a file and as identical stdout.
+///
+/// # Errors
+/// Returns a serialization error if the report cannot be encoded as JSON.
+pub fn publication_json<T: Serialize>(report: &T) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&identified(report))
+}
+
+fn version_message(identity: &BuildIdentity, version: &str) -> String {
+    let source = identity.source_commit.as_deref().unwrap_or("unknown");
+    let artifact = identity
+        .artifact_sha256
+        .as_deref()
+        .unwrap_or_else(|| identity.digest_absence.as_deref().unwrap_or("unreadable"));
+    format!(
+        "{version} {}@{source} {} sha256:{artifact}",
+        identity.repository, identity.source_state
+    )
+}
 
 /// Baseline exit-code classes shared by ADR-010 command-line tools.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,7 +258,16 @@ impl ControlPlaneRecord {
             schema: CONTROL_PLANE_SCHEMA,
             command: command.to_string(),
             kind,
-            message: message.to_string(),
+            message: if kind == ControlPlaneRecordKind::Version {
+                match (BUILD_IDENTITY.get(), &fields) {
+                    (Some(identity), Some(ControlPlaneFields::Version { version, .. })) => {
+                        version_message(identity, version)
+                    }
+                    _ => message.to_string(),
+                }
+            } else {
+                message.to_string()
+            },
             fields,
         }
     }
@@ -770,7 +866,7 @@ fn debug_name_to_snake_case(name: &str) -> String {
 /// Returns an error if serialisation or writing to stderr fails.
 pub fn emit_control_plane_record(record: &ControlPlaneRecord) -> io::Result<()> {
     let mut writer = LockedStderrWriter::new();
-    write_json_line(&mut writer, record)
+    write_json_line(&mut writer, &identified(record))
 }
 
 fn try_emit_control_plane_record(record: &ControlPlaneRecord) -> io::Result<bool> {
@@ -778,7 +874,7 @@ fn try_emit_control_plane_record(record: &ControlPlaneRecord) -> io::Result<bool
         return Ok(false);
     };
 
-    write_json_line(&mut writer, record)?;
+    write_json_line(&mut writer, &identified(record))?;
     Ok(true)
 }
 
@@ -906,7 +1002,7 @@ fn try_init_json_tracing_with_directive(filter_directive: &str) -> bool {
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(filter)
-        .with_writer(LockedStderr)
+        .with_writer(IdentifiedStderr)
         .try_init()
         .is_ok()
 }
@@ -919,7 +1015,7 @@ fn try_init_json_tracing_with_directive(filter_directive: &str) -> bool {
 pub fn emit<T: serde::Serialize>(value: &T) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    write_json_line(&mut out, value)
+    write_json_line(&mut out, &identified(value))
 }
 
 /// Run a stdout-producing single-JSON-object command.
@@ -1110,13 +1206,41 @@ where
     }
 }
 
-struct LockedStderr;
+struct IdentifiedStderr;
 
-impl<'writer> MakeWriter<'writer> for LockedStderr {
-    type Writer = LockedStderrWriter;
+impl<'writer> MakeWriter<'writer> for IdentifiedStderr {
+    type Writer = IdentifiedDiagnostic;
 
     fn make_writer(&'writer self) -> Self::Writer {
-        LockedStderrWriter::new()
+        IdentifiedDiagnostic(Vec::new())
+    }
+}
+
+// Tracing may write a record in fragments. Buffer exactly this writer's event
+// before adding metadata, without rewriting or reparsing corpus result objects.
+struct IdentifiedDiagnostic(Vec<u8>);
+
+impl Write for IdentifiedDiagnostic {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for IdentifiedDiagnostic {
+    fn drop(&mut self) {
+        let mut writer = LockedStderrWriter::new();
+        if BUILD_IDENTITY.get().is_none() {
+            let _ignored = writer.write_all(&self.0);
+            return;
+        }
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&self.0) {
+            let _ignored = write_json_line(&mut writer, &identified(&value));
+        }
     }
 }
 
@@ -1420,7 +1544,7 @@ fn write_json_report_if_changed<T: serde::Serialize>(
     path: &std::path::Path,
     value: &T,
 ) -> io::Result<PublicationChange> {
-    let mut bytes = serde_json::to_vec(value)?;
+    let mut bytes = serde_json::to_vec(&identified(value))?;
     bytes.push(b'\n');
 
     match publication::inspect_destination(path, &bytes, publication::PublicationMode::Public) {

@@ -4786,6 +4786,27 @@ fn byte_digest(bytes: &[u8]) -> String {
 
 /// Capture base bytes while blessing, otherwise compare them with the frozen oracle.
 fn frozen_bytes(name: &str, bytes: &[u8], expected_len: usize, expected_digest: &str) {
+    let stripped;
+    let bytes = if bytes.starts_with(b"{\"identity\":") {
+        let value: serde_json::Value = serde_json::from_slice(bytes).expect("identified report");
+        assert_eq!(value["identity"]["schema"], 1);
+        assert_eq!(
+            value["identity"]["artifact_sha256"],
+            byte_digest(&fs::read(env!("CARGO_BIN_EXE_superloop-lint")).expect("binary bytes"))
+        );
+        let identity = serde_json::to_string(&value["identity"]).expect("identity");
+        // Identity is first and contains no nested object. Elide only that
+        // build-dependent member; the existing semantic byte oracle stays exact.
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == b'}')
+            .expect("identity end");
+        assert!(identity.starts_with('{'));
+        stripped = [&b"{"[..], &bytes[end + 2..]].concat();
+        stripped.as_slice()
+    } else {
+        bytes
+    };
     if let Some(directory) = std::env::var_os("LINTER_CHARACTERIZATION_CAPTURE") {
         let directory = PathBuf::from(directory);
         fs::create_dir_all(&directory).expect("create the characterization capture directory");
@@ -5471,8 +5492,13 @@ fn citation_sites_preserve_resolved_addresses() {
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("protocol");
     assert_eq!(
+        report["identity"]["artifact_sha256"],
+        byte_digest(&fs::read(env!("CARGO_BIN_EXE_superloop-lint")).expect("binary bytes"))
+    );
+    assert_eq!(
         report,
         serde_json::json!({
+            "identity": report["identity"],
             "namespace":"class.linter.citation-sites", "version":[1,0,0],
             "sites":[{"citing_path":"adr/fixture.md", "target_path":"adr/fixture.md",
                       "surface":"document", "label":"sec:fixture:one", "owner":"PROJECTA", "path_class":null}]
