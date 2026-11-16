@@ -2,7 +2,7 @@
 
 A utility library which translates [`Event`][pdcm-event] back to markdown. It's the prerequisite for writing markdown filters which can work as [mdbook-preprocessors][mdbook-prep].
 
-The workspace adopts upstream 23.0.1, retaining its edition, lint and instrumentation conventions and the local reference-label, table-code and blank-line regression cases. The serializer receives the parser flags explicitly; it rejects invalid event streams or source ranges instead of silently changing their meaning. Source spellings are retained only when parsing them produces equivalent events.
+The workspace adopts upstream 23.0.1, retaining its edition, lint and instrumentation conventions and the local reference-label, table-code and blank-line regression cases. The serializer receives the parser flags explicitly; it rejects invalid event streams or source ranges instead of silently changing their meaning. Source spellings are retained only when parsing them produces equivalent events. Inside a table, that comparison reads a code span's pipes as the caller's table-code adaptation does, literal and with their backslashes kept: the block validator reconciles each such span at the exact output range the renderer wrote it, masks its pipes before reparsing a synthesized block, and still validates every surrounding event. After a refusal, `State::pending_source_start` gives the source offset of the buffered block, so a caller can name its line.
 
 ### How to use · `sec:packagespulldowncmarktocmarkreadmemd:how-to-use`
 
