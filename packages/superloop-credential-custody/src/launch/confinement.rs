@@ -253,6 +253,10 @@ fn denied_syscalls() -> Vec<nix::libc::c_long> {
     // io_uring can create sockets without SYS_socket; deny that alternate route
     // as well. No ring descriptor is admitted across this child exec.
     let mut denied = vec![
+        // Parent-death state is not inherited by descendants. This sealer is
+        // one direct process: no helper or thread may escape that lifetime.
+        nix::libc::SYS_clone,
+        nix::libc::SYS_clone3,
         // Effective/filesystem identity changes can clear parent-death state.
         // This direct-child construction has already fixed its identity.
         nix::libc::SYS_setuid,
@@ -316,6 +320,8 @@ fn denied_syscalls() -> Vec<nix::libc::c_long> {
     ];
     #[cfg(target_arch = "x86_64")]
     denied.extend([
+        nix::libc::SYS_fork,
+        nix::libc::SYS_vfork,
         nix::libc::SYS_chmod,
         nix::libc::SYS_chown,
         nix::libc::SYS_lchown,

@@ -132,6 +132,7 @@ fn main() {
     evidence.extend(group_changes());
     evidence.push(u8::from(parent_death_is_kill()) + b'0');
     evidence.extend(parent_death_changes());
+    evidence.extend(process_creation());
     std::io::stdout().write_all(&evidence).unwrap();
 }
 
@@ -303,23 +304,82 @@ fn ipc() -> Vec<u8> {
 
 #[allow(unsafe_code)]
 fn group_changes() -> [u8; 2] {
-    // SAFETY: setpgid(0,0) is a harmless no-op without the filter. A private
-    // forked child is not a group leader, so setsid would succeed without it.
-    // That child uses only scalar syscalls and exits before the parent proceeds.
+    // SAFETY: own process only. With process creation denied this leader cannot
+    // make a nonleader to isolate setsid from the kernel's leader restriction.
+    // This row witnesses refusal; the independent creation rows close that route.
+    let denied = |result| {
+        u8::from(
+            result == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::EPERM),
+        ) + b'0'
+    };
     unsafe {
-        let group = nix::libc::setpgid(0, 0) == -1
-            && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::EPERM);
-        let pid = nix::libc::fork();
-        assert!(pid >= 0);
-        if pid == 0 {
-            let result = nix::libc::setsid();
-            let denied = result == -1 && *nix::libc::__errno_location() == nix::libc::EPERM;
-            nix::libc::_exit(i32::from(!denied));
-        }
-        let mut status = 0;
-        assert_eq!(nix::libc::waitpid(pid, &raw mut status, 0), pid);
-        [u8::from(group) + b'0', u8::from(status == 0) + b'0']
+        [
+            denied(nix::libc::setpgid(0, 0)),
+            denied(nix::libc::setsid()),
+        ]
     }
+}
+
+#[allow(unsafe_code)]
+fn process_creation() -> Vec<u8> {
+    let denied = |result| {
+        u8::from(
+            result == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::EPERM),
+        ) + b'0'
+    };
+    // SAFETY: deliberately invalid clone flags and null clone3 arguments cannot
+    // create a process even when a mutation removes the relevant filter rule.
+    let rows = unsafe {
+        vec![
+            denied(nix::libc::syscall(
+                nix::libc::SYS_clone,
+                u64::MAX,
+                0_u64,
+                0_u64,
+                0_u64,
+                0_u64,
+            )),
+            denied(nix::libc::syscall(
+                nix::libc::SYS_clone3,
+                std::ptr::null::<u8>(),
+                88_u64,
+            )),
+        ]
+    };
+    #[cfg(target_arch = "x86_64")]
+    let rows = {
+        let mut rows = rows;
+        for number in [nix::libc::SYS_fork, nix::libc::SYS_vfork] {
+            // SAFETY: only a mutation can create this child. It immediately uses
+            // _exit, with no allocation or return through the shared vfork stack.
+            unsafe {
+                let pid = if number == nix::libc::SYS_vfork {
+                    raw_vfork()
+                } else {
+                    nix::libc::syscall(number)
+                };
+                if pid == 0 {
+                    nix::libc::_exit(0);
+                }
+                rows.push(if number == nix::libc::SYS_vfork {
+                    u8::from(pid == -i64::from(nix::libc::EPERM)) + b'0'
+                } else {
+                    denied(pid)
+                });
+                if pid > 0 {
+                    let mut status = 0;
+                    assert_eq!(
+                        nix::libc::waitpid(i32::try_from(pid).unwrap(), &raw mut status, 0),
+                        i32::try_from(pid).unwrap()
+                    );
+                }
+            }
+        }
+        rows
+    };
+    rows
 }
 
 #[allow(unsafe_code)]
@@ -330,4 +390,23 @@ fn parent_death_is_kill() -> bool {
         nix::libc::prctl(nix::libc::PR_GET_PDEATHSIG, &raw mut signal, 0, 0, 0) == 0
             && signal == nix::libc::SIGKILL
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+fn raw_vfork() -> i64 {
+    let result: i64;
+    // SAFETY: no stack or memory operation occurs in the child. It exits in
+    // assembly before Rust can observe the shared vfork stack. The parent
+    // receives the raw kernel return value; rcx/r11 are syscall clobbers.
+    unsafe {
+        std::arch::asm!(
+            "syscall", "test rax, rax", "jnz 2f",
+            "mov eax, 60", "xor edi, edi", "syscall", "ud2", "2:",
+            inlateout("rax") nix::libc::SYS_vfork => result,
+            lateout("rcx") _, lateout("r11") _, lateout("rdi") _,
+            options(nostack),
+        );
+    }
+    result
 }
