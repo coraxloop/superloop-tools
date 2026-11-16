@@ -13,6 +13,8 @@ struct Fixture {
     listener: UnixListener,
     value: serde_json::Value,
     image: ObjectIdentity,
+    generator_image: ObjectIdentity,
+    unit: String,
 }
 impl Fixture {
     fn new() -> Self {
@@ -36,6 +38,8 @@ impl Fixture {
             listener,
             value,
             image,
+            generator_image: image,
+            unit: "sample.service".into(),
         };
         f.write();
         f
@@ -57,8 +61,8 @@ impl Fixture {
                 public_case: &"c".repeat(64),
                 image: self.image,
                 owner: nix::unistd::geteuid().as_raw(),
-                unit: "sample.service",
-                fixture: self.image,
+                unit: &self.unit,
+                fixture: self.generator_image,
                 sealed_limit: 4096,
             },
             deadline(),
@@ -305,3 +309,6 @@ fn protected_client_bounds_records_before_connect() {
         );
     }
 }
+
+#[path = "control_client_action_tests.rs"]
+mod action_tests;

@@ -1,5 +1,5 @@
 //! Observation command routing and metadata publication.
-use crate::{Envelope, identity, observe, process, receipt, record};
+use crate::{Envelope, identity, launch::entry, observe, process, receipt, record};
 
 use clap::{Parser, Subcommand};
 use record::Result;
@@ -47,6 +47,34 @@ enum Command {
         #[arg(long)]
         receipt: String,
     },
+    /// Own a bounded sequential fixture campaign through retained completion.
+    CalibrationRun {
+        #[arg(long)]
+        parameters: PathBuf,
+        #[arg(long)]
+        case: String,
+    },
+    /// Observe the live keeper's invocation-bound retained completion.
+    Completion {
+        #[arg(long)]
+        parameters: PathBuf,
+        #[arg(long)]
+        case: String,
+    },
+    /// Request inventory and verify the retained observation-only process handle.
+    Descriptors {
+        #[arg(long)]
+        parameters: PathBuf,
+        #[arg(long)]
+        case: String,
+    },
+    /// Request the keeper's single-use release against its immutable inventory.
+    BarrierRelease {
+        #[arg(long)]
+        parameters: PathBuf,
+        #[arg(long)]
+        case: String,
+    },
 }
 
 pub fn main() -> ExitCode {
@@ -85,23 +113,62 @@ fn run() -> ExitCode {
     }
 }
 
+fn launcher(command: &Command) -> Option<(entry::Command, &std::path::Path, &str)> {
+    match command {
+        Command::CalibrationRun { parameters, case } => {
+            Some((entry::Command::CalibrationRun, parameters, case))
+        }
+        Command::Completion { parameters, case } => {
+            Some((entry::Command::Completion, parameters, case))
+        }
+        Command::Descriptors { parameters, case } => {
+            Some((entry::Command::Descriptors, parameters, case))
+        }
+        Command::BarrierRelease { parameters, case } => {
+            Some((entry::Command::BarrierRelease, parameters, case))
+        }
+        _ => None,
+    }
+}
+
 fn execute(command: &Command, start: Instant) -> Result<()> {
-    let (parameters, receipt_name) = match command {
-        Command::LengthObserve {
-            parameters,
-            receipt,
-            ..
-        }
-        | Command::FormatDiscover {
-            parameters,
-            receipt,
-            ..
-        }
-        | Command::IdentityCheck {
-            parameters,
-            receipt,
-            ..
-        } => (parameters, receipt),
+    let launch = launcher(command);
+    if let Some((operation, parameters, case)) = launch {
+        let evidence = entry::run(operation, parameters, case)?;
+        let envelope = Envelope {
+            schema: 1,
+            command: operation.label(),
+            case: case.into(),
+            outcome: match operation {
+                entry::Command::CalibrationRun | entry::Command::Completion => "completed",
+                entry::Command::Descriptors => "observed",
+                entry::Command::BarrierRelease => "released",
+            },
+            wall_us: start.elapsed().as_micros(),
+            evidence,
+        };
+        return superloop_cli_common::emit(&envelope).map_err(|_| "output-write");
+    }
+    execute_observation(command, start)
+}
+fn execute_observation(command: &Command, start: Instant) -> Result<()> {
+    let (Command::LengthObserve {
+        parameters,
+        receipt: receipt_name,
+        ..
+    }
+    | Command::FormatDiscover {
+        parameters,
+        receipt: receipt_name,
+        ..
+    }
+    | Command::IdentityCheck {
+        parameters,
+        receipt: receipt_name,
+        ..
+    }) = command
+    else {
+        return Err("launch-command");
     };
     if !record::name(receipt_name)
         || receipt_name.starts_with('.')
@@ -153,6 +220,7 @@ fn execute(command: &Command, start: Instant) -> Result<()> {
                 start,
             )
         }
+        _ => Err("launch-command"),
     }
 }
 
@@ -177,4 +245,38 @@ fn publish(
     bytes.push(b'\n');
     receipt::publish(root, receipt_name, &bytes)?;
     superloop_cli_common::emit(&envelope).map_err(|_| "output-write")
+}
+
+#[cfg(test)]
+mod launch_routing_tests {
+    use super::*;
+    /// ´test:unit:launcher-routing-preserves-role-and-case´
+    #[test]
+    fn launcher_routing_preserves_role_and_case() {
+        for (name, expected) in [
+            ("calibration-run", entry::Command::CalibrationRun),
+            ("descriptors", entry::Command::Descriptors),
+            ("barrier-release", entry::Command::BarrierRelease),
+            ("completion", entry::Command::Completion),
+        ] {
+            let parsed = Cli::try_parse_from([
+                PROGRAM,
+                name,
+                "--parameters",
+                "/synthetic-policy",
+                "--case",
+                "sample",
+            ])
+            .unwrap();
+            assert_eq!(
+                launcher(&parsed.command),
+                Some((
+                    expected,
+                    std::path::Path::new("/synthetic-policy"),
+                    "sample"
+                ))
+            );
+            assert_eq!(expected.label(), name);
+        }
+    }
 }

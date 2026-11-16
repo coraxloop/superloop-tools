@@ -11,6 +11,10 @@ use std::{
 };
 fn setup() -> Fixture {
     let mut f = harness::setup("normal");
+    install_launcher(&mut f);
+    f
+}
+pub(in crate::launch::keeper) fn install_launcher(f: &mut Fixture) {
     let current = std::env::current_exe().unwrap();
     let native = current
         .ancestors()
@@ -24,7 +28,6 @@ fn setup() -> Fixture {
     fs::write(&path, &bytes).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o555)).unwrap();
     f.value["artifacts"][0]["expected_sha256"] = crate::identity::hash(&bytes).into();
-    f
 }
 fn request(manifest: &serde_json::Value, operation: serde_json::Value) -> serde_json::Value {
     let mut value = serde_json::json!({"schema":2,"case":manifest["case"],"keeper_pid":manifest["keeper_pid"],"keeper_birth":manifest["keeper_birth"],"invocation":manifest["invocation"],"nonce":"a".repeat(32)});
@@ -39,7 +42,11 @@ fn peer(root: &Path, value: &serde_json::Value, observer: bool) -> Result<Vec<u8
         } else {
             "--control-client"
         })
-        .arg(root.join("runtime/sample/control.sock"))
+        .arg(
+            root.join("runtime")
+                .join(value["case"].as_str().ok_or("test-case")?)
+                .join("control.sock"),
+        )
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -120,7 +127,10 @@ fn run_client(
             "ExecMainExitTimestampMonotonic=0",
             "ExecMainExitTimestampMonotonic=200",
         );
-    fs::write(root.join("manager-reply"), reply).map_err(|_| "test-manager")?;
+    // The manager stand-in publishes one complete property snapshot atomically.
+    let staged = root.join("manager-terminal");
+    fs::write(&staged, reply).map_err(|_| "test-manager")?;
+    fs::rename(staged, root.join("manager-reply")).map_err(|_| "test-manager")?;
     loop {
         let mut query = request(manifest, serde_json::json!("completion"));
         query["schema"] = 1.into();
@@ -280,4 +290,56 @@ fn resident_start_observes_pending_and_stopped_without_rebinding() {
         ),
         Err("manager-invocation-binding")
     );
+}
+
+pub(in crate::launch::keeper) fn resident_case(
+    f: &Fixture,
+    admission: &crate::launch::measure::Admission,
+    index: usize,
+    store: &mut Store,
+) -> Result<()> {
+    let mut keeper = Keeper::prepare(RootStartup::test_owner(), admission, index, store)?;
+    keeper.submit()?;
+    let writers = keeper
+        .pipes
+        .paths()
+        .each_ref()
+        .map(|p| fs::OpenOptions::new().append(true).open(p).unwrap());
+    fs::set_permissions(
+        &admission.policy().cases[index].record,
+        fs::Permissions::from_mode(0o400),
+    )
+    .unwrap();
+    let (child, _pin) = crate::launch::inventory::tests::start_case(f, &writers, index);
+    let reply = String::from_utf8(crate::launch::manager::tests::reply_case(admission, index))
+        .unwrap()
+        .replace("MainPID=123", &format!("MainPID={}", child.child.id()))
+        .replace(
+            "1234567890abcdef1234567890abcdef",
+            &format!("{:032x}", index + 1),
+        );
+    fs::write(f.dir.path().join("manager-reply"), reply).unwrap();
+    keeper.capture_with(
+        |_| Ok(writers.each_ref().map(|f| f.try_clone().unwrap())),
+        crate::launch::control::Control::test_bind,
+    )?;
+    drop(writers);
+    let exit = keeper.process.as_ref().unwrap().duplicate()?;
+    let binding = serde_json::from_slice(
+        &fs::read(
+            f.dir
+                .path()
+                .join("runtime")
+                .join(&admission.policy().cases[index].id)
+                .join("control-manifest.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    std::thread::scope(|scope| {
+        let client = scope.spawn(|| run_client(f.dir.path(), &binding, child, &exit));
+        let result = keeper.run_captured();
+        assert_eq!(client.join().unwrap(), Ok(()));
+        result
+    })
 }

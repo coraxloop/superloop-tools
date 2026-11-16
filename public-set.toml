@@ -3769,3 +3769,12 @@ pattern = "packages/superloop-credential-custody/src/launch/campaign.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-credential-custody/src/launch/campaign_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/entry.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control_client_actions.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/control_client_action_tests.rs"

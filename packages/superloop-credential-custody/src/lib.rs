@@ -29,9 +29,9 @@ pub fn run_fixture() -> std::process::ExitCode {
     fixture_cli::main()
 }
 
-// Private cores are intentionally unselected until a keeper and its adapters exist.
+// Retained isolated core interfaces also support the unprivileged controls.
 #[allow(
     dead_code,
-    reason = "launcher cores are reviewed before any entrypoint is wired"
+    reason = "isolated core and control interfaces remain available beside installed adapters"
 )]
 mod launch;

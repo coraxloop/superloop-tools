@@ -177,6 +177,9 @@ pub(in crate::launch) fn completion(
     index: usize,
     deadline: Instant,
 ) -> Result<completion_client::Observation> {
+    opened(admission, index, deadline)?.completion(deadline)
+}
+fn opened(admission: &Admission, index: usize, deadline: Instant) -> Result<Opened> {
     let case = admission
         .policy()
         .cases
@@ -202,8 +205,7 @@ pub(in crate::launch) fn completion(
         &admission.policy().roots.runtime.join(&case.id),
         &expected,
         deadline,
-    )?
-    .completion(deadline)
+    )
 }
 
 #[cfg(test)]
@@ -274,4 +276,67 @@ fn socket_error(descriptor: &OwnedFd) -> Result<()> {
             && usize::try_from(length).ok() == Some(std::mem::size_of_val(&error)),
         "client-connect",
     )
+}
+
+#[path = "control_client_actions.rs"]
+mod actions;
+pub(in crate::launch) fn descriptors(
+    admission: &Admission,
+    index: usize,
+    deadline: Instant,
+) -> Result<String> {
+    let mut client = opened(admission, index, deadline)?;
+    let super::actions::Outcome::Inventory { inventory_sha256 } =
+        client.action(super::Operation::Inventory, deadline)?
+    else {
+        return Err("client-action-outcome");
+    };
+    client.reconnect(deadline)?;
+    let pin = client.observation(&inventory_sha256, deadline)?;
+    pin.verify()?;
+    Ok(inventory_sha256)
+}
+pub(in crate::launch) fn release(
+    admission: &Admission,
+    index: usize,
+    deadline: Instant,
+) -> Result<String> {
+    let mut client = opened(admission, index, deadline)?;
+    let path = admission
+        .policy()
+        .roots
+        .evidence
+        .join(&client.manifest.case)
+        .join("inventory.json");
+    let bytes = crate::receipt::protected_read(&path, 64 * 1024, true)?;
+    let digest = crate::identity::hash(&bytes);
+    let outcome = client.action(
+        super::Operation::Release {
+            inventory_sha256: digest.clone(),
+        },
+        deadline,
+    )?;
+    require(
+        matches!(outcome, super::actions::Outcome::Released { .. }),
+        "client-action-outcome",
+    )?;
+    Ok(digest)
+}
+pub(in crate::launch) fn wait_completion(
+    admission: &Admission,
+    index: usize,
+    deadline: Instant,
+) -> Result<()> {
+    let mut client = opened(admission, index, deadline)?;
+    loop {
+        if client.completion(deadline)? == completion_client::Observation::Complete {
+            client.reconnect(deadline)?;
+            return client.observed(deadline);
+        }
+        let timeout = super::budget(deadline)?.min(
+            i32::try_from(admission.policy().limits.poll_ms).map_err(|_| "client-poll-bound")?,
+        );
+        super::channel::poll(&mut [], timeout)?;
+        client.reconnect(deadline)?;
+    }
 }

@@ -408,3 +408,31 @@ fn campaign_reservation_collision_never_starts_a_case() {
             .is_file()
     );
 }
+
+/// ´test:unit:campaign-uses-resident-driver-for-each-pair´
+#[test]
+fn campaign_uses_resident_driver_for_each_pair() {
+    let _guard = crate::launch::test_support::case_guard();
+    let mut f = setup();
+    super::driver::tests::install_launcher(&mut f);
+    let admission = f.admit();
+    let mut visited = Vec::new();
+    let matrix = campaign::run(&admission, deadline(), |index, store, _deadline| {
+        if index == 1 {
+            assert!(!f.dir.path().join("runtime/sample/control.sock").exists());
+        }
+        visited.push(index);
+        super::driver::tests::resident_case(&f, &admission, index, store)
+    })
+    .unwrap();
+    assert_eq!(visited, [0, 1]);
+    assert_eq!(
+        serde_json::to_value(matrix).unwrap()["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(f.dir.path().join("evidence/campaign.json").is_file());
+    assert!(!f.dir.path().join("runtime/second/control.sock").exists());
+}

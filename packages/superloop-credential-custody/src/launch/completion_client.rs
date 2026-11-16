@@ -145,7 +145,7 @@ pub(in crate::launch) fn request(
 }
 
 #[allow(unsafe_code)]
-fn fresh_nonce() -> Result<String> {
+pub(super) fn fresh_nonce() -> Result<String> {
     let mut bytes = [0_u8; 16];
     // SAFETY: getrandom writes only into this initialized, exactly sized buffer.
     // Nonblocking entropy readiness refuses rather than adding an unbounded wait.

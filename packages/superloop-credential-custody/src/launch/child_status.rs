@@ -74,6 +74,30 @@ impl ChildStatus {
             "handoff-peer-signalling",
         )
     }
+    pub fn launcher_role(&self, role: super::policy::Role) -> Result<()> {
+        use super::policy::{Capability, Role};
+        require(role != Role::Fixture, "launch-role-command")?;
+        let mask = role
+            .properties()
+            .capability_bounding_set
+            .iter()
+            .fold(0_u64, |mask, cap| {
+                mask | match cap {
+                    Capability::SysPtrace => 1 << 19,
+                    Capability::Kill => 1 << 5,
+                }
+            });
+        require(self.uids == [0; 4], "launch-role-identity")?;
+        require(
+            self.permitted == mask
+                && self.effective == mask
+                && self.bounding == mask
+                && self.inheritable == 0
+                && self.ambient == 0,
+            "launch-role-capabilities",
+        )?;
+        require(self.no_new_privileges == 1, "launch-role-privileges")
+    }
     pub fn verify(&self, pid: u32, owner: u32, bounding: u64) -> Result<()> {
         require(
             self.pid == pid && self.uids == [owner; 4],
@@ -158,6 +182,73 @@ mod tests {
             let result =
                 ChildStatus::parse(text.as_bytes(), 99).and_then(|s| s.verify(123, 2000, 255));
             assert_eq!(result, Err(class), "{key}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+    use crate::launch::policy::Role;
+    /// ´test:unit:launcher-role-admission-requires-observed-identity-and-capabilities´
+    #[test]
+    fn launcher_role_admission_requires_observed_identity_and_capabilities() {
+        for (role, mask) in [
+            (Role::Completion, 0),
+            (Role::CalibrationRun, 0x80020),
+            (Role::Descriptors, 0x80000),
+            (Role::BarrierRelease, 0),
+        ] {
+            let good = ChildStatus {
+                pid: 123,
+                birth: 456,
+                uids: [0; 4],
+                inheritable: 0,
+                permitted: mask,
+                effective: mask,
+                ambient: 0,
+                bounding: mask,
+                no_new_privileges: 1,
+                seccomp: 0,
+            };
+            good.launcher_role(role).unwrap();
+            for field in [
+                "uid",
+                "permitted",
+                "effective",
+                "bounding",
+                "inheritable",
+                "ambient",
+                "nnp",
+            ] {
+                let mut bad = good.clone();
+                let class = match field {
+                    "uid" => {
+                        bad.uids[1] = 1234;
+                        "launch-role-identity"
+                    }
+                    "nnp" => {
+                        bad.no_new_privileges = 0;
+                        "launch-role-privileges"
+                    }
+                    _ => {
+                        match field {
+                            "permitted" => bad.permitted ^= 1,
+                            "effective" => bad.effective ^= 1,
+                            "bounding" => bad.bounding ^= 1,
+                            "inheritable" => bad.inheritable = 1,
+                            "ambient" => bad.ambient = 1,
+                            _ => unreachable!(),
+                        }
+                        "launch-role-capabilities"
+                    }
+                };
+                assert_eq!(bad.launcher_role(role), Err(class), "{role:?}/{field}");
+            }
+            assert_eq!(
+                good.launcher_role(Role::Fixture),
+                Err("launch-role-command")
+            );
         }
     }
 }

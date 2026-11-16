@@ -1056,3 +1056,31 @@ fn source_missing_object_cannot_start_transport() {
     assert!(!output.status.success());
     assert!(marker.exists(), "positive control must reach the transport");
 }
+
+/// ´test:integration:launcher-entrypoints-refuse-ordinary-uid-before-inputs´
+#[test]
+fn launcher_entrypoints_refuse_ordinary_uid_before_inputs() {
+    assert_ne!(nix::unistd::geteuid().as_raw(), 0);
+    for command in [
+        "calibration-run",
+        "completion",
+        "descriptors",
+        "barrier-release",
+    ] {
+        let output = binary()
+            .args([
+                command,
+                "--parameters",
+                "/nonexistent-public-policy",
+                "--case",
+                "synthetic",
+            ])
+            .env_clear()
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{command}");
+        assert_eq!(output.stdout.len(), 0);
+        let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(value["message"], "keeper-root-required", "{command}");
+    }
+}

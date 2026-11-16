@@ -115,4 +115,4 @@ impl Keeper<'_> {
 }
 #[cfg(test)]
 #[path = "driver_tests.rs"]
-mod tests;
+pub(super) mod tests;

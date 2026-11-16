@@ -1,4 +1,4 @@
-//! Unselected launcher cores. No installed entrypoint or plaintext reader.
+//! Launcher cores and root-only adapters; no plaintext reader.
 mod campaign;
 mod channel;
 mod child_status;
@@ -34,3 +34,5 @@ mod sealer_tests;
 
 #[cfg(test)]
 mod test_support;
+
+pub mod entry;
