@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-16
+
 ### Added
 
 - Install the collection journal design with the tools documentation, including the staged cuts, their acceptance and deployment boundaries, and the warning that no supported command prunes the current journal (`prob:docs:collection-journal-design-joins-the-tree`).
@@ -985,7 +987,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/coraxloop/superloop-tools/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/coraxloop/superloop-tools/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/coraxloop/superloop-tools/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/coraxloop/superloop-tools/compare/v0.3.2...v0.4.0
