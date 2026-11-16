@@ -107,6 +107,7 @@ pub(in crate::launch) fn reply(admission: &Admission) -> Vec<u8> {
 /// ´test:unit:manager-held-cli-uses-closed-vectors-and-empty-child-table´
 #[test]
 fn manager_held_cli_uses_closed_vectors_and_empty_child_table() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = fixture();
     let admission = fixture.admit();
     let manager = Manager::new(&admission, 0).unwrap();
@@ -183,6 +184,7 @@ fn manager_held_cli_uses_closed_vectors_and_empty_child_table() {
 /// ´test:unit:manager-reply-requires-complete-invocation-bound-properties´
 #[test]
 fn manager_reply_requires_complete_invocation_bound_properties() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = fixture();
     let admission = fixture.admit();
     let bytes = reply(&admission);
@@ -280,6 +282,7 @@ fn manager_reply_requires_complete_invocation_bound_properties() {
 /// ´test:unit:manager-transport-refuses-unexpected-output-and-replaced-image´
 #[test]
 fn manager_transport_refuses_unexpected_output_and_replaced_image() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = fixture();
     let admission = fixture.admit();
     let manager = Manager::new(&admission, 0).unwrap();
@@ -317,6 +320,7 @@ fn manager_transport_refuses_unexpected_output_and_replaced_image() {
 /// ´test:unit:manager-deadline-is-one-absolute-case-budget´
 #[test]
 fn manager_deadline_is_one_absolute_case_budget() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = fixture();
     let admission = fixture.admit();
     let mut manager = Manager::new(&admission, 0).unwrap();
@@ -360,6 +364,7 @@ fn parse(
 /// ´test:unit:manager-open-files-and-service-bounds-are-observed´
 #[test]
 fn manager_open_files_and_service_bounds_are_observed() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = fixture();
     let admission = fixture.admit();
     let bytes = reply(&admission);
@@ -396,6 +401,7 @@ fn manager_open_files_and_service_bounds_are_observed() {
 /// ´test:unit:manager-version-refuses-before-start-and-cleanup-has-a-budget´
 #[test]
 fn manager_version_refuses_before_start_and_cleanup_has_a_budget() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = fixture();
     let admission = fixture.admit();
     let mut manager = Manager::new(&admission, 0).unwrap();

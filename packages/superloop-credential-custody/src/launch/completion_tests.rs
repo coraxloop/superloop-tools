@@ -13,14 +13,6 @@ use std::os::{
     unix::fs::{MetadataExt as _, PermissionsExt as _},
 };
 
-// These controls each own a full case (two sealers, retained artifacts and
-// directory handles). Keep at most one added case resident per test process;
-// this bounds descriptor use under its ordinary 1024-fd limit, not wall time.
-static CASE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-fn case_guard() -> std::sync::MutexGuard<'static, ()> {
-    CASE.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 fn field(f: &Fixture, key: &str, value: &str) {
     let path = f.dir.path().join("manager-reply");
     let text = fs::read_to_string(&path).unwrap();
@@ -140,7 +132,7 @@ fn no_completion(f: &Fixture) {
 /// ´test:unit:completion-retains-an-observation-before-late-expiry-cleanup´
 #[test]
 fn completion_retains_an_observation_before_late_expiry_cleanup() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     for failed in [false, true] {
         let f = setup(if failed {
             "fail-after-output"
@@ -175,7 +167,7 @@ fn completion_retains_an_observation_before_late_expiry_cleanup() {
 /// ´test:unit:completion-start-identity-is-captured-before-release´
 #[test]
 fn completion_start_identity_is_captured_before_release() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     for (key, value) in [
         ("LoadState", "not-found"),
         ("ConditionResult", "no"),
@@ -222,7 +214,7 @@ fn completion_start_identity_is_captured_before_release() {
 /// ´test:unit:completion-compares-captured-configuration-identity´
 #[test]
 fn completion_compares_captured_configuration_identity() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("normal");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -238,7 +230,7 @@ fn completion_compares_captured_configuration_identity() {
 /// ´test:unit:completion-expired-budget-never-publishes-success´
 #[test]
 fn completion_expired_budget_never_publishes_success() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     for finish in [false, true] {
         let f = setup("normal");
         let admission = f.admit();
@@ -267,7 +259,7 @@ fn completion_expired_budget_never_publishes_success() {
 /// ´test:unit:completion-retains-before-cleanup-and-accepts-only-two-sealers´
 #[test]
 fn completion_retains_before_cleanup_and_accepts_only_two_sealers() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("normal");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -317,7 +309,7 @@ fn completion_retains_before_cleanup_and_accepts_only_two_sealers() {
 /// ´test:unit:completion-terminal-metadata-refusals-latch´
 #[test]
 fn completion_terminal_metadata_refusals_latch() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     for (key, value, class) in [
         ("LoadState", "not-found", "completion-unloaded"),
         ("ConditionResult", "no", "completion-condition"),
@@ -376,7 +368,7 @@ fn completion_terminal_metadata_refusals_latch() {
 /// ´test:unit:completion-rejects-stale-success-while-process-is-live´
 #[test]
 fn completion_rejects_stale_success_while_process_is_live() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("normal");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -399,7 +391,7 @@ fn completion_rejects_stale_success_while_process_is_live() {
 /// ´test:unit:completion-retains-full-output-generator-failure´
 #[test]
 fn completion_retains_full_output_generator_failure() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("fail-after-output");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -428,7 +420,7 @@ fn completion_retains_full_output_generator_failure() {
 /// ´test:unit:completion-missing-events-and-disconnect-never-recover´
 #[test]
 fn completion_missing_events_and_disconnect_never_recover() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     for missing in [true, false] {
         let f = setup("normal");
         let admission = f.admit();
@@ -469,7 +461,7 @@ fn completion_missing_events_and_disconnect_never_recover() {
 /// ´test:unit:completion-publication-and-stop-failure-stay-uncertain´
 #[test]
 fn completion_publication_and_stop_failure_stay_uncertain() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     for fault in ["retention", "stop", "publication"] {
         let f = setup("normal");
         let admission = f.admit();
@@ -512,7 +504,7 @@ fn completion_publication_and_stop_failure_stay_uncertain() {
 /// ´test:unit:completion-sealer-evidence-requires-every-eof-and-exit´
 #[test]
 fn completion_sealer_evidence_requires_every_eof_and_exit() {
-    let _case = case_guard();
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("normal");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();

@@ -344,6 +344,7 @@ mod tests {
     /// ´test:unit:process-pin-refuses-stale-identities-and-images´
     #[test]
     fn process_pin_refuses_stale_identities_and_images() {
+        let _case = crate::launch::test_support::case_guard();
         let f = crate::launch::inventory::tests::fixture("normal");
         let (_readers, writers) = crate::launch::inventory::tests::pipes();
         let (mut guard, mut pin) = crate::launch::inventory::tests::start(&f, &writers);
@@ -387,6 +388,7 @@ mod live_tests {
     /// ´test:unit:resumed-fixture-cannot-supply-stopped-inventory´
     #[test]
     fn resumed_fixture_cannot_supply_stopped_inventory() {
+        let _case = crate::launch::test_support::case_guard();
         let f = crate::launch::inventory::tests::fixture("normal");
         let path = f.dir.path().join("public.json");
         let mut case: serde_json::Value =

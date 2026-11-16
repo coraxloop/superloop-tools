@@ -518,6 +518,7 @@ mod tests {
     /// ´test:unit:sealer-execution-compares-the-retained-image´
     #[test]
     fn sealer_execution_compares_the_retained_image() {
+        let _case = crate::launch::test_support::case_guard();
         let fixture = super::super::sealer_tests::make_fixture("normal");
         let admission = fixture.admit();
         let artifact = admission
@@ -546,6 +547,7 @@ mod tests {
     /// ´test:unit:sealer-second-start-failure-reaps-the-first-child´
     #[test]
     fn sealer_second_start_failure_reaps_the_first_child() {
+        let _case = crate::launch::test_support::case_guard();
         let fixture = super::super::sealer_tests::make_fixture("normal");
         let admission = fixture.admit();
         let mut store = Store::reserve(&admission, 0).unwrap();

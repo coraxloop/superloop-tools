@@ -57,6 +57,7 @@ fn observe(bytes: &[u8], binding: &Binding<'_>) -> Result<Observation> {
 /// ´test:unit:completion-client-requires-live-bound-evidence´
 #[test]
 fn completion_client_requires_live_bound_evidence() {
+    let _case = crate::launch::test_support::case_guard();
     let invocation = invocation();
     let binding = expected(&invocation);
     let good = reply(&binding);
@@ -112,6 +113,7 @@ fn completion_client_requires_live_bound_evidence() {
 /// ´test:unit:completion-client-rejects-incomplete-and-failed-proofs´
 #[test]
 fn completion_client_rejects_incomplete_and_failed_proofs() {
+    let _case = crate::launch::test_support::case_guard();
     let invocation = invocation();
     let binding = expected(&invocation);
     let good = reply(&binding);
@@ -210,6 +212,7 @@ fn completion_client_rejects_incomplete_and_failed_proofs() {
 /// ´test:unit:completion-client-record-is-closed-and-bounded´
 #[test]
 fn completion_client_record_is_closed_and_bounded() {
+    let _case = crate::launch::test_support::case_guard();
     let invocation = invocation();
     let binding = expected(&invocation);
     let good = reply(&binding);
@@ -255,6 +258,7 @@ fn completion_client_record_is_closed_and_bounded() {
 /// ´test:unit:completion-client-refuses-a-lost-keeper-despite-buffered-success´
 #[test]
 fn completion_client_refuses_a_lost_keeper_despite_buffered_success() {
+    let _case = crate::launch::test_support::case_guard();
     let f = crate::launch::keeper::tests::fixture();
     let socket = f.dir.path().join("peer.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -317,6 +321,7 @@ fn completion_client_refuses_a_lost_keeper_despite_buffered_success() {
 /// ´test:unit:completion-client-measures-keeper-birth-not-its-echo´
 #[test]
 fn completion_client_measures_keeper_birth_not_its_echo() {
+    let _case = crate::launch::test_support::case_guard();
     let invocation = invocation();
     let mut binding = expected(&invocation);
     binding.keeper_birth += 1;
@@ -331,6 +336,7 @@ fn completion_client_measures_keeper_birth_not_its_echo() {
 /// ´test:unit:completion-client-generates-a-nonce-in-each-request´
 #[test]
 fn completion_client_generates_a_nonce_in_each_request() {
+    let _case = crate::launch::test_support::case_guard();
     let invocation = invocation();
     let binding = expected(&invocation);
     let mut nonces = Vec::new();

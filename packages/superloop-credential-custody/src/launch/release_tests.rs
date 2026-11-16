@@ -66,6 +66,7 @@ fn stopped(child: &fixture::ChildGuard) {
 /// ´test:unit:release-is-bound-to-retained-inventory-and-consumed-once´
 #[test]
 fn release_is_bound_to_retained_inventory_and_consumed_once() {
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("normal");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -114,6 +115,7 @@ fn release_is_bound_to_retained_inventory_and_consumed_once() {
 /// ´test:unit:release-refuses-stale-or-changed-evidence-before-signalling´
 #[test]
 fn release_refuses_stale_or_changed_evidence_before_signalling() {
+    let _case = crate::launch::test_support::case_guard();
     for case in [
         "digest",
         "mode",
@@ -189,6 +191,7 @@ fn release_refuses_stale_or_changed_evidence_before_signalling() {
 /// ´test:unit:release-intent-and-signal-failures-never-retry´
 #[test]
 fn release_intent_and_signal_failures_never_retry() {
+    let _case = crate::launch::test_support::case_guard();
     for case in ["intent", "signal", "published"] {
         let f = setup("normal");
         let admission = f.admit();
@@ -237,6 +240,7 @@ fn release_intent_and_signal_failures_never_retry() {
 /// ´test:unit:reexecuted-fixture-never-reaches-release´
 #[test]
 fn reexecuted_fixture_never_reaches_release() {
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("reexec-extra");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -259,6 +263,7 @@ fn reexecuted_fixture_never_reaches_release() {
 /// ´test:unit:inventory-publication-collision-latches-uncertainty´
 #[test]
 fn inventory_publication_collision_latches_uncertainty() {
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("normal");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -274,6 +279,7 @@ fn inventory_publication_collision_latches_uncertainty() {
 /// ´test:unit:release-rechecks-sealer-liveness-before-input´
 #[test]
 fn release_rechecks_sealer_liveness_before_input() {
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("normal");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -309,6 +315,7 @@ fn release_rechecks_sealer_liveness_before_input() {
 /// ´test:unit:release-rechecks-manager-invocation-before-signalling´
 #[test]
 fn release_rechecks_manager_invocation_before_signalling() {
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("normal");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -344,6 +351,7 @@ fn release_rechecks_manager_invocation_before_signalling() {
 /// ´test:unit:release-refuses-expired-budget-before-signalling´
 #[test]
 fn release_refuses_expired_budget_before_signalling() {
+    let _case = crate::launch::test_support::case_guard();
     let f = setup("normal");
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();

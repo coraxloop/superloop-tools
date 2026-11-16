@@ -534,6 +534,7 @@ mod tests {
     /// ´test:unit:launch-output-creation-is-exclusive´
     #[test]
     fn launch_output_creation_is_exclusive() {
+        let _case = crate::launch::test_support::case_guard();
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), Permissions::from_mode(0o700)).unwrap();
         let held = receipt::sealed_directory(dir.path()).unwrap();

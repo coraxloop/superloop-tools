@@ -111,6 +111,7 @@ fn assert_failed(fixture: &Fixture, store: &Store) {
 /// ´test:unit:sealers-complete-from-events-not-length-claims´
 #[test]
 fn sealers_complete_from_events_not_length_claims() {
+    let _case = crate::launch::test_support::case_guard();
     // Short, exact and excess synthetic inputs all reach EOF; C7, not C2, will
     // compare decoded lengths with the declared five-byte case.
     for length in [1, 5, 17] {
@@ -137,6 +138,7 @@ fn sealers_complete_from_events_not_length_claims() {
 /// ´test:unit:sealers-consume-a-pre-filled-pipe-without-a-plaintext-observer´
 #[test]
 fn sealers_consume_a_pre_filled_pipe_without_a_plaintext_observer() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("normal");
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -166,6 +168,7 @@ fn sealers_consume_a_pre_filled_pipe_without_a_plaintext_observer() {
 /// ´test:unit:sealers-refuse-early-zero-and-buffered-hangup´
 #[test]
 fn sealers_refuse_early_zero_and_buffered_hangup() {
+    let _case = crate::launch::test_support::case_guard();
     let mode = "early";
     let fixture = make_fixture(mode);
     let admission = fixture.admit();
@@ -183,6 +186,7 @@ fn sealers_refuse_early_zero_and_buffered_hangup() {
 /// ´test:unit:sealers-refuse-an-exit-with-a-retained-writer´
 #[test]
 fn sealers_refuse_an_exit_with_a_retained_writer() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("early");
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -200,6 +204,7 @@ fn sealers_refuse_an_exit_with_a_retained_writer() {
 /// ´test:unit:sealers-refuse-failure-signal-empty-and-overflow´
 #[test]
 fn sealers_refuse_failure_signal_empty_and_overflow() {
+    let _case = crate::launch::test_support::case_guard();
     for (mode, class) in [
         ("fail", "sealer-exit"),
         ("signal", "sealer-exit"),
@@ -239,6 +244,7 @@ fn sealers_refuse_failure_signal_empty_and_overflow() {
 /// ´test:unit:sealer-cancellation-is-an-event-with-manifest-cleanup´
 #[test]
 fn sealer_cancellation_is_an_event_with_manifest_cleanup() {
+    let _case = crate::launch::test_support::case_guard();
     for event in ["sealer-deadline", "generator-failed", "keeper-cancelled"] {
         let fixture = make_fixture("normal");
         let admission = fixture.admit();
@@ -271,6 +277,7 @@ fn sealer_cancellation_is_an_event_with_manifest_cleanup() {
 /// ´test:unit:sealer-drop-reaps-and-cleans-manifest´
 #[test]
 fn sealer_drop_reaps_and_cleans_manifest() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("normal");
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -285,6 +292,7 @@ fn sealer_drop_reaps_and_cleans_manifest() {
 /// ´test:unit:sealers-build-child-descriptors-explicitly´
 #[test]
 fn sealers_build_child_descriptors_explicitly() {
+    let _case = crate::launch::test_support::case_guard();
     let ambient = tempfile::tempfile().unwrap();
     fcntl(&ambient, FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
     let fixture = make_fixture("normal");
@@ -302,6 +310,7 @@ fn sealers_build_child_descriptors_explicitly() {
 /// ´test:unit:sealer-admission-binds-image-and-store-before-spawn´
 #[test]
 fn sealer_admission_binds_image_and_store_before_spawn() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("normal");
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -346,6 +355,7 @@ fn assert_exited(pidfds: &[OwnedFd]) {
 /// ´test:unit:sealer-success-does-not-override-generator-failure´
 #[test]
 fn sealer_success_does_not_override_generator_failure() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("normal");
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -364,6 +374,7 @@ fn sealer_success_does_not_override_generator_failure() {
 /// ´test:unit:sealer-preparation-refuses-occupied-output-and-wrong-phase´
 #[test]
 fn sealer_preparation_refuses_occupied_output_and_wrong_phase() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("normal");
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -383,6 +394,7 @@ fn sealer_preparation_refuses_occupied_output_and_wrong_phase() {
 /// ´test:unit:sealer-failure-publication-collision-retains-quarantine´
 #[test]
 fn sealer_failure_publication_collision_retains_quarantine() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("normal");
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -415,6 +427,7 @@ fn sealer_failure_publication_collision_retains_quarantine() {
 /// ´test:unit:sealer-deadline-conversion-uses-injected-instants´
 #[test]
 fn sealer_deadline_conversion_uses_injected_instants() {
+    let _case = crate::launch::test_support::case_guard();
     let now = Instant::now();
     assert_eq!(
         super::sealer::remaining_timeout(now, now, now),
@@ -437,6 +450,7 @@ fn sealer_deadline_conversion_uses_injected_instants() {
 /// ´test:unit:sealers-refuse-a-partial-reader-with-buffered-hangup´
 #[test]
 fn sealers_refuse_a_partial_reader_with_buffered_hangup() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("partial");
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -454,6 +468,7 @@ fn sealers_refuse_a_partial_reader_with_buffered_hangup() {
 /// ´test:unit:sealer-output-loss-latches-before-or-after-spawn´
 #[test]
 fn sealer_output_loss_latches_before_or_after_spawn() {
+    let _case = crate::launch::test_support::case_guard();
     for after_spawn in [false, true] {
         let fixture = make_fixture("normal");
         let admission = fixture.admit();
@@ -493,6 +508,7 @@ fn sealer_output_loss_latches_before_or_after_spawn() {
 /// ´test:unit:sealer-native-exec-failure-retains-a-typed-failure´
 #[test]
 fn sealer_native_exec_failure_retains_a_typed_failure() {
+    let _case = crate::launch::test_support::case_guard();
     let mut fixture = make_fixture("normal");
     let path = fixture.dir.path().join("sealer");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -517,6 +533,7 @@ fn sealer_native_exec_failure_retains_a_typed_failure() {
 /// ´test:unit:sealer-confinement-denies-new-authority-and-keeps-held-output´
 #[test]
 fn sealer_confinement_denies_new_authority_and_keeps_held_output() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("confinement");
     fs::write(fixture.dir.path().join("outside-canary"), b"public").unwrap();
     fs::write(fixture.dir.path().join("evidence/canary"), b"public").unwrap();
@@ -558,6 +575,7 @@ fn sealer_confinement_denies_new_authority_and_keeps_held_output() {
 /// ´test:unit:sealer-confinement-refuses-unprotected-key-and-missing-loader´
 #[test]
 fn sealer_confinement_refuses_unprotected_key_and_missing_loader() {
+    let _case = crate::launch::test_support::case_guard();
     for missing_loader in [false, true] {
         let mut fixture = make_fixture("normal");
         if missing_loader {
@@ -597,6 +615,7 @@ fn sealer_confinement_refuses_unprotected_key_and_missing_loader() {
 /// ´test:unit:sealer-host-key-path-and-file-custody-refuse-before-start´
 #[test]
 fn sealer_host_key_path_and_file_custody_refuse_before_start() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("normal");
     assert_eq!(
         super::measure::admit_for_owner(&serde_json::to_vec(&fixture.value).unwrap(), 0)
@@ -647,6 +666,7 @@ fn sealer_host_key_path_and_file_custody_refuse_before_start() {
 /// ´test:unit:sealer-status-readback-observes-both-live-children´
 #[test]
 fn sealer_status_readback_observes_both_live_children() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = make_fixture("normal");
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();

@@ -84,6 +84,7 @@ fn err<T>(result: super::Result<T>, class: &str) {
 /// ´test:unit:launch-policy-rejects-open-shapes´
 #[test]
 fn launch_policy_rejects_open_shapes() {
+    let _case = crate::launch::test_support::case_guard();
     let f = Fixture::new();
     assert_eq!(policy::parse(&f.bytes()).unwrap().cases.len(), 1);
     for key in [
@@ -170,6 +171,7 @@ fn launch_policy_rejects_open_shapes() {
 /// ´test:unit:launch-policy-bounds-all-work´
 #[test]
 fn launch_policy_bounds_all_work() {
+    let _case = crate::launch::test_support::case_guard();
     for field in [
         "case_ms",
         "campaign_ms",
@@ -210,6 +212,7 @@ fn launch_policy_bounds_all_work() {
 /// ´test:unit:launch-policy-rosters-and-mappings-are-closed´
 #[test]
 fn launch_policy_rosters_and_mappings_are_closed() {
+    let _case = crate::launch::test_support::case_guard();
     for pointer in ["/roles", "/artifacts"] {
         let mut f = Fixture::new();
         *f.value.pointer_mut(pointer).unwrap() = json!([]);
@@ -253,6 +256,7 @@ fn launch_policy_rosters_and_mappings_are_closed() {
 /// ´test:unit:launch-policy-cases-and-paths-are-distinct´
 #[test]
 fn launch_policy_cases_and_paths_are_distinct() {
+    let _case = crate::launch::test_support::case_guard();
     let mut f = Fixture::new();
     f.value["roots"]["evidence"] = f.value["roots"]["sealed"].clone();
     f.refusal("launch-root-separation");
@@ -306,6 +310,7 @@ fn launch_policy_cases_and_paths_are_distinct() {
 /// ´test:unit:launch-roles-require-the-reviewed-property-matrix´
 #[test]
 fn launch_roles_require_the_reviewed_property_matrix() {
+    let _case = crate::launch::test_support::case_guard();
     assert_eq!(
         Role::BarrierRelease.properties().capability_bounding_set,
         Vec::new()
@@ -346,6 +351,7 @@ fn launch_roles_require_the_reviewed_property_matrix() {
 /// ´test:unit:launch-measurement-uses-held-artifact-bytes´
 #[test]
 fn launch_measurement_uses_held_artifact_bytes() {
+    let _case = crate::launch::test_support::case_guard();
     let f = Fixture::new();
     let a = f.admit();
     assert_eq!(a.policy_sha256(), hash(&f.bytes()));
@@ -380,6 +386,7 @@ fn launch_measurement_uses_held_artifact_bytes() {
 /// ´test:unit:launch-artifact-custody-and-alias-refuse´
 #[test]
 fn launch_artifact_custody_and_alias_refuse() {
+    let _case = crate::launch::test_support::case_guard();
     for mode in [0o666, 0o4444] {
         let f = Fixture::new();
         fs::set_permissions(
@@ -423,6 +430,7 @@ fn launch_artifact_custody_and_alias_refuse() {
 /// ´test:unit:launch-configuration-is-measured-and-closed´
 #[test]
 fn launch_configuration_is_measured_and_closed() {
+    let _case = crate::launch::test_support::case_guard();
     let p = Role::Descriptors.properties();
     let bytes = serde_json::to_vec(&p).unwrap();
     let m = measure::configuration(&p, &bytes).unwrap();
@@ -468,6 +476,7 @@ const FLOW: [Phase; 9] = [
 /// ´test:unit:launch-state-never-releases-twice-or-recovers-success´
 #[test]
 fn launch_state_never_releases_twice_or_recovers_success() {
+    let _case = crate::launch::test_support::case_guard();
     let mut state = State::default();
     err(state.commit(Phase::Released), "launch-state-order");
     for p in FLOW {
@@ -488,6 +497,7 @@ fn launch_state_never_releases_twice_or_recovers_success() {
 /// ´test:unit:launch-store-publishes-immutable-measured-manifests´
 #[test]
 fn launch_store_publishes_immutable_measured_manifests() {
+    let _case = crate::launch::test_support::case_guard();
     let f = Fixture::new();
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -561,6 +571,7 @@ fn launch_store_publishes_immutable_measured_manifests() {
 /// ´test:unit:launch-store-refuses-replacement-and-publication-collision´
 #[test]
 fn launch_store_refuses_replacement_and_publication_collision() {
+    let _case = crate::launch::test_support::case_guard();
     output_custody_drift();
     let f = Fixture::new();
     let a = f.admit();
@@ -593,6 +604,7 @@ fn launch_store_refuses_replacement_and_publication_collision() {
 /// ´test:unit:launch-cleanup-is-manifest-bound-and-failure-only´
 #[test]
 fn launch_cleanup_is_manifest_bound_and_failure_only() {
+    let _case = crate::launch::test_support::case_guard();
     // A failed sealing step may have changed only one output to immutable mode.
     // A terminal failure can retain that mixed-mode manifest and clean it safely.
     let partial = Fixture::new();
@@ -650,15 +662,11 @@ fn launch_cleanup_is_manifest_bound_and_failure_only() {
 /// ´test:unit:launch-capture-binds-invocation-image-and-effective-properties´
 #[test]
 fn launch_capture_binds_invocation_image_and_effective_properties() {
+    let _case = crate::launch::test_support::case_guard();
     let f = Fixture::new();
     let a = f.admit();
     let mut s = Store::reserve(&a, 0).unwrap();
-    let image = a
-        .artifacts()
-        .iter()
-        .find(|a| a.id == "fixture")
-        .unwrap()
-        .object;
+    let image = a.fixture_image();
     let good = Invocation {
         id: "a".repeat(32),
         unit: "synthetic-sample.service".to_owned(),
@@ -755,6 +763,7 @@ fn launch_capture_binds_invocation_image_and_effective_properties() {
 /// ´test:unit:launch-public-case-is-measured-before-reservation´
 #[test]
 fn launch_public_case_is_measured_before_reservation() {
+    let _case = crate::launch::test_support::case_guard();
     let f = Fixture::new();
     let path = f.dir.path().join("public.json");
     let a = f.admit();
@@ -817,6 +826,7 @@ fn output_custody_drift() {
 /// ´test:unit:launch-binding-loss-latches-and-publishes-uncertainty´
 #[test]
 fn launch_binding_loss_latches_and_publishes_uncertainty() {
+    let _case = crate::launch::test_support::case_guard();
     for at_sync in [false, true] {
         let f = Fixture::new();
         let admission = f.admit();
@@ -884,6 +894,7 @@ fn launch_binding_loss_latches_and_publishes_uncertainty() {
 /// ´test:unit:launch-terminal-receipts-name-the-refusal-class´
 #[test]
 fn launch_terminal_receipts_name_the_refusal_class() {
+    let _case = crate::launch::test_support::case_guard();
     for uncertain in [false, true] {
         let f = Fixture::new();
         let admission = f.admit();
@@ -923,6 +934,7 @@ fn launch_terminal_receipts_name_the_refusal_class() {
 /// ´test:unit:launch-failure-publication-cannot-reopen-success´
 #[test]
 fn launch_failure_publication_cannot_reopen_success() {
+    let _case = crate::launch::test_support::case_guard();
     let f = Fixture::new();
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -947,6 +959,7 @@ fn launch_failure_publication_cannot_reopen_success() {
 /// ´test:unit:launch-original-cause-survives-output-loss´
 #[test]
 fn launch_original_cause_survives_output_loss() {
+    let _case = crate::launch::test_support::case_guard();
     let fixture = Fixture::new();
     let admission = fixture.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();

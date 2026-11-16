@@ -30,3 +30,6 @@ mod tests;
 
 #[cfg(test)]
 mod sealer_tests;
+
+#[cfg(test)]
+mod test_support;

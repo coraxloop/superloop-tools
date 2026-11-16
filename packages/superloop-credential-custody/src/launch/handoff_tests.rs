@@ -25,6 +25,7 @@ fn pair() -> (UnixStream, UnixStream) {
 /// ´test:unit:pidfd-handoff-binds-peer-receipt-and-stopped-process´
 #[test]
 fn pidfd_handoff_binds_peer_receipt_and_stopped_process() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture::fixture("normal");
     let (_readers, writers) = fixture::pipes();
     let (_child, pin) = fixture::start(&f, &writers);
@@ -96,6 +97,7 @@ fn raw(sender: &mut UnixStream, binding: &Binding<'_>, fds: &[OwnedFd]) {
 /// ´test:unit:pidfd-handoff-refuses-missing-extra-and-mismatched-rights´
 #[test]
 fn pidfd_handoff_refuses_missing_extra_and_mismatched_rights() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture::fixture("normal");
     let (_readers, writers) = fixture::pipes();
     let (_child, pin) = fixture::start(&f, &writers);
@@ -138,6 +140,7 @@ fn pidfd_handoff_refuses_missing_extra_and_mismatched_rights() {
 /// ´test:unit:pidfd-handoff-refuses-exited-target-and-expired-operation´
 #[test]
 fn pidfd_handoff_refuses_exited_target_and_expired_operation() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture::fixture("normal");
     let (_readers, writers) = fixture::pipes();
     let (mut child, pin) = fixture::start(&f, &writers);
@@ -165,6 +168,7 @@ fn pidfd_handoff_refuses_exited_target_and_expired_operation() {
 /// ´test:unit:pidfd-handoff-bounds-metadata-before-rights´
 #[test]
 fn pidfd_handoff_bounds_metadata_before_rights() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture::fixture("normal");
     let (_readers, writers) = fixture::pipes();
     let (_child, pin) = fixture::start(&f, &writers);

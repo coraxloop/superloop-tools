@@ -191,6 +191,7 @@ fn encoded(value: &serde_json::Value) -> Vec<u8> {
 /// ´test:unit:control-transaction-binds-owner-image-case-and-keeper-birth´
 #[test]
 fn control_transaction_binds_owner_image_case_and_keeper_birth() {
+    let _case = crate::launch::test_support::case_guard();
     let (_f, mut control) = setup();
     let (result, bytes) = transaction(&control, &encoded(&request(&control)));
     assert_eq!(result, Ok(()));
@@ -250,6 +251,7 @@ fn control_transaction_binds_owner_image_case_and_keeper_birth() {
 /// ´test:unit:control-record-is-closed-bounded-and-metadata-only´
 #[test]
 fn control_record_is_closed_bounded_and_metadata_only() {
+    let _case = crate::launch::test_support::case_guard();
     let (_f, mut control) = setup();
     let mut unknown = request(&control);
     unknown["payload"] = serde_json::json!("foreign bytes");
@@ -295,6 +297,7 @@ fn control_record_is_closed_bounded_and_metadata_only() {
 /// ´test:unit:control-cleanup-never-removes-a-replacement´
 #[test]
 fn control_cleanup_never_removes_a_replacement() {
+    let _case = crate::launch::test_support::case_guard();
     let (f, control) = setup();
     let path = f.dir.path().join("runtime/sample/control.sock");
     let old = path.with_extension("old");
@@ -331,6 +334,7 @@ fn control_cleanup_never_removes_a_replacement() {
 /// ´test:unit:control-refuses-signalling-peer-before-pidfd-transfer´
 #[test]
 fn control_refuses_signalling_peer_before_pidfd_transfer() {
+    let _case = crate::launch::test_support::case_guard();
     let f = crate::launch::inventory::tests::fixture("normal");
     let (_readers, writers) = crate::launch::inventory::tests::pipes();
     let (_child, pin) = crate::launch::inventory::tests::start(&f, &writers);
@@ -360,6 +364,7 @@ fn control_refuses_signalling_peer_before_pidfd_transfer() {
 /// ´test:unit:control-status-endpoint-refuses-descriptor-requests´
 #[test]
 fn control_status_endpoint_refuses_descriptor_requests() {
+    let _case = crate::launch::test_support::case_guard();
     let (_files, status_only) = setup();
     let mut value = request(&status_only);
     value["operation"] = "pidfd".into();
@@ -372,6 +377,7 @@ fn control_status_endpoint_refuses_descriptor_requests() {
 /// ´test:unit:control-transfers-pidfd-to-a-nonsignalling-live-peer´
 #[test]
 fn control_transfers_pidfd_to_a_nonsignalling_live_peer() {
+    let _case = crate::launch::test_support::case_guard();
     let f = crate::launch::inventory::tests::fixture("normal");
     let (_readers, writers) = crate::launch::inventory::tests::pipes();
     let (_child, pin) = crate::launch::inventory::tests::start(&f, &writers);
@@ -398,6 +404,7 @@ fn control_transfers_pidfd_to_a_nonsignalling_live_peer() {
 #[test]
 #[allow(unsafe_code)]
 fn control_peer_handle_refuses_a_different_live_process() {
+    let _case = crate::launch::test_support::case_guard();
     let (_files, mut control) = setup();
     control.image =
         ObjectIdentity::of(&File::open(std::env::current_exe().unwrap()).unwrap()).unwrap();
@@ -440,6 +447,7 @@ fn control_peer_handle_refuses_a_different_live_process() {
 /// ´test:unit:completion-server-is-read-only-and-requires-its-operation´
 #[test]
 fn completion_server_is_read_only_and_requires_its_operation() {
+    let _case = crate::launch::test_support::case_guard();
     let (_files, control) = setup();
     let mut value = request(&control);
     value["operation"] = "completion".into();

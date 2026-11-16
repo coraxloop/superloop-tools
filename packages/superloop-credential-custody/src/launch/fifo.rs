@@ -229,6 +229,7 @@ mod tests {
     /// ´test:unit:fifo-keeper-prevents-initial-eof-until-captured-writers´
     #[test]
     fn fifo_keeper_prevents_initial_eof_until_captured_writers() {
+        let _case = crate::launch::test_support::case_guard();
         let fixture = make_fixture("normal");
         let admission = fixture.admit();
         let mut pipes = Pipes::create(&admission, 0).unwrap();
@@ -268,6 +269,7 @@ mod tests {
     /// ´test:unit:fifo-capture-refuses-wrong-writers-and-latches´
     #[test]
     fn fifo_capture_refuses_wrong_writers_and_latches() {
+        let _case = crate::launch::test_support::case_guard();
         for kind in ["repeat", "reader", "regular"] {
             let fixture = Fixture::new();
             let admission = fixture.admit();
@@ -291,6 +293,7 @@ mod tests {
     /// ´test:unit:fifo-custody-is-exclusive-and-cleanup-verifies-all-objects´
     #[test]
     fn fifo_custody_is_exclusive_and_cleanup_verifies_all_objects() {
+        let _case = crate::launch::test_support::case_guard();
         for kind in ["replace", "mode", "link", "directory"] {
             let fixture = Fixture::new();
             let admission = fixture.admit();

@@ -167,6 +167,7 @@ pub(in crate::launch) fn pipes() -> ([File; 2], [File; 2]) {
 /// ´test:unit:external-inventory-observes-real-fixture-barrier´
 #[test]
 fn external_inventory_observes_real_fixture_barrier() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture("normal");
     let (_readers, writers) = pipes();
     let (_guard, pin) = start(&f, &writers);
@@ -219,6 +220,7 @@ fn external_inventory_observes_real_fixture_barrier() {
 /// ´test:unit:reexecuted-extra-descriptor-refuses-before-any-byte´
 #[test]
 fn reexecuted_extra_descriptor_refuses_before_any_byte() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture("reexec-extra");
     let (readers, writers) = pipes();
     let (_guard, pin) = start(&f, &writers);

@@ -114,6 +114,7 @@ fn captured(fixture: &Fixture, admission: &Admission, keeper: &mut Keeper<'_>) -
 /// ´test:unit:keeper-captures-real-stopped-image-with-manager-stand-in´
 #[test]
 fn keeper_captures_real_stopped_image_with_manager_stand_in() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture();
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -152,6 +153,7 @@ fn keeper_captures_real_stopped_image_with_manager_stand_in() {
 /// ´test:unit:keeper-contradiction-and-ambiguous-start-retain-quarantine´
 #[test]
 fn keeper_contradiction_and_ambiguous_start_retain_quarantine() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture();
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -189,6 +191,7 @@ fn keeper_contradiction_and_ambiguous_start_retain_quarantine() {
 /// ´test:unit:keeper-refuses-invocation-drift-and-preserves-first-failure´
 #[test]
 fn keeper_refuses_invocation_drift_and_preserves_first_failure() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture();
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();
@@ -219,6 +222,7 @@ fn keeper_refuses_invocation_drift_and_preserves_first_failure() {
 /// ´test:unit:process-pin-refuses-wrong-image-command-and-exit´
 #[test]
 fn process_pin_refuses_wrong_image_command_and_exit() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture();
     let admission = f.admit();
     let pipes = Pipes::create(&admission, 0).unwrap();
@@ -275,6 +279,7 @@ fn process_pin_refuses_wrong_image_command_and_exit() {
 #[test]
 #[allow(unsafe_code)]
 fn resident_startup_closes_ambient_descriptors_before_residency() {
+    let _case = crate::launch::test_support::case_guard();
     let file = tempfile::tempfile().unwrap();
     let raw = nix::fcntl::fcntl(&file, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(1000)).unwrap();
     // SAFETY: F_DUPFD_CLOEXEC returned a new owned descriptor.
@@ -316,6 +321,7 @@ fn resident_startup_closes_ambient_descriptors_before_residency() {
 /// ´test:unit:keeper-refuses-live-pid-and-barrier-state-drift´
 #[test]
 fn keeper_refuses_live_pid_and_barrier_state_drift() {
+    let _case = crate::launch::test_support::case_guard();
     for (field, value, class) in [
         ("MainPID", "999999", "keeper-process-binding"),
         ("ActiveState", "active", "keeper-unit-state"),
@@ -358,6 +364,7 @@ fn keeper_refuses_live_pid_and_barrier_state_drift() {
 /// ´test:unit:keeper-failed-stop-keeps-the-original-cause´
 #[test]
 fn keeper_failed_stop_keeps_the_original_cause() {
+    let _case = crate::launch::test_support::case_guard();
     let f = fixture();
     let admission = f.admit();
     let mut store = Store::reserve(&admission, 0).unwrap();

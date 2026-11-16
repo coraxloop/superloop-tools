@@ -3660,6 +3660,9 @@ pattern = "packages/superloop-credential-custody/src/launch/store.rs"
 pattern = "packages/superloop-credential-custody/src/launch/tests.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/test_support.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-credential-custody/src/launch/channel.rs"
 
 [[include.rows]]
