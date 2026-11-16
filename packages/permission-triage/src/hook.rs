@@ -1418,7 +1418,7 @@ fn adapt_hook_for_role(
     adapt_hook_for_domain(decoded, fast_lane, model, timing, role, None, peer_roots)
 }
 
-fn adapt_hook_for_domain(
+pub(crate) fn adapt_hook_for_domain(
     decoded: &DecodeResult,
     fast_lane: Option<&FastLane>,
     model: ModelStage<'_>,
@@ -1730,6 +1730,26 @@ fn adapt_service_failure(
     )
 }
 
+pub(crate) fn remote_root_remedy(
+    role: &CallerRole,
+    status: execute_command::request::VerdictStatus,
+    reason: &str,
+) -> Option<&'static str> {
+    if status != execute_command::request::VerdictStatus::InvalidOutput
+        || reason != "loop scope contradicts a protected target or unresolved identity/effect"
+    {
+        return None;
+    }
+    Some(match role {
+        CallerRole::OrchestratorSubagent(resolved) if resolved.worker() => {
+            "remote path outside the domain's declared roots; ask the loop to declare the remote root in its worker domain rubric"
+        }
+        _ => {
+            "remote path outside the domain's declared roots; ask the owner to declare the remote root in the loop's orchestrator domain rubric"
+        }
+    })
+}
+
 fn adapt_model_result(
     request: &PermissionRequest,
     result: &ModelResult,
@@ -1743,17 +1763,22 @@ fn adapt_model_result(
     let domain = rubrics.and_then(|rubrics| rubrics.domain().map(crate::rubric::OwnerRubric::text));
     let binding = crate::command_checks::binding(request, rubrics);
     let observed = RunnerOutcome::Output(serde_json::json!({"classification":result.classification().as_str(),"scope":result.scope().as_str(),"reason":result.reason()}).to_string().into_bytes());
-    let verdict = execute_command::triage::judge(
-        &binding,
-        Profile::HookSixClass,
-        &observed,
-        scope_floor_with_domain(request, role, domain, peer_roots),
-    );
+    let floor = assess_scope(request, role, domain, peer_roots);
+    let verdict =
+        execute_command::triage::judge(&binding, Profile::HookSixClass, &observed, floor.scope());
     if verdict.status != VerdictStatus::Valid {
         return (
             outcome(
                 PermissionDecision::Deny,
-                infrastructure_reason("scope validation", verdict.reason.as_str()),
+                infrastructure_reason(
+                    "scope validation",
+                    if matches!(floor, ScopeFloor::RemoteOutsideDomain) {
+                        remote_root_remedy(role, verdict.status, verdict.reason.as_str())
+                            .unwrap_or_else(|| verdict.reason.as_str())
+                    } else {
+                        verdict.reason.as_str()
+                    },
+                ),
                 ReasonKind::Infrastructure("scope validation"),
                 Some(request),
                 timing,
@@ -2444,14 +2469,38 @@ struct ScopeContext<'a> {
     peer_roots: &'a [PathBuf],
 }
 
-fn scope_floor_with_domain(
+enum ScopeFloor {
+    Loop,
+    Estate,
+    RemoteOutsideDomain,
+}
+
+impl ScopeFloor {
+    const fn scope(&self) -> Scope {
+        match self {
+            Self::Loop => Scope::Loop,
+            Self::Estate | Self::RemoteOutsideDomain => Scope::Estate,
+        }
+    }
+}
+
+pub(crate) fn scope_floor_with_domain(
     request: &PermissionRequest,
     role: &CallerRole,
     domain: Option<&str>,
     peer_roots: &[PathBuf],
 ) -> Scope {
+    assess_scope(request, role, domain, peer_roots).scope()
+}
+
+fn assess_scope(
+    request: &PermissionRequest,
+    role: &CallerRole,
+    domain: Option<&str>,
+    peer_roots: &[PathBuf],
+) -> ScopeFloor {
     let Some(entry) = role.entry() else {
-        return Scope::Estate;
+        return ScopeFloor::Estate;
     };
     let mut protected = ["PERMISSION_TRIAGE_OWNER_RUBRIC", LOOP_REGISTRY_VARIABLE]
         .iter()
@@ -2482,39 +2531,54 @@ fn scope_floor_with_domain(
         "Glob" | "Grep" => &["path"],
         "Agent" | "Task" | "SendMessage" | "ScheduleWakeup" | "TaskOutput" | "ListAgents"
         | "TaskStop" | "AskUserQuestion" | "TodoWrite" | "EnterPlanMode" | "ExitPlanMode" => &[],
-        _ => return Scope::Estate,
+        _ => return ScopeFloor::Estate,
     };
     for field in fields {
         match request.tool_input().get(*field) {
             Some(Value::String(path)) if local_scope_path(path, &context) => {}
             None if matches!(request.tool_name(), "Glob" | "Grep") => {}
-            _ => return Scope::Estate,
+            _ => return ScopeFloor::Estate,
         }
     }
-    Scope::Loop
+    ScopeFloor::Loop
 }
 
-fn shell_scope(command: &str, context: &ScopeContext<'_>) -> Scope {
-    let Some(words) = scope_words(command) else {
-        return Scope::Estate;
+fn shell_scope(command: &str, context: &ScopeContext<'_>) -> ScopeFloor {
+    let Some(scoped_words) = scope_words(command) else {
+        return ScopeFloor::Estate;
     };
+    let words = scoped_words
+        .iter()
+        .map(|word| word.text.clone())
+        .collect::<Vec<_>>();
     if words.windows(2).any(|pair| {
         pair.first().is_some_and(|word| word == "git")
             && pair.get(1).is_some_and(|word| word == "config")
     }) {
-        return Scope::Estate;
+        return ScopeFloor::Estate;
     }
     if estate_operation(&words) {
-        return Scope::Estate;
+        return ScopeFloor::Estate;
     }
-    for word in &words {
-        if (!word.starts_with('-') || word.contains('=') || word.contains('/'))
-            && !local_scope_path(word, context)
-        {
-            return Scope::Estate;
+    let mut result = ScopeFloor::Loop;
+    for scoped in &scoped_words {
+        let word = &scoped.text;
+        if !word.starts_with('-') || word.contains('=') || word.contains('/') {
+            let floor = if scoped.remote {
+                remote_scope_path(word, context)
+            } else if local_scope_path(word, context) {
+                ScopeFloor::Loop
+            } else {
+                ScopeFloor::Estate
+            };
+            match floor {
+                ScopeFloor::Estate => return ScopeFloor::Estate,
+                ScopeFloor::RemoteOutsideDomain => result = floor,
+                ScopeFloor::Loop => {}
+            }
         }
     }
-    Scope::Loop
+    result
 }
 
 fn estate_operation(words: &[String]) -> bool {
@@ -2645,6 +2709,51 @@ fn estate_path(path: &Path) -> bool {
     .any(|root| path.starts_with(root))
 }
 
+fn remote_scope_path(value: &str, context: &ScopeContext<'_>) -> ScopeFloor {
+    let value = value.split_once('=').map_or(value, |(_, target)| target);
+    if matches!(
+        value,
+        "/dev/null" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr"
+    ) {
+        return ScopeFloor::Loop;
+    }
+    if value.is_empty() || value.contains(['$', '`', '*', '?', '~', '@']) || value.contains("://") {
+        return ScopeFloor::Estate;
+    }
+    let path = Path::new(value);
+    // Reject parent components before normalization or prefix matching, including relative words.
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return ScopeFloor::Estate;
+    }
+    if estate_path(path) || protected_name(path) {
+        return ScopeFloor::Estate;
+    }
+    if !path.is_absolute() {
+        // Operand roles are not known: ordinary relative words retain the existing approximation,
+        // without assigning them a caller-local base or exempting protected remote names.
+        return ScopeFloor::Loop;
+    }
+    if context
+        .protected
+        .iter()
+        .any(|protected| path.starts_with(protected))
+        || peer_owned_path(path, context)
+    {
+        return ScopeFloor::Estate;
+    }
+    if context
+        .domain
+        .is_some_and(|domain| domain_path_candidate(domain, path))
+    {
+        ScopeFloor::Loop
+    } else {
+        ScopeFloor::RemoteOutsideDomain
+    }
+}
+
 fn local_scope_path(value: &str, context: &ScopeContext<'_>) -> bool {
     let cwd = context.cwd;
     let checkout = context.checkout;
@@ -2757,6 +2866,10 @@ fn protected_name_outside_checkout(path: &Path, checkout: &Path) -> bool {
     if path.starts_with(checkout) {
         return false;
     }
+    protected_name(path)
+}
+
+fn protected_name(path: &Path) -> bool {
     let components = path
         .components()
         .map(|component| component.as_os_str().to_str())

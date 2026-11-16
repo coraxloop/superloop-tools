@@ -262,7 +262,8 @@ pub(crate) fn rubric_root_spans(text: &str) -> impl Iterator<Item = &str> {
         .filter(|(index, _)| index % 2 == 1)
         .map(|(_, root)| root)
         .filter(|root| {
-            *root != "/"
+            root.split('/')
+                .any(|component| !component.is_empty() && component != "*")
                 && root.starts_with('/')
                 && root.ends_with('/')
                 && !root.contains("/../")

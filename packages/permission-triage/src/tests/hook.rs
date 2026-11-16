@@ -334,6 +334,135 @@ fn rubric_root_spans_apply_the_quoted_path_grammar_once() {
     }
 }
 
+/// ´test:crate:rubric-roots-require-a-restricting-component´
+#[test]
+fn rubric_roots_require_a_restricting_component() {
+    let temp = EstateFixture::temporary();
+    for root in ["/", "//", "///", "/*/", "//*//", "/*/*/"] {
+        let domain = format!("The domain is `{root}`.");
+        assert!(rubric_roots(&domain).is_empty(), "{root}");
+        assert_eq!(
+            remote_fixture_scope(&temp.0, "ssh A 'cat /unrelated/x'", &domain),
+            Scope::Estate,
+            "{root}"
+        );
+    }
+    assert_eq!(
+        rubric_roots("`/domain/*/` `/prefix*/`"),
+        ["/domain/*/", "/prefix*/"]
+    );
+    assert_eq!(
+        remote_fixture_scope(&temp.0, "ssh A 'cat /domain/job/x'", "`/domain/*/`"),
+        Scope::Loop
+    );
+}
+
+/// Exercise the production adapter with registry-resolved worker and orchestrator identities.
+///
+/// # Panics
+/// Panics only if a fixed fixture is invalid or its response names the wrong rubric owner.
+/// ´test:crate:remote-root-remedy-addresses-the-rubric-owner-for-each-role´
+#[test]
+fn remote_root_remedy_addresses_the_rubric_owner_for_each_role() {
+    let registry = worker_identity_registry("40000:4", "42000:4");
+    let mut input: Value = serde_json::from_slice(&request(
+        "Bash",
+        json!({"command":"timeout 20 ssh A 'cat /undeclared/x'"}),
+    ))
+    .expect("request");
+    input["cwd"] = json!("/launch/one");
+    let decoded = decode_request(&serde_json::to_vec(&input).expect("request bytes"));
+    let model = execute_command::triage::parse_hook(
+        &json!({"classification":"safe", "scope":"loop", "reason":"fixture"}),
+    )
+    .expect("model result");
+    for (uid, session, transcript, remedy) in [
+        (
+            40002,
+            "",
+            None,
+            "ask the loop to declare the remote root in its worker domain rubric",
+        ),
+        (
+            41001,
+            "one-sid",
+            None,
+            "ask the owner to declare the remote root in the loop's orchestrator domain rubric",
+        ),
+        (
+            41001,
+            "one-sid",
+            Some("/transcripts/subagents/child"),
+            "ask the owner to declare the remote root in the loop's orchestrator domain rubric",
+        ),
+    ] {
+        let role = resolve_role(
+            Some(&registry),
+            uid,
+            session,
+            "/launch/one",
+            transcript,
+            false,
+        );
+        assert!(role.entry().is_some());
+        let output = crate::hook::adapt_hook_for_domain(
+            &decoded,
+            Some(&FastLane::ToModel),
+            ModelStage::Result(&model),
+            HookTiming::default(),
+            &role,
+            None,
+            &[],
+        );
+        assert_eq!(
+            output.response().reason(),
+            format!(
+                "infrastructure-failure: scope validation failed: remote path outside the domain's declared roots; {remedy}; no policy judgment was made"
+            )
+        );
+        assert!(!output.response().reason().contains("/undeclared/x"));
+    }
+}
+
+/// ´test:crate:remote-root-remedy-requires-the-exact-scope-contradiction´
+#[test]
+fn remote_root_remedy_requires_the_exact_scope_contradiction() {
+    use execute_command::request::VerdictStatus;
+    let registry = worker_identity_registry("40000:4", "42000:4");
+    let role = resolve_role(
+        Some(&registry),
+        41001,
+        "one-sid",
+        "/launch/one",
+        None,
+        false,
+    );
+    let contradiction = "loop scope contradicts a protected target or unresolved identity/effect";
+    assert!(
+        crate::hook::remote_root_remedy(&role, VerdictStatus::InvalidOutput, contradiction)
+            .is_some()
+    );
+    for status in [
+        VerdictStatus::Valid,
+        VerdictStatus::AgentFailure,
+        VerdictStatus::Timeout,
+        VerdictStatus::InfrastructureFailure,
+    ] {
+        assert_eq!(
+            crate::hook::remote_root_remedy(&role, status, contradiction),
+            None
+        );
+    }
+    assert_eq!(
+        crate::hook::remote_root_remedy(
+            &role,
+            VerdictStatus::InvalidOutput,
+            "result is not an object"
+        ),
+        None
+    );
+}
+
 /// ´test:crate:worker-rubric-containment-covers-literal-wildcards-and-empty-rubrics´
 #[test]
 fn worker_rubric_containment_covers_literal_wildcards_and_empty_rubrics() {
@@ -828,6 +957,16 @@ fn subordinate_mapping_requires_account_and_well_formed_matching_lines() {
 struct EstateFixture(PathBuf);
 
 impl EstateFixture {
+    fn temporary() -> Self {
+        let sequence = NEXT_ESTATE_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "permission-triage-scope-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).expect("unique scope fixture");
+        Self(path)
+    }
+
     fn new() -> Self {
         let sequence = NEXT_ESTATE_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let home = std::env::var_os("HOME").expect("estate fixture needs a home directory");
@@ -1049,6 +1188,289 @@ fn request(tool: &str, tool_input: Value) -> Vec<u8> {
 
 fn decoded_request(tool: &str, input: Value) -> DecodeResult {
     decode_request(&request(tool, input))
+}
+
+fn remote_fixture_scope(checkout: &std::path::Path, command: &str, domain: &str) -> Scope {
+    let registry = parsed_worker_registry(&[(
+        "one.env",
+        format!(
+            "LOOP_NAME=one\nLOOP_CWD={}\nLOOP_HOME=/var/loops/one\n",
+            checkout.display()
+        ),
+    )]);
+    let cwd = checkout.to_str().expect("fixture path is UTF-8");
+    let role = resolve_role(Some(&registry), 42, "", cwd, None, false);
+    let mut input: Value =
+        serde_json::from_slice(&request("Bash", json!({"command":command}))).expect("fixture JSON");
+    input["cwd"] = json!(cwd);
+    let DecodeResult::Decoded(request) =
+        decode_request(&serde_json::to_vec(&input).expect("fixture bytes"))
+    else {
+        panic!("remote fixture decodes");
+    };
+    crate::hook::scope_floor_with_domain(&request, &role, Some(domain), &[])
+}
+
+/// ´test:crate:remote-scope-is-independent-of-local-ancestor-identity´
+#[test]
+fn remote_scope_is_independent_of_local_ancestor_identity() {
+    let temp = EstateFixture::temporary();
+    let checkout = temp.0.join("checkout");
+    let remote = temp.0.join("remote");
+    let outside = temp.0.join("outside");
+    fs::create_dir(&checkout).expect("checkout");
+    fs::create_dir(&outside).expect("outside");
+    let domain = format!("Remote domain `{}/`.", remote.display());
+    let command = format!("ssh own-worker 'git -C {}/repo status'", remote.display());
+    for state in ["absent", "directory", "outward-link"] {
+        match state {
+            "directory" => fs::create_dir(&remote).expect("remote-named local directory"),
+            "outward-link" => {
+                fs::remove_dir(&remote).expect("remove directory");
+                std::os::unix::fs::symlink(&outside, &remote).expect("outward link");
+            }
+            _ => {}
+        }
+        assert_eq!(
+            remote_fixture_scope(&checkout, &command, &domain),
+            Scope::Loop,
+            "{state}"
+        );
+    }
+    let local = format!("cat {}/repo", remote.display());
+    assert_eq!(
+        remote_fixture_scope(&checkout, &local, &domain),
+        Scope::Estate
+    );
+    assert_eq!(
+        remote_fixture_scope(&checkout, &command, "No declared remote root."),
+        Scope::Estate
+    );
+    for path in [
+        checkout.join("file"),
+        PathBuf::from("/var/loops/one/runs/file"),
+    ] {
+        let command = format!("ssh own-worker 'cat {}'", path.display());
+        assert_eq!(
+            remote_fixture_scope(&checkout, &command, "No remote roots."),
+            Scope::Estate
+        );
+    }
+}
+
+/// ´test:crate:remote-scope-comparison-pins-the-staged-verdicts´
+#[test]
+fn remote_scope_comparison_pins_the_staged_verdicts() {
+    let temp = EstateFixture::temporary();
+    let checkout = temp.0.join("checkout");
+    let remote = temp.0.join("remote");
+    let outside = temp.0.join("outside");
+    fs::create_dir(&checkout).expect("checkout");
+    fs::create_dir(&outside).expect("outside");
+    let root = remote.display();
+    let domain = format!("Remote domain `{root}/`.");
+    let cases = [
+        (
+            "absolute",
+            format!("ssh own-worker 'git -C {root}/repo status'"),
+            Scope::Loop,
+            Scope::Loop,
+        ),
+        (
+            "normalized",
+            format!("ssh own-worker 'cat {root}//./x'"),
+            Scope::Loop,
+            Scope::Loop,
+        ),
+        (
+            "parent",
+            format!("ssh own-worker 'cat {root}/../other/x'"),
+            Scope::Estate,
+            Scope::Estate,
+        ),
+        (
+            "sibling",
+            format!("ssh own-worker 'cat {root}-other/x'"),
+            Scope::Estate,
+            Scope::Estate,
+        ),
+        (
+            "post-option",
+            format!("ssh own-worker -E {root}/log true"),
+            Scope::Loop,
+            Scope::Estate,
+        ),
+        (
+            "pipe",
+            format!("ssh own-worker 'cat {root}/x' | tee {root}/out"),
+            Scope::Loop,
+            Scope::Estate,
+        ),
+    ];
+    let cases = cases
+        .into_iter()
+        .chain(remote_scope_fixed_cases())
+        .collect::<Vec<_>>();
+    let mut actual = Vec::new();
+    let mut expected = Vec::new();
+    for linked in [false, true] {
+        if linked {
+            std::os::unix::fs::symlink(&outside, &remote).expect("outward link");
+        }
+        for (name, command, plain, link) in &cases {
+            let scope = remote_fixture_scope(&checkout, command, &domain);
+            actual.push((linked, *name, scope));
+            expected.push((linked, *name, if linked { *link } else { *plain }));
+        }
+    }
+    assert_eq!(actual, expected);
+}
+
+fn remote_scope_fixed_cases() -> impl Iterator<Item = (&'static str, String, Scope, Scope)> {
+    [
+        ("system", "ssh own-worker 'cat /etc/hosts'", Scope::Estate),
+        (
+            "undeclared",
+            "ssh own-worker 'stat /srv/report'",
+            Scope::Estate,
+        ),
+        (
+            "cargo",
+            "ssh own-worker 'cargo test -p widget'",
+            Scope::Loop,
+        ),
+        ("make", "ssh own-worker 'time make check'", Scope::Loop),
+        ("relative", "ssh own-worker 'cat report'", Scope::Loop),
+        (
+            "protected-relative",
+            "ssh own-worker 'cat >> .ssh/authorized_keys'",
+            Scope::Estate,
+        ),
+        ("brace", "ssh own-worker 'cat {/etc/shadow,x}'", Scope::Loop),
+        (
+            "stdin",
+            "printf 'cat /etc/shadow' | ssh own-worker sh",
+            Scope::Loop,
+        ),
+        ("host-colon", "scp f own-worker:/etc/hosts", Scope::Loop),
+        (
+            "xargs-stdin",
+            "printf '/etc/hosts' | ssh own-worker 'xargs cat'",
+            Scope::Loop,
+        ),
+        ("expansion", "ssh own-worker 'cat $HOME/x'", Scope::Estate),
+        ("subshell", "ssh own-worker 'cat $(pwd)/x'", Scope::Estate),
+        (
+            "heredoc",
+            "ssh own-worker 'cat <<EOF\nx\nEOF'",
+            Scope::Estate,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, command, scope)| (name, command.to_owned(), scope, scope))
+}
+
+/// ´test:crate:remote-scope-parent-components-are-rejected-before-matching´
+#[test]
+fn remote_scope_parent_components_are_rejected_before_matching() {
+    let temp = EstateFixture::temporary();
+    for path in [
+        "/remote/root/../other/x",
+        "/remote/root/x/../y",
+        "../report",
+        "x/../report",
+    ] {
+        let command = format!("ssh own-worker 'cat {path}'");
+        assert_eq!(
+            remote_fixture_scope(&temp.0, &command, "Root `/remote/root/`."),
+            Scope::Estate,
+            "{path}"
+        );
+    }
+}
+
+/// ´test:crate:remote-scope-lexical-roots-and-protected-names´
+#[test]
+fn remote_scope_lexical_roots_and_protected_names() {
+    let temp = EstateFixture::temporary();
+    let domain = "Roots `/remote/root/`, `/remote/jobs/*/`, `/etc/`.";
+    for (path, expected) in [
+        ("//remote//root/./x", Scope::Loop),
+        ("/remote/root-other/x", Scope::Estate),
+        ("/remote/jobs/one/x", Scope::Loop),
+        ("/remote/other/one/x", Scope::Estate),
+        ("/etc/hosts", Scope::Estate),
+        ("/remote/root/settings.json", Scope::Estate),
+        ("settings.local.json", Scope::Estate),
+        ("/remote/root/.ssh/authorized_keys", Scope::Estate),
+        (".ssh/authorized_keys", Scope::Estate),
+        ("/remote/root/.config/custody/key", Scope::Estate),
+        (".config/custody/key", Scope::Estate),
+        ("/remote/root/AGENTS.md", Scope::Estate),
+        ("AGENTS.md", Scope::Estate),
+        ("/dev/null", Scope::Loop),
+    ] {
+        let command = format!("ssh own-worker 'cat {path}'");
+        assert_eq!(
+            remote_fixture_scope(&temp.0, &command, domain),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+/// ´test:crate:remote-relative-words-retain-the-untyped-operand-approximation´
+#[test]
+fn remote_relative_words_retain_the_untyped_operand_approximation() {
+    let temp = EstateFixture::temporary();
+    for payload in [
+        "cargo test -p widget",
+        "time make check",
+        "cat report",
+        "stat report",
+        "cat > report",
+        "status",
+    ] {
+        assert_eq!(
+            remote_fixture_scope(
+                &temp.0,
+                &format!("ssh own-worker '{payload}'"),
+                "No remote roots."
+            ),
+            Scope::Loop,
+            "{payload}"
+        );
+    }
+}
+
+/// ´test:crate:remote-scope-keeps-local-pipes-redirects-and-options-local´
+#[test]
+fn remote_scope_keeps_local_pipes_redirects_and_options_local() {
+    let temp = EstateFixture::temporary();
+    let checkout = temp.0.join("checkout");
+    let remote = temp.0.join("remote");
+    let outside = temp.0.join("outside");
+    fs::create_dir(&checkout).expect("checkout");
+    fs::create_dir(&outside).expect("outside");
+    std::os::unix::fs::symlink(&outside, &remote).expect("outward link");
+    let root = remote.display();
+    let domain = format!("Root `{root}/`.");
+    for command in [
+        format!("ssh A 'cat {root}/x' | tee {root}/out"),
+        format!("cat {root}/in | ssh A 'cat {root}/x'"),
+        format!("ssh A 'cat {root}/x' > {root}/out"),
+        format!("ssh A 'cat {root}/x' < {root}/in"),
+        format!("ssh -F {root}/file A 'cat {root}/x'"),
+        format!("ssh -i {root}/file A 'cat {root}/x'"),
+        format!("ssh -o IdentityFile={root}/file A 'cat {root}/x'"),
+        format!("ssh A -E {root}/log true"),
+    ] {
+        assert_eq!(
+            remote_fixture_scope(&checkout, &command, &domain),
+            Scope::Estate,
+            "{command}"
+        );
+    }
 }
 
 /// ´test:crate:config-custody-pairs-impose-estate-floor-outside-checkout´

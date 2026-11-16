@@ -11,6 +11,178 @@ use crate::checks::{self, READ_ONLY_TABLE, ReadOnlyEntry};
 use crate::request::{HygieneObservation, Request};
 use serde_json::{Value, json};
 
+fn scope_locations(command: &str, target: &str) -> Vec<bool> {
+    checks::scope_words(command)
+        .expect("scope fixture parses")
+        .into_iter()
+        .filter(|word| word.text == target)
+        .map(|word| word.remote)
+        .collect()
+}
+
+/// Preserve payload location through recursion and repeated word projection.
+///
+/// # Panics
+/// Panics only if the fixture's remote payload is lost or attributed to the caller.
+/// ´test:unit:scope-payload-provenance-keeps-both-word-copies´
+#[test]
+fn scope_payload_provenance_keeps_both_word_copies() {
+    for (command, count) in [
+        ("ssh A 'cat /remote/x'", 1),
+        ("ssh A cat /remote/x", 2),
+        ("ssh A /remote/x", 2),
+        ("timeout 20 ssh A 'cat /remote/x'", 1),
+        ("bash -c \"ssh A 'cat /remote/x'\"", 1),
+        ("ssh A \"bash -c 'cat /remote/x'\"", 1),
+    ] {
+        assert_eq!(
+            scope_locations(command, "/remote/x"),
+            vec![true; count],
+            "{command}"
+        );
+        assert!(
+            scope_locations(command, "A").iter().all(|remote| !remote),
+            "{command}"
+        );
+    }
+}
+
+/// Keep pipe neighbors and adjacent commands in their own execution location.
+///
+/// # Panics
+/// Panics only if a pipe neighbor is attributed to the remote payload.
+/// ´test:unit:scope-pipe-provenance-is-per-simple-command´
+#[test]
+fn scope_pipe_provenance_is_per_simple_command() {
+    for command in [
+        "cat /local/in | ssh A 'cat /remote/x'",
+        "ssh A 'cat /remote/x' | tee /local/in",
+        "ssh A 'cat /remote/x'; cat /local/in",
+    ] {
+        assert_eq!(scope_locations(command, "/remote/x"), [true], "{command}");
+        assert_eq!(scope_locations(command, "/local/in"), [false], "{command}");
+    }
+}
+
+/// Attribute a redirect to the shell that performs it.
+///
+/// # Panics
+/// Panics only if an outer or nested redirect has the wrong execution location.
+/// ´test:unit:scope-redirect-provenance-keeps-the-executing-shell´
+#[test]
+fn scope_redirect_provenance_keeps_the_executing_shell() {
+    for command in [
+        "ssh A 'cat /remote/x' < /local/in",
+        "ssh A 'cat /remote/x' > /local/in",
+        "ssh A 'cat < /remote/x' > /local/in",
+        "ssh A 'cat > /remote/x' < /local/in",
+    ] {
+        assert_eq!(scope_locations(command, "/remote/x"), [true], "{command}");
+        assert_eq!(scope_locations(command, "/local/in"), [false], "{command}");
+    }
+}
+
+/// Keep local option values and the established uncertain-parse fallback.
+///
+/// # Panics
+/// Panics only if a local option value becomes remote or uncertain SSH parsing gains attribution.
+/// ´test:unit:scope-ssh-options-retain-local-values-and-uncertain-fallback´
+#[test]
+fn scope_ssh_options_retain_local_values_and_uncertain_fallback() {
+    for option in ["-F", "-i", "-o", "-J", "-l", "-p"] {
+        let command = format!("ssh -n -T {option} /local/value A 'cat /remote/x'");
+        assert_eq!(
+            scope_locations(&command, "/local/value"),
+            [false],
+            "{command}"
+        );
+        assert_eq!(scope_locations(&command, "/remote/x"), [true], "{command}");
+    }
+    for command in [
+        "ssh A -E /remote/log true",
+        "ssh -E /remote/log A 'cat /remote/x'",
+        "ssh -Z A 'cat /remote/x'",
+        "ssh -oUnknown=value A 'cat /remote/x'",
+        "ssh A -E log ssh B 'cat /remote/x'",
+    ] {
+        assert!(
+            checks::scope_words(command)
+                .expect("fallback parses")
+                .iter()
+                .all(|word| !word.remote),
+            "{command}"
+        );
+    }
+}
+
+/// Attribute only a client whose name nothing earlier in its shell can rebind.
+///
+/// # Panics
+/// Panics only if a qualified, reassigned or rebound client gains remote attribution.
+/// ´test:unit:scope-remote-attribution-requires-an-unrebound-client´
+#[test]
+fn scope_remote_attribution_requires_an_unrebound_client() {
+    for command in [
+        "./ssh A 'cat /remote/x'",
+        "/opt/tools/ssh A 'cat /remote/x'",
+        "PATH=./bin ssh A 'cat /remote/x'",
+        "env PATH=./bin ssh A 'cat /remote/x'",
+        "export PATH=./bin; ssh A 'cat /remote/x'",
+        "hash -p ./tool ssh && ssh A 'cat /remote/x'",
+        "printf -v PATH ./bin; ssh A 'cat /remote/x'",
+        "bash -c \"export PATH=./bin; ssh A 'cat /remote/x'\"",
+        "export PATH=./bin; bash -c \"ssh A 'cat /remote/x'\"",
+    ] {
+        assert!(
+            checks::scope_words(command)
+                .expect("rebinding fixture parses")
+                .iter()
+                .all(|word| !word.remote),
+            "{command}"
+        );
+    }
+    assert_eq!(
+        scope_locations("cat /local/in | ssh A 'cat /remote/x'", "/remote/x"),
+        [true]
+    );
+}
+
+/// Check the client's enclosing launchers without changing ordinary timed invocations.
+///
+/// # Panics
+/// Panics only if a fixture fails to parse or its attribution contradicts the declared boundary.
+/// ´test:unit:scope-remote-attribution-checks-enclosing-launchers´
+#[test]
+fn scope_remote_attribution_checks_enclosing_launchers() {
+    for command in [
+        "PATH=./bin bash -c \"ssh A 'cat /remote/x'\"",
+        "env PATH=./bin sh -c \"ssh A 'cat /remote/x'\"",
+        "./bash -c \"ssh A 'cat /remote/x'\"",
+        "./timeout 20 ssh A 'cat /remote/x'",
+        "env -C ./other ssh A 'cat /remote/x'",
+        "env -u PATH ssh A 'cat /remote/x'",
+        "bash --rcfile ./rebind -ic \"ssh A 'cat /remote/x'\"",
+        "bash -lc \"ssh A 'cat /remote/x'\"",
+    ] {
+        assert!(
+            checks::scope_words(command)
+                .expect("launcher fixture parses")
+                .iter()
+                .all(|word| !word.remote),
+            "{command}"
+        );
+    }
+    for command in [
+        "time timeout 20 ssh A 'cat /remote/x'",
+        "env ssh A 'cat /remote/x'",
+        "env -- ssh A 'cat /remote/x'",
+        "time -o ./timing ssh A 'cat /remote/x'",
+        "bash -c \"ssh A 'cat /remote/x'\"",
+    ] {
+        assert_eq!(scope_locations(command, "/remote/x"), [true], "{command}");
+    }
+}
+
 /// Pin the crate table to the copied caller outcomes, including their order.
 ///
 /// # Panics

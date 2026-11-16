@@ -2400,8 +2400,12 @@ fn redirect_mutates(redirect: &Redirect) -> bool {
 }
 
 fn program_index(command: &SimpleCommand) -> Option<usize> {
+    program_identity(command).map(|(index, _)| index)
+}
+
+fn program_identity(command: &SimpleCommand) -> Option<(usize, bool)> {
     if informational_command_query(command) {
-        return Some(0);
+        return Some((0, false));
     }
     program_index_from(command, 0)
 }
@@ -2439,26 +2443,37 @@ fn git_subcommand_index(command: &SimpleCommand, git: usize) -> Option<usize> {
     None
 }
 
-fn program_index_from(command: &SimpleCommand, start: usize) -> Option<usize> {
+fn program_index_from(command: &SimpleCommand, start: usize) -> Option<(usize, bool)> {
     let mut index = start;
+    let mut unrebound = true;
     while command
         .words
         .get(index)
         .is_some_and(|word| assignment_word(&word.text))
     {
+        unrebound = false;
         index += 1;
     }
     loop {
-        let program = basename(&command.words.get(index)?.text);
+        let spelling = &command.words.get(index)?.text;
+        let program = basename(spelling);
+        unrebound &= spelling == program;
         match program {
             "env" => {
                 index += 1;
+                let options = index;
                 index = skip_options(command, index, &["-u", "--unset", "-C", "--chdir"]);
+                unrebound &= command
+                    .words
+                    .get(options..index)?
+                    .iter()
+                    .all(|word| word.text == "--");
                 while command
                     .words
                     .get(index)
                     .is_some_and(|word| assignment_word(&word.text))
                 {
+                    unrebound = false;
                     index += 1;
                 }
             }
@@ -2523,7 +2538,7 @@ fn program_index_from(command: &SimpleCommand, start: usize) -> Option<usize> {
             "sudo" | "doas" => {
                 index = privilege_command_index(command, index)?.0;
             }
-            _ => return Some(index),
+            _ => return Some((index, unrebound)),
         }
     }
 }
@@ -2969,13 +2984,27 @@ fn forbidden_git_read_option(option: &str) -> bool {
     })
 }
 
-/// Bounded shell tokens used by the hook's scope validator; no filesystem or environment access.
-#[must_use]
-pub fn scope_words(command: &str) -> Option<Vec<String>> {
-    scope_words_at_depth(command, 0)
+/// A scope word and whether it executes inside a recognized remote payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeWord {
+    /// Original token text, without consulting a filesystem or environment.
+    pub text: String,
+    /// True only for a remote payload, including its nested shells and redirects.
+    pub remote: bool,
 }
 
-fn scope_words_at_depth(command: &str, depth: u8) -> Option<Vec<String>> {
+/// Bounded shell tokens used by the hook's scope validator; no filesystem or environment access.
+#[must_use]
+pub fn scope_words(command: &str) -> Option<Vec<ScopeWord>> {
+    scope_words_at_depth(command, 0, false, true)
+}
+
+fn scope_words_at_depth(
+    command: &str,
+    depth: u8,
+    remote: bool,
+    attribute_remote: bool,
+) -> Option<Vec<ScopeWord>> {
     if depth >= 8 {
         return None;
     }
@@ -2986,15 +3015,33 @@ fn scope_words_at_depth(command: &str, depth: u8) -> Option<Vec<String>> {
         return None;
     }
     let mut words = Vec::new();
-    for simple in shape.commands {
-        let program = program_index(&simple)?;
+    let connectors = shape.connectors;
+    for (position, simple) in shape.commands.into_iter().enumerate() {
+        let (program, unrebound) = program_identity(&simple)?;
         let emits_data = simple
             .words
             .get(program)
             .is_some_and(|word| matches!(basename(&word.text), "printf" | "echo"));
         let nested = nested_shell_payload(&simple);
+        let ssh = basename(&simple.words.get(program)?.text) == "ssh";
+        // A command sequenced before this one in the same shell can rebind the client's name.
+        let attributable = attribute_remote
+            && unrebound
+            && !scope_shell_startup(&simple, program)
+            && connectors
+                .iter()
+                .take(position)
+                .all(|connector| *connector == Connector::Pipe);
+        let remote_start = attributable
+            .then(|| scope_remote_payload_start(&simple, program))
+            .flatten();
         if let Some(payload) = &nested {
-            words.extend(scope_words_at_depth(payload, depth + 1)?);
+            words.extend(scope_words_at_depth(
+                payload,
+                depth + 1,
+                remote || remote_start.is_some(),
+                attributable && (!ssh || remote_start.is_some()),
+            )?);
         }
         for (index, word) in simple.words.into_iter().enumerate() {
             if word.substitution || word.text.contains(['$', '`', '*', '?']) {
@@ -3005,14 +3052,80 @@ fn scope_words_at_depth(command: &str, depth: u8) -> Option<Vec<String>> {
             {
                 continue;
             }
-            words.push(word.text);
+            words.push(ScopeWord {
+                text: word.text,
+                remote: remote || remote_start.is_some_and(|start| index >= start),
+            });
         }
         for redirect in simple.redirects {
             if redirect.target.substitution || redirect.target.text.contains(['$', '`', '*', '?']) {
                 return None;
             }
-            words.push(redirect.target.text);
+            words.push(ScopeWord {
+                text: redirect.target.text,
+                remote,
+            });
         }
     }
     Some(words)
+}
+
+// Interactive/login shells and explicit startup files can rebind the client before -c runs.
+fn scope_shell_startup(command: &SimpleCommand, program: usize) -> bool {
+    if !command
+        .words
+        .get(program)
+        .is_some_and(|word| matches!(word.text.as_str(), "sh" | "bash"))
+    {
+        return false;
+    }
+    let Some(payload) = shell_command_payload(command, program) else {
+        return true;
+    };
+    command
+        .words
+        .iter()
+        .take(payload)
+        .skip(program + 1)
+        .any(|word| {
+            matches!(word.text.as_str(), "--login" | "--rcfile" | "--init-file")
+                || word.text.starts_with("--rcfile=")
+                || word.text.starts_with("--init-file=")
+                || (word.text.starts_with('-')
+                    && !word.text.starts_with("--")
+                    && word.text.contains(['i', 'l']))
+        })
+}
+
+// Attribution is narrower than token inspection: unknown SSH options retain the old local
+// judgment, including every recursively inspected word. OpenSSH also accepts local options
+// after the destination, so a leading dash there cannot begin an attributed payload. Only the
+// PATH-resolved client is attributed: a qualified program name, or an assignment before it,
+// can select a local executable named ssh.
+fn scope_remote_payload_start(command: &SimpleCommand, program: usize) -> Option<usize> {
+    let assigned = command
+        .words
+        .get(..program)?
+        .iter()
+        .any(|word| assignment_word(&word.text));
+    if assigned || command.words.get(program)?.text != "ssh" {
+        return None;
+    }
+    let destination = ssh_destination(command, program)?;
+    let mut index = program + 1;
+    while index < destination {
+        let option = &command.words.get(index)?.text;
+        if matches!(option.as_str(), "-o" | "-F" | "-i" | "-J" | "-l" | "-p") {
+            index += 2;
+        } else if matches!(
+            option.as_str(),
+            "-n" | "-T" | "-t" | "-q" | "-v" | "-4" | "-6"
+        ) {
+            index += 1;
+        } else {
+            return None;
+        }
+    }
+    let start = destination + 1;
+    (!command.words.get(start)?.text.starts_with('-')).then_some(start)
 }

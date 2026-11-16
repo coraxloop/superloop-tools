@@ -1657,6 +1657,82 @@ fn scope_hook_distinguishes_local_peer_authorization_and_account_effects() {
     }
 }
 
+/// ´test:integration:remote-root-refusal-names-class-and-rubric-remedy-without-path´
+#[test]
+fn remote_root_refusal_names_class_and_rubric_remedy_without_path() {
+    let fixture = ScopeFixture::new("remote-root-remedy");
+    let target = fixture.checkout.join("file");
+    let command = format!("timeout 20 ssh own-worker 'cat {}'", target.display());
+    let output = run(
+        fixture.hook("missing-root", "safe", "loop"),
+        &fixture.input(&command),
+    );
+    assert_eq!(
+        hook_reason(&output),
+        "infrastructure-failure: scope validation failed: remote path outside the domain's declared roots; ask the owner to declare the remote root in the loop's orchestrator domain rubric; no policy judgment was made"
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).expect("hook response");
+    assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains(target.to_str().expect("fixture path"))
+    );
+    let records = journal_values(&fixture.directory.state_root());
+    let event = records.last().expect("refusal record");
+    assert_eq!(event["classification"], Value::Null);
+    assert_eq!(event["scope"], "estate");
+    assert_eq!(event["model_status"], "scope-invalid");
+    assert_eq!(event["reason"], hook_reason(&output));
+
+    fs::write(
+        fixture.checkout.join("local/permissions/domain.md"),
+        format!(
+            "The loop owns remote root `{}/`.\n",
+            fixture.checkout.display()
+        ),
+    )
+    .expect("declare remote root");
+    let repaired = run(
+        fixture.hook("declared-root", "safe", "loop"),
+        &fixture.input(&command),
+    );
+    let response: Value = serde_json::from_slice(&repaired.stdout).expect("hook response");
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    assert_eq!(
+        journal_values(&fixture.directory.state_root())
+            .last()
+            .expect("repaired record")["scope"],
+        "loop"
+    );
+}
+
+/// ´test:integration:remote-protected-refusal-does-not-prescribe-a-domain-root´
+#[test]
+fn remote_protected_refusal_does_not_prescribe_a_domain_root() {
+    let fixture = ScopeFixture::new("remote-protected-reason");
+    for (index, payload) in [
+        "cat /etc/hosts",
+        "cat /undeclared/report /etc/hosts",
+        "cat >> .ssh/authorized_keys",
+        "make hooks",
+        "cargo test -p registry",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = run(
+            fixture.hook(&format!("protected-{index}"), "safe", "loop"),
+            &fixture.input(&format!("timeout 20 ssh own-worker 'time {payload}'")),
+        );
+        assert_eq!(
+            hook_reason(&output),
+            "infrastructure-failure: scope validation failed: loop scope contradicts a protected target or unresolved identity/effect; no policy judgment was made"
+        );
+    }
+}
+
 fn assert_estate_target_floor(
     fixture: &ScopeFixture,
     index: usize,
