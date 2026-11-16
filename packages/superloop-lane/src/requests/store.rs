@@ -6076,6 +6076,10 @@ pub(crate) mod tests {
         );
     }
 
+    /// The historical test name identifies an ordering case: the writer keeps
+    /// its lock until reader contention, then the reader sees the commit.
+    /// This does not prove a minimum writer duration or reader promptness.
+    ///
     /// # Panics
     /// Panics only if fixture setup or synchronized writer/reader assertions fail.
     /// ´test:unit:request-reader-outlasts-slow-writer-sync´
@@ -6116,7 +6120,7 @@ pub(crate) mod tests {
             });
             let rows = reader
                 .list_run("R")
-                .expect("reader waits through slow sync");
+                .expect("reader waits for the writer commit");
             assert_eq!(
                 rows.len(),
                 2,
