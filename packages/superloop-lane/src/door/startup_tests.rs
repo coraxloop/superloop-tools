@@ -1,8 +1,8 @@
 //! Start the production service in a built subprocess with its socket namespace step substituted and its startup run beneath the fixture's activated private home.
 
+use crate::door::tests::FixtureClient;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -172,7 +172,7 @@ fn service_startup_uses_show_only_registry_entry() {
         .expect("pinned socket location");
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut stream = loop {
-        if let Ok(stream) = UnixStream::connect(slot.address()) {
+        if let Ok(stream) = FixtureClient::connect(slot.address()) {
             break stream;
         }
         assert!(
@@ -182,13 +182,12 @@ fn service_startup_uses_show_only_registry_entry() {
         );
         std::thread::sleep(Duration::from_millis(10));
     };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("bounded service reply");
     // A reply proves the real accept loop ran after socket finalization; existence
     // or a successful connect alone would also observe an unfinished startup.
-    super::frame_write(&mut stream, &json!({"schema":2,"type":"request"})).expect("request");
-    let reply = super::tests::fixture_final_frame(&mut stream);
+    stream
+        .send(&json!({"schema":2,"type":"request"}))
+        .expect("request");
+    let reply = stream.answer();
     assert_eq!(reply["reason"], "door-request-refusal", "{reply}");
     assert_eq!(
         fs::read_to_string(entry.with_extension("argv")).expect("entry arguments"),

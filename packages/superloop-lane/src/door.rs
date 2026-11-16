@@ -1088,6 +1088,7 @@ fn peer_disconnected(stream: &UnixStream) -> io::Result<bool> {
     Ok(descriptor.revents & (libc::POLLHUP | libc::POLLERR) != 0)
 }
 
+#[cfg_attr(test, derive(Debug))]
 #[derive(Clone, Copy)]
 enum Answer {
     Allow(f64),
@@ -3682,8 +3683,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        MAX_PEERS, Registration, Scope, admit_peer, completed_door_group, frame_write,
-        frame_write_until, peer_uid, serve_one_for_peer, serve_request, serve_socket, stub_call,
+        MAX_PEERS, Registration, Scope, admit_peer, completed_door_group, frame_write, peer_uid,
+        serve_one_for_peer, serve_request, serve_socket, stub_call,
     };
     use crate::door::transport::{HostRunner, Operation, Runner};
     use crate::requests::{
@@ -3736,7 +3737,7 @@ mod tests {
                 )
                 .expect("private fixture namespace");
                 let (mut stream, _) = listener.accept().expect("peer");
-                let request = super::frame_read(&mut stream).expect("request");
+                let request = fixture_request(&mut stream).expect("request");
                 let registration = Registration::from_row(
                     &json!({"name":"alpha","uid":41001}),
                     "alpha",
@@ -4311,7 +4312,7 @@ mod tests {
             let started = Instant::now();
             let _socket_peer = peer_uid(&stream)?;
             let peer = 3000;
-            let request = super::frame_read_until(&mut stream, started + FIXTURE_HANG)?;
+            let request = fixture_request(&mut stream)?;
             let registration = Registration::from_row(
                 &json!({"name":"alpha","uid":41001}),
                 "alpha",
@@ -4383,7 +4384,7 @@ mod tests {
                 });
                 // Drop before scope joins even when a client assertion panics.
                 let _finish_watch = FinishWatch(&finished);
-                let read_reply = fixture_final_frame;
+                let read_reply = FixtureClient::answer;
                 for _ in 0..2 {
                     let observed = Arc::clone(&observed);
                     // Keep the watcher live while the receive is waiting. Only
@@ -4407,14 +4408,11 @@ mod tests {
                     let (runner, _, _) = counting_runner(&fixture);
                     let (socket, server) =
                         fixture_service(&fixture, runner, rubric(Some("allow")), 300, None);
-                    let mut client = UnixStream::connect(&socket).expect("fixture receive");
-                    frame_write_until(
-                        &mut client,
-                        &json!({"schema":2,"argv":[b"fixture".to_vec(),
-                            b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":300}),
-                        Instant::now() + Duration::from_secs(2),
-                    )
-                    .expect("receive request");
+                    let mut client = FixtureClient::connect(&socket).expect("fixture receive");
+                    client
+                        .send(&json!({"schema":2,"argv":[b"fixture".to_vec(),
+                            b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":300}))
+                        .expect("receive request");
                     client.shutdown(Shutdown::Write).expect("receive end");
                     let _reply = read_reply(&mut client);
                     server
@@ -4508,14 +4506,11 @@ mod tests {
         }
     }
 
-    fn send_probe(socket: &std::path::Path, deadline_ms: u64) -> UnixStream {
-        let mut client = UnixStream::connect(socket).expect("fixture connect");
-        frame_write_until(
-            &mut client,
-            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":deadline_ms}),
-            Instant::now() + FIXTURE_HANG,
-        )
-        .expect("fixture request");
+    fn send_probe(socket: &std::path::Path, deadline_ms: u64) -> FixtureClient {
+        let mut client = FixtureClient::connect(socket).expect("fixture connect");
+        client
+            .send(&json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":deadline_ms}))
+            .expect("fixture request");
         client.shutdown(Shutdown::Write).expect("request end");
         client
     }
@@ -4825,7 +4820,7 @@ mod tests {
         )
         .expect("registration");
         let held = store.fixture_exclusive_lock().expect("sibling holder");
-        let (mut server, mut worker) = UnixStream::pair().expect("worker connection");
+        let (mut worker, mut server) = FixtureClient::pair().expect("worker connection");
         let started = Instant::now();
         crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE
             .with(|bound| bound.set(Some(Duration::from_millis(30))));
@@ -4847,7 +4842,7 @@ mod tests {
         let mut observed_credit = 0;
         // Wire reads are intentional: every credited amount is part of this assertion.
         let delivered = loop {
-            let frame = super::frame_read(&mut worker).expect("worker frame");
+            let frame = super::frame_read(worker.wire()).expect("worker frame");
             if frame["type"] != "request-lock-wait" {
                 break frame;
             }
@@ -4919,7 +4914,7 @@ mod tests {
         if let Some(treatment) = answer {
             label(&store, &id, treatment);
         }
-        let _reply = fixture_final_frame(&mut client);
+        let _reply = client.answer();
         server.join().expect("fixture service").expect("reply");
         id
     }
@@ -4995,7 +4990,7 @@ mod tests {
             .expect("stub retains the final referral refusal")
         });
         let (mut stream, _) = listener.accept().expect("client connection");
-        let request = super::frame_read(&mut stream).expect("stub request");
+        let request = fixture_request(&mut stream).expect("stub request");
         (stream, request, client)
     }
 
@@ -5149,7 +5144,7 @@ mod tests {
                 Scope::Work,
             )
             .expect("registration");
-            let (mut stream, mut peer) = UnixStream::pair().expect("socket pair");
+            let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
             let (runner, calls, _) = counting_runner(&fixture);
             let route = route_for(&fixture.home);
             let (reply, _) = super::serve_request_with_agent(
@@ -5171,7 +5166,7 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(reply["reason"], "door-request-record-refusal");
             assert_eq!(reply["request_id"], rows[0].id());
-            assert_eq!(fixture_final_frame(&mut peer), as_sent(&reply));
+            assert_eq!(peer.answer(), as_sent(&reply));
             assert!(rows[0].value()["agent_status"].is_null());
             assert!(rows[0].value()["state"].is_null());
             assert_incomplete(&fixture, rows[0].id());
@@ -5222,7 +5217,7 @@ mod tests {
         let agent = Agent(AtomicUsize::new(0));
         let mut observed_ids = std::collections::HashSet::from([seed_id.clone()]);
         for iteration in 0..24 {
-            let (mut stream, mut peer) = UnixStream::pair().expect("socket pair");
+            let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
             peer.shutdown(std::net::Shutdown::Write)
                 .expect("empty input");
             let (reply, _) = super::serve_request_with_agent(
@@ -5240,7 +5235,7 @@ mod tests {
                 Instant::now(),
             )
             .expect("learned request");
-            let frame = fixture_final_frame(&mut peer);
+            let frame = peer.answer();
             assert_eq!(frame["would_do"], reply["would_do"]);
             assert_eq!(frame["reason"], "door-complete");
             assert_eq!(frame["status"], 0);
@@ -5271,7 +5266,8 @@ mod tests {
     // Observe the credit without consuming it: the final-reader mutation must
     // still encounter this very frame after the writer is released.
     #[allow(unsafe_code)] // MSG_PEEK has no stable UnixStream wrapper.
-    fn fixture_peek_frame(client: &UnixStream, mut partial: impl FnMut()) -> Value {
+    fn fixture_peek_frame(client: &mut FixtureClient, mut partial: impl FnMut()) -> Value {
+        let client = client.wire();
         let until = Instant::now() + FIXTURE_HANG;
         let mut peek = |bytes: &mut [u8]| loop {
             client
@@ -5312,7 +5308,7 @@ mod tests {
     }
 
     fn fixture_fragmented_credit() {
-        let (client, mut writer) = UnixStream::pair().expect("fragmented frame pair");
+        let (mut client, mut writer) = FixtureClient::pair().expect("fragmented frame pair");
         let body = br#"{"type":"request-lock-wait","wait_ms":50}"#;
         let (partial, observed) = std::sync::mpsc::sync_channel(1);
         let server = thread::spawn(move || {
@@ -5323,7 +5319,7 @@ mod tests {
             writer.write_all(body).expect("frame body");
         });
         let mut partial = Some(partial);
-        let frame = fixture_peek_frame(&client, || {
+        let frame = fixture_peek_frame(&mut client, || {
             if let Some(partial) = partial.take() {
                 partial.send(()).expect("release fragmented body");
             }
@@ -5332,43 +5328,101 @@ mod tests {
         server.join().expect("fragmented writer");
     }
 
-    // Default for answers: one bounded window through all protocol progress.
-    pub(super) fn fixture_final_frame(client: &mut UnixStream) -> Value {
-        fixture_protocol_frame(client, "final")
+    pub(super) use fixture_client::Client as FixtureClient;
+
+    // Server fixtures consume requests, never answers. Keep the raw reader here.
+    pub(super) fn fixture_request(stream: &mut UnixStream) -> io::Result<Value> {
+        super::frame_read_until(stream, Instant::now() + FIXTURE_HANG)
     }
 
-    // Use a named event only when that event, rather than the answer, is the claim.
-    // Raw framing stays qualified at inbound-request and wire-format test sites.
-    pub(super) fn fixture_protocol_frame(client: &mut UnixStream, expected: &str) -> Value {
-        let until = Instant::now() + FIXTURE_HANG;
-        loop {
-            let frame = super::frame_read_until(client, until).expect("fixture protocol frame");
-            let kind = frame["type"].as_str();
-            if expected == "final" && frame.get("status").is_some() {
-                assert!(frame["status"].as_i64().is_some(), "final status: {frame}");
-                assert!(
-                    kind.is_none() || kind == Some("final"),
-                    "final type: {frame}"
-                );
-                return frame;
+    // Own the socket: no Read, Deref, or implicit conversion to UnixStream.
+    // Ordinary tests use send/answer/event; wire assertions must opt in by name.
+    mod fixture_client {
+        use super::{FIXTURE_HANG, Instant, UnixStream, Value, io};
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::path::Path;
+
+        pub struct Client {
+            stream: UnixStream,
+        }
+
+        impl Client {
+            pub(crate) fn new(stream: UnixStream) -> Self {
+                Self { stream }
             }
-            if kind == Some("request-lock-wait") {
-                assert_eq!(frame["schema"], 2);
-                assert!(frame["wait_ms"].as_u64().is_some_and(|wait| wait > 0));
+
+            pub(crate) fn pair() -> io::Result<(Self, UnixStream)> {
+                UnixStream::pair().map(|(client, server)| (Self::new(client), server))
             }
-            if kind == Some(expected) {
-                assert_ne!(expected, "final", "final frame lacks status: {frame}");
-                return frame;
+
+            pub(crate) fn connect(path: impl AsRef<Path>) -> io::Result<Self> {
+                UnixStream::connect(path).map(Self::new)
             }
-            assert!(
-                kind == Some("request-lock-wait")
-                    || (expected == "final"
-                        && matches!(
-                            kind,
-                            Some("compute-deadline" | "stdout" | "stderr" | "limits")
-                        )),
-                "expected {expected}, received {frame}"
-            );
+
+            pub(crate) fn send(&mut self, request: &Value) -> io::Result<()> {
+                crate::door::frame_write_until(
+                    &mut self.stream,
+                    request,
+                    Instant::now() + FIXTURE_HANG,
+                )
+            }
+
+            pub(crate) fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+                self.stream.shutdown(how)
+            }
+
+            pub(crate) fn answer(&mut self) -> Value {
+                self.event("final")
+            }
+
+            pub(crate) fn wire(&mut self) -> &mut UnixStream {
+                &mut self.stream
+            }
+
+            pub(crate) fn event(&mut self, expected: &str) -> Value {
+                let until = Instant::now() + FIXTURE_HANG;
+                loop {
+                    let frame = crate::door::frame_read_until(&mut self.stream, until)
+                        .expect("fixture protocol frame");
+                    let kind = frame["type"].as_str();
+                    if expected == "final" && frame.get("status").is_some() {
+                        assert!(frame["status"].as_i64().is_some(), "final status: {frame}");
+                        assert!(
+                            kind.is_none() || kind == Some("final"),
+                            "final type: {frame}"
+                        );
+                        return frame;
+                    }
+                    if kind == Some("request-lock-wait") {
+                        assert_eq!(frame["schema"], 2);
+                        assert!(frame["wait_ms"].as_u64().is_some_and(|wait| wait > 0));
+                    }
+                    if kind == Some(expected) {
+                        assert_ne!(expected, "final", "final frame lacks status: {frame}");
+                        return frame;
+                    }
+                    assert!(
+                        kind == Some("request-lock-wait")
+                            || (expected == "final"
+                                && matches!(
+                                    kind,
+                                    Some("compute-deadline" | "stdout" | "stderr" | "limits")
+                                )),
+                        "expected {expected}, received {frame}"
+                    );
+                }
+            }
+        }
+
+        impl Write for Client {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.stream.write(bytes)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.stream.flush()
+            }
         }
     }
 
@@ -5383,7 +5437,7 @@ mod tests {
     #[test]
     fn door_final_reply_follows_lock_wait_credits() {
         for credits in [0, 1, 3] {
-            let (mut writer, mut reader) = UnixStream::pair().expect("reply channel");
+            let (mut reader, mut writer) = FixtureClient::pair().expect("reply channel");
             for wait_ms in 1..=credits {
                 frame_write(
                     &mut writer,
@@ -5400,7 +5454,7 @@ mod tests {
                 Instant::now(),
             );
             super::frame_write_no_drain(&mut writer, &reply).expect("final reply");
-            assert_eq!(fixture_final_frame(&mut reader), as_sent(&reply));
+            assert_eq!(reader.answer(), as_sent(&reply));
         }
     }
 
@@ -5423,7 +5477,7 @@ mod tests {
         assert_eq!(first["class"]["setter"], "door-service");
         assert_eq!(first["class"]["floor"], "audit");
         label(&store, &id, "allow");
-        let final_frame = fixture_final_frame(&mut client);
+        let final_frame = client.answer();
         assert_eq!(final_frame["queue_state"], "answered");
         assert!(
             final_frame["queue_wall_seconds"]
@@ -5458,12 +5512,12 @@ mod tests {
             .fixture_exclusive_lock()
             .expect("held admission writer");
         let mut client = send_probe(&socket, 120_000);
-        let progress = fixture_peek_frame(&client, || {});
+        let progress = fixture_peek_frame(&mut client, || {});
         assert_eq!(progress["type"], "request-lock-wait");
         assert!(progress["wait_ms"].as_u64().is_some_and(|wait| wait >= 50));
         assert_eq!(calls.load(Ordering::SeqCst), 0, "effect before admission");
         drop(held);
-        let final_frame = fixture_final_frame(&mut client);
+        let final_frame = client.answer();
         server.join().expect("service").expect("reply");
         assert_eq!(final_frame["queue_state"], "no-queue");
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
@@ -5496,7 +5550,7 @@ mod tests {
                 assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
                 label(&store, &id, "allow");
             }
-            let final_frame = fixture_final_frame(&mut client);
+            let final_frame = client.answer();
             server.join().expect("service").expect("reply");
             assert_eq!(final_frame["reason"], expected);
             assert_eq!(
@@ -5592,7 +5646,7 @@ mod tests {
             if disconnect {
                 drop(client);
             } else {
-                let final_frame = fixture_final_frame(&mut client);
+                let final_frame = client.answer();
                 assert_eq!(final_frame["reason"], "door-request-deadline");
                 assert_eq!(final_frame["queue_state"], "deadline");
             }
@@ -5625,7 +5679,7 @@ mod tests {
             let (runner, calls, _states) = counting_runner(&fixture);
             let (socket, server) = fixture_service(&fixture, runner, rubric(None), 2000, Some(0));
             let mut client = send_probe(&socket, 2000);
-            let final_frame = fixture_final_frame(&mut client);
+            let final_frame = client.answer();
             server.join().expect("service").expect("reply");
             assert_eq!(
                 final_frame["reason"],
@@ -5663,7 +5717,7 @@ mod tests {
         let mut client = send_probe(&socket, 2000);
         let id = wait_filed(&store);
         label(&store, &id, "refuse");
-        let reply = fixture_final_frame(&mut client);
+        let reply = client.answer();
         server.join().expect("service").expect("refusal");
         assert_eq!(reply["reason"], "door-adjudicated-refusal");
         assert_eq!(reply["queue_state"], "refused");
@@ -5710,7 +5764,7 @@ mod tests {
             if !allow {
                 label(&store, &id, "allow");
             }
-            let reply = fixture_final_frame(&mut client);
+            let reply = client.answer();
             server.join().expect("service").expect("incomplete reply");
             assert_eq!(reply["status"], 125);
             assert_eq!(reply["reason"], "door-record-incomplete");
@@ -5744,7 +5798,7 @@ mod tests {
                 true,
             );
             let mut client = send_probe(&socket, 2000);
-            let reply = fixture_final_frame(&mut client);
+            let reply = client.answer();
             server.join().expect("service").expect("reply");
             assert_eq!(reply["reason"], "door-record-incomplete");
             assert_eq!(reply["status"], 125);
@@ -5798,7 +5852,7 @@ mod tests {
                 registered,
             );
             let mut client = send_probe(&socket, 2000);
-            let reply = fixture_final_frame(&mut client);
+            let reply = client.answer();
             server.join().expect("service").expect("refusal");
             assert_eq!(reply["reason"], expected);
             assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
@@ -5846,7 +5900,7 @@ mod tests {
             if answer == "disconnect" {
                 drop(client);
             } else {
-                let reply = fixture_final_frame(&mut client);
+                let reply = client.answer();
                 assert_eq!(
                     reply["reason"],
                     if answer == "read" {
@@ -6035,16 +6089,18 @@ mod tests {
             crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.set(None);
             publication.expect("parked readers released the writer lock");
             let writer_wall = started.elapsed();
-            for waiter in resume {
-                waiter
-                    .send(())
-                    .expect("answer published before readers resume");
-            }
-            let longest = waiters
+            let longest = resume
                 .into_iter()
-                .map(|waiter| {
+                .zip(waiters)
+                .map(|(release, waiter)| {
+                    release
+                        .send(())
+                        .expect("answer published before reader resumes");
                     let (answer, wall) = waiter.join().expect("waiter");
-                    assert!(matches!(answer, super::Answer::Allow(_)));
+                    assert!(
+                        matches!(answer, super::Answer::Allow(_)),
+                        "waiter returned {answer:?}"
+                    );
                     wall
                 })
                 .max()
@@ -6164,7 +6220,10 @@ mod tests {
                 })
                 .expect("new request");
             label(&store, &id, treatment);
-            let _reply = fixture_final_frame(&mut client);
+            assert_eq!(
+                client.answer()["status"],
+                if treatment == "allow" { 0 } else { 125 }
+            );
             server.join().expect("service").expect("reply");
         }
         let records = store
@@ -6204,7 +6263,7 @@ mod tests {
         let (runner, _, _) = counting_runner(&fixture);
         let (socket, server) = fixture_service(&fixture, runner, rubric(Some("allow")), 2000, None);
         let mut client = send_probe(&socket, 2000);
-        let _reply = fixture_final_frame(&mut client);
+        let _reply = client.answer();
         server.join().expect("service").expect("allow");
         let id = store.list().expect("allow record").0[0].id().to_owned();
         label(&store, &id, "allow");
@@ -6469,13 +6528,13 @@ mod tests {
         let mut grants = Vec::new();
         let mut peers = Vec::new();
         for _ in 0..MAX_PEERS {
-            let (client, mut server) = UnixStream::pair().expect("fixture peer");
+            let (client, mut server) = FixtureClient::pair().expect("fixture peer");
             grants.push(admit_peer(&active, &mut server).expect("slot"));
             peers.push((client, server));
         }
-        let (mut client, mut server) = UnixStream::pair().expect("overflow peer");
+        let (mut client, mut server) = FixtureClient::pair().expect("overflow peer");
         assert!(admit_peer(&active, &mut server).is_none());
-        let reply = fixture_final_frame(&mut client);
+        let reply = client.answer();
         assert_eq!(reply["reason"], "door-capacity-refusal");
         assert_eq!(reply["queue_state"], "no-queue");
         assert_eq!(reply["peer_limit"], 16);
@@ -6505,7 +6564,7 @@ mod tests {
         assert_eq!(active.load(std::sync::atomic::Ordering::Relaxed), MAX_PEERS);
         drop(grants.pop().expect("one released slot"));
         assert_eq!(active.load(Ordering::Relaxed), MAX_PEERS - 1);
-        let (mut next, mut next_server) = UnixStream::pair().expect("next peer");
+        let (mut next, mut next_server) = FixtureClient::pair().expect("next peer");
         let grant = admit_peer(&active, &mut next_server).expect("released slot");
         assert_eq!(active.load(Ordering::Relaxed), MAX_PEERS);
         let registration = Registration::from_row(
@@ -6516,13 +6575,10 @@ mod tests {
             Scope::Work,
         )
         .expect("fixture registration");
-        frame_write(&mut next, &json!({"schema":2,"argv":[],"deadline_ms":1000}))
+        next.send(&json!({"schema":2,"argv":[],"deadline_ms":1000}))
             .expect("next request");
         serve_one_for_peer(&mut next_server, &registration, 3000).expect("next answer");
-        assert_eq!(
-            fixture_final_frame(&mut next)["reason"],
-            "door-compute-unregistered"
-        );
+        assert_eq!(next.answer()["reason"], "door-compute-unregistered");
         drop(grant);
         drop(grants);
         drop(peers);
@@ -6616,7 +6672,7 @@ mod tests {
         )
         .expect_err("host-view UID is outside the recorded block");
         assert_eq!(old_refusal.detail, "peer is outside the allocated block");
-        let (mut client, mut server) = UnixStream::pair().expect("host socket peer");
+        let (mut client, mut server) = FixtureClient::pair().expect("host socket peer");
         let worker = super::mapped_peer_uid(&server, &map).expect("mapped socket peer");
         assert_ne!(host_peer, worker);
         assert_eq!(worker, 3001);
@@ -6630,17 +6686,17 @@ mod tests {
             host_peer,
         )
         .expect("recorded review grant");
-        frame_write(
-            &mut client,
-            &json!({"schema":2,"argv":[b"door-shape-probe".to_vec(), b"migration-1".to_vec()],
+        client
+            .send(
+                &json!({"schema":2,"argv":[b"door-shape-probe".to_vec(), b"migration-1".to_vec()],
                 "deadline_ms":1000}),
-        )
-        .expect("probe request");
+            )
+            .expect("probe request");
         serve_one_for_peer(&mut server, &registration, worker).expect("review refusal");
-        let announced = fixture_protocol_frame(&mut client, "compute-deadline");
+        let announced = client.event("compute-deadline");
         assert_eq!(announced["type"], "compute-deadline");
         assert_eq!(announced["request_deadline_ms"], 1000);
-        let reply = fixture_final_frame(&mut client);
+        let reply = client.answer();
         assert_eq!(reply["reason"], "door-review-compute-refusal");
         assert_eq!(reply["peer_uid"], 3001);
     }
@@ -6747,20 +6803,20 @@ mod tests {
             ),
             (3001, json!({"schema":1,"argv":[]}), "door-peer-refusal"),
         ] {
-            let (mut client, mut server) = UnixStream::pair().expect("fixture pair");
-            frame_write(&mut client, &request).expect("request");
+            let (mut client, mut server) = FixtureClient::pair().expect("fixture pair");
+            client.send(&request).expect("request");
             let (response, _) =
                 serve_one_for_peer(&mut server, &registration, peer).expect("served");
             assert_eq!(response["reason"], reason);
             assert_eq!(response["peer_uid"], peer);
-            assert_eq!(fixture_final_frame(&mut client), as_sent(&response));
+            assert_eq!(client.answer(), as_sent(&response));
         }
     }
 
     /// ´test:unit:door-frame-deadline-bounds-a-trickling-peer´
     #[test]
     fn door_frame_deadline_bounds_a_trickling_peer() {
-        let (mut client, mut server) = UnixStream::pair().expect("fixture pair");
+        let (mut client, server) = FixtureClient::pair().expect("fixture pair");
         let (read_done, hold_writer) = std::sync::mpsc::channel();
         let writer = thread::spawn(move || {
             client
@@ -6777,7 +6833,8 @@ mod tests {
                 .expect("reader returned before writer closes");
         });
         let deadline = Instant::now() + std::time::Duration::from_millis(40);
-        let result = super::frame_read_until(&mut server, deadline);
+        let mut reader = FixtureClient::new(server);
+        let result = super::frame_read_until(reader.wire(), deadline);
         read_done.send(()).expect("release writer after read");
         writer.join().expect("bounded writer");
         let error = result.expect_err("whole frame deadline");

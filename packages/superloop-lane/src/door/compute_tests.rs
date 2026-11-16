@@ -1,6 +1,6 @@
-use super::tests::{fixture_final_frame, fixture_protocol_frame, route_for};
+use super::tests::{FixtureClient, fixture_request, route_for};
 use super::transport::{Operation, Runner};
-use super::{Registration, Scope, compute, frame_write, serve_request};
+use super::{Registration, Scope, compute, serve_request};
 use crate::requests::{
     RequestRecord,
     modes::Rubric,
@@ -9,7 +9,7 @@ use crate::requests::{
 use serde_json::{Value, json};
 use std::io::{self, Write as _};
 use std::net::Shutdown;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -140,7 +140,7 @@ fn compute_service_with_policy(
         super::REQUEST_FILED.with(|slot| *slot.borrow_mut() = filed);
         let (mut stream, _) = listener.accept()?;
         let started = Instant::now();
-        let request = super::frame_read_until(&mut stream, started + Duration::from_secs(120))?;
+        let request = fixture_request(&mut stream)?;
         serve_request(
             &mut stream,
             &registration,
@@ -440,7 +440,7 @@ fn door_preflight_sites_file_or_report_persistence_failure() {
                 remaining: None,
             };
             let (request, expected) = preflight_request(site, run);
-            let (mut server, mut client) = UnixStream::pair().expect("pair");
+            let (mut client, mut server) = FixtureClient::pair().expect("pair");
             let missing_home = fixture.home.join("absent");
             let home = if site == "store-open" {
                 &missing_home
@@ -464,7 +464,7 @@ fn door_preflight_sites_file_or_report_persistence_failure() {
             );
             crate::requests::store::fixture_file_cap(None);
             let reply = result.expect("service").0;
-            let frame = fixture_final_frame(&mut client);
+            let frame = client.answer();
             assert_eq!(frame, reply);
             assert_eq!(reply["reason"], expected, "{site}: {reply}");
             assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -1331,16 +1331,13 @@ fn door_compute_queue_deadline_and_disconnect_have_no_effect() {
         let fixture = Fixture::new();
         let (socket, calls, server) =
             compute_service(&fixture, run, worker, worker, Scope::Work, None);
-        let mut client = UnixStream::connect(socket).expect("client");
-        frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(), b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":100})).expect("request");
+        let mut client = FixtureClient::connect(socket).expect("client");
+        client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(), b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":100})).expect("request");
         if disconnect {
             drop(client);
         } else {
-            assert_eq!(
-                fixture_protocol_frame(&mut client, "compute-deadline")["type"],
-                "compute-deadline"
-            );
-            let reply = fixture_final_frame(&mut client);
+            assert_eq!(client.event("compute-deadline")["type"], "compute-deadline");
+            let reply = client.answer();
             assert_eq!(reply["reason"], "door-request-deadline");
         }
         server.join().expect("server").expect("service");
@@ -1418,17 +1415,14 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
             b"#!/usr/bin/python3\nimport time\ntime.sleep(20)\n",
         )
         .expect("closed slow executable");
-        let mut client = UnixStream::connect(socket).expect("client");
-        frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(), b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":11_000})).expect("request");
+        let mut client = FixtureClient::connect(socket).expect("client");
+        client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(), b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":11_000})).expect("request");
         client.shutdown(Shutdown::Write).expect("input end");
         if disconnect {
             drop(client);
         } else {
-            assert_eq!(
-                fixture_protocol_frame(&mut client, "compute-deadline")["type"],
-                "compute-deadline"
-            );
-            let reply = fixture_final_frame(&mut client);
+            assert_eq!(client.event("compute-deadline")["type"], "compute-deadline");
+            let reply = client.answer();
             assert_eq!(reply["reason"], "door-deadline-refusal");
             assert!(reply["compute"]["wrapper_exit_status"].is_null());
         }
@@ -1516,11 +1510,11 @@ fn door_compute_deadline_selects_only_the_exact_owner_form() {
     }
 }
 
-fn compute_refusal_frame(client: &mut UnixStream) -> (Value, u64) {
+fn compute_refusal_frame(client: &mut FixtureClient) -> (Value, u64) {
     // Preserve the credit assertions; an ordinary final reader would discard them.
     let mut observed_credit = 0;
     loop {
-        let frame = super::frame_read(client).expect("deadline progress or final");
+        let frame = super::frame_read(client.wire()).expect("deadline progress or final");
         if frame["type"] != "request-lock-wait" {
             assert_eq!(frame["type"], "final");
             return (frame, observed_credit);
@@ -1539,11 +1533,11 @@ fn compute_refusal_call(socket: &std::path::Path, use_stub: bool) -> (Value, Opt
         super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(previous));
         return (reply, None);
     }
-    let mut client = UnixStream::connect(socket).expect("socket");
-    frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":1000})).expect("shorter caller bound");
+    let mut client = FixtureClient::connect(socket).expect("socket");
+    client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":1000})).expect("shorter caller bound");
     client.shutdown(Shutdown::Write).expect("EOF");
     // The deadline announcement precedes admission and every request-lock wait.
-    let announcement = super::frame_read(&mut client).expect("announcement");
+    let announcement = super::frame_read(client.wire()).expect("announcement");
     assert_eq!(announcement["type"], "compute-deadline");
     assert_eq!(announcement["registered_deadline_ms"], 3_600_000);
     assert_eq!(announcement["request_deadline_ms"], 1000);
@@ -1765,9 +1759,9 @@ fn door_rejected_compute_announces_before_admission() {
             .expect("guard")
             .expect("free admission");
         let (socket, calls, server) = compute_service(&fixture, "R", 3000, 3000, scope, None);
-        let mut client = UnixStream::connect(socket).expect("connect");
-        frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),command.as_bytes().to_vec()],"deadline_ms":60000})).expect("compute-shaped request");
-        let announced = fixture_protocol_frame(&mut client, "compute-deadline");
+        let mut client = FixtureClient::connect(socket).expect("connect");
+        client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(),command.as_bytes().to_vec()],"deadline_ms":60000})).expect("compute-shaped request");
+        let announced = client.event("compute-deadline");
         assert_eq!(announced["type"], "compute-deadline");
         assert_eq!(announced["registered_deadline_ms"], compute::DEADLINE_MS);
         assert_eq!(announced["request_deadline_ms"], 60000);
@@ -1780,7 +1774,7 @@ fn door_rejected_compute_announces_before_admission() {
                 .is_empty()
         );
         drop(held);
-        let reply = fixture_final_frame(&mut client);
+        let reply = client.answer();
         server.join().expect("server").expect("service");
         assert_eq!(reply["reason"], reason);
         assert_eq!(reply["status"], 125);
@@ -1864,7 +1858,7 @@ fn door_root_refusal_announces_before_admission() {
     let held = super::RequestGuard::acquire(&fixture.home, &registration)
         .expect("guard")
         .expect("free admission");
-    let (mut client, mut service) = UnixStream::pair().expect("socket pair");
+    let (mut client, mut service) = FixtureClient::pair().expect("socket pair");
     let home = fixture.home.clone();
     let server = thread::spawn(move || {
         let home_fd = std::fs::File::open(&home).expect("home");
@@ -1879,7 +1873,7 @@ fn door_root_refusal_announces_before_admission() {
             nix::unistd::Uid::effective().as_raw(),
         )
         .expect("private fixture namespace");
-        let request = super::frame_read(&mut service).expect("request");
+        let request = fixture_request(&mut service).expect("request");
         super::root_refusal(
             &mut service,
             &registration,
@@ -1890,8 +1884,8 @@ fn door_root_refusal_announces_before_admission() {
             Instant::now(),
         )
     });
-    frame_write(&mut client, &json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":60000})).expect("request");
-    let announced = fixture_protocol_frame(&mut client, "compute-deadline");
+    client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":60000})).expect("request");
+    let announced = client.event("compute-deadline");
     assert_eq!(announced["type"], "compute-deadline");
     assert_eq!(announced["registered_deadline_ms"], compute::DEADLINE_MS);
     assert!(
@@ -1905,7 +1899,7 @@ fn door_root_refusal_announces_before_admission() {
     let deadline = Instant::now() + Duration::from_secs(5);
     // Here stderr is asserted as well as the answer; lock credits are intermediate.
     let reply = loop {
-        let frame = super::frame_read_until(&mut client, deadline)
+        let frame = super::frame_read_until(client.wire(), deadline)
             .expect("root diagnostic, credit or final");
         if frame.get("reason").is_some() {
             break frame;

@@ -26,11 +26,8 @@ fn door_concurrent_request_refuses_before_record() {
     let store = fixture.store();
     let (runner, calls, _) = counting_runner(&fixture);
     let (socket, first) = fixture_service(&fixture, runner, rubric(Some("allow")), 120_000, None);
-    let mut client = UnixStream::connect(socket).expect("first connection");
-    frame_write(
-        &mut client,
-        &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
-    )
+    let mut client = FixtureClient::connect(socket).expect("first connection");
+    client.send(&json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}))
     .expect("first request");
     let id = wait_filed(&store);
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -70,7 +67,7 @@ fn door_concurrent_request_refuses_before_record() {
     client
         .shutdown(Shutdown::Write)
         .expect("release first effect");
-    let reply = fixture_final_frame(&mut client);
+    let reply = client.answer();
     assert_eq!(reply["reason"], "door-complete");
     assert_eq!(reply["status"], 0);
     first.join().expect("first thread").expect("first served");
@@ -81,9 +78,9 @@ fn door_concurrent_request_refuses_before_record() {
     // Completion releases admission, including for a subsequent refusal record.
     let (runner, _, _) = counting_runner(&fixture);
     let (socket, next) = fixture_service(&fixture, runner, rubric(None), 120_000, None);
-    let mut peer = UnixStream::connect(socket).expect("next connection");
-    frame_write(&mut peer, &json!({"schema":2})).expect("next request");
-    let reply = fixture_final_frame(&mut peer);
+    let mut peer = FixtureClient::connect(socket).expect("next connection");
+    peer.send(&json!({"schema":2})).expect("next request");
+    let reply = peer.answer();
     assert_eq!(reply["reason"], "door-request-refusal");
     assert!(reply["request_id"].is_string());
     next.join().expect("next thread").expect("next served");
@@ -137,7 +134,7 @@ fn concurrent_process_peer() {
         .expect("numeric uid");
     let registration = concurrent_registration(uid);
     let mut stream = UnixStream::connect(socket).expect("peer connection");
-    let request = super::frame_read(&mut stream).expect("peer request");
+    let request = fixture_request(&mut stream).expect("peer request");
     let clock = std::rc::Rc::new(ControlledAdmissionClock::default());
     let started = super::AdmissionClock::now(clock.as_ref());
     super::ADMISSION_CLOCK.with(|slot| *slot.borrow_mut() = Some(clock));
@@ -187,9 +184,10 @@ fn concurrent_process_request(fixture: &Fixture, uid: u32, root: bool) -> Value 
         command.env("SUPERLOOP_DOOR_CONCURRENT_ROOT", "1");
     }
     let child = command.spawn().expect("separate handler process");
-    let (mut stream, _) = listener.accept().expect("separate handler connected");
-    frame_write(&mut stream, &json!({"schema":2,"deadline_ms":3000})).expect("peer request");
-    let reply = fixture_final_frame(&mut stream);
+    let (stream, _) = listener.accept().expect("separate handler connected");
+    let mut stream = FixtureClient::new(stream);
+    stream.send(&json!({"schema":2,"deadline_ms":3000})).expect("peer request");
+    let reply = stream.answer();
     let output = child.wait_with_output().expect("peer completion");
     assert!(output.status.success(), "{output:?}");
         assert!(
@@ -213,7 +211,7 @@ fn concurrent_process_request(fixture: &Fixture, uid: u32, root: bool) -> Value 
 fn door_concurrent_root_refusal_and_independent_boxes() {
     let fixture = Fixture::new();
     let store = fixture.store();
-    let (mut client, mut server) = UnixStream::pair().expect("root pair");
+    let (mut client, mut server) = FixtureClient::pair().expect("root pair");
     let home = fixture.home.clone();
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -252,19 +250,13 @@ fn door_concurrent_root_refusal_and_independent_boxes() {
     assert!(independent["request_id"].is_string());
     assert_eq!(store.list_run("R").expect("independent records").len(), 1);
     release_tx.send(()).expect("release root publication");
-    // Observe the diagnostic stream, selecting an answer only by its final tag.
-    loop {
-        let frame = super::frame_read(&mut client).expect("root diagnostic or final");
-        if frame["type"] == "final" {
-            assert_eq!(frame["reason"], "door-compute-root-refusal");
-            let id = frame["request_id"].as_str().expect("root record id");
-            assert_eq!(
-                store.request(id).expect("root record").value()["effect"]["reason"],
-                "door-compute-root-refusal"
-            );
-            break;
-        }
-    }
+    let frame = client.answer();
+    assert_eq!(frame["reason"], "door-compute-root-refusal");
+    let id = frame["request_id"].as_str().expect("root record id");
+    assert_eq!(
+        store.request(id).expect("root record").value()["effect"]["reason"],
+        "door-compute-root-refusal"
+    );
     root.join().expect("root thread").expect("root final");
     assert_eq!(
         concurrent_process_request(&fixture, 3000, false)["reason"],
@@ -350,7 +342,7 @@ fn door_two_boxes_share_the_bounded_store_wait() {
 }
 
 fn bounded_box_request(home: &std::path::Path, store: &Store, uid: u32) -> Value {
-    let (mut client, mut server) = UnixStream::pair().expect("box socket pair");
+    let (mut client, mut server) = FixtureClient::pair().expect("box socket pair");
     let (reply, _) = serve_request(
         &mut server,
         &concurrent_registration(uid),
@@ -364,7 +356,7 @@ fn bounded_box_request(home: &std::path::Path, store: &Store, uid: u32) -> Value
         Instant::now(),
     )
     .expect("box request completes");
-    assert_eq!(fixture_final_frame(&mut client), as_sent(&reply));
+    assert_eq!(client.answer(), as_sent(&reply));
     assert_eq!(reply["reason"], "door-request-refusal");
     assert!(reply["request_id"].is_string());
     assert!(reply.get("request_record_error").is_none());
@@ -390,7 +382,7 @@ impl super::agent::AgentRunner for CapturedAdmissionAgent {
 }
 
 struct HistoryCall {
-    client: UnixStream,
+    client: FixtureClient,
     input: std::sync::mpsc::Receiver<Value>,
     slot_released: std::sync::mpsc::Receiver<()>,
     release: std::sync::mpsc::Sender<()>,
@@ -404,7 +396,7 @@ fn history_call(fixture: &Fixture) -> HistoryCall {
     let agent = CapturedAdmissionAgent { input: input_tx, release: Mutex::new(release_rx) };
     let route = route_for(&fixture.home);
     let (runner, _, _) = counting_runner(fixture);
-    let (client, mut server) = UnixStream::pair().expect("history pair");
+    let (client, mut server) = FixtureClient::pair().expect("history pair");
     client.shutdown(Shutdown::Write).expect("EOF");
     let home = fixture.home.clone();
     let store = fixture.store();
@@ -435,7 +427,7 @@ fn door_concurrent_allow_agent_publication_window() {
     let store = fixture.store();
     let mut first = history_call(&fixture);
     first.input.recv_timeout(FIXTURE_HANG).expect("first agent held");
-    assert_eq!(fixture_final_frame(&mut first.client)["reason"], "door-complete");
+    assert_eq!(first.client.answer()["reason"], "door-complete");
     first.slot_released.recv_timeout(FIXTURE_HANG).expect("slot released while agent held");
     let id = store.list_run("R").expect("first filed")[0].id().to_owned();
     assert_eq!(store.request(&id).expect("effect").value()["effect"]["state"], "completed");
@@ -445,7 +437,7 @@ fn door_concurrent_allow_agent_publication_window() {
     let _measured = writeln!(io::stderr().lock(), "admission-history second_agent_wait_ms={}", began.elapsed().as_millis());
     assert_eq!(store.list_run("R").expect("both filed").len(), 2);
     assert_eq!(history_entry(&input, &id)["would_do"]["decision"], "undecided");
-    assert_eq!(fixture_final_frame(&mut second.client)["reason"], "door-complete");
+    assert_eq!(second.client.answer()["reason"], "door-complete");
     second.slot_released.recv_timeout(FIXTURE_HANG).expect("second slot released");
     first.release.send(()).expect("first advice released");
     first.handler.join().expect("first handler").expect("first publication");
@@ -454,7 +446,7 @@ fn door_concurrent_allow_agent_publication_window() {
     let input = third.input.recv_timeout(FIXTURE_HANG).expect("unlabelled advice remains a miss");
     assert_eq!(history_entry(&input, &id)["would_do"]["decision"], "refuse");
     assert!(history_entry(&input, &id)["label"].is_null());
-    assert_eq!(fixture_final_frame(&mut third.client)["reason"], "door-complete");
+    assert_eq!(third.client.answer()["reason"], "door-complete");
     for call in [second, third] {
         call.release.send(()).expect("release remaining agent");
         call.handler.join().expect("handler").expect("publication");
@@ -476,7 +468,7 @@ fn door_pending_judgements_release_request_writer_lock() {
         call.input
             .recv_timeout(FIXTURE_HANG)
             .expect("agent judgement pending");
-        assert_eq!(fixture_final_frame(&mut call.client)["reason"], "door-complete");
+        assert_eq!(call.client.answer()["reason"], "door-complete");
         call.slot_released
             .recv_timeout(FIXTURE_HANG)
             .expect("admission released while judgement waits");
@@ -511,7 +503,7 @@ fn door_root_admission_custody_failure_keeps_preflight_name() {
         .home
         .join(".config/loops/alpha/door-admission-3000.lock");
     fs::create_dir(&lock).expect("invalid lock type");
-    let (mut server, mut client) = UnixStream::pair().expect("root pair");
+    let (mut client, mut server) = FixtureClient::pair().expect("root pair");
     super::root_refusal(
         &mut server,
         &concurrent_registration(3000),
@@ -523,10 +515,10 @@ fn door_root_admission_custody_failure_keeps_preflight_name() {
     )
     .expect("named root refusal");
     assert_eq!(
-        fixture_protocol_frame(&mut client, "stderr")["type"],
+        client.event("stderr")["type"],
         "stderr"
     );
-    let reply = fixture_final_frame(&mut client);
+    let reply = client.answer();
     assert_eq!(reply["reason"], "door-compute-root-refusal");
     assert_eq!(reply["request_record_state"], "failed");
     assert!(
@@ -586,11 +578,11 @@ fn door_exercise_retries_concurrent_admission() {
     );
 }
 
-fn admission_final(client: &mut UnixStream) -> serde_json::Value {
+fn admission_final(client: &mut FixtureClient) -> serde_json::Value {
     // Unlike an ordinary answer read, this loop checks every credit's ordering.
     let mut observed_credit = 0;
     loop {
-        let frame = super::frame_read(client).expect("admission progress or final");
+        let frame = super::frame_read(client.wire()).expect("admission progress or final");
         if frame["type"] != "request-lock-wait" {
             assert_eq!(frame["type"], "final");
             return frame;
@@ -705,7 +697,7 @@ fn door_concurrent_request_admits_after_release() {
         let route = route_for(&fixture.home);
         let home = fixture.home.clone();
         let second_store = fixture.store();
-        let (mut second_client, mut second_server) = UnixStream::pair().expect("overlap pair");
+        let (mut second_client, mut second_server) = FixtureClient::pair().expect("overlap pair");
         second_client
             .shutdown(Shutdown::Write)
             .expect("overlap EOF");
@@ -848,13 +840,10 @@ fn door_receive_completes_beside_running_compute() {
     fixture.set_floor("allow");
     let (socket, compute_calls, compute_server) =
         super::compute_tests::compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
-    let mut compute = UnixStream::connect(socket).expect("compute connection");
-    frame_write(
-        &mut compute,
-        &json!({"schema":2,
+    let mut compute = FixtureClient::connect(socket).expect("compute connection");
+    compute.send(&json!({"schema":2,
         "argv":[b"fixture".to_vec(), b"/opt/fixture/bin/report cargo run --locked".to_vec()],
-        "deadline_ms":60000}),
-    )
+        "deadline_ms":60000}))
     .expect("compute request");
     let deadline = Instant::now() + Duration::from_secs(120);
     while compute_calls.load(Ordering::Relaxed) == 0 {
@@ -894,13 +883,8 @@ fn door_receive_completes_beside_running_compute() {
     compute
         .shutdown(Shutdown::Write)
         .expect("finish compute input");
-    loop {
-        let reply = super::frame_read_until(&mut compute, deadline).expect("compute reply");
-        if reply["type"] == "final" {
-            assert_eq!(reply["reason"], "door-complete", "{reply}");
-            break;
-        }
-    }
+    let reply = compute.answer();
+    assert_eq!(reply["reason"], "door-complete", "{reply}");
     compute_server
         .join()
         .expect("compute thread")
@@ -977,7 +961,7 @@ fn door_two_requesters_credit_contention_before_unlocked_triage() {
         let contended = contended_tx.clone();
         services.push(thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            let request = super::frame_read(&mut stream).expect("request");
+            let request = fixture_request(&mut stream).expect("request");
             let registration = Registration::from_row(&json!({"name":"alpha","uid":2001}), "alpha", run, 3000 + u32::try_from(index).expect("two callers"), Scope::Work).expect("registration");
             super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = Some(contended));
             super::serve_request_with_agent(&mut stream, &registration, registration.worker_uid,
@@ -1024,22 +1008,22 @@ fn door_two_requesters_credit_contention_before_unlocked_triage() {
 /// ´test:unit:door-wait-credit-announces-fifty-ms-steps-and-caps-deadline´
 #[test]
 fn door_wait_credit_announces_fifty_ms_steps_and_caps_deadline() {
-    let (server, mut peer) = UnixStream::pair().expect("pair");
-    peer.set_read_timeout(Some(Duration::from_secs(120)))
+    let (mut peer, server) = FixtureClient::pair().expect("pair");
+    peer.wire().set_read_timeout(Some(Duration::from_secs(120)))
         .expect("hang guard");
     let wait = super::RequestWait::new(&server).expect("wait credit");
     wait.credit(Duration::from_millis(49));
     assert_eq!(*wait.announced.lock().expect("announcement"), 0);
     wait.credit(Duration::from_millis(1));
     // This is a credit-frame assertion, not an answer read.
-    assert_eq!(super::frame_read(&mut peer).expect("first credit")["wait_ms"], 50);
+    assert_eq!(super::frame_read(peer.wire()).expect("first credit")["wait_ms"], 50);
     wait.credit(Duration::from_millis(49));
     assert_eq!(*wait.announced.lock().expect("announcement"), 50);
     wait.credit(Duration::from_millis(1));
     // This is a credit-frame assertion, not an answer read.
-    assert_eq!(super::frame_read(&mut peer).expect("second credit")["wait_ms"], 100);
+    assert_eq!(super::frame_read(peer.wire()).expect("second credit")["wait_ms"], 100);
     wait.credit(Duration::from_secs(200));
-    assert_eq!(super::frame_read(&mut peer).expect("capped credit")["wait_ms"], 120_000);
+    assert_eq!(super::frame_read(peer.wire()).expect("capped credit")["wait_ms"], 120_000);
     assert_eq!(wait.elapsed(), Duration::from_secs(120));
     let base = Instant::now();
     assert_eq!(wait.deadline(base), base + Duration::from_secs(120));
@@ -1050,11 +1034,11 @@ fn door_wait_credit_announces_fifty_ms_steps_and_caps_deadline() {
 /// ´test:unit:door-final-seal-suppresses-late-credit´
 #[test]
 fn door_final_seal_suppresses_late_credit() {
-    let (server, mut peer) = UnixStream::pair().expect("pair");
+    let (mut peer, server) = FixtureClient::pair().expect("pair");
     let wait = Arc::new(super::RequestWait::new(&server).expect("request wait"));
     drop(server);
     wait.credit(Duration::from_millis(50));
-    assert_eq!(super::frame_read(&mut peer).expect("early credit")["type"], "request-lock-wait");
+    assert_eq!(super::frame_read(peer.wire()).expect("early credit")["type"], "request-lock-wait");
     let (ready, entered) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
     let other = Arc::clone(&wait);
@@ -1070,13 +1054,13 @@ fn door_final_seal_suppresses_late_credit() {
     entered.recv_timeout(FIXTURE_HANG).expect("credit writer exists");
     let reply = json!({"schema":2,"status":0,"reason":"fixture-final"});
     wait.write_final(&reply, Instant::now() + FIXTURE_HANG).expect("final");
-    assert_eq!(fixture_final_frame(&mut peer), reply);
+    assert_eq!(peer.answer(), reply);
     release.send(()).expect("late credit");
     writer.join().expect("credit writer");
     assert_eq!(wait.elapsed(), Duration::from_millis(100), "agent credit remains active");
     drop(wait);
     let mut tail = Vec::new();
-    std::io::Read::read_to_end(&mut peer, &mut tail).expect("writer closed");
+    std::io::Read::read_to_end(peer.wire(), &mut tail).expect("writer closed");
     assert!(tail.is_empty(), "frame after final: {tail:?}");
 }
 
@@ -1143,7 +1127,7 @@ fn post_reply_failure_case(phase: &'static str) {
     };
     let route = route_for(&fixture.home);
     let (runner, calls, _) = counting_runner(&fixture);
-    let (mut client, mut server) = UnixStream::pair().expect("allow pair");
+    let (mut client, mut server) = FixtureClient::pair().expect("allow pair");
     client.shutdown(Shutdown::Write).expect("EOF");
     let home = fixture.home.clone();
     let server_store = fixture.store();
@@ -1161,7 +1145,7 @@ fn post_reply_failure_case(phase: &'static str) {
         result
     });
     entered_rx.recv_timeout(FIXTURE_HANG).expect("agent held");
-    let reply = fixture_final_frame(&mut client);
+    let reply = client.answer();
     assert_eq!(reply["reason"], "door-complete", "{phase}");
     let id = store.list_run("R").expect("durable effect")[0].id().to_owned();
     let active = fixture.command(&["status", "alpha"], b"").expect("active status");
@@ -1172,7 +1156,7 @@ fn post_reply_failure_case(phase: &'static str) {
     let result = handler.join().expect("handler");
     assert_eq!(as_sent(&result.expect("no late error reaches second-refusal writer").0), reply);
     let mut tail = Vec::new();
-    std::io::Read::read_to_end(&mut client, &mut tail).expect("closed handler");
+    std::io::Read::read_to_end(client.wire(), &mut tail).expect("closed handler");
     assert!(tail.is_empty(), "{phase}: post-final bytes {tail:?}");
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_incomplete(&fixture, &id);
@@ -1183,7 +1167,7 @@ fn post_reply_failure_case(phase: &'static str) {
     if phase == "agent-join" {
         super::recover_at_start(&fixture.home, "alpha");
     } else {
-        let (mut next_client, mut next_server) = UnixStream::pair().expect("next request");
+        let (mut next_client, mut next_server) = FixtureClient::pair().expect("next request");
         next_client.shutdown(Shutdown::Write).expect("next EOF");
         super::serve_request_with_agent(
             &mut next_server, &concurrent_registration(3000), 3000,
@@ -1192,7 +1176,7 @@ fn post_reply_failure_case(phase: &'static str) {
             Some(&fixture.home), Some(&rubric(Some("allow"))), Some(&store), None,
             None, Instant::now(),
         ).expect("later successful request recovers prior effect");
-        assert_eq!(fixture_final_frame(&mut next_client)["status"], 0);
+        assert_eq!(next_client.answer()["status"], 0);
     }
     let recovered = store.request(&id).expect("recovered record");
     assert_eq!(recovered.value()["state"], "waiting", "{phase}");

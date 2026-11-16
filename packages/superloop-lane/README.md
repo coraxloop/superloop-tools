@@ -635,6 +635,20 @@ Compatibility: the existing protected-plan backend is now required by harvest's 
 
 Compatibility: no command, record, credential member or bundle role changes. The thirty-second dispatcher pass and the possible print-call boundary reuse a stable binding instead of rereading the same program twice per pass. The reviewed installation reference is still reread through held configuration. A synthetic recorded-size program measures byte reads and duration for twenty such pairs; it does not measure the vendor program, live namespace or refresh margin. The Claude runtime gate stays closed (``test:unit:claude-program-binding-cache-follows-custody``; ``test:unit:claude-program-binding-cadence-measurement``).
 
+## Door test fixtures · `sec:superlooplane:door-test-fixtures`
+
+Door service fixtures return `FixtureClient`, which owns its socket. Test authors send requests with `send`, read answers with `answer`, and wait for a named intermediate event with `event`. The answer reader validates lock-wait credits and consumes output and deadline announcements within one 120-second hang bound before requiring an integer final status. The two answer loops formerly discarding unexamined intermediate frames use this same reader.
+
+```text
+let mut client = FixtureClient::connect(&socket).expect("fixture client");
+client.send(&request).expect("request");
+client.shutdown(std::net::Shutdown::Write).expect("empty input");
+let reply = client.answer();
+assert_eq!(reply["status"], 0);
+```
+
+The client has no `Read` or `Deref` implementation and does not expose its socket field. Framing and credit assertions explicitly opt into `wire`; server fixtures receive inbound requests through `fixture_request`. A wire-level test states which frame, credit sequence or EOF it observes, rather than copying an ordinary answer read. The sized-run waiter test parks every reader before the writer's zero-wait acquisition, then resumes and joins each waiter before resuming the next; concurrent polling capacity belongs to a separate measurement with the load accounted.
+
 ## Claude credential acceptance draft · `sec:superlooplane:claude-credential-acceptance-draft`
 
 This is a draft handoff for the loop's review and owner-operated trial, not an executable procedure or a record of vendor acceptance. The production runtime gate remains closed. Publication of the reviewed program on the compute node waits on the trial loop's accepted build report of the runbook's reviewed box inputs rather than on a loop step; that report supplies the program path, version, digest and source, and an unrelated executable copied onto the compute node cannot supply them. After it, the loop names the isolated trial, the operators and the reviewed observation method before any credential-bearing run, and the trial's cases below establish token-only startup, no worker refresh and reload after rejection with that program before the adapter is relied on. A worker prepares code and synthetic fixtures without accessing a live sign-in. The sign-in stays in the owner helper's home; the worker receives the six-member projection described by (`proto:superlooplane:claude-owner-credential-encoding`). The trial never revokes an owner's shared login or edits source expiry to manufacture a result.
@@ -807,8 +821,6 @@ The library returns existing measurement and outcome types without writing custo
 **Problem (The door file refusals test reads the final frame under store-lock contention)** · `prob:gates:door-file-refusals-test-reads-the-final-frame`
 
 **CLOSED (2026-11-15).** The typed file-refusal fixture consumes request-lock-wait progress frames through the shared final-frame reader within one bounded read window, then checks the refusal reason and the unchanged effect count. A progress frame has no refusal reason and cannot stand in for the final reply (``test:unit:door-file-refusals-and-absent-registration-are-typed``). This changes the test only; installed doors and operator procedures are unchanged.
-
-Door test authors use `fixture_final_frame` for an answer and `fixture_protocol_frame` for an explicitly named intermediate event. The shared reader keeps one hang bound across lock-wait credits and, when seeking a final reply, consumes deadline announcements and output frames before requiring an integer status. Raw readers are not imported into the test modules: qualified wire reads remain for inbound requests, framing tests and loops that assert progress itself. This keeps a lock-wait frame from being mistaken for an answer without changing the deployed protocol.
 
 **Problem (The checkout's pack transfer refuses a complete transfer as a broken pipe)** · `prob:lanes:checkout-pack-transfer-refuses-a-complete-transfer-as-a-broken-pipe`
 

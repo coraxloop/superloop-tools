@@ -1,3 +1,4 @@
+use crate::door::tests::fixture_request;
 // Real Git clients cross the production stub and request handler; node spawning and the registered route and upload ceiling are substituted.
 use std::io::Write as _;
 use std::sync::Arc;
@@ -207,8 +208,7 @@ fn route_service(
             "route-service-accept-deadline",
         )?;
         let started = Instant::now();
-        let request =
-            super::super::frame_read_until(&mut stream, started + Duration::from_secs(5))?;
+        let request = fixture_request(&mut stream)?;
         serve_request(
             &mut stream,
             &registration,
@@ -364,7 +364,7 @@ fn git_through_route(
     if !output.status.success() {
         // Wake an accept whose client exited before opening the bridge, then
         // collect it before publishing the client failure.
-        drop(UnixStream::connect(&bridge));
+        drop(FixtureClient::connect(&bridge));
         route_wait(
             Instant::now() + Duration::from_secs(5),
             "route-git-client-failure: relay deadline",
@@ -840,7 +840,7 @@ fn door_stub_refuses_output_beyond_announced_bound() {
         )
         .expect("peer");
         let deadline = Instant::now() + Duration::from_secs(5);
-        super::super::frame_read_until(&mut peer, deadline).expect("request");
+        fixture_request(&mut peer).expect("request");
         frame_write_until(
             &mut peer,
             &json!({"schema":2,"type":"limits","bound":3,"registered":"present"}),

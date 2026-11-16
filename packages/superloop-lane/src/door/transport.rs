@@ -1860,7 +1860,7 @@ mod tests {
         HostRunner, Operation, Runner, checked_ref_packet, compute_client_deadline,
         compute_deadline_frame, read_owner_leaf, stub_call, stub_call_stream,
     };
-    use crate::door::tests::{FIXTURE_HANG, fixture_final_frame};
+    use crate::door::tests::{FIXTURE_HANG, FixtureClient, fixture_request};
     use crate::door::{Registration, Scope, frame_write_until, peer_uid, serve_request};
     use crate::requests::{
         Mode,
@@ -1907,13 +1907,13 @@ mod tests {
                 "refusal changes no deadline"
             );
         }
-        let (service, mut client) = UnixStream::pair().expect("credit stream");
+        let (mut client, service) = FixtureClient::pair().expect("credit stream");
         let wait = super::super::RequestWait::new(&service).expect("wait accounting");
         wait.credit(Duration::from_secs(3600));
         wait.credit(Duration::from_secs(3600));
         assert_eq!(wait.elapsed(), Duration::from_secs(120));
         let frame =
-            super::super::frame_read_until(&mut client, Instant::now() + Duration::from_secs(2))
+            super::super::frame_read_until(client.wire(), Instant::now() + Duration::from_secs(2))
                 .expect("bounded credit frame");
         assert_eq!(
             frame,
@@ -2132,7 +2132,7 @@ mod tests {
         server.join().expect("server").expect("request");
         assert_eq!(reply["status"], 0);
         assert_eq!(output, b"READY\npayload");
-        let (writer, mut reader) = UnixStream::pair().expect("pair");
+        let (mut reader, writer) = FixtureClient::pair().expect("pair");
         let total = Arc::new(AtomicUsize::new(0));
         let count = Arc::new(AtomicUsize::new(0));
         let abort = Arc::new(AtomicBool::new(false));
@@ -2149,7 +2149,7 @@ mod tests {
             100,
         )
         .expect("interrupted node output survives");
-        let frame = super::super::frame_read_until(&mut reader, deadline).expect("output frame");
+        let frame = super::super::frame_read_until(reader.wire(), deadline).expect("output frame");
         assert_eq!(frame["bytes"], json!(b"payload".to_vec()));
         assert_eq!(count.load(Ordering::Relaxed), 7);
         assert_eq!(total.load(Ordering::Relaxed), 7);
@@ -2208,17 +2208,12 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut peer, _) = listener.accept().expect("fixture accept");
             let deadline = Instant::now() + Duration::from_secs(5);
-            let _request =
-                super::super::frame_read_until(&mut peer, deadline).expect("stub request");
+            let _request = fixture_request(&mut peer).expect("stub request");
             io::copy(&mut peer, &mut io::sink()).expect("drain input");
-            frame_write_until(
-                &mut peer,
-                &json!({"schema":2,"type":"final",
+            frame_write_until(&mut peer, &json!({"schema":2,"type":"final",
                 "status":0,"reason":"door-complete","ref_check":"not-applicable","stdout_bytes":0,"stderr_bytes":0,
                 "queue_state":"no-queue","queue_wall_seconds":null,
-                "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
-                deadline,
-            )
+                "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}), deadline)
             .expect("success frame");
         });
         let input = io::Cursor::new(vec![7_u8; crate::door::INPUT_LIMIT + 1]);
@@ -2240,18 +2235,13 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut peer, _) = listener.accept().expect("panic fixture accept");
             let deadline = Instant::now() + Duration::from_secs(5);
-            let _request =
-                super::super::frame_read_until(&mut peer, deadline).expect("panic stub request");
+            let _request = fixture_request(&mut peer).expect("panic stub request");
             permit.send(()).expect("release panic input");
             io::copy(&mut peer, &mut io::sink()).expect("drain panic input");
-            frame_write_until(
-                &mut peer,
-                &json!({"schema":2,"type":"final",
+            frame_write_until(&mut peer, &json!({"schema":2,"type":"final",
                 "status":0,"reason":"door-complete","ref_check":"not-applicable","stdout_bytes":0,"stderr_bytes":0,
                 "queue_state":"no-queue","queue_wall_seconds":null,
-                "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
-                deadline,
-            )
+                "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}), deadline)
             .expect("panic success frame");
         });
         let error = stub_call_stream(
@@ -2283,17 +2273,12 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut peer, _) = listener.accept().expect("fixture accept");
             let deadline = Instant::now() + Duration::from_secs(5);
-            let _request =
-                super::super::frame_read_until(&mut peer, deadline).expect("stub request");
+            let _request = fixture_request(&mut peer).expect("stub request");
             io::copy(&mut peer, &mut io::sink()).expect("drain input");
-            frame_write_until(
-                &mut peer,
-                &json!({"schema":2,"type":"final",
+            frame_write_until(&mut peer, &json!({"schema":2,"type":"final",
                     "status":0,"reason":"door-complete","ref_check":"not-applicable","stdout_bytes":0,"stderr_bytes":0,
                     "queue_state":"no-queue","queue_wall_seconds":null,
-                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
-                deadline,
-            )
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}), deadline)
             .expect("success frame");
         });
         let error = stub_call_stream(
@@ -2330,17 +2315,12 @@ mod tests {
             let server = thread::spawn(move || {
                 let (mut peer, _) = listener.accept().expect("fixture accept");
                 let deadline = Instant::now() + Duration::from_secs(5);
-                let _request =
-                    super::super::frame_read_until(&mut peer, deadline).expect("request frame");
+                let _request = fixture_request(&mut peer).expect("request frame");
                 let _closed = peer.shutdown(std::net::Shutdown::Read);
-                frame_write_until(
-                    &mut peer,
-                    &json!({"schema":2,"type":"final",
+                frame_write_until(&mut peer, &json!({"schema":2,"type":"final",
                     "status":0,"reason":"door-complete","ref_check":"not-applicable","stdout_bytes":0,"stderr_bytes":0,
                     "queue_state":"no-queue","queue_wall_seconds":null,
-                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
-                    deadline,
-                )
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}), deadline)
                 .expect("success frame");
             });
             let (release, receiver) = mpsc::channel();
@@ -2832,7 +2812,7 @@ mod tests {
     /// ´test:unit:door-child-exit-keeps-status-with-open-input-and-descendant-pipe´
     #[test]
     fn door_child_exit_keeps_status_with_open_input_and_descendant_pipe() {
-        let (mut client, server) = UnixStream::pair().expect("fixture peer");
+        let (mut client, server) = FixtureClient::pair().expect("fixture peer");
         let registration = Registration::from_row(
             &json!({"name":"alpha","uid":41001}),
             "alpha",
@@ -2858,7 +2838,7 @@ mod tests {
                 None,
             )
         });
-        let reply = fixture_final_frame(&mut client);
+        let reply = client.answer();
         assert_eq!(reply["status"], 7);
         assert_eq!(reply["compute_exit_status"], 7);
         assert_eq!(reply["reason"], "door-complete");
@@ -2929,7 +2909,7 @@ mod tests {
                 scope,
             )
             .map_err(io::Error::other)?;
-            let request = super::super::frame_read_until(&mut stream, started + FIXTURE_HANG)?;
+            let request = fixture_request(&mut stream)?;
             let route = HostRunner {
                 compute_deadlines: Vec::new(),
                 alias: "fixture".to_owned(),
@@ -3207,15 +3187,14 @@ mod tests {
             }));
         });
         let (_fixture, socket, server) = fixture_with_runner(Scope::Work, &UnreachableRunner);
-        let mut client = UnixStream::connect(&socket).expect("pre-spawn client");
-        frame_write_until(
-            &mut client,
-            &json!({"schema":2,"argv":[b"door-attribution-deadline".to_vec()],
+        let mut client = FixtureClient::connect(&socket).expect("pre-spawn client");
+        client
+            .send(
+                &json!({"schema":2,"argv":[b"door-attribution-deadline".to_vec()],
                 "deadline_ms":120_000}),
-            Instant::now() + Duration::from_secs(120),
-        )
-        .expect("pre-spawn request");
-        let reply = fixture_final_frame(&mut client);
+            )
+            .expect("pre-spawn request");
+        let reply = client.answer();
         assert_eq!(reply["status"], 125);
         assert_eq!(reply["reason"], "door-request-deadline");
         assert_eq!(reply["ref_check"], "not-reached");
@@ -3245,21 +3224,17 @@ mod tests {
         drop(first_fixture);
         SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = Some(Box::new(Instant::now)));
         let (second_fixture, socket, server) = fixture_with_runner(Scope::Work, &DeadlineRunner);
-        let mut client = UnixStream::connect(&socket).expect("deadline client");
-        let observation = Instant::now() + Duration::from_secs(120);
+        let mut client = FixtureClient::connect(&socket).expect("deadline client");
         // Mediation gets the maximum request budget; the test-only hook expires
         // the running child only after spawn, before the pumps copy its deadline.
-        frame_write_until(
-            &mut client,
-            &json!({"schema":2,
-            "argv":[b"door-attribution-deadline".to_vec()],"deadline_ms":120_000}),
-            observation,
-        )
-        .expect("deadline request");
+        client
+            .send(&json!({"schema":2,
+            "argv":[b"door-attribution-deadline".to_vec()],"deadline_ms":120_000}))
+            .expect("deadline request");
         client
             .shutdown(std::net::Shutdown::Write)
             .expect("deadline stdin end");
-        let reply = fixture_final_frame(&mut client);
+        let reply = client.answer();
         assert_eq!(reply["status"], 125);
         assert_eq!(reply["reason"], "door-deadline-refusal");
         server.join().expect("server join").expect("server reply");
@@ -3271,14 +3246,13 @@ mod tests {
         server.join().expect("server join").expect("server reply");
         drop(third_fixture);
         let (_temp, socket, server) = fixture(Scope::Work);
-        let mut client = UnixStream::connect(&socket).expect("disconnect client");
-        frame_write_until(
-            &mut client,
-            &json!({"schema":2,"argv":[b"door-attribution-probe".to_vec()],
+        let mut client = FixtureClient::connect(&socket).expect("disconnect client");
+        client
+            .send(
+                &json!({"schema":2,"argv":[b"door-attribution-probe".to_vec()],
             "deadline_ms":120_000}),
-            Instant::now() + FIXTURE_HANG,
-        )
-        .expect("request");
+            )
+            .expect("request");
         drop(client);
         let ended = server.join().expect("server join");
         assert!(

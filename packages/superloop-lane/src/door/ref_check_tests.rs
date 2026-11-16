@@ -76,17 +76,12 @@ fn door_receive_deadline_before_packet_records_not_reached() {
     });
     SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = Some(Box::new(Instant::now)));
     let (temp, socket, server) = fixture(Scope::Work);
-    let mut client = UnixStream::connect(&socket).expect("receive client");
-    let deadline = Instant::now() + Duration::from_secs(120);
-    frame_write_until(
-        &mut client,
-        &json!({"schema":2,"argv":[b"fixture".to_vec(),
-            b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":RECEIVE_DEADLINE_MS}),
-        deadline,
-    )
+    let mut client = FixtureClient::connect(&socket).expect("receive client");
+    client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(),
+            b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":RECEIVE_DEADLINE_MS}))
     .expect("receive request");
     client.write_all(b"000a").expect("incomplete packet");
-    let reply = fixture_final_frame(&mut client);
+    let reply = client.answer();
     assert_eq!(reply["ref_check"], "not-reached");
     assert!(
         matches!(
