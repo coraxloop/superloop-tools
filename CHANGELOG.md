@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The built-helper fixture now waits for its control socket to accept a connection, and reports a helper that exits before readiness. Its child, evidence and peer waits use distant 120-second hang guards. A socket pathname appearing during bind can no longer make a loaded test node refuse a healthy helper. Tests only; installed helper behavior is unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
+
 - Format emphasized footnote references with their definitions instead of rejecting them. Each block is validated with the document's actual footnote definitions as context and still chooses its own spelling, so a later fallback no longer re-spells unrelated blocks; public constructs are pinned to exact bytes. Documents without footnotes format as before, and the event comparison is unchanged (``claim:fmt:construct-fixtures-have-stable-bytes``).
 
 - The door fixture socket test now retries its exact stub call until the listener accepts it, with a distant hang guard, and reports a server failure before listen; a loaded test node no longer turns the brief bind-to-listen interval into a connection refusal. The compute-node fixture distinguishes its own `no` mode from the outer TERM by the deadline diagnostic; the 120-second probe timeout is its hang guard. Tests only; installed doors and operator procedures are unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
