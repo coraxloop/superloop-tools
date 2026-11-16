@@ -16,22 +16,16 @@ pub(super) struct Directory {
 }
 
 fn lock(file: File, path: &Path) -> Result<Flock<File>> {
-    lock_with(
-        file,
-        path,
-        Duration::from_secs(5),
-        Instant::now,
-        std::thread::sleep,
-    )
+    lock_with(file, path, Instant::now, std::thread::sleep)
 }
 
 fn lock_with(
     mut file: File,
     path: &Path,
-    limit: Duration,
     mut now: impl FnMut() -> Instant,
     mut sleep: impl FnMut(Duration),
 ) -> Result<Flock<File>> {
+    let limit = Duration::from_secs(5);
     let started = now();
     loop {
         match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
@@ -227,7 +221,6 @@ mod tests {
         let error = lock_with(
             File::open(root.path()).expect("contending handle"),
             root.path(),
-            Duration::from_secs(5),
             || now.get(),
             |pause| {
                 pauses.push(pause);
