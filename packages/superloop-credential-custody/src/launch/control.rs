@@ -38,11 +38,14 @@ struct Request {
     nonce: String,
 }
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum Operation {
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) enum Operation {
     Status,
     Pidfd,
     Completion,
+    Inventory,
+    Release { inventory_sha256: String },
+    Observed,
 }
 pub(super) struct Control {
     directory: Directory,
@@ -203,6 +206,20 @@ impl Control {
         handoff: Option<(&ProcessPin, &str)>,
         completion: Option<&completion_client::View>,
     ) -> Result<()> {
+        let mut transaction = self.accept(deadline)?;
+        match transaction.operation() {
+            Operation::Pidfd => {
+                let (pin, digest) = handoff.ok_or("control-operation")?;
+                transaction.reply_pidfd(pin, digest)
+            }
+            Operation::Completion => {
+                transaction.reply_completion(completion.ok_or("control-operation")?)
+            }
+            Operation::Status => transaction.reply_status(phase),
+            _ => Err("control-operation"),
+        }
+    }
+    pub(super) fn accept(&self, deadline: Instant) -> Result<actions::Transaction> {
         let deadline = deadline.min(self.deadline);
         self.verify()?;
         let (mut stream, _address) = loop {
@@ -225,7 +242,16 @@ impl Control {
         let bytes = read_request(&mut stream, deadline)?;
         let request: Request = serde_json::from_slice(&bytes).map_err(|_| "control-record")?;
         require(
-            request.schema == 1
+            ((request.schema == 1
+                && matches!(
+                    request.operation,
+                    Operation::Status | Operation::Pidfd | Operation::Completion
+                ))
+                || (request.schema == 2
+                    && matches!(
+                        request.operation,
+                        Operation::Inventory | Operation::Release { .. } | Operation::Observed
+                    )))
                 && request.case == self.case
                 && request.invocation == self.invocation
                 && request.keeper_pid == self.keeper.invocation().pid
@@ -243,38 +269,31 @@ impl Control {
         peer.verify()?;
         self.verify()?;
         budget(deadline)?;
-        if matches!(request.operation, Operation::Pidfd) {
-            let (pin, digest) = handoff.ok_or("control-operation")?;
-            peer.observer_role()?;
-            let binding = super::handoff::Binding {
-                schema: 1,
-                case: &self.case,
-                nonce: &request.nonce,
-                keeper_pid: self.keeper.invocation().pid,
-                keeper_birth: self.keeper.invocation().birth,
-                keeper_uid: self.owner,
-                invocation: pin.invocation(),
-                inventory_sha256: digest,
-            };
-            return super::handoff::send(&mut stream, &binding, pin, deadline);
-        }
-        let mut response = if matches!(request.operation, Operation::Completion) {
-            let view = completion.ok_or("control-operation")?;
-            serde_json::to_vec(&completion_client::Reply {
-                schema: 1,
-                case: self.case.clone(),
-                invocation: self.invocation.clone(),
-                keeper_pid: self.keeper.invocation().pid,
-                keeper_birth: self.keeper.invocation().birth,
-                nonce: request.nonce.clone(),
-                view: view.clone(),
-            })
-            .map_err(|_| "control-encoding")?
-        } else {
-            serde_json::to_vec(&serde_json::json!({"schema":1,"case":self.case,"invocation":self.invocation,"phase":phase,"nonce":request.nonce})).map_err(|_|"control-encoding")?
+        let transaction = actions::Transaction {
+            stream,
+            peer,
+            request,
+            owner: self.owner,
+            deadline,
         };
-        response.push(b'\n');
-        write_record(&mut stream, &response, deadline)
+        transaction.authorize()?;
+        Ok(transaction)
+    }
+    pub(super) fn ready(&self, interval_ms: u64, deadline: Instant) -> Result<bool> {
+        self.verify()?;
+        let timeout =
+            budget(deadline)?.min(i32::try_from(interval_ms).map_err(|_| "control-poll-bound")?);
+        let mut event = nix::libc::pollfd {
+            fd: self.listener.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        channel::poll(std::slice::from_mut(&mut event), timeout)?;
+        require(
+            event.revents & (nix::libc::POLLERR | nix::libc::POLLNVAL | nix::libc::POLLHUP) == 0,
+            "control-poll",
+        )?;
+        Ok(event.revents & nix::libc::POLLIN != 0)
     }
 
     fn authenticate(&self, stream: &UnixStream, owner: u32, pid: u32) -> Result<ProcessPin> {
@@ -433,3 +452,6 @@ pub(super) mod completion_client;
 
 #[path = "control_client.rs"]
 pub(super) mod client;
+
+#[path = "control_actions.rs"]
+pub(super) mod actions;

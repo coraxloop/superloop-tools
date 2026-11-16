@@ -15,7 +15,8 @@ fn main() {
         Some("--startup-control") => startup_control(&args),
         Some("--root-control") => root_control(),
         Some("--pidfd-client") => pidfd_client(&args),
-        Some("--observer-client") => observer_client(&args),
+        Some("--observer-client" | "--observer-metadata") => observer_client(&args),
+        Some("--control-client") => metadata_client(&args),
         _ => Err("arguments".into()),
     };
     if result.is_err() {
@@ -160,5 +161,28 @@ fn observer_client(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             return Err(std::io::Error::last_os_error().into());
         }
     }
-    pidfd_client(args)
+    if args[0] == "--observer-metadata" {
+        metadata_client(args)
+    } else {
+        pidfd_client(args)
+    }
+}
+
+fn metadata_client(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    std::io::stdin().take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        return Err("request bound".into());
+    }
+    let mut stream = std::os::unix::net::UnixStream::connect(args.get(1).ok_or("socket")?)?;
+    stream.write_all(&bytes)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    std::io::stdout().write_all(b"connected\n")?;
+    let mut reply = Vec::new();
+    stream.take(4097).read_to_end(&mut reply)?;
+    if reply.len() > 4096 {
+        return Err("reply bound".into());
+    }
+    std::io::stdout().write_all(&reply)?;
+    Ok(())
 }

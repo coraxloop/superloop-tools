@@ -94,6 +94,25 @@ fn transaction_completion(
     observer: bool,
     completion: Option<&super::completion_client::View>,
 ) -> (Result<()>, Vec<u8>) {
+    transaction_dispatch(control, bytes, pin, observer, |deadline| {
+        pin.map_or_else(
+            || {
+                completion.map_or_else(
+                    || control.serve_once(Phase::Captured, deadline),
+                    |view| control.serve_completion(view, deadline),
+                )
+            },
+            |pin| control.serve_pidfd(phase, deadline, pin, &"a".repeat(64)),
+        )
+    })
+}
+fn transaction_dispatch(
+    control: &Control,
+    bytes: &[u8],
+    pin: Option<&ProcessPin>,
+    observer: bool,
+    serve: impl FnOnce(Instant) -> Result<()>,
+) -> (Result<()>, Vec<u8>) {
     let path = format!(
         "/proc/{}/fd/{}/control.sock",
         std::process::id(),
@@ -118,7 +137,9 @@ fn transaction_completion(
     let mut command = std::process::Command::new(&image);
     command
         .args([
-            if observer {
+            if observer && pin.is_none() {
+                "--observer-metadata"
+            } else if observer {
                 "--observer-client"
             } else if pin.is_some() {
                 "--pidfd-client"
@@ -158,15 +179,7 @@ fn transaction_completion(
     stdout.read_exact(&mut frame).unwrap();
     assert_eq!(&frame, b"connected\n");
     let deadline = Instant::now() + Duration::from_secs(600);
-    let result = pin.map_or_else(
-        || {
-            completion.map_or_else(
-                || control.serve_once(Phase::Captured, deadline),
-                |view| control.serve_completion(view, deadline),
-            )
-        },
-        |pin| control.serve_pidfd(phase, deadline, pin, &"a".repeat(64)),
-    );
+    let result = serve(deadline);
     if pin.is_some() {
         child.stdin.take().unwrap().write_all(&[1]).unwrap();
     }
@@ -490,3 +503,6 @@ fn completion_server_is_read_only_and_requires_its_operation() {
     );
     control.cleanup().unwrap();
 }
+
+#[path = "control_action_tests.rs"]
+mod action_tests;
