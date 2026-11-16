@@ -3,3 +3,4 @@
 loops.d/
 /target/
 /Cargo.lock
+/build/

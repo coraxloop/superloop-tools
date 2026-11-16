@@ -436,6 +436,10 @@ fn build_identity() -> cli::BuildIdentity {
             "" => None,
             value => Some(value.to_owned()),
         },
+        source_tree: match env!("SUPERLOOP_LINT_SOURCE_TREE") {
+            "" => None,
+            value => Some(value.to_owned()),
+        },
         source_state: env!("SUPERLOOP_LINT_SOURCE_STATE").to_owned(),
         release_tag: match env!("SUPERLOOP_LINT_RELEASE_TAG") {
             "" => None,

@@ -50,6 +50,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cargo:rustc-env=SUPERLOOP_LINT_RELEASE_TAG={}",
         identity.release_tag.as_deref().unwrap_or("")
     )?;
+    writeln!(
+        output,
+        "cargo:rustc-env=SUPERLOOP_LINT_SOURCE_TREE={}",
+        identity.tree.as_deref().unwrap_or("")
+    )?;
     drop(output);
     Ok(())
 }

@@ -106,6 +106,13 @@ fn build_identity_survives_versions_results_and_refusals() {
             .args(&arguments)
             .output()
             .expect("linter");
+        if matches!(arguments[0], "--version" | "-V") {
+            assert!(
+                output.stderr.starts_with(b"{\"message\":"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         let records = output
             .stdout
             .split(|byte| *byte == b'\n')
@@ -115,6 +122,7 @@ fn build_identity_survives_versions_results_and_refusals() {
         for line in records {
             let value: serde_json::Value = serde_json::from_slice(line).expect("JSON record");
             let identity = &value["identity"];
+            assert!(identity.get("source_tree").is_some());
             assert!(value.get("runtime").is_none());
             assert_eq!(
                 identity["artifact_sha256"], digest,
@@ -226,6 +234,15 @@ fn execute_only_linter_keeps_judging_with_named_digest_absence() {
             serde_json::Value::Null
         );
         assert_eq!(record["identity"]["digest_absence"], "unreadable");
+        if record["kind"] == "version" {
+            assert!(bytes.starts_with(b"{\"message\":"));
+            let message = record["message"].as_str().expect("version message");
+            assert!(
+                message.contains("artifact digest unavailable (unreadable)"),
+                "{message}"
+            );
+            assert!(!message.contains("sha256:unreadable"), "{message}");
+        }
     }
 }
 

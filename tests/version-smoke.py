@@ -110,7 +110,7 @@ def main():
         measurement_valid = ((artifact == measured and absence is None)
                              or (artifact is None and absence in
                                  ("unreadable", "no-running-image-handle")))
-        required = {"schema", "repository", "version", "source_commit", "source_state",
+        required = {"schema", "repository", "version", "source_commit", "source_tree", "source_state",
                     "release_tag", "artifact_sha256", "digest_absence"}
         if (set(identity) != required or identity.get("schema") != 1
                 or identity.get("repository") != "superloop-tools"
@@ -130,9 +130,11 @@ def main():
         if identity.get("source_commit") is not None:
             expected["fields"]["source_commit"] = identity["source_commit"]
         source = identity.get("source_commit") or "unknown"
-        artifact = identity.get("artifact_sha256") or identity.get("digest_absence")
+        artifact = ("sha256:" + identity["artifact_sha256"]
+                    if identity.get("artifact_sha256") else
+                    "artifact digest unavailable (" + str(identity.get("digest_absence")) + ")")
         expected["message"] = (f"{version_text} superloop-tools@{source} "
-                               f"{identity.get('source_state')} sha256:{artifact}")
+                               f"{identity.get('source_state')} {artifact}")
     if record != expected:
         failures.append("version record does not match manifest identity and compiled commit")
     summary = {

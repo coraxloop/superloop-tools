@@ -56,6 +56,12 @@ pub struct BuildIdentity {
     /// build checks the candidate's closed overlay against it. This source
     /// claim does not authenticate a dishonest compiler or executable.
     pub source_commit: Option<String>,
+    /// Full Git tree digest of the checked public commit for source comparison.
+    /// An independently retained reviewed public tree is the trusted reference:
+    /// a supplier controls candidate source but cannot replace that reference.
+    /// This names the committed public base, not dirty changes or private inputs;
+    /// it does not authenticate the builder. Compare it only within a repository.
+    pub source_tree: Option<String>,
     /// Release, candidate, dirty, or unknown source state.
     pub source_state: String,
     /// Explicitly verified release tag, only for a release.
@@ -204,12 +210,17 @@ pub fn publication_json<T: Serialize>(report: &T) -> serde_json::Result<Vec<u8>>
 
 fn version_message(identity: &BuildIdentity, version: &str) -> String {
     let source = identity.source_commit.as_deref().unwrap_or("unknown");
-    let artifact = identity
-        .artifact_sha256
-        .as_deref()
-        .unwrap_or_else(|| identity.digest_absence.as_deref().unwrap_or("unreadable"));
+    let artifact = identity.artifact_sha256.as_deref().map_or_else(
+        || {
+            format!(
+                "artifact digest unavailable ({})",
+                identity.digest_absence.as_deref().unwrap_or("unreadable")
+            )
+        },
+        |digest| format!("sha256:{digest}"),
+    );
     format!(
-        "{version} {}@{source} {} sha256:{artifact}",
+        "{version} {}@{source} {} {artifact}",
         identity.repository, identity.source_state
     )
 }
@@ -959,7 +970,7 @@ fn debug_name_to_snake_case(name: &str) -> String {
 /// Returns an error if serialisation or writing to stderr fails.
 pub fn emit_control_plane_record(record: &ControlPlaneRecord) -> io::Result<()> {
     let mut writer = LockedStderrWriter::new();
-    write_json_line(&mut writer, &identified(record))
+    write_control_line(&mut writer, record)
 }
 
 fn try_emit_control_plane_record(record: &ControlPlaneRecord) -> io::Result<bool> {
@@ -967,8 +978,39 @@ fn try_emit_control_plane_record(record: &ControlPlaneRecord) -> io::Result<bool
         return Ok(false);
     };
 
-    write_json_line(&mut writer, &identified(record))?;
+    write_control_line(&mut writer, record)?;
     Ok(true)
+}
+
+fn write_control_line<W: Write>(writer: &mut W, record: &ControlPlaneRecord) -> io::Result<()> {
+    if record.kind == ControlPlaneRecordKind::Version
+        && let Some(identity) = BUILD_IDENTITY.get()
+    {
+        #[derive(Serialize)]
+        struct VersionLine<'a> {
+            message: &'a str,
+            identity: &'a BuildIdentity,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            runtime: Option<RuntimeEvidence>,
+            schema: u32,
+            command: &'a str,
+            kind: ControlPlaneRecordKind,
+            fields: &'a Option<ControlPlaneFields>,
+        }
+        return write_json_line(
+            writer,
+            &VersionLine {
+                message: &record.message,
+                identity,
+                runtime: runtime_evidence(),
+                schema: record.schema,
+                command: &record.command,
+                kind: record.kind,
+                fields: &record.fields,
+            },
+        );
+    }
+    write_json_line(writer, &identified(record))
 }
 
 fn write_json_line<W: Write, T: serde::Serialize>(writer: &mut W, value: &T) -> io::Result<()> {
@@ -1330,6 +1372,19 @@ impl Write for IdentifiedDiagnostic {
     }
 }
 
+fn diagnostic_value(bytes: &[u8]) -> serde_json::Value {
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(value) if value.is_object() => value,
+        _ => serde_json::json!({
+            "level": "ERROR",
+            "fields": {
+                "code": "diagnostic_serialization_failure",
+                "message": "diagnostic could not be encoded as a JSON object; unclassified text was omitted",
+            },
+        }),
+    }
+}
+
 impl Drop for IdentifiedDiagnostic {
     fn drop(&mut self) {
         let mut writer = LockedStderrWriter::new();
@@ -1337,9 +1392,8 @@ impl Drop for IdentifiedDiagnostic {
             let _ignored = writer.write_all(&self.0);
             return;
         }
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&self.0) {
-            let _ignored = write_json_line(&mut writer, &identified(&value));
-        }
+        let value = diagnostic_value(&self.0);
+        let _ignored = write_json_line(&mut writer, &identified(&value));
     }
 }
 
@@ -1679,4 +1733,59 @@ fn write_json_report_if_changed<T: serde::Serialize>(
         bytes_changed: true,
         mode_changed: false,
     })
+}
+
+/// Malformed diagnostics produce an identified failure instead of disappearing.
+///
+/// # Panics
+/// Panics only if a malformed diagnostic loses its failure class, exposes input,
+/// or rewrites a valid object.
+///
+/// ´claim:identity:malformed-diagnostics-are-retained´
+/// ´test:unit:malformed-diagnostics-are-retained´
+#[cfg(test)]
+#[test]
+fn malformed_diagnostics_are_retained() {
+    for bytes in [
+        b"lost diagnostic".as_slice(),
+        b"[1,2]".as_slice(),
+        b"{\"password\":\"private-value\"".as_slice(),
+        &[255, 0, 10],
+    ] {
+        let value = diagnostic_value(bytes);
+        assert_eq!(value["level"], "ERROR");
+        assert_eq!(value["fields"]["code"], "diagnostic_serialization_failure");
+        assert!(value["fields"].get("diagnostic").is_none());
+        assert!(value["fields"].get("diagnostic_bytes").is_none());
+        assert!(!value.to_string().contains("private-value"));
+    }
+    let value = serde_json::json!({"fields": {"message": "ordinary diagnostic"}});
+    assert_eq!(
+        diagnostic_value(&serde_json::to_vec(&value).unwrap()),
+        value
+    );
+}
+
+/// Unavailable measurement is named as an absence, never a digest value.
+///
+/// # Panics
+/// Panics only if the version text misrepresents the named absence.
+///
+/// ´claim:identity:version-names-an-unavailable-digest´
+/// ´test:unit:version-names-an-unavailable-digest´
+#[cfg(test)]
+#[test]
+fn version_names_an_unavailable_digest() {
+    let identity: BuildIdentity = serde_json::from_value(serde_json::json!({
+        "schema": 1, "repository": "superloop-tools", "version": "0.5.0",
+        "source_commit": null, "source_tree": null, "source_state": "unknown",
+        "release_tag": null, "artifact_sha256": null, "digest_absence": "unreadable",
+    }))
+    .unwrap();
+    let message = version_message(&identity, "superloop-lint 0.5.0");
+    assert!(
+        message.ends_with("artifact digest unavailable (unreadable)"),
+        "{message}"
+    );
+    assert!(!message.contains("sha256:unreadable"), "{message}");
 }

@@ -18,6 +18,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`runtime_fixture_has_an_isolated_writer`] | identity | Executable fixture descriptors belong to a separately reaped writer process. |
 //! | [`python_runtime_is_evidence_beside_stable_build_identity`] | identity | Build reports retain the reader process's runtime and change only that member when the same reader protocol reports another implementation version. |
 //! | [`mixed_python_readers_refuse_before_publication`] | identity | An invocation observing different Python readers refuses rather than publishing a verdict that attributes both readings to one interpreter. |
 //! | [`repository_programme_policy_is_deferred`] | cli | Explicit local ownership defers opaque rows and keeps their checker visible. |
@@ -92,6 +93,7 @@
 //! | [`a_parsed_snapshot_that_disagrees_is_judged_rather_than_refused`] | cli | A snapshot whose declaration is complete but whose partition disagrees with the tree is judged rather than refused: the run happens, the object is complete, and the exit is the findings class with the unaccounted path named in the report. |
 //! | [`a_writing_mode_refuses_a_declaration_that_disagrees_with_the_tree`] | cli | Every writing mode refuses to mutate under a declaration that disagrees with the tree. That is stricter than the exit codes alone require and deliberately so: a writer that proceeded would record a conclusion drawn from a question the corpus had not answered, so it exits the failure class with an empty stdout instead. |
 //! | [`a_title_minting_the_departed_document_kind_fails_at_the_catalogue`] | head | cites (´claim:head:a-title-validates-on-every-kind-the-relation-rows-its-environment´) |
+//! | [`frozen_oracles_exclude_runtime_evidence`] | identity | Frozen semantic bytes exclude runtime evidence as well as build identity. |
 //! | [`characterizes_no_surface_bytes`] | harness | Every command class refuses with the same empty data streams when the required shape document is absent from an invented root. |
 //! | [`characterizes_check_bytes`] | harness | A check over this deliberately undeclared fixture refuses before findings can be ordered. |
 //! | [`the_check_reports_a_corpus_finding_once`] | cli | A corpus finding is reported once because reporting it twice doubles a failure count a reader acts on and names the same repair twice. |
@@ -199,7 +201,7 @@ fn python_fixture() -> tempfile::TempDir {
 }
 
 fn runtime_reader() -> tempfile::TempDir {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::io::Write as _;
     let directory = tempfile::tempdir().expect("reader fixture");
     let python = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
         .map(|path| path.join("python3"))
@@ -223,9 +225,36 @@ record['runtime'] = dict(implementation='fixture', version=version)
 print(json.dumps(record))
 ";
     let path = directory.path().join("python3");
-    fs::write(&path, program).expect("stand-in reader");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("executable reader");
+    let mut writer = Command::new(&python)
+        .args(["-c", "import os, pathlib, sys; p = pathlib.Path(sys.argv[1]); p.write_bytes(sys.stdin.buffer.read()); p.chmod(0o755); p.with_name('writer-pid').write_text(str(os.getpid()))"])
+        .arg(&path)
+        .stdin(std::process::Stdio::piped())
+        .spawn().expect("reader writer process");
+    writer
+        .stdin
+        .take()
+        .expect("writer input")
+        .write_all(program.as_bytes())
+        .expect("reader bytes");
+    assert!(writer.wait().expect("reap executable writer").success());
     directory
+}
+
+/// Executable fixture descriptors belong to a separately reaped writer process.
+///
+/// # Panics
+/// Panics only if fixture creation fails or this process wrote its executable.
+///
+/// ´claim:identity:runtime-fixture-has-an-isolated-writer´
+/// ´test:integration:runtime-fixture-has-an-isolated-writer´
+#[test]
+fn runtime_fixture_has_an_isolated_writer() {
+    let reader = runtime_reader();
+    let writer: u32 = fs::read_to_string(reader.path().join("writer-pid"))
+        .expect("writer witness")
+        .parse()
+        .expect("writer pid");
+    assert_ne!(writer, std::process::id());
 }
 
 fn runtime_command(root: &Path, reader: &Path, version: &str) -> Command {
@@ -4920,6 +4949,33 @@ fn byte_digest(bytes: &[u8]) -> String {
     digest
 }
 
+/// Frozen semantic bytes exclude runtime evidence as well as build identity.
+///
+/// # Panics
+/// Panics only if provenance changes the semantic byte oracle.
+///
+/// ´claim:identity:frozen-oracles-exclude-runtime-evidence´
+/// ´test:integration:frozen-oracles-exclude-runtime-evidence´
+#[test]
+fn frozen_oracles_exclude_runtime_evidence() {
+    let version = Command::new(env!("CARGO_BIN_EXE_superloop-lint"))
+        .arg("--version")
+        .output()
+        .expect("version");
+    let record: serde_json::Value = serde_json::from_slice(&version.stderr).expect("record");
+    let identity = serde_json::to_string(&record["identity"]).expect("identity");
+    let bytes = format!(
+        r#"{{"identity":{identity},"runtime":{{"python":{{"implementation":"fixture","version":"9.8.7-final0"}}}},"ok":true}}"#
+    );
+    let expected = br#"{"ok":true}"#;
+    frozen_bytes(
+        "runtime-oracle",
+        bytes.as_bytes(),
+        expected.len(),
+        &byte_digest(expected),
+    );
+}
+
 /// Capture base bytes while blessing, otherwise compare them with the frozen oracle.
 fn frozen_bytes(name: &str, bytes: &[u8], expected_len: usize, expected_digest: &str) {
     let stripped;
@@ -4930,15 +4986,21 @@ fn frozen_bytes(name: &str, bytes: &[u8], expected_len: usize, expected_digest: 
             value["identity"]["artifact_sha256"],
             byte_digest(&fs::read(env!("CARGO_BIN_EXE_superloop-lint")).expect("binary bytes"))
         );
-        let identity = serde_json::to_string(&value["identity"]).expect("identity");
-        // Identity is first and contains no nested object. Elide only that
-        // build-dependent member; the existing semantic byte oracle stays exact.
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == b'}')
-            .expect("identity end");
-        assert!(identity.starts_with('{'));
-        stripped = [&b"{"[..], &bytes[end + 2..]].concat();
+        // Consume only provenance values, retaining the semantic bytes verbatim.
+        // Runtime contains a nested object, so a first-brace search is not enough.
+        let mut remaining = &bytes[1..];
+        for key in [b"\"identity\":".as_slice(), b"\"runtime\":".as_slice()] {
+            if let Some(value) = remaining.strip_prefix(key) {
+                let mut stream =
+                    serde_json::Deserializer::from_slice(value).into_iter::<serde_json::Value>();
+                stream
+                    .next()
+                    .expect("provenance value")
+                    .expect("valid provenance");
+                remaining = &value[stream.byte_offset() + 1..];
+            }
+        }
+        stripped = [&b"{"[..], remaining].concat();
         stripped.as_slice()
     } else {
         bytes

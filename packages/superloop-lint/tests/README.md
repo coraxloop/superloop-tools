@@ -4,6 +4,7 @@
 
 |Test|Area|Claim|
 |----|----|-----|
+|(`test:integration:runtime-fixture-has-an-isolated-writer`)|identity|Executable fixture descriptors belong to a separately reaped writer process.|
 |(`test:integration:python-runtime-is-evidence-beside-stable-build-identity`)|identity|Build reports retain the reader process's runtime and change only that member when the same reader protocol reports another implementation version.|
 |(`test:integration:mixed-python-readers-refuse-before-publication`)|identity|An invocation observing different Python readers refuses rather than publishing a verdict that attributes both readings to one interpreter.|
 |(`test:integration:repository-programme-policy-is-deferred`)|cli|Explicit local ownership defers opaque rows and keeps their checker visible.|
@@ -78,6 +79,7 @@
 |(`test:integration:a-parsed-snapshot-that-disagrees-is-judged-rather-than-refused`)|cli|A snapshot whose declaration is complete but whose partition disagrees with the tree is judged rather than refused: the run happens, the object is complete, and the exit is the findings class with the unaccounted path named in the report.|
 |(`test:integration:a-writing-mode-refuses-a-declaration-that-disagrees-with-the-tree`)|cli|Every writing mode refuses to mutate under a declaration that disagrees with the tree. That is stricter than the exit codes alone require and deliberately so: a writer that proceeded would record a conclusion drawn from a question the corpus had not answered, so it exits the failure class with an empty stdout instead.|
 |(`test:integration:a-title-minting-the-departed-document-kind-fails-at-the-catalogue`)|head|cites (`claim:head:a-title-validates-on-every-kind-the-relation-rows-its-environment`)|
+|(`test:integration:frozen-oracles-exclude-runtime-evidence`)|identity|Frozen semantic bytes exclude runtime evidence as well as build identity.|
 |(`test:integration:characterizes-no-surface-bytes`)|harness|Every command class refuses with the same empty data streams when the required shape document is absent from an invented root.|
 |(`test:integration:characterizes-check-bytes`)|harness|A check over this deliberately undeclared fixture refuses before findings can be ordered.|
 |(`test:integration:the-check-reports-a-corpus-finding-once`)|cli|A corpus finding is reported once because reporting it twice doubles a failure count a reader acts on and names the same repair twice.|

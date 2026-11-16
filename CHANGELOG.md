@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Formatter refusals pin table-row and table-header ranges across overlay slots, give an ambiguous header a line, a range and an action, and name the first differing writer event. A writer refusal asks for the smallest non-private excerpt that still refuses, shared with whoever supplied the build together with its build record's identity, and states that the package declares no public issue route; a run retained by a reference-dependent list can start before the failing block (`rule:output:linter-findings-status`).
 
+- Linter identity includes the public commit's tree, allowing equal public source to be recognized across commit histories. Version answers put their readable message first and name an unavailable artifact digest plainly. Malformed diagnostics remain visible as identified JSON error records. In-tree Meson builds use ignored `build/`; generated outputs no longer invalidate the source observer. Compatibility: the citation-sites reader requires identity, so deploy the matching `superloop-pack` and `superloop-lint` together; a null artifact digest remains accepted (``spec:output:linter-build-identity``).
+
 ### Fixed
 
 - Mail retry-clock tests hold logical time through an interrupted scan, then advance it to prove the retry; a loaded test node can no longer complete the retry before the pending-state assertion. Mail reminder failures include the captured diagnostics. Tests only; installed mail behavior is unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).

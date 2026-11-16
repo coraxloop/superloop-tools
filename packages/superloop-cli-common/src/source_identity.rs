@@ -11,6 +11,8 @@ use std::process::Command;
 pub struct SourceIdentity {
     /// Explicitly checked public commit, or the public checkout's HEAD.
     pub commit: Option<String>,
+    /// Tree of the checked public commit, independent of its history.
+    pub tree: Option<String>,
     /// Release, candidate, dirty, or unknown.
     pub state: &'static str,
     /// Explicit tag resolving to the clean, unoverlaid checkout HEAD.
@@ -62,10 +64,35 @@ pub fn verify_release(root: &Path, tag: &str, commit: &str) -> Result<(), String
 }
 
 /// Git metadata that invalidates compiled source observations, including worktrees.
+///
+/// Watch indexed and existing nonignored inputs, not generated directories.
+/// A newly created untracked file is observed at the next build-script run;
+/// it does not change the identity of an already-built executable.
 /// Missing Git history leaves only the source directory to watch.
 #[must_use]
 pub fn watch_paths(root: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![root.to_owned()];
+    let mut paths = git(
+        root,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    )
+    .ok()
+    .and_then(|bytes| String::from_utf8(bytes).ok())
+    .map_or_else(
+        || vec![root.to_owned()],
+        |files| {
+            files
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .map(|path| root.join(path))
+                .collect::<Vec<_>>()
+        },
+    );
     for name in ["HEAD", "index", "refs", "packed-refs"] {
         if let Ok(path) = text(root, &["rev-parse", "--git-path", name]) {
             let path = PathBuf::from(path);
@@ -79,6 +106,8 @@ pub fn watch_paths(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
+    paths.sort();
+    paths.dedup();
     paths
 }
 
@@ -130,6 +159,7 @@ pub fn observe(
 ) -> Result<SourceIdentity, String> {
     let unknown = || SourceIdentity {
         commit: None,
+        tree: None,
         state: "unknown",
         release_tag: None,
     };
@@ -187,6 +217,10 @@ pub fn observe(
         None
     };
     Ok(SourceIdentity {
+        tree: Some(text(
+            root,
+            &["rev-parse", "--verify", &format!("{commit}^{{tree}}")],
+        )?),
         commit: Some(commit),
         state,
         release_tag: tag,
@@ -195,7 +229,7 @@ pub fn observe(
 
 #[cfg(test)]
 mod tests {
-    use super::{git, observe, text, verify_release};
+    use super::{git, observe, text, verify_release, watch_paths};
     use std::path::Path;
 
     fn commit(root: &Path, message: &str) -> String {
@@ -226,6 +260,73 @@ mod tests {
         std::fs::write(root.path().join("public-set.toml"), "public\n").unwrap();
         let head = commit(root.path(), "public source");
         (root, head)
+    }
+
+    /// Public trees distinguish source content from commit history and artifacts.
+    ///
+    /// # Panics
+    /// Panics only if fixture Git operations fail or source evidence drifts.
+    ///
+    /// ´claim:identity:public-tree-compares-source-content´
+    /// ´test:unit:public-tree-compares-source-content´
+    #[test]
+    fn public_tree_compares_source_content() {
+        let (root, first) = repository();
+        let a = observe(root.path(), None, None).unwrap();
+        let second = commit(root.path(), "same tree, different history");
+        let b = observe(root.path(), None, None).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(a.tree, b.tree);
+        assert_eq!(
+            a.tree.as_deref(),
+            Some(
+                text(root.path(), &["rev-parse", "HEAD^{tree}"])
+                    .unwrap()
+                    .as_str()
+            )
+        );
+        std::fs::write(root.path().join("README.md"), "Different public source.\n").unwrap();
+        commit(root.path(), "different source");
+        let c = observe(root.path(), None, None).unwrap();
+        assert_ne!(a.tree, c.tree);
+        std::fs::write(root.path().join("Cargo.lock"), "private lock\n").unwrap();
+        commit(root.path(), "private overlay");
+        let unknown = observe(root.path(), None, None).unwrap();
+        assert_eq!(unknown.tree, None);
+        let public = c.commit.unwrap();
+        assert_eq!(
+            observe(root.path(), Some(&public), None).unwrap().tree,
+            c.tree
+        );
+    }
+
+    /// Ignored build output neither dirties source nor retriggers its observer.
+    ///
+    /// # Panics
+    /// Panics only if fixture IO fails or generated output becomes a source input.
+    ///
+    /// ´claim:identity:generated-output-is-not-a-source-watch´
+    /// ´test:unit:generated-output-is-not-a-source-watch´
+    #[test]
+    fn generated_output_is_not_a_source_watch() {
+        let (root, _) = repository();
+        std::fs::write(root.path().join(".gitignore"), "/build/\n").unwrap();
+        commit(root.path(), "declared build directory");
+        std::fs::create_dir(root.path().join("build")).unwrap();
+        std::fs::write(root.path().join("build/build.ninja"), "generated\n").unwrap();
+        let paths = watch_paths(root.path());
+        assert!(!paths.contains(&root.path().to_owned()));
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.starts_with(root.path().join("build")))
+        );
+        assert!(paths.contains(&root.path().join("README.md")));
+        assert_eq!(observe(root.path(), None, None).unwrap().state, "candidate");
+        std::fs::write(root.path().join("README.md"), "edited\n").unwrap();
+        assert_eq!(observe(root.path(), None, None).unwrap().state, "dirty");
+        std::fs::write(root.path().join("new-source.rs"), "new source\n").unwrap();
+        assert!(watch_paths(root.path()).contains(&root.path().join("new-source.rs")));
     }
 
     /// A release is an explicit tag at the clean checkout HEAD, never a build profile.
