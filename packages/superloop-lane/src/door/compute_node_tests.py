@@ -10,11 +10,17 @@ import sys
 import signal
 import shutil
 import time
+import itertools
+import types
 from unittest.mock import patch
 
 source, temporary = sys.argv[1:]
 namespace = {"__name__": "fixture"}
 exec(source, namespace)
+# Production still reads its clock at each phase; scheduling cannot spend the
+# synthetic preparation budget while real Git executes in this fixture.
+ticks = itertools.count()
+namespace["time"] = types.SimpleNamespace(monotonic=lambda: next(ticks) / 1000)
 root = Path(temporary)
 mirror = root / "mirrors" / "R.git"
 mirror.parent.mkdir()
@@ -167,7 +173,7 @@ assert (checkout / "extra").read_text() == "new tracked path"
 assert invoke(["git", "diff"], seconds="0")[1]["reason"] == "door-request-deadline"
 assert len(wrappers) == 5
 
-# A real child with no RUN-REPORT still produces independently measured evidence.
+# A real child with no RUN-REPORT still produces clock and CPU evidence.
 real_wrapper = namespace["run_wrapper"]
 def silent_wrapper(command, **kwargs):
     if command[0] == "/usr/bin/timeout":
@@ -245,56 +251,91 @@ assert status == 124
 assert metadata["reason"] == "door-request-deadline"
 assert metadata["detail"]["checkout_commit"] is None
 
-# Exercise real nested timeout process groups, with whole-second margins.
-# The outer budget is inner budget + kill grace + evidence margin, as in Rust.
+# Exercise wrapper status classification and real process-group cleanup by events.
 probe = root / "deadline.py"
 probe.write_text("""
-import subprocess, sys, os
+import subprocess, sys, os, signal, select, types
 from pathlib import Path
 from unittest.mock import patch
-source, mirror, ignore_term, environment_json = sys.argv[1:]
+source, mirror, mode, environment_json = sys.argv[1:]
 namespace = {"__name__": "fixture"}
 exec(source, namespace)
 namespace["KILL_GRACE"] = 1
 namespace["DEADLINE_MARGIN"] = 5
-real_popen = subprocess.Popen
+clock = {"now": 0.0}
+namespace["time"] = types.SimpleNamespace(monotonic=lambda: clock["now"])
+real_popen, real_killpg = subprocess.Popen, os.killpg
+kills = []
+def killpg(pid, sig):
+    kills.append((pid, sig))
+    return real_killpg(pid, sig)
+class ControlledChild:
+    def __init__(self, child, ready):
+        self.child, self.ready, self.first = child, ready, True
+        self.pid = child.pid
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        if self.child.poll() is None:
+            real_killpg(self.pid, signal.SIGKILL)
+        return self.child.__exit__(*args)
+    def wait(self):
+        if not self.first:
+            assert (self.pid, signal.SIGKILL) in kills, "outer TERM must kill wrapper group"
+            return self.child.wait(timeout=120)
+        self.first = False
+        assert select.select([self.ready], [], [], 120)[0], "wrapper readiness"
+        assert os.read(self.ready, 1) == b"R", "wrapper announced ready"
+        os.close(self.ready)
+        if mode == "outer":
+            Path(mirror + ".pid").write_text(str(self.pid))
+            clock["now"] = 1000.0
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise AssertionError("TERM must interrupt the wrapper wait")
+        if mode == "yes":
+            real_killpg(self.pid, signal.SIGKILL)
+        elif mode == "no":
+            real_killpg(self.pid, signal.SIGTERM)
+        result = self.child.wait(timeout=120)
+        clock["now"] = 0.0 if mode in ("124", "137") else 1000.0
+        return result
 def popen(command, **kwargs):
-    if command[0] == "/usr/bin/timeout":
-        # Ignore TERM so timeout must use its kill grace and return 137.
-        program = "import signal,time; "
-        if ignore_term in ("yes", "outer"):
-            program += "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        if ignore_term == "outer":
-            program += ("import os,pathlib; pathlib.Path(" + repr(mirror + ".pid")
-                        + ").write_text(str(os.getpid())); os.kill("
-                        + str(os.getpid()) + ", signal.SIGTERM); ")
-        program += "time.sleep(30)"
-        if ignore_term in ("124", "137"):
-            program = ("import sys; print('RUN-REPORT exit=" + ignore_term
-                       + " wall=0.01s', file=sys.stderr, flush=True); sys.exit("
-                       + ignore_term + ")")
-        command = command[:4] + [sys.executable, "-c", program]
-    return real_popen(command, **kwargs)
-sys.argv = ["node", mirror, "R", str(Path(mirror).parent.parent), "8", '["git","diff"]', "/opt/fixture/bin/report", environment_json]
-with patch("subprocess.Popen", popen), patch("os.access", return_value=True), \\
+    if command[0] != "/usr/bin/timeout":
+        return real_popen(command, **kwargs)
+    assert command[:3] == ["/usr/bin/timeout", "-k", "1"], command
+    assert float(command[3]) == 114.0, command
+    ready, announce = os.pipe()
+    program = "import os,signal,sys; "
+    program += "signal.signal(signal.SIGTERM, lambda *_: sys.exit(124)); "
+    program += "os.write(" + str(announce) + ", b'R'); os.close(" + str(announce) + "); "
+    if mode in ("124", "137"):
+        program += "print('RUN-REPORT exit=" + mode + " wall=0.01s',file=sys.stderr,flush=True); sys.exit(" + mode + ")"
+    else:
+        program += "signal.pause()"
+    child = real_popen([sys.executable, "-c", program], pass_fds=(announce,), **kwargs)
+    os.close(announce)
+    return ControlledChild(child, ready)
+sys.argv = ["node", mirror, "R", str(Path(mirror).parent.parent), "120", '["git","diff"]', "/opt/fixture/bin/report", environment_json]
+with patch("subprocess.Popen", popen), patch("os.killpg", killpg), patch("os.access", return_value=True), \\
         patch("shutil.which", return_value="/fixture/tool"):
     sys.exit(namespace["main"]())
 """)
-for ignore_term, expected in [("yes", 137), ("no", 124), ("outer", 124),
-                              ("124", 124), ("137", 137)]:
-    started = time.monotonic()
-    result = real_run(["/usr/bin/timeout", "-k", "1", "6", sys.executable,
-                       str(probe), source, str(mirror), ignore_term, json.dumps(compute_environment)], capture_output=True)
-    assert time.monotonic() - started < 12
+# Controlled clock selects deadline classification; pipe readiness orders signals.
+# Real child groups still prove outer TERM cleanup. The timeout is only a hang guard.
+for mode, expected in [("yes", 137), ("no", 124), ("outer", 124),
+                       ("124", 124), ("137", 137)]:
+    result = real_run(["/usr/bin/timeout", "-k", "5", "120", sys.executable,
+                       str(probe), source, str(mirror), mode, json.dumps(compute_environment)], capture_output=True)
+    assert b"DOOR-COMPUTE " in result.stderr, result.stderr
     metadata = json.loads(result.stderr.decode().split("DOOR-COMPUTE ")[-1])
-    early = ignore_term in ("124", "137")
+    early = mode in ("124", "137")
     assert metadata["reason"] == ("door-complete" if early else "door-request-deadline"), result.stderr
     assert result.returncode == expected, result.stderr
     assert metadata["detail"]["tree_clean"] is True
     assert metadata["detail"]["wrapper_exit_status"] == (expected if early else None)
     if early:
         assert f"RUN-REPORT exit={expected}" in result.stderr.decode()
-    if ignore_term == "outer":
+    if mode == "outer":
         wrapper_pid = int(Path(str(mirror) + ".pid").read_text())
         process = Path(f"/proc/{wrapper_pid}/stat")
         assert not process.exists() or process.read_text().split(") ", 1)[1][0] == "Z"

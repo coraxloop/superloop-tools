@@ -26,7 +26,7 @@ fn door_concurrent_request_refuses_before_record() {
     let store = fixture.store();
     let (runner, calls, _) = counting_runner(&fixture);
     let (socket, first) = fixture_service(&fixture, runner, rubric(Some("allow")), 120_000, None);
-    let mut client = FixtureClient::connect(socket).expect("first connection");
+    let mut client = socket;
     client.send(&json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}))
     .expect("first request");
     let id = wait_filed(&store);
@@ -78,7 +78,7 @@ fn door_concurrent_request_refuses_before_record() {
     // Completion releases admission, including for a subsequent refusal record.
     let (runner, _, _) = counting_runner(&fixture);
     let (socket, next) = fixture_service(&fixture, runner, rubric(None), 120_000, None);
-    let mut peer = FixtureClient::connect(socket).expect("next connection");
+    let mut peer = socket;
     peer.send(&json!({"schema":2})).expect("next request");
     let reply = peer.answer();
     assert_eq!(reply["reason"], "door-request-refusal");
@@ -133,7 +133,7 @@ fn concurrent_process_peer() {
         .parse()
         .expect("numeric uid");
     let registration = concurrent_registration(uid);
-    let mut stream = UnixStream::connect(socket).expect("peer connection");
+    let mut stream = FixtureServer::connect_reverse(socket).expect("reverse server connection");
     let request = fixture_request(&mut stream).expect("peer request");
     let clock = std::rc::Rc::new(ControlledAdmissionClock::default());
     let started = super::AdmissionClock::now(clock.as_ref());
@@ -691,7 +691,7 @@ fn door_concurrent_request_admits_after_release() {
         let store = fixture.store();
         let (runner, first_calls, _) = counting_runner(&fixture);
         let (socket, first) = fixture_service(&fixture, runner, rubric(Some("allow")), 120_000, None);
-        let mut client = send_probe(&socket, 120_000);
+        let mut client = send_probe(socket, 120_000);
         let first_id = wait_filed(&store);
         let (runner, second_calls, _) = counting_runner(&fixture);
         let route = route_for(&fixture.home);
@@ -840,7 +840,7 @@ fn door_receive_completes_beside_running_compute() {
     fixture.set_floor("allow");
     let (socket, compute_calls, compute_server) =
         super::compute_tests::compute_service(&fixture, "R", 3000, 3000, Scope::Work, None);
-    let mut compute = FixtureClient::connect(socket).expect("compute connection");
+    let mut compute = socket;
     compute.send(&json!({"schema":2,
         "argv":[b"fixture".to_vec(), b"/opt/fixture/bin/report cargo run --locked".to_vec()],
         "deadline_ms":60000}))
@@ -851,7 +851,7 @@ fn door_receive_completes_beside_running_compute() {
         thread::sleep(Duration::from_millis(5));
     }
     let (runner, receive_calls, _) = counting_runner(&fixture);
-    let (socket, receive_server) = fixture_service(&fixture, runner, rubric(None), 60000, None);
+    let (socket, receive_server) = fixture_stub_service(&fixture, runner, rubric(None), 60000, None);
     let command = format!(
         "{} {} refs/heads/lane/R\0report-status\n",
         "0".repeat(40),
@@ -960,7 +960,7 @@ fn door_two_requesters_credit_contention_before_unlocked_triage() {
         let agent = PausedAgent { run, entered: entered_tx.clone(), release: Mutex::new(release_rx) };
         let contended = contended_tx.clone();
         services.push(thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
+            let mut stream = FixtureServer::accept(&listener).expect("accept");
             let request = fixture_request(&mut stream).expect("request");
             let registration = Registration::from_row(&json!({"name":"alpha","uid":2001}), "alpha", run, 3000 + u32::try_from(index).expect("two callers"), Scope::Work).expect("registration");
             super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = Some(contended));
@@ -1052,7 +1052,7 @@ fn door_final_seal_suppresses_late_credit() {
         other.credit(Duration::from_millis(50));
     });
     entered.recv_timeout(FIXTURE_HANG).expect("credit writer exists");
-    let reply = json!({"schema":2,"status":0,"reason":"fixture-final"});
+    let reply = json!({"schema":2,"status":0,"reason":"fixture-final","stdout_bytes":0,"stderr_bytes":0});
     wait.write_final(&reply, Instant::now() + FIXTURE_HANG).expect("final");
     assert_eq!(peer.answer(), reply);
     release.send(()).expect("late credit");

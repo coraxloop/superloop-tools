@@ -637,17 +637,17 @@ Compatibility: no command, record, credential member or bundle role changes. The
 
 ## Door test fixtures · `sec:superlooplane:door-test-fixtures`
 
-Door service fixtures return `FixtureClient`, which owns its socket. Test authors send requests with `send`, read answers with `answer`, and wait for a named intermediate event with `event`. The answer reader validates lock-wait credits and consumes output and deadline announcements within one 120-second hang bound before requiring an integer final status. The two answer loops formerly discarding unexamined intermediate frames use this same reader.
+Door service fixtures return `FixtureClient`, which owns its socket. Test authors send requests with `send`, read answers with `answer`, and wait for a named intermediate event with `event`. The answer reader validates lock-wait credits and output bytes, accounts for output across named-event reads, and reconciles both byte totals with the final reply within one 120-second hang bound. The two answer loops formerly discarding unexamined intermediate frames use this same reader.
 
 ```text
-let mut client = FixtureClient::connect(&socket).expect("fixture client");
+let (mut client, server) = fixture_service(&fixture, runner, rubric, 120_000, None);
 client.send(&request).expect("request");
 client.shutdown(std::net::Shutdown::Write).expect("empty input");
 let reply = client.answer();
 assert_eq!(reply["status"], 0);
 ```
 
-The client has no `Read` or `Deref` implementation and does not expose its socket field. Framing and credit assertions explicitly opt into `wire`; server fixtures receive inbound requests through `fixture_request`. A wire-level test states which frame, credit sequence or EOF it observes, rather than copying an ordinary answer read. The sized-run waiter test parks every reader before the writer's zero-wait acquisition, then resumes and joins each waiter before resuming the next; concurrent polling capacity belongs to a separate measurement with the load accounted.
+The client has no `Read` or `Deref` implementation and does not expose its socket field. Framing and credit assertions explicitly opt into `wire`; server fixtures receive inbound requests through `fixture_request`, whose argument is a distinct `FixtureServer` endpoint returned by accept or pair, never a client or raw socket. Ordinary service fixtures return connected clients; tests exercising the production stub opt into explicitly named `stub` fixture endpoints because that public stub connects by pathname. The reverse-connection process fixture explicitly constructs a server endpoint. A wire-level test states which frame, credit sequence or EOF it observes, rather than copying an ordinary answer read. The sized-run waiter test parks every reader before the writer's zero-wait acquisition, then resumes and joins each waiter before resuming the next; concurrent polling capacity belongs to a separate measurement with the load accounted.
 
 ## Claude credential acceptance draft · `sec:superlooplane:claude-credential-acceptance-draft`
 

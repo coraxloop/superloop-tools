@@ -20,7 +20,7 @@ fn receive_args() -> [OsString; 2] {
 /// ´test:unit:door-receive-matched-packet-records-admitted-and-stdin-bytes´
 #[test]
 fn door_receive_matched_packet_records_admitted_and_stdin_bytes() {
-    let (temp, socket, server) = fixture(Scope::Work);
+    let (temp, socket, server) = fixture_stub(Scope::Work);
     let reply = stub_call(&socket, &receive_args(), &receive_packet("refs/heads/lane/R"))
         .expect("matched receive");
     assert_eq!(reply["reason"], "door-complete");
@@ -37,7 +37,7 @@ fn door_receive_matched_packet_records_admitted_and_stdin_bytes() {
 /// ´test:unit:door-receive-changed-packet-records-refused-and-stdin-bytes´
 #[test]
 fn door_receive_changed_packet_records_refused_and_stdin_bytes() {
-    let (temp, socket, server) = fixture(Scope::Work);
+    let (temp, socket, server) = fixture_stub(Scope::Work);
     let reply = stub_call(&socket, &receive_args(), &receive_packet("refs/heads/lane/S"))
         .expect("changed receive");
     assert_eq!(reply["reason"], "door-changed-ref-refusal");
@@ -54,7 +54,7 @@ fn door_receive_changed_packet_records_refused_and_stdin_bytes() {
 /// ´test:unit:door-receive-flush-without-ref-records-no-ref´
 #[test]
 fn door_receive_flush_without_ref_records_no_ref() {
-    let (temp, socket, server) = fixture(Scope::Work);
+    let (temp, socket, server) = fixture_stub(Scope::Work);
     let reply = stub_call(&socket, &receive_args(), b"0000").expect("no-op receive");
     assert_eq!(reply["reason"], "door-complete");
     assert_eq!(reply["ref_check"], "no-ref");
@@ -75,8 +75,7 @@ fn door_receive_deadline_before_packet_records_not_reached() {
         }));
     });
     SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = Some(Box::new(Instant::now)));
-    let (temp, socket, server) = fixture(Scope::Work);
-    let mut client = FixtureClient::connect(&socket).expect("receive client");
+    let (temp, mut client, server) = fixture_with_runner(Scope::Work, &FakeRunner);
     client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(),
             b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":RECEIVE_DEADLINE_MS}))
     .expect("receive request");
@@ -129,7 +128,7 @@ fn door_input_pump_deadline_before_packet_keeps_ref_not_reached() {
 /// ´test:unit:door-upload-records-not-applicable-ref-check´
 #[test]
 fn door_upload_records_not_applicable_ref_check() {
-    let (temp, socket, server) = fixture(Scope::Work);
+    let (temp, socket, server) = fixture_stub(Scope::Work);
     let args = [
         OsString::from("fixture"),
         OsString::from("git-upload-pack '~/mirrors/R.git'"),

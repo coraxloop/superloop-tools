@@ -1,3 +1,4 @@
+use crate::door::tests::FixtureServer;
 use crate::door::tests::fixture_request;
 // Real Git clients cross the production stub and request handler; node spawning and the registered route and upload ceiling are substituted.
 use std::io::Write as _;
@@ -26,7 +27,7 @@ fn route_accept(
     listener: &UnixListener,
     deadline: Instant,
     reason: &str,
-) -> io::Result<UnixStream> {
+) -> io::Result<FixtureServer> {
     use std::os::fd::AsRawFd as _;
     listener.set_nonblocking(true)?;
     loop {
@@ -51,8 +52,8 @@ fn route_accept(
             return Err(error);
         }
         if ready > 0 {
-            match listener.accept() {
-                Ok((stream, _)) => return Ok(stream),
+            match FixtureServer::accept(listener) {
+                Ok(stream) => return Ok(stream),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error),
             }
@@ -1120,7 +1121,7 @@ fn door_shallow_packets_preserve_ref_authority() {
 }
 
 fn assert_packet_case(bodies: &[Vec<u8>], expected: &str, first: Option<&str>) {
-    let (_fixture, socket, server) = fixture(Scope::Work);
+    let (_fixture, socket, server) = fixture_stub(Scope::Work);
     let mut wire = ref_wire(bodies);
     wire.extend(b"PACK-secret-must-not-be-evidence");
     // Every truncated prefix waits for more input; nothing is admitted before the flush.

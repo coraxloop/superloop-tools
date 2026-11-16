@@ -88,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Make door compute deadline and disconnect tests decide by readiness and controlled phase clocks; require typed fixture endpoints and reconcile answer output counts. Compatibility: test fixtures only; installed door behavior is unchanged (``sec:superlooplane:door-test-fixtures``).
+
 - Permission-triage model and journal tests now start short timeout claims after fixture readiness, use held events for ordering, and give ordinary fixture runs distant hang guards. Their interrupted fixtures outlive the model run's hang guard, so a missing kill or group kill fails the test instead of passing after the fixture exits. A loaded test machine no longer changes their verdicts. Installed time limits and behavior are unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
 
 - Selected fake topology rosters now have a 120-second per-trial hang bound, over sixty times the largest trial wall measured under node load; their outcome assertions and full-roster deadlines are unchanged. Release builds still refuse test rosters (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
