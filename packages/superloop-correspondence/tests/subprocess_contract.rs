@@ -3,6 +3,37 @@ use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::process::{Command, Output, Stdio};
 
+const FIXTURE_HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
+#[track_caller]
+fn assert_child_success(output: &Output) {
+    assert_child_success_with_stdout(output, &output.stdout);
+}
+
+#[track_caller]
+fn assert_child_success_with_stdout(output: &Output, stdout: &[u8]) {
+    let tail = &stdout[stdout.len().saturating_sub(512)..];
+    assert!(
+        output.status.success(),
+        "child status={} stderr={} stdout_tail={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(tail)
+    );
+}
+
+#[track_caller]
+fn assert_child_failure(output: &Output) {
+    let tail = &output.stdout[output.stdout.len().saturating_sub(512)..];
+    assert!(
+        !output.status.success(),
+        "unexpected child success: status={} stderr={} stdout_tail={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(tail)
+    );
+}
+
 // Close our writer before any spawn; another test's fork can still hold its
 // inherited descriptor until exec, so readiness retries only ETXTBSY.
 fn write_executable(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -33,9 +64,9 @@ fn fixture_output_after_busy(
     loop {
         match command.spawn() {
             Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
-                if started.elapsed() >= std::time::Duration::from_millis(500) {
+                if started.elapsed() >= FIXTURE_HANG_BOUND {
                     return Err(std::io::Error::other(
-                        "fixture-exec-busy: ETXTBSY exceeded readiness wall bound",
+                        "fixture-exec-busy: ETXTBSY exceeded 120-second hang bound",
                     ));
                 }
                 after_busy();
@@ -59,7 +90,7 @@ fn output_after_exit_event(command: &mut Command, event: impl Fn() -> bool) -> O
         if child.try_wait().unwrap().is_some() {
             break;
         }
-        if started.elapsed() >= std::time::Duration::from_secs(120) {
+        if started.elapsed() >= FIXTURE_HANG_BOUND {
             child.kill().unwrap();
             child.wait().unwrap();
             panic!("fixture process exceeded 120 seconds");
@@ -67,7 +98,12 @@ fn output_after_exit_event(command: &mut Command, event: impl Fn() -> bool) -> O
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let output = child.wait_with_output().unwrap();
-    assert!(event(), "fixture transport event absent");
+    assert!(
+        event(),
+        "fixture transport event absent: status={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     output
 }
 
@@ -92,7 +128,7 @@ fn fixture_readiness_retries_held_executable_writer() {
     )
     .unwrap();
     assert!(retries > 0);
-    assert!(output.status.success());
+    assert_child_success(&output);
     assert_eq!(output.stdout, b"transport-ready\n");
 }
 
@@ -160,7 +196,7 @@ remote=$2
 printf '%s %s\n' "$host" "$remote" >> "$r/calls"
 mode=$MODE
 case $mode in
-  slow) exec sleep 10;;
+  slow) exec sleep 300;;
   failed) exit 1;;
   unknown-key) exit 255;;
   partial) [ "$host" != beta ] || exit 1; mode=user;;
@@ -179,7 +215,7 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$r/$mode.reply"
                 .env("FIXTURE", self.root.path()),
         )
         .unwrap();
-        assert!(ready.status.success(), "{ready:?}");
+        assert_child_success(&ready);
         assert_eq!(ready.stdout, b"transport-ready\n");
         let mut command = Command::new(env!("CARGO_BIN_EXE_superloop-correspondence"));
         command
@@ -238,16 +274,16 @@ fn metadata(path: &std::path::Path) -> Vec<i128> {
 #[test]
 fn bare_reads_and_second_caller_preserve_and_resume_shared_cursor() {
     let f = Fixture::new();
-    assert!(f.run("poll", "user", false).status.success());
+    assert_child_success(&f.run("poll", "user", false));
     assert!(!f.root.path().join("state").exists());
-    assert!(f.run("watch", "user", false).status.success());
+    assert_child_success(&f.run("watch", "user", false));
     assert!(!f.root.path().join("state").exists());
-    assert!(f.run("poll", "user", true).status.success());
+    assert_child_success(&f.run("poll", "user", true));
     let path = f.root.path().join("state/cursor-alpha");
     let before = metadata(&path);
     for action in ["poll", "watch"] {
         let output = f.run(action, "repeat-user", false);
-        assert_eq!(output.status.code(), Some(0));
+        assert_child_success(&output);
         assert_eq!(before, metadata(&path));
         assert!(String::from_utf8_lossy(&output.stdout).contains("FEED-DURATION-MS "));
         assert!(String::from_utf8_lossy(&output.stdout).contains("file=message"));
@@ -265,12 +301,12 @@ fn bare_reads_and_second_caller_preserve_and_resume_shared_cursor() {
 fn failure_isolation_admin_publication_and_deadlines() {
     let f = Fixture::new();
     let output = f.run("watch", "admin-and-user", true);
-    assert_eq!(output.status.code(), Some(0));
+    assert_child_success(&output);
     assert!(String::from_utf8_lossy(&output.stdout).contains("from=admin"));
     let cursor = f.root.path().join("state/cursor-alpha");
     fs::write(f.root.path().join("state/cursor-beta"), "untouched").unwrap();
     let other = metadata(&f.root.path().join("state/cursor-beta"));
-    assert!(f.run("poll", "repeat-user", true).status.success());
+    assert_child_success(&f.run("poll", "repeat-user", true));
     assert_eq!(other, metadata(&f.root.path().join("state/cursor-beta")));
     assert_eq!(fs::read(&cursor).unwrap(), b"position-one");
     // Fresh alpha content ends the round after beta's failed transport is observed.
@@ -286,7 +322,7 @@ fn failure_isolation_admin_publication_and_deadlines() {
                 .is_ok_and(|log| log.lines().any(|line| line.starts_with("beta ")))
         },
     );
-    assert!(output.status.success());
+    assert_child_success(&output);
     assert!(String::from_utf8_lossy(&output.stdout).contains("FEED-WARNING"));
     let mut slow = f.command("poll", "slow");
     slow.env("CORRESPONDENCE_FEED_DEADLINE_MS", "5000");
@@ -296,7 +332,7 @@ fn failure_isolation_admin_publication_and_deadlines() {
         fs::read_to_string(&calls)
             .is_ok_and(|log| log.lines().any(|line| line.starts_with("alpha ")))
     });
-    assert!(!output.status.success());
+    assert_child_failure(&output);
 }
 
 /// ´test:integration:output-failure-unknown-alias-and-key-do-not-acknowledge´
@@ -311,10 +347,10 @@ fn output_failure_unknown_alias_and_key_do_not_acknowledge() {
         .command("poll", "bulk")
         .args(["--advance-cursor", "alpha"])
         .stdout(full)
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .output()
         .unwrap();
-    assert!(!output.success());
+    assert_child_failure(&output);
     assert!(!f.root.path().join("state/cursor-alpha").exists());
     let keys = fs::read(f.root.path().join("keys")).unwrap();
     let output = f
@@ -322,20 +358,14 @@ fn output_failure_unknown_alias_and_key_do_not_acknowledge() {
         .args(["alpha", "beta"])
         .output()
         .unwrap();
-    assert!(output.status.success());
+    assert_child_success(&output);
     assert!(String::from_utf8_lossy(&output.stdout).contains("host=alpha SSH-FAILED"));
     assert!(String::from_utf8_lossy(&output.stdout).contains("FEED-WARNING"));
     assert_eq!(fs::read(f.root.path().join("keys")).unwrap(), keys);
     assert!(!f.root.path().join(".ssh/known_hosts").exists());
     fs::remove_file(f.root.path().join("calls")).unwrap();
-    assert!(
-        !f.command("poll", "user")
-            .arg("missing")
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
+    let output = f.command("poll", "user").arg("missing").output().unwrap();
+    assert_child_failure(&output);
     assert!(!f.root.path().join("calls").exists());
 }
 
@@ -352,7 +382,8 @@ fn release_harness_keeps_all_correspondence_pins() {
         .unwrap();
     assert!(
         output.status.success(),
-        "{}{}",
+        "status={} stdout={} stderr={}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -372,7 +403,7 @@ fn empty_cursor_refuses_before_transport() {
     for action in ["poll", "watch"] {
         for advance in [false, true] {
             let output = f.run(action, "user", advance);
-            assert!(!output.status.success());
+            assert_child_failure(&output);
             assert!(
                 String::from_utf8_lossy(&output.stderr)
                     .contains(&format!("empty cursor: {}", path.display()))
@@ -396,7 +427,7 @@ fn cursor_lock_contention_and_killed_holder_recovery() {
     let mut byte = [0];
     holder.stdout.take().unwrap().read_exact(&mut byte).unwrap();
     let output = f.run("poll", "user", true);
-    assert!(!output.status.success());
+    assert_child_failure(&output);
     assert!(String::from_utf8_lossy(&output.stderr).contains("cursor lock"));
     assert!(!f.root.path().join("calls").exists());
     holder.kill().unwrap();
@@ -410,7 +441,6 @@ fn cursor_lock_contention_and_killed_holder_recovery() {
     let mut client = f
         .command("poll", "bulk")
         // Lock ordering is the subject; the client blocks in publication until it is killed below.
-        .env("CORRESPONDENCE_FEED_DEADLINE_MS", "30000")
         .args(["--advance-cursor", "alpha"])
         .stdout(Stdio::from(write))
         .spawn()
@@ -420,18 +450,14 @@ fn cursor_lock_contention_and_killed_holder_recovery() {
     let mut prefix = vec![0; expected.len()];
     pipe.read_exact(&mut prefix).unwrap();
     assert!(usize::try_from(capacity).unwrap() < 1_048_576 - prefix.len());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let held = loop {
-        let file = fs::File::open(&path).unwrap();
-        match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock) {
-            Ok(guard) => drop(guard),
-            Err((_, nix::errno::Errno::EWOULDBLOCK)) => break true,
-            Err((_, error)) => panic!("cursor lock probe: {error}"),
+    let file = fs::File::open(&path).unwrap();
+    let held = match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+        Ok(guard) => {
+            drop(guard);
+            false
         }
-        if std::time::Instant::now() >= deadline {
-            break false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        Err((_, nix::errno::Errno::EWOULDBLOCK)) => true,
+        Err((_, error)) => panic!("cursor lock probe: {error}"),
     };
     let contending = f.run("poll", "user", true);
     let inode = fs::metadata(&path).unwrap().ino();
@@ -447,10 +473,10 @@ fn cursor_lock_contention_and_killed_holder_recovery() {
         held,
         "client did not retain the cursor lock during publication"
     );
-    assert!(!contending.status.success());
+    assert_child_failure(&contending);
     assert!(String::from_utf8_lossy(&contending.stderr).contains("cursor lock"));
     assert!(!f.root.path().join("state/cursor-alpha").exists());
-    assert!(f.run("poll", "user", true).status.success());
+    assert_child_success(&f.run("poll", "user", true));
     assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
 }
 
@@ -462,6 +488,7 @@ fn publication_is_visible_before_cursor_save() {
         .command("poll", "bulk")
         .args(["--advance-cursor", "alpha"])
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let mut pipe = child.stdout.take().unwrap();
@@ -470,7 +497,8 @@ fn publication_is_visible_before_cursor_save() {
     assert!(!f.root.path().join("state/cursor-alpha").exists());
     let mut bytes = Vec::new();
     pipe.read_to_end(&mut bytes).unwrap();
-    assert!(child.wait().unwrap().success());
+    let output = child.wait_with_output().unwrap();
+    assert_child_success_with_stdout(&output, &bytes);
     assert!(String::from_utf8_lossy(&bytes).contains("from=user"));
     assert_eq!(
         fs::read(f.root.path().join("state/cursor-alpha")).unwrap(),
@@ -490,14 +518,8 @@ fn argument_validation_poll_floor_and_include_aliases() {
         vec!["alpha", "alpha"],
         vec!["-invalid"],
     ] {
-        assert!(
-            !f.command("poll", "user")
-                .args(arguments)
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
+        let output = f.command("poll", "user").args(arguments).output().unwrap();
+        assert_child_failure(&output);
         assert!(!f.root.path().join("calls").exists());
     }
     for (variable, value) in [
@@ -505,15 +527,13 @@ fn argument_validation_poll_floor_and_include_aliases() {
         ("CORRESPONDENCE_FEED_POLL_MS", "bad"),
         ("CORRESPONDENCE_WATCH_DEADLINE_MS", "0"),
     ] {
-        assert!(
-            !f.command("watch", "user")
-                .env(variable, value)
-                .arg("alpha")
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
+        let output = f
+            .command("watch", "user")
+            .env(variable, value)
+            .arg("alpha")
+            .output()
+            .unwrap();
+        assert_child_failure(&output);
     }
     let output = f
         .command("poll", "empty")
@@ -521,7 +541,7 @@ fn argument_validation_poll_floor_and_include_aliases() {
         .arg("alpha")
         .output()
         .unwrap();
-    assert!(output.status.success());
+    assert_child_success(&output);
     assert!(String::from_utf8_lossy(&output.stdout).ends_with("FEED-EMPTY\n"));
     assert!(!f.root.path().join("calls").exists());
     fs::write(f.root.path().join("config"), "Include hosts-*\n").unwrap();
@@ -531,7 +551,7 @@ fn argument_validation_poll_floor_and_include_aliases() {
     )
     .unwrap();
     let output = f.run("poll", "user", false);
-    assert!(output.status.success());
+    assert_child_success(&output);
     assert!(String::from_utf8_lossy(&output.stdout).ends_with("FEED-CONTENT\n"));
 }
 
@@ -549,7 +569,13 @@ fn usage_refuses_without_measuring_and_help_succeeds() {
             .args(args)
             .output()
             .unwrap();
-        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "status={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_ne!(output.stderr, [] as [u8; 0]);
         assert!(!String::from_utf8_lossy(&output.stdout).contains("DURATION"));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("DURATION"));
@@ -559,6 +585,6 @@ fn usage_refuses_without_measuring_and_help_succeeds() {
             .arg(flag)
             .output()
             .unwrap();
-        assert_eq!(output.status.code(), Some(0));
+        assert_child_success(&output);
     }
 }

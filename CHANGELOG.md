@@ -86,6 +86,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Door test replies use a shared final-status reader across service, compute, concurrency and startup fixtures; intermediate protocol events are requested explicitly. Lock-wait progress cannot be mistaken for an answer. Tests only; no installed behavior or deployment procedure changes (`prob:gates:elapsed-time-assertions-are-censused-and-rewritten`).
 
+- Correspondence subprocess checks now give executable readiness a distant hang guard and use publication itself to prove cursor-lock ownership. Unexpected child results name their exit status and stderr with a bounded stdout tail, and the slow SSH fixture stays beyond its five-second cutoff. The installed client is unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``; ``rule:conformance:ordering-and-timing-evidence``).
+
 - Door transport tests decide disconnect, receive expiry, child exit and input release from their events, with distant hang guards instead of short fixture windows. Installed programs and door deployment are unchanged (`prob:gates:elapsed-time-assertions-are-censused-and-rewritten`).
 
 - The unreaped-feeder regression checks the process-state branch directly, so a corpse and a deadline cannot pass as the same negative reading and scheduler delay cannot decide the verdict (``test:integration:an-unreaped-corpse-is-not-a-feeder-still-reaching-its-exec``).
