@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- The door fixture socket test now retries its exact stub call until the listener accepts it, with a distant hang guard; a loaded test node no longer turns the brief bind-to-listen interval into a connection refusal. The compute-node fixture distinguishes its own `no` mode from the outer hang guard by the deadline diagnostic. Tests only; installed doors and operator procedures are unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
+
 ## [0.5.0] - 2026-11-16
 
 ### Added

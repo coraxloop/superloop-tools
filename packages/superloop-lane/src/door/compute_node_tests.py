@@ -335,7 +335,10 @@ for mode, expected in [("yes", 137), ("no", 124), ("outer", 124),
     assert metadata["detail"]["wrapper_exit_status"] == (expected if early else None)
     if early:
         assert f"RUN-REPORT exit={expected}" in result.stderr.decode()
+    if mode == "no":
+        assert b"node preparation deadline" not in result.stderr, result.stderr
     if mode == "outer":
+        assert b"node preparation deadline" in result.stderr, result.stderr
         wrapper_pid = int(Path(str(mirror) + ".pid").read_text())
         process = Path(f"/proc/{wrapper_pid}/stat")
         assert not process.exists() or process.read_text().split(") ", 1)[1][0] == "Z"

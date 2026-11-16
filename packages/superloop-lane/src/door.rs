@@ -6733,18 +6733,31 @@ mod tests {
         let server_registration = registration;
         let server_socket = socket.clone();
         let server = thread::spawn(move || serve_socket(&server_socket, &server_registration));
-        for _ in 0..100 {
-            if socket.exists() {
-                break;
+        let args = [OsString::from("door-shape-probe"), OsString::from("R")];
+        let call_when_ready = |path: &std::path::Path| {
+            let until = Instant::now() + FIXTURE_HANG;
+            loop {
+                match stub_call(path, &args, b"") {
+                    Ok(reply) => break Ok(reply),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        if Instant::now() >= until {
+                            break Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!("fixture listener did not become ready: {error}"),
+                            ));
+                        }
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => break Err(error),
+                }
             }
-            thread::sleep(std::time::Duration::from_millis(2));
-        }
-        let reply = stub_call(
-            &socket,
-            &[OsString::from("door-shape-probe"), OsString::from("R")],
-            b"",
-        )
-        .expect("stub reply");
+        };
+        let reply = call_when_ready(&socket).expect("stub reply");
         let (response, body) = server.join().expect("server thread").expect("served");
         assert_eq!(reply, response);
         assert_eq!(body, Vec::<u8>::new());
@@ -6759,18 +6772,7 @@ mod tests {
             crate::fixture_exec::fixture_socket_path(fixture.path().join("review.sock"));
         let server_path = review_socket.clone();
         let server = thread::spawn(move || serve_socket(&server_path, &review));
-        for _ in 0..100 {
-            if review_socket.exists() {
-                break;
-            }
-            thread::sleep(std::time::Duration::from_millis(2));
-        }
-        let reply = stub_call(
-            &review_socket,
-            &[OsString::from("door-shape-probe"), OsString::from("R")],
-            b"",
-        )
-        .expect("review probe");
+        let reply = call_when_ready(&review_socket).expect("review probe");
         assert_eq!(reply["reason"], "door-review-compute-refusal");
         server
             .join()
