@@ -10,26 +10,29 @@ pwd -P > "${capture}.cwd"
 printf '%s\n' "${PERMISSION_TRIAGE_NESTED-}" > "${capture}.nested"
 printf '%s\n' "${PERMISSION_TRIAGE_TEST_SECRET-}" > "${capture}.secret"
 printf '%s\n' "$$" > "${capture}.pid"
+: > "${capture}.pid-recorded"
 
 case "$response" in
     stdin-gate-deadline)
         sleep 120 &
         descendant=$!
         printf '%s\n' "$descendant" > "${capture}.child-pid"
+        : > "${capture}.child-recorded"
         wait "$descendant"
         : > "${capture}.deadline"
         exit 0
         ;;
     never-read)
         : > "${capture}.stdin"
-        sleep 10 >/dev/null 2>&1 &
+        sleep 300 >/dev/null 2>&1 &
         descendant=$!
         printf '%s\n' "$descendant" > "${capture}.child-pid"
+        : > "${capture}.child-recorded"
         wait "$descendant"
         ;;
     never-read-direct)
         : > "${capture}.stdin"
-        exec sleep 10
+        exec sleep 300
         ;;
     never-read-short-descendant)
         : > "${capture}.stdin"
@@ -55,8 +58,8 @@ case "$response" in
             printf '%s\n' '{"structured_output":{"scope":"estate","classification":"safe","reason":"double-fork fixture skipped"}}'
             exit 0
         fi
-        "$setsid_program" -f sh -c 'printf "%s\n" "$$" > "$1"; exec sleep 30' sh "${capture}.child-pid"
-        while [ ! -e "${capture}.child-pid" ]; do
+        "$setsid_program" -f sh -c 'printf "%s\n" "$$" > "$1"; : > "$2"; exec sleep 30' sh "${capture}.child-pid" "${capture}.child-recorded"
+        while [ ! -e "${capture}.child-recorded" ]; do
             sleep 0.01
         done
         : > "${capture}.double-fork-ready"
@@ -117,10 +120,11 @@ case "$response" in
         ) &
         descendant=$!
         printf '%s\n' "$descendant" > "${capture}.child-pid"
+        : > "${capture}.child-recorded"
         exit 0
         ;;
     sleep)
-        sleep 10 >/dev/null 2>&1
+        sleep 300 >/dev/null 2>&1
         ;;
     unknown)
         printf '%s\n' '{"structured_output":{"scope":"estate","classification":"unknown","reason":"fixture reason"}}'

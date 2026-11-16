@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -42,10 +42,8 @@ const FIXTURE_EVENT_POLL: Duration = Duration::from_millis(2);
 
 /// Cap on an interrupting deadline.
 ///
-/// The fixtures stage ten-second hangs, so a deadline allowed to grow past that would outlive the
-/// hang it exists to interrupt: the fixture would exit on its own and there would be no timeout to
-/// report. Four seconds stays clear of the hang and below the deadline-return cap, so a run that
-/// actually pays this deadline can still satisfy the bound that follows it.
+/// The interrupted fixtures stage 300-second hangs. Four seconds stays clear of their natural
+/// exit, while the enclosing 120-second run guard catches a missing kill.
 const INTERRUPTING_DEADLINE_CAP: Duration = Duration::from_secs(4);
 
 /// Cap on observing completion before the poll-clock seam reports expiry.
@@ -63,11 +61,8 @@ const LOAD_SAMPLE_COUNT: usize = 3;
 
 /// Largest of three timed fixture-model runs, in milliseconds.
 ///
-/// Timing bounds in this file say that production returned at its own deadline rather than at its
-/// child's exit. What such a return costs is dominated by the launch, write, kill and reap the
-/// sampled run also performs, and that cost grows with machine load while production's behaviour
-/// does not, so the bounds are stated as a multiple of a measured run instead of a constant that
-/// only holds on an idle machine. The sample is taken once per test binary behind a lock, so any
+/// The interrupted fixtures must start before their deadlines; that launch cost grows with load.
+/// The sample is taken once per test binary behind a lock, so any
 /// other thread that asks for it waits rather than sampling again, and what it measures is the load
 /// outside this process.
 ///
@@ -235,6 +230,95 @@ fn run_fixture_after_marker(
     )
 }
 
+/// WAIT: a model that fails to kill its 300-second fixture must fail at this distant guard.
+/// The fixture group is signalled on that failure so the test leaves no child behind.
+fn run_model_with_hang_guard(
+    capture: &Path,
+    run: impl FnOnce() -> Result<crate::ModelResult, ModelError> + Send + 'static,
+) -> Result<crate::ModelResult, ModelError> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _sent = sender.send(run());
+    });
+    match receiver.recv_timeout(FIXTURE_EVENT_WAIT) {
+        Ok(result) => {
+            worker.join().expect("model fixture thread finishes");
+            result
+        }
+        Err(error) => {
+            if let Ok(pid) = fs::read_to_string(capture_file(capture, ".pid"))
+                && let Ok(pid) = pid.trim().parse::<i32>()
+            {
+                let _killed = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(-pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+            panic!("model fixture exceeded 120-second hang guard: {error}");
+        }
+    }
+}
+
+struct FixtureGroupGuard(i32);
+
+impl FixtureGroupGuard {
+    fn for_capture(capture: &Path) -> Self {
+        let pid = captured_process_id(capture, ".pid")
+            .parse()
+            .expect("fixture group id is numeric");
+        Self(pid)
+    }
+}
+
+impl Drop for FixtureGroupGuard {
+    fn drop(&mut self) {
+        let _killed = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(-self.0),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+}
+
+fn run_fixture_after_marker_guarded(
+    capture: &Path,
+    response: &str,
+    deadline: Duration,
+    submitted: &Prompt,
+    suffix: &str,
+) -> Result<crate::ModelResult, ModelError> {
+    let run_capture = capture.to_path_buf();
+    let response = response.to_owned();
+    let submitted = submitted.clone();
+    let suffix = suffix.to_owned();
+    run_model_with_hang_guard(capture, move || {
+        run_fixture_after_marker(&run_capture, &response, deadline, &submitted, &suffix)
+    })
+}
+
+fn run_fixture_with_kill_after_marker_guarded(
+    capture: &Path,
+    response: &str,
+    deadline: Duration,
+    submitted: &Prompt,
+    kill_program: OsString,
+    suffix: &str,
+) -> Result<crate::ModelResult, ModelError> {
+    let run_capture = capture.to_path_buf();
+    let response = response.to_owned();
+    let submitted = submitted.clone();
+    let suffix = suffix.to_owned();
+    run_model_with_hang_guard(capture, move || {
+        run_fixture_model_with_kill_program_after_marker(
+            fake_cli().as_os_str(),
+            &submitted,
+            deadline,
+            fixture_environment(&run_capture, &response),
+            kill_program,
+            capture_file(&run_capture, &suffix),
+        )
+    })
+}
+
 fn capture_file(capture: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(format!("{}{suffix}", capture.display()))
 }
@@ -394,6 +478,8 @@ impl Drop for FixtureProcessGuard {
     fn drop(&mut self) {
         let status = Command::new("/bin/kill")
             .args(["-KILL", "--", &self.process_id])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
         let process_path = Path::new("/proc").join(&self.process_id);
         let started = Instant::now();
@@ -573,26 +659,24 @@ fn blocking_model_stdin_is_governed_by_the_model_deadline() {
     let capture = directory.path().join("blocked-stdin");
     let submitted = large_prompt(&directory);
     assert!(submitted.as_str().len() > 70_000);
-    // DELAY: the fixture never reads its standard input and holds the pipe for ten seconds, so this
+    // DELAY: the fixture never reads its standard input and holds the pipe for 300 seconds, so this
     // deadline is the subject and the value it reports is part of the assertion.
     let deadline = interrupting_deadline(Duration::from_millis(80));
     let reported_ms = reported_deadline_ms(deadline);
-    let result =
-        run_fixture_after_marker(&capture, "never-read", deadline, &submitted, ".child-pid");
+    let result = run_fixture_after_marker_guarded(
+        &capture,
+        "never-read",
+        deadline,
+        &submitted,
+        ".child-recorded",
+    );
+    let _cleanup = FixtureGroupGuard::for_capture(&capture);
     assert!(matches!(
         result,
         Err(ModelError::Timeout(deadline_ms)) if deadline_ms == reported_ms
     ));
-    let Some(process_ids) = started_fixture_process_ids(
-        &capture,
-        &[".pid", ".child-pid"],
-        "blocking_model_stdin_is_governed_by_the_model_deadline",
-    ) else {
-        return;
-    };
-    for process_id in process_ids {
-        assert_process_gone(&process_id);
-    }
+    assert_process_gone(&captured_process_id(&capture, ".pid"));
+    assert_process_gone(&captured_process_id(&capture, ".child-pid"));
 }
 
 /// ´test:crate:model-timeout-terminates-the-entire-child-process-group´
@@ -601,11 +685,19 @@ fn model_timeout_terminates_the_entire_child_process_group() {
     let directory = FixtureDirectory::new();
     let capture = directory.path().join("process-group");
     let submitted = large_prompt(&directory);
-    // DELAY: the fixture's ten-second sleep is what this deadline has to interrupt.
+    // DELAY: the fixture's 300-second sleep is what this deadline has to interrupt.
     let deadline = interrupting_deadline(Duration::from_millis(80));
     let reported_ms = reported_deadline_ms(deadline);
+    let result = run_fixture_after_marker_guarded(
+        &capture,
+        "never-read",
+        deadline,
+        &submitted,
+        ".child-recorded",
+    );
+    let _cleanup = FixtureGroupGuard::for_capture(&capture);
     assert!(matches!(
-        run_fixture_after_marker(&capture, "never-read", deadline, &submitted, ".child-pid"),
+        result,
         Err(ModelError::Timeout(deadline_ms)) if deadline_ms == reported_ms
     ));
     assert_process_gone(&captured_process_id(&capture, ".pid"));
@@ -620,19 +712,18 @@ fn termination_failure_still_reaps_child_and_joins_io_helpers() {
     let capture = directory.path().join("termination-failure");
     let submitted = large_prompt(&directory);
     let missing_kill = directory.path().join("missing-kill").into_os_string();
-    // DELAY: the fixture execs a ten-second sleep, which this deadline interrupts.
+    // DELAY: the fixture execs a 300-second sleep, which this deadline interrupts.
     let deadline = interrupting_deadline(Duration::from_millis(80));
-    assert!(matches!(
-        run_fixture_model_with_kill_program_after_marker(
-            fake_cli().as_os_str(),
-            &submitted,
-            deadline,
-            fixture_environment(&capture, "never-read-direct"),
-            missing_kill,
-            capture_file(&capture, ".pid"),
-        ),
-        Err(ModelError::Kill(_))
-    ));
+    let result = run_fixture_with_kill_after_marker_guarded(
+        &capture,
+        "never-read-direct",
+        deadline,
+        &submitted,
+        missing_kill,
+        ".pid-recorded",
+    );
+    let _cleanup = FixtureGroupGuard::for_capture(&capture);
+    assert!(matches!(result, Err(ModelError::Kill(_))));
     assert_process_gone(&captured_process_id(&capture, ".pid"));
 }
 
@@ -1203,14 +1294,17 @@ fn model_rejects_trailing_data() {
 fn model_timeout_kills_and_reaps_the_child() {
     let directory = FixtureDirectory::new();
     let capture = directory.path().join("timeout");
-    // DELAY: the fixture sleeps ten seconds and this deadline interrupts it. The deadline also has
+    // DELAY: the fixture sleeps 300 seconds and this deadline interrupts it. The deadline also has
     // to outlast the fixture's own start, because the child id the assertion below reads is written
     // before that sleep, and a deadline shorter than a launch kills the fixture before it gets
     // there; one measured run is that launch cost, so the deadline follows the machine.
     let deadline = interrupting_deadline(Duration::from_millis(40));
     let reported_ms = reported_deadline_ms(deadline);
+    let result =
+        run_fixture_after_marker_guarded(&capture, "sleep", deadline, &prompt(), ".pid-recorded");
+    let _cleanup = FixtureGroupGuard::for_capture(&capture);
     assert!(matches!(
-        run_fixture_after_marker(&capture, "sleep", deadline, &prompt(), ".pid"),
+        result,
         Err(ModelError::Timeout(deadline_ms)) if deadline_ms == reported_ms
     ));
     // WAIT: the child is recorded before it sleeps and leaves /proc once the runner reaps it.
@@ -1583,16 +1677,17 @@ fn fixture_kill_program_is_used_for_group_signalling() {
     let directory = FixtureDirectory::new();
     let capture = directory.path().join("fixture-kill-program");
     let missing_kill = directory.path().join("missing-kill").into_os_string();
-    let result = run_fixture_model_with_kill_program_after_marker(
-        fake_cli().as_os_str(),
-        &prompt(),
-        // DELAY: the fixture execs a ten-second sleep, and interrupting it is what sends the
-        // signal through the named kill program.
+    // DELAY: the fixture execs a 300-second sleep, and interrupting it is what sends the
+    // signal through the named kill program.
+    let result = run_fixture_with_kill_after_marker_guarded(
+        &capture,
+        "never-read-direct",
         interrupting_deadline(Duration::from_millis(40)),
-        fixture_environment(&capture, "never-read-direct"),
+        &prompt(),
         missing_kill,
-        capture_file(&capture, ".pid"),
+        ".pid-recorded",
     );
+    let _cleanup = FixtureGroupGuard::for_capture(&capture);
     assert!(matches!(
         result,
         Err(ModelError::Kill(error)) if error.kind() == std::io::ErrorKind::NotFound
