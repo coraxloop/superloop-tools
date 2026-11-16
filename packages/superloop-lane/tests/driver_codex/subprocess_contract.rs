@@ -1267,6 +1267,53 @@ fn suspend_resume_record_distinguishes_both_stop_orders() {
     }
 }
 
+/// # Panics
+/// Panics only if a lost fixture release resumes a child or hides its refusal.
+/// ´test:integration:suspend-resume-lost-boundary-refuses-before-spawn´
+#[test]
+fn suspend_resume_lost_boundary_refuses_before_spawn() {
+    let harness = Harness::new("suspend-lost-boundary");
+    let run_dir = harness.run_dir("lane");
+    let listener = capacity_boundary(&harness);
+    let clock = harness.repo().join("clock");
+    fs::write(&clock, "0:0").expect("controlled clock");
+    let mut command = harness.command();
+    command
+        .env("ORACLE_MODE", "suspend-always")
+        .env("ORACLE_GAP", "900")
+        .env("ORACLE_AWAKE", "1")
+        .env("CODEX_LANE_TEST_CLOCK", format!("@{}", clock.display()))
+        .env("CODEX_LANE_TEST_BOUNDARY", "suspend-recorded-before-spawn")
+        .env(
+            "CODEX_LANE_TEST_BOUNDARY_SOCKET",
+            harness.root().file_name().expect("fixture name"),
+        )
+        .args(["-t60", "saved duty"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let driver = command.spawn_serialized().expect("driver");
+    let channel = await_capacity_boundary(&listener);
+    drop(channel);
+    let result = driver.wait_with_output().expect("refused step");
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    let report = String::from_utf8(result.stdout).expect("report text");
+    assert!(report.contains("verdict=FAILED"), "{report}");
+    assert!(report.contains("suspend_resumes=1"), "{report}");
+    let stderr = fs::read_to_string(run_dir.join("stderr.txt")).expect("diagnostic text");
+    assert!(
+        stderr.contains("fixture-boundary: suspend-recorded-before-spawn: release-read-failed"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(run_dir.join("suspend-resumes-lane.txt")).expect("record"),
+        "suspend_resumes=1 suspend_gap=900s awake=1s outcome=attempt-error\n"
+    );
+    assert_eq!(
+        fs::read_to_string(harness.root().join("ack")).expect("stub calls"),
+        "1\n"
+    );
+}
+
 /// Configure the production boxed-runtime entry with the same vendor fixture.
 /// # Panics
 /// Panics only if fixture setup fails or its declared vendor program is absent.

@@ -45,7 +45,6 @@ case "$ORACLE_MODE" in
         printf '%s:%s\n' "$awake" "$boot" > "$clock.next"
         mv "$clock.next" "$clock"
         case "$ORACLE_MODE" in
-            suspend-terminated) kill -TERM "$PPID"; exit 1 ;;
             suspend-killed) kill -KILL "$$" ;;
             suspend-attempt-wall)
                 printf 'attempt-wall wall_seconds=9 bound_seconds=8\n' > "$LANE_ATTEMPT_END"
