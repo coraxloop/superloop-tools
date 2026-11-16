@@ -105,6 +105,14 @@ impl<'a> Manager<'a> {
     pub const fn deadline(&self) -> Instant {
         self.deadline
     }
+    pub fn cap_deadline(&mut self, deadline: Instant) {
+        self.deadline = self.deadline.min(deadline);
+    }
+    pub fn starting(&self, expected: Option<&str>) -> Result<Snapshot> {
+        let reply = self.query_reply(self.deadline)?;
+        let snapshot = parse_starting(&reply, &self.expected(), expected)?;
+        Ok(snapshot)
+    }
     pub fn start_vector(&self, paths: &[PathBuf; 2]) -> Result<Vec<String>> {
         let policy = self.admission.policy();
         let case = &policy.cases[self.index];
@@ -223,6 +231,9 @@ impl<'a> Manager<'a> {
         self.snapshot_at(expected, self.deadline)
     }
     fn snapshot_at(&self, expected: Option<&str>, deadline: Instant) -> Result<Snapshot> {
+        parse(&self.query_reply(deadline)?, &self.expected(), expected)
+    }
+    fn query_reply(&self, deadline: Instant) -> Result<Vec<u8>> {
         let unit = &self.admission.policy().cases[self.index].generator_unit;
         let args = vec![
             "--system".into(),
@@ -233,8 +244,7 @@ impl<'a> Manager<'a> {
             "--".into(),
             unit.clone(),
         ];
-        let reply = self.call_at(self.query, &args, deadline)?;
-        parse(&reply, &self.expected(), expected)
+        self.call_at(self.query, &args, deadline)
     }
     // A caller must retain ownership of the unit name for this invocation.
     // Recheck immediately before the exact-unit request; a mismatch never stops
@@ -294,6 +304,46 @@ impl<'a> Manager<'a> {
     }
 }
 fn parse(bytes: &[u8], wire: &Expected<'_>, expected: Option<&str>) -> Result<Snapshot> {
+    parse_mode(bytes, wire, expected, false)
+}
+fn parse_starting(bytes: &[u8], wire: &Expected<'_>, expected: Option<&str>) -> Result<Snapshot> {
+    let snapshot = parse_mode(bytes, wire, expected, true)?;
+    require(
+        snapshot.load == "loaded"
+            && snapshot.active == "activating"
+            && snapshot.result == "success"
+            && snapshot.code == 0
+            && snapshot.status == 0
+            && snapshot.exited == 0,
+        "manager-start-state",
+    )?;
+    if snapshot.pid == 0 {
+        require(
+            matches!(snapshot.sub.as_str(), "condition" | "start-pre" | "start")
+                && snapshot.exec_pid == 0
+                && snapshot.started == 0,
+            "manager-start-pending",
+        )?;
+    } else {
+        require(
+            snapshot.pid > 1
+                && snapshot.exec_pid == snapshot.pid
+                && snapshot.started > 0
+                && snapshot.sub == "start"
+                && snapshot.condition
+                && snapshot.assertion
+                && !snapshot.invocation.is_empty(),
+            "manager-start-execution",
+        )?;
+    }
+    Ok(snapshot)
+}
+fn parse_mode(
+    bytes: &[u8],
+    wire: &Expected<'_>,
+    expected: Option<&str>,
+    starting: bool,
+) -> Result<Snapshot> {
     let unit = wire.unit;
     require(bytes.len() <= 64 * 1024, "manager-reply-size")?;
     let text = std::str::from_utf8(bytes).map_err(|_| "manager-reply-shape")?;
@@ -323,11 +373,12 @@ fn parse(bytes: &[u8], wire: &Expected<'_>, expected: Option<&str>) -> Result<Sn
     require(values["Id"] == unit, "manager-unit-binding")?;
     let id = values["InvocationID"];
     require(
-        id.len() == 32
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            && id.bytes().any(|b| b != b'0')
+        ((starting && expected.is_none() && id.is_empty())
+            || (id.len() == 32
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && id.bytes().any(|b| b != b'0')))
             && expected.is_none_or(|expected| expected == id),
         "manager-invocation-binding",
     )?;

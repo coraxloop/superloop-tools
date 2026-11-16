@@ -82,7 +82,7 @@ impl<'a> Keeper<'a> {
             "keeper-capture-order",
         )?;
         let result = (|| {
-            let snapshot = self.manager.snapshot(None)?;
+            let snapshot = self.manager.snapshot(self.invocation.as_deref())?;
             self.invocation = Some(snapshot.invocation.clone());
             require(
                 snapshot.active == "activating"
@@ -245,3 +245,6 @@ pub(in crate::launch) mod manager;
 #[cfg(test)]
 #[path = "campaign_tests.rs"]
 mod campaign_tests;
+
+#[path = "driver.rs"]
+mod driver;

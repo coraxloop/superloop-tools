@@ -1,5 +1,6 @@
 //! Entry-only descriptor closure before the keeper acquires any case objects.
 type Result<T> = std::result::Result<T, &'static str>;
+#[derive(Clone)]
 pub(super) struct RootStartup {
     owner: u32,
 }

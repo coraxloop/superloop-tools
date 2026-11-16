@@ -3696,6 +3696,12 @@ pattern = "packages/superloop-credential-custody/src/launch/process_pin.rs"
 pattern = "packages/superloop-credential-custody/src/launch/keeper.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/driver.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/driver_tests.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-credential-custody/src/launch/release.rs"
 
 [[include.rows]]

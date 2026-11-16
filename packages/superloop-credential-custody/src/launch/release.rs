@@ -129,11 +129,7 @@ impl Keeper<'_> {
             "handoff-phase",
         )?;
         let result = (|| {
-            self.verify_capture()?;
-            let (invocation, inventory, children) = self.observations()?;
-            let evidence = self.inventory.as_mut().ok_or("inventory-missing")?;
-            let digest = evidence.digest.clone();
-            evidence.verify(&digest, &invocation, &inventory, &children)?;
+            let digest = self.validated_inventory()?;
             self.control
                 .as_ref()
                 .ok_or("keeper-not-captured")?
@@ -145,6 +141,18 @@ impl Keeper<'_> {
                 )
         })();
         self.release_result(result)
+    }
+    pub(super) fn validated_inventory(&mut self) -> Result<String> {
+        require(
+            !self.terminal && self.session.store().phase() == Phase::InventoryComplete,
+            "handoff-phase",
+        )?;
+        self.verify_capture()?;
+        let (invocation, inventory, children) = self.observations()?;
+        let evidence = self.inventory.as_mut().ok_or("inventory-missing")?;
+        let digest = evidence.digest.clone();
+        evidence.verify(&digest, &invocation, &inventory, &children)?;
+        Ok(digest)
     }
     pub fn release(&mut self, digest: &str) -> Result<()> {
         self.release_with(digest, ProcessPin::resume)

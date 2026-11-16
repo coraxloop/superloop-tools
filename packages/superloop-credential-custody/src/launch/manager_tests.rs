@@ -468,3 +468,141 @@ fn expected_start(base: &std::path::Path, paths: &[PathBuf; 2]) -> Vec<String> {
     ]);
     expected
 }
+
+/// ´test:unit:manager-start-readiness-is-not-completion´
+#[test]
+fn manager_start_readiness_is_not_completion() {
+    let _case = crate::launch::test_support::case_guard();
+    let f = fixture();
+    let admission = f.admit();
+    let manager = Manager::new(&admission, 0).unwrap();
+    let text = String::from_utf8(reply(&admission)).unwrap();
+    let pending = text.replace("MainPID=123", "MainPID=0").replace(
+        "ExecMainStartTimestampMonotonic=100",
+        "ExecMainStartTimestampMonotonic=0",
+    );
+    for stage in ["condition", "start-pre", "start"] {
+        let p = pending.replace("SubState=start", &format!("SubState={stage}"));
+        fs::write(f.dir.path().join("manager-reply"), p).unwrap();
+        let snapshot = manager.starting(None).unwrap();
+        assert_eq!(snapshot.pid, 0);
+        assert_eq!(snapshot.started, 0);
+    }
+    let empty = pending.replace(
+        "InvocationID=1234567890abcdef1234567890abcdef",
+        "InvocationID=",
+    );
+    fs::write(f.dir.path().join("manager-reply"), &empty).unwrap();
+    assert_eq!(manager.starting(None).unwrap().invocation, "");
+    assert_eq!(
+        manager.snapshot(None).err(),
+        Some("manager-invocation-binding")
+    );
+    assert_eq!(
+        manager
+            .starting(Some("1234567890abcdef1234567890abcdef"))
+            .err(),
+        Some("manager-invocation-binding")
+    );
+    fs::write(f.dir.path().join("manager-reply"), &text).unwrap();
+    assert_eq!(manager.starting(None).unwrap().pid, 123);
+    start_refusals(&manager, &f, &text, &pending);
+}
+fn start_refusals(manager: &Manager<'_>, f: &Fixture, text: &str, pending: &str) {
+    for (from, to, class) in [
+        (
+            "LoadState=loaded",
+            "LoadState=not-found",
+            "manager-start-state",
+        ),
+        (
+            "ActiveState=activating",
+            "ActiveState=active",
+            "manager-start-state",
+        ),
+        ("ExecMainCode=0", "ExecMainCode=1", "manager-start-state"),
+        (
+            "ExecMainStatus=0",
+            "ExecMainStatus=1",
+            "manager-start-state",
+        ),
+        ("Result=success", "Result=exit-code", "manager-start-state"),
+        (
+            "ExecMainExitTimestampMonotonic=0",
+            "ExecMainExitTimestampMonotonic=101",
+            "manager-start-state",
+        ),
+        (
+            "ExecMainPID=123",
+            "ExecMainPID=124",
+            "manager-start-execution",
+        ),
+        (
+            "ConditionResult=yes",
+            "ConditionResult=no",
+            "manager-start-execution",
+        ),
+        (
+            "AssertResult=yes",
+            "AssertResult=no",
+            "manager-start-execution",
+        ),
+        (
+            "ExecMainStartTimestampMonotonic=100",
+            "ExecMainStartTimestampMonotonic=0",
+            "manager-start-execution",
+        ),
+        (
+            "InvocationID=1234567890abcdef1234567890abcdef",
+            "InvocationID=",
+            "manager-start-execution",
+        ),
+    ] {
+        fs::write(f.dir.path().join("manager-reply"), text.replace(from, to)).unwrap();
+        assert_eq!(manager.starting(None).err(), Some(class), "{from}");
+    }
+    for (from, to) in [
+        ("SubState=start", "SubState=dead"),
+        ("ExecMainPID=0", "ExecMainPID=123"),
+        (
+            "ExecMainStartTimestampMonotonic=0",
+            "ExecMainStartTimestampMonotonic=100",
+        ),
+    ] {
+        fs::write(
+            f.dir.path().join("manager-reply"),
+            pending.replace(from, to),
+        )
+        .unwrap();
+        assert_eq!(
+            manager.starting(None).err(),
+            Some("manager-start-pending"),
+            "{from}"
+        );
+    }
+}
+/// ´test:unit:manager-start-retains-invocation-and-caps-one-deadline´
+#[test]
+fn manager_start_retains_invocation_and_caps_one_deadline() {
+    let _case = crate::launch::test_support::case_guard();
+    let f = fixture();
+    let admission = f.admit();
+    let mut manager = Manager::new(&admission, 0).unwrap();
+    let text = String::from_utf8(reply(&admission)).unwrap();
+    fs::write(f.dir.path().join("manager-reply"), &text).unwrap();
+    let id = manager.starting(None).unwrap().invocation;
+    fs::write(
+        f.dir.path().join("manager-reply"),
+        text.replace(&id, &"f".repeat(32)),
+    )
+    .unwrap();
+    assert_eq!(
+        manager.starting(Some(&id)).err(),
+        Some("manager-invocation-binding")
+    );
+    let past = Instant::now();
+    manager.cap_deadline(past);
+    manager.cap_deadline(past + Duration::from_secs(600));
+    assert_eq!(manager.deadline(), past);
+    assert_eq!(manager.starting(None).err(), Some("manager-deadline"));
+}
