@@ -54,6 +54,7 @@ pub struct State {
     strong_token: String,
     renderer: Renderer,
     pending: Vec<BufferedEvent>,
+    pending_source_start: Option<usize>,
     open: Vec<TagEnd>,
     status: Status,
     last_source_end: usize,
@@ -78,11 +79,21 @@ impl State {
             },
             renderer: Renderer::new(parser_options),
             pending: Vec::new(),
+            pending_source_start: None,
             open: Vec::new(),
             status: Status::Active,
             last_source_end: 0,
             defer_output: false,
         }
+    }
+
+    /// Byte offset of the first event in the retained block, when supplied.
+    ///
+    /// After a rendering error this identifies the buffered input that failed.
+    /// A block deferred for reference resolution may include later siblings.
+    #[must_use]
+    pub const fn pending_source_start(&self) -> Option<usize> {
+        self.pending_source_start
     }
 
     /// Accept events and write any output whose syntax is already determined.
@@ -155,6 +166,7 @@ impl State {
             let mut progress = Progress::default();
             for (event, range) in events {
                 let event = event.borrow();
+                let source_start = range.as_ref().map(|range| range.start);
                 let original = match (source, range) {
                     (Some(source), Some(range)) => {
                         let mut start = range.start;
@@ -186,6 +198,9 @@ impl State {
                         return Err(Error::UnexpectedEvent);
                     }
                     _ => {}
+                }
+                if self.pending.is_empty() {
+                    self.pending_source_start = source_start;
                 }
                 self.pending.push(BufferedEvent {
                     event: event.clone().into_static(),
@@ -223,6 +238,7 @@ impl State {
             writer.write_str(&output)?;
         }
         self.pending.clear();
+        self.pending_source_start = None;
         Ok(output.len())
     }
 

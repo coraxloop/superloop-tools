@@ -17,6 +17,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`serialization_refusals_name_the_buffered_block_line`] | fmt | A serialization refusal names the first line of its buffered block, both at the next block boundary and at end of input. |
 //! | [`joins_a_hard_wrapped_paragraph`] | fmt | A soft break in a paragraph becomes one space, producing one running line without moving its words. |
 //! | [`formats_markdown_idempotently`] | fmt | The bytes emitted by one pass are the fixed point of the formatter, so checking the same document again reports no change. |
 //! | [`preserves_a_fenced_code_block_byte_for_byte`] | fmt | A safe three-backtick fence and every byte of its body survive while prose around it is independently formatted. |
@@ -38,8 +39,7 @@ use std::time::{Duration, Instant};
 
 use pulldown_cmark::{Event, Options as ParseOptions, Parser, Tag, TagEnd};
 use pulldown_cmark_to_cmark::{
-    Options as SerializeOptions, calculate_code_block_token_count,
-    cmark_with_source_range_and_options,
+    Options as SerializeOptions, State, calculate_code_block_token_count,
 };
 use serde::Serialize;
 
@@ -315,7 +315,7 @@ pub fn format_paths(paths: &[PathBuf], check: bool) -> Result<FormatReport, Form
 pub fn format_markdown(source: &str) -> Result<String, FormatError> {
     let slots = overlay_slot_lines(source);
     let mut rendered = if slots.is_empty() {
-        serialize_markdown(source)?
+        serialize_markdown(source, 1)?
     } else {
         serialize_around_slots(source, &slots)?
     };
@@ -328,7 +328,7 @@ pub fn format_markdown(source: &str) -> Result<String, FormatError> {
     Ok(rendered)
 }
 
-fn serialize_markdown(source: &str) -> Result<String, FormatError> {
+fn serialize_markdown(source: &str, first_line: usize) -> Result<String, FormatError> {
     let protected = protect_code_pipes(source);
     validate_table_rows(source, &protected)?;
     let parsed: Vec<_> = Parser::new_ext(&protected, parser_options())
@@ -338,18 +338,39 @@ fn serialize_markdown(source: &str) -> Result<String, FormatError> {
         .unwrap_or(3)
         .max(3);
     let events = reflow_soft_breaks(source, parsed);
-    let mut rendered = String::new();
+    serialize_events(source, &events, fence_width, first_line)
+}
 
-    cmark_with_source_range_and_options(
-        events
-            .iter()
-            .map(|(event, range)| (event, Some(range.clone()))),
-        source,
-        &mut rendered,
-        parser_options(),
-        serializer_options(fence_width),
-    )
-    .map_err(|error| FormatError::new(format!("could not serialize Markdown: {error}")))?;
+fn serialize_events(
+    source: &str,
+    events: &[(Event<'_>, Range<usize>)],
+    fence_width: usize,
+    first_line: usize,
+) -> Result<String, FormatError> {
+    let mut rendered = String::new();
+    let mut state = State::new(parser_options(), serializer_options(fence_width));
+    state
+        .process_with_source_range(
+            events
+                .iter()
+                .map(|(event, range)| (event, Some(range.clone()))),
+            source,
+            &mut rendered,
+        )
+        .and_then(|_| state.finish(&mut rendered))
+        .map_err(|error| {
+            let location = state
+                .pending_source_start()
+                .map_or_else(String::new, |start| {
+                    let line = first_line
+                        + source[..start]
+                            .bytes()
+                            .filter(|byte| *byte == b'\n')
+                            .count();
+                    format!(" in buffered block starting at line {line}")
+                });
+            FormatError::new(format!("could not serialize Markdown{location}: {error}"))
+        })?;
 
     Ok(rendered)
 }
@@ -450,14 +471,20 @@ fn table_cell_count(row: &str) -> usize {
 fn serialize_around_slots(source: &str, slots: &[Range<usize>]) -> Result<String, FormatError> {
     let mut rendered = String::new();
     let mut prose_start = 0usize;
+    let mut prose_line = 1usize;
 
     for slot in slots {
         rendered.push_str(&serialize_slot_bounded_prose(
             &source[prose_start..slot.start],
             prose_start != 0,
             true,
+            prose_line,
         )?);
         rendered.push_str(&source[slot.clone()]);
+        prose_line += source[prose_start..slot.end]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
         prose_start = slot.end;
     }
 
@@ -465,6 +492,7 @@ fn serialize_around_slots(source: &str, slots: &[Range<usize>]) -> Result<String
         &source[prose_start..],
         true,
         false,
+        prose_line,
     )?);
     Ok(rendered)
 }
@@ -473,6 +501,7 @@ fn serialize_slot_bounded_prose(
     source: &str,
     preserve_leading_breaks: bool,
     preserve_trailing_breaks: bool,
+    first_line: usize,
 ) -> Result<String, FormatError> {
     let is_break = |character: char| matches!(character, '\r' | '\n');
     let content_start = if preserve_leading_breaks {
@@ -491,7 +520,15 @@ fn serialize_slot_bounded_prose(
     }
 
     let mut rendered = String::from(&source[..content_start]);
-    rendered.push_str(&serialize_markdown(&source[content_start..content_end])?);
+    let first_line = first_line
+        + source[..content_start]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+    rendered.push_str(&serialize_markdown(
+        &source[content_start..content_end],
+        first_line,
+    )?);
     rendered.push_str(&source[content_end..]);
     Ok(rendered)
 }
@@ -971,7 +1008,45 @@ fn push_code_block_text(guarded: &mut Vec<GuardedEvent>, text: &str, range: Rang
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_value_preview, ensure_equivalent, format_markdown};
+    use super::{bounded_value_preview, ensure_equivalent, format_markdown, serialize_events};
+
+    /// A serialization refusal names the first line of its buffered block,
+    /// both at the next block boundary and at end of input.
+    ///
+    /// # Panics
+    /// Panics only if an unrepresentable event stream succeeds or loses its location.
+    ///
+    /// ´claim:fmt:serialization-refusals-name-the-buffered-block-line´
+    /// ´test:unit:serialization-refusals-name-the-buffered-block-line´
+    #[test]
+    fn serialization_refusals_name_the_buffered_block_line() {
+        for suffix in ["", "\nAfter.\n"] {
+            let source = format!("Before.\n\n*x*\n{suffix}");
+            let events: Vec<_> = pulldown_cmark::Parser::new(&source)
+                .into_offset_iter()
+                .map(|(event, range)| {
+                    let event = match event {
+                        pulldown_cmark::Event::Text(text) if text.as_ref() == "x" => {
+                            pulldown_cmark::Event::Text("".into())
+                        }
+                        event => event,
+                    };
+                    (event, range)
+                })
+                .collect();
+            for first_line in [1, 9] {
+                let error = serialize_events(&source, &events, 3, first_line)
+                    .expect_err("empty emphasis cannot be represented");
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "could not serialize Markdown in buffered block starting at line {}: Cannot preserve this event block with the supplied parser options",
+                        first_line + 2
+                    )
+                );
+            }
+        }
+    }
 
     fn formatted(source: &str) -> String {
         match format_markdown(source) {
