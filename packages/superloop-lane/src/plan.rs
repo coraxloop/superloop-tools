@@ -266,6 +266,27 @@ pub(crate) fn registry_with_ready(
     timeout: Duration,
     ready: impl FnOnce() -> Result<(), LaneError>,
 ) -> Result<Value, LaneError> {
+    registry_capture(settings, loop_name, timeout, ready, |_, _, _| {})
+}
+
+#[cfg(test)]
+pub(crate) fn registry_with_progress(
+    settings: &Settings,
+    loop_name: &str,
+    timeout: Duration,
+    progress: impl FnMut(bool, bool, bool),
+) -> Result<Value, LaneError> {
+    registry_capture(settings, loop_name, timeout, || Ok(()), progress)
+}
+
+#[allow(clippy::too_many_lines)]
+fn registry_capture(
+    settings: &Settings,
+    loop_name: &str,
+    timeout: Duration,
+    ready: impl FnOnce() -> Result<(), LaneError>,
+    mut progress: impl FnMut(bool, bool, bool),
+) -> Result<Value, LaneError> {
     let entry_bin = settings.entry_bin.as_ref().ok_or_else(|| {
         LaneError::input("missing-setting", "entry_bin is absent in workers.toml")
     })?;
@@ -336,6 +357,11 @@ pub(crate) fn registry_with_ready(
                 }
             }
         }
+        progress(
+            status.is_some(),
+            stdout_bytes.is_some(),
+            stderr_bytes.is_some(),
+        );
         if status.is_some() && stdout_bytes.is_some() && stderr_bytes.is_some() {
             break;
         }
