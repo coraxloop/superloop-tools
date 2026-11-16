@@ -17,6 +17,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`writer_refusals_put_the_reader_first`] | fmt | Writer refusals put file safety, location and recovery before internals, and qualify the location only after a real reference-list deferral. |
 //! | [`serialization_refusals_name_the_buffered_block_line`] | fmt | An injected empty-emphasis event stream proves serialization refusal diagnostics and original offsets, including across overlay slots. |
 //! | [`joins_a_hard_wrapped_paragraph`] | fmt | A soft break in a paragraph becomes one space, producing one running line without moving its words. |
 //! | [`formats_markdown_idempotently`] | fmt | The bytes emitted by one pass are the fixed point of the formatter, so checking the same document again reports no change. |
@@ -155,9 +156,11 @@ impl FormatError {
         }
     }
 
-    fn guard(rejection: GuardRejection) -> Self {
+    fn guard(rejection: GuardRejection, line: usize) -> Self {
         Self {
-            message: rejection.to_string(),
+            message: format!(
+                "the file was not changed; formatting would change the document at line {line}; reduce a copy to the smallest excerpt that still refuses and share only non-private content with the person who supplied this build; {rejection}"
+            ),
             kind: FormatErrorKind::Guard(rejection),
         }
     }
@@ -384,11 +387,17 @@ fn serialize_events(
                             .bytes()
                             .filter(|byte| *byte == b'\n')
                             .count();
-                    format!(" starting at line {line}")
+                    format!(" at line {line}")
                 });
+            // This state always has footnote context, so only lists can defer it.
+            let caveat = if state.has_deferred_blocks() {
+                " a reference-dependent list retained later blocks, so this line may precede the failing block;"
+            } else {
+                ""
+            };
             FormatError {
                 message: format!(
-                    "Markdown writer could not preserve the buffered run{location}: {error}; reduce a copy to the smallest excerpt that still refuses, keeping this event kind; retain it locally if you built this yourself; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; this package declares no public issue route; reference-dependent lists can retain later blocks, so the reported run start may precede the failing block; the file was not changed"
+                    "the file was not changed; the block{location} could not be preserved;{caveat} reduce a copy to the smallest excerpt that still refuses, keeping this event kind; if you built this yourself, use that excerpt to investigate the writer failure; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; this package declares no public issue route; writer detail: {error}"
                 ),
                 kind: FormatErrorKind::Serialization(
                     state.pending_source_start().map(|start| first_byte + start),
@@ -480,7 +489,7 @@ fn validate_table_rows(
                 .count();
         return Err(FormatError {
             message: format!(
-                "table-code-pipe-header: header at line {line} has ambiguous code-span pipes and delimiter columns; make the header and delimiter describe the same cells; the file was not changed"
+                "the file was not changed; table-code-pipe-header: header at line {line} has ambiguous code-span pipes and delimiter columns; make the header and delimiter describe the same cells"
             ),
             kind: FormatErrorKind::Source(first_byte + start..first_byte + end),
         });
@@ -499,7 +508,7 @@ fn validate_table_rows(
                             .count();
                     return Err(FormatError {
                         message: format!(
-                            "table-code-pipe-row: row at line {line} has {count} cells for {columns} columns; make the row match the header's column count; the file was not changed"
+                            "the file was not changed; table-code-pipe-row: row at line {line} has {count} cells for {columns} columns; make the row match the header's column count"
                         ),
                         kind: FormatErrorKind::Source(
                             first_byte + start
@@ -845,7 +854,11 @@ fn ensure_equivalent(input: &str, output: &str) -> Result<(), FormatError> {
         input_range,
     };
 
-    Err(FormatError::guard(rejection))
+    let line = 1 + input[..rejection.input_range.start]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    Err(FormatError::guard(rejection, line))
 }
 
 fn guard_difference(input: Option<&GuardEvent>, output: Option<&GuardEvent>) -> String {
@@ -1082,6 +1095,81 @@ fn push_code_block_text(guarded: &mut Vec<GuardedEvent>, text: &str, range: Rang
 mod tests {
     use super::{bounded_value_preview, ensure_equivalent, format_markdown, serialize_events};
 
+    /// Writer refusals put file safety, location and recovery before internals,
+    /// and qualify the location only after a real reference-list deferral.
+    ///
+    /// # Panics
+    /// Panics only if the injected impossible event stream is accepted or its
+    /// refusal loses the reader-facing order or conditional location caveat.
+    ///
+    /// ´claim:fmt:writer-refusals-put-the-reader-first´
+    /// ´test:unit:writer-refusals-put-the-reader-first´
+    #[test]
+    fn writer_refusals_put_the_reader_first() {
+        let mut failures = Vec::new();
+        for (source, deferred) in [
+            ("Before.\n\n*x*\n", false),
+            ("*[^a]*\n\n[^a]: note\n\n*x*\n", false),
+            ("- item\n\n*x*\n", false),
+            ("- item\n\n  [hidden]: /target\n\n*x*\n", true),
+        ] {
+            let events: Vec<_> = pulldown_cmark::Parser::new_ext(source, super::parser_options())
+                .into_offset_iter()
+                .map(|(event, range)| {
+                    let event = match event {
+                        pulldown_cmark::Event::Text(text) if text.as_ref() == "x" => {
+                            pulldown_cmark::Event::Text("".into())
+                        }
+                        event => event,
+                    };
+                    (event, range)
+                })
+                .collect();
+            let error = serialize_events(source, &events, 3, 1, 0)
+                .expect_err("empty emphasis cannot be spelled in Markdown");
+            let cause = error.to_string();
+            let start = if deferred {
+                0
+            } else {
+                source.find("*x*").expect("fixture")
+            };
+            let line = 1 + source[..start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count();
+            for (label, holds) in [
+                (
+                    "file safety first",
+                    cause.starts_with("the file was not changed;"),
+                ),
+                (
+                    "block line",
+                    cause.contains(&format!("the block at line {line}")),
+                ),
+                (
+                    "conditional list caveat",
+                    cause.contains("reference-dependent list") == deferred,
+                ),
+                (
+                    "clear action",
+                    !cause.contains("retain it locally")
+                        && cause
+                            .contains("reduce a copy to the smallest excerpt that still refuses")
+                        && cause.contains("use that excerpt to investigate the writer failure"),
+                ),
+                (
+                    "action before writer details",
+                    matches!((cause.find("reduce a copy"), cause.find("writer detail:")), (Some(action), Some(detail)) if action < detail),
+                ),
+            ] {
+                if !holds {
+                    failures.push(format!("{label}, deferred={deferred}: {cause}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// An injected empty-emphasis event stream proves serialization refusal
     /// diagnostics and original offsets, including across overlay slots.
     ///
@@ -1137,7 +1225,7 @@ mod tests {
                     assert!(
                         rejection
                             .cause
-                            .contains(&format!("buffered run starting at line {line}:")),
+                            .contains(&format!("the block at line {line} could not be preserved")),
                         "{}",
                         rejection.cause
                     );
@@ -1160,12 +1248,8 @@ mod tests {
                             .cause
                             .contains("build record's source commit and binary SHA-256")
                     );
-                    assert!(
-                        rejection
-                            .cause
-                            .contains("reference-dependent lists can retain later blocks")
-                    );
-                    assert!(rejection.cause.ends_with("the file was not changed"));
+                    assert!(!rejection.cause.contains("reference-dependent list"));
+                    assert!(rejection.cause.starts_with("the file was not changed;"));
                 }
             }
         }

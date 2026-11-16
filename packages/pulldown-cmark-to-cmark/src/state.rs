@@ -115,6 +115,15 @@ impl State {
         self.pending_source_start
     }
 
+    /// Whether output has been deferred across block boundaries.
+    ///
+    /// With footnote context supplied, only a reference-dependent list causes
+    /// this deferral. Its pending source start may precede a later failing block.
+    #[must_use]
+    pub const fn has_deferred_blocks(&self) -> bool {
+        self.defer_output
+    }
+
     /// Accept events and write any output whose syntax is already determined.
     ///
     /// A successful call consumes all supplied events. `bytes_written` can be zero

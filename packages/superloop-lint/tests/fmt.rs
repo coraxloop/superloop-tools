@@ -194,6 +194,7 @@ fn table_refusals_name_a_location_and_recovery() {
             let rejection = &report["rejected"][0];
             assert_eq!(rejection["kind"], kind, "{report}");
             let cause = rejection["cause"].as_str().expect("cause");
+            assert!(cause.starts_with("the file was not changed;"), "{cause}");
             assert!(
                 cause.contains(location) && cause.contains(action),
                 "{cause}"
@@ -374,6 +375,13 @@ fn check_continues_after_a_guard_rejection() {
         rejected.to_string_lossy().as_ref()
     );
     assert_eq!(report["rejected"][0]["kind"], "integrity_guard");
+    let cause = report["rejected"][0]["cause"].as_str().expect("cause");
+    assert!(cause.starts_with("the file was not changed;"), "{cause}");
+    assert!(cause.contains("at line 1"), "{cause}");
+    assert!(
+        cause.contains("reduce a copy to the smallest excerpt that still refuses"),
+        "{cause}"
+    );
     assert_eq!(report["rejected"][0]["event_index"], 2);
     assert!(
         report["rejected"][0]["difference"]
