@@ -14,7 +14,7 @@ pub(in crate::launch) struct Binding {
 #[serde(tag = "evidence", rename_all = "kebab-case")]
 pub(in crate::launch) enum Disposition {
     Retained,
-    Unbound,
+    Unbound { class: &'static str },
     NotAttempted,
     Unknown,
     StopJobCompleted { invocation: String },
@@ -63,7 +63,7 @@ impl Store {
             self.evidence.verify()?;
             let name = format!("lifecycle-{:02}.json", self.journal.next);
             let value = serde_json::json!({
-                "schema":1,"command":"campaign-lifecycle","case":self.case,"unit":self.unit,
+                "schema":2,"stop_request":crate::launch::stop::request(),"command":"campaign-lifecycle","case":self.case,"unit":self.unit,
                 "sequence":self.journal.next,"phase":self.phase(),
                 "original_cause":self.original_cause,"failure_stage":self.failure_stage,
                 "policy_sha256":self.policy_sha256,"code_sha256":self.code_sha256,
@@ -88,7 +88,10 @@ impl Store {
         self.lifecycle(Event::SubmissionAcknowledged)
     }
     pub fn retain_start(&mut self, snapshot: &crate::launch::manager::Snapshot) -> Result<()> {
-        super::super::require(self.phase() == Phase::Submitted, "lifecycle-binding-order")?;
+        super::super::require(
+            self.phase() == Phase::Submitted || self.failure_stage == Some(Phase::Submitted),
+            "lifecycle-binding-order",
+        )?;
         super::super::require(!snapshot.invocation.is_empty(), "lifecycle-binding-empty")?;
         if let Some(old) = &self.journal.binding {
             return super::super::require(

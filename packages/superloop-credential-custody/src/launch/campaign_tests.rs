@@ -69,6 +69,10 @@ fn run_case(
         Control::test_bind,
     )?;
     drop(writers);
+    if fault == "stop" {
+        crate::launch::stop::tests::send(nix::sys::signal::Signal::SIGTERM);
+        return keeper.release_result(crate::launch::stop::check());
+    }
     if fault == "capture" {
         return Err(keeper.fail("synthetic-capture-failure"));
     }
@@ -112,6 +116,97 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(1200)
 }
 
+/// ´test:unit:campaign-cooperative-stop-retains-sender-and-recovery´
+#[test]
+fn campaign_cooperative_stop_retains_sender_and_recovery() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    let result = campaign::run(&admission, deadline(), |index, store, _| {
+        run_case(&f, &admission, index, store, "stop")
+    });
+    assert_eq!(result.err(), Some("campaign-stopped"));
+    let failure: serde_json::Value = serde_json::from_slice(
+        &fs::read(f.dir.path().join("evidence/campaign-failure.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(failure["outcome"], "stopped");
+    assert_eq!(failure["refusal_class"], "campaign-stopped");
+    assert_eq!(failure["stop_request"]["signal"], 15);
+    assert_eq!(
+        failure["stop_request"]["sender_pid"],
+        nix::unistd::getpid().as_raw()
+    );
+    assert_eq!(
+        failure["failure"]["retained"]["original_cause"],
+        "campaign-stopped"
+    );
+    let last = failure["failure"]["retained"]["last_lifecycle_receipt"]
+        .as_str()
+        .unwrap();
+    let recovery: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.dir.path().join("evidence/sample").join(last)).unwrap())
+            .unwrap();
+    assert_eq!(
+        recovery["event"]["observation"]["holder"]["evidence"],
+        "stop-job-completed"
+    );
+    assert_eq!(
+        recovery["event"]["observation"]["holder"]["invocation"],
+        format!("{:032x}", 1)
+    );
+    assert_eq!(recovery["phase"], "uncertain");
+    assert_eq!(
+        recovery["event"]["observation"]["outputs"]["evidence"],
+        "retained"
+    );
+    assert!(
+        recovery["event"]["observation"]["sealer_exits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| !v.is_null())
+    );
+    assert!(!f.dir.path().join("evidence/campaign.json").exists());
+    assert!(!f.dir.path().join("evidence/second").exists());
+    listener.finish();
+}
+
+/// ´test:unit:campaign-stop-after-child-completion-keeps-outputs-but-no-matrix´
+#[test]
+fn campaign_stop_after_child_completion_keeps_outputs_but_no_matrix() {
+    let _guard = crate::launch::test_support::case_guard();
+    let mut f = setup();
+    f.value["cases"].as_array_mut().unwrap().truncate(1);
+    let admission = f.admit();
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    let mut original = None;
+    let result = campaign::run(&admission, deadline(), |index, store, _| {
+        run_case(&f, &admission, index, store, "normal")?;
+        original = Some(store.completed_case()?);
+        crate::launch::stop::tests::send(nix::sys::signal::Signal::SIGINT);
+        Ok(())
+    });
+    assert_eq!(result.err(), Some("campaign-stopped"));
+    for output in original.unwrap().outputs {
+        let path = f.dir.path().join("sealed/sample").join(output.name);
+        assert_eq!(
+            crate::identity::hash(&fs::read(&path).unwrap()),
+            output.sha256
+        );
+        assert_eq!(fs::metadata(path).unwrap().mode() & 0o7777, 0o400);
+    }
+    assert!(
+        f.dir
+            .path()
+            .join("evidence/sample/completion.json")
+            .is_file()
+    );
+    assert!(!f.dir.path().join("evidence/campaign.json").exists());
+    listener.finish();
+}
+
 /// ´test:unit:campaign-runs-completed-pairs-in-order-and-publishes-one-matrix´
 #[test]
 fn campaign_runs_completed_pairs_in_order_and_publishes_one_matrix() {
@@ -148,6 +243,21 @@ fn campaign_runs_completed_pairs_in_order_and_publishes_one_matrix() {
         campaign::run(&admission, deadline(), |_, _, _| panic!("rerun")).err(),
         Some("receipt-no-replace")
     );
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    crate::launch::stop::tests::send(nix::sys::signal::Signal::SIGTERM);
+    assert_eq!(crate::launch::stop::check(), Err("campaign-stopped"));
+    assert_eq!(
+        campaign::observation(&admission, &crate::identity::hash(&bytes))
+            .unwrap()
+            .rows
+            .len(),
+        2
+    );
+    assert_eq!(
+        fs::read(f.dir.path().join("evidence/campaign.json")).unwrap(),
+        bytes
+    );
+    listener.finish();
 }
 
 /// ´test:unit:campaign-refuses-repeated-invocations-and-final-publication-collisions´
@@ -232,7 +342,7 @@ fn stops_after_failure(fault: &str) {
         &fs::read(f.dir.path().join("evidence/campaign-failure.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(failure["schema"], 3);
+    assert_eq!(failure["schema"], 4);
     assert_eq!(failure["failure"]["index"], 0);
     assert_eq!(failure["failure"]["case"], "sample");
     assert_eq!(failure["failure"]["stage"], "case");
@@ -251,6 +361,13 @@ fn stops_after_failure(fault: &str) {
         serde_json::from_slice(&fs::read(f.dir.path().join("evidence/sample").join(name)).unwrap())
             .unwrap();
     assert_eq!(recovery["event"]["kind"], "recovery");
+    assert_eq!(recovery["schema"], 2);
+    if fault == "sealers" {
+        assert_eq!(
+            recovery["event"]["observation"]["holder"]["class"],
+            "keeper-not-submitted"
+        );
+    }
     assert_eq!(
         failure["completed_prefix"]["rows"]
             .as_array()

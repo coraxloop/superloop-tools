@@ -140,6 +140,39 @@ fn no_completion(f: &Fixture) {
     assert!(!evidence(f).join("completion.json").exists());
 }
 
+/// ´test:unit:completion-retains-before-a-stop-at-the-decision-boundary´
+#[test]
+fn completion_retains_before_a_stop_at_the_decision_boundary() {
+    let _case = crate::launch::test_support::case_guard();
+    let f = setup("normal");
+    let admission = f.admit();
+    let mut store = Store::reserve(&admission, 0).unwrap();
+    let mut keeper = Keeper::prepare(RootStartup::test_owner(), &admission, 0, &mut store).unwrap();
+    released(&f, &admission, &mut keeper);
+    terminal_reply(&f, 0);
+    fs::write(f.dir.path().join("manager-require-retained"), b"").unwrap();
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    let before = Instant::now();
+    let mut calls = 0;
+    let result =
+        keeper.capture_generator_with_clock(before + std::time::Duration::from_secs(600), || {
+            calls += 1;
+            if calls == 2 {
+                crate::launch::stop::tests::send(nix::sys::signal::Signal::SIGTERM);
+            }
+            before
+        });
+    let observed = crate::launch::stop::check();
+    let _cleanup = keeper.release_result(observed);
+    listener.finish();
+    assert_eq!(result, Err("campaign-stopped"));
+    assert_eq!(calls, 2);
+    assert_eq!(retained(&f)["generator"]["successful"], true);
+    assert!(f.dir.path().join("manager-stopped").is_file());
+    assert_eq!(keeper.phase(), Phase::Uncertain);
+    no_completion(&f);
+}
+
 /// ´test:unit:completion-retains-an-observation-before-late-expiry-cleanup´
 #[test]
 fn completion_retains_an_observation_before_late_expiry_cleanup() {
@@ -496,6 +529,15 @@ fn completion_publication_and_stop_failure_stay_uncertain() {
             let result = keeper.finish_completion();
             if fault == "stop" {
                 assert_eq!(result, Err("manager-stop-output"));
+                let context = keeper.session.store().failure_context();
+                let value: serde_json::Value = serde_json::from_slice(
+                    &fs::read(evidence(&f).join(context.last_lifecycle_receipt.unwrap())).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    value["event"]["observation"]["holder"]["class"],
+                    "manager-stop-output"
+                );
             } else {
                 assert_eq!(result, Err("receipt-no-replace"));
                 assert_eq!(

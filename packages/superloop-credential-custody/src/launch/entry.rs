@@ -71,6 +71,7 @@ pub fn run(command: Command, parameters: &Path, case: &str) -> Result<serde_json
                 "manager-artifact-roster",
             )?;
         }
+        let _stop = super::stop::Guard::install()?;
         let deadline =
             Instant::now() + Duration::from_millis(admission.policy().limits.campaign_ms);
         let matrix = campaign::run(&admission, deadline, |index, store, deadline| {

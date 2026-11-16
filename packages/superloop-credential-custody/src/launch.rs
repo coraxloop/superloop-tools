@@ -15,6 +15,7 @@ mod process_pin;
 mod sealer;
 mod startup;
 mod state;
+pub mod stop;
 mod store;
 
 use crate::record::Result;

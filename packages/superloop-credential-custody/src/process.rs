@@ -194,6 +194,7 @@ pub fn pin_matching(
     };
     use std::os::unix::fs::MetadataExt as _;
     use std::path::{Path, PathBuf};
+    crate::launch::stop::configure_child(command);
     let requested = Path::new(command.get_program());
     // Only the fixed interpreter may be a vendor symlink. Its containing
     // directory is protected before resolution; operator exclusion covers
@@ -324,6 +325,7 @@ fn capture_inner(
         let mut output = Vec::new();
         let mut errors = Vec::new();
         loop {
+            crate::launch::stop::check()?;
             if start.elapsed() >= Duration::from_millis(limits.timeout_ms) {
                 return Err("child-timeout");
             }
@@ -348,6 +350,7 @@ fn capture_inner(
         }
         drop(stdin);
         loop {
+            crate::launch::stop::check()?;
             if start.elapsed() >= Duration::from_millis(limits.timeout_ms) {
                 return Err("child-timeout");
             }
@@ -362,6 +365,7 @@ fn capture_inner(
             )
             .map_err(|_| "child-wait")?;
             if !matches!(status, WaitStatus::StillAlive) && out_done && err_done {
+                crate::launch::stop::check()?;
                 return if matches!(status, WaitStatus::Exited(_, 0)) && errors.is_empty() {
                     Ok(output)
                 } else {

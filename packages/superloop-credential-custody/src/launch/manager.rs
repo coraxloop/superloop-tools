@@ -109,7 +109,10 @@ impl<'a> Manager<'a> {
         self.deadline = self.deadline.min(deadline);
     }
     pub fn starting(&self, expected: Option<&str>) -> Result<Snapshot> {
-        let reply = self.query_reply(self.deadline)?;
+        self.starting_at(expected, self.deadline)
+    }
+    pub fn starting_at(&self, expected: Option<&str>, deadline: Instant) -> Result<Snapshot> {
+        let reply = self.query_reply(deadline)?;
         let snapshot = parse_starting(&reply, &self.expected(), expected)?;
         Ok(snapshot)
     }
@@ -252,6 +255,9 @@ impl<'a> Manager<'a> {
     pub fn stop(&self, invocation: &str) -> Result<()> {
         let deadline =
             Instant::now() + Duration::from_millis(self.admission.policy().limits.case_ms);
+        self.stop_at(invocation, deadline)
+    }
+    pub fn stop_at(&self, invocation: &str, deadline: Instant) -> Result<()> {
         self.snapshot_at(Some(invocation), deadline)?;
         let unit = &self.admission.policy().cases[self.index].generator_unit;
         let reply = self.call_at(

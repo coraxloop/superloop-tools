@@ -3787,3 +3787,6 @@ pattern = "packages/superloop-credential-custody/tests/support/campaign_evidence
 
 [[include.rows]]
 pattern = "packages/superloop-credential-custody/src/launch/lifecycle.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/stop.rs"

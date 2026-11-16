@@ -43,6 +43,7 @@ fn verify_root(admission: &Admission, root: &File) -> Result<()> {
     )
 }
 fn budget(deadline: Instant) -> Result<()> {
+    super::stop::check()?;
     require(Instant::now() < deadline, "campaign-deadline")
 }
 
@@ -159,7 +160,9 @@ fn retain_failure(
     FAILURE.with(|slot| *slot.borrow_mut() = Some(serde_json::json!({"refusal_class":class,"failure":failure,"failure_receipt_published":false})));
     verify_root(admission, root)?;
     let bytes = serde_json::to_vec(&serde_json::json!({
-        "schema":3, "command":"calibration-run", "outcome":"refused",
+        "schema":4, "command":"calibration-run",
+        "outcome":if super::stop::request().is_some() {"stopped"} else {"refused"},
+        "stop_request":super::stop::request(),
         "refusal_class":class, "failure":failure, "completed_prefix":matrix,
     }))
     .map_err(|_| "launch-evidence-encoding")?;

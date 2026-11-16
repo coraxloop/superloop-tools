@@ -54,6 +54,144 @@ fn setup() -> Fixture {
     install_launcher(&mut f);
     f
 }
+
+/// ´test:unit:recovery-adopts-only-the-whole-start-comparison´
+#[test]
+fn recovery_adopts_only_the_whole_start_comparison() {
+    let _guard = crate::launch::test_support::case_guard();
+    for fault in ["good", "slice", "state"] {
+        let changed = fault != "good";
+        let f = setup();
+        let admission = f.admit();
+        let mut store = Store::reserve(&admission, 0).unwrap();
+        let mut reply = String::from_utf8(crate::launch::manager::tests::reply(&admission))
+            .unwrap()
+            .replace("MainPID=123", "MainPID=0")
+            .replace("ExecMainPID=123", "ExecMainPID=0")
+            .replace(
+                "ExecMainStartTimestampMonotonic=100",
+                "ExecMainStartTimestampMonotonic=0",
+            );
+        if fault == "slice" {
+            reply = reply.replace(
+                &format!("Slice={}", admission.policy().slice),
+                "Slice=foreign.slice",
+            );
+        }
+        if fault == "state" {
+            reply = reply.replace("ActiveState=activating", "ActiveState=failed");
+        }
+        fs::write(f.dir.path().join("manager-reply"), reply).unwrap();
+        let mut keeper =
+            Keeper::prepare(RootStartup::test_owner(), &admission, 0, &mut store).unwrap();
+        keeper.submit().unwrap();
+        assert!(keeper.invocation.is_none());
+        keeper
+            .session
+            .store()
+            .uncertain("synthetic-start-interrupted")
+            .unwrap();
+        assert_eq!(
+            keeper.fail("synthetic-start-interrupted"),
+            "synthetic-start-interrupted"
+        );
+        assert_eq!(f.dir.path().join("manager-stopped").exists(), !changed);
+        assert_eq!(keeper.invocation.is_some(), !changed);
+        let context = keeper.session.store().failure_context();
+        let value: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                f.dir
+                    .path()
+                    .join("evidence/sample")
+                    .join(context.last_lifecycle_receipt.unwrap()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["original_cause"], "synthetic-start-interrupted");
+        assert_eq!(
+            value["event"]["observation"]["holder"]["evidence"],
+            if changed {
+                "unbound"
+            } else {
+                "stop-job-completed"
+            }
+        );
+        if !changed {
+            assert_eq!(
+                value["binding"]["manager_configuration_sha256"]
+                    .as_str()
+                    .unwrap()
+                    .len(),
+                64
+            );
+        }
+    }
+}
+
+/// ´test:unit:recovery-expired-allowance-never-starts-a-manager-call´
+#[test]
+fn recovery_expired_allowance_never_starts_a_manager_call() {
+    let _guard = crate::launch::test_support::case_guard();
+    for bound in [false, true] {
+        let f = setup();
+        let admission = f.admit();
+        fs::write(
+            f.dir.path().join("manager-reply"),
+            crate::launch::manager::tests::reply(&admission),
+        )
+        .unwrap();
+        let mut store = Store::reserve(&admission, 0).unwrap();
+        let mut keeper =
+            Keeper::prepare(RootStartup::test_owner(), &admission, 0, &mut store).unwrap();
+        keeper.submit().unwrap();
+        if bound {
+            keeper.invocation = Some("1234567890abcdef1234567890abcdef".into());
+        }
+        keeper
+            .session
+            .store()
+            .uncertain("synthetic-start-interrupted")
+            .unwrap();
+        fs::remove_file(f.dir.path().join("manager-argv.json")).unwrap();
+        assert_eq!(
+            keeper.recover_holder(
+                Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(1))
+                    .unwrap()
+            ),
+            Err("manager-deadline")
+        );
+        assert!(!f.dir.path().join("manager-argv.json").exists());
+        assert!(!f.dir.path().join("manager-stopped").exists());
+        keeper.terminal = true; // This core-only control has deliberately spent its allowance.
+    }
+}
+
+/// ´test:unit:keeper-signal-mask-does-not-escape-into-held-exec´
+#[test]
+fn keeper_signal_mask_does_not_escape_into_held_exec() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    let mut command = Command::new(f.dir.path().join("manager-start"));
+    command.arg("--signal-mask");
+    loop_home::CommandDescriptors::default()
+        .configure(&mut command)
+        .unwrap();
+    let output = crate::process::capture(
+        command,
+        &[],
+        &crate::record::Limits {
+            file_bytes: 0,
+            output_bytes: 128,
+            timeout_ms: 600_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(output, b"false false\n");
+    listener.finish();
+}
 pub(in crate::launch::keeper) fn install_launcher(f: &mut Fixture) {
     let current = std::env::current_exe().unwrap();
     let native = current
@@ -68,6 +206,40 @@ pub(in crate::launch::keeper) fn install_launcher(f: &mut Fixture) {
     fs::write(&path, &bytes).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o555)).unwrap();
     f.value["artifacts"][0]["expected_sha256"] = crate::identity::hash(&bytes).into();
+}
+
+/// ´test:unit:keeper-child-reply-cannot-cross-an-observed-stop´
+#[test]
+#[allow(unsafe_code)]
+fn keeper_child_reply_cannot_cross_an_observed_stop() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    let mut command = Command::new(f.dir.path().join("manager-start"));
+    // SAFETY: gettid only identifies this thread for the child-to-parent event.
+    command
+        .arg("--signal-keeper")
+        .arg(unsafe { nix::libc::syscall(nix::libc::SYS_gettid) }.to_string());
+    loop_home::CommandDescriptors::default()
+        .configure(&mut command)
+        .unwrap();
+    let result = crate::process::capture(
+        command,
+        &[],
+        &crate::record::Limits {
+            file_bytes: 0,
+            output_bytes: 128,
+            timeout_ms: 600_000,
+        },
+    );
+    // Consume even if a mutation let the reply through, so restoring the mask
+    // cannot terminate libtest before its acceptance assertion is reported.
+    let observed = crate::launch::stop::check();
+    let request = crate::launch::stop::request();
+    listener.finish();
+    assert_eq!(result, Err("campaign-stopped"));
+    assert_eq!(observed, Err("campaign-stopped"));
+    assert_eq!(request.unwrap().signal, 15);
 }
 fn request(manifest: &serde_json::Value, operation: serde_json::Value) -> serde_json::Value {
     let mut value = serde_json::json!({"schema":2,"case":manifest["case"],"keeper_pid":manifest["keeper_pid"],"keeper_birth":manifest["keeper_birth"],"invocation":manifest["invocation"],"nonce":"a".repeat(32)});
