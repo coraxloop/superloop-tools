@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Pin formatter refusal locations across one or more overlay slots, including LF and CRLF padding and multibyte prefixes, through check and write mode. The line and byte position refer to the unchanged complete input (``test:integration:refusal-locations-cross-overlay-slots``).
+
 - Formatter writer refusals now use `serialization_failure` instead of `source_parse_failure`, identify the block's starting line and byte position, and suggest simplifying it or reporting it with the formatter version. Ambiguous table rows name a line and give their original byte range. Callers must recognize the new kind; exit statuses and refusal to overwrite rejected files are unchanged (``rule:output:linter-findings-status``).
 
 - The exec wrapper uses textwrap 0.16.4 with the ICU line breaker. Non-ASCII text may wrap at different positions in calligraphic output; plain output is unchanged (`sec:publictools:build`).
