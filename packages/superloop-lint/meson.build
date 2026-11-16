@@ -235,3 +235,7 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lint/tests/fmt.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#14","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
 {"kind":"call","site":"packages/superloop-lint/tests/fmt.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#15","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
 ''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-lint/tests/fmt.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#16","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
+''']

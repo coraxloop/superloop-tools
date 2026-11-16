@@ -33,6 +33,10 @@ pub struct BufferedEvent {
 ///
 /// Lists whose structure depends on invisible reference definitions can buffer
 /// the remaining input until `finish`, to reserve a label without collisions.
+/// Footnote references and definitions also retain the remaining input: block
+/// validation must reparse them together, including definitions preceding a use.
+/// A complete-document caller can avoid footnote deferral with
+/// [`with_footnote_context`](Self::with_footnote_context).
 ///
 /// ```
 /// use pulldown_cmark::Parser;
@@ -59,6 +63,7 @@ pub struct State {
     status: Status,
     last_source_end: usize,
     defer_output: bool,
+    footnote_context_supplied: bool,
 }
 
 impl State {
@@ -84,7 +89,21 @@ impl State {
             status: Status::Active,
             last_source_end: 0,
             defer_output: false,
+            footnote_context_supplied: false,
         }
+    }
+
+    /// Supply the complete source's footnote definitions before processing events.
+    ///
+    /// The definitions are validation context only, never emitted output. This
+    /// lets each block choose its spelling independently rather than retaining
+    /// every sibling after a footnote. The source must be the document that
+    /// produced the events, with the same parser options as this state.
+    #[must_use]
+    pub fn with_footnote_context(mut self, source: &str) -> Self {
+        self.renderer.read_footnote_context(source);
+        self.footnote_context_supplied = true;
+        self
     }
 
     /// Byte offset of the first event in the retained block, when supplied.
@@ -186,7 +205,16 @@ impl State {
                     _ => None,
                 };
                 if self.open.is_empty() && !self.pending.is_empty() && !self.defer_output {
-                    if crate::render::needs_list_placeholder(&self.pending) {
+                    if crate::render::needs_list_placeholder(&self.pending)
+                        || (!self.footnote_context_supplied
+                            && self.pending.iter().any(|event| {
+                                matches!(
+                                    event.event,
+                                    Event::FootnoteReference(_)
+                                        | Event::Start(pulldown_cmark::Tag::FootnoteDefinition(_))
+                                )
+                            }))
+                    {
                         self.defer_output = true;
                     } else {
                         progress.bytes_written += self.flush(Some(event), &mut writer)?;
@@ -258,7 +286,7 @@ impl State {
             if !self.open.is_empty() {
                 return Err(Error::UnexpectedEvent);
             }
-            if self.defer_output || crate::render::needs_list_placeholder(&self.pending) {
+            if crate::render::needs_list_placeholder(&self.pending) {
                 self.renderer.reserve_list_label(&self.pending);
             }
             let mut bytes_written = self.flush(None, &mut writer)?;

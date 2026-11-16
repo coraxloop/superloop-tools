@@ -6,7 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Formatter refusals pin table-row and table-header ranges across overlay slots, give an ambiguous header a line, a range and an action, and name the first differing writer event. A writer refusal asks for the smallest non-private excerpt that still refuses, shared with whoever supplied the build together with its build record's identity, and states that the package declares no public issue route; a run retained by a reference-dependent list can start before the failing block (`rule:output:linter-findings-status`).
+
 ### Fixed
+
+- Format emphasized footnote references with their definitions instead of rejecting them. Each block is validated with the document's actual footnote definitions as context and still chooses its own spelling, so a later fallback no longer re-spells unrelated blocks; public constructs are pinned to exact bytes. Documents without footnotes format as before, and the event comparison is unchanged (``claim:fmt:construct-fixtures-have-stable-bytes``).
 
 - The door fixture socket test now retries its exact stub call until the listener accepts it, with a distant hang guard; a loaded test node no longer turns the brief bind-to-listen interval into a connection refusal. The compute-node fixture distinguishes its own `no` mode from the outer hang guard by the deadline diagnostic. Tests only; installed doors and operator procedures are unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
 

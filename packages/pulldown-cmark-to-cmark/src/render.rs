@@ -255,6 +255,7 @@ pub struct Renderer {
     literal_labels: HashSet<UniCase<CowStr<'static>>>,
     list_label: Option<String>,
     retained_table_code: Vec<(Range<usize>, Event<'static>)>,
+    footnote_definitions: std::sync::Arc<Vec<(String, String)>>,
 }
 
 impl Renderer {
@@ -275,6 +276,7 @@ impl Renderer {
             literal_labels: HashSet::new(),
             list_label: None,
             retained_table_code: Vec::new(),
+            footnote_definitions: std::sync::Arc::default(),
         }
     }
 
@@ -346,15 +348,17 @@ impl Renderer {
             let output =
                 original.render_block(events, next, options, false, Delimiters::PREFERRED)?;
             let definitions = original.reference_definitions()?;
-            if events_match(
+            let preferred_match = events_match(
                 &output,
                 &definitions,
                 events,
                 &reference_labels,
                 self.validation_options(),
                 &original.retained_table_code,
+                &self.footnote_definitions,
                 true,
-            ) {
+            );
+            if preferred_match.is_ok() {
                 *self = original;
                 return Ok((output, definitions));
             }
@@ -420,7 +424,9 @@ impl Renderer {
                 *self = original;
                 Ok((output, definitions))
             } else {
-                Err(Error::Unrepresentable)
+                Err(Error::Unrepresentable {
+                    first_event: preferred_match.err().flatten(),
+                })
             }
         })();
         if let Ok((_, definitions)) = &result {
@@ -484,6 +490,25 @@ impl Renderer {
         }
     }
 
+    pub(crate) fn read_footnote_context(&mut self, source: &str) {
+        let mut definition = None;
+        let mut definitions = Vec::new();
+        for (event, range) in Parser::new_ext(source, self.parser_options).into_offset_iter() {
+            match event {
+                Event::Start(Tag::FootnoteDefinition(label)) => {
+                    definition = Some((label.to_string(), range.start));
+                }
+                Event::End(TagEnd::FootnoteDefinition) => {
+                    if let Some((label, start)) = definition.take() {
+                        definitions.push((label, source[start..range.end].to_owned()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.footnote_definitions = std::sync::Arc::new(definitions);
+    }
+
     fn checked_block(
         &self,
         events: &[BufferedEvent],
@@ -507,8 +532,11 @@ impl Renderer {
             previous_labels,
             self.validation_options(),
             &candidate.retained_table_code,
+            &self.footnote_definitions,
             !source_spelling,
-        ) {
+        )
+        .is_ok()
+        {
             Ok(Some((candidate, output, definitions)))
         } else {
             Ok(None)
@@ -2147,8 +2175,37 @@ fn code_source_matches(source: &str, event: &Event<'_>) -> bool {
         && parsed.next().is_none()
 }
 
+fn footnote_context(
+    expected: &[BufferedEvent],
+    footnote_definitions: &[(String, String)],
+) -> String {
+    // Only footnote-bearing blocks need this context. Copy actual definitions,
+    // not invented definitions for references: unresolved input stays unresolved.
+    // Exclude a definition already supplied by the block itself.
+    let mut context = String::new();
+    if expected
+        .iter()
+        .any(|event| matches!(event.event, Event::FootnoteReference(_)))
+    {
+        for (label, definition) in footnote_definitions {
+            if !expected.iter().any(|event| {
+                matches!(&event.event,
+                Event::Start(Tag::FootnoteDefinition(own)) if own.as_ref() == label)
+            }) {
+                context.push_str(definition);
+                context.push_str("\n\n");
+            }
+        }
+    }
+    context
+}
+
 // Check source spelling and delimiter choices after rendering the whole block,
 // because new indentation or surrounding delimiters can change their meaning.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep validation context separate from emitted block events"
+)]
 fn events_match(
     output: &str,
     definitions: &str,
@@ -2156,9 +2213,12 @@ fn events_match(
     previous_labels: &HashSet<UniCase<CowStr<'static>>>,
     parser_options: ParserOptions,
     retained_table_code: &[(Range<usize>, Event<'static>)],
+    footnote_definitions: &[(String, String)],
     protect_pipes: bool,
-) -> bool {
+) -> Result<(), Option<String>> {
     use pulldown_cmark::{BrokenLink, utils::TextMergeStream};
+    let mut context = footnote_context(expected, footnote_definitions);
+    let context_end = context.len();
     // Leading blank lines disable metadata recognition, so only prefix a
     // separator when this block actually has reference definitions.
     let mut markdown = if definitions.is_empty() {
@@ -2166,17 +2226,22 @@ fn events_match(
     } else {
         Cow::Owned(format!("{definitions}\n\n{output}"))
     };
+    if !context.is_empty() {
+        context.push_str(&markdown);
+        markdown = Cow::Owned(context);
+    }
     // The caller's table adaptation treats code-span pipes as literal code,
     // including their backslashes. Protect only the exact spans the renderer
     // retained after checking their source/event shape. Masking keeps offsets
     // stable and stops the table parser from splitting cells or eating escapes;
     // only a code event at the same complete range regains its original value.
     // Every surrounding event is still validated against the rendered block.
-    let prefix = if definitions.is_empty() {
-        0
-    } else {
-        definitions.len() + 2
-    };
+    let prefix = context_end
+        + if definitions.is_empty() {
+            0
+        } else {
+            definitions.len() + 2
+        };
     let retained_code: HashMap<_, _> = retained_table_code
         .iter()
         .map(|(range, event)| {
@@ -2214,26 +2279,66 @@ fn events_match(
         // unresolved label can still become a link through an earlier block.
         let mut resolves_earlier = false;
         let callback = |link: BrokenLink<'_>| {
-            resolves_earlier |= previous_labels.contains(&UniCase::new(link.reference));
+            resolves_earlier |= link.span.start >= context_end
+                && previous_labels.contains(&UniCase::new(link.reference));
             None
         };
         let parser =
             Parser::new_with_broken_link_callback(&markdown, parser_options, Some(callback));
         let mut in_table = false;
-        let parsed = parser.into_offset_iter().map(|(event, range)| {
-            match &event {
-                Event::Start(Tag::Table(_)) => in_table = true,
-                Event::End(TagEnd::Table) => in_table = false,
-                Event::Code(_) if in_table => {
-                    if let Some(retained) = retained_code.get(&range) {
-                        return (*retained).clone();
+        let parsed = parser
+            .into_offset_iter()
+            .filter(|(_, range)| {
+                // Footnote container ranges include following blank separators.
+                // Ignore that padding, but never discard output content consumed
+                // by a context container: it must fail the exact comparison.
+                context_end == 0
+                    || !(range.end <= context_end
+                        || (range.start < context_end
+                            && markdown[context_end..range.end]
+                                .bytes()
+                                .all(|byte| byte.is_ascii_whitespace())))
+            })
+            .map(|(event, range)| {
+                match &event {
+                    Event::Start(Tag::Table(_)) => in_table = true,
+                    Event::End(TagEnd::Table) => in_table = false,
+                    Event::Code(_) if in_table => {
+                        if let Some(retained) = retained_code.get(&range) {
+                            return (*retained).clone();
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
+                event
+            });
+        let mut parsed = TextMergeStream::new(parsed);
+        for event in &expected {
+            if parsed.next().as_ref() != Some(event) {
+                return Err(Some(event_kind(event)));
             }
-            event
-        });
-        let matches = TextMergeStream::new(parsed).eq(expected.iter().cloned());
-        matches && !resolves_earlier
+        }
+        if parsed.next().is_some() {
+            return Err(None);
+        }
+        drop(parsed);
+        if resolves_earlier { Err(None) } else { Ok(()) }
+    }
+}
+
+fn event_kind(event: &Event<'_>) -> String {
+    match event {
+        Event::Start(tag) => format!("start of {:?}", tag.to_end()),
+        Event::End(tag) => format!("end of {tag:?}"),
+        Event::Text(_) => "text".to_owned(),
+        Event::Code(_) => "code span".to_owned(),
+        Event::FootnoteReference(_) => "footnote reference".to_owned(),
+        Event::InlineMath(_) => "inline math".to_owned(),
+        Event::DisplayMath(_) => "display math".to_owned(),
+        Event::Html(_) | Event::InlineHtml(_) => "HTML".to_owned(),
+        Event::SoftBreak => "soft break".to_owned(),
+        Event::HardBreak => "hard break".to_owned(),
+        Event::Rule => "thematic break".to_owned(),
+        Event::TaskListMarker(_) => "task list marker".to_owned(),
     }
 }

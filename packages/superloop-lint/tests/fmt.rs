@@ -4,8 +4,9 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`construct_fixtures_have_stable_bytes`] | fmt | Public Markdown constructs retain their expected bytes and are idempotent. |
 //! | [`code_span_pipes_preserve_every_cell`] | fmt | Code-span pipes are cell text, so formatting retains all four columns and both literal pipe spellings without rewriting their code spans. |
-//! | [`writer_refusals_name_a_location_and_recovery`] | fmt | A writer refusal identifies its category, source start and recovery action; an ambiguous table row names its line and retains the refused source. |
+//! | [`table_refusals_name_a_location_and_recovery`] | fmt | Ambiguous table refusals identify their category, source range and recovery action; an ambiguous table row names its line and retains the refused source. |
 //! | [`refusal_locations_cross_overlay_slots`] | fmt | Refusals after one or more overlay slots retain original lines and byte offsets, including CRLF padding and a multibyte prefix, in both modes. |
 //! | [`check_reports_an_unformatted_file_without_writing_it`] | fmt | Formatter check mode reports every path that would change, exits with the linter's findings status, and leaves the named file byte-for-byte alone. |
 //! | [`check_continues_after_a_guard_rejection`] | fmt | Formatter check mode records a guard rejection for one file and still reports a later file that would reflow, so one unsafe source does not hide the rest of the requested paths. |
@@ -20,6 +21,49 @@ use std::io::{self, Write as _};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
+
+/// Public Markdown constructs retain their expected bytes and are idempotent.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the formatter changes the construct.
+///
+/// ´claim:fmt:construct-fixtures-have-stable-bytes´
+/// ´test:integration:construct-fixtures-have-stable-bytes´
+#[test]
+fn construct_fixtures_have_stable_bytes() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let path = root.path().join("construct.md");
+    for (source, expected) in [
+        "*[^a]*\n\n[^a]: note\n",
+        "**see [^a]**\n\n[^a]: note\n",
+        "[^a]: note\n\n*[^a]*\n",
+        "[^a]: note\n\nplain [^a] &copy;\n",
+        "*[^a]*\n\n[^a]: see [^b]\n\n[^b]: note\n",
+        "*[^a]*\n\n[^a]: *note*\n",
+        "[link][x]\n\n*[^a]*\n\n[^a]: [x]\n\n[x]: /target\n",
+        "Before.\n\n*[^a]*\n\nBetween.\n\n[^a]: note\n\nAfter.\n",
+        "|a|b|\n|-|-|\n|`\\|` *label*|x|\n",
+    ].into_iter().map(|source| (source, source)).chain([
+        (
+            "*[^a]*\n\n[^a]: note\n\n|a|b|\n|-|-|\n|stray ` tick|x|\n|`a|b` *label*|x|\n\nAn &copy; authored \\*literal\\* stays text.\n\nA ``code`` span.\n",
+            "*[^a]*\n\n[^a]: note\n\n|a|b|\n|-|-|\n|stray \\` tick|x|\n|`a|b` *label*|x|\n\nAn &copy; authored \\*literal\\* stays text.\n\nA ``code`` span.\n",
+        ),
+    ]) {
+        fs::write(&path, source).expect("write construct");
+        for (index, args) in [vec!["fmt"], vec!["fmt", "--check"]].into_iter().enumerate() {
+            let output = Command::new(env!("CARGO_BIN_EXE_superloop-lint"))
+                .args(args)
+                .arg(&path)
+                .output()
+                .expect("production formatter");
+            assert!(output.status.success(), "{output:?}");
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report");
+            assert_eq!(report["files_rejected"], 0, "{report}");
+            assert_eq!(report["files_changed"], usize::from(index == 0 && source != expected), "{report}");
+            assert_eq!(fs::read_to_string(&path).expect("read construct"), expected);
+        }
+    }
+}
 
 /// Code-span pipes are cell text, so formatting retains all four columns and
 /// both literal pipe spellings without rewriting their code spans.
@@ -111,24 +155,24 @@ fn code_span_pipes_preserve_every_cell() {
     }
 }
 
-/// A writer refusal identifies its category, source start and recovery action;
+/// Ambiguous table refusals identify their category, source range and recovery action;
 /// an ambiguous table row names its line and retains the refused source.
 ///
 /// # Panics
 /// Panics only if fixture IO fails or the production formatter violates the contract.
 ///
-/// ´claim:fmt:writer-refusals-name-a-location-and-recovery´
-/// ´test:integration:writer-refusals-name-a-location-and-recovery´
+/// ´claim:fmt:table-refusals-name-a-location-and-recovery´
+/// ´test:integration:table-refusals-name-a-location-and-recovery´
 #[test]
-fn writer_refusals_name_a_location_and_recovery() {
+fn table_refusals_name_a_location_and_recovery() {
     let root = tempfile::tempdir().expect("temporary directory");
     let path = root.path().join("refused.md");
     for (source, kind, location, action) in [
         (
-            "Before.\n\n*[^a]*\n\n[^a]: note\n",
-            "serialization_failure",
-            "block starting at line 3",
-            "report this block with the formatter version",
+            "Before.\n\n|a|`b|c`|\n|-|-|-|\n|x|y|z|\n",
+            "source_parse_failure",
+            "header at line 3",
+            "make the header and delimiter describe the same cells",
         ),
         (
             "Before.\n\n|a|b|\n|-|-|\n|a|b|c|\n",
@@ -154,12 +198,16 @@ fn writer_refusals_name_a_location_and_recovery() {
                 cause.contains(location) && cause.contains(action),
                 "{cause}"
             );
-            if kind == "serialization_failure" {
-                assert_eq!(
-                    rejection["input_range"],
-                    serde_json::json!({"start":9,"end":9})
-                );
-            }
+            let row = if location.starts_with("header") {
+                "|a|`b|c`|\n"
+            } else {
+                "|a|b|c|\n"
+            };
+            let start = source.find(row).expect("refused row");
+            assert_eq!(
+                rejection["input_range"],
+                serde_json::json!({"start":start,"end":start + row.trim_end_matches('\n').len()})
+            );
             assert_eq!(fs::read_to_string(&path).expect("read fixture"), source);
         }
     }
@@ -178,6 +226,7 @@ fn refusal_locations_cross_overlay_slots() {
     let root = tempfile::tempdir().expect("temporary directory");
     let path = root.path().join("slots.md");
     for (prefix, first_line) in [
+        ("", 1),
         ("Préface.\n{{overlay:body:test:first}}\n\n", 4),
         (
             "Préface.\n{{overlay:body:test:first}}\n\nMiddle.\n{{overlay:body:test:second}}\n\n",
@@ -187,8 +236,9 @@ fn refusal_locations_cross_overlay_slots() {
         for suffix in ["", "\n{{overlay:body:test:last}}\nAfter.\n"] {
             for newline in ["\n", "\r\n"] {
                 let source =
-                    format!("{prefix}*[^a]*\n\n[^a]: note\n{suffix}").replace('\n', newline);
-                let start = prefix.replace('\n', newline).len();
+                    format!("{prefix}|a|b|\n|-|-|\n|a|b|c|\n{suffix}").replace('\n', newline);
+                let start = source.find("|a|b|c|").expect("refused row");
+                let end = start + 7;
                 fs::write(&path, &source).expect("write fixture");
                 for args in [vec!["fmt", "--check"], vec!["fmt"]] {
                     let output = Command::new(env!("CARGO_BIN_EXE_superloop-lint"))
@@ -201,17 +251,17 @@ fn refusal_locations_cross_overlay_slots() {
                     assert_eq!(output.status.code(), Some(3), "{report}");
                     assert_eq!(report["files_rejected"], 1, "{report}");
                     let rejection = &report["rejected"][0];
-                    assert_eq!(rejection["kind"], "serialization_failure", "{report}");
+                    assert_eq!(rejection["kind"], "source_parse_failure", "{report}");
                     assert!(
                         rejection["cause"]
                             .as_str()
                             .expect("cause")
-                            .contains(&format!("block starting at line {first_line}:")),
+                            .contains(&format!("row at line {} has", first_line + 2)),
                         "{report}"
                     );
                     assert_eq!(
                         rejection["input_range"],
-                        serde_json::json!({"start":start,"end":start})
+                        serde_json::json!({"start":start,"end":end})
                     );
                     assert_eq!(fs::read_to_string(&path).expect("read fixture"), source);
                 }

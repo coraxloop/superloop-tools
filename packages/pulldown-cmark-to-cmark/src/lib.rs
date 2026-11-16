@@ -312,7 +312,10 @@ pub enum Error {
     /// An event was encountered that cannot be produced by valid markdown
     UnexpectedEvent,
     /// No lossless Markdown spelling was found for the supplied event block.
-    Unrepresentable,
+    Unrepresentable {
+        /// First differing input event in the preferred rendering, without source text.
+        first_event: Option<String>,
+    },
     /// A source range is out of bounds or is not on UTF-8 character boundaries.
     InvalidSourceRange,
     /// More input was supplied after finishing the serializer.
@@ -326,8 +329,15 @@ impl fmt::Display for Error {
         match self {
             Self::FormatFailed(e) => e.fmt(f),
             Self::UnexpectedEvent => f.write_str("Unexpected event while reconstructing Markdown"),
-            Self::Unrepresentable => {
-                f.write_str("Cannot preserve this event block with the supplied parser options")
+            Self::Unrepresentable { first_event } => {
+                f.write_str("no lossless Markdown spelling")?;
+                if let Some(event) = first_event {
+                    write!(
+                        f,
+                        "; first differing input event in the preferred rendering: {event}"
+                    )?;
+                }
+                Ok(())
             }
             Self::InvalidSourceRange => f.write_str("Invalid Markdown source range"),
             Self::Finished => f.write_str("Markdown serializer has already finished"),
