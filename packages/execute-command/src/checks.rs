@@ -7,7 +7,8 @@ mod hygiene;
 
 pub use hygiene::{
     FastLane, HYGIENE_RULE_COUNT, HYGIENE_RULES, HygieneRule, HygieneRuleId, READ_ONLY_TABLE,
-    ReadOnlyEntry, ScopeWord, hygiene_rule, matching_read_only_entry, scope_words,
+    ReadOnlyEntry, ScopeProjectionError, ScopeWord, hygiene_rule, matching_read_only_entry,
+    scope_projection, scope_projection_with_interpretation, scope_words,
 };
 
 #[cfg(test)]

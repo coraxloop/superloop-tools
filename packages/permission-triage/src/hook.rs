@@ -15,13 +15,12 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use execute_command::checks::{ScopeProjectionError, scope_projection};
 use execute_command::record::{HookRecordFailure, hook_record_failure};
 use loop_home::allocations::{Allocations, allocations_path};
 use serde_json::{Map, Value};
 
-use crate::command_checks::{
-    FastLane, MAX_MONITOR_TIMEOUT_MS, READ_ONLY_TABLE, classify_scoped, scope_words,
-};
+use crate::command_checks::{FastLane, MAX_MONITOR_TIMEOUT_MS, READ_ONLY_TABLE, classify_scoped};
 use crate::journal::{
     LOCK_BUDGET_FLOOR, LOCK_WAIT, journal_filename, request_digest, verdict_event_id,
 };
@@ -1820,6 +1819,12 @@ fn adapt_model_result(
                     if matches!(floor, ScopeFloor::RemoteOutsideDomain) {
                         remote_root_remedy(role, verdict.status, verdict.reason.as_str())
                             .unwrap_or_else(|| verdict.reason.as_str())
+                    } else if matches!(floor, ScopeFloor::CommandString)
+                        && verdict.status == VerdictStatus::InvalidOutput
+                        && verdict.reason.as_str()
+                            == "loop scope contradicts a protected target or unresolved identity/effect"
+                    {
+                        "unresolved command-string or launcher syntax; use a supported literal body such as bash -c 'COMMAND', keeping required safety wrappers"
                     } else {
                         verdict.reason.as_str()
                     },
@@ -2611,13 +2616,14 @@ enum ScopeFloor {
     Loop,
     Estate,
     RemoteOutsideDomain,
+    CommandString,
 }
 
 impl ScopeFloor {
     const fn scope(&self) -> Scope {
         match self {
             Self::Loop => Scope::Loop,
-            Self::Estate | Self::RemoteOutsideDomain => Scope::Estate,
+            Self::Estate | Self::RemoteOutsideDomain | Self::CommandString => Scope::Estate,
         }
     }
 }
@@ -2682,8 +2688,17 @@ fn assess_scope(
 }
 
 fn shell_scope(command: &str, context: &ScopeContext<'_>) -> ScopeFloor {
-    let Some(scoped_words) = scope_words(command) else {
-        return ScopeFloor::Estate;
+    shell_scope_projection(scope_projection(command), context)
+}
+
+fn shell_scope_projection(
+    projection: Result<Vec<execute_command::checks::ScopeWord>, ScopeProjectionError>,
+    context: &ScopeContext<'_>,
+) -> ScopeFloor {
+    let scoped_words = match projection {
+        Ok(words) => words,
+        Err(ScopeProjectionError::CommandString) => return ScopeFloor::CommandString,
+        Err(ScopeProjectionError::Syntax) => return ScopeFloor::Estate,
     };
     let words = scoped_words
         .iter()
@@ -2700,23 +2715,67 @@ fn shell_scope(command: &str, context: &ScopeContext<'_>) -> ScopeFloor {
     }
     let mut result = ScopeFloor::Loop;
     for scoped in &scoped_words {
-        let word = &scoped.text;
-        if !word.starts_with('-') || word.contains('=') || word.contains('/') {
-            let floor = if scoped.remote {
-                remote_scope_path(word, context)
-            } else if local_scope_path(word, context) {
-                ScopeFloor::Loop
-            } else {
-                ScopeFloor::Estate
-            };
-            match floor {
-                ScopeFloor::Estate => return ScopeFloor::Estate,
-                ScopeFloor::RemoteOutsideDomain => result = floor,
-                ScopeFloor::Loop => {}
+        for word in scope_path_views(&scoped.text) {
+            if !word.starts_with('-') || word.contains('=') || word.contains('/') {
+                let floor = if scoped.remote {
+                    remote_scope_path(word, context)
+                } else if local_scope_path(word, context) {
+                    ScopeFloor::Loop
+                } else {
+                    ScopeFloor::Estate
+                };
+                match floor {
+                    ScopeFloor::Estate | ScopeFloor::CommandString => return ScopeFloor::Estate,
+                    ScopeFloor::RemoteOutsideDomain => result = floor,
+                    ScopeFloor::Loop => {}
+                }
             }
         }
     }
     result
+}
+
+fn scope_path_views(word: &str) -> Vec<&str> {
+    let mut views = vec![word];
+    for (index, character) in word.char_indices() {
+        if matches!(character, '=' | ':')
+            && let Some(value) = word.get(index + 1..).filter(|value| !value.is_empty())
+        {
+            views.push(value);
+        }
+    }
+    if word.starts_with('-') && !word.starts_with("--") {
+        for (index, character) in word.char_indices().skip(1) {
+            if !character.is_ascii_alphabetic() {
+                break;
+            }
+            if let Some(value) = word.get(index + 1..).filter(|value| !value.is_empty()) {
+                views.push(value);
+            }
+        }
+    }
+    views
+}
+
+#[cfg(test)]
+pub(crate) fn scope_with_interpretation_for_test(
+    command: &str,
+    checkout: &Path,
+    interpretation: Result<Vec<execute_command::checks::ScopeWord>, ScopeProjectionError>,
+) -> Scope {
+    let context = ScopeContext {
+        cwd: checkout,
+        checkout,
+        own_runs: None,
+        domain: None,
+        protected: Vec::new(),
+        peer_roots: &[],
+    };
+    shell_scope_projection(
+        execute_command::checks::scope_projection_with_interpretation(command, |_| interpretation),
+        &context,
+    )
+    .scope()
 }
 
 fn estate_operation(words: &[String]) -> bool {

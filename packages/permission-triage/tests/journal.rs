@@ -1586,7 +1586,8 @@ impl ScopeFixture {
 fn scope_hook_distinguishes_local_peer_authorization_and_account_effects() {
     let fixture = ScopeFixture::new("scope-effects");
     let cases = [
-        ("Bash", json!({"command": "printf '/etc/hosts'"}), "loop"),
+        // Literal data retains its path floor even when printf does not open it.
+        ("Bash", json!({"command": "printf '/etc/hosts'"}), "estate"),
         ("Read", json!({"file_path": "src/main.rs"}), "loop"),
         (
             "Write",
@@ -2285,4 +2286,1085 @@ fn scope_approval_binds_authorization_digests_and_rejects_legacy() {
             .all(|event| event["event"] != "approval-consumed")
     );
     legacy_schema_one_approval_cannot_be_consumed();
+}
+
+const COMMAND_STRING_SCOPE_CASES: &[(&str, &str, &str)] = &[
+    (
+        "env-abbreviation-protected",
+        "env --split-str 'sh -c \"cat /etc/shadow\"'",
+        "estate",
+    ),
+    (
+        "env-abbreviation-build",
+        "env --split-str='sh -c \"time cargo test -p widget\"'",
+        "estate",
+    ),
+    (
+        "env-unset-value",
+        "env -u -S bash -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "env-chdir-value",
+        "env -C --split-string bash -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "env-cluster-protected",
+        "env -iS 'sh -c \"cat /etc/shadow\"'",
+        "estate",
+    ),
+    (
+        "env-cluster-build",
+        "env -iS 'sh -c \"time cargo test -p widget\"'",
+        "estate",
+    ),
+    (
+        "env-short-attached-protected",
+        "env -S'sh -c' 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "env-short-attached-build",
+        "env -S'sh -c' 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "buffer-client-protected",
+        "timeout 20 stdbuf -oL ssh own-worker 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "buffer-client-build",
+        "timeout 20 stdbuf -oL ssh own-worker 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "env-long-protected",
+        "env --split-string 'sh -c \"cat /etc/shadow\"'",
+        "estate",
+    ),
+    (
+        "env-long-build",
+        "env --split-string 'sh -c \"time cargo test -p widget\"'",
+        "loop",
+    ),
+    (
+        "env-attached-protected",
+        "env --split-string='sh -c \"cat /etc/shadow\"'",
+        "estate",
+    ),
+    ("env-leading-option", "env -S '-u X sh -c true'", "estate"),
+    (
+        "stdbuf-missing-mode",
+        "stdbuf -o ssh A 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "flock-argv-build",
+        "flock build.lock sh -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "option_shells-0-protected",
+        "bash -o pipefail -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "option_shells-0-build",
+        "bash -o pipefail -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "option_shells-1-protected",
+        "bash -euo pipefail -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "option_shells-1-build",
+        "bash -euo pipefail -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "option_shells-2-protected",
+        "bash -O extglob -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "option_shells-2-build",
+        "bash -O extglob -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "option_shells-3-protected",
+        "bash +o pipefail -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "option_shells-3-build",
+        "bash +o pipefail -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "option_shells-4-protected",
+        "bash +O extglob -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "option_shells-4-build",
+        "bash +O extglob -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "option_shells-5-protected",
+        "sh -o errexit -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "option_shells-5-build",
+        "sh -o errexit -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "option_shells-6-protected",
+        "sh +o errexit -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "option_shells-6-build",
+        "sh +o errexit -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "other_shells-0-protected",
+        "dash -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "other_shells-0-build",
+        "dash -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "other_shells-1-protected",
+        "ksh -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "other_shells-1-build",
+        "ksh -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "other_shells-2-protected",
+        "zsh -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "other_shells-2-build",
+        "zsh -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "split_strings-0-protected",
+        "env -S 'sh -c \"cat /etc/shadow\"'",
+        "estate",
+    ),
+    (
+        "split_strings-0-build",
+        "env -S 'sh -c \"time cargo test -p widget\"'",
+        "loop",
+    ),
+    (
+        "buffering_launcher-0-protected",
+        "stdbuf -oL bash -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "buffering_launcher-0-build",
+        "stdbuf -oL bash -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "buffering_launcher-1-protected",
+        "stdbuf --output=L bash -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "buffering_launcher-1-build",
+        "stdbuf --output=L bash -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "buffering_launcher-2-protected",
+        "stdbuf -o L bash -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "buffering_launcher-2-build",
+        "stdbuf -o L bash -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "lock_payload-0-protected",
+        "flock build.lock -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "lock_payload-0-build",
+        "flock build.lock -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "lock_payload-1-protected",
+        "flock -n build.lock --command 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "lock_payload-1-build",
+        "flock -n build.lock --command 'time cargo test -p widget'",
+        "loop",
+    ),
+    ("plain-protected", "bash -c 'cat /etc/shadow'", "estate"),
+    ("plain-build", "time cargo test -p widget", "loop"),
+    (
+        "set-build",
+        "set -euo pipefail; time cargo test -p widget",
+        "loop",
+    ),
+    (
+        "remote-protected",
+        "timeout 20 ssh own-worker 'bash -o pipefail -c \"cat /etc/shadow\"'",
+        "estate",
+    ),
+    (
+        "remote-build",
+        "timeout 20 ssh own-worker 'bash -o pipefail -c \"time cargo test -p widget\"'",
+        "loop",
+    ),
+    (
+        "remote-bare",
+        "ssh own-worker 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "stdin-literal",
+        "printf 'time cargo test -p widget' | sh",
+        "loop",
+    ),
+    (
+        "stdin-transform",
+        "printf 'time cargo test -p widget' | sed 's/widget/widget/' | sh",
+        "loop",
+    ),
+    ("stdin-file", "cat build.sh | sh", "loop"),
+    (
+        "stdin-remote",
+        "printf 'time cargo test -p widget' | timeout 20 ssh own-worker sh",
+        "loop",
+    ),
+    ("flock-lock", "flock '/etc/lock file' -c 'true'", "estate"),
+    (
+        "flock-argv",
+        "flock build.lock sh -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    ("env-data", "env -S 'printf \"cat /etc/shadow\"'", "estate"),
+    ("missing-shell-value", "bash -o -c 'true'", "estate"),
+    (
+        "ambiguous-shell-cluster",
+        "bash -oc pipefail 'true'",
+        "estate",
+    ),
+    (
+        "unsupported-shell-option",
+        "dash --unknown -c 'true'",
+        "estate",
+    ),
+    ("unsupported-split", "env -S 'sh\\_ -c true'", "estate"),
+    ("missing-lock-body", "flock build.lock -c", "estate"),
+    (
+        "unknown-buffer-option",
+        "stdbuf --unknown ssh A true",
+        "estate",
+    ),
+    (
+        "find-protected",
+        "find . -exec sh -c 'cat /etc/shadow' sh {} \\;",
+        "estate",
+    ),
+    (
+        "find-build",
+        "find . -exec sh -c 'time cargo test -p widget' sh {} \\;",
+        "estate",
+    ),
+    (
+        "grammar-0-protected",
+        "bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-0-build",
+        "bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-1-protected",
+        "bash -c - 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-1-build",
+        "bash -c - 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-2-protected",
+        "bash -c -e 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-2-build",
+        "bash -c -e 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-3-protected",
+        "bash -c -o pipefail 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-3-build",
+        "bash -c -o pipefail 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-4-protected",
+        "bash -c +o pipefail 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-4-build",
+        "bash -c +o pipefail 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-5-protected",
+        "bash -c -O extglob 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-5-build",
+        "bash -c -O extglob 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-6-protected",
+        "bash -c +O extglob 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-6-build",
+        "bash -c +O extglob 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-7-protected",
+        "bash -c -euo pipefail 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-7-build",
+        "bash -c -euo pipefail 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-8-protected",
+        "bash -c -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-8-build",
+        "bash -c -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-9-protected",
+        "bash -ec -x 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-9-build",
+        "bash -ec -x 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-10-protected",
+        "bash -co pipefail 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-10-build",
+        "bash -co pipefail 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-11-protected",
+        "sh -c -x 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-11-build",
+        "sh -c -x 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-12-protected",
+        "dash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-12-build",
+        "dash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-13-protected",
+        "ksh -c -e 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-13-build",
+        "ksh -c -e 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-14-protected",
+        "zsh -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-14-build",
+        "zsh -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-15-protected",
+        "env -S 'sh -c' -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-15-build",
+        "env -S 'sh -c' -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-16-protected",
+        "flock -e build.lock -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-16-build",
+        "flock -e build.lock -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-17-protected",
+        "flock --nb build.lock -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-17-build",
+        "flock --nb build.lock -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-18-protected",
+        "flock -w5 build.lock -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-18-build",
+        "flock -w5 build.lock -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-19-protected",
+        "flock --wait=5 build.lock -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-19-build",
+        "flock --wait=5 build.lock -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-20-protected",
+        "flock -xnw5 build.lock -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-20-build",
+        "flock -xnw5 build.lock -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-21-protected",
+        "flock --verbose build.lock -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-21-build",
+        "flock --verbose build.lock -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-22-protected",
+        "flock -- build.lock -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-22-build",
+        "flock -- build.lock -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-23-protected",
+        "stdbuf --output=L -- bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-23-build",
+        "stdbuf --output=L -- bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-24-protected",
+        "timeout -sTERM -k2 20 bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-24-build",
+        "timeout -sTERM -k2 20 bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-25-protected",
+        "time -f%U bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-25-build",
+        "time -f%U bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-26-protected",
+        "nice --adjustment=5 bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-26-build",
+        "nice --adjustment=5 bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-27-protected",
+        "nohup -- bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-27-build",
+        "nohup -- bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-28-protected",
+        "setsid -f bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-28-build",
+        "setsid -f bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-29-protected",
+        "env -u NAME bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-29-build",
+        "env -u NAME bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "grammar-30-protected",
+        "env --unset=NAME bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "grammar-30-build",
+        "env --unset=NAME bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "after-c-remote-protected",
+        "timeout 20 ssh own-worker \"bash -c -- 'cat /etc/shadow'\"",
+        "estate",
+    ),
+    (
+        "after-c-remote-build",
+        "timeout 20 ssh own-worker \"bash -c -- 'time cargo test -p widget'\"",
+        "loop",
+    ),
+    ("query-0", "bash --version", "loop"),
+    ("query-1", "bash --help", "loop"),
+    ("query-2", "zsh --version", "loop"),
+    ("query-3", "zsh --help", "loop"),
+    ("query-4", "ksh --version", "loop"),
+    ("query-5", "ksh --help", "loop"),
+    ("query-6", "env --version", "loop"),
+    ("query-7", "env --help", "loop"),
+    ("query-8", "stdbuf --version", "loop"),
+    ("query-9", "stdbuf --help", "loop"),
+    ("query-10", "flock --version", "loop"),
+    ("query-11", "flock -V", "loop"),
+    ("query-12", "flock --help", "loop"),
+    ("query-13", "flock -h", "loop"),
+    ("unresolved-0", "bash -c --", "estate"),
+    ("unresolved-1", "bash -c -o", "estate"),
+    ("unresolved-2", "bash -c -o pipefail", "estate"),
+    ("unresolved-3", "zsh -bc -x true", "estate"),
+    ("unresolved-4", "stdbuf --out=L bash -c true", "estate"),
+    ("unresolved-5", "flock --wa=5 build.lock -c true", "estate"),
+    (
+        "unresolved-6",
+        "timeout --unknown VALUE bash -c true",
+        "estate",
+    ),
+    ("unresolved-7", "bash -oc pipefail true", "estate"),
+    (
+        "body-stops-options",
+        "bash -c 'true' -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "flock-argv-options",
+        "flock build.lock sh -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-0-protected",
+        "env -a label bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-0-build",
+        "env -a label bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "boundary-1-protected",
+        "env -uS bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-1-build",
+        "env -uS bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "boundary-2-protected",
+        "env -uS -S 'bash -c' -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-2-build",
+        "env -uS -S 'bash -c' -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "boundary-3-protected",
+        "chrt -o 0 bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-3-build",
+        "chrt -o 0 bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "boundary-4-protected",
+        "ionice -c2 -n7 bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-4-build",
+        "ionice -c2 -n7 bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "boundary-5-protected",
+        "command -p bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-5-build",
+        "command -p bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "boundary-6-protected",
+        "time --format=%U bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-6-build",
+        "time --format=%U bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "boundary-7-protected",
+        "stdbuf -o L -- bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-7-build",
+        "stdbuf -o L -- bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "boundary-8-protected",
+        "flock -E7 build.lock -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-8-build",
+        "flock -E7 build.lock -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "boundary-9-protected",
+        "flock --conflict-exit-code=7 build.lock -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-9-build",
+        "flock --conflict-exit-code=7 build.lock -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "boundary-10-protected",
+        "bash --noprofile -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "boundary-10-build",
+        "bash --noprofile -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    ("query-prefix-0", "env -i --version", "loop"),
+    ("query-prefix-1", "stdbuf -oL --help", "loop"),
+    ("query-prefix-2", "nice --version", "loop"),
+    ("query-prefix-3", "timeout --help", "loop"),
+    ("query-prefix-4", "nohup --version", "loop"),
+    ("query-prefix-5", "setsid --help", "loop"),
+    ("query-prefix-6", "chrt --version", "loop"),
+    ("query-prefix-7", "ionice --help", "loop"),
+    (
+        "unknown-boundary-0",
+        "env --unknown VALUE bash -c true",
+        "estate",
+    ),
+    (
+        "unknown-boundary-1",
+        "chrt --unknown VALUE 0 bash -c true",
+        "estate",
+    ),
+    (
+        "unknown-boundary-2",
+        "ionice --unknown VALUE bash -c true",
+        "estate",
+    ),
+    ("unknown-boundary-3", "nice --adj=5 bash -c true", "estate"),
+    (
+        "unknown-boundary-4",
+        "zsh -c -oSH_WORD_SPLIT true",
+        "estate",
+    ),
+    ("unknown-boundary-5", "flock --fd 9 -c true", "estate"),
+    (
+        "flag-cluster-0-protected",
+        "setsid -fw bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "flag-cluster-0-build",
+        "setsid -fw bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "flag-cluster-1-protected",
+        "time -pv bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "flag-cluster-1-build",
+        "time -pv bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "flag-cluster-2-protected",
+        "time -vf%U bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "flag-cluster-2-build",
+        "time -vf%U bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    ("query-time", "time --version", "loop"),
+    ("query-flock-cluster", "flock -nV", "loop"),
+    (
+        "coverage-0-protected",
+        "bash -rcfile true -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-0-build",
+        "bash -rcfile true -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-1-protected",
+        "sh -rcfile true -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-1-build",
+        "sh -rcfile true -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-2-protected",
+        "bash --noprofile --norc -rcfile true -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-2-build",
+        "bash --noprofile --norc -rcfile true -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-3-protected",
+        "env -S 'bash -rcfile true -c' 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-3-build",
+        "env -S 'bash -rcfile true -c' 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-4-protected",
+        "timeout 20 ssh own-worker \"bash -rcfile true -c 'cat /etc/shadow'\"",
+        "estate",
+    ),
+    (
+        "coverage-4-build",
+        "timeout 20 ssh own-worker \"bash -rcfile true -c 'time cargo test -p widget'\"",
+        "loop",
+    ),
+    (
+        "coverage-5-protected",
+        "zsh -cO 'cat /etc/shadow' x",
+        "estate",
+    ),
+    (
+        "coverage-5-build",
+        "zsh -cO 'time cargo test -p widget' x",
+        "loop",
+    ),
+    (
+        "coverage-6-protected",
+        "zsh -c -O 'cat /etc/shadow' x",
+        "estate",
+    ),
+    (
+        "coverage-6-build",
+        "zsh -c -O 'time cargo test -p widget' x",
+        "loop",
+    ),
+    (
+        "coverage-7-protected",
+        "zsh -c +O 'cat /etc/shadow' x",
+        "estate",
+    ),
+    (
+        "coverage-7-build",
+        "zsh -c +O 'time cargo test -p widget' x",
+        "loop",
+    ),
+    (
+        "coverage-8-protected",
+        "taskset -c 0 bash -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-8-build",
+        "taskset -c 0 bash -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    ("coverage-9-protected", "watch 'cat /etc/shadow'", "estate"),
+    (
+        "coverage-9-build",
+        "watch 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-10-protected",
+        "script -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-10-build",
+        "script -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-11-protected",
+        "toolbox run sh -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-11-build",
+        "toolbox run sh -c 'time cargo test -p widget'",
+        "estate",
+    ),
+    (
+        "coverage-12-protected",
+        "flatpak-spawn --host sh -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-12-build",
+        "flatpak-spawn --host sh -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-13-protected",
+        "bash -c -- 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-13-build",
+        "bash -c -- 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-14-protected",
+        "bash -c -e 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-14-build",
+        "bash -c -e 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-15-protected",
+        "bash -c -o pipefail 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-15-build",
+        "bash -c -o pipefail 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-16-protected",
+        "bash -c -c 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-16-build",
+        "bash -c -c 'time cargo test -p widget'",
+        "loop",
+    ),
+    (
+        "coverage-17-protected",
+        "env -S'sh -c' 'cat /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-17-build",
+        "env -S'sh -c' 'time cargo test -p widget'",
+        "loop",
+    ),
+    ("coverage-brace-path", "cat {/,}etc/shadow", "estate"),
+    ("coverage-brace-build", "cp f{,.bak}", "estate"),
+    ("coverage-attached-tar", "tar -C/etc -xf a.tar", "estate"),
+    ("coverage-attached-cp", "cp -t/etc/cron.d f", "estate"),
+    ("coverage-attached-build", "tar -Cbuild -xf a.tar", "loop"),
+    (
+        "coverage-prose",
+        "git commit -m 'fix(scope): retain replies'",
+        "loop",
+    ),
+    (
+        "coverage-apostrophe",
+        "git commit -m \"don't drop replies\"",
+        "loop",
+    ),
+    ("coverage-pattern", "rg 'Result<Thing>' src", "loop"),
+    (
+        "coverage-prose-path",
+        "git commit -m 'fix(scope): /etc/shadow'",
+        "estate",
+    ),
+    (
+        "coverage-parent-fallback",
+        "git commit -m '( .\"\"./outside'",
+        "estate",
+    ),
+    (
+        "coverage-existing-question",
+        "git commit -m 'why?'",
+        "estate",
+    ),
+    ("coverage-existing-glob", "find . -name '*.rs'", "estate"),
+    (
+        "coverage-existing-url",
+        "git commit -m 'https://example.invalid'",
+        "estate",
+    ),
+    (
+        "coverage-existing-heredoc",
+        "cat <<'EOF'\nordinary\nEOF",
+        "estate",
+    ),
+];
+
+/// # Panics
+/// Panics only if the hook fixture fails to emit a verdict or its scope contradicts the table.
+/// ´test:integration:scope-command-string-extraction-preserves-ordinary-builds´
+#[test]
+fn scope_command_string_extraction_preserves_ordinary_builds() {
+    let fixture = ScopeFixture::new("command-string-extraction");
+    let mut actual = Vec::new();
+    let mut expected = Vec::new();
+    for &(name, command, scope) in COMMAND_STRING_SCOPE_CASES {
+        let output = run(fixture.hook(name, "safe", "loop"), &fixture.input(command));
+        let response: Value = serde_json::from_slice(&output.stdout).expect("hook output");
+        assert!(matches!(
+            response["hookSpecificOutput"]["permissionDecision"].as_str(),
+            Some("allow" | "deny")
+        ));
+        let records = journal_values(&fixture.directory.state_root());
+        let event = records.last().expect("verdict record");
+        actual.push((name, event["scope"].as_str().expect("scope").to_owned()));
+        expected.push((name, scope.to_owned()));
+    }
+    assert_eq!(actual, expected);
 }

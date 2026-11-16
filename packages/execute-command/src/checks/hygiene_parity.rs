@@ -1457,3 +1457,364 @@ fn hygiene_table_declares_the_counted_length_and_drops_the_vestigial_layout() {
     assert!(source.contains("pub const HYGIENE_RULES: &[HygieneRule; HYGIENE_RULE_COUNT]"));
     assert!(!source.contains(concat!("#[repr(", "usize)]")));
 }
+
+/// # Panics
+/// Panics only if a fixture loses its ordinary body or hides its protected operand.
+/// ´test:unit:scope-extracts-option-shells´
+#[test]
+fn scope_extracts_option_shells() {
+    for prefix in [
+        "bash -o pipefail -c",
+        "bash -euo pipefail -c",
+        "bash -O extglob -c",
+        "bash +o pipefail -c",
+        "bash +O extglob -c",
+        "sh -o errexit -c",
+        "sh +o errexit -c",
+    ] {
+        for body in ["time cargo test -p widget", "cat /etc/shadow"] {
+            let command = format!("{prefix} '{body}'");
+            let words = checks::scope_words(&command).expect("modeled body parses");
+            let operand = if body.starts_with("cat") {
+                "/etc/shadow"
+            } else {
+                "cargo"
+            };
+            assert!(
+                words.iter().any(|word| word.text == operand),
+                "{command}: {words:?}"
+            );
+        }
+    }
+}
+
+/// # Panics
+/// Panics only if a fixture loses its ordinary body or hides its protected operand.
+/// ´test:unit:scope-extracts-other-shells´
+#[test]
+fn scope_extracts_other_shells() {
+    for prefix in ["dash -c", "ksh -c", "zsh -c"] {
+        for body in ["time cargo test -p widget", "cat /etc/shadow"] {
+            let command = format!("{prefix} '{body}'");
+            let words = checks::scope_words(&command).expect("modeled body parses");
+            let operand = if body.starts_with("cat") {
+                "/etc/shadow"
+            } else {
+                "cargo"
+            };
+            assert!(
+                words.iter().any(|word| word.text == operand),
+                "{command}: {words:?}"
+            );
+        }
+    }
+}
+
+/// # Panics
+/// Panics only if a fixture loses its ordinary body or hides its protected operand.
+/// ´test:unit:scope-extracts-split-strings´
+#[test]
+fn scope_extracts_split_strings() {
+    for prefix in [
+        "env -S",
+        "env --split-string=",
+        "env -S ",
+        "env --split-string ",
+    ] {
+        for body in ["time cargo test -p widget", "cat /etc/shadow"] {
+            let command = format!("{prefix}'sh -c \"{body}\"'");
+            let words = checks::scope_words(&command).expect("modeled body parses");
+            let operand = if body.starts_with("cat") {
+                "/etc/shadow"
+            } else {
+                "cargo"
+            };
+            assert!(
+                words.iter().any(|word| word.text == operand),
+                "{command}: {words:?}"
+            );
+        }
+    }
+}
+
+/// # Panics
+/// Panics only if a fixture loses its ordinary body or hides its protected operand.
+/// ´test:unit:scope-extracts-buffering-launcher´
+#[test]
+fn scope_extracts_buffering_launcher() {
+    for prefix in [
+        "stdbuf -oL bash -c",
+        "stdbuf --output=L bash -c",
+        "stdbuf -o L bash -c",
+        "stdbuf -o64k bash -c",
+        "stdbuf --output=2MiB bash -c",
+    ] {
+        for body in ["time cargo test -p widget", "cat /etc/shadow"] {
+            let command = format!("{prefix} '{body}'");
+            let words = checks::scope_words(&command).expect("modeled body parses");
+            let operand = if body.starts_with("cat") {
+                "/etc/shadow"
+            } else {
+                "cargo"
+            };
+            assert!(
+                words.iter().any(|word| word.text == operand),
+                "{command}: {words:?}"
+            );
+        }
+    }
+}
+
+/// # Panics
+/// Panics only if a fixture loses its ordinary body or hides its protected operand.
+/// ´test:unit:scope-extracts-lock-payload´
+#[test]
+fn scope_extracts_lock_payload() {
+    for prefix in ["flock build.lock -c", "flock -n build.lock --command"] {
+        for body in ["time cargo test -p widget", "cat /etc/shadow"] {
+            let command = format!("{prefix} '{body}'");
+            let words = checks::scope_words(&command).expect("modeled body parses");
+            let operand = if body.starts_with("cat") {
+                "/etc/shadow"
+            } else {
+                "cargo"
+            };
+            assert!(
+                words.iter().any(|word| word.text == operand),
+                "{command}: {words:?}"
+            );
+        }
+    }
+}
+
+/// # Panics
+/// Panics only if an unsupported executable string is silently treated as a path.
+/// ´test:unit:scope-unmodeled-command-strings-are-unresolved´
+#[test]
+fn scope_unmodeled_command_strings_are_unresolved() {
+    for command in [
+        "env --split-str 'sh -c \"cat /etc/shadow\"'",
+        "env --split-str='sh -c \"time cargo test -p widget\"'",
+        "env -iS 'sh -c \"cat /etc/shadow\"'",
+        "env -iS 'sh -c \"time cargo test -p widget\"'",
+        "bash -o -c 'true'",
+        "bash -oc pipefail 'true'",
+        "bash -c",
+        "dash --unknown -c 'true'",
+        "env -S 'sh -c'",
+        "env -S '-u X sh -c true'",
+        r"env -S 'sh\_ -c true'",
+        "env -S 'sh ${BODY}'",
+        "stdbuf --unknown ssh A true",
+        "stdbuf -o",
+        "stdbuf -o ssh A 'cat /etc/shadow'",
+        "flock build.lock -c",
+    ] {
+        assert!(checks::scope_words(command).is_none(), "{command}");
+    }
+}
+
+/// # Panics
+/// Panics only if extraction loses a local lock or treats argv data as shell source.
+/// ´test:unit:scope-extraction-preserves-argument-boundaries´
+#[test]
+fn scope_extraction_preserves_argument_boundaries() {
+    for command in [
+        "env -u -S bash -c 'time cargo test -p widget'",
+        "env -C --split-string bash -c 'time cargo test -p widget'",
+    ] {
+        let words = checks::scope_words(command).expect("option values stay values");
+        assert!(
+            words.iter().any(|word| word.text == "cargo"),
+            "{command}: {words:?}"
+        );
+    }
+
+    let words = checks::scope_words("flock '/etc/lock file' -c 'true'").expect("lock fixture");
+    assert!(
+        words
+            .iter()
+            .any(|word| word.text == "/etc/lock file" && !word.remote)
+    );
+    let words =
+        checks::scope_words("flock build.lock sh -c 'cat /etc/shadow'").expect("argv fixture");
+    assert!(words.iter().any(|word| word.text == "/etc/shadow"));
+    let words = checks::scope_words("env -S 'printf \"cat /etc/shadow\"'").expect("data fixture");
+    // Interpretation preserves argv boundaries, but literal coverage also inspects data.
+    assert!(words.iter().any(|word| word.text == "/etc/shadow"));
+    assert_eq!(
+        scope_locations("stdbuf -oL ssh A 'cat /remote/x'", "/remote/x"),
+        [true]
+    );
+}
+
+/// # Panics
+/// Panics only if options after the command flag conceal a body's operands.
+/// ´test:unit:scope-shell-options-after-command-flag´
+#[test]
+fn scope_shell_options_after_command_flag() {
+    for prefix in [
+        "bash -c --",
+        "bash -c -",
+        "bash -c -e",
+        "bash -c -o pipefail",
+        "bash -c +o pipefail",
+        "bash -c -O extglob",
+        "bash -c +O extglob",
+        "bash -c -euo pipefail",
+        "bash -c -c",
+        "bash -ec -x",
+        "bash -co pipefail",
+        "sh -c -x",
+        "dash -c --",
+        "ksh -c -e",
+        "zsh -c --",
+        "env -S 'sh -c' --",
+    ] {
+        for (body, operand) in [
+            ("cat /etc/shadow", "/etc/shadow"),
+            ("time cargo test -p widget", "cargo"),
+        ] {
+            let command = format!("{prefix} '{body}'");
+            let words = checks::scope_words(&command).expect("modeled command");
+            assert!(
+                words.iter().any(|word| word.text == operand),
+                "{command}: {words:?}"
+            );
+        }
+    }
+}
+
+/// # Panics
+/// Panics only if a nonexecuting query is mistaken for an absent command body.
+/// ´test:unit:scope-nonexecuting-queries-have-no-payload´
+#[test]
+fn scope_nonexecuting_queries_have_no_payload() {
+    for command in [
+        "bash --version",
+        "bash --help",
+        "zsh --version",
+        "zsh --help",
+        "ksh --version",
+        "ksh --help",
+        "env --version",
+        "env --help",
+        "stdbuf --version",
+        "stdbuf --help",
+        "flock --version",
+        "flock -V",
+        "flock --help",
+        "flock -h",
+    ] {
+        assert!(checks::scope_words(command).is_some(), "{command}");
+    }
+}
+
+/// # Panics
+/// Panics only if a lock option conceals a body or the lock boundary is crossed.
+/// ´test:unit:scope-flock-option-slots´
+#[test]
+fn scope_flock_option_slots() {
+    for prefix in [
+        "flock -e build.lock -c",
+        "flock --nb build.lock -c",
+        "flock -w5 build.lock -c",
+        "flock --wait=5 build.lock -c",
+        "flock -xnw5 build.lock -c",
+        "flock --verbose build.lock -c",
+        "flock -- build.lock -c",
+    ] {
+        let command = format!("{prefix} 'cat /etc/shadow'");
+        let words = checks::scope_words(&command).expect("lock command");
+        assert!(
+            words.iter().any(|word| word.text == "/etc/shadow"),
+            "{command}"
+        );
+    }
+    let words =
+        checks::scope_words("flock build.lock sh -c -- 'cat /etc/shadow'").expect("argv command");
+    assert!(words.iter().any(|word| word.text == "/etc/shadow"));
+    assert!(checks::scope_words("flock --wa=5 build.lock -c true").is_none());
+}
+
+/// # Panics
+/// Panics only if a launcher value is mistaken for its command or an unknown slot is guessed.
+/// ´test:unit:scope-launcher-grammar-slots´
+#[test]
+fn scope_launcher_grammar_slots() {
+    for prefix in [
+        "setsid -fw bash -c --",
+        "time -pv bash -c --",
+        "time -vf%U bash -c --",
+    ] {
+        let command = format!("{prefix} 'cat /etc/shadow'");
+        let words = checks::scope_words(&command).expect("flag cluster");
+        assert!(
+            words.iter().any(|word| word.text == "/etc/shadow"),
+            "{command}"
+        );
+    }
+    for prefix in [
+        "env -a label bash -c --",
+        "env -uS bash -c --",
+        "env -uS -S 'bash -c' --",
+        "chrt -o 0 bash -c --",
+        "ionice -c2 -n7 bash -c --",
+        "command -p bash -c --",
+        "time --format=%U bash -c --",
+        "stdbuf -o L -- bash -c --",
+        "flock -E7 build.lock -c",
+        "flock --conflict-exit-code=7 build.lock -c",
+        "bash --noprofile -c --",
+    ] {
+        let command = format!("{prefix} 'cat /etc/shadow'");
+        let words = checks::scope_words(&command).expect("modeled launcher");
+        assert!(
+            words.iter().any(|word| word.text == "/etc/shadow"),
+            "{command}"
+        );
+    }
+    for command in [
+        "env -i --version",
+        "stdbuf -oL --help",
+        "nice --version",
+        "timeout --help",
+        "nohup --version",
+        "setsid --help",
+        "chrt --version",
+        "ionice --help",
+    ] {
+        assert!(checks::scope_words(command).is_some(), "{command}");
+    }
+    for command in [
+        "env --unknown VALUE bash -c true",
+        "chrt --unknown VALUE 0 bash -c true",
+        "ionice --unknown VALUE bash -c true",
+        "nice --adj=5 bash -c true",
+        "zsh -c -oSH_WORD_SPLIT true",
+        "flock --fd 9 -c true",
+    ] {
+        assert!(checks::scope_words(command).is_none(), "{command}");
+    }
+}
+
+/// # Panics
+/// Panics only if the literal bound is skipped or a lexical fallback grants remote location.
+/// ´test:unit:scope-literal-coverage-bounds-and-fallback-location´
+#[test]
+fn scope_literal_coverage_bounds_and_fallback_location() {
+    let mut command = "ordinary".to_owned();
+    for _ in 0..9 {
+        command = format!("unknown '{}'", command.replace('\'', "'\\''"));
+    }
+    assert!(checks::scope_projection(&command).is_err());
+    let words =
+        checks::scope_projection(r#"ssh A "printf '(ordinary'""#).expect("lexical data fallback");
+    let fallback = words
+        .iter()
+        .filter(|word| word.text == "ordinary")
+        .collect::<Vec<_>>();
+    assert_ne!(fallback.len(), 0);
+    assert!(fallback.iter().all(|word| !word.remote));
+    assert!(checks::scope_projection("echo ordinary # ignored { $ ?").is_ok());
+}

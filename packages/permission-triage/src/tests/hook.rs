@@ -29,6 +29,197 @@ use crate::{
 
 static NEXT_ESTATE_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
+fn coverage_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// # Panics
+/// Panics only if a body selection can erase a refused literal from the production floor.
+/// ´test:crate:scope-coverage-survives-adversarial-body-selection´
+#[test]
+fn scope_coverage_survives_adversarial_body_selection() {
+    use execute_command::checks::ScopeWord;
+    let temp = EstateFixture::temporary();
+    let checkout = temp.0.join("checkout");
+    fs::create_dir(&checkout).expect("checkout");
+    let mut cases = 0;
+    // Four argv positions, seven literal nesting levels below the depth-eight guard,
+    // three refused paths, seven spellings, and four unrelated/data program names.
+    for program in ["unmodelled", "watch", "printf", "echo"] {
+        for path in ["/etc/shadow", "/etc/cron.d", "../outside"] {
+            for literal in [
+                path.to_owned(),
+                format!("cat {path}"),
+                format!("value={path}"),
+                format!("host:{path}"),
+                format!("-C{path}"),
+                format!("-xnC{path}"),
+                format!("true # {path}"),
+            ] {
+                let mut nested = literal;
+                for depth in 0..7 {
+                    for position in 0..4 {
+                        let mut argv = [
+                            program.to_owned(),
+                            "one".into(),
+                            "two".into(),
+                            "three".into(),
+                            "four".into(),
+                        ];
+                        argv[position + 1] = nested.clone();
+                        let command = argv
+                            .iter()
+                            .map(|word| coverage_quote(word))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        // Replace the entire interpretation layer, including all nested
+                        // recognizers: each possible body as one unparsed word, then none.
+                        for selected in argv.iter().map(Some).chain(std::iter::once(None)) {
+                            let interpretation = selected
+                                .into_iter()
+                                .map(|word| ScopeWord {
+                                    text: word.clone(),
+                                    remote: false,
+                                })
+                                .collect();
+                            assert_eq!(
+                                crate::hook::scope_with_interpretation_for_test(
+                                    &command,
+                                    &checkout,
+                                    Ok(interpretation)
+                                ),
+                                Scope::Estate,
+                                "program={program} depth={depth} position={position} selected={selected:?}"
+                            );
+                            cases += 1;
+                        }
+                    }
+                    nested = format!("unknown {}", coverage_quote(&nested));
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 14_112);
+    for command in [
+        "cat {/,}etc/shadow",
+        "cat {.,}./x",
+        "tar -C/etc -xf a.tar",
+        "cp -t/etc/cron.d f",
+        "cat .\"\"./outside",
+        "echo x=/etc/shadow",
+        "echo host:/etc/shadow",
+        "env -S 'sh\\_-c'",
+        "bash --unknown-option -c 'true'",
+    ] {
+        assert_eq!(
+            crate::hook::scope_with_interpretation_for_test(command, &checkout, Ok(Vec::new())),
+            Scope::Estate,
+            "{command}"
+        );
+    }
+    assert_eq!(
+        crate::hook::scope_with_interpretation_for_test(
+            "echo ordinary",
+            &checkout,
+            Err(execute_command::checks::ScopeProjectionError::CommandString)
+        ),
+        Scope::Estate
+    );
+}
+
+/// # Panics
+/// Panics only if a previous counterexample depends on the recognizer's body choice.
+/// ´test:crate:scope-coverage-counterexamples-ignore-body-choice´
+#[test]
+fn scope_coverage_counterexamples_ignore_body_choice() {
+    use execute_command::checks::ScopeWord;
+    let temp = EstateFixture::temporary();
+    let checkout = temp.0.join("checkout");
+    fs::create_dir(&checkout).expect("checkout");
+    let body = "cat /etc/shadow";
+    let forms: &[&[&str]] = &[
+        &["bash", "-rcfile", "true", "-c", body],
+        &["zsh", "-cO", body, "x"],
+        &["bash", "-c", "--", body],
+        &["bash", "-c", "-e", body],
+        &["bash", "-c", "-o", "pipefail", body],
+        &["bash", "-c", "-c", body],
+        &["sh", "-c", "-x", body],
+        &["env", "-Ssh -c", body],
+        &["env", "-iS", "sh -c 'cat /etc/shadow'"],
+        &["ssh", "A", "bash -c -- 'cat /etc/shadow'"],
+        &["taskset", "-c", "0", "bash", "-c", body],
+        &["watch", body],
+        &["script", "-c", body],
+        &["toolbox", "run", "sh", "-c", body],
+        &["flatpak-spawn", "--host", "sh", "-c", body],
+    ];
+    let mut cases = 0;
+    for argv in forms {
+        let command = argv
+            .iter()
+            .map(|word| coverage_quote(word))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for selected in argv.iter().map(Some).chain(std::iter::once(None)) {
+            let interpretation = selected
+                .into_iter()
+                .map(|word| ScopeWord {
+                    text: (*word).to_owned(),
+                    remote: false,
+                })
+                .collect();
+            assert_eq!(
+                crate::hook::scope_with_interpretation_for_test(
+                    &command,
+                    &checkout,
+                    Ok(interpretation)
+                ),
+                Scope::Estate,
+                "{command}: {selected:?}"
+            );
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 75);
+}
+
+/// # Panics
+/// Panics only if fallback loses literal fragments or unnecessarily rejects ordinary prose.
+/// ´test:crate:scope-data-fallback-preserves-prose-and-paths´
+#[test]
+fn scope_data_fallback_preserves_prose_and_paths() {
+    let temp = EstateFixture::temporary();
+    let checkout = temp.0.join("checkout");
+    fs::create_dir(&checkout).expect("checkout");
+    for data in [
+        "fix(scope): retain replies",
+        "don't drop replies",
+        "Result<Thing>",
+        "<ordinary>",
+    ] {
+        let command = format!("git commit -m {}", coverage_quote(data));
+        assert_eq!(
+            remote_fixture_scope(&checkout, &command, ""),
+            Scope::Loop,
+            "{command}"
+        );
+    }
+    for data in [
+        "fix(scope): /etc/shadow",
+        "don't read /etc/shadow",
+        "Result</etc/shadow>",
+        "( .\"\"./outside",
+    ] {
+        let command = format!("git commit -m {}", coverage_quote(data));
+        assert_eq!(
+            remote_fixture_scope(&checkout, &command, ""),
+            Scope::Estate,
+            "{command}"
+        );
+    }
+}
+
 fn parsed_worker_registry(entries: &[(&str, String)]) -> Registry {
     let mut listing = Vec::new();
     let mut texts = BTreeMap::new();
@@ -1346,17 +1537,21 @@ fn remote_scope_fixed_cases() -> impl Iterator<Item = (&'static str, String, Sco
             "ssh own-worker 'cat >> .ssh/authorized_keys'",
             Scope::Estate,
         ),
-        ("brace", "ssh own-worker 'cat {/etc/shadow,x}'", Scope::Loop),
+        (
+            "brace",
+            "ssh own-worker 'cat {/etc/shadow,x}'",
+            Scope::Estate,
+        ),
         (
             "stdin",
             "printf 'cat /etc/shadow' | ssh own-worker sh",
-            Scope::Loop,
+            Scope::Estate,
         ),
-        ("host-colon", "scp f own-worker:/etc/hosts", Scope::Loop),
+        ("host-colon", "scp f own-worker:/etc/hosts", Scope::Estate),
         (
             "xargs-stdin",
             "printf '/etc/hosts' | ssh own-worker 'xargs cat'",
-            Scope::Loop,
+            Scope::Estate,
         ),
         ("expansion", "ssh own-worker 'cat $HOME/x'", Scope::Estate),
         ("subshell", "ssh own-worker 'cat $(pwd)/x'", Scope::Estate),
@@ -2565,5 +2760,105 @@ fn hook_module_doc_names_environment_inputs_and_pure_adapter() {
         "`adapt_hook` itself remains a pure response adapter",
     ] {
         assert!(source.contains(contract));
+    }
+}
+
+/// # Panics
+/// Panics only if a fixture cannot decode or extraction changes an ordinary loop verdict.
+/// ´test:crate:extracted-builds-and-stdin-controls-retain-loop-verdicts´
+#[test]
+fn extracted_builds_and_stdin_controls_retain_loop_verdicts() {
+    let registry = worker_identity_registry("40000:4", "42000:4");
+    let role = resolve_role(
+        Some(&registry),
+        41001,
+        "one-sid",
+        "/launch/one",
+        None,
+        false,
+    );
+    let model = execute_command::triage::parse_hook(
+        &json!({"classification":"safe", "scope":"loop", "reason":"fixture"}),
+    )
+    .expect("model fixture");
+    for command in [
+        "bash -o pipefail -c 'time cargo test -p widget'",
+        "bash -euo pipefail -c 'time cargo test -p widget'",
+        "bash -O extglob -c 'time cargo test -p widget'",
+        "bash +o pipefail -c 'time cargo test -p widget'",
+        "dash -c 'time cargo test -p widget'",
+        "ksh -c 'time cargo test -p widget'",
+        "zsh -c 'time cargo test -p widget'",
+        "env -S 'sh -c \"time cargo test -p widget\"'",
+        "stdbuf -oL bash -c 'time cargo test -p widget'",
+        "flock build.lock -c 'time cargo test -p widget'",
+        "set -euo pipefail; time cargo test -p widget",
+        "time cargo test -p widget",
+        "printf 'time cargo test -p widget' | sh",
+        "printf 'time cargo test -p widget' | sed 's/widget/widget/' | sh",
+        "cat build.sh | sh",
+        "printf 'time cargo test -p widget' | timeout 20 ssh own-worker sh",
+    ] {
+        let mut input: Value =
+            serde_json::from_slice(&request("Bash", json!({"command":command}))).expect("request");
+        input["cwd"] = json!("/launch/one");
+        let decoded = decode_request(&serde_json::to_vec(&input).expect("request bytes"));
+        let output = crate::hook::adapt_hook_for_domain(
+            &decoded,
+            Some(&FastLane::ToModel),
+            ModelStage::Result(&model),
+            HookTiming::default(),
+            &role,
+            None,
+            &[],
+        );
+        assert_eq!(output.response().reason(), "safe: fixture", "{command}");
+    }
+}
+
+/// # Panics
+/// Panics only if a fixture cannot decode or extraction changes an ordinary loop verdict.
+/// ´test:crate:unparsed-command-string-remedy-and-recovery´
+#[test]
+fn unparsed_command_string_remedy_and_recovery() {
+    let registry = worker_identity_registry("40000:4", "42000:4");
+    let role = resolve_role(
+        Some(&registry),
+        41001,
+        "one-sid",
+        "/launch/one",
+        None,
+        false,
+    );
+    let model = execute_command::triage::parse_hook(
+        &json!({"classification":"safe", "scope":"loop", "reason":"fixture"}),
+    )
+    .expect("model fixture");
+    for command in [
+        "bash --unknown -c 'true'",
+        "bash -c -- 'true'",
+        "bash -c 'true'",
+    ] {
+        let mut input: Value =
+            serde_json::from_slice(&request("Bash", json!({"command":command}))).expect("request");
+        input["cwd"] = json!("/launch/one");
+        let decoded = decode_request(&serde_json::to_vec(&input).expect("request bytes"));
+        let output = crate::hook::adapt_hook_for_domain(
+            &decoded,
+            Some(&FastLane::ToModel),
+            ModelStage::Result(&model),
+            HookTiming::default(),
+            &role,
+            None,
+            &[],
+        );
+        if command.contains("--unknown") {
+            assert_eq!(
+                output.response().reason(),
+                "infrastructure-failure: scope validation failed: unresolved command-string or launcher syntax; use a supported literal body such as bash -c 'COMMAND', keeping required safety wrappers; no policy judgment was made"
+            );
+        } else {
+            assert_eq!(output.response().reason(), "safe: fixture", "{command}");
+        }
     }
 }
