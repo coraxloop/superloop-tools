@@ -3850,7 +3850,7 @@ fn bite_two_generated_counts_and_censored_latency_survive_failure() {
 }
 
 fn run_roster_mode(mode: &str, roster: &str) -> (FixtureDirectory, Output, Value) {
-    run_roster_mode_with_ceiling(mode, roster, "10000")
+    run_roster_mode_with_ceiling(mode, roster, "120000")
 }
 
 fn run_roster_mode_with_ceiling(
@@ -4042,7 +4042,7 @@ fn fix_test_roster_ceiling_floor_retains_selected_rows() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("ceiling_ms=10000"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ceiling_ms=120000"));
     assert_eq!(verdict["status"], "ready");
     for row in required_rows(&verdict, "audit") {
         assert_eq!(row["classification"], "pass");

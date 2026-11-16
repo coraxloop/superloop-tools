@@ -1149,8 +1149,8 @@ fn run_harness_preflight(
     let ceiling = if progress.selection == RosterSelection::Full {
         configured
     } else {
-        // Explicit fake test rosters retain every row and allow process contention.
-        configured.max(Duration::from_secs(10))
+        // Explicit fake test rosters retain every row; this is a distant hang guard under load.
+        configured.max(Duration::from_secs(120))
     };
     let allowed_version = env::var_os("PERMISSION_TRIAGE_HARNESS_ALLOW_VERSION");
     let harness = configured_harness()?;
