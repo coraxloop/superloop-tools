@@ -386,14 +386,20 @@ fn mail_retry_clock_delivers_only_known_unfinished_letters() {
     fixture(
         "mail_retry_clock_delivers_only_known_unfinished_letters",
         |service, home| {
+            let base = Monotonic::now();
+            service.clock = Box::new(ControlledClock {
+                base,
+                seconds: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            });
             publication::STOP.with(|stop| stop.set(Some(0)));
-            assert_ne!(
-                service.scan().expect("post-claim refusal"),
-                Vec::<String>::new()
-            );
+            let failures = service.scan().expect("post-claim refusal");
+            assert!(!failures.is_empty(), "first scan must refuse: {failures:?}");
+            let source = home.join(".var/loops/alpha/mail/outbox/alpha.self.letter");
             assert!(
-                home.join(".var/loops/alpha/mail/outbox/alpha.self.letter")
-                    .exists()
+                source.exists(),
+                "first scan must leave {}; failures={failures:?}; records={:?}",
+                source.display(),
+                service.journal.records().expect("records")
             );
             fs::rename(
                 home.join(".var/loops/beta/.mail-staging/held"),
@@ -401,7 +407,7 @@ fn mail_retry_clock_delivers_only_known_unfinished_letters() {
             )
             .expect("unrelated arrival");
             assert_eq!(
-                service.retry_due_at(Monotonic::now() + Duration::from_secs(1)),
+                service.retry_due_at(base + Duration::from_secs(1)),
                 Vec::<String>::new()
             );
             delivered(home, "alpha", 1);
@@ -421,21 +427,21 @@ fn mail_retry_clock_finishes_accepted_publication_without_a_wake() {
     fixture(
         "mail_retry_clock_finishes_accepted_publication_without_a_wake",
         |service, home| {
+            let base = Monotonic::now();
+            service.clock = Box::new(ControlledClock {
+                base,
+                seconds: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            });
             publication::STOP.with(|stop| stop.set(Some(5)));
-            assert_ne!(
-                service.scan().expect("pending publication"),
-                Vec::<String>::new()
-            );
+            let failures = service.scan().expect("pending publication");
+            assert!(!failures.is_empty(), "first scan must refuse: {failures:?}");
+            let records = service.journal.records().expect("records");
             assert!(
-                service
-                    .journal
-                    .records()
-                    .expect("records")
-                    .iter()
-                    .any(|record| record.completed.is_none())
+                records.iter().any(|record| record.completed.is_none()),
+                "first scan must leave an accepted publication pending: failures={failures:?}; records={records:?}"
             );
             assert_eq!(
-                service.retry_due_at(Monotonic::now() + Duration::from_secs(1)),
+                service.retry_due_at(base + Duration::from_secs(1)),
                 Vec::<String>::new()
             );
             delivered(home, "alpha", 1);
@@ -464,7 +470,7 @@ fn mail_retry_clock_finishes_accepted_publication_without_a_wake() {
                 1
             );
             assert_eq!(
-                service.retry_due_at(Monotonic::now() + Duration::from_secs(1)),
+                service.retry_due_at(base + Duration::from_secs(1)),
                 Vec::<String>::new()
             );
             delivered(home, "alpha", 2);

@@ -697,12 +697,14 @@ mod tests {
         assert_eq!(
             text.matches("mail notifications remain unavailable")
                 .count(),
-            2
+            2,
+            "captured diagnostics: {text}"
         );
         assert_eq!(
             text.matches("mail uncovered path no longer requested")
                 .count(),
-            2
+            2,
+            "captured diagnostics: {text}"
         );
         assert!(text.contains("missing=true"), "{text}");
         std::fs::remove_dir_all(root).expect("cleanup");
