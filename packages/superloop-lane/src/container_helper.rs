@@ -4870,7 +4870,7 @@ mod tests {
         reader
             .join()
             .expect("client received output before disconnect");
-        assert_eq!(refusal.kind, "container-stream");
+        assert_eq!(refusal.kind, "container-stream", "received {refusal:?}");
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(evidence).expect("attempt evidence"))
                 .expect("evidence JSON");
@@ -5979,7 +5979,7 @@ exit 0
             .err()
             .expect("closed stdin refuses");
         assert_eq!(reader.join().expect("status reader"), 1);
-        assert_eq!(refusal.kind, "container-stream");
+        assert_eq!(refusal.kind, "container-stream", "received {refusal:?}");
         let evidence = fixture.evidence();
         assert_eq!(evidence["status"], 1);
         assert_eq!(evidence["stream_error"]["stream"], "stdin");
@@ -6006,7 +6006,7 @@ exit 0
             .err()
             .expect("stream limit refuses");
         assert_eq!(reader.join().expect("status reader"), 1);
-        assert_eq!(refusal.kind, "container-stream");
+        assert_eq!(refusal.kind, "container-stream", "received {refusal:?}");
         assert!(refusal.detail.contains("container stream limit reached"));
         let evidence = fixture.evidence();
         assert_eq!(evidence["stream_error"]["stream"], "stdout");
@@ -6183,7 +6183,7 @@ exit 0
         });
         let (refusal, evidence, removed) =
             finish_held_runner(&holder, &publication, &completion, runner);
-        assert_eq!(refusal.kind, "container-stream");
+        assert_eq!(refusal.kind, "container-stream", "received {refusal:?}");
         assert_eq!(read_attempt_status(&mut client), 1);
         assert_eq!(evidence["status"], 1);
         assert_eq!(evidence["stream_error"]["stream"], "drain");
@@ -6262,7 +6262,7 @@ exit 0
             1,
             "reader finishes during stop; only the retained drain expiry remains"
         );
-        assert_eq!(refusal.kind, "container-stream");
+        assert_eq!(refusal.kind, "container-stream", "received {refusal:?}");
         assert_eq!(
             refusal.detail,
             "stream drain exceeded 0.000 seconds after child exit"
