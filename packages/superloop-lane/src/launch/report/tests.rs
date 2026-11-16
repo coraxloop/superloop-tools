@@ -439,3 +439,46 @@ fn failed_report_archive_refuses_a_replaced_inode_with_equal_bytes() {
             .exists()
     );
 }
+
+/// # Panics
+/// Panics only if refusal reports lose their cause, remedy, or bounded reader admission.
+/// ´test:unit:launch-readback-refusal-report-retains-cause-and-remedy´
+#[test]
+fn launch_readback_refusal_report_retains_cause_and_remedy() {
+    let (fixture, runs) = held();
+    for (step, mut report) in [(None, first()), (Some("review"), resumed())] {
+        let error = crate::error::LaneError::operation(
+            "settle-evidence",
+            super::super::steering::MISSING_REPLY_BINDING,
+        );
+        let line = error.line();
+        report["settlement"] =
+            super::settlement_result(&Err(error), "alpha", "R", "review").expect("refusal report");
+        if step.is_some() {
+            report["thread_id"] = Value::Null;
+        }
+        replace(&fixture, step, report.to_string().as_bytes());
+        let read = read_bound(&runs, "R", step, Uid::effective().as_raw()).expect("read refusal");
+        assert_eq!(read, report);
+        assert_eq!(read["settlement"]["state"], "refused");
+        assert_eq!(read["settlement"]["detail"], line);
+        assert_eq!(
+            read["settlement"]["next_command"],
+            "bind-reply alpha R --step review --delivery UTC_INSTANT"
+        );
+    }
+    let report = super::settlement_result(
+        &Err(crate::error::LaneError::input(
+            "readback",
+            "reply custody differs",
+        )),
+        "alpha",
+        "R",
+        "review",
+    )
+    .expect("other refusal");
+    assert_eq!(
+        report["next_command"],
+        "settle alpha R --round review --dry-run"
+    );
+}

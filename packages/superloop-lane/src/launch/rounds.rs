@@ -2004,6 +2004,11 @@ fn resume_with_program(
                 .and_then(|rounds| rounds.last_mut())
                 .ok_or_else(|| LaneError::input("round-record", "active round is absent"))?;
             round["phase"] = json!("failed");
+            if round["settlement_error"].is_null()
+                && let Err(error) = &settlement
+            {
+                round["settlement_error"] = json!(error.line());
+            }
             if let Some(line) = reaping.as_ref().err().map(LaneError::line).or_else(|| {
                 reaping.as_ref().ok().and_then(|report| {
                     super::reaping::reaping_verdict(report)
@@ -2019,17 +2024,37 @@ fn resume_with_program(
         publish_reservation(&path, &saved)?;
         (round_dir, saved["thread_id"].clone(), saved)
     };
+    let report: Result<Value, LaneError> = (|| {
+        let settlement_report =
+            super::report::settlement_result(&settlement, &request.loop_name, &request.run, step)?;
+        let driver_report = result.as_ref().map_or_else(LaneError::line, Clone::clone);
+        let publication = super::report::credential_publication(&publication)?;
+        Ok(
+            json!({"schema":1,"command":"launch","dry_run":false,"round":step,"round_dir":round_dir,"budget_seconds":request.budget,"letter":letter_name,"letter_reconciliation":letter_reconciliation,"thread_id":thread,"driver_report":driver_report,"settlement":settlement_report,"credential_publication":publication,"wall_seconds":began.elapsed().as_secs_f64()}),
+        )
+    })();
+    let report = if settlement.is_err() {
+        let report = report?;
+        super::report::finish_with_fallback(
+            &verified_runs,
+            &request.run,
+            Some(step),
+            report.clone(),
+            on_failure,
+        )?;
+        Ok(report)
+    } else {
+        report
+    };
     step_directory?;
     super::reaping::reaping_verdict(&reaping?)?;
-    let driver_report = result?;
-    let settlement = super::settlement_document(&settlement?)?;
-    let publication = super::report::credential_publication(&publication)?;
-    let report = json!({"schema":1,"command":"launch","dry_run":false,"round":step,"round_dir":round_dir,"budget_seconds":request.budget,"letter":letter_name,"letter_reconciliation":letter_reconciliation,"thread_id":thread,"driver_report":driver_report,"settlement":settlement,"credential_publication":publication,"wall_seconds":began.elapsed().as_secs_f64()});
+    result?;
+    settlement?;
     super::report::finish_with_fallback(
         &verified_runs,
         &request.run,
         Some(step),
-        report,
+        report?,
         on_failure,
     )
 }

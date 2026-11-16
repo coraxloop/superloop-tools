@@ -528,6 +528,13 @@ fn replaceable_report(
         return Ok(Value::Null);
     }
     let prior = super::report::read_bound(runs, run, step, owner)?;
+    if prior["settlement"]["state"] == "refused"
+        && prior["settlement"]["detail"].is_string()
+        && prior["settlement"]["detail"] == record["readback_end"]
+        && prior["round_dir"] == super::report::round_dir(plan, record, step)?
+    {
+        return Ok(prior);
+    }
     if super::reaping::recovery_verdict(record).is_ok()
         && prior["interrupted_settlement"]["state"] == "completed-interrupted-settlement"
         && prior["interrupted_settlement"]["phase"] == "failed"
@@ -711,7 +718,17 @@ fn publish_settled_report(
             "private report path differs from the settled round",
         ));
     }
-    let prior = &settled["reaping_recovery"]["previous_report"];
+    let retained = &settled["reaping_recovery"]["previous_report"];
+    let prior = if retained.is_null() && private["report_archive"].is_object() {
+        super::report::read_bound(
+            runs,
+            &request.run,
+            step.as_deref(),
+            Uid::effective().as_raw(),
+        )?
+    } else {
+        retained.clone()
+    };
     if !prior.is_null() {
         let mut archive = super::report::archive_preview(runs, &request.run, step.as_deref())?;
         for key in ["source", "target"] {
@@ -736,7 +753,7 @@ fn publish_settled_report(
         &request.run,
         step.as_deref(),
         &report,
-        (!prior.is_null()).then_some(prior),
+        (!prior.is_null()).then_some(&prior),
     ) {
         on_failure(&report);
         return Err(LaneError {

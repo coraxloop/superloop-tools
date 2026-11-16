@@ -277,6 +277,30 @@ pub(crate) fn finish_with_fallback(
     Ok(report)
 }
 
+/// Keep a readback refusal in the existing settlement object of the launch report.
+pub(crate) fn settlement_result(
+    result: &Result<String, LaneError>,
+    loop_name: &str,
+    run: &str,
+    step: &str,
+) -> Result<Value, LaneError> {
+    match result {
+        Ok(text) => super::settlement_document(text),
+        Err(error) => {
+            let next = if error
+                .detail
+                .contains(super::steering::MISSING_REPLY_BINDING)
+            {
+                format!("bind-reply {loop_name} {run} --step {step} --delivery UTC_INSTANT")
+            } else {
+                format!("settle {loop_name} {run} --round {step} --dry-run")
+            };
+            Ok(serde_json::json!({"state":"refused", "detail":error.line(),
+                "run_phase":"failed", "round_phase":"failed", "next_command":next}))
+        }
+    }
+}
+
 fn has_exact_keys(value: &Value, expected: &[&str]) -> bool {
     value.as_object().is_some_and(|fields| {
         fields.keys().map(String::as_str).collect::<BTreeSet<_>>()
@@ -476,7 +500,9 @@ fn exact_shape(report: &Value, step: Option<&str>) -> bool {
                 && report["budget_seconds"].is_u64()
                 && report["letter"].is_string()
                 && report["letter_reconciliation"].is_array()
-                && report["thread_id"].is_string()
+                && (report["thread_id"].is_string()
+                    || (report["thread_id"].is_null()
+                        && report["settlement"]["state"] == "refused"))
         },
     )
 }

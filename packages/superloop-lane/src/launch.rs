@@ -4714,6 +4714,11 @@ fn run_with_program(
             .and_then(|rounds| rounds.last_mut())
             .ok_or_else(|| LaneError::input("round-record", "active round is absent"))?;
         round["phase"] = json!("failed");
+        if round["settlement_error"].is_null()
+            && let Err(error) = &settlement
+        {
+            round["settlement_error"] = json!(error.line());
+        }
         if let Some(line) = reaping.as_ref().err().map(LaneError::line).or_else(|| {
             reaping.as_ref().ok().and_then(|report| {
                 reaping::reaping_verdict(report)
@@ -4735,6 +4740,34 @@ fn run_with_program(
     );
     let round_dir = report::round_dir(&plan, &record, None)?;
     publish_reservation(&reservation, &record)?;
+    let report: Result<Value, LaneError> = (|| {
+        let settlement_report = report::settlement_result(
+            &settlement,
+            &request.loop_name,
+            &request.run,
+            record["active_round"]
+                .as_str()
+                .ok_or_else(|| LaneError::input("launch-report", "active round is absent"))?,
+        )?;
+        let output = result.as_ref().map_or_else(LaneError::line, Clone::clone);
+        let publication = report::credential_publication(&record)?;
+        Ok(
+            json!({"schema":1,"command":"launch","dry_run":false,"observe":request.observe,"enforcing":!request.observe,"observed":observed.as_ref().ok(),"home":plan.home,"driver_dir":plan.driver_dir,"round_dir":round_dir,"preparation":preparation.trim_end(),"driver_report":output.trim_end(),"settlement":settlement_report,"credential_publication":publication,"evidence":"driver directory outside home","wall_seconds":started.elapsed().as_secs_f64()}),
+        )
+    })();
+    let report = if settlement.is_err() {
+        let report = report?;
+        report::finish_with_fallback(
+            &verified_runs,
+            &request.run,
+            None,
+            report.clone(),
+            on_failure,
+        )?;
+        Ok(report)
+    } else {
+        report
+    };
     if !socket_good {
         return Err(LaneError::operation(
             "observer-socket",
@@ -4749,12 +4782,10 @@ fn run_with_program(
     }
     step_directory?;
     reaping::reaping_verdict(&reaping?)?;
-    let output = result?;
-    let observed = observed?;
-    let settlement = settlement_document(&settlement?)?;
-    let publication = report::credential_publication(&record)?;
-    let report = json!({"schema":1,"command":"launch","dry_run":false,"observe":request.observe,"enforcing":!request.observe,"observed":observed,"home":plan.home,"driver_dir":plan.driver_dir,"round_dir":round_dir,"preparation":preparation.trim_end(),"driver_report":output.trim_end(),"settlement":settlement,"credential_publication":publication,"evidence":"driver directory outside home","wall_seconds":started.elapsed().as_secs_f64()});
-    report::finish_with_fallback(&verified_runs, &request.run, None, report, on_failure)
+    result?;
+    observed?;
+    settlement?;
+    report::finish_with_fallback(&verified_runs, &request.run, None, report?, on_failure)
 }
 
 fn record_failed_pre_driver(

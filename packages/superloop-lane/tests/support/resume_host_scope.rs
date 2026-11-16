@@ -485,6 +485,7 @@ pub(super) fn late_reply(driver: &str) {
             "refused preview preserves the late-binding admission"
         );
     }
+    readback_refusal_report(fixture, &failed);
     late_reply_refusals(fixture, &failed);
     host::write(
         fixture.home().join("runs/.reservation-R.json"),
@@ -492,6 +493,28 @@ pub(super) fn late_reply(driver: &str) {
         0o600,
     );
     settle_late_reply(fixture, &failed);
+}
+
+fn readback_refusal_report(fixture: &host::Host, failed: &serde_json::Value) {
+    let path = fixture.home().join("runs/.report=R=review.json");
+    let report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&path).expect("refused readback publishes launch report"),
+    )
+    .expect("launch report");
+    assert_eq!(report["settlement"]["state"], "refused");
+    assert_eq!(report["settlement"]["detail"], failed["readback_end"]);
+    assert_eq!(report["settlement"]["run_phase"], "failed");
+    assert_eq!(report["settlement"]["round_phase"], "failed");
+    assert_eq!(
+        report["settlement"]["next_command"],
+        "bind-reply alpha R --step review --delivery UTC_INSTANT"
+    );
+    writeln!(
+        std::io::stdout().lock(),
+        "READBACK-REFUSAL-REPORT {}",
+        report["settlement"]
+    )
+    .expect("report evidence");
 }
 
 fn settle_late_reply(fixture: &host::Host, failed: &serde_json::Value) {
@@ -522,6 +545,10 @@ fn settle_late_reply(fixture: &host::Host, failed: &serde_json::Value) {
     let preview = fixture
         .settle(None)
         .expect("bound reply settlement preview");
+    assert!(
+        !preview["report_archive"].is_null(),
+        "refused launch report is archived"
+    );
     let digest = preview["preview_sha256"]
         .as_str()
         .expect("settlement digest");
