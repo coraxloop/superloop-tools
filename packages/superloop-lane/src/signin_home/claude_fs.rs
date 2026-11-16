@@ -15,20 +15,35 @@ pub(super) struct Directory {
     path: PathBuf,
 }
 
-fn lock(mut file: File, path: &Path) -> Result<Flock<File>> {
-    let started = Instant::now();
-    let limit = Duration::from_secs(5);
+fn lock(file: File, path: &Path) -> Result<Flock<File>> {
+    lock_with(
+        file,
+        path,
+        Duration::from_secs(5),
+        Instant::now,
+        std::thread::sleep,
+    )
+}
+
+fn lock_with(
+    mut file: File,
+    path: &Path,
+    limit: Duration,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+) -> Result<Flock<File>> {
+    let started = now();
     loop {
         match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
             Ok(locked) => return Ok(locked),
             Err((returned, nix::errno::Errno::EWOULDBLOCK)) => file = returned,
             Err((_, error)) => return Err(error.to_string()),
         }
-        let remaining = limit.saturating_sub(started.elapsed());
+        let remaining = limit.saturating_sub(now().saturating_duration_since(started));
         if remaining.is_zero() {
             return Err(format!("claude-home-locked: {}", path.display()));
         }
-        std::thread::sleep(remaining.min(Duration::from_millis(25)));
+        sleep(remaining.min(Duration::from_millis(25)));
     }
 }
 
@@ -207,15 +222,33 @@ mod tests {
             .expect("protected fixture");
         let held = Directory::open(root.path(), root.path(), false).expect("first handle");
         let started = Instant::now();
-        let error = Directory::open(root.path(), root.path(), false)
-            .err()
-            .expect("contending handle refuses");
+        let now = std::cell::Cell::new(started);
+        let mut pauses = Vec::new();
+        let error = lock_with(
+            File::open(root.path()).expect("contending handle"),
+            root.path(),
+            Duration::from_secs(5),
+            || now.get(),
+            |pause| {
+                pauses.push(pause);
+                now.set(now.get() + pause);
+            },
+        )
+        .expect_err("contending handle refuses");
         assert_eq!(
             error,
             format!("claude-home-locked: {}", root.path().display())
         );
-        // Allow scheduler overhead beyond the five-second retry budget.
-        assert!(started.elapsed() < Duration::from_secs(6));
+        assert_eq!(
+            now.get() - started,
+            Duration::from_secs(5),
+            "lock budget credit"
+        );
+        assert_eq!(
+            pauses,
+            vec![Duration::from_millis(25); 200],
+            "lock retry steps"
+        );
         drop(held);
         assert!(Directory::open(root.path(), root.path(), false).is_ok());
     }
