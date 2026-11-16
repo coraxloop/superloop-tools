@@ -83,7 +83,6 @@ fn err<T>(result: super::Result<T>, class: &str) {
 /// ´test:unit:launch-policy-rejects-open-shapes´
 #[test]
 fn launch_policy_rejects_open_shapes() {
-    let _case = crate::launch::test_support::case_guard();
     let f = Fixture::new();
     assert_eq!(policy::parse(&f.bytes()).unwrap().cases.len(), 1);
     for key in [
@@ -170,7 +169,6 @@ fn launch_policy_rejects_open_shapes() {
 /// ´test:unit:launch-policy-bounds-all-work´
 #[test]
 fn launch_policy_bounds_all_work() {
-    let _case = crate::launch::test_support::case_guard();
     for field in [
         "case_ms",
         "campaign_ms",
@@ -211,7 +209,6 @@ fn launch_policy_bounds_all_work() {
 /// ´test:unit:launch-policy-rosters-and-mappings-are-closed´
 #[test]
 fn launch_policy_rosters_and_mappings_are_closed() {
-    let _case = crate::launch::test_support::case_guard();
     for pointer in ["/roles", "/artifacts"] {
         let mut f = Fixture::new();
         *f.value.pointer_mut(pointer).unwrap() = json!([]);
@@ -255,7 +252,6 @@ fn launch_policy_rosters_and_mappings_are_closed() {
 /// ´test:unit:launch-policy-cases-and-paths-are-distinct´
 #[test]
 fn launch_policy_cases_and_paths_are_distinct() {
-    let _case = crate::launch::test_support::case_guard();
     let mut f = Fixture::new();
     f.value["roots"]["evidence"] = f.value["roots"]["sealed"].clone();
     f.refusal("launch-root-separation");
@@ -309,7 +305,6 @@ fn launch_policy_cases_and_paths_are_distinct() {
 /// ´test:unit:launch-roles-require-the-reviewed-property-matrix´
 #[test]
 fn launch_roles_require_the_reviewed_property_matrix() {
-    let _case = crate::launch::test_support::case_guard();
     assert_eq!(
         Role::BarrierRelease.properties().capability_bounding_set,
         Vec::new()
@@ -429,7 +424,6 @@ fn launch_artifact_custody_and_alias_refuse() {
 /// ´test:unit:launch-configuration-is-measured-and-closed´
 #[test]
 fn launch_configuration_is_measured_and_closed() {
-    let _case = crate::launch::test_support::case_guard();
     let p = Role::Descriptors.properties();
     let bytes = serde_json::to_vec(&p).unwrap();
     let m = measure::configuration(&p, &bytes).unwrap();
@@ -475,7 +469,6 @@ const FLOW: [Phase; 9] = [
 /// ´test:unit:launch-state-never-releases-twice-or-recovers-success´
 #[test]
 fn launch_state_never_releases_twice_or_recovers_success() {
-    let _case = crate::launch::test_support::case_guard();
     let mut state = State::default();
     err(state.commit(Phase::Released), "launch-state-order");
     for p in FLOW {
@@ -978,7 +971,6 @@ fn launch_original_cause_survives_output_loss() {
 /// ´test:unit:launch-policy-separates-direct-sealers-from-unit-roles´
 #[test]
 fn launch_policy_separates_direct_sealers_from_unit_roles() {
-    let _case = crate::launch::test_support::case_guard();
     let f = Fixture::new();
     let admitted = policy::parse(&f.bytes()).unwrap();
     assert_eq!(admitted.roles.len(), 5);

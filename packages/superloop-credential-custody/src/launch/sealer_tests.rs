@@ -427,7 +427,6 @@ fn sealer_failure_publication_collision_retains_quarantine() {
 /// ´test:unit:sealer-deadline-conversion-uses-injected-instants´
 #[test]
 fn sealer_deadline_conversion_uses_injected_instants() {
-    let _case = crate::launch::test_support::case_guard();
     let now = Instant::now();
     assert_eq!(
         super::sealer::remaining_timeout(now, now, now),

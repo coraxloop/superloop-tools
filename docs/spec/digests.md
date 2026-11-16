@@ -506,9 +506,9 @@ This index locates every matching line in the tracked corpus outside this docume
 |``packages/superloop-credential-custody/src/launch/policy.rs:100,171,329,369``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/launch/release.rs:18,40,59,64,89,90,119,121,122,132,140,153,154,155,157,158,162,165,169,181``|D253; retained receipt measurement and release correspondence.|
 |``packages/superloop-credential-custody/src/launch/release_tests.rs:17,76,90,92,111,120,135,138,139,140,161,178,188,202,215,234,288,305,324,340,360,367``|D250, D253; synthetic artifact and immutable inventory controls.|
-|``packages/superloop-credential-custody/src/launch/sealer_tests.rs:37,51,70,517``|D250; synthetic measured-image controls, no encryption or root rehearsal claim.|
+|``packages/superloop-credential-custody/src/launch/sealer_tests.rs:37,51,70,516``|D250; synthetic measured-image controls, no encryption or root rehearsal claim.|
 |``packages/superloop-credential-custody/src/launch/store.rs:97,98,103,126,127,128,134,135,136,146,147,148,156,157,158,212,213,215,236,237,238,243,244,245,275,276,338,339,340,346,347,348,381,383,400,401,412,413``|D250, D252, D254; measured identities, retained completion references and strict synthetic controls; authenticity still requires protected producer custody.|
-|``packages/superloop-credential-custody/src/launch/tests.rs:39,64,92,93,235,356,359,378,407,436,440,441,510,511,757,769``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
+|``packages/superloop-credential-custody/src/launch/tests.rs:39,64,91,92,232,351,354,373,402,430,434,435,503,504,750,762``|D250; measured identities and strict synthetic controls, not independently authenticated runtime evidence.|
 |``packages/superloop-credential-custody/src/observe.rs:180,181,202,216,241,323,328``|D246–D247; source-payload selection and completed sealed-file comparisons.|
 |``packages/superloop-credential-custody/src/process.rs:165``|D246; the held interpreter identity is compared before execution; no independent digest producer.|
 |``packages/superloop-credential-custody/src/record.rs:48,49,67,112,119,165,189,221,233,242,321,345,355``|D246–D247; strict identity fields and full-digest grammar.|

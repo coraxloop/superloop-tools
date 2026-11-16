@@ -111,7 +111,6 @@ mod tests {
     /// ´test:unit:sealer-eof-is-readiness-not-a-read´
     #[test]
     fn sealer_eof_is_readiness_not_a_read() {
-        let _case = crate::launch::test_support::case_guard();
         let (r, w) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
         let (_, probe) = Input::admit(r).unwrap().split().unwrap();
         // No writer task is ever started. A read here would block forever.
@@ -133,7 +132,6 @@ mod tests {
     /// ´test:unit:sealer-input-requires-two-distinct-blocking-read-pipes´
     #[test]
     fn sealer_input_requires_two_distinct_blocking_read_pipes() {
-        let _case = crate::launch::test_support::case_guard();
         let (r, w) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
         assert_eq!(Input::admit(w).err(), Some("sealer-input-kind"));
         let duplicate = r.try_clone().unwrap();
@@ -153,7 +151,6 @@ mod tests {
     #[test]
     fn sealer_probe_accepts_an_already_open_fifo() {
         use std::os::unix::fs::OpenOptionsExt as _;
-        let _case = crate::launch::test_support::case_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stream");
         nix::unistd::mkfifo(

@@ -122,7 +122,6 @@ mod tests {
     /// ´test:unit:observer-role-refuses-signalling-in-every-capability-set´
     #[test]
     fn observer_role_refuses_signalling_in_every_capability_set() {
-        let _case = crate::launch::test_support::case_guard();
         let clean = TEXT.replace("CapBnd:\tff", "CapBnd:\t0");
         ChildStatus::parse(clean.as_bytes(), 99)
             .unwrap()
@@ -143,7 +142,6 @@ mod tests {
     /// ´test:unit:child-status-requires-complete-observed-fields´
     #[test]
     fn child_status_requires_complete_observed_fields() {
-        let _case = crate::launch::test_support::case_guard();
         let status = ChildStatus::parse(TEXT.as_bytes(), 99).unwrap();
         status.verify(123, 2000, 255).unwrap();
         assert_eq!(status.verify(124, 2000, 255), Err("sealer-status-identity"));

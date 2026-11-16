@@ -212,7 +212,6 @@ fn completion_client_rejects_incomplete_and_failed_proofs() {
 /// ´test:unit:completion-client-record-is-closed-and-bounded´
 #[test]
 fn completion_client_record_is_closed_and_bounded() {
-    let _case = crate::launch::test_support::case_guard();
     let invocation = invocation();
     let binding = expected(&invocation);
     let good = reply(&binding);

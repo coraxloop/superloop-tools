@@ -293,7 +293,6 @@ mod tests {
     /// ´test:unit:sealer-landlock-floor-never-degrades´
     #[test]
     fn sealer_landlock_floor_never_degrades() {
-        let _case = crate::launch::test_support::case_guard();
         for version in [-1, 0, 1, 2, 3, 4, 5] {
             assert_eq!(
                 Confinement::require_abi(version),
@@ -309,7 +308,6 @@ mod tests {
     #[test]
     fn sealer_key_owner_is_exact() {
         use std::os::unix::fs::PermissionsExt as _;
-        let _case = crate::launch::test_support::case_guard();
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = dir.path().join("synthetic");

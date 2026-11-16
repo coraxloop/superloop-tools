@@ -1,4 +1,5 @@
-//! One resident launch case across all in-process case controls.
+//! Serialize retained admissions, stores and child cases, not pure parsers or small pipe controls.
+//! This bounds the expensive case owners without serializing unrelated test work.
 static CASE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(super) fn case_guard() -> std::sync::MutexGuard<'static, ()> {
