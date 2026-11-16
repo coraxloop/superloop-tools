@@ -1,4 +1,7 @@
 //! Synthetic command-boundary tests; no secret, supervisor or host key.
+#[path = "support/campaign_evidence.rs"]
+mod campaign_evidence;
+
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use std::fs;
@@ -167,20 +170,22 @@ impl Fixture {
                         .join(format!("{length}-{content}.sealed"));
                     fs::write(&path, bytes).unwrap();
                     mode(&path, 0o400);
+                    let pair = usize::from((name == "alpha") != (content == "a"));
                     samples.push(json!({"name":name,"input_length":length,"content":content,
-                        "completion":{"case":"campaign","invocation":format!("{name}-{length}-{content}"),
-                            "success":true,"distinct_content":true,"sealed_sha256":hash(bytes)}}));
+                        "case":format!("pair-{length}-{pair}")}));
                 }
             }
         }
-        let record = json!({"schema":2,"case":"campaign","config_digest":"a".repeat(64),"code_digest":"b".repeat(64),
+        let record = json!({"schema":3,"case":"campaign","campaign":{},
             "sealed_root":root.join("sealed"),"evidence_root":root.join("evidence"),
             "payload":{"path":root.join("parser.py"),"sha256":hash(payload.as_bytes()),"repository":repo,"source_commit":commit,"document":"procedure.md"},
             "limits":{"file_bytes":1_048_576,"output_bytes":1_048_576,"timeout_ms":60000},"identity":identity,
             "probes":roles.iter().map(|role| json!({"role":role,"argv":["/usr/bin/printf","synthetic-v1\n"]})).collect::<Vec<_>>(),
             "names":["alpha","beta"],"lengths":[3,4,5],"contents":["a","b"],"samples":samples,
             "comparisons":[{"id":"pair","left":"alpha","right":"beta"}]});
-        Self { dir, record }
+        let mut fixture = Self { dir, record };
+        fixture.campaign();
+        fixture
     }
     fn save(&self) {
         parameter_bytes(
@@ -223,7 +228,7 @@ impl Fixture {
         mode(&path, 0o600);
         fs::write(&path, bytes).unwrap();
         mode(&path, 0o400);
-        self.record["samples"][0]["completion"]["sealed_sha256"] = json!(hash(bytes));
+        self.campaign();
     }
 }
 fn pass(output: &Output) -> Value {
@@ -282,7 +287,9 @@ fn known_lengths_and_identity() {
     assert_eq!(report["evidence"]["constants"][0]["constant"], 0);
     let calibration = f.dir.path().join("evidence/calibration");
     let before = fs::read(&calibration).unwrap();
-    assert_eq!(pass(&f.check())["evidence"]["matches"], true);
+    let comparison = pass(&f.check());
+    assert_eq!(comparison["schema"], 2);
+    assert_eq!(comparison["evidence"]["matches"], true);
     assert_eq!(fs::read(calibration).unwrap(), before);
 }
 
@@ -299,10 +306,10 @@ fn record_refusals_before_effects() {
         ("/contents", json!(["a", "a"])),
         ("/names", json!(["alpha", "alpha"])),
         ("/samples", json!([])),
-        ("/samples/0/completion/success", json!(false)),
-        ("/samples/0/completion/distinct_content", json!(false)),
-        ("/samples/0/completion/case", json!("other")),
-        ("/samples/0/completion/invocation", json!("")),
+        ("/samples/0/case", json!(false)),
+        ("/campaign/matrix_sha256", json!(false)),
+        ("/campaign/policy", json!("other")),
+        ("/samples/0/case", json!("")),
         ("/probes", json!([])),
         ("/identity/probes", json!([])),
         ("/identity/files/interpreter/path", json!("/bin/false")),
@@ -444,6 +451,7 @@ fn discovery_never_accepts_length() {
     fs::remove_file(f.dir.path().join("parser.py")).unwrap();
     let record = discovery_record(&f);
     let result = pass(&discovery_command(&f, &record).output().unwrap());
+    assert_eq!(result["schema"], 1);
     assert_eq!(result["command"], "format-discover");
     assert_eq!(result["case"], "representation-case");
     assert_eq!(result["outcome"], "observed");
@@ -545,8 +553,12 @@ fn receipt_exclusivity_and_modes() {
 fn every_identity_member_drift() {
     for role in 0..7 {
         let mut f = Fixture::new();
+        let metadata = f.dir.path().join("probe-metadata");
+        fs::write(&metadata, b"synthetic-v1\n").unwrap();
+        f.record["probes"][role]["argv"] = json!(["/usr/bin/cat", metadata]);
         pass(&f.observe());
-        f.record["probes"][role]["argv"][1] = json!("synthetic-v2\n");
+        // The parameter vector stays identical: only the live metadata changes.
+        fs::write(&metadata, b"synthetic-v2\n").unwrap();
         refused(&f.check(), "identity-drift");
     }
     for member in ["sealer", "library", "parser"] {
@@ -556,7 +568,7 @@ fn every_identity_member_drift() {
             .as_str()
             .unwrap();
         fs::write(path, b"changed").unwrap();
-        refused(&f.check(), "identity-drift");
+        refused(&f.check(), "launch-artifact-drift");
     }
     let mut f = Fixture::new();
     pass(&f.observe());
@@ -635,7 +647,7 @@ fn interpreter_bytes_are_compared() {
     mode(&path, 0o400);
     let result = f.check();
     let diagnostic: Value = serde_json::from_slice(&result.stderr).unwrap();
-    assert_eq!(diagnostic["message"], "identity-drift");
+    assert_eq!(diagnostic["message"], "observation-artifact");
     refuse(&result);
 }
 
@@ -703,16 +715,19 @@ fn wrapped_format_is_frozen() {
         mode(&path, 0o600);
         fs::write(&path, &bytes).unwrap();
         mode(&path, 0o400);
-        sample["completion"]["sealed_sha256"] = json!(hash(&bytes));
     }
+    f.campaign();
     pass(&f.observe());
 }
 
 /// ´test:integration:sealed-digest-custody-and-limits´
 #[test]
 fn sealed_digest_custody_and_limits() {
-    let mut f = Fixture::new();
-    f.record["samples"][0]["completion"]["sealed_sha256"] = json!("0".repeat(64));
+    let f = Fixture::new();
+    let path = f.dir.path().join("sealed/alpha/3-a.sealed");
+    mode(&path, 0o600);
+    fs::write(&path, b"QkJC\n").unwrap();
+    mode(&path, 0o400);
     let output = f.observe();
     let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(diagnostic["message"], "sealed-completion-identity");
@@ -725,15 +740,14 @@ fn sealed_digest_custody_and_limits() {
     refuse(&f.observe());
 }
 
-/// ´test:integration:inconsistent-invocation-refuses´
+/// ´test:integration:repeated-campaign-output-refuses´
 #[test]
-fn inconsistent_invocation_refuses() {
+fn repeated_campaign_output_refuses() {
     let mut f = Fixture::new();
-    f.record["samples"][1]["completion"]["invocation"] =
-        f.record["samples"][0]["completion"]["invocation"].clone();
+    f.record["samples"][1]["case"] = f.record["samples"][0]["case"].clone();
     let output = f.observe();
     let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(diagnostic["message"], "record-invocation-identity");
+    assert_eq!(diagnostic["message"], "observation-output-repeated");
     refuse(&output);
 }
 
@@ -919,7 +933,8 @@ fn identity_members_must_be_distinct() {
     fs::hard_link(f.dir.path().join("sealer"), &library).unwrap();
     f.record["identity"]["files"]["library"]["sha256"] =
         f.record["identity"]["files"]["sealer"]["sha256"].clone();
-    refused(&f.observe(), "identity-file-alias");
+    f.campaign();
+    refused(&f.observe(), "launch-artifact-alias");
 }
 
 /// ´test:integration:frozen-form-binds-text-byte-count´
@@ -1029,7 +1044,7 @@ fn probe_output_is_digest_only() {
     }
     pass(&f.check());
     f.record["probes"][0]["argv"][1] = json!("changed");
-    refused(&f.check(), "identity-drift");
+    refused(&f.check(), "calibration-identity");
 }
 
 /// ´test:integration:probe-digest-record-is-strict´

@@ -108,6 +108,11 @@ pub(super) fn root_admission(path: &Path) -> Result<Admission> {
     admit_bytes(&receipt::parameters(path)?, 0)
 }
 
+// Observation opens measured metadata without granting any launcher effect.
+pub(super) fn observation_admission(path: &Path) -> Result<Admission> {
+    admit_bytes(&receipt::parameters(path)?, nix::unistd::geteuid().as_raw())
+}
+
 // The owner parameter belongs to the private core, never a CLI or policy field.
 // The root adapter always passes zero. Ordinary-user tests exercise held files.
 fn admit_bytes(bytes: &[u8], owner: u32) -> Result<Admission> {
@@ -199,7 +204,11 @@ fn measure_artifact(
     let m = file.metadata().map_err(|_| "file-metadata")?;
     require(
         m.is_file()
-            && (m.uid() == owner || (expected.role == ArtifactRole::Library && m.uid() == 0))
+            && (m.uid() == owner
+                || (matches!(
+                    expected.role,
+                    ArtifactRole::Library | ArtifactRole::Interpreter
+                ) && m.uid() == 0))
             && m.nlink() > 0
             && m.mode() & 0o7022 == 0
             && m.len() <= limit,

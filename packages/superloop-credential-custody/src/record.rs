@@ -1,6 +1,6 @@
 //! Strict, bounded metadata records. No field carries a plaintext stream.
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, &'static str>;
@@ -45,8 +45,7 @@ pub fn parse_discovery(bytes: &[u8]) -> Result<Discovery> {
 pub struct Parameters {
     pub schema: u32,
     pub case: String,
-    pub config_digest: String,
-    pub code_digest: String,
+    pub campaign: Campaign,
     pub sealed_root: PathBuf,
     pub evidence_root: PathBuf,
     pub payload: Payload,
@@ -152,17 +151,14 @@ pub struct Sample {
     pub name: String,
     pub input_length: u64,
     pub content: String,
-    pub completion: Completion,
+    pub case: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Completion {
-    pub case: String,
-    pub invocation: String,
-    pub success: bool,
-    pub distinct_content: bool,
-    pub sealed_sha256: String,
+pub struct Campaign {
+    pub policy: PathBuf,
+    pub matrix_sha256: String,
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Parameters> {
@@ -215,13 +211,14 @@ pub fn path(value: &Path, absolute: bool) -> bool {
 
 impl Parameters {
     fn validate(&self) -> Result<()> {
-        if self.schema != 2 {
+        if self.schema != 3 {
             return Err("record-schema");
         }
-        if !name(&self.case) || !digest(&self.config_digest) || !digest(&self.code_digest) {
+        if !name(&self.case) || !digest(&self.campaign.matrix_sha256) {
             return Err("record-identity");
         }
-        if !path(&self.sealed_root, true)
+        if !path(&self.campaign.policy, true)
+            || !path(&self.sealed_root, true)
             || !path(&self.evidence_root, true)
             || self.sealed_root == self.evidence_root
             || !path(&self.payload.path, true)
@@ -301,24 +298,12 @@ impl Parameters {
 
     fn validate_samples(&self, names: &BTreeSet<&String>, lengths: &BTreeSet<&u64>) -> Result<()> {
         let mut matrix = BTreeSet::new();
-        let mut invocations = BTreeMap::new();
         for sample in &self.samples {
-            let input = (sample.input_length, &sample.content);
-            if invocations
-                .insert(&sample.completion.invocation, input)
-                .is_some_and(|old| old != input)
-            {
-                return Err("record-invocation-identity");
-            }
             if !names.contains(&sample.name)
                 || !lengths.contains(&sample.input_length)
                 || !self.contents.contains(&sample.content)
                 || !matrix.insert((&sample.name, sample.input_length, &sample.content))
-                || sample.completion.case != self.case
-                || !name(&sample.completion.invocation)
-                || !sample.completion.success
-                || !sample.completion.distinct_content
-                || !digest(&sample.completion.sealed_sha256)
+                || !name(&sample.case)
             {
                 return Err("record-completion");
             }

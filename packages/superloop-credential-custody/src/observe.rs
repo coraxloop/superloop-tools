@@ -230,15 +230,19 @@ fn payload(record: &Parameters) -> Result<Vec<u8>> {
     Ok(installed)
 }
 
-fn sample_bytes(record: &Parameters) -> Result<BTreeMap<(String, u64, String), u64>> {
+fn sample_bytes(
+    record: &Parameters,
+    binding: &crate::launch::observation::Binding,
+) -> Result<BTreeMap<(String, u64, String), u64>> {
     let mut sizes = BTreeMap::new();
-    for sample in &record.samples {
+    for (sample, measured) in record.samples.iter().zip(&binding.samples) {
         let path = record
             .sealed_root
             .join(&sample.name)
             .join(format!("{}-{}.sealed", sample.input_length, sample.content));
         let bytes = receipt::read(&path, record.limits.file_bytes, true)?;
-        if identity::hash(&bytes) != sample.completion.sealed_sha256 {
+        if identity::hash(&bytes) != measured.sha256 || bytes.len() as u64 != measured.sealed_bytes
+        {
             return Err("sealed-completion-identity");
         }
         sizes.insert(
@@ -283,6 +287,7 @@ pub fn discover(record: &Discovery) -> Result<Value> {
 }
 
 pub fn run(record: &Parameters) -> Result<Value> {
+    let binding = crate::launch::observation::bind(record)?;
     // Other accounts cannot replace any directory component while the reviewed
     // payload rereads these paths. Concurrent mutation by the effective user is
     // still excluded by the caller's observation protocol.
@@ -294,7 +299,7 @@ pub fn run(record: &Parameters) -> Result<Value> {
         .collect::<Result<_>>()?;
     let source = payload(record)?;
     let live = identity::live(record)?;
-    let sizes = sample_bytes(record)?;
+    let sizes = sample_bytes(record, &binding)?;
     let mut command = Command::new("/usr/bin/python3");
     command
         .arg("-I")
@@ -316,8 +321,11 @@ pub fn run(record: &Parameters) -> Result<Value> {
             return Err("payload-file-size");
         }
     }
-    if sizes != sample_bytes(record)? {
+    if sizes != sample_bytes(record, &binding)? {
         return Err("sealed-changed");
+    }
+    if binding.evidence != crate::launch::observation::bind(record)?.evidence {
+        return Err("observation-campaign-changed");
     }
     // Re-read identities after the observation; deployment exclusion remains an
     // operator prerequisite, not something a successful digest check establishes.
@@ -325,7 +333,7 @@ pub fn run(record: &Parameters) -> Result<Value> {
         return Err("identity-drift");
     }
     Ok(
-        json!({"identity": live.identity, "config_digest": record.config_digest, "code_digest": record.code_digest,
+        json!({"identity": live.identity, "campaign": binding.evidence,
         "rows": rows, "constants": constants, "comparisons": comparisons}),
     )
 }

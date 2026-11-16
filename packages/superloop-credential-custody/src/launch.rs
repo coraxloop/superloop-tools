@@ -36,3 +36,5 @@ mod sealer_tests;
 mod test_support;
 
 pub mod entry;
+
+pub mod observation;

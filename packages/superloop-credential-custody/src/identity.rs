@@ -95,8 +95,7 @@ struct Calibration {
 #[serde(deny_unknown_fields)]
 struct CalibrationEvidence {
     identity: Identity,
-    config_digest: String,
-    code_digest: String,
+    campaign: crate::launch::observation::Evidence,
     rows: Vec<crate::observe::Row>,
     constants: Vec<crate::observe::Constant>,
     comparisons: Vec<crate::observe::Compared>,
@@ -117,12 +116,11 @@ pub fn run(record: &Parameters, path: &Path) -> Result<Value> {
     let calibration: Calibration =
         serde_json::from_slice(&bytes).map_err(|_| "calibration-shape")?;
     let evidence = &calibration.evidence;
-    if calibration.schema != 1
+    if calibration.schema != 2
         || calibration.command != "length-observe"
         || calibration.case != record.case
         || calibration.outcome != "ok"
-        || evidence.config_digest != record.config_digest
-        || evidence.code_digest != record.code_digest
+        || evidence.campaign != crate::launch::observation::bind(record)?.evidence
         || evidence.identity != record.identity
     {
         return Err("calibration-identity");
@@ -135,5 +133,5 @@ pub fn run(record: &Parameters, path: &Path) -> Result<Value> {
         &evidence.comparisons,
     )?;
     live(record)?;
-    Ok(json!({"matches": true, "calibration_sha256": hash(&bytes)}))
+    Ok(json!({"matches": true, "calibration_sha256": hash(&bytes), "campaign": evidence.campaign}))
 }

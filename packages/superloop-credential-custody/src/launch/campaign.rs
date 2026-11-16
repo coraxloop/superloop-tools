@@ -144,7 +144,6 @@ pub(super) fn run(
 
 // Read only the completed campaign's bounded, protected evidence. This does
 // not launch a process, reinterpret a manager result or accept asserted success.
-#[allow(dead_code)] // Wired to the separately versioned observation record next.
 pub(super) fn observation(admission: &Admission, expected_digest: &str) -> Result<Matrix> {
     observation_with(admission, expected_digest, || {})
 }

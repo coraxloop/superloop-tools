@@ -238,7 +238,7 @@ fn publish(
     start: Instant,
 ) -> Result<()> {
     let envelope = Envelope {
-        schema: 1,
+        schema: if label == "format-discover" { 1 } else { 2 },
         command: label,
         case: case.into(),
         outcome,
