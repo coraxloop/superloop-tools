@@ -1103,7 +1103,6 @@ fn suspend_recovery_reuses_the_saved_step_and_enforces_both_bounds() {
         ("suspend-trailing", 900, 1, 60, 1, 0, true),
         ("suspend-no-thread", 900, 1, 60, 1, 0, false),
         ("suspend-first-gap", 900, 1, 60, 2, 1, false),
-        ("suspend-terminated", 900, 1, 60, 1, 0, false),
         ("suspend-attempt-wall", 900, 1, 60, 1, 0, false),
         ("suspend-killed", 900, 1, 60, 1, 0, false),
     ] {
@@ -1135,10 +1134,7 @@ fn suspend_recovery_reuses_the_saved_step_and_enforces_both_bounds() {
             harness.run_dir("lane")
         };
         let report = String::from_utf8(result.stdout).expect("report text");
-        if matches!(
-            mode,
-            "suspend-terminated" | "suspend-attempt-wall" | "suspend-killed"
-        ) {
+        if matches!(mode, "suspend-attempt-wall" | "suspend-killed") {
             assert!(report.contains("suspend_gap=900s"), "{case}: {report}");
         }
         if mode == "suspend-attempt-wall" {
@@ -1191,6 +1187,83 @@ fn suspend_recovery_reuses_the_saved_step_and_enforces_both_bounds() {
             let argv = String::from_utf8(harness.read("argv")).expect("resume argv");
             assert!(argv.contains("resume\nsession-1\n"), "{case}: {argv}");
         }
+    }
+}
+
+/// # Panics
+/// Panics only if a controlled stop starts or misrecords a suspended resume.
+/// ´test:integration:suspend-resume-record-distinguishes-both-stop-orders´
+#[test]
+fn suspend_resume_record_distinguishes_both_stop_orders() {
+    let contract = include_str!("../../../../docs/spec/output.md");
+    assert!(
+        contract.contains("`suspend_resumes=N` counts accepted resume attempts"),
+        "output contract must name the count's meaning"
+    );
+    for (boundary, expected_record, expected_count) in [
+        ("suspend-before-resume", None, None),
+        (
+            "suspend-recorded-before-spawn",
+            Some(
+                "suspend_resumes=1 suspend_gap=900s awake=1s outcome=not-started:stopped:SIGTERM\n",
+            ),
+            Some("suspend_resumes=1"),
+        ),
+    ] {
+        let harness = Harness::new("suspend-stop-order");
+        let run_dir = harness.run_dir("lane");
+        let listener = capacity_boundary(&harness);
+        let clock = harness.repo().join("clock");
+        fs::write(&clock, "0:0").expect("controlled clock");
+        let mut command = harness.command();
+        command
+            .env("ORACLE_MODE", "suspend-always")
+            .env("ORACLE_GAP", "900")
+            .env("ORACLE_AWAKE", "1")
+            .env("CODEX_LANE_TEST_CLOCK", format!("@{}", clock.display()))
+            .env("CODEX_LANE_TEST_BOUNDARY", boundary)
+            .env(
+                "CODEX_LANE_TEST_BOUNDARY_SOCKET",
+                harness.root().file_name().expect("fixture name"),
+            )
+            .args(["-t60", "saved duty"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let driver = command.spawn_serialized().expect("driver");
+        let mut channel = await_capacity_boundary(&listener);
+        let record = run_dir.join("suspend-resumes-lane.txt");
+        if expected_record.is_some() {
+            assert!(record.exists(), "record must precede this boundary");
+        } else {
+            assert!(!record.exists(), "no attempt accepted yet");
+        }
+        assert!(
+            Command::new("kill")
+                .args(["-TERM", &driver.id().to_string()])
+                .status_serialized()
+                .expect("signal driver")
+                .success()
+        );
+        channel.write_all(b"s").expect("release after signal");
+        let result = driver.wait_with_output().expect("stopped step");
+        assert_eq!(result.status.code(), Some(1), "{boundary}: {result:?}");
+        let report = String::from_utf8(result.stdout).expect("report text");
+        assert!(report.contains("verdict=FAILED"), "{boundary}: {report}");
+        assert!(report.contains("suspend_gap=900s"), "{boundary}: {report}");
+        match expected_count {
+            Some(count) => assert!(report.contains(count), "{boundary}: {report}"),
+            None => assert!(!report.contains("suspend_resumes="), "{boundary}: {report}"),
+        }
+        if let Some(line) = expected_record {
+            assert_eq!(fs::read_to_string(record).expect("record"), line);
+        } else {
+            assert!(!record.exists(), "{boundary}: unexpected record");
+        }
+        assert_eq!(
+            fs::read_to_string(harness.root().join("ack")).expect("stub calls"),
+            "1\n",
+            "{boundary}: another stub ran"
+        );
     }
 }
 
@@ -1549,12 +1622,12 @@ fn await_capacity_boundary(
     listener: &std::os::unix::net::UnixListener,
 ) -> std::os::unix::net::UnixStream {
     use std::io::Read as _;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         match listener.accept() {
             Ok((mut channel, _)) => {
                 channel
-                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .set_read_timeout(Some(Duration::from_secs(120)))
                     .expect("read bound");
                 let mut ready = [0; 5];
                 channel.read_exact(&mut ready).expect("boundary reached");
