@@ -122,12 +122,27 @@ fn build_identity_survives_versions_results_and_refusals() {
             );
             assert_eq!(identity["digest_absence"], serde_json::Value::Null);
             assert_eq!(identity["version"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(
+                identity["source_state"],
+                env!("SUPERLOOP_LINT_SOURCE_STATE")
+            );
+            let source = match env!("SUPERLOOP_LINT_SOURCE_COMMIT") {
+                "" => None,
+                value => Some(value),
+            };
+            let tag = match env!("SUPERLOOP_LINT_RELEASE_TAG") {
+                "" => None,
+                value => Some(value),
+            };
+            assert_eq!(identity["source_commit"], serde_json::json!(source));
+            assert_eq!(identity["release_tag"], serde_json::json!(tag));
             if let Some(previous) = &held {
                 assert_eq!(identity, previous);
             } else {
                 held = Some(identity.clone());
             }
             if arguments == ["--version"] || arguments == ["-V"] {
+                assert_eq!(value["fields"]["source_commit"], identity["source_commit"]);
                 assert_eq!(
                     value["fields"]["version"],
                     concat!("superloop-lint ", env!("CARGO_PKG_VERSION"))

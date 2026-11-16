@@ -1429,17 +1429,8 @@ fn verify_release(
             "identity_checked",
         )
     };
-    if tag.is_empty() || commit.is_empty() {
-        return Err(refuse());
-    }
-    let identity = git_identity(repository_root).map_err(|_| refuse())?;
-    let tag_ref = format!("refs/tags/{tag}^{{commit}}");
-    let tagged =
-        git_output(repository_root, &["rev-parse", "--verify", &tag_ref]).map_err(|_| refuse())?;
-    if identity.dirty || identity.commit != commit || tagged.trim() != commit {
-        return Err(refuse());
-    }
-    Ok(())
+    superloop_cli_common::source_identity::verify_release(repository_root, tag, commit)
+        .map_err(|_| refuse())
 }
 
 fn provenance_bytes(

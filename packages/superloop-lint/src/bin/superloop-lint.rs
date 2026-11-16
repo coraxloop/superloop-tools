@@ -432,9 +432,15 @@ fn build_identity() -> cli::BuildIdentity {
         schema: 1,
         repository: "superloop-tools".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
-        source_commit: None,
-        source_state: "unknown".to_owned(),
-        release_tag: None,
+        source_commit: match env!("SUPERLOOP_LINT_SOURCE_COMMIT") {
+            "" => None,
+            value => Some(value.to_owned()),
+        },
+        source_state: env!("SUPERLOOP_LINT_SOURCE_STATE").to_owned(),
+        release_tag: match env!("SUPERLOOP_LINT_RELEASE_TAG") {
+            "" => None,
+            value => Some(value.to_owned()),
+        },
         artifact_sha256,
         digest_absence,
     }

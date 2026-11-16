@@ -1280,6 +1280,9 @@ pattern = "packages/superloop-cli-common/src/public_set.rs"
 pattern = "packages/superloop-cli-common/src/publication.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-cli-common/src/source_identity.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-cli-common/src/tests/mod.rs"
 
 [[include.rows]]
@@ -2736,6 +2739,9 @@ pattern = "packages/superloop-lint/docs/adrs.md"
 
 [[include.rows]]
 pattern = "packages/superloop-lint/meson-paths.in"
+
+[[include.rows]]
+pattern = "packages/superloop-lint/build.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lint/meson.build"

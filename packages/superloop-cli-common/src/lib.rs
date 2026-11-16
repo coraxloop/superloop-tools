@@ -2,6 +2,7 @@
 
 pub mod burn_match;
 pub mod public_set;
+pub mod source_identity;
 
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
@@ -50,6 +51,10 @@ pub struct BuildIdentity {
     /// Package version compiled into the executable.
     pub version: String,
     /// Verified public source commit, when known.
+    /// The full Git object digest is compared with an independently reviewed
+    /// public revision. A source supplier cannot replace that reference; the
+    /// build checks the candidate's closed overlay against it. This source
+    /// claim does not authenticate a dishonest compiler or executable.
     pub source_commit: Option<String>,
     /// Release, candidate, dirty, or unknown source state.
     pub source_state: String,
@@ -335,8 +340,13 @@ impl ControlPlaneRecord {
         command: &str,
         kind: ControlPlaneRecordKind,
         message: &str,
-        fields: Option<ControlPlaneFields>,
+        mut fields: Option<ControlPlaneFields>,
     ) -> Self {
+        if let (Some(identity), Some(ControlPlaneFields::Version { source_commit, .. })) =
+            (BUILD_IDENTITY.get(), &mut fields)
+        {
+            source_commit.clone_from(&identity.source_commit);
+        }
         Self {
             schema: CONTROL_PLANE_SCHEMA,
             command: command.to_string(),

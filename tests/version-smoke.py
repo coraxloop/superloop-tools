@@ -117,7 +117,18 @@ def main():
                 or identity.get("version") != version
                 or not measurement_valid):
             failures.append("linter identity differs from the measured executable")
+        state = identity.get("source_state")
+        tag = identity.get("release_tag")
+        source_commit = identity.get("source_commit")
+        if (state not in ("release", "candidate", "dirty", "unknown")
+                or (state == "release") != (isinstance(tag, str) and bool(tag))
+                or (source_commit is None and state not in ("unknown", "dirty"))
+                or (source_commit is not None and args.record_commit
+                    and source_commit != args.record_commit)):
+            failures.append("linter source identity differs from its producer handoff")
         expected["identity"] = identity
+        if identity.get("source_commit") is not None:
+            expected["fields"]["source_commit"] = identity["source_commit"]
         source = identity.get("source_commit") or "unknown"
         artifact = identity.get("artifact_sha256") or identity.get("digest_absence")
         expected["message"] = (f"{version_text} superloop-tools@{source} "

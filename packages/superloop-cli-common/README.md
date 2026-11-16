@@ -4,6 +4,8 @@
 
 It is infrastructure, not policy about any particular subject. It contains no repository knowledge: a helper binary receives its subjects as explicit arguments (ADR-014) and uses this crate only to parse argv, emit machine-readable records, publish outputs, and exit correctly.
 
+The source-identity module owns the existing installer release predicate and build-time validation of an explicit public commit against the closed private overlay. It does not inspect Git during command publication.
+
 ## The output contract · `sec:clicommon:the-output-contract`
 
 Three rules govern every binary that uses this crate.

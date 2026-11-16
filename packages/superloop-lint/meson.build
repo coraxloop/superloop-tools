@@ -1,4 +1,5 @@
 pkg_superloop_lint_rust = files(
+  'build.rs',
   'src/abnf.rs',
   'src/adoption.rs',
   'src/application.rs',
@@ -211,11 +212,11 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
-{"kind":"meson-call","site":"packages/superloop-lint/meson.build:custom_target#1","sha256":"5d58c2a0c06db241bdc59317f8835ada6178fe82df36e415a7caf5c97866d81a","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"b09912c5f9d94f4a0d87daad99896b65d81ddef22e00322588ea06dbabf7897a"}
+{"kind":"meson-call","site":"packages/superloop-lint/meson.build:custom_target#1","sha256":"5d58c2a0c06db241bdc59317f8835ada6178fe82df36e415a7caf5c97866d81a","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"ea2c35a2b64c252b8c4c6ef2e8e9083f5ec3d24284b199478e6da130083a4e8e"}
 ''']
 
 dependency_ledger += ['''
-{"kind":"meson-call","site":"packages/superloop-lint/meson.build:find_program#1","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env to invoke the shared artifact staging helper","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"b09912c5f9d94f4a0d87daad99896b65d81ddef22e00322588ea06dbabf7897a"}
+{"kind":"meson-call","site":"packages/superloop-lint/meson.build:find_program#1","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env to invoke the shared artifact staging helper","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"ea2c35a2b64c252b8c4c6ef2e8e9083f5ec3d24284b199478e6da130083a4e8e"}
 ''']
 
 # Publication command dependencies.
