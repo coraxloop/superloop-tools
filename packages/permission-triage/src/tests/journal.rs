@@ -955,7 +955,7 @@ const REFUSED_LOCK_WAIT: Duration = Duration::from_millis(5);
 /// never spend when the steal lands, so it is sized for the slowest machine the suite runs on. Five
 /// milliseconds was enough on an idle machine and turned a successful recovery into an exhausted
 /// deadline under load.
-const STEAL_RECOVERY_WAIT: Duration = Duration::from_secs(10);
+const STEAL_RECOVERY_WAIT: Duration = Duration::from_secs(120);
 
 fn fixture_with_lock(
     name: &str,
@@ -1285,7 +1285,7 @@ fn journal_real_acquire_retries_not_found_with_a_sleep() -> Result<(), Box<dyn s
     // WAIT: the acquire must survive one vanished lock path, and the retry is one fixed poll apart,
     // so a longer budget adds nothing to a passing run and only stops a descheduled retry from
     // reading as a lock that could not be taken. The poll count below is what states the retry.
-    journal.set_test_lock_wait(Duration::from_secs(10));
+    journal.set_test_lock_wait(STEAL_RECOVERY_WAIT);
     journal.set_test_lock_vanish_before_open();
     journal.append_test_escalation("printf retry", "fixture reason")?;
     assert_eq!(

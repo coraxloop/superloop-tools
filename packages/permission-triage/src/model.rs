@@ -1051,6 +1051,19 @@ pub(crate) fn run_fixture_model(
 }
 
 #[cfg(test)]
+pub(crate) fn run_fixture_model_after_marker(
+    cli: &std::ffi::OsStr,
+    prompt: &Prompt,
+    deadline: Duration,
+    environment: Vec<(OsString, OsString)>,
+    marker: PathBuf,
+) -> Result<ModelResult, ModelError> {
+    let mut runner = ModelRunner::fixture(cli, deadline, environment, None, None, None);
+    runner.fixture_start_marker = Some(marker);
+    runner.run(prompt)
+}
+
+#[cfg(test)]
 pub(crate) fn run_fixture_model_after_output_exit(
     cli: &std::ffi::OsStr,
     prompt: &Prompt,
@@ -1071,17 +1084,6 @@ pub(crate) fn run_fixture_model_with_self_stat(
     self_stat: Vec<u8>,
 ) -> Result<ModelResult, ModelError> {
     ModelRunner::fixture(cli, deadline, environment, None, Some(self_stat), None).run(prompt)
-}
-
-#[cfg(test)]
-pub(crate) fn run_fixture_model_with_kill_program(
-    cli: &std::ffi::OsStr,
-    prompt: &Prompt,
-    deadline: Duration,
-    environment: Vec<(OsString, OsString)>,
-    kill_program: OsString,
-) -> Result<ModelResult, ModelError> {
-    ModelRunner::fixture(cli, deadline, environment, Some(kill_program), None, None).run(prompt)
 }
 
 #[cfg(test)]

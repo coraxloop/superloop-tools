@@ -84,6 +84,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Permission-triage model and journal tests now start short timeout claims after fixture readiness, use held events for ordering, and give ordinary fixture runs distant hang guards; a loaded test machine no longer changes their verdicts. Installed time limits and behavior are unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
+
 - Door test fixtures expose an owned client whose answer read consumes validated progress frames; raw wire reads require an explicit opt-in. The sized-run test waits for each resumed reader to finish after proving the writer can acquire without waiting. Tests only; installed doors and operator procedures are unchanged (``sec:superlooplane:door-test-fixtures``).
 
 - Door test replies use a shared final-status reader across service, compute, concurrency and startup fixtures; intermediate protocol events are requested explicitly. Lock-wait progress cannot be mistaken for an answer. Tests only; no installed behavior or deployment procedure changes (`prob:gates:elapsed-time-assertions-are-censused-and-rewritten`).

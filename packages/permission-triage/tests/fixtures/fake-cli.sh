@@ -50,11 +50,16 @@ case "$response" in
             :
         else
             printf '%s\n' 'setsid is unavailable at /usr/bin/setsid and on PATH' > "${capture}.double-fork-skip"
+            : > "${capture}.double-fork-ready"
             cat > "${capture}.stdin"
             printf '%s\n' '{"structured_output":{"scope":"estate","classification":"safe","reason":"double-fork fixture skipped"}}'
             exit 0
         fi
         "$setsid_program" -f sh -c 'printf "%s\n" "$$" > "$1"; exec sleep 30' sh "${capture}.child-pid"
+        while [ ! -e "${capture}.child-pid" ]; do
+            sleep 0.01
+        done
+        : > "${capture}.double-fork-ready"
         sleep 10 >/dev/null 2>&1
         ;;
     nested-probe)
@@ -107,6 +112,7 @@ case "$response" in
         (
             sleep 0.05
             head -c 70000 /dev/zero | tr '\000' x
+            : > "${capture}.oversized-written"
             sleep 30
         ) &
         descendant=$!

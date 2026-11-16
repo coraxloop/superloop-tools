@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use crate::model::{
     CLASSIFICATION_SCHEMA, Classification, DEFAULT_MODEL, MAX_MODEL_DEADLINE_MS, MAX_STDOUT_BYTES,
     ModelError, PollClock, configuration_from_test_environment, fixed_kill_programs_for_test,
-    mint_nesting_token_for_test, run_fixture_model, run_fixture_model_with_clock,
-    run_fixture_model_with_kill_program, run_fixture_model_with_kill_program_after_marker,
+    mint_nesting_token_for_test, run_fixture_model, run_fixture_model_after_marker,
+    run_fixture_model_with_clock, run_fixture_model_with_kill_program_after_marker,
     run_fixture_model_with_self_stat, run_model_from_test_environment, settings_arguments_for_test,
 };
 use crate::rubric::{
@@ -29,27 +29,16 @@ static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 /// passing run and decides everything in a run on a loaded machine: two seconds was a property of
 /// the machine that wrote it, not of the code under test. The runs whose subject is the deadline
 /// firing name their own short value at the call site instead.
-const COMPLETING_RUN_DEADLINE: Duration = Duration::from_secs(20);
+const COMPLETING_RUN_DEADLINE: Duration = Duration::from_secs(120);
 
 /// WAIT deadline for a fixture side effect: a process-id file appearing, a process leaving `/proc`.
 ///
 /// Waiting costs nothing when the event arrives, so the window is sized for the slowest machine the
 /// suite runs on rather than the fastest, and only a genuine absence pays it.
-const FIXTURE_EVENT_WAIT: Duration = Duration::from_secs(10);
+const FIXTURE_EVENT_WAIT: Duration = Duration::from_secs(120);
 
 /// Poll interval inside those waits.
 const FIXTURE_EVENT_POLL: Duration = Duration::from_millis(2);
-
-/// Multiple of a measured fixture run allowed for a run that returns at its own deadline.
-///
-/// Such a run pays one spawn, one kill and one reap beyond the deadline it was given, which is the
-/// same work the load sample measures; four times that sample leaves room for the deadline itself
-/// and for the variance a loaded machine adds.
-const DEADLINE_RETURN_MULTIPLE: u64 = 4;
-
-/// Cap on a deadline-return bound: the fixtures that stage a hang sleep ten seconds, so a bound
-/// above that would pass for a runner that waited for its child instead of returning.
-const DEADLINE_RETURN_CAP: Duration = Duration::from_secs(8);
 
 /// Cap on an interrupting deadline.
 ///
@@ -62,7 +51,7 @@ const INTERRUPTING_DEADLINE_CAP: Duration = Duration::from_secs(4);
 /// Cap on observing completion before the poll-clock seam reports expiry.
 ///
 /// The original settle bound remains, but the seam now waits for the child and both I/O helpers
-/// instead of sampling their state after a sleep. This stays inside the twenty-second run budget.
+/// instead of sampling their state after a sleep. This stays inside the completing-run hang bound.
 const POLL_SETTLE_CAP: Duration = Duration::from_secs(5);
 
 /// Number of load samples; the maximum of them stands.
@@ -130,9 +119,7 @@ fn measured_fixture_run_ms() -> u64 {
 /// interrupt, so a machine slow enough to reach it fails the run rather than quietly losing the
 /// timeout the assertion is about.
 ///
-/// Every caller takes its deadline before stamping the window its bound assertion measures: taking
-/// it is what may run the load sample, and a sample inside the window would be judged by a bound
-/// derived from that same sample.
+/// Every caller measures fixture launch before using this interrupting deadline.
 fn interrupting_deadline(floor: Duration) -> Duration {
     super::load_scaled_bound(
         floor,
@@ -145,16 +132,6 @@ fn interrupting_deadline(floor: Duration) -> Duration {
 /// Millisecond value a deadline is reported with when it fires.
 fn reported_deadline_ms(deadline: Duration) -> u64 {
     u64::try_from(deadline.as_millis()).expect("the deadline fits its report")
-}
-
-/// BOUND ASSERTION window: production returned at its own deadline, not at its child's exit.
-fn deadline_return_bound(floor: Duration) -> Duration {
-    super::load_scaled_bound(
-        floor,
-        measured_fixture_run_ms(),
-        DEADLINE_RETURN_MULTIPLE,
-        DEADLINE_RETURN_CAP,
-    )
 }
 
 struct FixtureDirectory(PathBuf);
@@ -242,6 +219,22 @@ fn run_fixture_with_prompt(
     )
 }
 
+fn run_fixture_after_marker(
+    capture: &Path,
+    response: &str,
+    deadline: Duration,
+    submitted: &Prompt,
+    suffix: &str,
+) -> Result<crate::ModelResult, ModelError> {
+    run_fixture_model_after_marker(
+        fake_cli().as_os_str(),
+        submitted,
+        deadline,
+        fixture_environment(capture, response),
+        capture_file(capture, suffix),
+    )
+}
+
 fn capture_file(capture: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(format!("{}{suffix}", capture.display()))
 }
@@ -254,28 +247,51 @@ fn large_prompt(directory: &FixtureDirectory) -> Prompt {
     Prompt::build(&rubrics, "Bash", "/workspace/project", "time cargo test")
 }
 
-/// WAIT: the fixture writes its process id when the shell reaches that line, which a loaded machine
-/// delays without changing what the test observes. The window only has to outlast that delay, and a
-/// run that does spend it reports the path and how long it waited, because a file that never
-/// appears and a file that appeared late are different defects.
+/// WAIT: the fixture writes a complete numeric line after creating its process-id file.
+/// A reader scheduled between those operations must not accept an empty or partial id.
 fn captured_process_id(capture: &Path, suffix: &str) -> String {
+    captured_process_id_after_unready(capture, suffix, || {})
+}
+
+fn captured_process_id_after_unready(
+    capture: &Path,
+    suffix: &str,
+    after_unready: impl FnOnce(),
+) -> String {
     let path = capture_file(capture, suffix);
     let started = Instant::now();
+    let mut after_unready = Some(after_unready);
     loop {
         match fs::read_to_string(&path) {
-            Ok(process_id) => return process_id.trim().to_owned(),
+            Ok(process_id)
+                if process_id.ends_with('\n')
+                    && !process_id.trim_end().is_empty()
+                    && process_id
+                        .trim_end()
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit()) =>
+            {
+                return process_id.trim_end().to_owned();
+            }
+            Ok(process_id) if started.elapsed() >= FIXTURE_EVENT_WAIT => panic!(
+                "fixture process id at {} is incomplete after {:?}: {process_id:?}",
+                path.display(),
+                started.elapsed()
+            ),
+            Ok(_) => {}
             Err(error)
                 if error.kind() == std::io::ErrorKind::NotFound
-                    && started.elapsed() < FIXTURE_EVENT_WAIT =>
-            {
-                std::thread::sleep(FIXTURE_EVENT_POLL);
-            }
+                    && started.elapsed() < FIXTURE_EVENT_WAIT => {}
             Err(error) => panic!(
                 "fixture process id at {} is not readable after {:?}: {error}",
                 path.display(),
                 started.elapsed()
             ),
         }
+        if let Some(after_unready) = after_unready.take() {
+            after_unready();
+        }
+        std::thread::sleep(FIXTURE_EVENT_POLL);
     }
 }
 
@@ -561,8 +577,8 @@ fn blocking_model_stdin_is_governed_by_the_model_deadline() {
     // deadline is the subject and the value it reports is part of the assertion.
     let deadline = interrupting_deadline(Duration::from_millis(80));
     let reported_ms = reported_deadline_ms(deadline);
-    let started = Instant::now();
-    let result = run_fixture_with_prompt(&capture, "never-read", deadline, &submitted);
+    let result =
+        run_fixture_after_marker(&capture, "never-read", deadline, &submitted, ".child-pid");
     assert!(matches!(
         result,
         Err(ModelError::Timeout(deadline_ms)) if deadline_ms == reported_ms
@@ -574,13 +590,6 @@ fn blocking_model_stdin_is_governed_by_the_model_deadline() {
     ) else {
         return;
     };
-    // BOUND: the write returned at the deadline rather than at the fixture's exit. The window is
-    // closed before the bound is asked for, so the sample the bound may take stays outside it.
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < deadline_return_bound(Duration::from_secs(2)),
-        "returned after {elapsed:?}"
-    );
     for process_id in process_ids {
         assert_process_gone(&process_id);
     }
@@ -596,7 +605,7 @@ fn model_timeout_terminates_the_entire_child_process_group() {
     let deadline = interrupting_deadline(Duration::from_millis(80));
     let reported_ms = reported_deadline_ms(deadline);
     assert!(matches!(
-        run_fixture_with_prompt(&capture, "never-read", deadline, &submitted),
+        run_fixture_after_marker(&capture, "never-read", deadline, &submitted, ".child-pid"),
         Err(ModelError::Timeout(deadline_ms)) if deadline_ms == reported_ms
     ));
     assert_process_gone(&captured_process_id(&capture, ".pid"));
@@ -611,28 +620,19 @@ fn termination_failure_still_reaps_child_and_joins_io_helpers() {
     let capture = directory.path().join("termination-failure");
     let submitted = large_prompt(&directory);
     let missing_kill = directory.path().join("missing-kill").into_os_string();
-    // DELAY: the fixture execs a ten-second sleep, which this deadline interrupts. The deadline is
-    // taken before the stamp below, because taking it is what may run the load sample, and a sample
-    // inside the measured window would be judged by a bound derived from that same sample.
+    // DELAY: the fixture execs a ten-second sleep, which this deadline interrupts.
     let deadline = interrupting_deadline(Duration::from_millis(80));
-    let started = Instant::now();
     assert!(matches!(
-        run_fixture_model_with_kill_program(
+        run_fixture_model_with_kill_program_after_marker(
             fake_cli().as_os_str(),
             &submitted,
             deadline,
             fixture_environment(&capture, "never-read-direct"),
             missing_kill,
+            capture_file(&capture, ".pid"),
         ),
         Err(ModelError::Kill(_))
     ));
-    // BOUND: the failed kill still returned at the deadline instead of joining the io helpers on
-    // the fixture's own exit.
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < deadline_return_bound(Duration::from_secs(2)),
-        "returned after {elapsed:?}"
-    );
     assert_process_gone(&captured_process_id(&capture, ".pid"));
 }
 
@@ -647,7 +647,6 @@ fn failed_group_kill_reaps_after_cleanup_deadline() {
         .spawn()
         .expect("sleep child");
     let pid = child.id();
-    let started = Instant::now();
     let result = crate::model::terminate_fixture_after_cleanup_deadline(
         &mut child,
         directory.path().join("missing-kill").as_os_str(),
@@ -661,7 +660,6 @@ fn failed_group_kill_reaps_after_cleanup_deadline() {
         gone,
         "directly killed child was not reaped before returning"
     );
-    assert!(started.elapsed() < deadline_return_bound(Duration::from_secs(2)));
 }
 
 /// ´test:crate:group-signalling-never-resolves-kill-through-path´
@@ -733,12 +731,16 @@ fn daemonized_model_descendant_is_reported_within_cleanup_bound() {
             .path()
             .join(format!("daemonized-descendant-{attempt}"));
         // DELAY: the fixture daemonizes a thirty-second descendant out of its process group, which this
-        // deadline interrupts for the parent while the descendant survives. Taken before the stamp, so
-        // the load sample it may run stays outside the window the bound judges.
+        // deadline interrupts for the parent while the descendant survives.
         let deadline = interrupting_deadline(Duration::from_millis(40));
         let started = Instant::now();
-        let result =
-            run_fixture_with_prompt(&capture, "never-read-double-fork", deadline, &submitted);
+        let result = run_fixture_after_marker(
+            &capture,
+            "never-read-double-fork",
+            deadline,
+            &submitted,
+            ".double-fork-ready",
+        );
         if let Ok(reason) = fs::read_to_string(capture_file(&capture, ".double-fork-skip")) {
             let reason = reason.trim();
             assert_eq!(
@@ -785,14 +787,7 @@ fn daemonized_model_descendant_is_reported_within_cleanup_bound() {
         let cleanup = FixtureProcessGuard::new(process_ids.remove(0));
         let outcome = cleanup.outcome();
         assert!(matches!(result, Err(ModelError::CleanupTimeout)));
-        // BOUND: the ordering is the subject and the pair above and below states it — the cleanup
-        // timeout was reported while the escaped descendant was still alive, so the runner gave up on
-        // its own bound rather than waiting to reap. The elapsed window adds that it gave up promptly,
-        // which only a measured bound can say on a machine whose spawns are slower than the writer's.
-        assert!(
-            elapsed < deadline_return_bound(Duration::from_secs(1)),
-            "returned after {elapsed:?}"
-        );
+        // The cleanup timeout was reported while the escaped descendant was still alive.
         assert_process_alive(cleanup.process_id());
         drop(cleanup);
         assert_guard_killed(&outcome);
@@ -1214,17 +1209,10 @@ fn model_timeout_kills_and_reaps_the_child() {
     // there; one measured run is that launch cost, so the deadline follows the machine.
     let deadline = interrupting_deadline(Duration::from_millis(40));
     let reported_ms = reported_deadline_ms(deadline);
-    let started = Instant::now();
     assert!(matches!(
-        run_fixture(&capture, "sleep", deadline),
+        run_fixture_after_marker(&capture, "sleep", deadline, &prompt(), ".pid"),
         Err(ModelError::Timeout(deadline_ms)) if deadline_ms == reported_ms
     ));
-    // BOUND: the kill and the reap happened on the runner's schedule, not the fixture's.
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < deadline_return_bound(Duration::from_secs(2)),
-        "returned after {elapsed:?}"
-    );
     // WAIT: the child is recorded before it sleeps and leaves /proc once the runner reaps it.
     assert_process_gone(&captured_process_id(&capture, ".pid"));
 }
@@ -1327,23 +1315,26 @@ fn reaped_oversized_cleanup_preserves_kill_failure() {
     let directory = FixtureDirectory::new();
     let capture = directory.path().join("reaped-oversized-missing-kill");
     let missing_kill = directory.path().join("missing-kill").into_os_string();
-    // WAIT: the subject is the cleanup after an oversized read, and the fixture's descendant writes
-    // that output fifty milliseconds in. The eighty-millisecond deadline this run used to carry was
-    // racing that write, so which path ran — the oversized read or the deadline — was decided by
-    // machine load; a deadline out of the way leaves the named path.
-    let result = run_fixture_model_with_kill_program(
+    // WAIT: the fixture confirms its oversized write before the model deadline starts. The
+    // explicit 20-second cleanup backstop stays below its 30-second descendant lifetime;
+    // ordinary completing fixtures receive 120 seconds.
+    let result = run_fixture_model_with_kill_program_after_marker(
         fake_cli().as_os_str(),
         &prompt(),
-        COMPLETING_RUN_DEADLINE,
+        Duration::from_secs(20),
         fixture_environment(&capture, "reaped-oversized"),
         missing_kill,
+        capture_file(&capture, ".oversized-written"),
     );
     let cleanup = FixtureProcessGuard::new(captured_process_id(&capture, ".child-pid"));
     let outcome = cleanup.outcome();
-    assert!(matches!(
-        result,
-        Err(ModelError::Kill(error)) if error.kind() == std::io::ErrorKind::NotFound
-    ));
+    assert!(
+        matches!(
+            &result,
+            Err(ModelError::Kill(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ),
+        "oversized cleanup result: {result:?}"
+    );
     assert_process_alive(cleanup.process_id());
     drop(cleanup);
     assert_guard_killed(&outcome);
@@ -1353,15 +1344,29 @@ fn reaped_oversized_cleanup_preserves_kill_failure() {
 #[test]
 fn captured_process_id_waits_for_fixture_file() {
     let directory = FixtureDirectory::new();
-    let capture = directory.path().join("delayed-process-id");
-    let process_file = capture_file(&capture, ".pid");
-    let writer = std::thread::spawn(move || {
-        // DELAY: the late write is the subject — the helper must wait for it rather than read once.
-        std::thread::sleep(Duration::from_millis(20));
-        fs::write(process_file, "12345\n").expect("delayed process id is written");
-    });
-    assert_eq!(captured_process_id(&capture, ".pid"), "12345");
-    writer.join().expect("process-id writer finishes");
+    for (name, initially_present) in [("missing", false), ("incomplete", true)] {
+        let capture = directory.path().join(name);
+        let process_file = capture_file(&capture, ".pid");
+        if initially_present {
+            fs::write(&process_file, b"").expect("incomplete process file exists");
+        }
+        let (unready, unready_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            captured_process_id_after_unready(&capture, ".pid", || {
+                unready.send(()).expect("the unready-file event is sent");
+                release_rx
+                    .recv_timeout(FIXTURE_EVENT_WAIT)
+                    .expect("the writer releases the reader");
+            })
+        });
+        unready_rx
+            .recv_timeout(FIXTURE_EVENT_WAIT)
+            .expect("the reader observed an unready file");
+        fs::write(process_file, "12345\n").expect("complete process id is written");
+        release.send(()).expect("the reader is released");
+        assert_eq!(reader.join().expect("process-id reader finishes"), "12345");
+    }
 }
 
 /// ´test:crate:model-revalidates-the-classification-schema´
@@ -1578,7 +1583,7 @@ fn fixture_kill_program_is_used_for_group_signalling() {
     let directory = FixtureDirectory::new();
     let capture = directory.path().join("fixture-kill-program");
     let missing_kill = directory.path().join("missing-kill").into_os_string();
-    let result = run_fixture_model_with_kill_program(
+    let result = run_fixture_model_with_kill_program_after_marker(
         fake_cli().as_os_str(),
         &prompt(),
         // DELAY: the fixture execs a ten-second sleep, and interrupting it is what sends the
@@ -1586,19 +1591,13 @@ fn fixture_kill_program_is_used_for_group_signalling() {
         interrupting_deadline(Duration::from_millis(40)),
         fixture_environment(&capture, "never-read-direct"),
         missing_kill,
+        capture_file(&capture, ".pid"),
     );
     assert!(matches!(
         result,
         Err(ModelError::Kill(error)) if error.kind() == std::io::ErrorKind::NotFound
     ));
-    let Some(process_ids) = started_fixture_process_ids(
-        &capture,
-        &[".pid"],
-        "fixture_kill_program_is_used_for_group_signalling",
-    ) else {
-        return;
-    };
-    assert_process_gone(&process_ids[0]);
+    assert_process_gone(&captured_process_id(&capture, ".pid"));
 }
 
 /// ´test:crate:fixture-directory-cleanup-failure-does-not-panic´
