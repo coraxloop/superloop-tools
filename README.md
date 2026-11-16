@@ -2,6 +2,10 @@
 
 superloop-tools is tooling for running and auditing loops of collaborative engineering work. It provides worker lanes, doors that mediate command execution, sign-in homes, a repository linter, and a gate for checking changes before integration.
 
+**Principle (Well made and good to use)** · `prin:publictools:well-made-and-good-to-use`
+
+These tools are well made and ergonomic in the practical sense: they are designed for the comfort and efficiency of whoever calls and operates them, when an operation goes wrong as much as when it goes right. A friction met in their use is therefore read as one of two things: a defect of workmanship, ground down where it is; or, more often, the symptom of an engineering or design question that was settled without its user's comfort and efficiency in mind, and then the repair goes to that question and to wherever else it was left unasked, not only to the place where the friction surfaced. A loop and its workers act through these tools all day, so an awkward tool is paid for at every use, and a user who cannot see, stop or recover an operation works around it.
+
 Slice workers start with the contributing guide (`guide:contributing:superloop-tools`) and read the backlog with its priorities register.
 
 ## Build · `sec:publictools:build`
