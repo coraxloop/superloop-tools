@@ -3429,9 +3429,12 @@ fn run_confined_mode(mode: &str, expected_status: i32) -> CachedProbe {
     let root = directory.path().join(format!("probe-{mode}"));
     let harness = install_fake_harness(&root, true);
     let verdict_path = root.join("verdict.json");
-    let output = topology_command(&root, &home)
-        .arg("--verdict")
-        .arg(&verdict_path)
+    let mut command = topology_command(&root, &home);
+    command.arg("--verdict").arg(&verdict_path);
+    if mode == "topology-ceiling" {
+        command.args(["--test-roster", "full-ceiling"]);
+    }
+    let output = command
         .current_dir(&cwd)
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)
@@ -3442,7 +3445,12 @@ fn run_confined_mode(mode: &str, expected_status: i32) -> CachedProbe {
         .env("FAKE_HARNESS_MODE", mode)
         .output_serialized()
         .expect("confined topology probe exits");
-    assert_eq!(output.status.code(), Some(expected_status), "mode={mode}");
+    assert_eq!(
+        output.status.code(),
+        Some(expected_status),
+        "mode={mode} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     for (root, expected) in scratch_roots.iter().zip(&before) {
         assert_eq!(
             *expected,

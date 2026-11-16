@@ -1018,6 +1018,7 @@ pub fn run_topology_probe(
         verdict_path,
         progress_sink,
         RosterSelection::Full,
+        None,
     )
 }
 
@@ -1042,6 +1043,7 @@ pub fn run_topology_probe_for_test(
         return Err(TopologyError::Fixture("test roster requires a debug build and the named, byte-identical fake-harness.sh fixture".to_owned()));
     }
     let selection = match roster {
+        "full-ceiling" => RosterSelection::Full,
         "implemented" => RosterSelection::Implemented,
         "baseline" => RosterSelection::Baseline,
         "audit" => RosterSelection::Phase("audit"),
@@ -1050,7 +1052,13 @@ pub fn run_topology_probe_for_test(
         "settings-deny-wins" => RosterSelection::Phase("settings_deny_wins"),
         _ => return Err(TopologyError::Fixture("unknown test roster".to_owned())),
     };
-    run_selected_probe(fixture_root, verdict_path, progress_sink, selection)
+    run_selected_probe(
+        fixture_root,
+        verdict_path,
+        progress_sink,
+        selection,
+        (roster == "full-ceiling").then_some(Duration::from_secs(120)),
+    )
 }
 
 fn run_selected_probe(
@@ -1058,6 +1066,7 @@ fn run_selected_probe(
     verdict_path: Option<&Path>,
     progress_sink: &mut dyn Write,
     selection: RosterSelection,
+    version_hang_bound: Option<Duration>,
 ) -> Result<ProbeReport, TopologyError> {
     let mut state = ProbeState {
         progress: Progress {
@@ -1070,7 +1079,12 @@ fn run_selected_probe(
         reasons: Vec::new(),
         acceptance: Vec::new(),
     };
-    let preflight = match run_harness_preflight(fixture_root, verdict_path, &mut state.progress)? {
+    let preflight = match run_harness_preflight(
+        fixture_root,
+        verdict_path,
+        &mut state.progress,
+        version_hang_bound,
+    )? {
         Preflight::Supported(preflight) => preflight,
         Preflight::Unsupported(report) => return Ok(report),
     };
@@ -1129,6 +1143,7 @@ fn run_harness_preflight(
     fixture_root: &Path,
     verdict_path: Option<&Path>,
     progress: &mut Progress<'_>,
+    version_hang_bound: Option<Duration>,
 ) -> Result<Preflight, TopologyError> {
     let configured = configured_ceiling()?;
     let ceiling = if progress.selection == RosterSelection::Full {
@@ -1156,7 +1171,7 @@ fn run_harness_preflight(
         &[OsString::from("--version")],
         &version_cwd,
         &[],
-        ceiling,
+        version_hang_bound.unwrap_or(ceiling),
     )?;
     if version_output.timed_out
         || version_output.output_overflow
