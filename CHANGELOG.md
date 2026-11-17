@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-17
+
 ### Changed
 
 - The readable version sentence names the full public source tree before its commit. Install matching linter and pack releases together; the deploy's explicit `tools_source_commit` handover also names the public commit in build records (``spec:output:linter-build-identity``).
@@ -1035,7 +1037,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/coraxloop/superloop-tools/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/coraxloop/superloop-tools/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/coraxloop/superloop-tools/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/coraxloop/superloop-tools/compare/v0.4.0...v0.4.1
