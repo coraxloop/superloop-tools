@@ -4670,9 +4670,8 @@ mod tests {
     #[test]
     fn stale_socket_wait_has_wall_bound() {
         let mut attempts = 0;
-        let refused = refused_socket_within(Duration::from_millis(5), || {
+        let refused = refused_socket_within(Duration::ZERO, || {
             attempts += 1;
-            thread::sleep(Duration::from_millis(20));
             Err(io::Error::from(io::ErrorKind::NotFound))
         });
         assert!(!refused);
@@ -6097,13 +6096,18 @@ mod tests {
         let (filed, request) = std::sync::mpsc::channel();
         super::REQUEST_FILED.with(|slot| *slot.borrow_mut() = Some(filed));
         let (runner, _, _) = counting_runner(fixture);
-        let (socket, server) =
-            fixture_service(fixture, runner, fixture_class_rubric(decision), 2000, None);
-        let mut client = send_probe(socket, 2000);
-        // Rendezvous after the production store write releases its lock. Keep
-        // the former 100 x 10 ms wait bound without polling unrelated records.
+        let (socket, server) = fixture_service(
+            fixture,
+            runner,
+            fixture_class_rubric(decision),
+            120_000,
+            None,
+        );
+        let mut client = send_probe(socket, 120_000);
+        // Rendezvous after the production store write releases its lock.
+        // The common bound guards a hung fixture, not setup performance.
         let id = request
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(FIXTURE_HANG)
             .expect("fixture request filed");
         if let Some(treatment) = answer {
             label(&store, &id, treatment);
@@ -6132,21 +6136,37 @@ mod tests {
         let (mut stream, _peer) = UnixStream::pair().expect("socket pair");
         let (runner, calls, _) = counting_runner(&fixture);
         let route = route_for(&fixture.home);
+        let (filed, observed) = std::sync::mpsc::channel();
+        super::REQUEST_READY.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |id| {
+                filed.send(id.to_owned()).expect("filed lookup miss");
+                Ok(Instant::now())
+            }));
+        });
+        // Model delayed setup without sleeping: the event, not this elapsed
+        // second, selects expiry after the named miss has been filed.
+        let started = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("fixture past acceptance");
         serve_request(
             &mut stream,
             &registration,
             3000,
-            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":100}),
+            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
             Some(&route),
             Some(&runner),
             Some(&fixture.home),
             None,
             Some(&store),
-            Instant::now(),
+            started,
         )
         .expect("recorded deadline");
+        let id = observed
+            .try_recv()
+            .expect("readiness followed durable filing");
         let rows = store.list_run("R").expect("record");
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id(), id);
         assert_eq!(rows[0].value()["would_do"]["decision"], "undecided");
         assert!(
             rows[0].value()["would_do"]["reason"]
@@ -7378,7 +7398,21 @@ mod tests {
             let store = fixture.store();
             let (runner, calls, _states) = counting_runner(&fixture);
             let deadline_ms = 120_000;
-            if !disconnect {
+            let (waiting, entered) = std::sync::mpsc::channel();
+            let (release, proceed) = std::sync::mpsc::channel();
+            if disconnect {
+                super::REQUEST_READY.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move |_| {
+                        crate::requests::store::BEFORE_READER_LOCK_ATTEMPT.with(|hook| {
+                            *hook.borrow_mut() = Some(Box::new(move |_| {
+                                waiting.send(()).expect("owner wait entered");
+                                proceed.recv_timeout(FIXTURE_HANG).expect("peer closed");
+                            }));
+                        });
+                        Ok(Instant::now() + FIXTURE_HANG)
+                    }));
+                });
+            } else {
                 let expired = Instant::now();
                 super::REQUEST_READY.with(|slot| {
                     *slot.borrow_mut() = Some(Box::new(move |_| Ok(expired)));
@@ -7389,13 +7423,16 @@ mod tests {
             let mut client = send_probe(socket, deadline_ms);
             let id = wait_filed(&store);
             if disconnect {
+                entered.recv_timeout(FIXTURE_HANG).expect("owner wait read");
                 drop(client);
+                release.send(()).expect("observe close in owner wait");
             } else {
                 let final_frame = client.answer();
                 assert_eq!(final_frame["reason"], "door-request-deadline");
                 assert_eq!(final_frame["queue_state"], "deadline");
             }
-            server.join().expect("service").expect("reply");
+            let reply = server.join().expect("service").expect("reply");
+            assert_eq!(reply["queue_state"], "deadline", "{reply}");
             assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
             let reason = if disconnect {
                 "door-disconnect-refusal"

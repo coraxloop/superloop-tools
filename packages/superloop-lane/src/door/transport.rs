@@ -27,6 +27,15 @@ use crate::error::LaneError;
 thread_local! { pub(super) static STUB_TEST_BUDGET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
 
 const CHUNK: usize = 8192;
+#[cfg(test)]
+type FixtureDeadline = Box<dyn FnOnce() -> Instant + Send>;
+
+#[cfg(test)]
+thread_local! {
+    static INPUT_DEADLINE: std::cell::RefCell<Option<FixtureDeadline>> = const { std::cell::RefCell::new(None) };
+    pub(super) static CHECK_DEADLINE: std::cell::RefCell<Option<FixtureDeadline>> = const { std::cell::RefCell::new(None) };
+}
+
 const POST_FINAL_STDIN_WAIT: Duration = Duration::from_millis(500);
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 pub const MAX_UPLOAD_OUTPUT_LIMIT: usize = 1024 * 1024 * 1024;
@@ -1483,6 +1492,9 @@ pub(super) fn serve_compute(
     let request_base_deadline = deadline;
     let request_deadline_ms = deadline.saturating_duration_since(started).as_millis();
     let deadline = wait.map_or(deadline, |wait| wait.deadline(deadline));
+    #[cfg(test)]
+    let deadline =
+        CHECK_DEADLINE.with(|slot| slot.borrow_mut().take().map_or(deadline, |check| check()));
     let writer = if let Some(wait) = wait {
         Arc::clone(&wait.writer)
     } else {
@@ -1970,6 +1982,8 @@ where
     let mut writer = stream.try_clone()?;
     let input_failure = Arc::new(Mutex::new(None));
     let sender_failure = Arc::clone(&input_failure);
+    #[cfg(test)]
+    let mut input_deadline = INPUT_DEADLINE.with(|slot| slot.borrow_mut().take());
     let sender = thread::spawn(move || {
         let mut buffer = [0_u8; CHUNK];
         let mut total = 0;
@@ -2013,6 +2027,8 @@ where
                 ));
             }
             let deadline = deadline + Duration::from_millis(sender_credit.load(Ordering::Relaxed));
+            #[cfg(test)]
+            let deadline = input_deadline.take().map_or(deadline, |ready| ready());
             if Instant::now() >= deadline {
                 *sender_failure
                     .lock()
@@ -2704,7 +2720,7 @@ mod tests {
         super::write_input_until(
             &mut writer,
             b"payload",
-            Instant::now() + Duration::from_secs(1),
+            Instant::now() + super::super::tests::FIXTURE_HANG,
         )
         .expect("retry and partial writes");
         assert_eq!(writer.bytes, b"payload");
@@ -2973,10 +2989,12 @@ mod tests {
     /// ´test:unit:door-stub-keeps-input-deadline-over-successful-final-frame´
     #[test]
     fn door_stub_keeps_input_deadline_over_successful_final_frame() {
-        struct LateInput;
+        struct LateInput(bool);
         impl io::Read for LateInput {
             fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-                thread::sleep(Duration::from_millis(650));
+                if std::mem::replace(&mut self.0, true) {
+                    return Ok(0);
+                }
                 buffer[0] = 7;
                 Ok(1)
             }
@@ -2986,7 +3004,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).expect("fixture listener");
         let server = thread::spawn(move || {
             let mut peer = FixtureServer::accept(&listener).expect("fixture accept");
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + super::super::tests::FIXTURE_HANG;
             let _request = fixture_request(&mut peer).expect("stub request");
             io::copy(&mut peer, &mut io::sink()).expect("drain input");
             frame_write_until(&mut peer, &json!({"schema":2,"type":"final",
@@ -2995,10 +3013,14 @@ mod tests {
                     "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}), deadline)
             .expect("success frame");
         });
+        super::STUB_TEST_BUDGET.with(|slot| slot.set(Some(120_000)));
+        super::INPUT_DEADLINE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(Instant::now));
+        });
         let error = stub_call_stream(
             &socket,
             &[OsString::from("door-attribution-deadline")],
-            LateInput,
+            LateInput(false),
             io::sink(),
             io::sink(),
         )
@@ -3028,7 +3050,7 @@ mod tests {
             let listener = UnixListener::bind(&socket).expect("fixture listener");
             let server = thread::spawn(move || {
                 let mut peer = FixtureServer::accept(&listener).expect("fixture accept");
-                let deadline = Instant::now() + Duration::from_secs(5);
+                let deadline = Instant::now() + super::super::tests::FIXTURE_HANG;
                 let _request = fixture_request(&mut peer).expect("request frame");
                 let _closed = peer.shutdown(std::net::Shutdown::Read);
                 frame_write_until(&mut peer, &json!({"schema":2,"type":"final",
@@ -3038,7 +3060,7 @@ mod tests {
                 .expect("success frame");
             });
             let (release, receiver) = mpsc::channel();
-            let started = Instant::now();
+
             let reply = if open {
                 stub_call_stream(
                     &socket,
@@ -3058,7 +3080,8 @@ mod tests {
             }
             .expect("successful final status");
             assert_eq!(reply["status"], 0);
-            assert!(started.elapsed() < super::POST_FINAL_STDIN_WAIT + Duration::from_secs(1));
+            // The open reader is still parked: returning this final must not
+            // depend on its EOF. Release it only after observing the answer.
             let _released = release.send(());
             server.join().expect("fixture server");
         }
@@ -3975,6 +3998,17 @@ mod tests {
         assert_eq!(reply["reason"], "door-review-compute-refusal");
         server.join().expect("server join").expect("server reply");
         drop(third_fixture);
+        let (filed, observed) = mpsc::channel();
+        let (release, closed) = mpsc::channel();
+        super::super::REQUEST_READY.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |_| {
+                filed.send(()).map_err(io::Error::other)?;
+                closed
+                    .recv_timeout(FIXTURE_HANG)
+                    .map_err(io::Error::other)?;
+                Ok(Instant::now() + FIXTURE_HANG)
+            }));
+        });
         let (_temp, mut client, server) = fixture_with_runner(Scope::Work, &FakeRunner);
         client
             .send(
@@ -3982,11 +4016,15 @@ mod tests {
             "deadline_ms":120_000}),
             )
             .expect("request");
+        observed
+            .recv_timeout(FIXTURE_HANG)
+            .expect("request filed before close");
         drop(client);
-        let ended = server.join().expect("server join");
-        assert!(
-            ended.is_err(),
-            "disconnected peer cannot receive a final status"
-        );
+        release.send(()).expect("observe full close after filing");
+        let ended = server
+            .join()
+            .expect("server join")
+            .expect("observed disconnect completes without a final");
+        assert_eq!(ended["reason"], "door-disconnect-refusal");
     }
 }

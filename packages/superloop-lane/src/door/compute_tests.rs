@@ -156,11 +156,13 @@ fn compute_stub_service_with_policy(
     .expect("rubric");
     let filed = super::REQUEST_FILED.with(|slot| slot.borrow_mut().take());
     let ready = super::REQUEST_READY.with(|slot| slot.borrow_mut().take());
+    let check = super::transport::CHECK_DEADLINE.with(|slot| slot.borrow_mut().take());
     let credit = super::WAIT_CREDIT_CAP.with(std::cell::Cell::take);
     let server = thread::spawn(move || {
         super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = contended);
         super::REQUEST_FILED.with(|slot| *slot.borrow_mut() = filed);
         super::REQUEST_READY.with(|slot| *slot.borrow_mut() = ready);
+        super::transport::CHECK_DEADLINE.with(|slot| *slot.borrow_mut() = check);
         super::WAIT_CREDIT_CAP.with(|slot| slot.set(credit));
         let mut stream = FixtureServer::accept(&listener)?;
         let started = Instant::now();
@@ -1672,19 +1674,19 @@ fn compute_refusal_frame(client: &mut FixtureClient) -> (Value, u64) {
 
 fn compute_refusal_call(socket: &std::path::Path, use_stub: bool) -> (Value, Option<u64>) {
     if use_stub {
-        let previous = super::transport::STUB_TEST_BUDGET.with(|slot| slot.replace(Some(1000)));
+        let previous = super::transport::STUB_TEST_BUDGET.with(|slot| slot.replace(Some(120_000)));
         let (reply, _, _) = compute_call(socket, "/opt/fixture/bin/report cargo test --locked");
         super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(previous));
         return (reply, None);
     }
     let mut client = FixtureClient::connect(socket).expect("socket");
-    client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":1000})).expect("shorter caller bound");
+    client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(),b"/opt/fixture/bin/report cargo test --locked".to_vec()],"deadline_ms":120_000})).expect("shorter caller bound");
     client.shutdown(Shutdown::Write).expect("EOF");
     // The deadline announcement precedes admission and every request-lock wait.
     let announcement = super::frame_read(client.wire()).expect("announcement");
     assert_eq!(announcement["type"], "compute-deadline");
     assert_eq!(announcement["registered_deadline_ms"], 3_600_000);
-    assert_eq!(announcement["request_deadline_ms"], 1000);
+    assert_eq!(announcement["request_deadline_ms"], 120_000);
     let (reply, observed_credit) = compute_refusal_frame(&mut client);
     (reply, Some(observed_credit))
 }
@@ -1736,6 +1738,20 @@ fn compute_deadline_refusal_case(
     if queue == "refused" {
         super::REQUEST_FILED.with(|slot| *slot.borrow_mut() = Some(filed_tx));
     }
+    if floor == "allow" {
+        super::transport::CHECK_DEADLINE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(Instant::now));
+        });
+    } else if queue != "refused" {
+        super::REQUEST_READY.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(|_| {
+                // Expire only after filing, beyond even the maximum lock credit.
+                Ok(Instant::now()
+                    .checked_sub(Duration::from_millis(super::MAX_LOCK_WAIT_CREDIT_MS + 1))
+                    .expect("fixture past credit cap"))
+            }));
+        });
+    }
     let (socket, calls, server) = compute_stub_service_with_policy(
         &fixture,
         "R",
@@ -1765,14 +1781,14 @@ fn compute_deadline_refusal_case(
         }
     }
     assert!(credit <= super::MAX_LOCK_WAIT_CREDIT_MS);
-    assert_eq!(reply["effective_deadline_ms"], 1000 + credit);
+    assert_eq!(reply["effective_deadline_ms"], 120_000 + credit);
     assert_eq!(reply["reason"], reason);
     assert_eq!(reply["queue_state"], queue);
     assert_eq!(reply["registered_deadline_ms"], 3_600_000);
-    assert_eq!(reply["request_deadline_ms"], 1000);
+    assert_eq!(reply["request_deadline_ms"], 120_000);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     let expected_line = if reason == "door-request-deadline" {
-        "door-request-deadline: registered_deadline_ms=3600000 request_deadline_ms=1000"
+        "door-request-deadline: registered_deadline_ms=3600000 request_deadline_ms=120000"
     } else {
         "door-adjudicated-refusal"
     };
