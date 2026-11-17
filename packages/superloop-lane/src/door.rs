@@ -123,7 +123,7 @@ thread_local! {
 
 pub(crate) const MAX_LOCK_WAIT_CREDIT_MS: u64 = 120_000;
 pub(crate) struct RequestWait {
-    pub(super) writer: std::sync::Arc<std::sync::Mutex<UnixStream>>,
+    writer: std::sync::Arc<std::sync::Mutex<transport::Writer>>,
     micros: AtomicU64,
     cap_ms: u64,
     announced: std::sync::Mutex<u64>,
@@ -142,7 +142,9 @@ impl RequestWait {
             .with(std::cell::Cell::take)
             .unwrap_or(cap_ms);
         Ok(Self {
-            writer: std::sync::Arc::new(std::sync::Mutex::new(stream.try_clone()?)),
+            writer: std::sync::Arc::new(std::sync::Mutex::new(transport::Writer::new(
+                stream.try_clone()?,
+            ))),
             micros: AtomicU64::new(0),
             cap_ms,
             announced: std::sync::Mutex::new(0),
@@ -250,10 +252,10 @@ impl RequestWait {
             });
             let deadline = Instant::now() + Duration::from_secs(2);
             let _sent = transport::with_writer(&self.writer, deadline, |stream| {
-                if self.final_sent.load(Ordering::Relaxed) {
+                if self.final_sent.load(Ordering::Relaxed) || stream.sealed {
                     return Ok(());
                 }
-                frame_write_until(stream, &frame, deadline)
+                frame_write_until(&mut stream.stream, &frame, deadline)
             });
             *announced = total;
             // A fixture may release its holder only after the progress frame.
@@ -285,7 +287,7 @@ impl RequestWait {
             }
         });
         let result = transport::with_writer(&self.writer, deadline, |stream| {
-            frame_write_until(stream, reply, deadline)?;
+            stream.final_reply(reply, deadline)?;
             // credit checks this flag under this same writer lock.
             self.final_sent.store(true, Ordering::Relaxed);
             Ok(())
@@ -6543,7 +6545,7 @@ mod tests {
 
     // A reply as its peer decodes it. Frames are `serde_json::to_vec`, and the default
     // parser can land one unit in the last place away from a printed float measurement.
-    fn as_sent(reply: &Value) -> Value {
+    pub(super) fn as_sent(reply: &Value) -> Value {
         let bytes = serde_json::to_vec(reply).expect("encode reply");
         serde_json::from_slice(&bytes).expect("decode reply")
     }

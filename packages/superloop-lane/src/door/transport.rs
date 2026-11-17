@@ -915,42 +915,181 @@ pub(super) fn refusal(
         "compute_wall_seconds":0.0})
 }
 
+/// Counts and the output seal are accessed only with the socket writer held.
+pub(super) struct Writer {
+    pub(super) stream: UnixStream,
+    pub(super) sealed: bool,
+    final_sent: bool,
+    accounted: bool,
+    stdout: usize,
+    stderr: usize,
+}
+
+impl Writer {
+    pub(super) const fn new(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            sealed: false,
+            final_sent: false,
+            accounted: false,
+            stdout: 0,
+            stderr: 0,
+        }
+    }
+
+    fn counts(&self, reply: &mut Value) {
+        if self.accounted {
+            reply["stdout_bytes"] = json!(self.stdout);
+            reply["stderr_bytes"] = json!(self.stderr);
+        }
+    }
+
+    pub(super) fn final_reply(&mut self, reply: &Value, deadline: Instant) -> io::Result<()> {
+        if self.final_sent {
+            return Err(io::Error::other("door final already written"));
+        }
+        self.sealed = true;
+        let mut reply = reply.clone();
+        self.counts(&mut reply);
+        frame_write_until(&mut self.stream, &reply, deadline)?;
+        self.final_sent = true;
+        Ok(())
+    }
+}
+
 fn send_output(
-    stream: &Arc<Mutex<UnixStream>>,
-    kind: &str,
+    writer: &Arc<Mutex<Writer>>,
+    kind: &'static str,
     bytes: &[u8],
+    count: &AtomicUsize,
+    abort: &Abort,
     deadline: Instant,
 ) -> io::Result<()> {
-    let value = json!({"schema":2,"type":kind,"bytes":bytes});
-    write_frame_locked(stream, &value, deadline)
+    with_writer(writer, deadline, |locked| {
+        if locked.sealed {
+            return Err(io::Error::other("door output sealed"));
+        }
+        let value = json!({"schema":2,"type":kind,"bytes":bytes});
+        let body = serde_json::to_vec(&value)?;
+        let mut frame = u32::try_from(body.len())
+            .map_err(io::Error::other)?
+            .to_be_bytes()
+            .to_vec();
+        frame.extend_from_slice(&body);
+        let mut partial = false;
+        if let Err(error) =
+            write_output_bytes(&locked.stream, &frame, abort, deadline, &mut partial)
+        {
+            // A partial frame cannot be followed by a parseable final.
+            if partial {
+                let _closed = locked.stream.shutdown(Shutdown::Write);
+            }
+            locked.sealed = true;
+            return Err(error);
+        }
+        count.fetch_add(bytes.len(), Ordering::Relaxed);
+        if kind == "stdout" {
+            locked.stdout += bytes.len();
+        } else {
+            locked.stderr += bytes.len();
+        }
+        Ok(())
+    })
+}
+
+#[allow(unsafe_code)]
+fn write_output_bytes(
+    stream: &UnixStream,
+    mut bytes: &[u8],
+    abort: &Abort,
+    deadline: Instant,
+    partial: &mut bool,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    while !bytes.is_empty() {
+        if Instant::now() >= deadline {
+            abort.stop(super::lifetime::Cause::Deadline);
+        }
+        if abort.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "door output stopped",
+            ));
+        }
+        // SAFETY: the live socket and borrowed byte slice remain valid for send.
+        let sent = unsafe {
+            libc::send(
+                stream.as_raw_fd(),
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if sent < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if error.kind() == io::ErrorKind::WouldBlock {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            return Err(error);
+        }
+        let sent = usize::try_from(sent).map_err(io::Error::other)?;
+        if sent == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "door output closed",
+            ));
+        }
+        *partial = true;
+        bytes = &bytes[sent..];
+    }
+    Ok(())
+}
+
+fn nonblocking_output(pipe: &impl std::os::fd::AsFd) -> io::Result<()> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    let flags = fcntl(pipe, FcntlArg::F_GETFL).map_err(io::Error::other)?;
+    fcntl(
+        pipe,
+        FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
+    )
+    .map_err(io::Error::other)?;
+    Ok(())
 }
 
 pub(super) fn write_frame_locked(
-    stream: &Arc<Mutex<UnixStream>>,
+    stream: &Arc<Mutex<Writer>>,
     value: &Value,
     deadline: Instant,
 ) -> io::Result<()> {
     with_writer(stream, deadline, |locked| {
-        frame_write_until(locked, value, deadline)
+        frame_write_until(&mut locked.stream, value, deadline)
     })
 }
 
 fn write_final(
-    writer: &Arc<Mutex<UnixStream>>,
+    writer: &Arc<Mutex<Writer>>,
     wait: Option<&super::RequestWait>,
     reply: &Value,
     deadline: Instant,
 ) -> io::Result<()> {
     wait.map_or_else(
-        || write_frame_locked(writer, reply, deadline),
+        || {
+            with_writer(writer, deadline, |locked| {
+                locked.final_reply(reply, deadline)
+            })
+        },
         |wait| wait.write_final(reply, deadline),
     )
 }
 
 pub(super) fn with_writer<T>(
-    stream: &Arc<Mutex<UnixStream>>,
+    stream: &Arc<Mutex<Writer>>,
     deadline: Instant,
-    action: impl FnOnce(&mut UnixStream) -> io::Result<T>,
+    action: impl FnOnce(&mut Writer) -> io::Result<T>,
 ) -> io::Result<T> {
     loop {
         match stream.try_lock() {
@@ -995,7 +1134,7 @@ impl Abort {
 #[allow(clippy::too_many_arguments)]
 fn output_pump<R: io::Read>(
     mut source: R,
-    writer: &Arc<Mutex<UnixStream>>,
+    writer: &Arc<Mutex<Writer>>,
     kind: &'static str,
     total: &Arc<AtomicUsize>,
     stream_count: &Arc<AtomicUsize>,
@@ -1017,6 +1156,10 @@ fn output_pump<R: io::Read>(
         }
         let count = match source.read(&mut buffer) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
             result => result?,
         };
         if count == 0 {
@@ -1047,8 +1190,16 @@ fn output_pump<R: io::Read>(
                 "door output stopped",
             ));
         }
-        stream_count.fetch_add(count, Ordering::Relaxed);
-        if let Err(error) = send_output(writer, kind, &buffer[..count], deadline) {
+        #[cfg(test)]
+        tests::output_before_write(kind, stream_count);
+        if let Err(error) = send_output(
+            writer,
+            kind,
+            &buffer[..count],
+            stream_count,
+            abort,
+            deadline,
+        ) {
             abort.stop(
                 if matches!(
                     error.kind(),
@@ -1310,7 +1461,7 @@ pub(super) fn serve_compute(
     let writer = if let Some(wait) = wait {
         Arc::clone(&wait.writer)
     } else {
-        Arc::new(Mutex::new(stream.try_clone()?))
+        Arc::new(Mutex::new(Writer::new(stream.try_clone()?)))
     };
     if registration.scope != Scope::Work {
         let reply = refusal(registration, peer, "door-review-compute-refusal", started);
@@ -1408,6 +1559,12 @@ pub(super) fn serve_compute(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("compute stderr absent"))?;
+    nonblocking_output(&stdout)?;
+    nonblocking_output(&stderr)?;
+    with_writer(&writer, deadline, |locked| {
+        locked.accounted = true;
+        Ok(())
+    })?;
     let cause = wait.map_or_else(
         || Arc::new(super::lifetime::FirstCause::default()),
         |wait| Arc::clone(&wait.cause),
@@ -1444,12 +1601,16 @@ pub(super) fn serve_compute(
             )
         })
     };
+    #[cfg(test)]
+    let output_hook = tests::OUTPUT_WRITE_HOOK.with(|slot| slot.borrow_mut().take());
     let output = {
         let writer = Arc::clone(&writer);
         let total = Arc::clone(&output_total);
         let count = Arc::clone(&stdout_count);
         let abort = Arc::clone(&abort);
         thread::spawn(move || {
+            #[cfg(test)]
+            tests::OUTPUT_WRITE_HOOK.with(|slot| *slot.borrow_mut() = output_hook);
             output_pump(
                 stdout, &writer, "stdout", &total, &count, &abort, deadline, None, bound,
             )
@@ -1500,7 +1661,6 @@ pub(super) fn serve_compute(
             break child.wait()?;
         }
         if let Some(status) = child.try_wait()? {
-            cause.select(super::lifetime::Cause::ChildExit);
             break status;
         }
         thread::sleep(Duration::from_millis(5));
@@ -1512,9 +1672,6 @@ pub(super) fn serve_compute(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         ending["local_child"] = json!("reaped");
         drop(ending);
-        if let Some(life) = &wait.lifetime {
-            life.finish();
-        }
     }
     let compute_wall = compute_started.elapsed().as_secs_f64();
     input_stopped.store(true, Ordering::Relaxed);
@@ -1523,15 +1680,40 @@ pub(super) fn serve_compute(
         // The remote command has exited; descendants cannot retain output pipes.
         stop_group(&mut child, runner.owns_process_group());
     }
-    let join_deadline = Instant::now() + Duration::from_secs(2);
-    let input_result = bounded_join(input, join_deadline)?;
+    while !output.is_finished() || !errors.is_finished() {
+        #[cfg(test)]
+        tests::drain_waiting();
+        let stop = wait
+            .and_then(|wait| wait.stop(request_base_deadline))
+            .or_else(|| (Instant::now() >= deadline).then_some(super::lifetime::Cause::Deadline));
+        if let Some(stop) = stop {
+            abort.stop(stop);
+            outcome = if stop == super::lifetime::Cause::Deadline {
+                "door-deadline-refusal"
+            } else {
+                stop.reason()
+            };
+        }
+        #[cfg(test)]
+        tests::drain_stopped(stop.is_some());
+        thread::sleep(Duration::from_millis(5));
+    }
+    let output_result = Some(
+        output
+            .join()
+            .map_err(|_| io::Error::other("door output pump panicked"))?,
+    );
+    let error_result = Some(
+        errors
+            .join()
+            .map_err(|_| io::Error::other("door error pump panicked"))?,
+    );
+    let input_result = bounded_join(input, Instant::now() + Duration::from_secs(2))?;
     if let Some(Err(reason)) = input_result
         && abort.load(Ordering::Relaxed)
     {
         outcome = reason;
     }
-    let output_result = bounded_join(output, join_deadline)?;
-    let error_result = bounded_join(errors, join_deadline)?;
     if (output_result.as_ref().is_none_or(Result::is_err)
         || error_result.as_ref().is_none_or(Result::is_err))
         && outcome == "door-complete"
@@ -1543,6 +1725,12 @@ pub(super) fn serve_compute(
     }
     if output_total.load(Ordering::Relaxed) > bound {
         outcome = "door-output-limit-refusal";
+    }
+    cause.select(super::lifetime::Cause::for_reply(outcome));
+    if let Some(wait) = wait
+        && let Some(life) = &wait.lifetime
+    {
+        life.finish();
     }
     let code = if outcome == "door-complete" {
         status.code().unwrap_or(125)
@@ -1562,6 +1750,11 @@ pub(super) fn serve_compute(
         "stderr_bytes":stderr_count.load(Ordering::Relaxed),
         "queue_wall_seconds":queue_wall,"mediation_wall_seconds":(total_wall - compute_wall - queue_wall.unwrap_or(0.0)).max(0.0),
         "compute_wall_seconds":compute_wall});
+    with_writer(&writer, Instant::now() + Duration::from_secs(2), |locked| {
+        locked.sealed = true;
+        locked.counts(&mut reply);
+        Ok(())
+    })?;
     if let Some(packet) = ref_packet
         .lock()
         .map_err(|_| io::Error::other("ref packet evidence lock"))?
@@ -1987,6 +2180,207 @@ mod tests {
         pub(super) static SPAWN_DEADLINE: std::cell::RefCell<Option<SpawnDeadline>> = const { std::cell::RefCell::new(None) };
     }
 
+    use serde_json::Value;
+    use std::net::Shutdown;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    type DrainHook = Box<dyn FnOnce(bool) + Send>;
+    pub(super) type OutputHook = Box<dyn FnOnce(usize) + Send>;
+    thread_local! {
+        pub(super) static OUTPUT_WRITE_HOOK: std::cell::RefCell<Option<OutputHook>> = const { std::cell::RefCell::new(None) };
+        static DRAIN_WAITING: std::cell::RefCell<Option<Box<dyn FnOnce() + Send>>> = const { std::cell::RefCell::new(None) };
+        static DRAIN_STOPPED: std::cell::RefCell<Option<DrainHook>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn output_before_write(kind: &str, count: &AtomicUsize) {
+        if kind == "stdout" {
+            OUTPUT_WRITE_HOOK.with(|slot| {
+                if let Some(hook) = slot.borrow_mut().take() {
+                    hook(count.load(Ordering::Relaxed));
+                }
+            });
+        }
+    }
+    pub(super) fn drain_waiting() {
+        DRAIN_WAITING.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().take() {
+                hook();
+            }
+        });
+    }
+    pub(super) fn drain_stopped(stopped: bool) {
+        DRAIN_STOPPED.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().take() {
+                hook(stopped);
+            }
+        });
+    }
+
+    /// ´test:unit:door-output-final-counts-and-seal-follow-delivery´
+    #[test]
+    fn door_output_final_counts_and_seal_follow_delivery() {
+        ordered_output(false);
+    }
+
+    /// ´test:unit:door-output-drain-retains-request-lifetime´
+    #[test]
+    fn door_output_drain_retains_request_lifetime() {
+        ordered_output(true);
+    }
+
+    fn ordered_output_hooks(
+        events: &std::sync::mpsc::Sender<(&'static str, usize)>,
+        held: std::sync::mpsc::Receiver<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+        expire: bool,
+    ) {
+        let tx = events.clone();
+        OUTPUT_WRITE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |count| {
+                tx.send(("held", count)).expect("held event");
+                held.recv_timeout(FIXTURE_HANG).expect("release pump");
+            }));
+        });
+        let tx = events.clone();
+        DRAIN_WAITING.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                tx.send(("draining", 0))
+                    .expect("child exited, pump still held");
+                resume.recv_timeout(FIXTURE_HANG).expect("resume drain");
+            }));
+        });
+        let tx = events.clone();
+        if expire {
+            DRAIN_STOPPED.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |stopped| {
+                    tx.send((if stopped { "stopped" } else { "not-stopped" }, 0))
+                        .expect("stop observed");
+                }));
+            });
+        }
+    }
+
+    fn assert_output_sealed(wait: &crate::door::RequestWait) {
+        let count = AtomicUsize::new(0);
+        let abort = super::Abort::new(Arc::clone(&wait.cause));
+        assert!(
+            super::send_output(
+                &wait.writer,
+                "stdout",
+                b"late",
+                &count,
+                &abort,
+                Instant::now() + FIXTURE_HANG
+            )
+            .is_err(),
+            "final seals output"
+        );
+    }
+
+    fn ordered_output(expire: bool) {
+        let (mut client, server) = FixtureClient::pair().expect("pair");
+        client.shutdown(Shutdown::Write).expect("input EOF");
+        let row = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("row");
+        let started = Instant::now();
+        let (start, clock) = crate::door::lifetime::Start::controlled(started);
+        let (events, observed) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::sync_channel(1);
+        let (go, resume) = std::sync::mpsc::sync_channel(1);
+        let service = thread::spawn(move || {
+            let wait = crate::door::RequestWait::new(&server)
+                .expect("wait")
+                .with_lifetime(start, true, &server)
+                .expect("life");
+            ordered_output_hooks(&events, held, resume, expire);
+            let complete = |reply: &Value| {
+                events
+                    .send((
+                        "complete",
+                        usize::try_from(reply["stdout_bytes"].as_u64().unwrap_or_default())
+                            .expect("delivered count"),
+                    ))
+                    .expect("complete event");
+                Ok(())
+            };
+            let reply = super::serve_compute(
+                &server,
+                &row,
+                3000,
+                Operation::ProbeEcho,
+                &FakeRunner,
+                started,
+                started + FIXTURE_HANG,
+                "no-queue",
+                None,
+                None,
+                Some(&complete),
+                Some(&wait),
+            )
+            .expect("serve");
+            assert_output_sealed(&wait);
+            reply
+        });
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            let event = observed
+                .recv_timeout(FIXTURE_HANG)
+                .expect("held and draining events");
+            assert_ne!(event.0, "complete", "final cannot precede held output");
+            if event.0 == "held" {
+                assert_eq!(event.1, 0, "unsent chunk is not delivered");
+            }
+            seen.push(event.0);
+        }
+        assert!(seen.contains(&"held") && seen.contains(&"draining"));
+        if expire {
+            clock.advance(240_000);
+        }
+        go.send(()).expect("drain continuation");
+        if expire {
+            assert_eq!(
+                observed.recv_timeout(FIXTURE_HANG).expect("typed stop").0,
+                "stopped"
+            );
+        }
+        release.send(()).expect("pump continuation");
+        let reply = client.answer();
+        assert_eq!(reply["stdout_bytes"], if expire { 0 } else { 6 });
+        assert_eq!(reply["status"], if expire { 125 } else { 0 });
+        assert_eq!(
+            reply["stop_cause"],
+            if expire { "deadline" } else { "child-exit" }
+        );
+        assert_eq!(
+            observed
+                .recv_timeout(FIXTURE_HANG)
+                .expect("durable completion"),
+            ("complete", if expire { 0 } else { 6 })
+        );
+        assert_eq!(
+            crate::door::tests::as_sent(&service.join().expect("join")),
+            reply
+        );
+        let mut byte = [0];
+        assert_eq!(
+            std::io::Read::read(client.wire(), &mut byte).expect("EOF after final"),
+            0
+        );
+        #[allow(clippy::print_stderr)] // Captured ordering evidence.
+        {
+            eprintln!("DELIVERY-FINAL {reply}");
+        }
+    }
+
     struct FakeRunner;
 
     /// ´test:unit:compute-ending-retains-supplied-bound-without-a-remote-anchor´
@@ -2335,7 +2729,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         super::output_pump(
             source(),
-            &Arc::new(Mutex::new(writer.into_wire())),
+            &Arc::new(Mutex::new(super::Writer::new(writer.into_wire()))),
             "stdout",
             &total,
             &count,
