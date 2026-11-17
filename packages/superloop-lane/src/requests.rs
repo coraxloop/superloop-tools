@@ -302,6 +302,91 @@ fn validate_workspace_effect(value: &Value) -> Result<(), LaneError> {
     Ok(())
 }
 
+/// Unobserved terminal facts, also used by the explicit historical rewrite.
+pub(crate) fn unobserved_ending() -> Value {
+    json!({"cause":"unobserved","wall_clock":"unobserved","final_write":"unknown","local_child":"unobserved",
+        "remote":{"state":"unconfirmed","bound_seconds":null,"configured_seconds":null,
+            "local_spawn_unix_ns":null,"start":"unobserved"}})
+}
+
+/// Discard pending placeholders when no terminal measurement was observed.
+pub(crate) fn unknown_effect_measurements(effect: &mut Value) {
+    for key in [
+        "stdin_bytes",
+        "stdout_bytes",
+        "stderr_bytes",
+        "queue_wall_seconds",
+        "mediation_wall_seconds",
+        "compute_wall_seconds",
+        "exit_status",
+    ] {
+        effect[key] = Value::Null;
+    }
+    if effect.get("output_bytes").is_some() {
+        effect["output_bytes"] = Value::Null;
+    }
+}
+
+fn valid_ending(value: &Value) -> bool {
+    let remote = &value["remote"];
+    exact(
+        value,
+        &[
+            "cause",
+            "wall_clock",
+            "final_write",
+            "local_child",
+            "remote",
+        ],
+    ) && matches!(
+        value["wall_clock"].as_str(),
+        Some("monotonic-awake" | "unobserved")
+    ) && matches!(
+        value["cause"].as_str(),
+        Some(
+            "unobserved"
+                | "child-exit"
+                | "deadline"
+                | "refusal"
+                | "transport"
+                | "handler-failure"
+                | "observation-failure"
+                | "disconnect"
+                | "abandoned"
+        )
+    ) && matches!(
+        value["final_write"].as_str(),
+        Some("unknown" | "not-attempted" | "failed" | "succeeded-locally")
+    ) && matches!(
+        value["local_child"].as_str(),
+        Some("unobserved" | "not-started" | "spawned" | "reaped")
+    ) && exact(
+        remote,
+        &[
+            "state",
+            "bound_seconds",
+            "configured_seconds",
+            "local_spawn_unix_ns",
+            "start",
+        ],
+    ) && matches!(
+        remote["state"].as_str(),
+        Some("unconfirmed" | "not-started")
+    ) && remote["start"] == "unobserved"
+        && (remote["configured_seconds"].is_null()
+            || remote["configured_seconds"]
+                .as_f64()
+                .is_some_and(|n| n.is_finite() && n > 0.0))
+        && (remote["bound_seconds"].is_null()
+            || remote["bound_seconds"]
+                .as_f64()
+                .is_some_and(|n| n.is_finite() && n > 0.0))
+        && (remote["local_spawn_unix_ns"].is_null()
+            || remote["local_spawn_unix_ns"].as_str().is_some_and(|s| {
+                !s.is_empty() && s.len() <= 40 && s.bytes().all(|b| b.is_ascii_digit())
+            }))
+}
+
 impl RequestRecord {
     /// Decode the one record shape used by the door and request tools.
     ///
@@ -459,6 +544,7 @@ impl RequestRecord {
         let effect_pending = value["effect"]["state"] == "pending";
         let ref_check = &value["effect"]["ref_check"];
         let mut effect_keys = vec![
+            "ending",
             "state",
             "reason",
             "exit_status",
@@ -542,12 +628,15 @@ impl RequestRecord {
                 "effect.bound and effect.output_bytes must be present together",
             ));
         }
+        let interrupted = value["effect"]["state"] == "interrupted";
         for key in ["bound", "output_bytes"] {
             if let Some(value) = value["effect"].get(key) {
                 effect_keys.push(key);
-                if value.as_u64().is_none_or(|bytes| {
-                    key == "bound" && !(1..=MAX_UPLOAD_OUTPUT_LIMIT).contains(&bytes)
-                }) {
+                if !(interrupted && key == "output_bytes" && value.is_null())
+                    && value.as_u64().is_none_or(|bytes| {
+                        key == "bound" && !(1..=MAX_UPLOAD_OUTPUT_LIMIT).contains(&bytes)
+                    })
+                {
                     return Err(refusal(
                         "requests-record-refusal",
                         "output bound or count differs",
@@ -619,10 +708,17 @@ impl RequestRecord {
                 ));
             }
         }
-        if !exact(&value["effect"], &effect_keys)
+        if value["effect"].get("ending").is_none() && exact(&value["effect"], &effect_keys[1..]) {
+            return Err(refusal(
+                "requests-rewrite-required",
+                "effect ending requires requests rewrite LOOP --dry-run",
+            ));
+        }
+        if !valid_ending(&value["effect"]["ending"])
+            || !exact(&value["effect"], &effect_keys)
             || !matches!(
                 value["effect"]["state"].as_str(),
-                Some("pending" | "completed" | "refused")
+                Some("pending" | "completed" | "refused" | "interrupted")
             )
             || !(value["effect"]["reason"].is_null() || word(&value["effect"]["reason"], 128))
             || (effect_pending != ref_check.is_null())
@@ -643,14 +739,20 @@ impl RequestRecord {
                 || value["effect"]["exit_status"].as_i64().is_some())
             || ["stdin_bytes", "stdout_bytes", "stderr_bytes"]
                 .iter()
-                .any(|key| value["effect"][key].as_u64().is_none())
+                .any(|key| {
+                    !(interrupted && value["effect"][key].is_null())
+                        && value["effect"][key].as_u64().is_none()
+                })
             || !(value["effect"]["queue_wall_seconds"].is_null()
                 || value["effect"]["queue_wall_seconds"]
                     .as_f64()
                     .is_some_and(|wall| wall >= 0.0))
             || ["mediation_wall_seconds", "compute_wall_seconds"]
                 .iter()
-                .any(|key| value["effect"][key].as_f64().is_none_or(|wall| wall < 0.0))
+                .any(|key| {
+                    !(interrupted && value["effect"][key].is_null())
+                        && value["effect"][key].as_f64().is_none_or(|wall| wall < 0.0)
+                })
         {
             return Err(refusal("requests-record-refusal", "effect shape differs"));
         }

@@ -2004,9 +2004,10 @@ pub(crate) fn run_with(
             .ok_or_else(|| LaneError::operation("install-door-actions", "actions are absent"))?
             .extend(node_plan.actions.iter().cloned());
     }
+    let restart_admission = crate::door::restart_probe(owner_home, &request.loop_name)?;
     if request.dry_run {
         return Ok(agent_admission_report(
-            json!({"schema":1,"command":"install-door","loop":request.loop_name,"dry_run":true,"changed":changed,"actions":actions,"repin_required_runs":repin_required_runs,"repin_unmeasured_runs":inventory.repin_unmeasured_runs,"container_states":inventory.container_states,"agent":agent_configuration,"agent_metadata":agent_metadata,"node_root":node_root,"stub_sha256":stub_digest,"service_sha256":service_digest,"unit_activation_performed":false,"activation":["systemctl --user daemon-reload",format!("systemctl --user start superloop-lane-door@{}.service",request.loop_name)],"wall_seconds":started.elapsed().as_secs_f64()}),
+            json!({"schema":1,"command":"install-door","loop":request.loop_name,"dry_run":true,"changed":changed,"actions":actions,"repin_required_runs":repin_required_runs,"repin_unmeasured_runs":inventory.repin_unmeasured_runs,"container_states":inventory.container_states,"agent":agent_configuration,"agent_metadata":agent_metadata,"node_root":node_root,"stub_sha256":stub_digest,"service_sha256":service_digest,"unit_activation_performed":false,"restart_admission":restart_admission,"activation":["systemctl --user daemon-reload",format!("systemctl --user start superloop-lane-door@{}.service",request.loop_name)],"wall_seconds":started.elapsed().as_secs_f64()}),
         ));
     }
     let attempted = if record_attempt {
@@ -2110,7 +2111,7 @@ pub(crate) fn run_with(
         replace_file(owner_home, &destination)?;
     }
     Ok(agent_admission_report(
-        json!({"schema":1,"command":"install-door","loop":request.loop_name,"dry_run":false,"changed":changed,"actions":actions,"repin_required_runs":repin_required_runs,"repin_unmeasured_runs":inventory.repin_unmeasured_runs,"container_states":inventory.container_states,"agent":agent_configuration,"agent_metadata":agent_metadata,"node_root":node_root,"stub_sha256":stub_digest,"service_sha256":service_digest,"socket_dir":door_path,"unit_dir":unit_dir,"unit_activation_performed":false,"activation":["systemctl --user daemon-reload",format!("systemctl --user start superloop-lane-door@{}.service",request.loop_name)],"wall_seconds":started.elapsed().as_secs_f64()}),
+        json!({"schema":1,"command":"install-door","loop":request.loop_name,"dry_run":false,"changed":changed,"actions":actions,"repin_required_runs":repin_required_runs,"repin_unmeasured_runs":inventory.repin_unmeasured_runs,"container_states":inventory.container_states,"agent":agent_configuration,"agent_metadata":agent_metadata,"node_root":node_root,"stub_sha256":stub_digest,"service_sha256":service_digest,"socket_dir":door_path,"unit_dir":unit_dir,"unit_activation_performed":false,"restart_admission":restart_admission,"activation":["systemctl --user daemon-reload",format!("systemctl --user start superloop-lane-door@{}.service",request.loop_name)],"wall_seconds":started.elapsed().as_secs_f64()}),
     ))
 }
 
@@ -3851,6 +3852,13 @@ mod tests {
         );
     }
 
+    fn assert_generation_omits_agent_observations(bytes: &[u8]) {
+        let generation: serde_json::Value = serde_json::from_slice(bytes).expect("generation");
+        assert!(generation["agent"].get("sign_in").is_none());
+        assert!(generation["agent"].get("executable_status").is_none());
+        assert!(generation.get("agent_metadata").is_none());
+    }
+
     /// ´test:unit:door-installer-reports-entry-metadata-without-generation-drift´
     #[test]
     fn door_installer_reports_entry_metadata_without_generation_drift() {
@@ -3884,6 +3892,7 @@ mod tests {
         };
         let preview =
             run_with(home, &request, &stub, &service, Some(group)).expect("preview through entry");
+        assert_eq!(preview["restart_admission"]["status"], "admission-idle");
         assert_eq!(preview["agent_metadata"]["sign_in"]["exists"], false);
         let program = &preview["agent_metadata"]["executable_status"];
         assert_eq!(program["usable"], true);
@@ -3906,14 +3915,11 @@ mod tests {
         request.dry_run = false;
         let changed = run_with(home, &request, &stub, &service, Some(group))
             .expect("install with absent sign-in");
+        assert_eq!(changed["restart_admission"]["status"], "admission-idle");
         assert_eq!(changed["agent_metadata"]["sign_in"]["exists"], false);
         let generation_path = config.join("door-install-generation.json");
         let generation_bytes = fs::read(&generation_path).expect("generation bytes");
-        let generation: serde_json::Value =
-            serde_json::from_slice(&generation_bytes).expect("generation");
-        assert!(generation["agent"].get("sign_in").is_none());
-        assert!(generation["agent"].get("executable_status").is_none());
-        assert!(generation.get("agent_metadata").is_none());
+        assert_generation_omits_agent_observations(&generation_bytes);
         directory(&private.join(".codex"), 0o755);
         file(
             &private.join(".codex/auth.json"),

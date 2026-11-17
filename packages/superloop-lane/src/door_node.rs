@@ -189,7 +189,7 @@ fn derive(value: &Value, config: &Path) -> Result<[String; 2], LaneError> {
     };
     Ok([
         format!(
-            "# Registered host key: {key}\nHost {alias}\n  HostName {address}\n  Port {port}\n  User {user}\n  UserKnownHostsFile {known}\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking yes\n  UpdateHostKeys no\n  BatchMode yes\n"
+            "# Registered host key: {key}\nHost {alias}\n  HostName {address}\n  Port {port}\n  User {user}\n  UserKnownHostsFile {known}\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking yes\n  UpdateHostKeys no\n  BatchMode yes\n  ServerAliveInterval 30\n  ServerAliveCountMax 4\n"
         ),
         format!("{host} {key}\n"),
     ])
@@ -471,6 +471,15 @@ pub(crate) fn fixture_for(config: &Path, alias: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ´test:unit:door-node-derived-config-pins-compute-keepalive´
+    #[test]
+    fn door_node_derived_config_pins_compute_keepalive() {
+        let value = json!({"schema":1,"loop":"alpha","alias":"fixture","address":"192.0.2.1","port":22,"user":"account","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
+        let [config, _] = derive(&value, Path::new("/owner/config")).expect("derived config");
+        assert_eq!(config.matches("  ServerAliveInterval 30\n").count(), 1);
+        assert_eq!(config.matches("  ServerAliveCountMax 4\n").count(), 1);
+    }
 
     /// # Panics
     /// Panics only if malformed public facts pass registration validation.

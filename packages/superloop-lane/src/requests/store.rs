@@ -289,12 +289,13 @@ type ReaderAttemptHook = Box<dyn FnOnce(Option<Instant>)>;
 #[cfg(test)]
 thread_local! {
     static BEFORE_READER_LOCK_SLEEP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static BEFORE_READER_LOCK_ATTEMPT: std::cell::RefCell<Option<ReaderAttemptHook>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static BEFORE_READER_LOCK_ATTEMPT: std::cell::RefCell<Option<ReaderAttemptHook>> = const { std::cell::RefCell::new(None) };
     pub(crate) static WRITER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static READER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static BEFORE_LEAF_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static WRITE_ACQUISITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FAIL_SHAPE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static CHECK_ACTIVE_FILING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_MODE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FILE_CAP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static LOOP_CAP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
@@ -1260,6 +1261,25 @@ impl Store {
         )
     }
 
+    fn request_stop(&self, waiting: Option<(Instant, Option<&str>)>) -> Option<ReadFailure> {
+        let deadline = self.writer_deadline.or(self.reader_deadline)?;
+        let reason = self.wait_credit.as_ref()?.stop_reason(deadline)?;
+        let detail = waiting.map_or_else(
+            || reason.to_owned(),
+            |(started, holder)| {
+                format!(
+                    "request lock stopped: {reason}; wait_seconds={:.3}; holder_request_id={}",
+                    started.elapsed().as_secs_f64(),
+                    holder.unwrap_or("unknown")
+                )
+            },
+        );
+        Some(ReadFailure::Contended(problem(
+            "requests-record-refusal",
+            detail,
+        )))
+    }
+
     fn lock_retry(
         &self,
         changing: bool,
@@ -1277,6 +1297,9 @@ impl Store {
             deadline
         };
         loop {
+            if let Some(error) = self.request_stop(None) {
+                return Err(error);
+            }
             let deadline =
                 base_deadline.map(|end| end + self.credited_wait().saturating_sub(initial_credit));
             let result = self.lock_attempt(changing, deadline, true, &mut ticket);
@@ -1284,7 +1307,8 @@ impl Store {
                 base_deadline.map(|end| end + self.credited_wait().saturating_sub(initial_credit));
             match result {
                 Err(ReadFailure::Contended(_))
-                    if deadline.is_some_and(|end| lock_retry_now() < end) =>
+                    if self.request_stop(None).is_none()
+                        && deadline.is_some_and(|end| lock_retry_now() < end) =>
                 {
                     // Yield between bounded acquisitions just as wait callers do.
                     let waiting = lock_retry_now();
@@ -1436,6 +1460,12 @@ impl Store {
         let attempt_deadline = lock_retry_now() + if changing { writer_wait } else { reader_wait };
         let initial_credit = self.credited_wait();
         loop {
+            if let Some(error) =
+                self.request_stop(contended.then_some((started, holder.as_deref())))
+            {
+                self.log_lock_wait(changing, started, "stopped", holder.as_deref());
+                return Err(error);
+            }
             let caller_deadline = caller_deadline
                 .map(|end| end + self.credited_wait().saturating_sub(initial_credit));
             let deadline =
@@ -1734,7 +1764,7 @@ impl Store {
                     json!({
                         "class":key.0,"shape_key":key.1,"requests":0,"would_allow":0,
                         "would_refuse":0,"would_undecided":0,"would_refer":0,"labels_allow":0,"labels_refuse":0,
-                        "agreements":0,"corrections":0,"labels_after_undecided":0,"labels_after_refer":0,"effect_completed":0,"effect_refused":0,
+                        "agreements":0,"corrections":0,"labels_after_undecided":0,"labels_after_refer":0,"effect_completed":0,"effect_refused":0,"effect_interrupted":0,"effect_pending":0,
                         "request_ids":[],"settings":[]
                     })
                 });
@@ -1760,17 +1790,13 @@ impl Store {
                         group[name] = json!(group[name].as_u64().unwrap_or(0) + 1);
                     }
                 }
-                if matches!(
-                    value["effect"]["state"].as_str(),
-                    Some("completed" | "refused")
-                ) {
-                    let name = if value["effect"]["state"] == "completed" {
-                        "effect_completed"
-                    } else {
-                        "effect_refused"
-                    };
-                    group[name] = json!(group[name].as_u64().unwrap_or(0) + 1);
-                }
+                let effect_group = match value["effect"]["state"].as_str() {
+                    Some("completed") => "effect_completed",
+                    Some("refused") => "effect_refused",
+                    Some("interrupted") => "effect_interrupted",
+                    _ => "effect_pending",
+                };
+                group[effect_group] = json!(group[effect_group].as_u64().unwrap_or(0) + 1);
                 if let Some(ids) = group["request_ids"].as_array_mut() {
                     ids.push(value["id"].clone());
                 }
@@ -2068,6 +2094,21 @@ impl Store {
     /// Refuses duplicate IDs, changed grants or a full record before any effect.
     pub fn file(&self, request: RequestRecord) -> Result<(), LaneError> {
         let _lock = self.write_lock("file")?;
+        self.file_locked(request)
+    }
+
+    /// File a handler intent and retain its lease before exposing the record to a sweep.
+    pub(crate) fn file_active(
+        &self,
+        request: RequestRecord,
+    ) -> Result<PublicationActivity, LaneError> {
+        let _lock = self.write_lock("file")?;
+        let activity = self.publication_activity(request.id())?;
+        self.file_locked(request)?;
+        Ok(activity)
+    }
+
+    fn file_locked(&self, request: RequestRecord) -> Result<(), LaneError> {
         hold::request(request.id());
         let run = request.run().to_owned();
         let (old, revision, mut requests) = self.read_run(&run)?;
@@ -2132,6 +2173,13 @@ impl Store {
                 format!("loop request capacity is full; {LOOP_CAP_REMEDY}"),
             ));
         }
+        #[cfg(test)]
+        if CHECK_ACTIVE_FILING.with(|check| check.replace(false)) {
+            assert!(
+                matches!(self.try_publication_activity(request.id(), false), Ok(None)),
+                "handler lease precedes visible filing"
+            );
+        }
         requests.push(request);
         self.commit_run(&run, old.as_deref(), revision + 1, &requests)
     }
@@ -2156,6 +2204,105 @@ impl Store {
         }
         self.change_one_locked(id, false, |request| request.record_effect(effect))
             .map(|(request, _)| request)
+    }
+
+    /// Persist the observed local final write without revising the execution outcome.
+    pub(crate) fn finish_request(
+        &self,
+        id: &str,
+        effect: Option<Value>,
+        ending: &Value,
+    ) -> Result<(), LaneError> {
+        let view = self.publication_view(self.publication_deadline(Instant::now()))?;
+        let _lock = view.write_lock("finish_request")?;
+        hold::request(id);
+        let run = id
+            .split_once(':')
+            .map(|(run, _)| run)
+            .ok_or_else(|| problem("requests-request-refusal", "request identifier is invalid"))?;
+        let record = view
+            .read_run(run)?
+            .2
+            .into_iter()
+            .find(|row| row.id() == id)
+            .ok_or_else(|| problem("requests-request-refusal", "request is absent"))?;
+        if record.value()["effect"]["state"] == "pending" {
+            let effect = effect.unwrap_or_else(|| {
+                let mut fallback = abandoned_effect(
+                    &record,
+                    if std::thread::panicking() {
+                        "door-handler-panicked"
+                    } else {
+                        "door-handler-ended"
+                    },
+                );
+                let cause = fallback["ending"]["cause"].clone();
+                fallback["ending"] = ending.clone();
+                if fallback["ending"]["cause"] == "unobserved" {
+                    fallback["ending"]["cause"] = cause;
+                }
+                fallback
+            });
+            if view.channel_record_effect(id, &effect)?.is_none() {
+                view.change_one_locked(id, false, |row| row.record_effect(effect))?;
+            }
+        }
+        let (record, _) = view.change_one_locked(id, false, |row| {
+            let mut value = row.value().clone();
+            value["effect"]["ending"]["final_write"] = ending["final_write"].clone();
+            *row = RequestRecord::decode(value)?;
+            Ok(())
+        })?;
+        request_end(&record);
+        Ok(())
+    }
+
+    /// Mark stranded filed requests only while their publication lease is free.
+    pub(crate) fn abandon_at_start(&self) -> Result<(), LaneError> {
+        let view = self.publication_view(self.publication_deadline(Instant::now()))?;
+        let _lock = view.write_lock("abandon_at_start")?;
+        let mut failure = None;
+        for (_, _, records) in view.all_runs(None)? {
+            for record in records
+                .iter()
+                .filter(|row| row.value()["effect"]["state"] == "pending")
+            {
+                let activity = match view.try_publication_activity(record.id(), false) {
+                    Ok(activity) => activity,
+                    Err(error) => {
+                        crate::door::post_reply_event(record.id(), "abandon-activity", error.kind);
+                        failure.get_or_insert(error);
+                        continue;
+                    }
+                };
+                let Some(_activity) = activity else {
+                    continue;
+                };
+                hold::request(record.id());
+                let effect = abandoned_effect(record, "door-abandoned");
+                let changed =
+                    view.channel_record_effect(record.id(), &effect)
+                        .and_then(|changed| {
+                            changed.map_or_else(
+                                || {
+                                    view.change_one_locked(record.id(), false, |row| {
+                                        row.record_effect(effect)
+                                    })
+                                    .map(|(row, _)| row)
+                                },
+                                Ok,
+                            )
+                        });
+                match changed {
+                    Ok(changed) => request_end(&changed),
+                    Err(error) => {
+                        crate::door::post_reply_event(record.id(), "abandon-record", error.kind);
+                        failure.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     /// Merge one agent result under the same lock as effect and label changes.
@@ -3071,6 +3218,27 @@ impl Store {
     }
 }
 
+fn abandoned_effect(record: &RequestRecord, reason: &str) -> Value {
+    let mut effect = record.value()["effect"].clone();
+    super::unknown_effect_measurements(&mut effect);
+    effect["state"] = json!("interrupted");
+    effect["reason"] = json!(reason);
+    effect["ref_check"] = json!("unrecorded");
+    effect["ending"] = super::unobserved_ending();
+    effect["ending"]["cause"] = json!(if reason == "door-abandoned" {
+        "abandoned"
+    } else {
+        "handler-failure"
+    });
+    effect
+}
+
+fn request_end(record: &RequestRecord) {
+    let effect = &record.value()["effect"];
+    crate::door::request_end_event(&json!({"request_id":record.id(),
+        "cause":effect["ending"]["cause"],"reason":effect["reason"]}));
+}
+
 fn correction_pending(request: &RequestRecord, ledger: &ModeLedger) -> Result<bool, LaneError> {
     if !is_enforce_correction(request) {
         return Ok(false);
@@ -3164,6 +3332,338 @@ pub(crate) mod tests {
         let base = Instant::now();
         assert_eq!(credit.deadline(base), base + Duration::from_millis(120));
         drop(held);
+    }
+
+    /// ´test:unit:interrupted-effects-preserve-unknown-measurements-and-history´
+    #[test]
+    fn interrupted_effects_preserve_unknown_measurements_and_history() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        for nonce in ["1a", "2b"] {
+            store
+                .file(waiting("R", nonce, 3000, Mode::Audit))
+                .expect("file");
+        }
+        let active = store.publication_activity("R:2b").expect("second active");
+        store.abandon_at_start().expect("sweep");
+        let record = store.request("R:1a").expect("interrupted");
+        assert_eq!(
+            record.value()["effect"]["ending"]["wall_clock"],
+            "unobserved"
+        );
+        let mut unlabelled = record.value().clone();
+        unlabelled["effect"]["ending"]
+            .as_object_mut()
+            .expect("ending")
+            .remove("wall_clock");
+        assert!(
+            RequestRecord::decode(unlabelled.clone()).is_err(),
+            "clock is required"
+        );
+        let converted =
+            super::rewrite::convert_record(&unlabelled).expect("explicit clock rewrite");
+        assert_eq!(
+            converted.value()["effect"]["ending"]["wall_clock"],
+            "unobserved"
+        );
+        unlabelled["effect"]["ending"]["wall_clock"] = json!("boottime");
+        assert!(
+            RequestRecord::decode(unlabelled).is_err(),
+            "no invented clock"
+        );
+        for key in [
+            "stdin_bytes",
+            "stdout_bytes",
+            "stderr_bytes",
+            "output_bytes",
+            "mediation_wall_seconds",
+            "compute_wall_seconds",
+            "queue_wall_seconds",
+            "exit_status",
+        ] {
+            assert!(
+                record.value()["effect"][key].is_null(),
+                "{key} was not measured"
+            );
+        }
+        let shapes = Store::shapes(&store.all_runs(None).expect("inventory")).expect("shapes");
+        assert_eq!(shapes["groups"][0]["effect_interrupted"], 1);
+        assert_eq!(shapes["groups"][0]["effect_pending"], 1);
+        let mut measured = record.value().clone();
+        measured["effect"]["stdin_bytes"] = json!(0);
+        assert!(
+            RequestRecord::decode(measured.clone()).is_ok(),
+            "measured zero remains distinct"
+        );
+        let current =
+            super::rewrite::convert_record(&measured).expect("current record remains measured");
+        assert_eq!(current.value()["effect"]["stdin_bytes"], 0);
+        let mut historical = measured.clone();
+        historical["effect"]
+            .as_object_mut()
+            .expect("effect")
+            .remove("ending");
+        let rewritten =
+            super::rewrite::convert_record(&historical).expect("explicit interrupted rewrite");
+        assert!(
+            rewritten.value()["effect"]["stdin_bytes"].is_null(),
+            "legacy interrupted placeholder is unknown"
+        );
+        measured["effect"]["state"] = json!("completed");
+        assert!(
+            RequestRecord::decode(measured).is_err(),
+            "completed counters cannot silently become unknown"
+        );
+        drop(active);
+        let mut ending = crate::requests::unobserved_ending();
+        ending["local_child"] = json!("reaped");
+        store
+            .finish_request("R:2b", None, &ending)
+            .expect("handler fallback");
+        let fallback = store.request("R:2b").expect("fallback");
+        assert_eq!(
+            fallback.value()["effect"]["ending"]["local_child"],
+            "reaped"
+        );
+        assert!(fallback.value()["effect"]["stdout_bytes"].is_null());
+        assert!(fallback.value()["effect"]["compute_wall_seconds"].is_null());
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("INTERRUPTED-RECORD {}", fallback.value());
+        }
+    }
+
+    /// ´test:unit:request-ending-sweep-respects-live-publication-activity´
+    #[test]
+    fn request_ending_sweep_respects_live_publication_activity() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        super::CHECK_ACTIVE_FILING.with(|check| check.set(true));
+        let activity = store
+            .file_active(waiting("R", "1a", 3000, Mode::Audit))
+            .expect("file with live handler lease");
+        store.abandon_at_start().expect("live sweep");
+        assert_eq!(
+            store.request("R:1a").expect("live").value()["effect"]["state"],
+            "pending"
+        );
+        drop(activity);
+        store.abandon_at_start().expect("idle sweep");
+        let record = store.request("R:1a").expect("abandoned");
+        assert_eq!(record.value()["effect"]["state"], "interrupted");
+        assert_eq!(record.value()["effect"]["ending"]["cause"], "abandoned");
+        assert_eq!(record.value()["effect"]["ending"]["final_write"], "unknown");
+        #[allow(clippy::print_stderr)] // Captured fixture evidence for the terminal record.
+        {
+            eprintln!("ENDING-ABANDONED {}", record.value());
+        }
+        store.abandon_at_start().expect("idempotent sweep");
+        assert_eq!(
+            store.request("R:1a").expect("unchanged").value(),
+            record.value()
+        );
+    }
+
+    /// ´test:unit:request-ending-sweep-isolates-write-failure-and-retries´
+    #[test]
+    fn request_ending_sweep_isolates_write_failure_and_retries() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        for nonce in ["1a", "2b"] {
+            store
+                .file(waiting("R", nonce, 3000, Mode::Audit))
+                .expect("file");
+        }
+        FAIL_SHAPE_WRITE.with(|fail| fail.set(true));
+        assert!(
+            store.abandon_at_start().is_err(),
+            "report the failed record"
+        );
+        assert_eq!(
+            store.request("R:1a").expect("first").value()["effect"]["state"],
+            "pending"
+        );
+        assert_eq!(
+            store.request("R:2b").expect("second").value()["effect"]["state"],
+            "interrupted",
+            "later records survive an earlier publication failure"
+        );
+        store.abandon_at_start().expect("retry next startup");
+        assert_eq!(
+            store.request("R:1a").expect("retried").value()["effect"]["state"],
+            "interrupted"
+        );
+    }
+
+    /// ´test:unit:request-ending-delivery-survives-common-owner-projection´
+    #[test]
+    fn request_ending_delivery_survives_common_owner_projection() {
+        if !super::publication_tests::in_namespace() {
+            return;
+        }
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = super::publication_tests::provision(&fixture);
+        store
+            .file(waiting("S", "aa", 3000, Mode::Allow))
+            .expect("seed");
+        fixture
+            .command(
+                &["triage", "alpha", "S"],
+                br#"[{"id":"S:aa","action":"mark","reason":"bind owner"}]"#,
+            )
+            .expect("bind");
+        unpublished_fixture(&store, "1a");
+        store
+            .recover_unpublished(Some("R"))
+            .expect("publish outcome");
+        let before = store.request("R:1a").expect("outcome");
+        store
+            .finish_request("R:1a", None, &{
+                let mut ending = crate::requests::unobserved_ending();
+                ending["final_write"] = json!("failed");
+                ending
+            })
+            .expect("delivery fact");
+        let after = store.request("R:1a").expect("projected delivery");
+        assert_eq!(after.value()["effect"]["ending"]["final_write"], "failed");
+        assert_eq!(
+            after.value()["effect"]["reason"],
+            before.value()["effect"]["reason"]
+        );
+        let status = fixture
+            .command(&["status", "alpha"], b"")
+            .expect("owner status");
+        let end = status["request_endings"]
+            .as_array()
+            .expect("endings")
+            .iter()
+            .find(|row| row["id"] == "R:1a")
+            .expect("request ending");
+        assert_eq!(end["ending"]["final_write"], "failed");
+        store
+            .file(waiting("R", "ab", 3000, Mode::Allow))
+            .expect("before-effect intent");
+        fixture
+            .command(
+                &["triage", "alpha", "R"],
+                br#"[{"id":"R:ab","action":"mark","reason":"import before effect"}]"#,
+            )
+            .expect("import before effect");
+        store.abandon_at_start().expect("common owner abandonment");
+        let abandoned = store.request("R:ab").expect("retained abandonment");
+        assert_eq!(abandoned.value()["effect"]["reason"], "door-abandoned");
+        assert_eq!(abandoned.value()["effect"]["ending"]["cause"], "abandoned");
+        let mut observation = crate::requests::unobserved_ending();
+        observation["final_write"] = json!("failed");
+        store
+            .finish_request("R:ab", None, &observation)
+            .expect("before-effect delivery");
+        assert_eq!(
+            store
+                .request("R:ab")
+                .expect("common completed projection")
+                .value()["effect"]["ending"]["final_write"],
+            "failed"
+        );
+    }
+
+    /// ´test:unit:request-ending-rewrite-preserves-unobserved-history´
+    #[test]
+    fn request_ending_rewrite_preserves_unobserved_history() {
+        let mut old = waiting("R", "1a", 3000, Mode::Audit).into_value();
+        old["effect"]
+            .as_object_mut()
+            .expect("effect")
+            .remove("ending");
+        assert_eq!(
+            RequestRecord::decode(old.clone())
+                .expect_err("no compatibility reader")
+                .kind,
+            "requests-rewrite-required"
+        );
+        let converted = super::rewrite::convert_record(&old).expect("explicit conversion");
+        assert_eq!(
+            converted.value()["effect"]["ending"],
+            crate::requests::unobserved_ending()
+        );
+        assert_eq!(
+            super::rewrite::convert_record(converted.value())
+                .expect("repeat")
+                .value(),
+            converted.value()
+        );
+    }
+
+    /// ´test:unit:request-ending-rewrite-is-preview-bound-and-stopped´
+    #[test]
+    fn request_ending_rewrite_is_preview_bound_and_stopped() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store
+            .file(waiting("R", "1a", 3000, Mode::Audit))
+            .expect("current record");
+        let path = fixture.runs.join(".launch-R/door-requests.json");
+        let mut old: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("run bytes")).expect("run");
+        old["requests"][0]["effect"]
+            .as_object_mut()
+            .expect("effect")
+            .remove("ending");
+        fs::write(&path, serde_json::to_vec(&old).expect("historical bytes"))
+            .expect("historical run");
+        let before = fs::read(&path).expect("before");
+        let service = nix::fcntl::Flock::lock(
+            File::open(fixture.configure_door()).expect("service directory"),
+            nix::fcntl::FlockArg::LockExclusiveNonblock,
+        )
+        .expect("service active");
+        let preview = fixture
+            .command(&["rewrite", "alpha", "--dry-run"], b"")
+            .expect("live preview");
+        assert_eq!(preview["changed"], 1);
+        assert_eq!(fs::read(&path).expect("after preview"), before);
+        let digest = preview["preview_sha256"].as_str().expect("digest");
+        assert_eq!(
+            fixture
+                .command(&["rewrite", "alpha", "--expect-digest", digest], b"")
+                .expect_err("live apply refuses")
+                .kind,
+            "requests-rewrite-idle"
+        );
+        drop(service);
+        assert_eq!(
+            fixture
+                .command(&["rewrite", "alpha", "--expect-digest", "wrong"], b"")
+                .expect_err("changed authority refuses")
+                .kind,
+            "requests-rewrite-digest"
+        );
+        assert_eq!(fs::read(&path).expect("after refusals"), before);
+        let fresh = fixture
+            .command(&["rewrite", "alpha", "--dry-run"], b"")
+            .expect("stopped preview");
+        #[allow(clippy::print_stderr)] // Captured fixture evidence for the terminal record.
+        {
+            eprintln!("ENDING-REWRITE-PREVIEW {fresh}");
+        }
+        let applied = fixture
+            .command(
+                &[
+                    "rewrite",
+                    "alpha",
+                    "--expect-digest",
+                    fresh["preview_sha256"].as_str().expect("fresh digest"),
+                ],
+                b"",
+            )
+            .expect("apply");
+        assert_eq!(applied["complete"], true);
+        assert_eq!(
+            store.request("R:1a").expect("converted").value()["effect"]["ending"],
+            crate::requests::unobserved_ending()
+        );
+        assert_eq!(store.rewrite(None).expect("done")["changed"], 0);
     }
 
     /// ´test:unit:requests-registry-reader-validates-the-named-acl-mask´

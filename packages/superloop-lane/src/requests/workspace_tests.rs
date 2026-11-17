@@ -166,6 +166,7 @@ fn preflight(check: &str, words: Value) -> Value {
         "ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
         "queue_wall_seconds":null,"mediation_wall_seconds":0.0,"compute_wall_seconds":0.0,
         "preflight":{"check":check,"words":null}});
+    row["effect"]["ending"] = crate::requests::unobserved_ending();
     row["effect"]["preflight"]["words"] = words;
     row
 }

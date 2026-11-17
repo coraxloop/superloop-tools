@@ -28,6 +28,28 @@ impl Drop for ServiceChild {
     }
 }
 
+fn spawn_fixture(
+    service: &Path,
+    home: &Path,
+    log: &Path,
+    test: &str,
+    env: (&str, &str),
+) -> ServiceChild {
+    ServiceChild(
+        Command::new(service)
+            .args(["--exact", test, "--nocapture"])
+            .env("HOME", home)
+            .env("TMPDIR", std::env::temp_dir())
+            .env_remove("ENTER_LOOP_REGISTRY")
+            .env(env.0, env.1)
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(fs::File::create(log).expect("service diagnostics"))
+            .spawn()
+            .expect("built service fixture"),
+    )
+}
+
 fn private_file(path: &Path, body: impl AsRef<[u8]>) {
     fs::write(path, body).expect("fixture file");
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private file");
@@ -151,22 +173,12 @@ fn service_startup_uses_show_only_registry_entry() {
     fs::remove_dir(home.join(".var/loops/alpha/policy")).expect("absent policy tier");
     let _home = activate_home(&home);
     let error_log = home.join("service.stderr");
-    let mut child = ServiceChild(
-        Command::new(&service)
-            .args([
-                "--exact",
-                "door::startup_tests::service_startup_uses_show_only_registry_entry",
-                "--nocapture",
-            ])
-            .env("HOME", &home)
-            .env("TMPDIR", std::env::temp_dir())
-            .env_remove("ENTER_LOOP_REGISTRY")
-            .env("SUPERLOOP_DOOR_STARTUP_FIXTURE", "1")
-            .process_group(0)
-            .stdout(Stdio::null())
-            .stderr(fs::File::create(&error_log).expect("service diagnostics"))
-            .spawn()
-            .expect("built service fixture"),
+    let mut child = spawn_fixture(
+        &service,
+        &home,
+        &error_log,
+        "door::startup_tests::service_startup_uses_show_only_registry_entry",
+        ("SUPERLOOP_DOOR_STARTUP_FIXTURE", "1"),
     );
     let slot = crate::SocketSlot::pinned(&socket, nix::unistd::Uid::effective().as_raw())
         .expect("pinned socket location");
@@ -205,4 +217,100 @@ fn service_startup_uses_show_only_registry_entry() {
         !Path::new("/proc").join(pid.to_string()).exists(),
         "service was reaped"
     );
+}
+
+/// # Panics
+/// Panics if a killed service's filed request is not abandoned by the next startup.
+/// ´test:unit:service-startup-abandons-a-killed-services-pending-effect´
+#[test]
+fn service_startup_abandons_a_killed_services_pending_effect() {
+    if let Some(seed) = std::env::var_os("SUPERLOOP_DOOR_ENDING_FIXTURE") {
+        let home = crate::caller_home().expect("home");
+        let _home = activate_home(&home);
+        SOCKET_FIXTURE.with(|enabled| enabled.set(true));
+        let store = crate::requests::store::Store::open(&home, "alpha", true).expect("store");
+        let _activity = if seed == "seed" {
+            store
+                .file(crate::requests::tests::waiting(
+                    "R",
+                    "1a",
+                    3000,
+                    crate::requests::Mode::Audit,
+                ))
+                .expect("file before startup");
+            Some(
+                store
+                    .publication_activity("R:1a")
+                    .expect("live handler lease"),
+            )
+        } else {
+            None
+        };
+        super::run_service("alpha").expect("service");
+        return;
+    }
+    let root = tempfile::tempdir().expect("TMPDIR");
+    let home = root.path().join("home");
+    let (service, _, socket) = install_fixture(&home);
+    fs::create_dir(home.join("runs/.launch-R")).expect("run custody");
+    fs::set_permissions(
+        home.join("runs/.launch-R"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .expect("custody mode");
+    let _home = activate_home(&home);
+    let error_log = home.join("ending-service.stderr");
+    let launch = |seed: &str| {
+        spawn_fixture(
+            &service,
+            &home,
+            &error_log,
+            "door::startup_tests::service_startup_abandons_a_killed_services_pending_effect",
+            ("SUPERLOOP_DOOR_ENDING_FIXTURE", seed),
+        )
+    };
+    let ready = |child: &mut ServiceChild| {
+        let until = Instant::now() + Duration::from_secs(120);
+        let slot = crate::SocketSlot::pinned(&socket, nix::unistd::Uid::effective().as_raw())
+            .expect("socket");
+        let mut stream = loop {
+            if let Ok(stream) = FixtureClient::connect(slot.address()) {
+                break stream;
+            }
+            assert!(
+                child.0.try_wait().expect("status").is_none() && Instant::now() < until,
+                "service readiness: {}",
+                fs::read_to_string(&error_log).unwrap_or_default()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        stream
+            .wire()
+            .set_read_timeout(Some(until.saturating_duration_since(Instant::now())))
+            .expect("hang guard");
+        stream
+            .send(&json!({"schema":2,"type":"request"}))
+            .expect("probe");
+        let reply = stream.answer();
+        assert_eq!(reply["reason"], "door-request-refusal");
+    };
+    let mut first = launch("seed");
+    ready(&mut first);
+    let store = crate::requests::store::Store::open(&home, "alpha", true).expect("parent store");
+    assert_eq!(
+        store.request("R:1a").expect("live intent").value()["effect"]["state"],
+        "pending"
+    );
+    drop(first);
+    let mut second = launch("recover");
+    ready(&mut second);
+    let record = store.request("R:1a").expect("recovered record");
+    assert_eq!(record.value()["effect"]["ending"]["cause"], "abandoned");
+    assert_eq!(record.value()["effect"]["ending"]["final_write"], "unknown");
+    #[allow(clippy::print_stderr)] // Captured fixture evidence for the terminal record.
+    {
+        eprintln!("ENDING-KILLED-SERVICE {}", record.value());
+    }
+    let log = fs::read_to_string(&error_log).expect("ending journal");
+    assert_eq!(log.matches("door-request-end ").count(), 1, "{log}");
 }

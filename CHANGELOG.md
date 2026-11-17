@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-17
+
+### Fixed
+
+- Clarify the door record wave’s retained owner executable and step-4 path report, live triage admission holds, and failed-round repinning. The repin binds only the stub digest; the service verifies the compute SSH configuration per request. Compatibility: operators retain `changed` from the wave's first `pause`, resume only a pause introduced by the wave, and run the ordinary resume dry run after admission resumes. No program or record format changes (``alg:superlooplane:door-request-life-deploy``).
+
+- Door lookup and queue fixtures wait for durable filing or entry into the store read before selecting expiry or closing their peer. Compute and input deadline fixtures inject expiry at the check they claim; the open-input case proves completion before releasing its reader rather than requiring a short wall. Tests only; installed request limits and the deployment wave are unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
+
+- An observed full peer close now ends admission, owner wait and running compute alike: no final is attempted, the durable final-write observation is `not-attempted`, and the service returns successfully. A close selected during a request-store read retains its typed disconnect cause instead of becoming a read failure and logs the coincident store error under a stop-specific journal prefix. Compatibility: the unreleased ending shape gains `not-attempted` while `unknown` remains for lost observations; the service result changes and a spurious broken-pipe diagnostic disappears. The request-life wave still supplies the one refresh and restart, with no additional rewrite or operator step (``prob:door:a-door-requests-life-is-watched-stopped-bounded-and-recovered``).
+
+- The door gives final replies the remaining request lifetime instead of a separate two-second write window. A slow live peer can drain queued output and receive its final; a partial final closes the write half and cannot be followed by credit. The stopped-caller notice rounds the remote bound upward to whole seconds, explains its unobserved start and admits a repeat without asking the worker to await a loop response. Compatibility: the door and SSH stub receive these changes through the same coordinated rewrite, repin and restart wave; no second stop or new record shape is required (``prob:door:a-door-requests-life-is-watched-stopped-bounded-and-recovered``).
+
+### Added
+
+- Door stop replies now carry the remote state and supplied relative bound, and the SSH notice tells the caller whether to ask again or report an unconfirmed effect to its loop. Top-level effect and reply walls identify their awake monotonic clock, distinct from the suspend-counting deadline; historical clocks remain unobserved. Compatibility: these required ending fields join the held record rewrite and the same coordinated door reinstall/restart wave. The wave names digest-bound repinning and the startup recovery retry commands.
+
+- Door finals count only complete output frames delivered before them and seal the writer against later output. A child's exit no longer starts a two-second delivery race: output drains under the request lifetime, with a typed stop on expiry or full close. A partial failed frame closes the stream and leaves its terminal evidence in the record. Compatibility: this repair rides the request-life rewrite and reinstall wave, with one restart per door (``proto:superlooplane:door-request-lifetime``).
+
+- Door requests count their deadline from acceptance on the boot-time clock through admission, judgement and compute; suspend no longer extends that budget. A full peer close stops those phases, while half close and Git receive/upload retain EOF semantics. Replies and durable endings retain one typed first cause, and compute SSH uses the derived 30-by-4 keepalive. Compatibility: deploy both request-life slices in the coordinated stopped-door rewrite and reinstall wave; keep every affected loop and shared installation held until its own conversion and startup checks complete. Missing interrupted measurements are null rather than invented zero. The wave distinguishes running publications from effects awaiting startup recovery and states the shared-installation and first-apply rollback boundaries (``proto:superlooplane:door-request-lifetime``; ``alg:superlooplane:door-request-life-deploy``).
+
+- Door request effects retain their ending cause, local final-write observation, child disposition and the remote timeout's unobserved start. Startup marks stranded pending requests abandoned; installer previews report whether admission locks are idle. Compatibility: hold the global tools install until every affected loop has quiesced boxes, exercises and retirement, finished active publications, retained idle recovery entries and stopped its door. Each loop then previews and applies its own digest-bound rewrite, refreshes and starts with the new tools. Finish all old record commands before global replacement. The first rewrite write prohibits old-reader rollback; a failed apply leaves the door stopped until its resumable transaction completes. Apply refuses a live service; interrupted rewrites resume and are not atomic across all files. Coordinate this record change with the accompanying behavior slice in one restart wave (``sec:superlooplane:door-request-endings``).
+
 ## [0.6.0] - 2026-11-17
 
 ### Changed
@@ -1037,7 +1059,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/coraxloop/superloop-tools/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/coraxloop/superloop-tools/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/coraxloop/superloop-tools/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/coraxloop/superloop-tools/compare/v0.4.1...v0.4.2

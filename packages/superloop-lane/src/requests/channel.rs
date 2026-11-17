@@ -121,6 +121,14 @@ fn check_source(record: &RequestRecord, saved: &RequestRecord) -> Result<(), Lan
     Ok(())
 }
 
+fn same_execution_effect(left: &Value, right: &Value) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left["ending"]["final_write"] = Value::Null;
+    right["ending"]["final_write"] = Value::Null;
+    left == right
+}
+
 fn project(record: &RequestRecord, row: &Request, at: &str) -> Result<RequestRecord, LaneError> {
     check_source(record, &source(row)?)?;
     if !record.value()["label"].is_null() && row.decision.is_none() {
@@ -158,7 +166,17 @@ fn project(record: &RequestRecord, row: &Request, at: &str) -> Result<RequestRec
     // The common commit may be newer than the compatibility custody projection.
     // Only the door owner can supply this validated effect evidence.
     if row.body["record"]["effect"]["state"] != "pending" {
+        let final_write = value["effect"]["ending"]["final_write"].clone();
+        let same_effect = same_execution_effect(&value["effect"], &row.body["record"]["effect"]);
         value["effect"] = row.body["record"]["effect"].clone();
+        if same_effect
+            && matches!(
+                final_write.as_str(),
+                Some("not-attempted" | "failed" | "succeeded-locally")
+            )
+        {
+            value["effect"]["ending"]["final_write"] = final_write;
+        }
     }
     RequestRecord::decode(value)
 }
@@ -185,7 +203,13 @@ fn imported(record: &RequestRecord, loop_name: &str) -> Result<Request, LaneErro
     row.waiter_gone = !after
         && matches!(
             value["effect"]["reason"].as_str(),
-            Some("door-disconnect-refusal" | "door-request-deadline")
+            Some(
+                "door-disconnect-refusal"
+                    | "door-request-deadline"
+                    | "door-abandoned"
+                    | "door-handler-ended"
+                    | "door-handler-panicked"
+            )
         );
     if value["state"] == "marked" {
         row.state = State::Marked;
@@ -834,7 +858,7 @@ impl Store {
             .ok_or_else(|| core("effect source absent"))?;
         match completion_disposition(
             row.state == State::Completed,
-            record.value()["effect"] == *effect,
+            same_execution_effect(&record.value()["effect"], effect),
         ) {
             CompletionDisposition::IdenticalRetry => return Ok(Some(record)),
             CompletionDisposition::Conflict => return Err(core("conflicting completed effect")),
@@ -844,7 +868,13 @@ impl Store {
         let (action, document) = if row.service_claim.is_none() {
             if !matches!(
                 effect["reason"].as_str(),
-                Some("door-disconnect-refusal" | "door-request-deadline")
+                Some(
+                    "door-disconnect-refusal"
+                        | "door-request-deadline"
+                        | "door-abandoned"
+                        | "door-handler-ended"
+                        | "door-handler-panicked"
+                )
             ) {
                 return Err(core("unjudged effect is not a waiter refusal"));
             }
@@ -1095,6 +1125,7 @@ mod tests {
             );
             record["schema"] = json!(6);
             record["agent_observations"] = Value::Null;
+            record["effect"]["ending"] = crate::requests::unobserved_ending();
             let bytes = serde_json::to_vec(&json!({"schema":1,"run":"R","revision":1,
                 "requests":[record]}))
             .expect("base run");
