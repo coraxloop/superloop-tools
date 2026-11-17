@@ -336,13 +336,21 @@ impl Drop for RequestEnding<'_> {
             .clone();
         if let Err(error) = self.store.finish_request(self.id, effect.clone(), &ending) {
             post_reply_event(self.id, "terminal-record", error.kind);
-            let effect = effect.unwrap_or_else(
-                || json!({"reason":"door-handler-ended", "ending":{"cause":"handler-failure"}}),
-            );
-            request_end_event(&json!({"request_id":self.id,
-                "cause":effect["ending"]["cause"],"reason":effect["reason"],"recorded":false}));
+            request_end_event(&unrecorded_ending(self.id, effect, &ending));
         }
     }
+}
+
+fn unrecorded_ending(id: &str, effect: Option<Value>, ending: &Value) -> Value {
+    let effect = effect.unwrap_or_else(|| {
+        let cause = if ending["cause"] == "unobserved" {
+            json!("handler-failure")
+        } else {
+            ending["cause"].clone()
+        };
+        json!({"reason":"door-handler-ended", "ending":{"cause":cause}})
+    });
+    json!({"request_id":id,"cause":effect["ending"]["cause"],"reason":effect["reason"],"recorded":false})
 }
 
 trait AdmissionClock {
@@ -2026,7 +2034,8 @@ fn serve_request_with_agent(
     let id = record.id().to_owned();
     let store = store.with_request_id(&id);
     let binding_source = record.value().clone();
-    if let Err(error) = store.file(record) {
+    let activity = store.file_active(record);
+    if let Err(error) = &activity {
         let _logged = writeln!(io::stderr().lock(), "door request file: {}", error.line());
         if let Err(attempt) = store.record_incomplete(&registration.run, &id, error.kind) {
             let _logged = writeln!(
@@ -2051,13 +2060,7 @@ fn serve_request_with_agent(
         )?;
         return Ok((reply, Vec::new()));
     }
-    let _publication_activity = store.publication_activity(&id).map_err(|error| {
-        if let Err(ending) = store.finish_request(&id, None, &crate::requests::unobserved_ending())
-        {
-            post_reply_event(&id, "terminal-record", ending.kind);
-        }
-        io::Error::other(error)
-    })?;
+    let _publication_activity = activity.map_err(io::Error::other)?;
     let _ending = RequestEnding {
         store: &store,
         wait: &wait,
@@ -3991,6 +3994,20 @@ mod tests {
         store::{FixtureFault, Store, fixture_fault, fixture_file_cap, tests::Fixture},
         tests::waiting,
     };
+
+    /// ´test:unit:unrecorded-ending-retains-observed-stop-cause´
+    #[test]
+    fn unrecorded_ending_retains_observed_stop_cause() {
+        let mut ending = crate::requests::unobserved_ending();
+        let unknown = super::unrecorded_ending("R:aa", None, &ending);
+        assert_eq!(unknown["cause"], "handler-failure");
+        ending["cause"] = json!("deadline");
+        let event = super::unrecorded_ending("R:aa", None, &ending);
+        assert_eq!(event["cause"], "deadline");
+        assert_eq!(event["reason"], "door-handler-ended");
+        assert_eq!(event["request_id"], "R:aa");
+        assert_eq!(event["recorded"], false);
+    }
 
     /// ´test:unit:door-root-registration-refusal-reaches-worker-with-path´
     #[test]

@@ -295,6 +295,7 @@ thread_local! {
     pub(crate) static BEFORE_LEAF_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static WRITE_ACQUISITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FAIL_SHAPE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CHECK_ACTIVE_FILING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_MODE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FILE_CAP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static LOOP_CAP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
@@ -2068,6 +2069,21 @@ impl Store {
     /// Refuses duplicate IDs, changed grants or a full record before any effect.
     pub fn file(&self, request: RequestRecord) -> Result<(), LaneError> {
         let _lock = self.write_lock("file")?;
+        self.file_locked(request)
+    }
+
+    /// File a handler intent and retain its lease before exposing the record to a sweep.
+    pub(crate) fn file_active(
+        &self,
+        request: RequestRecord,
+    ) -> Result<PublicationActivity, LaneError> {
+        let _lock = self.write_lock("file")?;
+        let activity = self.publication_activity(request.id())?;
+        self.file_locked(request)?;
+        Ok(activity)
+    }
+
+    fn file_locked(&self, request: RequestRecord) -> Result<(), LaneError> {
         hold::request(request.id());
         let run = request.run().to_owned();
         let (old, revision, mut requests) = self.read_run(&run)?;
@@ -2131,6 +2147,13 @@ impl Store {
                 "requests-store-full",
                 format!("loop request capacity is full; {LOOP_CAP_REMEDY}"),
             ));
+        }
+        #[cfg(test)]
+        if CHECK_ACTIVE_FILING.with(|check| check.replace(false)) {
+            assert!(
+                matches!(self.try_publication_activity(request.id(), false), Ok(None)),
+                "handler lease precedes visible filing"
+            );
         }
         requests.push(request);
         self.commit_run(&run, old.as_deref(), revision + 1, &requests)
@@ -2233,13 +2256,25 @@ impl Store {
                 hold::request(record.id());
                 let effect = abandoned_effect(record, "door-abandoned");
                 let changed =
-                    if let Some(changed) = view.channel_record_effect(record.id(), &effect)? {
-                        changed
-                    } else {
-                        view.change_one_locked(record.id(), false, |row| row.record_effect(effect))?
-                            .0
-                    };
-                request_end(&changed);
+                    view.channel_record_effect(record.id(), &effect)
+                        .and_then(|changed| {
+                            changed.map_or_else(
+                                || {
+                                    view.change_one_locked(record.id(), false, |row| {
+                                        row.record_effect(effect)
+                                    })
+                                    .map(|(row, _)| row)
+                                },
+                                Ok,
+                            )
+                        });
+                match changed {
+                    Ok(changed) => request_end(&changed),
+                    Err(error) => {
+                        crate::door::post_reply_event(record.id(), "abandon-record", error.kind);
+                        failure.get_or_insert(error);
+                    }
+                }
             }
         }
         failure.map_or(Ok(()), Err)
@@ -3160,7 +3195,7 @@ impl Store {
 
 fn abandoned_effect(record: &RequestRecord, reason: &str) -> Value {
     let mut effect = record.value()["effect"].clone();
-    effect["state"] = json!("refused");
+    effect["state"] = json!("interrupted");
     effect["reason"] = json!(reason);
     effect["ref_check"] = json!("unrecorded");
     effect["ending"] = super::unobserved_ending();
@@ -3278,10 +3313,10 @@ pub(crate) mod tests {
     fn request_ending_sweep_respects_live_publication_activity() {
         let fixture = Fixture::new();
         let store = fixture.store();
-        store
-            .file(waiting("R", "1a", 3000, Mode::Audit))
-            .expect("file");
-        let activity = store.publication_activity("R:1a").expect("live handler");
+        super::CHECK_ACTIVE_FILING.with(|check| check.set(true));
+        let activity = store
+            .file_active(waiting("R", "1a", 3000, Mode::Audit))
+            .expect("file with live handler lease");
         store.abandon_at_start().expect("live sweep");
         assert_eq!(
             store.request("R:1a").expect("live").value()["effect"]["state"],
@@ -3290,6 +3325,7 @@ pub(crate) mod tests {
         drop(activity);
         store.abandon_at_start().expect("idle sweep");
         let record = store.request("R:1a").expect("abandoned");
+        assert_eq!(record.value()["effect"]["state"], "interrupted");
         assert_eq!(record.value()["effect"]["ending"]["cause"], "abandoned");
         assert_eq!(record.value()["effect"]["ending"]["final_write"], "unknown");
         #[allow(clippy::print_stderr)] // Captured fixture evidence for the terminal record.
@@ -3300,6 +3336,37 @@ pub(crate) mod tests {
         assert_eq!(
             store.request("R:1a").expect("unchanged").value(),
             record.value()
+        );
+    }
+
+    /// ´test:unit:request-ending-sweep-isolates-write-failure-and-retries´
+    #[test]
+    fn request_ending_sweep_isolates_write_failure_and_retries() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        for nonce in ["1a", "2b"] {
+            store
+                .file(waiting("R", nonce, 3000, Mode::Audit))
+                .expect("file");
+        }
+        FAIL_SHAPE_WRITE.with(|fail| fail.set(true));
+        assert!(
+            store.abandon_at_start().is_err(),
+            "report the failed record"
+        );
+        assert_eq!(
+            store.request("R:1a").expect("first").value()["effect"]["state"],
+            "pending"
+        );
+        assert_eq!(
+            store.request("R:2b").expect("second").value()["effect"]["state"],
+            "interrupted",
+            "later records survive an earlier publication failure"
+        );
+        store.abandon_at_start().expect("retry next startup");
+        assert_eq!(
+            store.request("R:1a").expect("retried").value()["effect"]["state"],
+            "interrupted"
         );
     }
 

@@ -398,7 +398,7 @@ impl Runner for ComputeRunner<'_> {
             wait.ending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)["remote"] = json!({"state":"unconfirmed","configured_seconds":seconds.max(0.001),
-                    "bound_seconds":(seconds.max(0.001) - 15.0 + 10.0 + 2.0).max(0.001) + 10.0,
+                    "bound_seconds":compute_timeout(seconds).0 + compute_timeout(seconds).1,
                     "local_spawn_unix_ns":at,"start":"unobserved"});
         }
         Ok(child)
@@ -814,11 +814,9 @@ impl HostRunner {
             .as_ref()
             .ok_or_else(|| io::Error::other("door-compute-settings-refusal"))?;
         let seconds = seconds.max(0.001);
+        let (term, kill) = compute_timeout(seconds);
         let remote = format!(
-            "if test -x /usr/bin/python3 && test -x /usr/bin/timeout; then exec /usr/bin/timeout -k 10 {} /usr/bin/python3 -c {} {} {} {} {} {} {} {}; else echo DOOR-COMPUTE-TOOL-REFUSAL >&2; exit 127; fi",
-            // Inner TERM is at seconds - 15; allow its ten-second kill grace,
-            // then two seconds for evidence before the outer TERM (seconds - 3).
-            (seconds - 15.0 + 10.0 + 2.0).max(0.001),
+            "if test -x /usr/bin/python3 && test -x /usr/bin/timeout; then exec /usr/bin/timeout -k {kill} {term} /usr/bin/python3 -c {} {} {} {} {} {} {} {}; else echo DOOR-COMPUTE-TOOL-REFUSAL >&2; exit 127; fi",
             quote(super::compute::NODE_SCRIPT),
             quote(&self.mirror_path(registration)),
             quote(&registration.run),
@@ -844,6 +842,12 @@ impl HostRunner {
             .stderr(Stdio::piped());
         Ok(command)
     }
+}
+
+// The outer timeout grants this TERM interval and kill grace. Both the command
+// and terminal evidence use these values, so the record cannot drift from argv.
+fn compute_timeout(seconds: f64) -> (f64, f64) {
+    ((seconds.max(0.001) - 15.0 + 10.0 + 2.0).max(0.001), 10.0)
 }
 
 impl Runner for HostRunner {
@@ -1975,10 +1979,35 @@ mod tests {
             ending["remote"]["configured_seconds"],
             json!(seconds.max(0.001))
         );
-        assert_eq!(
-            ending["remote"]["bound_seconds"],
-            json!((seconds.max(0.001) - 15.0 + 10.0 + 2.0).max(0.001) + 10.0)
-        );
+        let host = HostRunner {
+            compute_deadlines: Vec::new(),
+            alias: "fixture".to_owned(),
+            ssh_options: Vec::new(),
+            ssh_config_sha256: String::new(),
+            mirror_root: "/mirrors".to_owned(),
+            node_root: "/node".to_owned(),
+            key_path: PathBuf::from("/key"),
+            upload_output_limit: None,
+            compute_wrapper: Some("/wrapper".to_owned()),
+            compute_environment: Some(json!({})),
+        };
+        let command = host
+            .compute_command(&row, &words, seconds)
+            .expect("actual wrapper");
+        let remote = command
+            .get_args()
+            .last()
+            .expect("remote command")
+            .to_str()
+            .expect("text");
+        let timeout = remote
+            .split("exec /usr/bin/timeout -k ")
+            .nth(1)
+            .expect("timeout argv");
+        let mut argv = timeout.split_whitespace();
+        let kill: f64 = argv.next().expect("kill grace").parse().expect("seconds");
+        let term: f64 = argv.next().expect("TERM bound").parse().expect("seconds");
+        assert_eq!(ending["remote"]["bound_seconds"], json!(term + kill));
         assert_eq!(ending["remote"]["start"], "unobserved");
         assert!(ending["remote"]["local_spawn_unix_ns"].as_str().is_some());
         assert!(ending["remote"].get("ends_by").is_none());

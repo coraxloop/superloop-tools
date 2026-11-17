@@ -690,7 +690,7 @@ impl RequestRecord {
             || !exact(&value["effect"], &effect_keys)
             || !matches!(
                 value["effect"]["state"].as_str(),
-                Some("pending" | "completed" | "refused")
+                Some("pending" | "completed" | "refused" | "interrupted")
             )
             || !(value["effect"]["reason"].is_null() || word(&value["effect"]["reason"], 128))
             || (effect_pending != ref_check.is_null())
