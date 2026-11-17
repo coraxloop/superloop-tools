@@ -1416,7 +1416,7 @@ fn door_compute_queue_deadline_and_disconnect_have_no_effect() {
             assert_eq!(rows[0].value()["effect"]["ending"]["cause"], "disconnect");
             assert_eq!(
                 rows[0].value()["effect"]["ending"]["final_write"],
-                "unknown"
+                "not-attempted"
             );
             #[allow(clippy::print_stderr)]
             {
@@ -1563,7 +1563,7 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
         if disconnect {
             assert_eq!(
                 rows[0].value()["effect"]["ending"]["final_write"],
-                "unknown"
+                "not-attempted"
             );
         }
         assert_eq!(rows.len(), 1);

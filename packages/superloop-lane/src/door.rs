@@ -319,9 +319,13 @@ impl RequestWait {
         {
             observed_effect(reply, self);
         }
-        // An observed full close has no final reader. Preserve "unknown":
-        // no write was attempted, irrespective of which stop site observed it.
+        // An observed full close has no final reader. Record the deliberate
+        // absence of a write separately from a lost write observation.
         if self.cause.get() == Some(lifetime::Cause::Disconnect) {
+            self.ending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)["final_write"] =
+                json!("not-attempted");
             return Ok(());
         }
         #[cfg(test)]
@@ -1563,6 +1567,7 @@ type RequestReadiness = Box<dyn FnOnce(&str) -> io::Result<Instant> + Send>;
 #[cfg(test)]
 thread_local! {
     static AFTER_WAIT_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_WAIT_STOP_FAULT_LOG: std::cell::RefCell<Option<std::sync::mpsc::Sender<String>>> = const { std::cell::RefCell::new(None) };
     static AFTER_WAIT_LOCK_TIMEOUT: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
     static REQUEST_FILED: std::cell::RefCell<Option<std::sync::mpsc::Sender<String>>> = const { std::cell::RefCell::new(None) };
     static REQUEST_READY: std::cell::RefCell<Option<RequestReadiness>> = const { std::cell::RefCell::new(None) };
@@ -1592,6 +1597,19 @@ fn wait_answer_controlled(
                 // The peer or deadline may have stopped during the store read.
                 // Keep that typed first cause instead of inventing a read fault.
                 if let Some(stop) = control.and_then(|wait| wait.stop(base_deadline)) {
+                    let line = format!("door request wait: {}", error.line());
+                    #[cfg(test)]
+                    let logged = writeln!(io::stderr().lock(), "{line}");
+                    #[cfg(not(test))]
+                    let _logged = writeln!(io::stderr().lock(), "{line}");
+                    #[cfg(test)]
+                    if logged.is_ok() {
+                        AFTER_WAIT_STOP_FAULT_LOG.with(|slot| {
+                            if let Some(sender) = slot.borrow_mut().take() {
+                                let _sent = sender.send(line);
+                            }
+                        });
+                    }
                     return Answer::stopped(stop, queued.elapsed().as_secs_f64());
                 }
                 if crate::requests::store::is_lock_contention(&error) {
@@ -2816,10 +2834,10 @@ fn serve_request_with_agent_at(
             Ok((reply, Vec::new()))
         }
         Answer::Refuse(wall) | Answer::Deadline(wall) | Answer::Disconnect(wall) => {
-            let (reason, state, disconnected) = match answer {
-                Answer::Refuse(_) => ("door-adjudicated-refusal", "refused", false),
-                Answer::Deadline(_) => ("door-request-deadline", "deadline", false),
-                Answer::Disconnect(_) => ("door-disconnect-refusal", "deadline", true),
+            let (reason, state) = match answer {
+                Answer::Refuse(_) => ("door-adjudicated-refusal", "refused"),
+                Answer::Deadline(_) => ("door-request-deadline", "deadline"),
+                Answer::Disconnect(_) => ("door-disconnect-refusal", "deadline"),
                 Answer::Allow(_) | Answer::ReadFailure(_) => unreachable!(),
             };
             let mut reply = queue_reply(registration, peer, reason, started, state, wall, &id);
@@ -2833,9 +2851,7 @@ fn serve_request_with_agent_at(
                 reply["request_record_error"] = json!(error.line());
             }
             wait.report(&mut reply);
-            if !disconnected {
-                wait.write_final(&reply, admission_deadline)?;
-            }
+            wait.write_final(&reply, admission_deadline)?;
             Ok((reply, Vec::new()))
         }
     }
@@ -6578,7 +6594,7 @@ mod tests {
             if disconnected {
                 assert_eq!(
                     rows[0].value()["effect"]["ending"]["final_write"],
-                    "unknown"
+                    "not-attempted"
                 );
                 #[allow(clippy::print_stderr)]
                 {
@@ -7667,9 +7683,13 @@ mod tests {
             let deadline_ms = 120_000;
             let (waiting, entered) = std::sync::mpsc::channel();
             let (release, proceed) = std::sync::mpsc::channel();
+            let (fault_logged, logged_fault) = std::sync::mpsc::channel();
             if answer == "disconnect" {
                 super::REQUEST_READY.with(|slot| {
                     *slot.borrow_mut() = Some(Box::new(move |_| {
+                        super::AFTER_WAIT_STOP_FAULT_LOG.with(|slot| {
+                            *slot.borrow_mut() = Some(fault_logged);
+                        });
                         crate::requests::store::BEFORE_READER_LOCK_ATTEMPT.with(|hook| {
                             *hook.borrow_mut() = Some(Box::new(move |_| {
                                 waiting.send(()).expect("owner wait entered");
@@ -7720,6 +7740,12 @@ mod tests {
             let outcome = server.join().expect("service");
             assert!(outcome.is_ok(), "owner wait {answer}: {outcome:?}");
             if answer == "disconnect" {
+                assert!(
+                    logged_fault
+                        .recv_timeout(FIXTURE_HANG)
+                        .expect("coincident store fault logged")
+                        .starts_with("door request wait: ")
+                );
                 let reply = outcome.expect("stopped owner wait");
                 assert_eq!(reply["queue_state"], "deadline", "{reply}");
                 assert!(reply["request_record_error"].is_string(), "{reply}");
@@ -7730,7 +7756,7 @@ mod tests {
                 }
                 assert_eq!(
                     rows[0].value()["effect"]["ending"]["final_write"],
-                    "unknown"
+                    "not-attempted"
                 );
             }
             assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);

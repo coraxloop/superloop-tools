@@ -169,7 +169,12 @@ fn project(record: &RequestRecord, row: &Request, at: &str) -> Result<RequestRec
         let final_write = value["effect"]["ending"]["final_write"].clone();
         let same_effect = same_execution_effect(&value["effect"], &row.body["record"]["effect"]);
         value["effect"] = row.body["record"]["effect"].clone();
-        if same_effect && matches!(final_write.as_str(), Some("failed" | "succeeded-locally")) {
+        if same_effect
+            && matches!(
+                final_write.as_str(),
+                Some("not-attempted" | "failed" | "succeeded-locally")
+            )
+        {
             value["effect"]["ending"]["final_write"] = final_write;
         }
     }

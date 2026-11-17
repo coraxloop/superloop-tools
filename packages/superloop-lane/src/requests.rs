@@ -356,7 +356,7 @@ fn valid_ending(value: &Value) -> bool {
         )
     ) && matches!(
         value["final_write"].as_str(),
-        Some("unknown" | "failed" | "succeeded-locally")
+        Some("unknown" | "not-attempted" | "failed" | "succeeded-locally")
     ) && matches!(
         value["local_child"].as_str(),
         Some("unobserved" | "not-started" | "spawned" | "reaped")
