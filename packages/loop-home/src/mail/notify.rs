@@ -456,7 +456,9 @@ impl Notifications {
 
 #[cfg(test)]
 mod tests {
+    use super::super::directory::bounded;
     use super::*;
+    use std::process::Command;
     /// ´claim:loophome:mail-notifications-wake-for-rename-without-a-scan´
     /// ´test:unit:mail-notifications-wake-for-rename-without-a-scan´
     #[test]
@@ -649,10 +651,52 @@ mod tests {
         }
     }
 
+    fn prime_uncovered_info_callsite() {
+        let root = std::env::temp_dir().join(format!("mail-notify-prime-{}", std::process::id()));
+        std::fs::create_dir(&root).expect("prime fixture");
+        let path = root.join("uncovered");
+        std::fs::write(&path, b"fixture").expect("prime path");
+        let mut notifications = Notifications::new();
+        ADD_ERROR.with(|error| *error.borrow_mut() = Some((path.clone(), libc::ENOSPC)));
+        notifications
+            .add(&path, &File::open(&path).expect("prime file"), None)
+            .expect("prime fallback");
+        notifications.begin_scan();
+        notifications.finish_scan();
+        std::fs::remove_dir_all(root).expect("prime cleanup");
+    }
+
     /// ´claim:loophome:mail-fallback-drops-unrequested-paths-and-reports-bounded-reminders´
     /// ´test:unit:mail-fallback-drops-unrequested-paths-and-reports-bounded-reminders´
     #[test]
     fn mail_fallback_drops_unrequested_paths_and_reports_bounded_reminders() {
+        const CHILD: &str = "LOOP_HOME_NOTIFY_LOG_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Register the INFO callsite without a subscriber before the capture. A fresh
+            // process must still record it, regardless of this process's cached interest.
+            prime_uncovered_info_callsite();
+
+            let output = bounded::output(
+                Command::new(std::env::current_exe().expect("test image"))
+                    .args([
+                        "mail::notify::tests::mail_fallback_drops_unrequested_paths_and_reports_bounded_reminders",
+                        "--exact",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1"),
+                "mail notification capture",
+                Duration::from_secs(120),
+            )
+            .expect("bounded capture child");
+            assert!(
+                output.status.success(),
+                "capture child: {}; stdout={}; stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let root =
             std::env::temp_dir().join(format!("mail-notify-reminders-{}", std::process::id()));
         std::fs::create_dir(&root).expect("fixture");
