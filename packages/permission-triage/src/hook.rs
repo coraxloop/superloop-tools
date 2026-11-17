@@ -2598,7 +2598,7 @@ fn unknown_action(tool_name: &str, input: &Map<String, Value>) -> Result<String,
     Ok(format!("{tool_name} fields={}", Value::Array(fields)))
 }
 
-/// Conservative target floor; model policy may raise loop to estate, never lower estate.
+/// Observed target floor; model policy may raise loop to estate, never lower estate.
 pub(crate) fn scope_floor(request: &PermissionRequest, role: &CallerRole) -> Scope {
     scope_floor_with_domain(request, role, None, &[])
 }
