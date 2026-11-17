@@ -919,7 +919,7 @@ pub(super) fn refusal(
 pub(super) struct Writer {
     pub(super) stream: UnixStream,
     pub(super) sealed: bool,
-    final_sent: bool,
+    final_started: bool,
     accounted: bool,
     stdout: usize,
     stderr: usize,
@@ -930,7 +930,7 @@ impl Writer {
         Self {
             stream,
             sealed: false,
-            final_sent: false,
+            final_started: false,
             accounted: false,
             stdout: 0,
             stderr: 0,
@@ -944,15 +944,19 @@ impl Writer {
         }
     }
 
-    pub(super) fn final_reply(&mut self, reply: &Value, deadline: Instant) -> io::Result<()> {
-        if self.final_sent {
+    pub(super) fn final_reply(
+        &mut self,
+        reply: &Value,
+        remaining: &dyn Fn() -> io::Result<Duration>,
+    ) -> io::Result<()> {
+        if self.final_started {
             return Err(io::Error::other("door final already written"));
         }
         self.sealed = true;
+        self.final_started = true;
         let mut reply = reply.clone();
         self.counts(&mut reply);
-        frame_write_until(&mut self.stream, &reply, deadline)?;
-        self.final_sent = true;
+        super::frame_write_final(&mut self.stream, &reply, remaining)?;
         Ok(())
     }
 }
@@ -1086,7 +1090,9 @@ fn write_final(
     wait.map_or_else(
         || {
             with_writer(writer, deadline, |locked| {
-                locked.final_reply(reply, deadline)
+                locked.final_reply(reply, &|| {
+                    Ok(deadline.saturating_duration_since(Instant::now()))
+                })
             })
         },
         |wait| wait.write_final(reply, deadline),
@@ -1098,13 +1104,25 @@ pub(super) fn with_writer<T>(
     deadline: Instant,
     action: impl FnOnce(&mut Writer) -> io::Result<T>,
 ) -> io::Result<T> {
+    with_writer_window(
+        stream,
+        &|| Ok(deadline.saturating_duration_since(Instant::now())),
+        action,
+    )
+}
+
+pub(super) fn with_writer_window<T>(
+    stream: &Arc<Mutex<Writer>>,
+    remaining: &dyn Fn() -> io::Result<Duration>,
+    action: impl FnOnce(&mut Writer) -> io::Result<T>,
+) -> io::Result<T> {
     loop {
         match stream.try_lock() {
             Ok(mut locked) => return action(&mut locked),
             Err(TryLockError::Poisoned(_)) => {
                 return Err(io::Error::other("door writer lock poisoned"));
             }
-            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+            Err(TryLockError::WouldBlock) if !remaining()?.is_zero() => {
                 thread::sleep(Duration::from_millis(5));
             }
             Err(TryLockError::WouldBlock) => {
@@ -1472,7 +1490,7 @@ pub(super) fn serve_compute(
     };
     if registration.scope != Scope::Work {
         let reply = refusal(registration, peer, "door-review-compute-refusal", started);
-        write_final(&writer, wait, &reply, deadline)?;
+        write_final(&writer, wait, &reply, request_base_deadline)?;
         return Ok(reply);
     }
     let compute_started = Instant::now();
@@ -1516,12 +1534,7 @@ pub(super) fn serve_compute(
         if let Some(wait) = wait {
             wait.report(&mut reply);
         }
-        write_final(
-            &writer,
-            wait,
-            &reply,
-            Instant::now() + Duration::from_secs(2),
-        )?;
+        write_final(&writer, wait, &reply, request_base_deadline)?;
         return Ok(reply);
     }
     if upload {
@@ -1757,11 +1770,14 @@ pub(super) fn serve_compute(
         "stderr_bytes":stderr_count.load(Ordering::Relaxed),
         "queue_wall_seconds":queue_wall,"mediation_wall_seconds":(total_wall - compute_wall - queue_wall.unwrap_or(0.0)).max(0.0),
         "compute_wall_seconds":compute_wall});
-    with_writer(&writer, Instant::now() + Duration::from_secs(2), |locked| {
-        locked.sealed = true;
-        locked.counts(&mut reply);
-        Ok(())
-    })?;
+    #[cfg(test)]
+    tests::AFTER_OUTPUT_DRAIN.with(|slot| {
+        if let Some(action) = slot.borrow_mut().take() {
+            action();
+        }
+    });
+    // Both output pumps have joined: these counts cannot change. The final
+    // acquires and seals the shared writer; no separate timed seal is needed.
     if let Some(packet) = ref_packet
         .lock()
         .map_err(|_| io::Error::other("ref packet evidence lock"))?
@@ -1791,12 +1807,7 @@ pub(super) fn serve_compute(
     if let Some(wait) = wait {
         wait.report(&mut reply);
     }
-    write_final(
-        &writer,
-        wait,
-        &reply,
-        Instant::now() + Duration::from_secs(2),
-    )?;
+    write_final(&writer, wait, &reply, request_base_deadline)?;
     Ok(reply)
 }
 
@@ -2224,6 +2235,90 @@ mod tests {
                 hook(stopped);
             }
         });
+    }
+
+    thread_local! {
+        pub(super) static AFTER_OUTPUT_DRAIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// ´test:unit:door-final-waits-for-prior-writer-without-an-early-seal´
+    #[test]
+    fn door_final_waits_for_prior_writer_without_an_early_seal() {
+        let (mut client, server) = FixtureClient::pair().expect("pair");
+        client.shutdown(Shutdown::Write).expect("input ends");
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("registration");
+        let (events, observed) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let service = thread::spawn(move || {
+            let wait = super::super::RequestWait::new(&server).expect("wait");
+            let writer = Arc::clone(&wait.writer);
+            let (ready, acquired) = std::sync::mpsc::channel();
+            let holder = Arc::new(std::sync::Mutex::new(None));
+            let retained = Arc::clone(&holder);
+            AFTER_OUTPUT_DRAIN.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    *retained.lock().expect("holder") = Some(thread::spawn(move || {
+                        let _writer = writer.lock().expect("prior writer");
+                        ready.send(()).expect("writer held");
+                        held.recv_timeout(FIXTURE_HANG).expect("release writer");
+                    }));
+                    acquired
+                        .recv_timeout(FIXTURE_HANG)
+                        .expect("writer owns lock");
+                }));
+            });
+            let before = events.clone();
+            super::super::BEFORE_TERMINAL_WRITE.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    before.send("final").expect("terminal reached");
+                }));
+            });
+            let started = Instant::now();
+            let result = super::serve_compute(
+                &server,
+                &registration,
+                3000,
+                Operation::ProbeEcho,
+                &FakeRunner,
+                started,
+                started + FIXTURE_HANG,
+                "no-queue",
+                None,
+                None,
+                None,
+                Some(&wait),
+            );
+            if result.is_err() {
+                events.send("failed").expect("failure observed");
+            }
+            holder
+                .lock()
+                .expect("holder")
+                .take()
+                .expect("thread")
+                .join()
+                .expect("writer done");
+            result
+        });
+        let event = observed
+            .recv_timeout(FIXTURE_HANG)
+            .expect("final or failure");
+        release.send(()).expect("release writer");
+        if event != "final" {
+            let result = service.join().expect("service");
+            panic!("writer contention failed before final: {result:?}");
+        }
+        let reply = client.answer();
+        assert_eq!(reply["reason"], "door-complete");
+        assert_eq!(reply["stdout_bytes"], 6);
+        service.join().expect("service").expect("served");
     }
 
     /// ´test:unit:door-output-final-counts-and-seal-follow-delivery´

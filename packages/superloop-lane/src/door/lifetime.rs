@@ -168,6 +168,10 @@ impl Lifetime {
         self.finished.store(true, Ordering::Release);
     }
 
+    pub(super) fn close_output(&self) {
+        let _closed = self.peer.shutdown(std::net::Shutdown::Write);
+    }
+
     pub(super) fn finished(&self) -> bool {
         self.finished.load(Ordering::Acquire)
     }

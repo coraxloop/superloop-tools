@@ -562,6 +562,8 @@ The admission followup gives post-reply publication a fresh 300-second lock-admi
 
 (2026-11-16, output accounting repair) Delivered counts and the final seal share the writer; pumps are drained under the request lifetime instead of a two-second join. Ordered and injected-clock cases pin complete-frame counts, no output after final and a typed delivery stop. This joins the held request-life wave; the later control authority and remote confirmation remain open.
 
+(2026-11-16, final delivery) The final write now shares the remaining acceptance lifetime, with no renewed two-second window or separate timed pre-record seal. Ordered slow-reader, partial-final and writer-contention cases pin delivery and closure. The notice rounds its remote bound upward and states that reporting the stop does not require a loop answer before an admitted repeat. This closes the final-delivery residual inside the same held wave; control authority and remote confirmation remain open.
+
 The 2026-11-16 caller follow-up carries the unconfirmed remote bound to the reply and SSH notice, labels top-level walls by clock without inventing historical measurements, and names the repin and startup-retry commands in the held wave. Delivery unknown includes no attempted write. The output-accounting repair and these notices travel in that same wave; owner control and remote confirmation remain separate slices.
 
 **Problem (The door-agent exercise meets the queue it finds or refuses early with the reason)** · `prob:door:agent-exercise-meets-the-queue-or-refuses-early`

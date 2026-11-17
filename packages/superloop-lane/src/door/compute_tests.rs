@@ -1518,12 +1518,16 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
                 &reply,
             )
             .expect("stop line");
-            assert!(line.contains("remote_state=unconfirmed"));
+            assert!(line.contains("the remote command is unconfirmed"));
             assert!(line.contains(&format!(
-                "remote_bound_seconds={}",
-                reply["remote"]["bound_seconds"]
-            )));
-            assert!(line.contains("tell your loop before repeating"));
+                    "up to {:.0} s after it started",
+                    reply["remote"]["bound_seconds"]
+                        .as_f64()
+                        .expect("bound")
+                        .ceil()
+                )));
+            assert!(line.contains("report this stop to your loop"));
+            assert!(!line.contains("remote_bound_seconds="));
             #[allow(clippy::print_stderr)] // Captured caller evidence.
             {
                 eprintln!("STOPPED-REPLY {reply}\nSTUB-LINE {line}");
@@ -1751,7 +1755,15 @@ fn compute_deadline_refusal_case(
     let line = super::final_line(&["fixture".into(), "cargo test".into()], &reply).expect("notice");
     if reason == "door-request-deadline" {
         assert!(line.starts_with(expected_line), "{line}");
-        assert!(line.contains("remote_state=not-started"), "{line}");
+        assert!(line.contains("no remote command started"), "{line}");
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("UNSTARTED-STUB-LINE {line}");
+        }
+        assert!(
+            !line.contains("null") && !line.contains("unobserved"),
+            "{line}"
+        );
         assert!(
             line.contains("ask again through the ordinary door route"),
             "{line}"

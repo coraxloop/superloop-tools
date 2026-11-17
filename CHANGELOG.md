@@ -6,9 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- The door gives final replies the remaining request lifetime instead of a separate two-second write window. A slow live peer can drain queued output and receive its final; a partial final closes the write half and cannot be followed by credit. The stopped-caller notice rounds the remote bound upward to whole seconds, explains its unobserved start and admits a repeat without asking the worker to await a loop response. Compatibility: the door and SSH stub receive these changes through the same coordinated rewrite, repin and restart wave; no second stop or new record shape is required (``prob:door:a-door-requests-life-is-watched-stopped-bounded-and-recovered``).
+
 ### Added
 
-- Door stop replies now carry the remote state and supplied relative bound, and the SSH notice tells the caller whether to ask again or consult its loop before repeating an unconfirmed effect. Top-level effect and reply walls identify their awake monotonic clock, distinct from the suspend-counting deadline; historical clocks remain unobserved. Compatibility: these required ending fields join the held record rewrite and the same coordinated door reinstall/restart wave. The wave names digest-bound repinning and the startup recovery retry commands.
+- Door stop replies now carry the remote state and supplied relative bound, and the SSH notice tells the caller whether to ask again or report an unconfirmed effect to its loop. Top-level effect and reply walls identify their awake monotonic clock, distinct from the suspend-counting deadline; historical clocks remain unobserved. Compatibility: these required ending fields join the held record rewrite and the same coordinated door reinstall/restart wave. The wave names digest-bound repinning and the startup recovery retry commands.
 
 - Door finals count only complete output frames delivered before them and seal the writer against later output. A child's exit no longer starts a two-second delivery race: output drains under the request lifetime, with a typed stop on expiry or full close. A partial failed frame closes the stream and leaves its terminal evidence in the record. Compatibility: this repair rides the request-life rewrite and reinstall wave, with one restart per door (``proto:superlooplane:door-request-lifetime``).
 

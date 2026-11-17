@@ -50,10 +50,8 @@ pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Opt
             .as_str()
             .map_or_else(String::new, |cause| format!("; {cause}"));
         Some(format!(
-            "{reason}: {bounds}stop_cause={} remote_state={} remote_bound_seconds={} remote_start=unobserved; {next}{diagnostic}",
-            reply["stop_cause"].as_str().unwrap_or("unobserved"),
-            reply["remote"]["state"].as_str().unwrap_or("unconfirmed"),
-            reply["remote"]["bound_seconds"]
+            "{reason}: {bounds}stop_cause={}; {next}{diagnostic}",
+            reply["stop_cause"].as_str().unwrap_or("unobserved")
         ))
     } else if reason == "door-output-limit-refusal" {
         Some(format!(
@@ -291,6 +289,27 @@ impl RequestWait {
         }
     }
 
+    fn final_remaining(&self, base: Instant) -> io::Result<Duration> {
+        if matches!(
+            self.cause.get(),
+            Some(
+                lifetime::Cause::Deadline
+                    | lifetime::Cause::Disconnect
+                    | lifetime::Cause::ObservationFailure
+            )
+        ) {
+            return Ok(Duration::ZERO);
+        }
+        self.lifetime.as_ref().map_or_else(
+            || {
+                Ok(self
+                    .deadline(base)
+                    .saturating_duration_since(Instant::now()))
+            },
+            |life| life.remaining(base, self.elapsed()),
+        )
+    }
+
     fn write_final(&self, reply: &Value, deadline: Instant) -> io::Result<()> {
         if self
             .observed_effect
@@ -306,12 +325,20 @@ impl RequestWait {
                 action();
             }
         });
-        let result = transport::with_writer(&self.writer, deadline, |stream| {
-            stream.final_reply(reply, deadline)?;
+        let remaining = || self.final_remaining(deadline);
+        let result = transport::with_writer_window(&self.writer, &remaining, |stream| {
+            stream.final_reply(reply, &remaining)?;
             // credit checks this flag under this same writer lock.
             self.final_sent.store(true, Ordering::Relaxed);
             Ok(())
         });
+        if result.is_err()
+            && let Some(life) = &self.lifetime
+        {
+            // Also close when the writer could not be acquired: the connection
+            // fallback and an older credit writer must not append a new frame.
+            life.close_output();
+        }
         self.ending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)["final_write"] =
@@ -342,16 +369,22 @@ impl RequestWait {
                 reply["next_step"] = json!(if reply["remote"]["state"] == "unconfirmed"
                     && reply["remote"]["bound_seconds"].is_number()
                 {
-                    "tell your loop before repeating; a retry may wait for the node run lock through the supplied bound from its unobserved remote start"
+                    format!(
+                        "the remote command is unconfirmed and may hold the node run lock for up to {:.0} s after it started (start not observed); report this stop to your loop; a repeat is admitted but may wait for that lock",
+                        reply["remote"]["bound_seconds"]
+                            .as_f64()
+                            .unwrap_or_default()
+                            .ceil()
+                    )
                 } else if reply["remote"]["state"] == "unconfirmed" {
-                    "tell your loop before repeating; the remote end is unconfirmed and no relative bound was observed"
+                    "the remote command is unconfirmed and no time bound was observed; report this stop to your loop; a repeat is admitted but may wait for the node run lock".to_owned()
                 } else if matches!(
                     stop,
                     lifetime::Cause::ObservationFailure | lifetime::Cause::Transport
                 ) {
-                    "tell your loop to inspect the recorded failure before repeating"
+                    "no remote command started; report this stop to your loop for inspection; a repeat through the ordinary door route is admitted".to_owned()
                 } else {
-                    "no remote command started; ask again through the ordinary door route when ready"
+                    "no remote command started; ask again through the ordinary door route when ready".to_owned()
                 });
             }
             if matches!(
@@ -806,11 +839,12 @@ fn admission_window() -> String {
 }
 
 fn concurrent_refusal(
-    stream: &mut UnixStream,
+    wait: &RequestWait,
     registration: &Registration,
     peer: u32,
     started: Instant,
     waited: Duration,
+    deadline: Instant,
 ) -> io::Result<(Value, Vec<u8>)> {
     let _logged = writeln!(
         io::stderr().lock(),
@@ -821,7 +855,7 @@ fn concurrent_refusal(
     reply["admission_window"] = json!(admission_window());
     reply["waited_seconds"] = json!((waited.as_secs_f64() * 1000.0).round() / 1000.0);
     reply["retry_after_seconds"] = json!(RETRY_AFTER_SECONDS);
-    frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+    wait.write_final(&reply, deadline)?;
     Ok((reply, Vec::new()))
 }
 
@@ -1012,6 +1046,95 @@ fn frame_write_until(stream: &mut UnixStream, value: &Value, deadline: Instant) 
     frame_write_checked(stream, value, deadline, true)
 }
 
+// A terminal frame gets the remaining request lifetime. Even at expiry one
+// nonblocking attempt can deliver the stop; waiting never renews the budget.
+#[allow(unsafe_code)]
+fn frame_write_final(
+    stream: &mut UnixStream,
+    value: &Value,
+    remaining: &dyn Fn() -> io::Result<Duration>,
+) -> io::Result<()> {
+    let body = serde_json::to_vec(value)?;
+    if body.len() > FRAME_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "door frame is too long",
+        ));
+    }
+    let mut bytes = u32::try_from(body.len())
+        .map_err(io::Error::other)?
+        .to_be_bytes()
+        .to_vec();
+    bytes.extend_from_slice(&body);
+    let result = (|| {
+        let mut bytes = bytes.as_slice();
+        while !bytes.is_empty() {
+            // SAFETY: the live socket and borrowed frame bytes remain valid for send.
+            let sent = unsafe {
+                libc::send(
+                    stream.as_raw_fd(),
+                    bytes.as_ptr().cast(),
+                    bytes.len(),
+                    libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+                )
+            };
+            if sent < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if error.kind() != io::ErrorKind::WouldBlock {
+                    return Err(error);
+                }
+                let left = remaining()?;
+                #[cfg(test)]
+                FINAL_BLOCKED.with(|slot| {
+                    if let Some(action) = slot.borrow_mut().take() {
+                        action(left);
+                    }
+                });
+                if left.is_zero() || remaining()?.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "door final lifetime expired",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            let sent = usize::try_from(sent).map_err(io::Error::other)?;
+            if sent == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "door final closed",
+                ));
+            }
+            bytes = &bytes[sent..];
+            if !bytes.is_empty() && remaining()?.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "door partial final lifetime expired",
+                ));
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _closed = stream.shutdown(Shutdown::Write);
+    } else if value["status"] == 125 {
+        drain_refusal(stream);
+    }
+    result
+}
+
+#[cfg(test)]
+type FinalBlocked = std::cell::RefCell<Option<Box<dyn FnOnce(Duration)>>>;
+
+#[cfg(test)]
+thread_local! {
+    static FINAL_BLOCKED: FinalBlocked = const { std::cell::RefCell::new(None) };
+}
+
 fn frame_write_no_drain(stream: &mut UnixStream, value: &Value) -> io::Result<()> {
     frame_write_checked(stream, value, Instant::now() + PEER_DEADLINE, false)
 }
@@ -1036,36 +1159,40 @@ fn frame_write_checked(
     )?;
     write_all_until(stream, &bytes, deadline)?;
     if drain_refusal && value["type"] == "final" && value["status"] == 125 {
-        let _closed = stream.shutdown(Shutdown::Write);
-        let drain_deadline = Instant::now() + Duration::from_millis(500);
-        let mut remaining = INPUT_LIMIT;
-        let mut buffer = [0_u8; 16 * 1024];
-        while remaining > 0 && Instant::now() < drain_deadline {
-            let timeout = drain_deadline.saturating_duration_since(Instant::now());
-            if stream.set_read_timeout(Some(timeout)).is_err() {
-                break;
-            }
-            let amount = remaining.min(buffer.len());
-            match stream.read(&mut buffer[..amount]) {
-                Ok(0) => break,
-                Ok(read) => remaining -= read,
-                // Timed socket calls can return EINTR after a stop and continue.
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::TimedOut
-                            | io::ErrorKind::WouldBlock
-                            | io::ErrorKind::ConnectionReset
-                    ) =>
-                {
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
+        self::drain_refusal(stream);
     }
     Ok(())
+}
+
+fn drain_refusal(stream: &mut UnixStream) {
+    let _closed = stream.shutdown(Shutdown::Write);
+    let drain_deadline = Instant::now() + Duration::from_millis(500);
+    let mut remaining = INPUT_LIMIT;
+    let mut buffer = [0_u8; 16 * 1024];
+    while remaining > 0 && Instant::now() < drain_deadline {
+        let timeout = drain_deadline.saturating_duration_since(Instant::now());
+        if stream.set_read_timeout(Some(timeout)).is_err() {
+            break;
+        }
+        let amount = remaining.min(buffer.len());
+        match stream.read(&mut buffer[..amount]) {
+            Ok(0) => break,
+            Ok(read) => remaining -= read,
+            // Timed socket calls can return EINTR after a stop and continue.
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                break;
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 fn frame_read(stream: &mut UnixStream) -> io::Result<Value> {
@@ -1665,6 +1792,7 @@ fn admission_failed_refusal(
     reply
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn root_refusal(
     stream: &mut UnixStream,
@@ -1675,14 +1803,50 @@ fn root_refusal(
     error: &LaneError,
     started: Instant,
 ) -> io::Result<()> {
-    let (bounded_request, _) =
-        announce_compute_deadline(stream, registration, peer, request, None, started.elapsed());
+    root_refusal_at(
+        stream,
+        registration,
+        peer,
+        request,
+        owner_home,
+        error,
+        lifetime::Start::at(started)?,
+    )
+}
+
+fn root_refusal_at(
+    stream: &mut UnixStream,
+    registration: &Registration,
+    peer: u32,
+    request: &Value,
+    owner_home: &Path,
+    error: &LaneError,
+    acceptance: lifetime::Start,
+) -> io::Result<()> {
+    let started = acceptance.awake;
+    let (bounded_request, _) = announce_compute_deadline(
+        stream,
+        registration,
+        peer,
+        request,
+        None,
+        acceptance.elapsed().unwrap_or(Duration::MAX),
+    );
     let request = &bounded_request;
+    let deadline = started
+        + Duration::from_millis(
+            request["deadline_ms"]
+                .as_u64()
+                .filter(|ms| *ms > 0 && *ms <= 120_000)
+                .unwrap_or(120_000),
+        );
+    let wait = RequestWait::new(stream)?.with_lifetime(acceptance, true, stream)?;
     let (_request_guard, admission_error) = if peer == registration.worker_uid {
         match RequestGuard::acquire_wait(owner_home, registration, request, None, started) {
             Ok((Some(guard), _)) => (Some(guard), None),
             Ok((None, waited)) => {
-                return concurrent_refusal(stream, registration, peer, started, waited).map(|_| ());
+                return concurrent_refusal(&wait, registration, peer, started, waited, deadline)
+                    .map(|_| ());
             }
             Err(error) => (None, Some(error)),
         }
@@ -1721,12 +1885,12 @@ fn root_refusal(
             reply
         },
     );
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let diagnostic_deadline = Instant::now() + Duration::from_secs(2);
     for bytes in diagnostic.as_bytes().chunks(8192) {
         if let Err(error) = frame_write_until(
             stream,
             &json!({"schema":2,"type":"stderr","bytes":bytes}),
-            deadline,
+            diagnostic_deadline,
         ) {
             finish_preflight(
                 &reply,
@@ -1737,7 +1901,7 @@ fn root_refusal(
         }
     }
     write_preflight_final(
-        stream,
+        &wait,
         &reply,
         (Some(owner_home), None, &registration.loop_name),
         deadline,
@@ -1780,12 +1944,12 @@ fn finish_preflight(
 }
 
 fn write_preflight_final(
-    stream: &mut UnixStream,
+    wait: &RequestWait,
     reply: &Value,
     context: (Option<&Path>, Option<&Store>, &str),
     deadline: Instant,
 ) -> io::Result<()> {
-    let result = frame_write_until(stream, reply, deadline);
+    let result = wait.write_final(reply, deadline);
     finish_preflight(
         reply,
         context,
@@ -1862,6 +2026,7 @@ fn finish_stopped(
     peer: u32,
     started: Instant,
     stop: lifetime::Cause,
+    deadline: Instant,
 ) -> io::Result<(Value, Vec<u8>)> {
     let mut reply = transport::refusal(registration, peer, stop.reason(), started);
     reply["request_id"] = json!(id);
@@ -1880,7 +2045,7 @@ fn finish_stopped(
         reply["request_record_error"] = json!(error.line());
     }
     wait.report(&mut reply);
-    wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
+    wait.write_final(&reply, deadline)?;
     Ok((reply, Vec::new()))
 }
 
@@ -1992,10 +2157,17 @@ fn serve_request_with_agent_at(
                     let mut reply = transport::refusal(registration, peer, stop.reason(), started);
                     reply["waited_seconds"] = json!(waited.as_secs_f64());
                     wait.report(&mut reply);
-                    wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
+                    wait.write_final(&reply, admission_deadline)?;
                     return Ok((reply, Vec::new()));
                 }
-                return concurrent_refusal(stream, registration, peer, started, waited);
+                return concurrent_refusal(
+                    &wait,
+                    registration,
+                    peer,
+                    started,
+                    waited,
+                    admission_deadline,
+                );
             }
             Err(error) => (None, Some(error)),
         }
@@ -2072,20 +2244,20 @@ fn serve_request_with_agent_at(
             document.remove("registration");
         }
         write_preflight_final(
-            stream,
+            &wait,
             &reply,
             (owner_home, fixture_store, &registration.loop_name),
-            Instant::now() + Duration::from_secs(2),
+            admission_deadline,
         )?;
         return Ok((reply, Vec::new()));
     }
     let Some(route) = route else {
         let reply = refuse("door-compute-unregistered");
         write_preflight_final(
-            stream,
+            &wait,
             &reply,
             (owner_home, fixture_store, &registration.loop_name),
-            Instant::now() + Duration::from_secs(2),
+            admission_deadline,
         )?;
         return Ok((reply, Vec::new()));
     };
@@ -2095,10 +2267,10 @@ fn serve_request_with_agent_at(
             Err(reason) => {
                 let reply = refuse(reason);
                 write_preflight_final(
-                    stream,
+                    &wait,
                     &reply,
                     (owner_home, fixture_store, &registration.loop_name),
-                    Instant::now() + Duration::from_secs(2),
+                    admission_deadline,
                 )?;
                 return Ok((reply, Vec::new()));
             }
@@ -2109,20 +2281,20 @@ fn serve_request_with_agent_at(
     let Some(operation) = route.allowed(args.as_deref().unwrap_or_default(), registration) else {
         let reply = refuse("door-caller-authority-refusal");
         write_preflight_final(
-            stream,
+            &wait,
             &reply,
             (owner_home, fixture_store, &registration.loop_name),
-            Instant::now() + Duration::from_secs(2),
+            admission_deadline,
         )?;
         return Ok((reply, Vec::new()));
     };
     let Some(runner) = runner else {
         let reply = refuse("door-compute-unregistered");
         write_preflight_final(
-            stream,
+            &wait,
             &reply,
             (owner_home, fixture_store, &registration.loop_name),
-            Instant::now() + Duration::from_secs(2),
+            admission_deadline,
         )?;
         return Ok((reply, Vec::new()));
     };
@@ -2141,10 +2313,10 @@ fn serve_request_with_agent_at(
     let Some(owner_home) = owner_home else {
         let reply = refuse("door-requests-unregistered");
         write_preflight_final(
-            stream,
+            &wait,
             &reply,
             (owner_home, fixture_store, &registration.loop_name),
-            Instant::now() + Duration::from_secs(2),
+            admission_deadline,
         )?;
         return Ok((reply, Vec::new()));
     };
@@ -2183,10 +2355,10 @@ fn serve_request_with_agent_at(
             reply["request_record_error"] = json!(error.line());
             wait.report(&mut reply);
             write_preflight_final(
-                stream,
+                &wait,
                 &reply,
                 (Some(owner_home), fixture_store, &registration.loop_name),
-                Instant::now() + Duration::from_secs(2),
+                admission_deadline,
             )?;
             return Ok((reply, Vec::new()));
         }
@@ -2232,10 +2404,10 @@ fn serve_request_with_agent_at(
             reply["request_record_error"] = json!(error.line());
             wait.report(&mut reply);
             write_preflight_final(
-                stream,
+                &wait,
                 &reply,
                 (Some(owner_home), fixture_store, &registration.loop_name),
-                Instant::now() + Duration::from_secs(2),
+                admission_deadline,
             )?;
             return Ok((reply, Vec::new()));
         }
@@ -2247,10 +2419,10 @@ fn serve_request_with_agent_at(
             let mut reply = refuse(error.0);
             wait.report(&mut reply);
             write_preflight_final(
-                stream,
+                &wait,
                 &reply,
                 (Some(owner_home), fixture_store, &registration.loop_name),
-                Instant::now() + Duration::from_secs(2),
+                admission_deadline,
             )?;
             return Ok((reply, Vec::new()));
         }
@@ -2335,10 +2507,10 @@ fn serve_request_with_agent_at(
         reply["request_record_error"] = json!(error.line());
         wait.report(&mut reply);
         write_preflight_final(
-            stream,
+            &wait,
             &reply,
             (Some(owner_home), fixture_store, &registration.loop_name),
-            Instant::now() + Duration::from_secs(2),
+            admission_deadline,
         )?;
         return Ok((reply, Vec::new()));
     }
@@ -2363,7 +2535,16 @@ fn serve_request_with_agent_at(
     if (initially_immediate || synchronous_agent)
         && let Some(stop) = wait.stop(deadline)
     {
-        return finish_stopped(&store, &id, &wait, registration, peer, started, stop);
+        return finish_stopped(
+            &store,
+            &id,
+            &wait,
+            registration,
+            peer,
+            started,
+            stop,
+            deadline,
+        );
     }
     if synchronous_agent {
         // The intent is durable before any vendor call, including audit.
@@ -2387,11 +2568,20 @@ fn serve_request_with_agent_at(
             reply["request_record_error"] = json!(error.line());
             reply["request_id"] = json!(id);
             wait.report(&mut reply);
-            wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
+            wait.write_final(&reply, admission_deadline)?;
             return Ok((reply, Vec::new()));
         }
         if let Some(stop) = stopped {
-            return finish_stopped(&store, &id, &wait, registration, peer, started, stop);
+            return finish_stopped(
+                &store,
+                &id,
+                &wait,
+                registration,
+                peer,
+                started,
+                stop,
+                deadline,
+            );
         }
         would_do = json!({"decision":result.verdict,"reason":result.reason});
     }
@@ -2410,7 +2600,7 @@ fn serve_request_with_agent_at(
             reply["request_record_error"] = json!(error.line());
         }
         wait.report(&mut reply);
-        wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
+        wait.write_final(&reply, admission_deadline)?;
         return Ok((reply, Vec::new()));
     }
     if immediate {
@@ -2604,7 +2794,7 @@ fn serve_request_with_agent_at(
                 );
             }
             wait.report(&mut reply);
-            wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
+            wait.write_final(&reply, admission_deadline)?;
             Ok((reply, Vec::new()))
         }
         Answer::Refuse(wall) | Answer::Deadline(wall) | Answer::Disconnect(wall) => {
@@ -2626,7 +2816,7 @@ fn serve_request_with_agent_at(
             }
             if !disconnected {
                 wait.report(&mut reply);
-                wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
+                wait.write_final(&reply, admission_deadline)?;
             }
             Ok((reply, Vec::new()))
         }
@@ -3186,14 +3376,14 @@ fn run_service_with_snapshot(
                 ) {
                     Ok(route) => Some(route.with_compute_deadlines(&compute_deadlines)),
                     Err(error) if error.kind == "door-compute-root-refusal" => {
-                        return root_refusal(
+                        return root_refusal_at(
                             &mut stream,
                             &registration,
                             uid,
                             &request,
                             &owner_home,
                             &error,
-                            started,
+                            acceptance,
                         );
                     }
                     Err(error) => {
@@ -5582,7 +5772,7 @@ mod tests {
                     ) {
                         "ask again through the ordinary door route"
                     } else {
-                        "tell your loop"
+                        "report this stop to your loop"
                     }
                 ),
                 "{line}"
@@ -5596,12 +5786,279 @@ mod tests {
             let line = super::final_line(&["fixture".into(), "git status".into()], &reply)
                 .expect("notice");
             assert!(
-                line.contains("remote_state=unconfirmed remote_bound_seconds=42"),
+                line.contains("up to 42 s after it started (start not observed)"),
                 "{line}"
             );
-            assert!(line.contains("tell your loop before repeating"), "{line}");
+            assert!(line.contains("report this stop to your loop"), "{line}");
             assert!(line.contains("node run lock"), "{line}");
+            assert!(
+                line.contains("a repeat is admitted but may wait for that lock"),
+                "{line}"
+            );
         }
+    }
+
+    /// ´test:unit:door-final-credit-cannot-revive-an-observed-stop´
+    #[test]
+    fn door_final_credit_cannot_revive_an_observed_stop() {
+        let (peer, server) = UnixStream::pair().expect("pair");
+        let awake = Instant::now();
+        let (start, clock) = super::lifetime::Start::controlled(awake);
+        let wait = super::RequestWait::new(&server)
+            .expect("wait")
+            .with_lifetime(start, true, &server)
+            .expect("life");
+        let base = awake + Duration::from_secs(30);
+        clock.advance(30_000);
+        assert_eq!(wait.stop(base), Some(super::lifetime::Cause::Deadline));
+        wait.credit(Duration::from_secs(120));
+        assert_eq!(
+            wait.final_remaining(base).expect("remaining"),
+            Duration::ZERO
+        );
+        let held = wait.writer.lock().expect("prior writer");
+        let reply =
+            json!({"type":"final","schema":2,"status":125,"reason":"door-request-deadline"});
+        assert!(
+            wait.write_final(&reply, base).is_err(),
+            "spent admission cannot wait for writer"
+        );
+        drop(held);
+        assert!(
+            super::frame_write_until(
+                &mut server.try_clone().expect("fallback"),
+                &reply,
+                Instant::now() + FIXTURE_HANG
+            )
+            .is_err(),
+            "a failed final closes the connection fallback too"
+        );
+        drop(peer);
+    }
+
+    fn final_write_record(fixture: &Fixture) -> (Store, String, Registration) {
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        set_fixture_mode(&store, crate::requests::Mode::Allow);
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("registration");
+        let record = super::request_record(
+            &registration,
+            "ssh",
+            Operation::ProbeEcho,
+            &store.effective_mode("ssh").expect("mode"),
+            &json!({"decision":"undecided","reason":"fixture"}),
+            false,
+            &[],
+        )
+        .expect("record");
+        let id = record.id().to_owned();
+        store.file(record).expect("file");
+        (store, id, registration)
+    }
+
+    #[allow(unsafe_code)]
+    fn small_final_buffer(server: &UnixStream) {
+        let size: libc::c_int = 1024;
+        assert_eq!(
+            // SAFETY: size is a live c_int and its supplied length matches its type.
+            unsafe {
+                libc::setsockopt(
+                    server.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    std::ptr::from_ref(&size).cast(),
+                    std::mem::size_of_val(&size)
+                        .try_into()
+                        .expect("option size"),
+                )
+            },
+            0,
+            "small output buffer"
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn final_write_service(
+        server: &UnixStream,
+        store: &Store,
+        id: &str,
+        registration: &Registration,
+        start: super::lifetime::Start,
+        events: &std::sync::mpsc::Sender<Duration>,
+        resume: std::sync::mpsc::Receiver<()>,
+        expire: bool,
+    ) -> Value {
+        let base = start.awake + FIXTURE_HANG;
+        let wait = super::RequestWait::new(server)
+            .expect("wait")
+            .with_lifetime(start, true, server)
+            .expect("lifetime");
+        let ending = super::RequestEnding {
+            store,
+            wait: &wait,
+            id,
+        };
+        let mut reply =
+            super::transport::refusal(registration, 3000, "door-complete", Instant::now());
+        reply["status"] = json!(0);
+        reply["compute_exit_status"] = json!(0);
+        reply["padding"] = json!("x".repeat(50_000));
+        // A complete output frame is queued before the terminal frame.
+        super::frame_write_until(
+            &mut server.try_clone().expect("output writer"),
+            &final_fixture_output(),
+            base,
+        )
+        .expect("queued output");
+        reply["stdout_bytes"] = json!(13);
+        store
+            .record_effect(id, super::observed_effect(&reply, &wait))
+            .expect("effect");
+        let resume = Arc::new(std::sync::Mutex::new(resume));
+        let continuation = Arc::clone(&resume);
+        let blocked = events.clone();
+        super::FINAL_BLOCKED.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |left| {
+                blocked.send(left).expect("blocked final event");
+                continuation
+                    .lock()
+                    .expect("continuation")
+                    .recv_timeout(FIXTURE_HANG)
+                    .expect("peer resumes");
+            }));
+        });
+        let result = wait.write_final(&reply, base);
+        assert_eq!(result.is_err(), expire, "final outcome: {result:?}");
+        wait.credit(Duration::from_millis(100));
+        drop(ending);
+        events.send(Duration::ZERO).expect("final completed");
+        resume
+            .lock()
+            .expect("continuation")
+            .recv_timeout(FIXTURE_HANG)
+            .expect("peer checked while writer lives");
+        reply
+    }
+
+    fn ordered_final_write(expire: bool) {
+        use std::io::Read as _;
+        let fixture = Fixture::new();
+        let (store, id, registration) = final_write_record(&fixture);
+        let (mut client, server) = FixtureClient::pair().expect("pair");
+        small_final_buffer(&server);
+        let (start, clock) = super::lifetime::Start::controlled(Instant::now());
+        let (events, blocked) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let service = thread::spawn(move || {
+            final_write_service(
+                &server,
+                &store,
+                &id,
+                &registration,
+                start,
+                &events,
+                resume,
+                expire,
+            )
+        });
+        let left = blocked
+            .recv_timeout(FIXTURE_HANG)
+            .expect("final blocked on live peer");
+        // This is injected-clock budget, not a wall measurement of the node.
+        assert_eq!(left, FIXTURE_HANG, "final owns the request lifetime");
+        clock.advance(if expire { 240_000 } else { 3_000 });
+        release.send(()).expect("resume final");
+        if expire {
+            // This wire test deliberately receives an incomplete frame.
+            assert_eq!(
+                blocked
+                    .recv_timeout(FIXTURE_HANG)
+                    .expect("failed final completed"),
+                Duration::ZERO
+            );
+            client
+                .wire()
+                .set_nonblocking(true)
+                .expect("observe closed half without a wall");
+            let mut partial = Vec::new();
+            let read = client.wire().read_to_end(&mut partial);
+            release.send(()).expect("release live writer");
+            let reply = service.join().expect("service");
+            read.expect("partial final closes write half while writer remains alive");
+            let expected = final_fixture_bytes(&reply);
+            assert!(!partial.is_empty() && partial.len() < expected.len());
+            assert!(
+                expected.starts_with(&partial),
+                "no credit follows partial final"
+            );
+        } else {
+            let reply = client.answer();
+            assert_eq!(
+                blocked.recv_timeout(FIXTURE_HANG).expect("final completed"),
+                Duration::ZERO
+            );
+            release.send(()).expect("release live writer");
+            let returned = service.join().expect("service");
+            assert_eq!(reply, as_sent(&returned));
+            assert_eq!(reply["stdout_bytes"], 13);
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "SLOW-FINAL status={} reason={} stdout_bytes={} stderr_bytes={} padding_bytes={}",
+                    reply["status"],
+                    reply["reason"],
+                    reply["stdout_bytes"],
+                    reply["stderr_bytes"],
+                    reply["padding"].as_str().expect("padding").len()
+                );
+            }
+        }
+        let rows = fixture.store().list_run("R").expect("record");
+        assert_eq!(
+            rows[0].value()["effect"]["ending"]["final_write"],
+            if expire {
+                "failed"
+            } else {
+                "succeeded-locally"
+            }
+        );
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("SLOW-FINAL-RECORD {}", rows[0].value());
+        }
+    }
+
+    fn final_fixture_output() -> Value {
+        json!({"schema":2,"type":"stdout","bytes":b"queued output".to_vec()})
+    }
+
+    fn final_fixture_bytes(reply: &Value) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for frame in [final_fixture_output(), reply.clone()] {
+            let body = serde_json::to_vec(&frame).expect("encode");
+            bytes.extend(u32::try_from(body.len()).expect("length").to_be_bytes());
+            bytes.extend(body);
+        }
+        bytes
+    }
+
+    /// ´test:unit:door-slow-final-uses-request-lifetime´
+    #[test]
+    fn door_slow_final_uses_request_lifetime() {
+        ordered_final_write(false);
+    }
+
+    /// ´test:unit:door-partial-final-closes-before-credit´
+    #[test]
+    fn door_partial_final_closes_before_credit() {
+        ordered_final_write(true);
     }
 
     fn fixture_class_call(
