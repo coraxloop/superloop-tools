@@ -3347,6 +3347,30 @@ pub(crate) mod tests {
         let active = store.publication_activity("R:2b").expect("second active");
         store.abandon_at_start().expect("sweep");
         let record = store.request("R:1a").expect("interrupted");
+        assert_eq!(
+            record.value()["effect"]["ending"]["wall_clock"],
+            "unobserved"
+        );
+        let mut unlabelled = record.value().clone();
+        unlabelled["effect"]["ending"]
+            .as_object_mut()
+            .expect("ending")
+            .remove("wall_clock");
+        assert!(
+            RequestRecord::decode(unlabelled.clone()).is_err(),
+            "clock is required"
+        );
+        let converted =
+            super::rewrite::convert_record(&unlabelled).expect("explicit clock rewrite");
+        assert_eq!(
+            converted.value()["effect"]["ending"]["wall_clock"],
+            "unobserved"
+        );
+        unlabelled["effect"]["ending"]["wall_clock"] = json!("boottime");
+        assert!(
+            RequestRecord::decode(unlabelled).is_err(),
+            "no invented clock"
+        );
         for key in [
             "stdin_bytes",
             "stdout_bytes",

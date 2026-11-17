@@ -562,6 +562,8 @@ The admission followup gives post-reply publication a fresh 300-second lock-admi
 
 (2026-11-16, output accounting repair) Delivered counts and the final seal share the writer; pumps are drained under the request lifetime instead of a two-second join. Ordered and injected-clock cases pin complete-frame counts, no output after final and a typed delivery stop. This joins the held request-life wave; the later control authority and remote confirmation remain open.
 
+The 2026-11-16 caller follow-up carries the unconfirmed remote bound to the reply and SSH notice, labels top-level walls by clock without inventing historical measurements, and names the repin and startup-retry commands in the held wave. Delivery unknown includes no attempted write. The output-accounting repair and these notices travel in that same wave; owner control and remote confirmation remain separate slices.
+
 **Problem (The door-agent exercise meets the queue it finds or refuses early with the reason)** · `prob:door:agent-exercise-meets-the-queue-or-refuses-early`
 
 **OPEN.** (2026-11-13, two runs of one door loop's exercise on the program of #114) In both runs the exercise's third fixture request was not filed before the exercise's own bound, `fixture request was not filed: stub_finished=false service_finished=false`, so that the real runner stage was never reached, and the exercise exited 0 with verdict fail after about five minutes; the fixture requests that were filed each waited 78 to 101 s in the queue (`prob:door:door-parts-contend-for-the-request-lock-within-one-request`). The exercise scales its fixture bound to the queue it meets, or refuses early and names the queue as its reason, so that a run tells a door that cannot be measured from an agent that fails.

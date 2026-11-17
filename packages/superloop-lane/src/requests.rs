@@ -304,7 +304,7 @@ fn validate_workspace_effect(value: &Value) -> Result<(), LaneError> {
 
 /// Unobserved terminal facts, also used by the explicit historical rewrite.
 pub(crate) fn unobserved_ending() -> Value {
-    json!({"cause":"unobserved","final_write":"unknown","local_child":"unobserved",
+    json!({"cause":"unobserved","wall_clock":"unobserved","final_write":"unknown","local_child":"unobserved",
         "remote":{"state":"unconfirmed","bound_seconds":null,"configured_seconds":null,
             "local_spawn_unix_ns":null,"start":"unobserved"}})
 }
@@ -329,44 +329,50 @@ pub(crate) fn unknown_effect_measurements(effect: &mut Value) {
 
 fn valid_ending(value: &Value) -> bool {
     let remote = &value["remote"];
-    exact(value, &["cause", "final_write", "local_child", "remote"])
-        && matches!(
-            value["cause"].as_str(),
-            Some(
-                "unobserved"
-                    | "child-exit"
-                    | "deadline"
-                    | "refusal"
-                    | "transport"
-                    | "handler-failure"
-                    | "observation-failure"
-                    | "disconnect"
-                    | "abandoned"
-            )
+    exact(
+        value,
+        &[
+            "cause",
+            "wall_clock",
+            "final_write",
+            "local_child",
+            "remote",
+        ],
+    ) && matches!(
+        value["wall_clock"].as_str(),
+        Some("monotonic-awake" | "unobserved")
+    ) && matches!(
+        value["cause"].as_str(),
+        Some(
+            "unobserved"
+                | "child-exit"
+                | "deadline"
+                | "refusal"
+                | "transport"
+                | "handler-failure"
+                | "observation-failure"
+                | "disconnect"
+                | "abandoned"
         )
-        && matches!(
-            value["final_write"].as_str(),
-            Some("unknown" | "failed" | "succeeded-locally")
-        )
-        && matches!(
-            value["local_child"].as_str(),
-            Some("unobserved" | "not-started" | "spawned" | "reaped")
-        )
-        && exact(
-            remote,
-            &[
-                "state",
-                "bound_seconds",
-                "configured_seconds",
-                "local_spawn_unix_ns",
-                "start",
-            ],
-        )
-        && matches!(
-            remote["state"].as_str(),
-            Some("unconfirmed" | "not-started")
-        )
-        && remote["start"] == "unobserved"
+    ) && matches!(
+        value["final_write"].as_str(),
+        Some("unknown" | "failed" | "succeeded-locally")
+    ) && matches!(
+        value["local_child"].as_str(),
+        Some("unobserved" | "not-started" | "spawned" | "reaped")
+    ) && exact(
+        remote,
+        &[
+            "state",
+            "bound_seconds",
+            "configured_seconds",
+            "local_spawn_unix_ns",
+            "start",
+        ],
+    ) && matches!(
+        remote["state"].as_str(),
+        Some("unconfirmed" | "not-started")
+    ) && remote["start"] == "unobserved"
         && (remote["configured_seconds"].is_null()
             || remote["configured_seconds"]
                 .as_f64()

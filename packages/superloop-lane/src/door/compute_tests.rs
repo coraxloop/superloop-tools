@@ -1505,6 +1505,29 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
             assert_eq!(client.event("compute-deadline")["type"], "compute-deadline");
             let reply = client.answer();
             assert_eq!(reply["reason"], "door-deadline-refusal");
+            assert_eq!(reply["remote"]["state"], "unconfirmed");
+            assert!(
+                reply["remote"]["bound_seconds"]
+                    .as_f64()
+                    .is_some_and(|n| n > 0.0)
+            );
+            assert_eq!(reply["remote"]["start"], "unobserved");
+            assert_eq!(reply["wall_clock"], "monotonic-awake");
+            let line = super::final_line(
+                &["fixture".into(), "/opt/fixture/bin/report git diff".into()],
+                &reply,
+            )
+            .expect("stop line");
+            assert!(line.contains("remote_state=unconfirmed"));
+            assert!(line.contains(&format!(
+                "remote_bound_seconds={}",
+                reply["remote"]["bound_seconds"]
+            )));
+            assert!(line.contains("tell your loop before repeating"));
+            #[allow(clippy::print_stderr)] // Captured caller evidence.
+            {
+                eprintln!("STOPPED-REPLY {reply}\nSTUB-LINE {line}");
+            }
             assert!(reply["compute"]["wrapper_exit_status"].is_null());
         }
         let result = server.join().expect("server ends");
@@ -1515,6 +1538,14 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
         let rows = fixture.store().list_run(run).expect("record");
         assert_eq!(rows.len(), 1);
         assert!(rows[0].value()["effect"]["compute"]["wrapper_exit_status"].is_null());
+        assert_eq!(
+            rows[0].value()["effect"]["ending"]["wall_clock"],
+            "monotonic-awake"
+        );
+        #[allow(clippy::print_stderr)] // Captured terminal evidence.
+        {
+            eprintln!("STOPPED-RECORD {}", rows[0].value());
+        }
         assert_eq!(
             rows[0].value()["effect"]["ending"]["cause"],
             if disconnect { "disconnect" } else { "deadline" }
@@ -1717,10 +1748,17 @@ fn compute_deadline_refusal_case(
     } else {
         "door-adjudicated-refusal"
     };
-    assert_eq!(
-        super::final_line(&["fixture".into(), "cargo test".into()], &reply).as_deref(),
-        Some(expected_line)
-    );
+    let line = super::final_line(&["fixture".into(), "cargo test".into()], &reply).expect("notice");
+    if reason == "door-request-deadline" {
+        assert!(line.starts_with(expected_line), "{line}");
+        assert!(line.contains("remote_state=not-started"), "{line}");
+        assert!(
+            line.contains("ask again through the ordinary door route"),
+            "{line}"
+        );
+    } else {
+        assert_eq!(line, expected_line);
+    }
 }
 
 /// ´test:unit:door-compute-deadline-refusal-names-the-owner-bound´

@@ -37,6 +37,24 @@ pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Opt
         )
     {
         Some(reply.to_string())
+    } else if let Some(next) = reply["next_step"].as_str() {
+        let bounds = if reply["registered_deadline_ms"].is_u64() {
+            format!(
+                "registered_deadline_ms={} request_deadline_ms={}; ",
+                reply["registered_deadline_ms"], reply["request_deadline_ms"]
+            )
+        } else {
+            String::new()
+        };
+        let diagnostic = reply["request_record_error"]
+            .as_str()
+            .map_or_else(String::new, |cause| format!("; {cause}"));
+        Some(format!(
+            "{reason}: {bounds}stop_cause={} remote_state={} remote_bound_seconds={} remote_start=unobserved; {next}{diagnostic}",
+            reply["stop_cause"].as_str().unwrap_or("unobserved"),
+            reply["remote"]["state"].as_str().unwrap_or("unconfirmed"),
+            reply["remote"]["bound_seconds"]
+        ))
     } else if reason == "door-output-limit-refusal" {
         Some(format!(
             "{reason} bound={} output_bytes={} registered={}",
@@ -141,6 +159,8 @@ impl RequestWait {
         let cap_ms = WAIT_CREDIT_CAP
             .with(std::cell::Cell::take)
             .unwrap_or(cap_ms);
+        let mut ending = crate::requests::unobserved_ending();
+        ending["wall_clock"] = json!("monotonic-awake");
         Ok(Self {
             writer: std::sync::Arc::new(std::sync::Mutex::new(transport::Writer::new(
                 stream.try_clone()?,
@@ -149,7 +169,7 @@ impl RequestWait {
             cap_ms,
             announced: std::sync::Mutex::new(0),
             final_sent: AtomicBool::new(false),
-            ending: std::sync::Mutex::new(crate::requests::unobserved_ending()),
+            ending: std::sync::Mutex::new(ending),
             observed_effect: std::sync::Mutex::new(None),
             lifetime: None,
             cause: Arc::new(lifetime::FirstCause::default()),
@@ -304,8 +324,36 @@ impl RequestWait {
     }
 
     fn report(&self, reply: &mut Value) {
+        reply["wall_clock"] = json!("monotonic-awake");
+        let ending = self.ending_snapshot();
+        reply["remote"] = ending["remote"].clone();
+        if ending["local_child"] == "unobserved" {
+            reply["remote"]["state"] = json!("not-started");
+        }
         if let Some(stop) = self.cause.get() {
             reply["stop_cause"] = json!(stop.name());
+            if matches!(
+                stop,
+                lifetime::Cause::Deadline
+                    | lifetime::Cause::Disconnect
+                    | lifetime::Cause::ObservationFailure
+                    | lifetime::Cause::Transport
+            ) {
+                reply["next_step"] = json!(if reply["remote"]["state"] == "unconfirmed"
+                    && reply["remote"]["bound_seconds"].is_number()
+                {
+                    "tell your loop before repeating; a retry may wait for the node run lock through the supplied bound from its unobserved remote start"
+                } else if reply["remote"]["state"] == "unconfirmed" {
+                    "tell your loop before repeating; the remote end is unconfirmed and no relative bound was observed"
+                } else if matches!(
+                    stop,
+                    lifetime::Cause::ObservationFailure | lifetime::Cause::Transport
+                ) {
+                    "tell your loop to inspect the recorded failure before repeating"
+                } else {
+                    "no remote command started; ask again through the ordinary door route when ready"
+                });
+            }
             if matches!(
                 stop,
                 lifetime::Cause::Deadline
@@ -1298,6 +1346,7 @@ fn effect_with_cause(reply: &Value, cause: lifetime::Cause) -> Value {
     }
     effect["ending"] = crate::requests::unobserved_ending();
     effect["ending"]["cause"] = json!(cause.name());
+    effect["ending"]["wall_clock"] = json!("monotonic-awake");
     effect["ending"]["local_child"] = json!("not-started");
     effect["ending"]["remote"]["state"] = json!("not-started");
     effect
@@ -5505,6 +5554,54 @@ mod tests {
             super::final_line(&["fixture".into(), "git status --short".into()], &reply),
             Some("door-request-concurrent: waited=1.001s retry_after=30s; the door waited for admission held through the durable effect and final reply; allow-mode agent publication may finish after admission is released; retry after 30 seconds".to_owned())
         );
+    }
+
+    /// ´test:unit:door-stop-guidance-distinguishes-unstarted-and-unconfirmed´
+    #[test]
+    fn door_stop_guidance_distinguishes_unstarted_and_unconfirmed() {
+        for cause in [
+            super::lifetime::Cause::Deadline,
+            super::lifetime::Cause::Disconnect,
+            super::lifetime::Cause::ObservationFailure,
+            super::lifetime::Cause::Transport,
+        ] {
+            let (server, _client) = UnixStream::pair().expect("pair");
+            let wait = super::RequestWait::new(&server).expect("wait");
+            wait.cause.select(cause);
+            let mut reply = json!({"reason":cause.reason()});
+            wait.report(&mut reply);
+            assert_eq!(reply["remote"]["state"], "not-started");
+            assert_eq!(reply["wall_clock"], "monotonic-awake");
+            let line = super::final_line(&["fixture".into(), "git status".into()], &reply)
+                .expect("notice");
+            assert!(
+                line.contains(
+                    if matches!(
+                        cause,
+                        super::lifetime::Cause::Deadline | super::lifetime::Cause::Disconnect
+                    ) {
+                        "ask again through the ordinary door route"
+                    } else {
+                        "tell your loop"
+                    }
+                ),
+                "{line}"
+            );
+            {
+                let mut ending = wait.ending.lock().expect("ending");
+                ending["local_child"] = json!("reaped");
+                ending["remote"]["bound_seconds"] = json!(42);
+            }
+            wait.report(&mut reply);
+            let line = super::final_line(&["fixture".into(), "git status".into()], &reply)
+                .expect("notice");
+            assert!(
+                line.contains("remote_state=unconfirmed remote_bound_seconds=42"),
+                "{line}"
+            );
+            assert!(line.contains("tell your loop before repeating"), "{line}");
+            assert!(line.contains("node run lock"), "{line}");
+        }
     }
 
     fn fixture_class_call(

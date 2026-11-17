@@ -81,6 +81,9 @@ pub(super) fn convert_record(before: &Value) -> Result<RequestRecord, LaneError>
             super::super::unknown_effect_measurements(&mut row["effect"]);
         }
     }
+    if row["effect"]["ending"].get("wall_clock").is_none() {
+        row["effect"]["ending"]["wall_clock"] = json!("unobserved");
+    }
     RequestRecord::decode(row)
 }
 
@@ -523,6 +526,7 @@ fn changed_records(plan: &Value) -> usize {
                 .filter(|row| {
                     matches!(row["schema"].as_u64(), Some(3..=5))
                         || row["effect"].get("ending").is_none()
+                        || row["effect"]["ending"].get("wall_clock").is_none()
                 })
                 .count()
         })

@@ -901,13 +901,13 @@ pub(super) fn refusal(
     started: Instant,
 ) -> Value {
     if peer != registration.worker_uid {
-        return json!({"schema":2,"type":"final","status":125,"reason":reason,"peer_uid":peer,
+        return json!({"schema":2,"type":"final","wall_clock":"monotonic-awake","status":125,"reason":reason,"peer_uid":peer,
             "ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
             "queue_state":"no-queue","queue_wall_seconds":null,"compute_exit_status":null,
             "mediation_wall_seconds":started.elapsed().as_secs_f64(),
             "compute_wall_seconds":0.0});
     }
-    json!({"schema":2,"type":"final","status":125,"reason":reason,
+    json!({"schema":2,"type":"final","wall_clock":"monotonic-awake","status":125,"reason":reason,
         "registration":registration.document(),"peer_uid":peer,
         "ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
         "queue_state":"no-queue","queue_wall_seconds":null,"compute_exit_status":null,
@@ -965,7 +965,7 @@ fn send_output(
     abort: &Abort,
     deadline: Instant,
 ) -> io::Result<()> {
-    with_writer(writer, deadline, |locked| {
+    let result = with_writer(writer, deadline, |locked| {
         if locked.sealed {
             return Err(io::Error::other("door output sealed"));
         }
@@ -994,7 +994,14 @@ fn send_output(
             locked.stderr += bytes.len();
         }
         Ok(())
-    })
+    });
+    if result
+        .as_ref()
+        .is_err_and(|error| error.kind() == io::ErrorKind::TimedOut)
+    {
+        abort.stop(super::lifetime::Cause::Deadline);
+    }
+    result
 }
 
 #[allow(unsafe_code)]
@@ -1738,7 +1745,7 @@ pub(super) fn serve_compute(
         125
     };
     let total_wall = started.elapsed().as_secs_f64();
-    let mut reply = json!({"schema":2,"type":"final","status":code,"reason":outcome,
+    let mut reply = json!({"schema":2,"type":"final","wall_clock":"monotonic-awake","status":code,"reason":outcome,
         "registration":registration.document(),"peer_uid":peer,
         "compute_exit_status":status.code(),"queue_state":queue_state,
         "ref_check":if operation == Operation::GitReceive {
@@ -2229,6 +2236,28 @@ mod tests {
     #[test]
     fn door_output_drain_retains_request_lifetime() {
         ordered_output(true);
+    }
+
+    /// ´test:unit:door-output-writer-expiry-preserves-deadline-cause´
+    #[test]
+    fn door_output_writer_expiry_preserves_deadline_cause() {
+        let (server, _peer) = UnixStream::pair().expect("pair");
+        let writer = Arc::new(std::sync::Mutex::new(super::Writer::new(server)));
+        let held = writer.lock().expect("held writer");
+        let cause = Arc::new(crate::door::lifetime::FirstCause::default());
+        let abort = super::Abort::new(Arc::clone(&cause));
+        let count = AtomicUsize::new(0);
+        assert_eq!(
+            super::send_output(&writer, "stdout", b"unsent", &count, &abort, Instant::now())
+                .expect_err("spent writer deadline")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        // The pump's generic I/O fallback cannot replace the observed deadline.
+        abort.stop(crate::door::lifetime::Cause::Transport);
+        assert_eq!(cause.get(), Some(crate::door::lifetime::Cause::Deadline));
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+        assert_eq!(held.stdout, 0);
     }
 
     fn ordered_output_hooks(
