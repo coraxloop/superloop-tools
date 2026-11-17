@@ -91,6 +91,9 @@ fn list_response(
         "decisions":decisions,
         "door_judgements":requests.iter().map(|row| judgement_response(store, row)).collect::<Vec<_>>(),
         "requests":requests.iter().map(super::RequestRecord::value).collect::<Vec<_>>(),
+        "request_endings":requests.iter().filter(|row| row.value()["effect"]["state"] != "pending")
+            .map(|row| json!({"id":row.id(),"reason":row.value()["effect"]["reason"],
+                "ending":row.value()["effect"]["ending"]})).collect::<Vec<_>>(),
         "referrals":requests.iter().filter(|row| row.value()["agent_verdict"] == "refer").map(|row|
             json!({"id":row.id(),"target":if row.value()["agent_scope"] == "estate" {"estate"} else {loop_name},
                 "reason":row.value()["agent_reason"],"status":row.value()["agent_status"]})).collect::<Vec<_>>()}),

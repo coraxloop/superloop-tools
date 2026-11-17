@@ -122,6 +122,7 @@ fn read(store: &Store, action: &str, loop_name: &str, pending: bool) -> Result<V
     result["schema"] = json!(2);
     let native = super::list_response(store, loop_name, &records, stale)?;
     result["decisions"] = native["decisions"].clone();
+    result["request_endings"] = native["request_endings"].clone();
     result["door_judgements"] = native["door_judgements"].clone();
     result["preflight_refusals"] = json!(
         records

@@ -116,6 +116,7 @@ static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 thread_local! {
     static WAIT_CREDIT_OBSERVED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_TERMINAL_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static WAIT_CREDIT_CAP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
@@ -126,6 +127,8 @@ pub(crate) struct RequestWait {
     cap_ms: u64,
     announced: std::sync::Mutex<u64>,
     final_sent: AtomicBool,
+    ending: std::sync::Mutex<Value>,
+    observed_effect: std::sync::Mutex<Option<Value>>,
 }
 
 impl RequestWait {
@@ -141,6 +144,8 @@ impl RequestWait {
             cap_ms,
             announced: std::sync::Mutex::new(0),
             final_sent: AtomicBool::new(false),
+            ending: std::sync::Mutex::new(crate::requests::unobserved_ending()),
+            observed_effect: std::sync::Mutex::new(None),
         })
     }
 
@@ -206,12 +211,35 @@ impl RequestWait {
     }
 
     fn write_final(&self, reply: &Value, deadline: Instant) -> io::Result<()> {
-        transport::with_writer(&self.writer, deadline, |stream| {
+        if self
+            .observed_effect
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+        {
+            observed_effect(reply, self);
+        }
+        #[cfg(test)]
+        BEFORE_TERMINAL_WRITE.with(|slot| {
+            if let Some(action) = slot.borrow_mut().take() {
+                action();
+            }
+        });
+        let result = transport::with_writer(&self.writer, deadline, |stream| {
             frame_write_until(stream, reply, deadline)?;
             // credit checks this flag under this same writer lock.
             self.final_sent.store(true, Ordering::Relaxed);
             Ok(())
-        })
+        });
+        self.ending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)["final_write"] =
+            json!(if result.is_ok() {
+                "succeeded-locally"
+            } else {
+                "failed"
+            });
+        result
     }
 
     fn report(&self, reply: &mut Value) {
@@ -222,6 +250,97 @@ impl RequestWait {
         reply["request_lock_wait_credit_cap_ms"] = json!(self.cap_ms);
         if let Some(requested) = reply["request_deadline_ms"].as_u64() {
             reply["effective_deadline_ms"] = json!(requested.saturating_add(credit));
+        }
+    }
+}
+
+/// Observe admission locks without waiting or claiming that later arrivals are excluded.
+pub(crate) fn restart_probe(home: &Path, loop_name: &str) -> Result<Value, LaneError> {
+    use nix::fcntl::{Flock, FlockArg, OFlag, OpenHow, ResolveFlag, openat2};
+    let owner = nix::unistd::Uid::effective().as_raw();
+    let directory =
+        crate::home::pin_parent_beneath(&home.join(".config/loops").join(loop_name), home, owner)?;
+    let mut entries = nix::dir::Dir::from_fd(
+        nix::unistd::dup(&directory)
+            .map_err(|error| LaneError::input("door-restart-refusal", error.to_string()))?,
+    )
+    .map_err(|error| LaneError::input("door-restart-refusal", error.to_string()))?;
+    let mut busy = Vec::new();
+    let mut held = Vec::new();
+    for entry in entries.iter() {
+        let entry =
+            entry.map_err(|error| LaneError::input("door-restart-refusal", error.to_string()))?;
+        let bytes = entry.file_name().to_bytes();
+        let Ok(name) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        if !name.starts_with("door-admission-") || name.strip_suffix(".lock").is_none() {
+            continue;
+        }
+        let fd = openat2(
+            &directory,
+            name,
+            OpenHow::new()
+                .flags(OFlag::O_RDWR | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW)
+                .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
+        )
+        .map_err(|error| LaneError::input("door-restart-refusal", error.to_string()))?;
+        let stat = fstat(&fd)
+            .map_err(|error| LaneError::input("door-restart-refusal", error.to_string()))?;
+        if stat.st_uid != owner
+            || stat.st_mode & 0o7777 != 0o600
+            || stat.st_nlink != 1
+            || SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
+        {
+            return Err(LaneError::input(
+                "door-restart-refusal",
+                "admission lock custody differs",
+            ));
+        }
+        match Flock::lock(File::from(fd), FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => held.push(lock),
+            Err((_, nix::errno::Errno::EWOULDBLOCK)) => busy.push(name.to_owned()),
+            Err((_, error)) => {
+                return Err(LaneError::input("door-restart-refusal", error.to_string()));
+            }
+        }
+    }
+    busy.sort();
+    let checked_locks = held.len() + busy.len();
+    drop(held);
+    Ok(
+        json!({"status":if busy.is_empty() { "admission-idle" } else { "request-in-flight" },
+        "busy_locks":busy,"checked_locks":checked_locks,"reservation":false}),
+    )
+}
+
+struct RequestEnding<'a> {
+    store: &'a Store,
+    wait: &'a RequestWait,
+    id: &'a str,
+}
+
+impl Drop for RequestEnding<'_> {
+    fn drop(&mut self) {
+        let ending = self
+            .wait
+            .ending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let effect = self
+            .wait
+            .observed_effect
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Err(error) = self.store.finish_request(self.id, effect.clone(), &ending) {
+            post_reply_event(self.id, "terminal-record", error.kind);
+            let effect = effect.unwrap_or_else(
+                || json!({"reason":"door-handler-ended", "ending":{"cause":"handler-failure"}}),
+            );
+            request_end_event(&json!({"request_id":self.id,
+                "cause":effect["ending"]["cause"],"reason":effect["reason"],"recorded":false}));
         }
     }
 }
@@ -503,10 +622,26 @@ fn recover_after_success(
 }
 
 fn recover_at_start(home: &Path, loop_name: &str) {
-    if let Err(error) =
-        Store::open(home, loop_name, true).and_then(|store| store.recover_unpublished(None))
-    {
+    if let Err(error) = Store::open(home, loop_name, true).and_then(|store| {
+        let abandoned = store.abandon_at_start();
+        let recovered = store.recover_unpublished(None);
+        abandoned.and(recovered)
+    }) {
         post_reply_event("", "recovery-at-start", error.kind);
+    }
+}
+
+pub(crate) fn request_end_event(event: &Value) {
+    #[cfg(test)]
+    {
+        #[allow(clippy::print_stderr)] // Preserve libtest capture of terminal evidence.
+        {
+            eprintln!("door-request-end {event}");
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _logged = writeln!(io::stderr().lock(), "door-request-end {event}");
     }
 }
 
@@ -1053,6 +1188,42 @@ pub(crate) fn effect_from_final(reply: &Value) -> Value {
     if let Some(detail) = reply.get("compute") {
         effect["compute"] = detail.clone();
     }
+    effect["ending"] = crate::requests::unobserved_ending();
+    effect["ending"]["cause"] = json!(ending_cause(reply["reason"].as_str().unwrap_or_default()));
+    effect["ending"]["local_child"] = json!("not-started");
+    effect["ending"]["remote"]["state"] = json!("not-started");
+    effect
+}
+
+fn ending_cause(reason: &str) -> &'static str {
+    match reason {
+        "door-complete" => "child-exit",
+        "door-deadline-refusal" | "door-request-deadline" => "deadline",
+        "door-disconnect-refusal" => "disconnect",
+        "door-abandoned" => "abandoned",
+        "door-transport-refusal" => "transport",
+        _ => "refusal",
+    }
+}
+
+fn observed_effect(reply: &Value, wait: &RequestWait) -> Value {
+    let mut effect = effect_from_final(reply);
+    let observed = wait
+        .ending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if observed["local_child"] != "unobserved" {
+        effect["ending"] = observed;
+        if effect["ending"]["cause"] == "unobserved" {
+            effect["ending"]["cause"] =
+                json!(ending_cause(reply["reason"].as_str().unwrap_or_default()));
+        }
+    }
+    *wait
+        .observed_effect
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(effect.clone());
     effect
 }
 
@@ -1386,13 +1557,79 @@ fn root_refusal(
     );
     let deadline = Instant::now() + Duration::from_secs(2);
     for bytes in diagnostic.as_bytes().chunks(8192) {
-        frame_write_until(
+        if let Err(error) = frame_write_until(
             stream,
             &json!({"schema":2,"type":"stderr","bytes":bytes}),
             deadline,
-        )?;
+        ) {
+            finish_preflight(
+                &reply,
+                (Some(owner_home), None, &registration.loop_name),
+                "unknown",
+            );
+            return Err(error);
+        }
     }
-    frame_write_until(stream, &reply, deadline)
+    write_preflight_final(
+        stream,
+        &reply,
+        (Some(owner_home), None, &registration.loop_name),
+        deadline,
+    )
+}
+
+fn finish_preflight(
+    reply: &Value,
+    context: (Option<&Path>, Option<&Store>, &str),
+    final_write: &str,
+) {
+    let Some(id) = reply["request_id"].as_str() else {
+        return;
+    };
+    let result = (|| {
+        let opened = if context.1.is_none() {
+            Some(Store::open(
+                context
+                    .0
+                    .ok_or_else(|| LaneError::input("door-record-refusal", "owner home absent"))?,
+                context.2,
+                true,
+            )?)
+        } else {
+            None
+        };
+        context
+            .1
+            .or(opened.as_ref())
+            .ok_or_else(|| LaneError::input("door-record-refusal", "store absent"))?
+            .finish_request(id, None, &{
+                let mut ending = crate::requests::unobserved_ending();
+                ending["final_write"] = json!(final_write);
+                ending
+            })
+    })();
+    if let Err(error) = result {
+        post_reply_event(id, "terminal-record", error.kind);
+    }
+}
+
+fn write_preflight_final(
+    stream: &mut UnixStream,
+    reply: &Value,
+    context: (Option<&Path>, Option<&Store>, &str),
+    deadline: Instant,
+) -> io::Result<()> {
+    let result = frame_write_until(stream, reply, deadline);
+    finish_preflight(
+        reply,
+        context,
+        if result.is_ok() {
+            "succeeded-locally"
+        } else {
+            "failed"
+        },
+    );
+    result
 }
 
 fn announce_compute_deadline(
@@ -1557,12 +1794,22 @@ fn serve_request_with_agent(
         if shape && let Some(document) = reply.as_object_mut() {
             document.remove("registration");
         }
-        frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+        write_preflight_final(
+            stream,
+            &reply,
+            (owner_home, fixture_store, &registration.loop_name),
+            Instant::now() + Duration::from_secs(2),
+        )?;
         return Ok((reply, Vec::new()));
     }
     let Some(route) = route else {
         let reply = refuse("door-compute-unregistered");
-        frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+        write_preflight_final(
+            stream,
+            &reply,
+            (owner_home, fixture_store, &registration.loop_name),
+            Instant::now() + Duration::from_secs(2),
+        )?;
         return Ok((reply, Vec::new()));
     };
     let words = if compute_candidate {
@@ -1570,7 +1817,12 @@ fn serve_request_with_agent(
             Ok(words) => words,
             Err(reason) => {
                 let reply = refuse(reason);
-                frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+                write_preflight_final(
+                    stream,
+                    &reply,
+                    (owner_home, fixture_store, &registration.loop_name),
+                    Instant::now() + Duration::from_secs(2),
+                )?;
                 return Ok((reply, Vec::new()));
             }
         }
@@ -1579,12 +1831,22 @@ fn serve_request_with_agent(
     };
     let Some(operation) = route.allowed(args.as_deref().unwrap_or_default(), registration) else {
         let reply = refuse("door-caller-authority-refusal");
-        frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+        write_preflight_final(
+            stream,
+            &reply,
+            (owner_home, fixture_store, &registration.loop_name),
+            Instant::now() + Duration::from_secs(2),
+        )?;
         return Ok((reply, Vec::new()));
     };
     let Some(runner) = runner else {
         let reply = refuse("door-compute-unregistered");
-        frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+        write_preflight_final(
+            stream,
+            &reply,
+            (owner_home, fixture_store, &registration.loop_name),
+            Instant::now() + Duration::from_secs(2),
+        )?;
         return Ok((reply, Vec::new()));
     };
     let wait = std::sync::Arc::new(RequestWait::new(stream)?);
@@ -1602,7 +1864,12 @@ fn serve_request_with_agent(
     };
     let Some(owner_home) = owner_home else {
         let reply = refuse("door-requests-unregistered");
-        frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+        write_preflight_final(
+            stream,
+            &reply,
+            (owner_home, fixture_store, &registration.loop_name),
+            Instant::now() + Duration::from_secs(2),
+        )?;
         return Ok((reply, Vec::new()));
     };
     if let Some(error) = admission_error {
@@ -1636,7 +1903,12 @@ fn serve_request_with_agent(
                 transport::refusal(registration, peer, "door-request-record-refusal", started);
             reply["request_record_error"] = json!(error.line());
             wait.report(&mut reply);
-            frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+            write_preflight_final(
+                stream,
+                &reply,
+                (Some(owner_home), fixture_store, &registration.loop_name),
+                Instant::now() + Duration::from_secs(2),
+            )?;
             return Ok((reply, Vec::new()));
         }
         Err(error) => return Err(io::Error::other(error)),
@@ -1675,7 +1947,12 @@ fn serve_request_with_agent(
                 transport::refusal(registration, peer, "door-request-record-refusal", started);
             reply["request_record_error"] = json!(error.line());
             wait.report(&mut reply);
-            frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+            write_preflight_final(
+                stream,
+                &reply,
+                (Some(owner_home), fixture_store, &registration.loop_name),
+                Instant::now() + Duration::from_secs(2),
+            )?;
             return Ok((reply, Vec::new()));
         }
         Err(error) => return Err(io::Error::other(error)),
@@ -1685,7 +1962,12 @@ fn serve_request_with_agent(
         Err(error) => {
             let mut reply = refuse(error.0);
             wait.report(&mut reply);
-            frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+            write_preflight_final(
+                stream,
+                &reply,
+                (Some(owner_home), fixture_store, &registration.loop_name),
+                Instant::now() + Duration::from_secs(2),
+            )?;
             return Ok((reply, Vec::new()));
         }
     };
@@ -1761,10 +2043,26 @@ fn serve_request_with_agent(
         let mut reply = transport::refusal(registration, peer, &reason, started);
         reply["request_record_error"] = json!(error.line());
         wait.report(&mut reply);
-        frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+        write_preflight_final(
+            stream,
+            &reply,
+            (Some(owner_home), fixture_store, &registration.loop_name),
+            Instant::now() + Duration::from_secs(2),
+        )?;
         return Ok((reply, Vec::new()));
     }
-    let _publication_activity = store.publication_activity(&id).map_err(io::Error::other)?;
+    let _publication_activity = store.publication_activity(&id).map_err(|error| {
+        if let Err(ending) = store.finish_request(&id, None, &crate::requests::unobserved_ending())
+        {
+            post_reply_event(&id, "terminal-record", ending.kind);
+        }
+        io::Error::other(error)
+    })?;
+    let _ending = RequestEnding {
+        store: &store,
+        wait: &wait,
+        id: &id,
+    };
     #[cfg(test)]
     REQUEST_FILED.with(|slot| {
         if let Some(sender) = slot.borrow_mut().take() {
@@ -1793,7 +2091,7 @@ fn serve_request_with_agent(
             reply["request_record_error"] = json!(error.line());
             reply["request_id"] = json!(id);
             wait.report(&mut reply);
-            frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+            wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
             return Ok((reply, Vec::new()));
         }
         would_do = json!({"decision":result.verdict,"reason":result.reason});
@@ -1805,7 +2103,7 @@ fn serve_request_with_agent(
         reply["would_do"] = would_do;
         reply["request_id"] = json!(id);
         let result = store
-            .record_effect(&id, effect_from_final(&reply))
+            .record_effect(&id, observed_effect(&reply, &wait))
             .and_then(|_| store.publish_observed(&id));
         if let Err(error) = result {
             let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
@@ -1813,7 +2111,7 @@ fn serve_request_with_agent(
             reply["request_record_error"] = json!(error.line());
         }
         wait.report(&mut reply);
-        frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+        wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
         return Ok((reply, Vec::new()));
     }
     if immediate {
@@ -1833,7 +2131,7 @@ fn serve_request_with_agent(
                 });
                 let complete = |reply: &Value| {
                     store
-                        .record_effect(&id, effect_from_final(reply))
+                        .record_effect(&id, observed_effect(reply, &wait))
                         .map(|_| ())
                 };
                 let outcome = transport::serve_compute(
@@ -1916,7 +2214,7 @@ fn serve_request_with_agent(
             });
         }
         let complete = |reply: &Value| {
-            if let Err(error) = store.record_effect(&id, effect_from_final(reply)) {
+            if let Err(error) = store.record_effect(&id, observed_effect(reply, &wait)) {
                 let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
                 return Err(error);
             }
@@ -1958,7 +2256,7 @@ fn serve_request_with_agent(
     match answer {
         Answer::Allow(wall) => {
             let complete = |reply: &Value| {
-                if let Err(error) = store.record_effect(&id, effect_from_final(reply)) {
+                if let Err(error) = store.record_effect(&id, observed_effect(reply, &wait)) {
                     let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
                     return Err(error);
                 }
@@ -2007,7 +2305,7 @@ fn serve_request_with_agent(
                 );
             }
             wait.report(&mut reply);
-            frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+            wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
             Ok((reply, Vec::new()))
         }
         Answer::Refuse(wall) | Answer::Deadline(wall) | Answer::Disconnect(wall) => {
@@ -2022,14 +2320,14 @@ fn serve_request_with_agent(
                 reply["registered_deadline_ms"] = json!(registered_deadline_ms);
                 reply["request_deadline_ms"] = request["deadline_ms"].clone();
             }
-            if let Err(error) = store.record_effect(&id, effect_from_final(&reply)) {
+            if let Err(error) = store.record_effect(&id, observed_effect(&reply, &wait)) {
                 let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
                 reply["reason"] = json!("door-record-incomplete");
                 reply["request_record_error"] = json!(error.line());
             }
             if !disconnected {
                 wait.report(&mut reply);
-                frame_write_until(stream, &reply, Instant::now() + Duration::from_secs(2))?;
+                wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
             }
             Ok((reply, Vec::new()))
         }
@@ -5148,6 +5446,159 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// ´test:unit:door-terminal-record-retains-outcome-and-local-final-write´
+    #[test]
+    fn door_terminal_record_retains_outcome_and_local_final_write() {
+        for (deadline, broken, cause, written) in [
+            (false, false, "child-exit", "succeeded-locally"),
+            (true, false, "deadline", "succeeded-locally"),
+            (true, true, "deadline", "failed"),
+        ] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            set_fixture_mode(&store, crate::requests::Mode::Allow);
+            let registration = Registration::from_row(
+                &json!({"name":"alpha","uid":41001}),
+                "alpha",
+                "R",
+                3000,
+                Scope::Work,
+            )
+            .expect("registration");
+            let (mut peer, mut stream) = FixtureClient::pair().expect("pair");
+            peer.shutdown(std::net::Shutdown::Write)
+                .expect("empty input");
+            if deadline {
+                super::transport::fixture_expire_after_spawn();
+            }
+            if broken {
+                let peer = peer.wire().try_clone().expect("closing peer");
+                super::BEFORE_TERMINAL_WRITE.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        peer.shutdown(std::net::Shutdown::Both)
+                            .expect("failed final event");
+                    }));
+                });
+            }
+            let (runner, _, _) = counting_runner(&fixture);
+            let route = route_for(&fixture.home);
+            let result = super::serve_request_with_agent(
+                &mut stream,
+                &registration,
+                3000,
+                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+                Some(&route),
+                Some(&runner),
+                Some(&fixture.home),
+                None,
+                Some(&store),
+                None,
+                None,
+                Instant::now(),
+            );
+            assert_eq!(result.is_err(), broken, "transport result {result:?}");
+            if !broken {
+                assert!(peer.answer()["status"].is_i64());
+            }
+            let rows = store.list_run("R").expect("ending");
+            assert_eq!(rows.len(), 1);
+            let ending = &rows[0].value()["effect"]["ending"];
+            assert_eq!(ending["cause"], cause);
+            assert_eq!(ending["local_child"], "reaped");
+            assert_eq!(ending["final_write"], written);
+            #[allow(clippy::print_stderr)] // Captured fixture evidence for the terminal record.
+            {
+                eprintln!("ENDING-TRANSPORT {}", rows[0].value());
+            }
+        }
+    }
+
+    /// ´test:unit:door-restart-probe-observes-shared-and-exclusive-admission´
+    #[test]
+    fn door_restart_probe_observes_shared_and_exclusive_admission() {
+        let fixture = Fixture::new();
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("registration");
+        for operation in [
+            None,
+            Some(super::transport::Operation::Compute),
+            Some(super::transport::Operation::GitReceive),
+        ] {
+            let guard =
+                super::RequestGuard::acquire_operation(&fixture.home, &registration, operation)
+                    .expect("admission")
+                    .expect("free slot");
+            assert_eq!(
+                super::restart_probe(&fixture.home, "alpha").expect("busy probe")["status"],
+                "request-in-flight"
+            );
+            drop(guard);
+            assert_eq!(
+                super::restart_probe(&fixture.home, "alpha").expect("idle probe")["status"],
+                "admission-idle"
+            );
+        }
+    }
+
+    /// ´test:unit:door-terminal-record-survives-advisory-unwind´
+    #[test]
+    fn door_terminal_record_survives_advisory_unwind() {
+        struct Panics;
+        impl super::agent::AgentRunner for Panics {
+            fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+                panic!("controlled advisory failure")
+            }
+        }
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let registration = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("registration");
+        let (mut stream, _peer) = UnixStream::pair().expect("pair");
+        let (runner, _, _) = counting_runner(&fixture);
+        let route = route_for(&fixture.home);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::serve_request_with_agent(
+                &mut stream,
+                &registration,
+                3000,
+                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+                Some(&route),
+                Some(&runner),
+                Some(&fixture.home),
+                None,
+                Some(&store),
+                Some(&Panics),
+                None,
+                Instant::now(),
+            )
+        }));
+        assert!(result.is_err(), "controlled panic reached");
+        let rows = store.list_run("R").expect("terminal record");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value()["effect"]["reason"], "door-handler-panicked");
+        assert_eq!(
+            rows[0].value()["effect"]["ending"]["final_write"],
+            "unknown"
+        );
+        assert_eq!(
+            rows[0].value()["effect"]["ending"]["cause"],
+            "handler-failure"
+        );
     }
 
     /// ´test:unit:door-agent-merge-failure-records-incomplete´

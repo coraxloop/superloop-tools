@@ -1,4 +1,4 @@
-//! Digest-bound, resumable schema-three/four/five conversion. No live reader accepts it.
+//! Digest-bound, resumable historical record conversion. No live reader accepts older shapes.
 
 use super::*;
 use sha2::{Digest as _, Sha256};
@@ -74,6 +74,9 @@ pub(super) fn convert_record(before: &Value) -> Result<RequestRecord, LaneError>
             }
         }
         row["schema"] = json!(6);
+    }
+    if row["effect"].get("ending").is_none() {
+        row["effect"]["ending"] = super::super::unobserved_ending();
     }
     RequestRecord::decode(row)
 }
@@ -514,7 +517,10 @@ fn changed_records(plan: &Value) -> usize {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|row| matches!(row["schema"].as_u64(), Some(3..=5)))
+                .filter(|row| {
+                    matches!(row["schema"].as_u64(), Some(3..=5))
+                        || row["effect"].get("ending").is_none()
+                })
                 .count()
         })
         .sum();

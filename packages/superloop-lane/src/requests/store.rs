@@ -2158,6 +2158,93 @@ impl Store {
             .map(|(request, _)| request)
     }
 
+    /// Persist the observed local final write without revising the execution outcome.
+    pub(crate) fn finish_request(
+        &self,
+        id: &str,
+        effect: Option<Value>,
+        ending: &Value,
+    ) -> Result<(), LaneError> {
+        let view = self.publication_view(self.publication_deadline(Instant::now()))?;
+        let _lock = view.write_lock("finish_request")?;
+        hold::request(id);
+        let run = id
+            .split_once(':')
+            .map(|(run, _)| run)
+            .ok_or_else(|| problem("requests-request-refusal", "request identifier is invalid"))?;
+        let record = view
+            .read_run(run)?
+            .2
+            .into_iter()
+            .find(|row| row.id() == id)
+            .ok_or_else(|| problem("requests-request-refusal", "request is absent"))?;
+        if record.value()["effect"]["state"] == "pending" {
+            let effect = effect.unwrap_or_else(|| {
+                let mut fallback = abandoned_effect(
+                    &record,
+                    if std::thread::panicking() {
+                        "door-handler-panicked"
+                    } else {
+                        "door-handler-ended"
+                    },
+                );
+                let cause = fallback["ending"]["cause"].clone();
+                fallback["ending"] = ending.clone();
+                if fallback["ending"]["cause"] == "unobserved" {
+                    fallback["ending"]["cause"] = cause;
+                }
+                fallback
+            });
+            if view.channel_record_effect(id, &effect)?.is_none() {
+                view.change_one_locked(id, false, |row| row.record_effect(effect))?;
+            }
+        }
+        let (record, _) = view.change_one_locked(id, false, |row| {
+            let mut value = row.value().clone();
+            value["effect"]["ending"]["final_write"] = ending["final_write"].clone();
+            *row = RequestRecord::decode(value)?;
+            Ok(())
+        })?;
+        request_end(&record);
+        Ok(())
+    }
+
+    /// Mark stranded filed requests only while their publication lease is free.
+    pub(crate) fn abandon_at_start(&self) -> Result<(), LaneError> {
+        let view = self.publication_view(self.publication_deadline(Instant::now()))?;
+        let _lock = view.write_lock("abandon_at_start")?;
+        let mut failure = None;
+        for (_, _, records) in view.all_runs(None)? {
+            for record in records
+                .iter()
+                .filter(|row| row.value()["effect"]["state"] == "pending")
+            {
+                let activity = match view.try_publication_activity(record.id(), false) {
+                    Ok(activity) => activity,
+                    Err(error) => {
+                        crate::door::post_reply_event(record.id(), "abandon-activity", error.kind);
+                        failure.get_or_insert(error);
+                        continue;
+                    }
+                };
+                let Some(_activity) = activity else {
+                    continue;
+                };
+                hold::request(record.id());
+                let effect = abandoned_effect(record, "door-abandoned");
+                let changed =
+                    if let Some(changed) = view.channel_record_effect(record.id(), &effect)? {
+                        changed
+                    } else {
+                        view.change_one_locked(record.id(), false, |row| row.record_effect(effect))?
+                            .0
+                    };
+                request_end(&changed);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
     /// Merge one agent result under the same lock as effect and label changes.
     ///
     /// # Errors
@@ -3071,6 +3158,26 @@ impl Store {
     }
 }
 
+fn abandoned_effect(record: &RequestRecord, reason: &str) -> Value {
+    let mut effect = record.value()["effect"].clone();
+    effect["state"] = json!("refused");
+    effect["reason"] = json!(reason);
+    effect["ref_check"] = json!("unrecorded");
+    effect["ending"] = super::unobserved_ending();
+    effect["ending"]["cause"] = json!(if reason == "door-abandoned" {
+        "abandoned"
+    } else {
+        "handler-failure"
+    });
+    effect
+}
+
+fn request_end(record: &RequestRecord) {
+    let effect = &record.value()["effect"];
+    crate::door::request_end_event(&json!({"request_id":record.id(),
+        "cause":effect["ending"]["cause"],"reason":effect["reason"]}));
+}
+
 fn correction_pending(request: &RequestRecord, ledger: &ModeLedger) -> Result<bool, LaneError> {
     if !is_enforce_correction(request) {
         return Ok(false);
@@ -3164,6 +3271,207 @@ pub(crate) mod tests {
         let base = Instant::now();
         assert_eq!(credit.deadline(base), base + Duration::from_millis(120));
         drop(held);
+    }
+
+    /// ´test:unit:request-ending-sweep-respects-live-publication-activity´
+    #[test]
+    fn request_ending_sweep_respects_live_publication_activity() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store
+            .file(waiting("R", "1a", 3000, Mode::Audit))
+            .expect("file");
+        let activity = store.publication_activity("R:1a").expect("live handler");
+        store.abandon_at_start().expect("live sweep");
+        assert_eq!(
+            store.request("R:1a").expect("live").value()["effect"]["state"],
+            "pending"
+        );
+        drop(activity);
+        store.abandon_at_start().expect("idle sweep");
+        let record = store.request("R:1a").expect("abandoned");
+        assert_eq!(record.value()["effect"]["ending"]["cause"], "abandoned");
+        assert_eq!(record.value()["effect"]["ending"]["final_write"], "unknown");
+        #[allow(clippy::print_stderr)] // Captured fixture evidence for the terminal record.
+        {
+            eprintln!("ENDING-ABANDONED {}", record.value());
+        }
+        store.abandon_at_start().expect("idempotent sweep");
+        assert_eq!(
+            store.request("R:1a").expect("unchanged").value(),
+            record.value()
+        );
+    }
+
+    /// ´test:unit:request-ending-delivery-survives-common-owner-projection´
+    #[test]
+    fn request_ending_delivery_survives_common_owner_projection() {
+        if !super::publication_tests::in_namespace() {
+            return;
+        }
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = super::publication_tests::provision(&fixture);
+        store
+            .file(waiting("S", "aa", 3000, Mode::Allow))
+            .expect("seed");
+        fixture
+            .command(
+                &["triage", "alpha", "S"],
+                br#"[{"id":"S:aa","action":"mark","reason":"bind owner"}]"#,
+            )
+            .expect("bind");
+        unpublished_fixture(&store, "1a");
+        store
+            .recover_unpublished(Some("R"))
+            .expect("publish outcome");
+        let before = store.request("R:1a").expect("outcome");
+        store
+            .finish_request("R:1a", None, &{
+                let mut ending = crate::requests::unobserved_ending();
+                ending["final_write"] = json!("failed");
+                ending
+            })
+            .expect("delivery fact");
+        let after = store.request("R:1a").expect("projected delivery");
+        assert_eq!(after.value()["effect"]["ending"]["final_write"], "failed");
+        assert_eq!(
+            after.value()["effect"]["reason"],
+            before.value()["effect"]["reason"]
+        );
+        let status = fixture
+            .command(&["status", "alpha"], b"")
+            .expect("owner status");
+        let end = status["request_endings"]
+            .as_array()
+            .expect("endings")
+            .iter()
+            .find(|row| row["id"] == "R:1a")
+            .expect("request ending");
+        assert_eq!(end["ending"]["final_write"], "failed");
+        store
+            .file(waiting("R", "ab", 3000, Mode::Allow))
+            .expect("before-effect intent");
+        fixture
+            .command(
+                &["triage", "alpha", "R"],
+                br#"[{"id":"R:ab","action":"mark","reason":"import before effect"}]"#,
+            )
+            .expect("import before effect");
+        store.abandon_at_start().expect("common owner abandonment");
+        let abandoned = store.request("R:ab").expect("retained abandonment");
+        assert_eq!(abandoned.value()["effect"]["reason"], "door-abandoned");
+        assert_eq!(abandoned.value()["effect"]["ending"]["cause"], "abandoned");
+        let mut observation = crate::requests::unobserved_ending();
+        observation["final_write"] = json!("failed");
+        store
+            .finish_request("R:ab", None, &observation)
+            .expect("before-effect delivery");
+        assert_eq!(
+            store
+                .request("R:ab")
+                .expect("common completed projection")
+                .value()["effect"]["ending"]["final_write"],
+            "failed"
+        );
+    }
+
+    /// ´test:unit:request-ending-rewrite-preserves-unobserved-history´
+    #[test]
+    fn request_ending_rewrite_preserves_unobserved_history() {
+        let mut old = waiting("R", "1a", 3000, Mode::Audit).into_value();
+        old["effect"]
+            .as_object_mut()
+            .expect("effect")
+            .remove("ending");
+        assert_eq!(
+            RequestRecord::decode(old.clone())
+                .expect_err("no compatibility reader")
+                .kind,
+            "requests-rewrite-required"
+        );
+        let converted = super::rewrite::convert_record(&old).expect("explicit conversion");
+        assert_eq!(
+            converted.value()["effect"]["ending"],
+            crate::requests::unobserved_ending()
+        );
+        assert_eq!(
+            super::rewrite::convert_record(converted.value())
+                .expect("repeat")
+                .value(),
+            converted.value()
+        );
+    }
+
+    /// ´test:unit:request-ending-rewrite-is-preview-bound-and-stopped´
+    #[test]
+    fn request_ending_rewrite_is_preview_bound_and_stopped() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store
+            .file(waiting("R", "1a", 3000, Mode::Audit))
+            .expect("current record");
+        let path = fixture.runs.join(".launch-R/door-requests.json");
+        let mut old: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("run bytes")).expect("run");
+        old["requests"][0]["effect"]
+            .as_object_mut()
+            .expect("effect")
+            .remove("ending");
+        fs::write(&path, serde_json::to_vec(&old).expect("historical bytes"))
+            .expect("historical run");
+        let before = fs::read(&path).expect("before");
+        let service = nix::fcntl::Flock::lock(
+            File::open(fixture.configure_door()).expect("service directory"),
+            nix::fcntl::FlockArg::LockExclusiveNonblock,
+        )
+        .expect("service active");
+        let preview = fixture
+            .command(&["rewrite", "alpha", "--dry-run"], b"")
+            .expect("live preview");
+        assert_eq!(preview["changed"], 1);
+        assert_eq!(fs::read(&path).expect("after preview"), before);
+        let digest = preview["preview_sha256"].as_str().expect("digest");
+        assert_eq!(
+            fixture
+                .command(&["rewrite", "alpha", "--expect-digest", digest], b"")
+                .expect_err("live apply refuses")
+                .kind,
+            "requests-rewrite-idle"
+        );
+        drop(service);
+        assert_eq!(
+            fixture
+                .command(&["rewrite", "alpha", "--expect-digest", "wrong"], b"")
+                .expect_err("changed authority refuses")
+                .kind,
+            "requests-rewrite-digest"
+        );
+        assert_eq!(fs::read(&path).expect("after refusals"), before);
+        let fresh = fixture
+            .command(&["rewrite", "alpha", "--dry-run"], b"")
+            .expect("stopped preview");
+        #[allow(clippy::print_stderr)] // Captured fixture evidence for the terminal record.
+        {
+            eprintln!("ENDING-REWRITE-PREVIEW {fresh}");
+        }
+        let applied = fixture
+            .command(
+                &[
+                    "rewrite",
+                    "alpha",
+                    "--expect-digest",
+                    fresh["preview_sha256"].as_str().expect("fresh digest"),
+                ],
+                b"",
+            )
+            .expect("apply");
+        assert_eq!(applied["complete"], true);
+        assert_eq!(
+            store.request("R:1a").expect("converted").value()["effect"]["ending"],
+            crate::requests::unobserved_ending()
+        );
+        assert_eq!(store.rewrite(None).expect("done")["changed"], 0);
     }
 
     /// ´test:unit:requests-registry-reader-validates-the-named-acl-mask´

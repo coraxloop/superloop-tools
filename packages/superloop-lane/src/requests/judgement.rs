@@ -20,6 +20,7 @@ pub const KEYS: [&str; 12] = [
 
 /// Initialize an intent or mechanically convert historical evidence.
 pub fn initialize(record: &mut Value) {
+    record["effect"]["ending"] = super::unobserved_ending();
     record["schema"] = json!(6);
     let source = if matches!(
         record["would_do"]["decision"].as_str(),

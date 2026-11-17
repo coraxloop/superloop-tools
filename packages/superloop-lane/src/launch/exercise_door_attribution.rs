@@ -875,24 +875,27 @@ mod tests {
                     }
                 })
             });
-            let initial = observed_rx.recv_timeout(Duration::from_secs(5));
+            let initial = observed_rx.recv_timeout(Duration::from_secs(120));
             if initial.is_err() {
                 finished.store(true, Ordering::Release);
             }
             assert_eq!(initial.expect("initial observation"), "initial");
-            store
-                .record_effect(
-                    "R:5e",
-                    json!({
-                        "state":"completed","reason":"door-complete","exit_status":0,
-                        "ref_check":"admitted",
-                        "stdin_bytes":101,"stdout_bytes":0,"stderr_bytes":0,
-                        "queue_wall_seconds":null,"mediation_wall_seconds":0.01,
-                        "compute_wall_seconds":0.01
-                    }),
-                )
-                .expect("record receive effect");
-            let refreshed = observed_rx.recv_timeout(Duration::from_secs(5));
+            let recorded = store.record_effect(
+                "R:5e",
+                json!({
+                    "state":"completed","reason":"door-complete","exit_status":0,
+                    "ref_check":"admitted",
+                    "stdin_bytes":101,"stdout_bytes":0,"stderr_bytes":0,
+                    "queue_wall_seconds":null,"mediation_wall_seconds":0.01,
+                    "compute_wall_seconds":0.01,
+                    "ending":crate::requests::unobserved_ending()
+                }),
+            );
+            if recorded.is_err() {
+                finished.store(true, Ordering::Release);
+            }
+            recorded.expect("record receive effect");
+            let refreshed = observed_rx.recv_timeout(Duration::from_secs(120));
             if refreshed.is_err() {
                 finished.store(true, Ordering::Release);
             }

@@ -382,14 +382,26 @@ pub(super) struct ComputeRunner<'a> {
 
 impl Runner for ComputeRunner<'_> {
     fn spawn(&self, registration: &Registration, _operation: Operation) -> io::Result<Child> {
-        self.inner.spawn_compute(
-            registration,
-            self.words,
-            self.wait
-                .map_or(self.deadline, |wait| wait.deadline(self.deadline))
-                .saturating_duration_since(Instant::now())
-                .as_secs_f64(),
-        )
+        let seconds = self
+            .wait
+            .map_or(self.deadline, |wait| wait.deadline(self.deadline))
+            .saturating_duration_since(Instant::now())
+            .as_secs_f64();
+        let child = self
+            .inner
+            .spawn_compute(registration, self.words, seconds)?;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|time| time.as_nanos().to_string());
+        if let Some(wait) = self.wait {
+            wait.ending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)["remote"] = json!({"state":"unconfirmed","configured_seconds":seconds.max(0.001),
+                    "bound_seconds":(seconds.max(0.001) - 15.0 + 10.0 + 2.0).max(0.001) + 10.0,
+                    "local_spawn_unix_ns":at,"start":"unobserved"});
+        }
+        Ok(child)
     }
     fn compute_words(&self) -> Option<&[String]> {
         Some(self.words)
@@ -1315,6 +1327,22 @@ pub(super) fn serve_compute(
         )?;
     }
     let mut child = runner.spawn(registration, operation)?;
+    if let Some(wait) = wait {
+        let mut ending = wait
+            .ending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ending["local_child"] = json!("spawned");
+        if ending["remote"]["local_spawn_unix_ns"].is_null() {
+            ending["remote"]["local_spawn_unix_ns"] = json!(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|at| at.as_nanos().to_string())
+            );
+        }
+    }
+
     #[cfg(test)]
     let deadline = tests::SPAWN_DEADLINE.with(|slot| {
         slot.borrow_mut()
@@ -1414,6 +1442,14 @@ pub(super) fn serve_compute(
         }
         thread::sleep(Duration::from_millis(5));
     };
+    if let Some(wait) = wait {
+        let mut ending = wait
+            .ending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ending["local_child"] = json!("reaped");
+        ending["cause"] = json!(super::ending_cause(outcome));
+    }
     let compute_wall = compute_started.elapsed().as_secs_f64();
     input_stopped.store(true, Ordering::Relaxed);
     let _read_end = stream.shutdown(Shutdown::Read);
@@ -1441,6 +1477,17 @@ pub(super) fn serve_compute(
     }
     if output_total.load(Ordering::Relaxed) > bound {
         outcome = "door-output-limit-refusal";
+    }
+    if let Some(wait) = wait {
+        let mut ending = wait
+            .ending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A pump can identify the deadline behind the shared abort signal.
+        // A later pipe error cannot replace an already observed deadline stop.
+        if ending["cause"] != "deadline" {
+            ending["cause"] = json!(super::ending_cause(outcome));
+        }
     }
     let code = if outcome == "door-complete" {
         status.code().unwrap_or(125)
@@ -1496,6 +1543,11 @@ pub(super) fn serve_compute(
         Instant::now() + Duration::from_secs(2),
     )?;
     Ok(reply)
+}
+
+#[cfg(test)]
+pub(super) fn fixture_expire_after_spawn() {
+    tests::SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = Some(Box::new(Instant::now)));
 }
 
 pub(super) fn compute_deadline_frame(registered: u64, requested: u64, deadline: Instant) -> Value {
@@ -1876,6 +1928,62 @@ mod tests {
     }
 
     struct FakeRunner;
+
+    /// ´test:unit:compute-ending-retains-supplied-bound-without-a-remote-anchor´
+    #[test]
+    fn compute_ending_retains_supplied_bound_without_a_remote_anchor() {
+        struct Capture(std::sync::Mutex<Option<f64>>);
+        impl Runner for Capture {
+            fn spawn(&self, row: &Registration, operation: Operation) -> io::Result<Child> {
+                FakeRunner.spawn(row, operation)
+            }
+            fn spawn_compute(
+                &self,
+                row: &Registration,
+                _: &[String],
+                seconds: f64,
+            ) -> io::Result<Child> {
+                *self.0.lock().expect("capture") = Some(seconds);
+                self.spawn(row, Operation::Compute)
+            }
+        }
+        let row = Registration::from_row(
+            &json!({"name":"alpha","uid":41001}),
+            "alpha",
+            "R",
+            3000,
+            Scope::Work,
+        )
+        .expect("row");
+        let (server, _peer) = UnixStream::pair().expect("pair");
+        let wait = crate::door::RequestWait::new(&server).expect("wait");
+        let inner = Capture(std::sync::Mutex::new(None));
+        let words = ["git".to_owned(), "status".to_owned()];
+        let runner = super::ComputeRunner {
+            inner: &inner,
+            words: &words,
+            deadline: Instant::now() + FIXTURE_HANG,
+            registered_deadline_ms: 120_000,
+            wait: Some(&wait),
+        };
+        let mut child = runner.spawn(&row, Operation::Compute).expect("spawn");
+        drop(child.stdin.take());
+        assert!(child.wait().expect("reap").success());
+        let seconds = inner.0.lock().expect("supplied seconds").expect("captured");
+        let ending = wait.ending.lock().expect("ending");
+        assert_eq!(
+            ending["remote"]["configured_seconds"],
+            json!(seconds.max(0.001))
+        );
+        assert_eq!(
+            ending["remote"]["bound_seconds"],
+            json!((seconds.max(0.001) - 15.0 + 10.0 + 2.0).max(0.001) + 10.0)
+        );
+        assert_eq!(ending["remote"]["start"], "unobserved");
+        assert!(ending["remote"]["local_spawn_unix_ns"].as_str().is_some());
+        assert!(ending["remote"].get("ends_by").is_none());
+        drop(ending);
+    }
 
     /// ´test:unit:door-lock-credit-is-cumulative-bounded-and-strict´
     #[test]

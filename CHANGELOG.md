@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Door request effects retain their ending cause, local final-write observation, child disposition and the remote timeout's unobserved start. Startup marks stranded pending requests abandoned; installer previews report whether admission locks are idle. Compatibility: each loop quiesces and stops its own door, previews and applies the digest-bound record rewrite, refreshes and starts. Apply refuses a live service; interrupted rewrites resume and are not atomic across all files. Coordinate this record change with the next behavior slice in one restart wave; this slice changes no running command's stop or deadline policy (``sec:superlooplane:door-request-endings``).
+
 ## [0.6.0] - 2026-11-17
 
 ### Changed

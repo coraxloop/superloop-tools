@@ -302,6 +302,66 @@ fn validate_workspace_effect(value: &Value) -> Result<(), LaneError> {
     Ok(())
 }
 
+/// Unobserved terminal facts, also used by the explicit historical rewrite.
+pub(crate) fn unobserved_ending() -> Value {
+    json!({"cause":"unobserved","final_write":"unknown","local_child":"unobserved",
+        "remote":{"state":"unconfirmed","bound_seconds":null,"configured_seconds":null,
+            "local_spawn_unix_ns":null,"start":"unobserved"}})
+}
+
+fn valid_ending(value: &Value) -> bool {
+    let remote = &value["remote"];
+    exact(value, &["cause", "final_write", "local_child", "remote"])
+        && matches!(
+            value["cause"].as_str(),
+            Some(
+                "unobserved"
+                    | "child-exit"
+                    | "deadline"
+                    | "refusal"
+                    | "transport"
+                    | "handler-failure"
+                    | "disconnect"
+                    | "abandoned"
+            )
+        )
+        && matches!(
+            value["final_write"].as_str(),
+            Some("unknown" | "failed" | "succeeded-locally")
+        )
+        && matches!(
+            value["local_child"].as_str(),
+            Some("unobserved" | "not-started" | "spawned" | "reaped")
+        )
+        && exact(
+            remote,
+            &[
+                "state",
+                "bound_seconds",
+                "configured_seconds",
+                "local_spawn_unix_ns",
+                "start",
+            ],
+        )
+        && matches!(
+            remote["state"].as_str(),
+            Some("unconfirmed" | "not-started")
+        )
+        && remote["start"] == "unobserved"
+        && (remote["configured_seconds"].is_null()
+            || remote["configured_seconds"]
+                .as_f64()
+                .is_some_and(|n| n.is_finite() && n > 0.0))
+        && (remote["bound_seconds"].is_null()
+            || remote["bound_seconds"]
+                .as_f64()
+                .is_some_and(|n| n.is_finite() && n > 0.0))
+        && (remote["local_spawn_unix_ns"].is_null()
+            || remote["local_spawn_unix_ns"].as_str().is_some_and(|s| {
+                !s.is_empty() && s.len() <= 40 && s.bytes().all(|b| b.is_ascii_digit())
+            }))
+}
+
 impl RequestRecord {
     /// Decode the one record shape used by the door and request tools.
     ///
@@ -459,6 +519,7 @@ impl RequestRecord {
         let effect_pending = value["effect"]["state"] == "pending";
         let ref_check = &value["effect"]["ref_check"];
         let mut effect_keys = vec![
+            "ending",
             "state",
             "reason",
             "exit_status",
@@ -619,7 +680,14 @@ impl RequestRecord {
                 ));
             }
         }
-        if !exact(&value["effect"], &effect_keys)
+        if value["effect"].get("ending").is_none() && exact(&value["effect"], &effect_keys[1..]) {
+            return Err(refusal(
+                "requests-rewrite-required",
+                "effect ending requires requests rewrite LOOP --dry-run",
+            ));
+        }
+        if !valid_ending(&value["effect"]["ending"])
+            || !exact(&value["effect"], &effect_keys)
             || !matches!(
                 value["effect"]["state"].as_str(),
                 Some("pending" | "completed" | "refused")
