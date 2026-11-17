@@ -246,7 +246,7 @@
 |(`test:unit:sweeps-several-notices-in-one-file`)|fix|cites (`claim:fix:every-site-in-one-file-is-swept-in-one-pass`)|
 |(`test:unit:refuses-a-notice-whose-marker-has-moved`)|fix|cites (`claim:fix:a-place-the-sweep-cannot-repair-is-refused-and-left-untouched`)|
 |(`test:unit:restores-a-perturbed-notice-to-the-canonical-form`)|fix|A notice perturbed by hand is restored to exactly the bytes the sweep writes from a clean line — not merely to something the reader accepts. The canonical form is taken from the writer itself rather than typed into the test, so the guarantee cannot drift with the writer: a label that is not the derivation, a label of the wrong area, and no label at all all converge on the one form, and the restored line then stands.|
-|(`test:unit:writer-refusals-put-the-reader-first`)|fmt|Writer refusals put file safety, location and recovery before internals, and qualify the location only after a real reference-list deferral.|
+|(`test:unit:writer-refusals-put-the-reader-first`)|fmt|Writer refusals put file safety and location first, name the failing event before recovery, and qualify the location only after a real list deferral.|
 |(`test:unit:serialization-refusals-name-the-buffered-block-line`)|fmt|An injected empty-emphasis event stream proves serialization refusal diagnostics and original offsets, including across overlay slots.|
 |(`test:unit:joins-a-hard-wrapped-paragraph`)|fmt|A soft break in a paragraph becomes one space, producing one running line without moving its words.|
 |(`test:unit:formats-markdown-idempotently`)|fmt|The bytes emitted by one pass are the fixed point of the formatter, so checking the same document again reports no change.|

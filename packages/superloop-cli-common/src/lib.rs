@@ -210,6 +210,7 @@ pub fn publication_json<T: Serialize>(report: &T) -> serde_json::Result<Vec<u8>>
 
 fn version_message(identity: &BuildIdentity, version: &str) -> String {
     let source = identity.source_commit.as_deref().unwrap_or("unknown");
+    let tree = identity.source_tree.as_deref().unwrap_or("unknown");
     let artifact = identity.artifact_sha256.as_deref().map_or_else(
         || {
             format!(
@@ -220,7 +221,7 @@ fn version_message(identity: &BuildIdentity, version: &str) -> String {
         |digest| format!("sha256:{digest}"),
     );
     format!(
-        "{version} {}@{source} {} {artifact}",
+        "{version} {} tree:{tree} commit:{source} {} {artifact}",
         identity.repository, identity.source_state
     )
 }
@@ -1788,4 +1789,39 @@ fn version_names_an_unavailable_digest() {
         "{message}"
     );
     assert!(!message.contains("sha256:unreadable"), "{message}");
+}
+
+/// The version sentence exposes the full public tree before commit history.
+///
+/// # Panics
+/// Panics only if equal public trees cannot be compared in the readable message.
+///
+/// ´claim:identity:version-names-public-tree´
+/// ´test:unit:version-names-public-tree´
+#[cfg(test)]
+#[test]
+fn version_names_public_tree() {
+    let mut identity: BuildIdentity = serde_json::from_value(serde_json::json!({
+        "schema": 1, "repository": "superloop-tools", "version": "0.5.0",
+        "source_commit": "1111111111111111111111111111111111111111",
+        "source_tree": "2222222222222222222222222222222222222222",
+        "source_state": "candidate", "release_tag": null,
+        "artifact_sha256": null, "digest_absence": "unreadable",
+    }))
+    .unwrap();
+    for commit in [
+        "1111111111111111111111111111111111111111",
+        "3333333333333333333333333333333333333333",
+    ] {
+        identity.source_commit = Some(commit.to_owned());
+        let message = version_message(&identity, "superloop-lint 0.5.0");
+        assert!(
+            message.contains(&format!(
+                "tree:2222222222222222222222222222222222222222 commit:{commit}"
+            )),
+            "{message}"
+        );
+    }
+    identity.source_tree = None;
+    assert!(version_message(&identity, "superloop-lint 0.5.0").contains("tree:unknown"));
 }

@@ -17,7 +17,7 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`writer_refusals_put_the_reader_first`] | fmt | Writer refusals put file safety, location and recovery before internals, and qualify the location only after a real reference-list deferral. |
+//! | [`writer_refusals_put_the_reader_first`] | fmt | Writer refusals put file safety and location first, name the failing event before recovery, and qualify the location only after a real list deferral. |
 //! | [`serialization_refusals_name_the_buffered_block_line`] | fmt | An injected empty-emphasis event stream proves serialization refusal diagnostics and original offsets, including across overlay slots. |
 //! | [`joins_a_hard_wrapped_paragraph`] | fmt | A soft break in a paragraph becomes one space, producing one running line without moving its words. |
 //! | [`formats_markdown_idempotently`] | fmt | The bytes emitted by one pass are the fixed point of the formatter, so checking the same document again reports no change. |
@@ -159,7 +159,7 @@ impl FormatError {
     fn guard(rejection: GuardRejection, line: usize) -> Self {
         Self {
             message: format!(
-                "the file was not changed; formatting would change the document at line {line}; reduce a copy to the smallest excerpt that still refuses and share only non-private content with the person who supplied this build; {rejection}"
+                "the file was not changed; formatting would change the document at line {line}, although the document is valid Markdown; reduce a copy to the smallest excerpt that still refuses; if you built this yourself, use that excerpt as a regression test for the formatter in packages/superloop-lint/src/fmt.rs; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; {rejection}"
             ),
             kind: FormatErrorKind::Guard(rejection),
         }
@@ -397,7 +397,7 @@ fn serialize_events(
             };
             FormatError {
                 message: format!(
-                    "the file was not changed; the block{location} could not be preserved;{caveat} reduce a copy to the smallest excerpt that still refuses, keeping this event kind; if you built this yourself, use that excerpt to investigate the writer failure; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; this package declares no public issue route; writer detail: {error}"
+                    "the file was not changed; the block{location} could not be preserved ({error});{caveat} reduce a copy to the smallest excerpt that still refuses with the same writer detail; if you built this yourself, that excerpt is your test case for the Markdown writer in packages/pulldown-cmark-to-cmark; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; this package declares no public issue route"
                 ),
                 kind: FormatErrorKind::Serialization(
                     state.pending_source_start().map(|start| first_byte + start),
@@ -1095,8 +1095,8 @@ fn push_code_block_text(guarded: &mut Vec<GuardedEvent>, text: &str, range: Rang
 mod tests {
     use super::{bounded_value_preview, ensure_equivalent, format_markdown, serialize_events};
 
-    /// Writer refusals put file safety, location and recovery before internals,
-    /// and qualify the location only after a real reference-list deferral.
+    /// Writer refusals put file safety and location first, name the failing event
+    /// before recovery, and qualify the location only after a real list deferral.
     ///
     /// # Panics
     /// Panics only if the injected impossible event stream is accepted or its
@@ -1155,11 +1155,11 @@ mod tests {
                     !cause.contains("retain it locally")
                         && cause
                             .contains("reduce a copy to the smallest excerpt that still refuses")
-                        && cause.contains("use that excerpt to investigate the writer failure"),
+                        && cause.contains("your test case for the Markdown writer in packages/pulldown-cmark-to-cmark"),
                 ),
                 (
-                    "action before writer details",
-                    matches!((cause.find("reduce a copy"), cause.find("writer detail:")), (Some(action), Some(detail)) if action < detail),
+                    "writer event before action",
+                    matches!((cause.find("reduce a copy"), cause.find("first differing input event")), (Some(action), Some(detail)) if detail < action),
                 ),
             ] {
                 if !holds {
@@ -1230,11 +1230,9 @@ mod tests {
                         rejection.cause
                     );
                     assert!(rejection.cause.contains("first differing input event in the preferred rendering: start of Emphasis"), "{}", rejection.cause);
-                    assert!(
-                        rejection.cause.contains(
-                            "smallest excerpt that still refuses, keeping this event kind"
-                        )
-                    );
+                    assert!(rejection.cause.contains(
+                        "smallest excerpt that still refuses with the same writer detail"
+                    ));
                     assert!(rejection.cause.contains(
                         "share only non-private content with the person who supplied this build"
                     ));
@@ -1403,6 +1401,19 @@ mod tests {
         let result = ensure_equivalent("Text ``span``.\n", "Text `span`.\n");
         let message = result.expect_err("the guard rejects delimiter-width drift");
         let message = message.to_string();
+        assert!(
+            message.contains("the document is valid Markdown"),
+            "{message}"
+        );
+        assert!(message.contains("if you built this yourself"), "{message}");
+        assert!(
+            message.contains("packages/superloop-lint/src/fmt.rs"),
+            "{message}"
+        );
+        assert!(
+            message.contains("build record's source commit and binary SHA-256"),
+            "{message}"
+        );
 
         assert!(
             message.contains("delimiter width differs"),

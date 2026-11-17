@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The readable version sentence names the full public source tree before its commit. Install matching linter and pack releases together; the deploy's explicit `tools_source_commit` handover also names the public commit in build records (``spec:output:linter-build-identity``).
+
 - Formatter refusals pin table-row and table-header ranges across overlay slots, give an ambiguous header a line, a range and an action, and name the first differing writer event. A writer refusal asks for the smallest non-private excerpt that still refuses, shared with whoever supplied the build together with its build record's identity, and states that the package declares no public issue route; a run retained by a reference-dependent list can start before the failing block (`rule:output:linter-findings-status`).
 
 - Linter identity includes the public commit's tree, allowing equal public source to be recognized across commit histories. Version answers put their readable message first and name an unavailable artifact digest plainly. Malformed diagnostics remain visible as identified JSON error records. In-tree Meson builds use ignored `build/`; generated outputs no longer invalidate the source observer. Compatibility: the citation-sites reader requires identity, so deploy the matching `superloop-pack` and `superloop-lint` together; a null artifact digest remains accepted (``spec:output:linter-build-identity``).
@@ -20,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Sign-in entry fixtures now keep executable writes and child starts in one test interval, so a child forked by another test cannot retain a writer and make the inspector report an unmeasured entry. Every sign-in report assertion prints the full report on failure, including its inspection error. Tests only; installed door behavior is unchanged (``prob:gates:load-sensitive-tests-made-deterministic``).
 
-- Formatter refusals put the unchanged-file assurance, location and recovery before writer details; only a deferred reference-dependent list adds the location caveat. Table and integrity-guard refusals use the same reader-facing order, keeping their structured categories and ranges (``rule:output:linter-findings-status``).
+- Formatter refusals put the unchanged-file assurance and location first; serialization refusals name the writer detail before recovery advice, and both serialization and integrity-guard refusals give self-builders a concrete test location and other readers the build-record identity to report; only a deferred reference-dependent list adds the location caveat. Table and integrity-guard refusals use the same reader-facing order, keeping their structured categories and ranges (``rule:output:linter-findings-status``).
 
 - The built-helper fixture now waits for its control socket to accept a connection, and reports a helper that exits before readiness. Its child, evidence and peer waits use distant 120-second hang guards. A socket pathname appearing during bind can no longer make a loaded test node refuse a healthy helper. Tests only; installed helper behavior is unchanged (``prob:gates:elapsed-time-assertions-are-censused-and-rewritten``).
 

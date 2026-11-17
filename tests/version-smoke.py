@@ -133,7 +133,7 @@ def main():
         artifact = ("sha256:" + identity["artifact_sha256"]
                     if identity.get("artifact_sha256") else
                     "artifact digest unavailable (" + str(identity.get("digest_absence")) + ")")
-        expected["message"] = (f"{version_text} superloop-tools@{source} "
+        expected["message"] = (f"{version_text} superloop-tools tree:{identity.get('source_tree') or 'unknown'} commit:{source} "
                                f"{identity.get('source_state')} {artifact}")
     if record != expected:
         failures.append("version record does not match manifest identity and compiled commit")
