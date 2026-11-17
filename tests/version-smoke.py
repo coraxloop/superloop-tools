@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import time
 import tomllib
@@ -64,7 +65,12 @@ def main():
         raise ValueError("provenance release group must be explicit")
 
     binary = args.binary.name
-    command = args.installed_name
+    installed_tag = None
+    if args.installed_name.startswith("superloop-lint-"):
+        installed_tag = args.installed_name.removeprefix("superloop-lint-")
+        if re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", installed_tag) is None:
+            raise ValueError("invalid tagged linter installed name")
+    command = "superloop-lint" if installed_tag is not None else args.installed_name
     version_text = command + " " + version
     expected = {
         "schema": 1,
@@ -126,6 +132,8 @@ def main():
                 or (source_commit is not None and args.record_commit
                     and source_commit != args.record_commit)):
             failures.append("linter source identity differs from its producer handoff")
+        if installed_tag is not None and (state != "release" or installed_tag != tag):
+            failures.append("tagged linter identity differs from its installed name")
         expected["identity"] = identity
         if identity.get("source_commit") is not None:
             expected["fields"]["source_commit"] = identity["source_commit"]

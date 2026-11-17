@@ -38,7 +38,7 @@ Each correspondence binds its named interface to the ledger's installed, build-o
 |``cargo-clean@.service``, `.timer`|``superloop-target-clean@.service``, `.timer` with the account as instance|server system unit directory|
 |`codex-rt`, `codex`, `codex-rt-create`, `codex-host`, `claude-in-loops`|`superloop-runtime exec\|create\|run-host\|run-toolbox`; `codex` retires|search path|
 |`rulebook-install`, `public-pack`|`superloop-install`, `superloop-pack`|search path|
-|`linter`, deployed `orchestration-linter`|`superloop-lint`|search path|
+|`linter`, deployed `orchestration-linter`|`superloop-lint`; with `release_tag`, also `superloop-lint-vX.Y.Z`|search path|
 |`build-sync`|`build-sync`|private directory|
 |`run-report`|`superloop-run-report`|build tree only; not installed|
 |`chat-export`, `node-load`|`superloop-chat-export`, `superloop-node-status`|search path|

@@ -243,6 +243,27 @@ fn census_reports_resolved_graph() {
     assert_eq!(report["packages"][1]["consumers"], json!([]));
 }
 
+/// A configured tag cannot be compared with a workspace release without its version.
+/// ´test:integration:census-tagged-linter-needs-workspace-version´
+#[test]
+fn census_tagged_linter_needs_workspace_version() {
+    let fixture = Fixture::new();
+    assert!(
+        fs::write(
+            fixture
+                .root
+                .path()
+                .join("meson-info/intro-buildoptions.json"),
+            r#"[{"name":"release_tag","value":"v0.1.0"}]"#,
+        )
+        .is_ok()
+    );
+    fixture.run_at(
+        fixture.root.path(),
+        Some("workspace.package.version must be a string"),
+    );
+}
+
 /// Consumers include every dependency kind but name each source only once.
 /// ´test:integration:census-derives-consumers-from-all-edge-kinds´
 #[test]

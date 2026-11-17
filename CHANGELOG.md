@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- A clean build configured with the workspace release tag installs a separate regular `superloop-lint-<tag>` and its build record beside `superloop-lint`. The command hook recognizes release-shaped tagged names, and the version smoke checker accepts the tagged installed name when invoked against it. Other valid build tags retain their existing install without a tagged copy. Compatibility: the plain command remains the linter installed by that build; build-sync's census reads the workspace version only when a build tag is configured, and refuses a tagged build whose workspace declares none (``prin:publictools:well-made-and-good-to-use``).
+
 ### Fixed
 
 - Clarify that non-erasing command-text inspection does not establish runtime working-directory or filename-expansion containment (``rule:permissiontriage:command-string-scope-extraction``).
