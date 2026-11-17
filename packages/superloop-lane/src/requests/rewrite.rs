@@ -77,6 +77,9 @@ pub(super) fn convert_record(before: &Value) -> Result<RequestRecord, LaneError>
     }
     if row["effect"].get("ending").is_none() {
         row["effect"]["ending"] = super::super::unobserved_ending();
+        if row["effect"]["state"] == "interrupted" {
+            super::super::unknown_effect_measurements(&mut row["effect"]);
+        }
     }
     RequestRecord::decode(row)
 }

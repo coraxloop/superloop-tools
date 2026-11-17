@@ -1466,19 +1466,42 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
     for (run, worker, disconnect) in [("R", 3000, false), ("S", 3001, true)] {
         let fixture = Fixture::new();
         fixture.set_floor("allow");
+        let (ready, spawned) = std::sync::mpsc::sync_channel(1);
+        let (release, proceed) = std::sync::mpsc::sync_channel(1);
+        super::REQUEST_READY.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |_| {
+                super::transport::fixture_after_spawn(move || {
+                    ready.send(()).expect("spawn observed");
+                    proceed
+                        .recv_timeout(super::tests::FIXTURE_HANG)
+                        .expect("peer action after spawn");
+                    if disconnect {
+                        Instant::now() + super::tests::FIXTURE_HANG
+                    } else {
+                        Instant::now()
+                    }
+                });
+                Ok(Instant::now() + super::tests::FIXTURE_HANG)
+            }));
+        });
         let (socket, calls, server) =
             compute_service(&fixture, run, worker, worker, Scope::Work, None);
         crate::fixture_exec::write_executable(
             &fixture.home.join(format!("node-{run}")),
-            b"#!/usr/bin/python3\nimport time\ntime.sleep(20)\n",
+            b"#!/usr/bin/python3\nimport signal\nsignal.pause()\n",
         )
         .expect("closed slow executable");
         let mut client = socket;
-        client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(), b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":11_000})).expect("request");
+        client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(), b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":120_000})).expect("request");
         client.shutdown(Shutdown::Write).expect("input end");
+        spawned
+            .recv_timeout(super::tests::FIXTURE_HANG)
+            .expect("running child before stop");
         if disconnect {
             drop(client);
+            release.send(()).expect("observe full close");
         } else {
+            release.send(()).expect("expire running deadline");
             assert_eq!(client.event("compute-deadline")["type"], "compute-deadline");
             let reply = client.answer();
             assert_eq!(reply["reason"], "door-deadline-refusal");
@@ -1492,6 +1515,10 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
         let rows = fixture.store().list_run(run).expect("record");
         assert_eq!(rows.len(), 1);
         assert!(rows[0].value()["effect"]["compute"]["wrapper_exit_status"].is_null());
+        assert_eq!(
+            rows[0].value()["effect"]["ending"]["cause"],
+            if disconnect { "disconnect" } else { "deadline" }
+        );
     }
 }
 

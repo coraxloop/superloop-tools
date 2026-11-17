@@ -309,6 +309,24 @@ pub(crate) fn unobserved_ending() -> Value {
             "local_spawn_unix_ns":null,"start":"unobserved"}})
 }
 
+/// Discard pending placeholders when no terminal measurement was observed.
+pub(crate) fn unknown_effect_measurements(effect: &mut Value) {
+    for key in [
+        "stdin_bytes",
+        "stdout_bytes",
+        "stderr_bytes",
+        "queue_wall_seconds",
+        "mediation_wall_seconds",
+        "compute_wall_seconds",
+        "exit_status",
+    ] {
+        effect[key] = Value::Null;
+    }
+    if effect.get("output_bytes").is_some() {
+        effect["output_bytes"] = Value::Null;
+    }
+}
+
 fn valid_ending(value: &Value) -> bool {
     let remote = &value["remote"];
     exact(value, &["cause", "final_write", "local_child", "remote"])
@@ -321,6 +339,7 @@ fn valid_ending(value: &Value) -> bool {
                     | "refusal"
                     | "transport"
                     | "handler-failure"
+                    | "observation-failure"
                     | "disconnect"
                     | "abandoned"
             )
@@ -603,12 +622,15 @@ impl RequestRecord {
                 "effect.bound and effect.output_bytes must be present together",
             ));
         }
+        let interrupted = value["effect"]["state"] == "interrupted";
         for key in ["bound", "output_bytes"] {
             if let Some(value) = value["effect"].get(key) {
                 effect_keys.push(key);
-                if value.as_u64().is_none_or(|bytes| {
-                    key == "bound" && !(1..=MAX_UPLOAD_OUTPUT_LIMIT).contains(&bytes)
-                }) {
+                if !(interrupted && key == "output_bytes" && value.is_null())
+                    && value.as_u64().is_none_or(|bytes| {
+                        key == "bound" && !(1..=MAX_UPLOAD_OUTPUT_LIMIT).contains(&bytes)
+                    })
+                {
                     return Err(refusal(
                         "requests-record-refusal",
                         "output bound or count differs",
@@ -711,14 +733,20 @@ impl RequestRecord {
                 || value["effect"]["exit_status"].as_i64().is_some())
             || ["stdin_bytes", "stdout_bytes", "stderr_bytes"]
                 .iter()
-                .any(|key| value["effect"][key].as_u64().is_none())
+                .any(|key| {
+                    !(interrupted && value["effect"][key].is_null())
+                        && value["effect"][key].as_u64().is_none()
+                })
             || !(value["effect"]["queue_wall_seconds"].is_null()
                 || value["effect"]["queue_wall_seconds"]
                     .as_f64()
                     .is_some_and(|wall| wall >= 0.0))
             || ["mediation_wall_seconds", "compute_wall_seconds"]
                 .iter()
-                .any(|key| value["effect"][key].as_f64().is_none_or(|wall| wall < 0.0))
+                .any(|key| {
+                    !(interrupted && value["effect"][key].is_null())
+                        && value["effect"][key].as_f64().is_none_or(|wall| wall < 0.0)
+                })
         {
             return Err(refusal("requests-record-refusal", "effect shape differs"));
         }

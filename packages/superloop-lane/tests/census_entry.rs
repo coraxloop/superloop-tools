@@ -436,7 +436,7 @@ fn retirement_node_absence_through_built_entry() {
         write(
             &config.join("door-ssh_config"),
             format!(
-                "# Registered host key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nHost fixture\n  HostName fixture.invalid\n  Port 22\n  User fixture\n  UserKnownHostsFile {}\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking yes\n  UpdateHostKeys no\n  BatchMode yes\n",
+                "# Registered host key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nHost fixture\n  HostName fixture.invalid\n  Port 22\n  User fixture\n  UserKnownHostsFile {}\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking yes\n  UpdateHostKeys no\n  BatchMode yes\n  ServerAliveInterval 30\n  ServerAliveCountMax 4\n",
                 config.join("door-known_hosts").display()
             ),
         );

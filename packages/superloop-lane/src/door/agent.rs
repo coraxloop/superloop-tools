@@ -336,6 +336,17 @@ pub trait AgentRunner: Send + Sync {
     fn judge_request(&self, input: &[u8], budget: Duration, _identity: &Value) -> RunnerOutcome {
         self.judge(input, budget)
     }
+
+    fn judge_request_controlled(
+        &self,
+        input: &[u8],
+        budget: Duration,
+        identity: &Value,
+        _now: &dyn Fn() -> Instant,
+        _stop: &dyn Fn() -> bool,
+    ) -> RunnerOutcome {
+        self.judge_request(input, budget, identity)
+    }
 }
 
 /// Decode the existing door profile through the shared judgement validator.
@@ -442,10 +453,31 @@ impl AgentRunner for CodexRunner {
     }
 
     fn judge_request(&self, input: &[u8], budget: Duration, identity: &Value) -> RunnerOutcome {
+        self.observed_request(identity, || self.judge(input, budget))
+    }
+
+    fn judge_request_controlled(
+        &self,
+        input: &[u8],
+        budget: Duration,
+        identity: &Value,
+        now: &dyn Fn() -> Instant,
+        stop: &dyn Fn() -> bool,
+    ) -> RunnerOutcome {
+        self.observed_request(identity, || self.judge_controlled(input, budget, now, stop))
+    }
+}
+
+impl CodexRunner {
+    fn observed_request(
+        &self,
+        identity: &Value,
+        judge: impl FnOnce() -> RunnerOutcome,
+    ) -> RunnerOutcome {
         let settings = json!({"model":self.model,"effort":self.effort,
             "agent_expected_tokens":self.usage_monitor.expected});
         usage::journal(identity, "start", &json!({"settings":settings}), false);
-        let result = self.judge(input, budget);
+        let result = judge();
         let usage = usage::Usage::read(&result.observations["usage"]);
         let (accounting, alarms) = self.usage_monitor.observe(&usage);
         usage::journal(
@@ -474,6 +506,16 @@ impl CodexRunner {
         input: &[u8],
         remaining: Duration,
         now: impl Fn() -> Instant,
+    ) -> RunnerOutcome {
+        self.judge_controlled(input, remaining, now, || false)
+    }
+
+    fn judge_controlled(
+        &self,
+        input: &[u8],
+        remaining: Duration,
+        now: impl Fn() -> Instant,
+        stop: impl Fn() -> bool,
     ) -> RunnerOutcome {
         let started = now();
         let Some(budget) = execute_command::triage::budget(
@@ -506,7 +548,7 @@ impl CodexRunner {
                 );
             }
         };
-        self.call(input, budget, started, now, loop_uid)
+        self.call(input, budget, started, now, loop_uid, stop)
     }
 }
 
@@ -519,6 +561,7 @@ impl CodexRunner {
         started: Instant,
         now: impl Fn() -> Instant,
         loop_uid: u32,
+        stop: impl Fn() -> bool,
     ) -> RunnerOutcome {
         use std::io::{Read as _, Write as _};
         use std::os::unix::process::CommandExt as _;
@@ -587,6 +630,7 @@ impl CodexRunner {
         let end = started + budget;
         let mut timed_out = false;
         let mut termination_sent = false;
+        let mut cleanup_until = None;
         let success = loop {
             if !pipes_ready {
                 break false;
@@ -635,18 +679,23 @@ impl CodexRunner {
                 Err(_) => break false,
                 Ok(None) => {}
             }
-            if now() >= end {
+            if stop() || now() >= end {
                 timed_out = true;
-                break false;
             }
             if !termination_sent
-                && end.saturating_duration_since(now()) <= Duration::from_millis(500)
+                && (timed_out || end.saturating_duration_since(now()) <= Duration::from_millis(500))
             {
                 let _terminated = nix::sys::signal::killpg(
                     nix::unistd::Pid::from_raw(pid),
                     nix::sys::signal::Signal::SIGTERM,
                 );
                 termination_sent = true;
+                // Cleanup is a fresh awake-clock grace even after a sleep jump.
+                // Python's TERM handler must be allowed to stop its vendor session.
+                cleanup_until = Some(cleanup_now() + Duration::from_millis(500));
+            }
+            if timed_out && cleanup_until.is_some_and(|until| cleanup_now() >= until) {
+                break false;
             }
             std::thread::sleep(Duration::from_millis(5));
         };
@@ -795,6 +844,15 @@ impl CodexRunner {
     }
 }
 
+fn cleanup_now() -> Instant {
+    #[cfg(test)]
+    if let Some(now) = tests::CLEANUP_CLOCK.with(|slot| slot.borrow().as_ref().map(|clock| clock()))
+    {
+        return now;
+    }
+    Instant::now()
+}
+
 fn nonblocking(fd: &impl std::os::fd::AsFd) -> std::io::Result<()> {
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
     let flags = fcntl(fd, FcntlArg::F_GETFL).map_err(std::io::Error::from)?;
@@ -809,6 +867,88 @@ fn nonblocking(fd: &impl std::os::fd::AsFd) -> std::io::Result<()> {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    thread_local! {
+        pub(super) static CLEANUP_CLOCK: std::cell::RefCell<Option<Box<dyn Fn() -> Instant>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// ´test:unit:agent-sleep-expiry-retains-awake-cleanup-grace´
+    #[test]
+    fn agent_sleep_expiry_retains_awake_cleanup_grace() {
+        let (root, runner, input) = fixture("#!/usr/bin/python3\nimport time\ntime.sleep(120)\n");
+        let ready = root.path().join("vendor-ready");
+        let terminated = root.path().join("term-observed");
+        let release = root.path().join("cleanup-release");
+        let vendor = format!(
+            "#!/usr/bin/python3\nfrom pathlib import Path\nimport os, time\nPath({}).write_text(str(os.getpid()))\ntime.sleep(120)\n",
+            json!(ready)
+        );
+        crate::fixture_exec::write_executable(&runner.executable, vendor.as_bytes())
+            .expect("ready vendor");
+        let prefix = format!(
+            "import signal, time\nfrom pathlib import Path\n_original_signal = signal.signal\ndef _install_signal(sig, handler):\n if sig == signal.SIGTERM and callable(handler):\n  def held(signum, frame):\n   Path({}).write_text('term')\n   while not Path({}).exists(): time.sleep(0.005)\n   handler(signum, frame)\n  return _original_signal(sig, held)\n return _original_signal(sig, handler)\nsignal.signal = _install_signal\n",
+            json!(terminated),
+            json!(release)
+        );
+        let entry = format!(
+            "#!/usr/bin/python3\nimport os, sys\nos.environ['HOME'] = {}\nos.environ['TMPDIR'] = {}\nsys.argv[7] = {} + sys.argv[7]\nos.execv(sys.argv[4], sys.argv[4:])\n",
+            json!(root.path().join("loop")),
+            json!(root.path().join("tmp")),
+            json!(prefix)
+        );
+        crate::fixture_exec::write_executable(&runner.entry, entry.as_bytes())
+            .expect("held cleanup entry");
+        let began = Instant::now();
+        let ticks = std::cell::Cell::new(0);
+        CLEANUP_CLOCK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                ticks.set(ticks.get() + 1);
+                if ticks.get() > 1 && terminated.exists() {
+                    std::fs::write(&release, b"continue").expect("cleanup event");
+                }
+                // Only a distant hang guard advances this independent awake clock.
+                if began.elapsed() >= Duration::from_secs(120) {
+                    began + Duration::from_secs(121)
+                } else {
+                    began
+                }
+            }));
+        });
+        let result = runner.judge_with_clock(
+            &input.encode().expect("input"),
+            Duration::from_secs(120),
+            || {
+                if ready.exists() || began.elapsed() >= Duration::from_secs(120) {
+                    began + Duration::from_secs(1000)
+                } else {
+                    began
+                }
+            },
+        );
+        CLEANUP_CLOCK.with(|slot| *slot.borrow_mut() = None);
+        let pid = std::fs::read_to_string(ready).expect("vendor readiness");
+        let reaped = !std::path::Path::new("/proc").join(&pid).exists();
+        if !reaped {
+            // A forced failure must not leave the fixture's escaped vendor running.
+            let _killed = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid.parse().expect("fixture pid")),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        assert_eq!(result.status, "timeout", "{result:?}");
+        assert!(
+            root.path().join("cleanup-release").exists(),
+            "awake grace allowed the cleanup event"
+        );
+        assert!(reaped, "vendor was reaped");
+        assert_eq!(
+            std::fs::read_dir(root.path().join("tmp/door-agent"))
+                .expect("private root")
+                .count(),
+            0,
+            "runner removed its private directory"
+        );
+    }
 
     pub const FIXTURE_HANG_MS: u64 = 120_000;
 

@@ -106,7 +106,7 @@ fn door_input_pump_deadline_before_packet_keeps_ref_not_reached() {
     let count = Arc::new(AtomicUsize::new(0));
     let ref_check = Arc::new(AtomicU8::new(super::REF_NOT_REACHED));
     let ref_packet = Arc::new(Mutex::new(None));
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = Arc::new(super::Abort::new(Arc::default()));
     let stopped = Arc::new(AtomicBool::new(false));
     let result = super::input_pump(
         socket,

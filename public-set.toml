@@ -1790,6 +1790,9 @@ pattern = "packages/superloop-lane/src/door/concurrent_tests.rs"
 pattern = "packages/superloop-lane/src/door/config.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/door/lifetime.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/door/metadata.rs"
 
 [[include.rows]]

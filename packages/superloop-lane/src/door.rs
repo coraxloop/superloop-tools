@@ -21,6 +21,7 @@ pub mod agent;
 mod agent_exercise;
 mod agent_probes;
 pub mod config;
+mod lifetime;
 pub mod metadata;
 
 /// Format the final door reply for the SSH command boundary.
@@ -129,6 +130,8 @@ pub(crate) struct RequestWait {
     final_sent: AtomicBool,
     ending: std::sync::Mutex<Value>,
     observed_effect: std::sync::Mutex<Option<Value>>,
+    lifetime: Option<lifetime::Lifetime>,
+    cause: Arc<lifetime::FirstCause>,
 }
 
 impl RequestWait {
@@ -146,6 +149,8 @@ impl RequestWait {
             final_sent: AtomicBool::new(false),
             ending: std::sync::Mutex::new(crate::requests::unobserved_ending()),
             observed_effect: std::sync::Mutex::new(None),
+            lifetime: None,
+            cause: Arc::new(lifetime::FirstCause::default()),
         })
     }
 
@@ -158,7 +163,61 @@ impl RequestWait {
     }
 
     pub(crate) fn deadline(&self, base: Instant) -> Instant {
-        base + self.elapsed()
+        self.lifetime.as_ref().map_or_else(
+            || base + self.elapsed(),
+            |life| Instant::now() + life.remaining(base, self.elapsed()).unwrap_or_default(),
+        )
+    }
+
+    fn with_lifetime(
+        mut self,
+        start: lifetime::Start,
+        full_close: bool,
+        stream: &UnixStream,
+    ) -> io::Result<Self> {
+        self.lifetime = Some(lifetime::Lifetime::new(start, stream, full_close)?);
+        Ok(self)
+    }
+
+    pub(crate) fn stop_reason(&self, base: Instant) -> Option<&'static str> {
+        self.stop(base).map(lifetime::Cause::reason)
+    }
+
+    fn stop(&self, base: Instant) -> Option<lifetime::Cause> {
+        let life = self.lifetime.as_ref()?;
+        if life.finished() {
+            return None;
+        }
+        if let Some(first) = self.cause.get() {
+            return matches!(
+                first,
+                lifetime::Cause::Deadline
+                    | lifetime::Cause::Disconnect
+                    | lifetime::Cause::ObservationFailure
+            )
+            .then_some(first);
+        }
+        let candidate = life.poll(base, self.elapsed())?;
+        let first = self.cause.select(candidate);
+        matches!(
+            first,
+            lifetime::Cause::Deadline
+                | lifetime::Cause::Disconnect
+                | lifetime::Cause::ObservationFailure
+        )
+        .then_some(first)
+    }
+
+    fn ending_snapshot(&self) -> Value {
+        let mut ending = self
+            .ending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(cause) = self.cause.get() {
+            ending["cause"] = json!(cause.name());
+        }
+        ending
     }
 
     pub(crate) fn credit(&self, elapsed: Duration) {
@@ -243,6 +302,23 @@ impl RequestWait {
     }
 
     fn report(&self, reply: &mut Value) {
+        if let Some(stop) = self.cause.get() {
+            reply["stop_cause"] = json!(stop.name());
+            if matches!(
+                stop,
+                lifetime::Cause::Deadline
+                    | lifetime::Cause::Disconnect
+                    | lifetime::Cause::ObservationFailure
+            ) && matches!(
+                reply["reason"].as_str(),
+                Some("door-request-record-refusal" | "door-request-read-refusal")
+            ) {
+                reply["reason"] = json!(stop.reason());
+            }
+        }
+        if self.lifetime.is_some() {
+            reply["deadline_clock"] = json!("boottime");
+        }
         let waited = self.micros.load(Ordering::Relaxed) / 1000;
         let credit = waited.min(self.cap_ms);
         reply["request_lock_wait_ms"] = json!(waited);
@@ -322,12 +398,11 @@ struct RequestEnding<'a> {
 
 impl Drop for RequestEnding<'_> {
     fn drop(&mut self) {
-        let ending = self
-            .wait
-            .ending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        if let Some(life) = &self.wait.lifetime {
+            life.finish();
+        }
+        self.wait.cause.select(lifetime::Cause::HandlerFailure);
+        let ending = self.wait.ending_snapshot();
         let effect = self
             .wait
             .observed_effect
@@ -412,12 +487,28 @@ impl RequestGuard {
         started: Instant,
         clock: &dyn AdmissionClock,
     ) -> io::Result<(Option<Self>, Duration)> {
+        Self::acquire_controlled(home, registration, request, operation, started, clock, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_controlled(
+        home: &Path,
+        registration: &Registration,
+        request: &Value,
+        operation: Option<transport::Operation>,
+        started: Instant,
+        clock: &dyn AdmissionClock,
+        control: Option<(&RequestWait, Instant)>,
+    ) -> io::Result<(Option<Self>, Duration)> {
         let began = clock.now();
         let remaining = Duration::from_millis(request["deadline_ms"].as_u64().unwrap_or(0))
             .saturating_sub(clock.now().saturating_duration_since(started))
             .saturating_sub(ADMISSION_REPLY_MARGIN);
         let budget = remaining.min(ADMISSION_WAIT);
         loop {
+            if control.is_some_and(|(wait, deadline)| wait.stop(deadline).is_some()) {
+                return Ok((None, clock.now().saturating_duration_since(began)));
+            }
             if let Some(guard) = Self::acquire_operation(home, registration, operation)? {
                 return Ok((Some(guard), clock.now().saturating_duration_since(began)));
             }
@@ -1182,6 +1273,13 @@ fn request_record(
 }
 
 pub(crate) fn effect_from_final(reply: &Value) -> Value {
+    effect_with_cause(
+        reply,
+        lifetime::Cause::for_reply(reply["reason"].as_str().unwrap_or_default()),
+    )
+}
+
+fn effect_with_cause(reply: &Value, cause: lifetime::Cause) -> Value {
     let mut effect = json!({"state":if reply["reason"] == "door-complete" {"completed"} else {"refused"},
         "reason":reply["reason"],"exit_status":reply["status"],"ref_check":reply["ref_check"],
         "stdin_bytes":reply["stdin_bytes"],"stdout_bytes":reply["stdout_bytes"],
@@ -1197,36 +1295,23 @@ pub(crate) fn effect_from_final(reply: &Value) -> Value {
         effect["compute"] = detail.clone();
     }
     effect["ending"] = crate::requests::unobserved_ending();
-    effect["ending"]["cause"] = json!(ending_cause(reply["reason"].as_str().unwrap_or_default()));
+    effect["ending"]["cause"] = json!(cause.name());
     effect["ending"]["local_child"] = json!("not-started");
     effect["ending"]["remote"]["state"] = json!("not-started");
     effect
 }
 
-fn ending_cause(reason: &str) -> &'static str {
-    match reason {
-        "door-complete" => "child-exit",
-        "door-deadline-refusal" | "door-request-deadline" => "deadline",
-        "door-disconnect-refusal" => "disconnect",
-        "door-abandoned" => "abandoned",
-        "door-transport-refusal" => "transport",
-        _ => "refusal",
-    }
-}
-
 fn observed_effect(reply: &Value, wait: &RequestWait) -> Value {
-    let mut effect = effect_from_final(reply);
-    let observed = wait
-        .ending
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+    let cause = wait.cause.select(lifetime::Cause::for_reply(
+        reply["reason"].as_str().unwrap_or_default(),
+    ));
+    if let Some(life) = &wait.lifetime {
+        life.finish();
+    }
+    let mut effect = effect_with_cause(reply, cause);
+    let observed = wait.ending_snapshot();
     if observed["local_child"] != "unobserved" {
         effect["ending"] = observed;
-        if effect["ending"]["cause"] == "unobserved" {
-            effect["ending"]["cause"] =
-                json!(ending_cause(reply["reason"].as_str().unwrap_or_default()));
-        }
     }
     *wait
         .observed_effect
@@ -1288,10 +1373,28 @@ thread_local! {
     static REQUEST_READY: std::cell::RefCell<Option<RequestReadiness>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
 fn wait_answer(store: &Store, id: &str, stream: &UnixStream, base_deadline: Instant) -> Answer {
+    wait_answer_controlled(store, id, stream, base_deadline, None)
+}
+
+fn wait_answer_controlled(
+    store: &Store,
+    id: &str,
+    stream: &UnixStream,
+    base_deadline: Instant,
+    control: Option<&RequestWait>,
+) -> Answer {
     let queued = Instant::now();
     let mut interval = Duration::from_millis(10);
     loop {
+        if let Some(stop) = control.and_then(|wait| wait.stop(base_deadline)) {
+            return match stop {
+                lifetime::Cause::Deadline => Answer::Deadline(queued.elapsed().as_secs_f64()),
+                lifetime::Cause::Disconnect => Answer::Disconnect(queued.elapsed().as_secs_f64()),
+                _ => Answer::ReadFailure(queued.elapsed().as_secs_f64()),
+            };
+        }
         let record = match store.waiting_request_until(id, base_deadline) {
             Ok(record) => record,
             Err(error) => {
@@ -1321,7 +1424,11 @@ fn wait_answer(store: &Store, id: &str, stream: &UnixStream, base_deadline: Inst
             }
         });
         let deadline = store.request_deadline(base_deadline);
-        match peer_disconnected(stream) {
+        match if control.is_some() {
+            Ok(false)
+        } else {
+            peer_disconnected(stream)
+        } {
             Ok(true) => return Answer::Disconnect(queued.elapsed().as_secs_f64()),
             Err(error) => {
                 let _logged = writeln!(io::stderr().lock(), "door wait peer: {error}");
@@ -1518,7 +1625,7 @@ fn root_refusal(
     started: Instant,
 ) -> io::Result<()> {
     let (bounded_request, _) =
-        announce_compute_deadline(stream, registration, peer, request, None, started);
+        announce_compute_deadline(stream, registration, peer, request, None, started.elapsed());
     let request = &bounded_request;
     let (_request_guard, admission_error) = if peer == registration.worker_uid {
         match RequestGuard::acquire_wait(owner_home, registration, request, None, started) {
@@ -1646,7 +1753,7 @@ fn announce_compute_deadline(
     peer: u32,
     request: &Value,
     route: Option<&transport::HostRunner>,
-    started: Instant,
+    elapsed: Duration,
 ) -> (Value, u64) {
     // Announce every well-formed authenticated compute candidate before admission.
     // Only a route-validated work request can select a longer owner deadline.
@@ -1677,7 +1784,7 @@ fn announce_compute_deadline(
             .unwrap_or(0)
             .min(registered_deadline_ms);
         bounded_request["deadline_ms"] = json!(bound);
-        let deadline = started + Duration::from_millis(bound);
+        let deadline = Instant::now() + Duration::from_millis(bound).saturating_sub(elapsed);
         // Preserve the normal disconnect record even when the peer leaves before this frame.
         let _announcement = frame_write_until(
             stream,
@@ -1695,6 +1802,37 @@ fn announce_compute_deadline(
     (bounded_request, registered_deadline_ms)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finish_stopped(
+    store: &Store,
+    id: &str,
+    wait: &RequestWait,
+    registration: &Registration,
+    peer: u32,
+    started: Instant,
+    stop: lifetime::Cause,
+) -> io::Result<(Value, Vec<u8>)> {
+    let mut reply = transport::refusal(registration, peer, stop.reason(), started);
+    reply["request_id"] = json!(id);
+    let effect = observed_effect(&reply, wait);
+    if let Err(error) = store.record_effect(id, effect).and_then(|record| {
+        if crate::requests::decided_enforce(
+            record.value()["mode"].as_str().unwrap_or_default(),
+            &record.value()["would_do"]["decision"],
+        ) {
+            store.publish_observed(id)
+        } else {
+            store.publish_waiting(id)
+        }
+    }) {
+        post_reply_failure(store, &registration.run, id, "stopped-record", error.kind);
+        reply["request_record_error"] = json!(error.line());
+    }
+    wait.report(&mut reply);
+    wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
+    Ok((reply, Vec::new()))
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn serve_request_with_agent(
     stream: &mut UnixStream,
@@ -1710,22 +1848,102 @@ fn serve_request_with_agent(
     configured_model: Option<&str>,
     started: Instant,
 ) -> io::Result<(Value, Vec<u8>)> {
-    let (bounded_request, registered_deadline_ms) =
-        announce_compute_deadline(stream, registration, peer, request, route, started);
+    serve_request_with_agent_at(
+        stream,
+        registration,
+        peer,
+        request,
+        route,
+        runner,
+        owner_home,
+        rubric,
+        fixture_store,
+        agent,
+        configured_model,
+        started,
+        lifetime::Start::at(started)?,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn serve_request_with_agent_at(
+    stream: &mut UnixStream,
+    registration: &Registration,
+    peer: u32,
+    request: &Value,
+    route: Option<&transport::HostRunner>,
+    runner: Option<&dyn transport::Runner>,
+    owner_home: Option<&Path>,
+    rubric: Option<&Rubric>,
+    fixture_store: Option<&Store>,
+    agent: Option<&dyn agent::AgentRunner>,
+    configured_model: Option<&str>,
+    started: Instant,
+    acceptance: lifetime::Start,
+) -> io::Result<(Value, Vec<u8>)> {
+    let (bounded_request, registered_deadline_ms) = announce_compute_deadline(
+        stream,
+        registration,
+        peer,
+        request,
+        route,
+        acceptance.elapsed().unwrap_or(Duration::MAX),
+    );
     let request = &bounded_request;
     // Classify only a route-validated operation; all other shapes retain exclusive admission.
     let admission_operation = route.and_then(|route| {
         transport::argument_bytes(request).and_then(|args| route.allowed(&args, registration))
     });
+    let maximum = if admission_operation == Some(transport::Operation::Compute) {
+        registered_deadline_ms
+    } else {
+        120_000
+    };
+    // Invalid words still reach the existing request-shape refusal below.
+    let budget = request["deadline_ms"]
+        .as_u64()
+        .filter(|ms| *ms > 0 && *ms <= maximum)
+        .unwrap_or(maximum);
+    let admission_deadline = started + Duration::from_millis(budget);
+    let full_close = !matches!(
+        admission_operation,
+        Some(
+            transport::Operation::GitReceive
+                | transport::Operation::GitUpload
+                | transport::Operation::GitUploadV2
+        )
+    );
+    let wait = std::sync::Arc::new(
+        RequestWait::new(stream)?.with_lifetime(acceptance, full_close, stream)?,
+    );
     // Claim the authenticated box before any preflight or intent record write,
     // and retain it through the durable effect and sent final reply.
     let (mut request_guard, admission_error) = if let Some(home) =
         owner_home.filter(|_| peer == registration.worker_uid)
     {
-        match RequestGuard::acquire_wait(home, registration, request, admission_operation, started)
-        {
+        let clock: &dyn AdmissionClock = &RealAdmissionClock;
+        #[cfg(test)]
+        let fixture_clock = ADMISSION_CLOCK.with(|slot| slot.borrow().clone());
+        #[cfg(test)]
+        let clock = fixture_clock.as_deref().unwrap_or(clock);
+        match RequestGuard::acquire_controlled(
+            home,
+            registration,
+            request,
+            admission_operation,
+            started,
+            clock,
+            Some((&wait, admission_deadline)),
+        ) {
             Ok((Some(guard), _)) => (Some(guard), None),
             Ok((None, waited)) => {
+                if let Some(stop) = wait.stop(admission_deadline) {
+                    let mut reply = transport::refusal(registration, peer, stop.reason(), started);
+                    reply["waited_seconds"] = json!(waited.as_secs_f64());
+                    wait.report(&mut reply);
+                    wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
+                    return Ok((reply, Vec::new()));
+                }
                 return concurrent_refusal(stream, registration, peer, started, waited);
             }
             Err(error) => (None, Some(error)),
@@ -1857,7 +2075,6 @@ fn serve_request_with_agent(
         )?;
         return Ok((reply, Vec::new()));
     };
-    let wait = std::sync::Arc::new(RequestWait::new(stream)?);
     let bound_runner = transport::ComputeRunner {
         inner: runner,
         words: &words,
@@ -1906,7 +2123,10 @@ fn serve_request_with_agent(
     let class = rubric.unwrap_or(&default_rubric).class();
     let setting = match store.ensure_first_mode(class) {
         Ok(setting) => setting,
-        Err(error) if crate::requests::store::is_lock_contention(&error) => {
+        Err(error)
+            if wait.stop(deadline).is_some()
+                || crate::requests::store::is_lock_contention(&error) =>
+        {
             let mut reply =
                 transport::refusal(registration, peer, "door-request-record-refusal", started);
             reply["request_record_error"] = json!(error.line());
@@ -1931,7 +2151,9 @@ fn serve_request_with_agent(
             store
                 .learned_judgement(class, operation.name(), &shape_key)
                 .or_else(|error| {
-                    if crate::requests::store::is_lock_contention(&error) {
+                    if wait.stop(deadline).is_some()
+                        || crate::requests::store::is_lock_contention(&error)
+                    {
                         return Err(error);
                     }
                     Ok((
@@ -1950,7 +2172,10 @@ fn serve_request_with_agent(
         },
     ) {
         Ok(judgement) => judgement,
-        Err(error) if crate::requests::store::is_lock_contention(&error) => {
+        Err(error)
+            if wait.stop(deadline).is_some()
+                || crate::requests::store::is_lock_contention(&error) =>
+        {
             let mut reply =
                 transport::refusal(registration, peer, "door-request-record-refusal", started);
             reply["request_record_error"] = json!(error.line());
@@ -1996,12 +2221,18 @@ fn serve_request_with_agent(
         let mut result = agent.map_or_else(
             || agent::RunnerOutcome::referral("failure", "door-agent-unconfigured", Instant::now()),
             |runner| match input.encode() {
-                Ok(bytes) => runner.judge_request(
-                    &bytes,
-                    wait.deadline(deadline)
-                        .saturating_duration_since(Instant::now()),
-                    &json!({"loop":registration.loop_name,"run":registration.run,"request_id":id}),
-                ),
+                Ok(bytes) => {
+                    let began = Instant::now();
+                    let life = wait.lifetime.as_ref();
+                    let boot = life.and_then(|life| life.elapsed().ok()).unwrap_or_default();
+                    let now = || began + life.and_then(|life| life.elapsed().ok()).unwrap_or(boot).saturating_sub(boot);
+                    runner.judge_request_controlled(
+                        &bytes,
+                        wait.deadline(deadline).saturating_duration_since(Instant::now()),
+                        &json!({"loop":registration.loop_name,"run":registration.run,"request_id":id}),
+                        &now, &|| wait.stop(deadline).is_some(),
+                    )
+                },
                 Err(error) => agent::RunnerOutcome::referral("failure", error.0, Instant::now()),
             },
         );
@@ -2078,10 +2309,21 @@ fn serve_request_with_agent(
             .take()
             .map_or(Ok(deadline), |ready| ready(&id))
     })?;
+    if (initially_immediate || synchronous_agent)
+        && let Some(stop) = wait.stop(deadline)
+    {
+        return finish_stopped(&store, &id, &wait, registration, peer, started, stop);
+    }
     if synchronous_agent {
         // The intent is durable before any vendor call, including audit.
         // record_agent merges under the store lock before publishing waiting.
         let (result, _verdict) = judge(&binding_source, &id);
+        let stopped = wait.stop(deadline);
+        if stopped.is_some()
+            && let Some(life) = &wait.lifetime
+        {
+            life.finish();
+        }
         if let Err(error) = store.record_agent(
             &id,
             &result,
@@ -2096,6 +2338,9 @@ fn serve_request_with_agent(
             wait.report(&mut reply);
             wait.write_final(&reply, Instant::now() + Duration::from_secs(2))?;
             return Ok((reply, Vec::new()));
+        }
+        if let Some(stop) = stopped {
+            return finish_stopped(&store, &id, &wait, registration, peer, started, stop);
         }
         would_do = json!({"decision":result.verdict,"reason":result.reason});
     }
@@ -2255,7 +2500,7 @@ fn serve_request_with_agent(
             (reply, Vec::new())
         });
     }
-    let answer = wait_answer(&store, &id, stream, deadline);
+    let answer = wait_answer_controlled(&store, &id, stream, deadline, Some(&wait));
     match answer {
         Answer::Allow(wall) => {
             let complete = |reply: &Value| {
@@ -2843,6 +3088,8 @@ fn run_service_with_snapshot(
     for connection in listener.incoming() {
         let mut stream =
             connection.map_err(|error| LaneError::operation("door-socket", error.to_string()))?;
+        let acceptance = lifetime::Start::now()
+            .map_err(|error| LaneError::operation("door-clock", error.to_string()))?;
         let Some(guard) = admit_peer(&active, &mut stream) else {
             continue;
         };
@@ -2857,7 +3104,7 @@ fn run_service_with_snapshot(
         let compute_deadlines = Arc::clone(&compute_deadlines);
         thread::spawn(move || {
             let _guard = guard;
-            let started = Instant::now();
+            let started = acceptance.awake;
             let result = (|| {
                 let uid = mapped_peer_uid(&stream, &peer_map)?;
                 let request = frame_read_until(&mut stream, started + PEER_DEADLINE)?;
@@ -2903,7 +3150,7 @@ fn run_service_with_snapshot(
                         None
                     }
                 };
-                serve_request_with_agent(
+                serve_request_with_agent_at(
                     &mut stream,
                     &registration,
                     uid,
@@ -2916,6 +3163,7 @@ fn run_service_with_snapshot(
                     Some(agent_runner.as_ref()),
                     Some(&agent_runner.model),
                     started,
+                    acceptance,
                 )
                 .map(|_reply| ())
             })();
@@ -4736,11 +4984,12 @@ mod tests {
                 let read_reply = FixtureClient::answer;
                 for _ in 0..2 {
                     let observed = Arc::clone(&observed);
+                    let expired = Instant::now();
                     // Keep the watcher live while the receive is waiting. Only
-                    // its actual observation arms the unchanged 300 ms claim.
+                    // its actual observation permits this fixture to end the wait.
                     super::REQUEST_READY.with(|slot| {
                         *slot.borrow_mut() = Some(Box::new(move |id| {
-                            let setup = Instant::now() + Duration::from_secs(2);
+                            let setup = Instant::now() + FIXTURE_HANG;
                             while !observed
                                 .lock()
                                 .map_err(|_| io::Error::other("observer lock"))?
@@ -4751,16 +5000,20 @@ mod tests {
                                 }
                                 thread::sleep(Duration::from_millis(5));
                             }
-                            Ok(Instant::now() + Duration::from_millis(300))
+                            Ok(if floor == "allow" {
+                                Instant::now() + FIXTURE_HANG
+                            } else {
+                                expired
+                            })
                         }));
                     });
                     let (runner, _, _) = counting_runner(&fixture);
                     let (socket, server) =
-                        fixture_service(&fixture, runner, rubric(Some("allow")), 300, None);
+                        fixture_service(&fixture, runner, rubric(Some("allow")), 120_000, None);
                     let mut client = socket;
                     client
                         .send(&json!({"schema":2,"argv":[b"fixture".to_vec(),
-                            b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":300}))
+                            b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":120_000}))
                         .expect("receive request");
                     client.shutdown(Shutdown::Write).expect("receive end");
                     let _reply = read_reply(&mut client);
@@ -4770,8 +5023,9 @@ mod tests {
                         .expect("service reply");
                 }
                 let (runner, _, _) = counting_runner(&fixture);
-                let (socket, server) = fixture_service(&fixture, runner, rubric(None), 2000, None);
-                let mut echo = send_probe(socket, 2000);
+                let (socket, server) =
+                    fixture_service(&fixture, runner, rubric(None), 120_000, None);
+                let mut echo = send_probe(socket, 120_000);
                 let echo_frame = read_reply(&mut echo);
                 assert_eq!(
                     echo_frame["queue_state"],
@@ -5171,20 +5425,27 @@ mod tests {
         let held = store.fixture_exclusive_lock().expect("sibling holder");
         let (mut worker, mut server) = FixtureClient::pair().expect("worker connection");
         let started = Instant::now();
+        let (acceptance, clock) = super::lifetime::Start::controlled(started);
         crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE
-            .with(|bound| bound.set(Some(Duration::from_millis(30))));
-        super::WAIT_CREDIT_CAP.with(|cap| cap.set(Some(60)));
-        let (reply, _) = serve_request(
+            .with(|bound| bound.set(Some(FIXTURE_HANG)));
+        super::WAIT_CREDIT_CAP.with(|cap| cap.set(Some(50)));
+        super::BEFORE_CREDIT_WRITE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || clock.advance(120_051)));
+        });
+        let (reply, _) = super::serve_request_with_agent_at(
             &mut server,
             &registration,
             3000,
-            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":30}),
+            &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
             Some(&route),
             Some(&runner),
             Some(&fixture.home),
             Some(&rubric(Some("allow"))),
             Some(&store),
+            None,
+            None,
             started,
+            acceptance,
         )
         .expect("named admission lock deadline reply");
         crate::requests::store::WRITER_LOCK_WAIT_OVERRIDE.with(|bound| bound.set(None));
@@ -5196,23 +5457,24 @@ mod tests {
                 break frame;
             }
             let credit = frame["wait_ms"].as_u64().expect("credit milliseconds");
-            assert!(credit >= observed_credit && credit <= 60);
+            assert!(credit >= observed_credit && credit <= 50);
             observed_credit = credit;
         };
-        assert!(observed_credit >= 50);
+        assert_eq!(observed_credit, 50);
         assert_eq!(delivered, reply);
-        assert_eq!(reply["reason"], "door-request-record-refusal");
-        assert_eq!(reply["request_lock_wait_credit_ms"], 60);
-        assert_eq!(reply["request_lock_wait_credit_cap_ms"], 60);
+        assert_eq!(reply["reason"], "door-request-deadline");
+        assert_eq!(reply["stop_cause"], "deadline");
+        assert_eq!(reply["request_lock_wait_credit_ms"], 50);
+        assert_eq!(reply["request_lock_wait_credit_cap_ms"], 50);
         assert!(
             reply["request_lock_wait_ms"]
                 .as_u64()
                 .expect("measured contention")
-                >= 60
+                >= 50
         );
         let line = super::final_line(&["fixture".into(), "git status --short".into()], &reply)
             .expect("worker diagnostic");
-        assert!(line.contains("request lock:"), "{line}");
+        assert!(line.contains("request lock stopped:"), "{line}");
         assert!(line.contains("wait_seconds="), "{line}");
         assert!(line.contains("holder_request_id=S:holder"), "{line}");
         let mut preflight = reply;
@@ -5502,6 +5764,7 @@ mod tests {
             }
             let (runner, _, _) = counting_runner(&fixture);
             let route = route_for(&fixture.home);
+            crate::requests::store::CHECK_ACTIVE_FILING.with(|check| check.set(true));
             let result = super::serve_request_with_agent(
                 &mut stream,
                 &registration,
@@ -5515,6 +5778,10 @@ mod tests {
                 None,
                 None,
                 Instant::now(),
+            );
+            assert!(
+                !crate::requests::store::CHECK_ACTIVE_FILING.with(std::cell::Cell::get),
+                "door used the lease-first filing boundary"
             );
             assert_eq!(result.is_err(), broken, "transport result {result:?}");
             if !broken {
@@ -5530,6 +5797,279 @@ mod tests {
             {
                 eprintln!("ENDING-TRANSPORT {}", rows[0].value());
             }
+        }
+    }
+
+    /// ´test:unit:door-acceptance-clock-and-close-stop-admission-and-compute´
+    #[test]
+    fn door_acceptance_clock_and_close_stop_admission_and_compute() {
+        for admission in [true, false] {
+            for disconnected in [false, true] {
+                let fixture = Fixture::new();
+                fixture.set_floor("allow");
+                let store = fixture.store();
+                set_fixture_mode(&store, crate::requests::Mode::Allow);
+                let registration = concurrent_registration(3000);
+                let (mut peer, mut stream) = FixtureClient::pair().expect("pair");
+                // EOF alone must leave the response side and the request alive.
+                peer.shutdown(Shutdown::Write).expect("input EOF");
+                let closed = peer.wire().try_clone().expect("close event");
+                let began = Instant::now();
+                let (start, clock) = super::lifetime::Start::controlled(began);
+                let action = move || {
+                    if disconnected {
+                        closed.shutdown(Shutdown::Both).expect("full close event");
+                    } else {
+                        clock.advance(240_000);
+                    }
+                };
+                let guard = admission.then(|| {
+                    super::RequestGuard::acquire(&fixture.home, &registration)
+                        .expect("guard")
+                        .expect("uncontended")
+                });
+                if admission {
+                    super::ADMISSION_CONTENDED
+                        .with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
+                    super::ADMISSION_CLOCK.with(|slot| {
+                        *slot.borrow_mut() =
+                            Some(std::rc::Rc::new(ControlledAdmissionClock::default()));
+                    });
+                } else {
+                    super::transport::fixture_after_spawn(move || {
+                        action();
+                        Instant::now() + Duration::from_secs(120)
+                    });
+                }
+                let (runner, _, _) = counting_runner(&fixture);
+                let route = route_for(&fixture.home);
+                let result = super::serve_request_with_agent_at(
+                    &mut stream,
+                    &registration,
+                    3000,
+                    &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+                    Some(&route),
+                    Some(&runner),
+                    Some(&fixture.home),
+                    None,
+                    Some(&store),
+                    None,
+                    None,
+                    began,
+                    start,
+                );
+                super::ADMISSION_CLOCK.with(|slot| *slot.borrow_mut() = None);
+                drop(guard);
+                let cause = if disconnected {
+                    "disconnect"
+                } else {
+                    "deadline"
+                };
+                if disconnected {
+                    assert!(result.is_err(), "closed final write: {result:?}");
+                } else {
+                    let reply = peer.answer();
+                    assert_eq!(reply["stop_cause"], cause, "{reply}");
+                    assert_eq!(reply["deadline_clock"], "boottime");
+                    assert_eq!(reply["status"], 125);
+                    assert!(result.is_ok(), "{result:?}");
+                    #[allow(clippy::print_stderr)]
+                    {
+                        eprintln!("STOP-REPLY {reply}");
+                    }
+                }
+                let rows = store.list_run("R").expect("records");
+                if admission {
+                    assert!(rows.is_empty(), "admission stops before filing");
+                } else {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0].value()["effect"]["ending"]["cause"], cause);
+                    assert_eq!(rows[0].value()["effect"]["ending"]["local_child"], "reaped");
+                    #[allow(clippy::print_stderr)]
+                    {
+                        eprintln!("STOP-RECORD {}", rows[0].value());
+                    }
+                }
+            }
+        }
+    }
+
+    /// ´test:unit:door-judgement-stop-prevents-effect-and-retains-first-cause´
+    #[test]
+    fn door_judgement_stop_prevents_effect_and_retains_first_cause() {
+        struct Stops(std::sync::Arc<super::lifetime::TestClock>, UnixStream, bool);
+        impl super::agent::AgentRunner for Stops {
+            fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+                if self.2 {
+                    self.1
+                        .shutdown(Shutdown::Both)
+                        .expect("full close during judgement");
+                } else {
+                    self.0.advance(240_000);
+                }
+                super::agent::RunnerOutcome::referral(
+                    "failure",
+                    "fixture stopped judgement",
+                    Instant::now(),
+                )
+            }
+        }
+        for disconnected in [false, true] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            set_fixture_mode(&store, crate::requests::Mode::Audit);
+            let registration = concurrent_registration(3000);
+            let (mut peer, mut stream) = FixtureClient::pair().expect("pair");
+            let began = Instant::now();
+            let (start, clock) = super::lifetime::Start::controlled(began);
+            let agent = Stops(
+                clock,
+                peer.wire().try_clone().expect("close control"),
+                disconnected,
+            );
+            let (runner, calls, _) = counting_runner(&fixture);
+            let route = route_for(&fixture.home);
+            let result = super::serve_request_with_agent_at(
+                &mut stream,
+                &registration,
+                3000,
+                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+                Some(&route),
+                Some(&runner),
+                Some(&fixture.home),
+                None,
+                Some(&store),
+                Some(&agent),
+                None,
+                began,
+                start,
+            );
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                0,
+                "stopped judgement must not run an effect"
+            );
+            assert_eq!(result.is_err(), disconnected, "{result:?}");
+            let cause = if disconnected {
+                "disconnect"
+            } else {
+                "deadline"
+            };
+            if !disconnected {
+                let reply = peer.answer();
+                assert_eq!(reply["stop_cause"], cause);
+                assert_eq!(reply["reason"], "door-request-deadline");
+                assert_eq!(reply["status"], 125);
+            }
+            let rows = store.list_run("R").expect("terminal record");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].value()["effect"]["ending"]["cause"], cause);
+            assert_eq!(
+                rows[0].value()["effect"]["ending"]["local_child"],
+                "not-started"
+            );
+        }
+    }
+
+    /// ´test:unit:door-git-routes-do-not-treat-full-close-as-cancellation´
+    #[test]
+    fn door_git_routes_do_not_treat_full_close_as_cancellation() {
+        for operation in ["git-upload-pack", "git-receive-pack"] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            set_fixture_mode(&store, crate::requests::Mode::Allow);
+            store
+                .set_mode(
+                    &crate::requests::modes::ModeTarget::class("git").expect("class"),
+                    crate::requests::Mode::Allow,
+                    "fixture owner",
+                    "fixture first setting",
+                    "1",
+                    &[],
+                )
+                .expect("git mode");
+            let registration = concurrent_registration(3000);
+            let (mut peer, mut stream) = FixtureClient::pair().expect("pair");
+            let closed = peer.wire().try_clone().expect("close event");
+            super::REQUEST_READY.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |_| {
+                    closed.shutdown(Shutdown::Both).expect("full close");
+                    Ok(Instant::now() + Duration::from_secs(120))
+                }));
+            });
+            let (runner, _, _) = counting_runner(&fixture);
+            let route = route_for(&fixture.home);
+            let result = super::serve_request_with_agent(
+                &mut stream,
+                &registration,
+                3000,
+                &json!({"schema":2,"argv":[b"fixture".to_vec(), format!("{operation} '~/mirrors/R.git'").into_bytes()],"deadline_ms":120_000}),
+                Some(&route),
+                Some(&runner),
+                Some(&fixture.home),
+                None,
+                Some(&store),
+                None,
+                None,
+                Instant::now(),
+            );
+            assert!(result.is_err(), "closed reply transport: {result:?}");
+            let rows = store.list_run("R").expect("record");
+            assert_eq!(rows.len(), 1);
+            assert_ne!(
+                rows[0].value()["effect"]["ending"]["cause"],
+                "disconnect",
+                "{operation}: close retains Git EOF/transport semantics"
+            );
+        }
+    }
+
+    /// ´test:unit:door-stopped-decided-enforce-outcome-remains-observed´
+    #[test]
+    fn door_stopped_decided_enforce_outcome_remains_observed() {
+        for decision in ["allow", "refuse"] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            set_fixture_mode(&store, crate::requests::Mode::Enforce);
+            let registration = concurrent_registration(3000);
+            let (mut peer, mut stream) = FixtureClient::pair().expect("pair");
+            let began = Instant::now();
+            let (start, clock) = super::lifetime::Start::controlled(began);
+            super::REQUEST_READY.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |_| {
+                    clock.advance(240_000);
+                    Ok(began + Duration::from_secs(120))
+                }));
+            });
+            let (runner, calls, _) = counting_runner(&fixture);
+            let route = route_for(&fixture.home);
+            super::serve_request_with_agent_at(
+                &mut stream,
+                &registration,
+                3000,
+                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+                Some(&route),
+                Some(&runner),
+                Some(&fixture.home),
+                Some(&rubric(Some(decision))),
+                Some(&store),
+                None,
+                None,
+                began,
+                start,
+            )
+            .expect("stopped before effect");
+            assert_eq!(peer.answer()["stop_cause"], "deadline");
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+            let rows = store.list_run("R").expect("records");
+            assert_eq!(
+                rows[0].value()["state"],
+                "observed",
+                "decided {decision} is not new triage"
+            );
         }
     }
 
@@ -6241,7 +6781,13 @@ mod tests {
             let fixture = Fixture::new();
             let store = fixture.store();
             let (runner, calls, _states) = counting_runner(&fixture);
-            let deadline_ms = if disconnect { 2000 } else { 120 };
+            let deadline_ms = 120_000;
+            if !disconnect {
+                let expired = Instant::now();
+                super::REQUEST_READY.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move |_| Ok(expired)));
+                });
+            }
             let (socket, server) =
                 fixture_service(&fixture, runner, rubric(None), deadline_ms, None);
             let mut client = send_probe(socket, deadline_ms);
@@ -6485,7 +7031,13 @@ mod tests {
             let fixture = Fixture::new();
             let store = fixture.store();
             let (runner, calls, _) = counting_runner(&fixture);
-            let deadline_ms = if answer == "deadline" { 120 } else { 2000 };
+            let deadline_ms = 120_000;
+            if answer == "deadline" {
+                let expired = Instant::now();
+                super::REQUEST_READY.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move |_| Ok(expired)));
+                });
+            }
             let (socket, server) = fixture_service_with(
                 &fixture,
                 runner,
@@ -6528,7 +7080,15 @@ mod tests {
             let fixture = Fixture::new();
             let store = fixture.store();
             let (runner, calls, _) = counting_runner(&fixture);
-            let (socket, server) = fixture_stub_service(&fixture, runner, rubric(None), 2000, None);
+            if !answered {
+                let expired = Instant::now();
+                super::REQUEST_READY.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move |_| Ok(expired)));
+                });
+            }
+            super::transport::STUB_TEST_BUDGET.with(|slot| slot.set(Some(120_000)));
+            let (socket, server) =
+                fixture_stub_service(&fixture, runner, rubric(None), 120_000, None);
             let labeler = answered.then(|| {
                 thread::spawn(move || {
                     let id = wait_filed(&store);
@@ -6553,7 +7113,7 @@ mod tests {
             assert!(
                 reply["queue_wall_seconds"]
                     .as_f64()
-                    .is_some_and(|wall| wall > 0.0)
+                    .is_some_and(|wall| wall >= 0.0)
             );
             assert_eq!(
                 calls.load(std::sync::atomic::Ordering::Relaxed),

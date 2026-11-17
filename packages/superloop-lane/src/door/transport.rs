@@ -971,6 +971,27 @@ pub(super) fn with_writer<T>(
     }
 }
 
+struct Abort {
+    stopped: AtomicBool,
+    cause: Arc<super::lifetime::FirstCause>,
+}
+
+impl Abort {
+    const fn new(cause: Arc<super::lifetime::FirstCause>) -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+            cause,
+        }
+    }
+    fn load(&self, ordering: Ordering) -> bool {
+        self.stopped.load(ordering)
+    }
+    fn stop(&self, cause: super::lifetime::Cause) {
+        self.cause.select(cause);
+        self.stopped.store(true, Ordering::Release);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn output_pump<R: io::Read>(
     mut source: R,
@@ -978,14 +999,17 @@ fn output_pump<R: io::Read>(
     kind: &'static str,
     total: &Arc<AtomicUsize>,
     stream_count: &Arc<AtomicUsize>,
-    abort: &Arc<AtomicBool>,
+    abort: &Arc<Abort>,
     deadline: Instant,
     capture: Option<&Mutex<Vec<u8>>>,
     bound: usize,
 ) -> io::Result<()> {
     let mut buffer = [0_u8; CHUNK];
     loop {
-        if Instant::now() >= deadline || abort.load(Ordering::Relaxed) {
+        if Instant::now() >= deadline {
+            abort.stop(super::lifetime::Cause::Deadline);
+        }
+        if abort.load(Ordering::Relaxed) {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "door output deadline",
@@ -1011,7 +1035,7 @@ fn output_pump<R: io::Read>(
             .saturating_add(count)
             > bound
         {
-            abort.store(true, Ordering::Relaxed);
+            abort.stop(super::lifetime::Cause::Refusal);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "door output exceeds limit",
@@ -1025,7 +1049,18 @@ fn output_pump<R: io::Read>(
         }
         stream_count.fetch_add(count, Ordering::Relaxed);
         if let Err(error) = send_output(writer, kind, &buffer[..count], deadline) {
-            abort.store(true, Ordering::Relaxed);
+            abort.stop(
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::NotConnected
+                ) {
+                    super::lifetime::Cause::Disconnect
+                } else {
+                    super::lifetime::Cause::Transport
+                },
+            );
             return Err(error);
         }
     }
@@ -1140,7 +1175,7 @@ fn input_pump(
     count: &Arc<AtomicUsize>,
     ref_check: &Arc<AtomicU8>,
     ref_packet: &Arc<Mutex<Option<Value>>>,
-    abort: &Arc<AtomicBool>,
+    abort: &Arc<Abort>,
     stopped: &Arc<AtomicBool>,
     deadline: Instant,
 ) -> Result<(), &'static str> {
@@ -1149,7 +1184,7 @@ fn input_pump(
     let mut checked = expected_ref.is_none();
     loop {
         if Instant::now() >= deadline {
-            abort.store(true, Ordering::Relaxed);
+            abort.stop(super::lifetime::Cause::Deadline);
             return Err("door-deadline-refusal");
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1168,12 +1203,12 @@ fn input_pump(
                 if stopped.load(Ordering::Relaxed) {
                     return Ok(());
                 }
-                abort.store(true, Ordering::Relaxed);
+                abort.stop(super::lifetime::Cause::Deadline);
                 return Err("door-deadline-refusal");
             }
             Err(_) if stopped.load(Ordering::Relaxed) => return Ok(()),
             Err(_) => {
-                abort.store(true, Ordering::Relaxed);
+                abort.stop(super::lifetime::Cause::Disconnect);
                 return Err("door-disconnect-refusal");
             }
         };
@@ -1182,7 +1217,7 @@ fn input_pump(
                 return Ok(());
             }
             if !checked {
-                abort.store(true, Ordering::Relaxed);
+                abort.stop(super::lifetime::Cause::Refusal);
                 return Err("door-git-packet-refusal");
             }
             return Ok(());
@@ -1192,7 +1227,7 @@ fn input_pump(
             .saturating_add(read)
             > super::INPUT_LIMIT
         {
-            abort.store(true, Ordering::Relaxed);
+            abort.stop(super::lifetime::Cause::Refusal);
             return Err("door-input-limit-refusal");
         }
         if checked {
@@ -1201,7 +1236,7 @@ fn input_pump(
         } else {
             guarded.extend_from_slice(&buffer[..read]);
             if guarded.len() > 65_536 {
-                abort.store(true, Ordering::Relaxed);
+                abort.stop(super::lifetime::Cause::Refusal);
                 return Err("door-git-packet-refusal");
             }
             match checked_ref_packet(&guarded, expected_ref.unwrap_or_default()) {
@@ -1220,7 +1255,7 @@ fn input_pump(
                     if refusal.reason == "door-changed-ref-refusal" {
                         ref_check.store(REF_REFUSED, Ordering::Relaxed);
                     }
-                    abort.store(true, Ordering::Relaxed);
+                    abort.stop(super::lifetime::Cause::Refusal);
                     *ref_packet.lock().map_err(|_| "door-git-packet-refusal")? = refusal.packet;
                     return Err(refusal.reason);
                 }
@@ -1269,6 +1304,7 @@ pub(super) fn serve_compute(
     complete: Option<&Completion<'_>>,
     wait: Option<&super::RequestWait>,
 ) -> io::Result<Value> {
+    let request_base_deadline = deadline;
     let request_deadline_ms = deadline.saturating_duration_since(started).as_millis();
     let deadline = wait.map_or(deadline, |wait| wait.deadline(deadline));
     let writer = if let Some(wait) = wait {
@@ -1295,11 +1331,18 @@ pub(super) fn serve_compute(
     } else {
         "absent"
     };
-    if Instant::now() >= deadline
+    let stopping = wait.and_then(|wait| wait.stop(request_base_deadline));
+    if stopping.is_some()
+        || Instant::now() >= deadline
         || (operation == Operation::Compute
             && deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(10))
     {
-        let mut reply = refusal(registration, peer, "door-request-deadline", started);
+        let mut reply = refusal(
+            registration,
+            peer,
+            stopping.map_or("door-request-deadline", super::lifetime::Cause::reason),
+            started,
+        );
         if operation == Operation::Compute {
             reply["compute"] = super::compute::pending(runner.compute_words().unwrap_or_default());
             reply["registered_deadline_ms"] = json!(runner.compute_registered_deadline_ms());
@@ -1365,7 +1408,11 @@ pub(super) fn serve_compute(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("compute stderr absent"))?;
-    let abort = Arc::new(AtomicBool::new(false));
+    let cause = wait.map_or_else(
+        || Arc::new(super::lifetime::FirstCause::default()),
+        |wait| Arc::clone(&wait.cause),
+    );
+    let abort = Arc::new(Abort::new(Arc::clone(&cause)));
     let input_stopped = Arc::new(AtomicBool::new(false));
     let stdin_count = Arc::new(AtomicUsize::new(0));
     let ref_check = Arc::new(AtomicU8::new(REF_NOT_REACHED));
@@ -1430,18 +1477,30 @@ pub(super) fn serve_compute(
     };
     let mut outcome = "door-complete";
     let status = loop {
+        if let Some(stop) = wait.and_then(|wait| wait.stop(request_base_deadline)) {
+            outcome = if stop == super::lifetime::Cause::Deadline {
+                "door-deadline-refusal"
+            } else {
+                stop.reason()
+            };
+            stop_group(&mut child, runner.owns_process_group());
+            let _read_end = stream.shutdown(Shutdown::Read);
+            break child.wait()?;
+        }
         if abort.load(Ordering::Relaxed) {
             outcome = "door-transport-refusal";
             stop_group(&mut child, runner.owns_process_group());
             break child.wait()?;
         }
         if Instant::now() >= deadline {
+            cause.select(super::lifetime::Cause::Deadline);
             outcome = "door-deadline-refusal";
             stop_group(&mut child, runner.owns_process_group());
             let _read_end = stream.shutdown(Shutdown::Read);
             break child.wait()?;
         }
         if let Some(status) = child.try_wait()? {
+            cause.select(super::lifetime::Cause::ChildExit);
             break status;
         }
         thread::sleep(Duration::from_millis(5));
@@ -1452,7 +1511,10 @@ pub(super) fn serve_compute(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         ending["local_child"] = json!("reaped");
-        ending["cause"] = json!(super::ending_cause(outcome));
+        drop(ending);
+        if let Some(life) = &wait.lifetime {
+            life.finish();
+        }
     }
     let compute_wall = compute_started.elapsed().as_secs_f64();
     input_stopped.store(true, Ordering::Relaxed);
@@ -1477,21 +1539,10 @@ pub(super) fn serve_compute(
         outcome = "door-output-refusal";
     }
     if output_result.is_none() || error_result.is_none() {
-        abort.store(true, Ordering::Relaxed);
+        abort.stop(super::lifetime::Cause::Transport);
     }
     if output_total.load(Ordering::Relaxed) > bound {
         outcome = "door-output-limit-refusal";
-    }
-    if let Some(wait) = wait {
-        let mut ending = wait
-            .ending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // A pump can identify the deadline behind the shared abort signal.
-        // A later pipe error cannot replace an already observed deadline stop.
-        if ending["cause"] != "deadline" {
-            ending["cause"] = json!(super::ending_cause(outcome));
-        }
     }
     let code = if outcome == "door-complete" {
         status.code().unwrap_or(125)
@@ -1552,6 +1603,11 @@ pub(super) fn serve_compute(
 #[cfg(test)]
 pub(super) fn fixture_expire_after_spawn() {
     tests::SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = Some(Box::new(Instant::now)));
+}
+
+#[cfg(test)]
+pub(super) fn fixture_after_spawn(action: impl FnOnce() -> Instant + Send + 'static) {
+    tests::SPAWN_DEADLINE.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
 pub(super) fn compute_deadline_frame(registered: u64, requested: u64, deadline: Instant) -> Value {
@@ -2251,7 +2307,7 @@ mod tests {
     fn door_stub_and_output_pump_retry_interrupted_reads() {
         use std::sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         };
         let source = || InterruptedInput {
             interrupted: false,
@@ -2273,7 +2329,9 @@ mod tests {
         let (mut reader, writer) = FixtureClient::pair().expect("pair");
         let total = Arc::new(AtomicUsize::new(0));
         let count = Arc::new(AtomicUsize::new(0));
-        let abort = Arc::new(AtomicBool::new(false));
+        let abort = Arc::new(super::Abort::new(Arc::new(
+            crate::door::lifetime::FirstCause::default(),
+        )));
         let deadline = Instant::now() + Duration::from_secs(5);
         super::output_pump(
             source(),
