@@ -289,7 +289,7 @@ type ReaderAttemptHook = Box<dyn FnOnce(Option<Instant>)>;
 #[cfg(test)]
 thread_local! {
     static BEFORE_READER_LOCK_SLEEP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static BEFORE_READER_LOCK_ATTEMPT: std::cell::RefCell<Option<ReaderAttemptHook>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static BEFORE_READER_LOCK_ATTEMPT: std::cell::RefCell<Option<ReaderAttemptHook>> = const { std::cell::RefCell::new(None) };
     pub(crate) static WRITER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static READER_LOCK_WAIT_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static BEFORE_LEAF_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };

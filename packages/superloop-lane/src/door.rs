@@ -319,6 +319,11 @@ impl RequestWait {
         {
             observed_effect(reply, self);
         }
+        // An observed full close has no final reader. Preserve "unknown":
+        // no write was attempted, irrespective of which stop site observed it.
+        if self.cause.get() == Some(lifetime::Cause::Disconnect) {
+            return Ok(());
+        }
         #[cfg(test)]
         BEFORE_TERMINAL_WRITE.with(|slot| {
             if let Some(action) = slot.borrow_mut().take() {
@@ -377,7 +382,7 @@ impl RequestWait {
                             .ceil()
                     )
                 } else if reply["remote"]["state"] == "unconfirmed" {
-                    "the remote command is unconfirmed and no time bound was observed; report this stop to your loop; a repeat is admitted but may wait for the node run lock".to_owned()
+                    "the remote command is unconfirmed and no time bound was observed; report this stop to your loop; a repeat is admitted but may duplicate remote work".to_owned()
                 } else if matches!(
                     stop,
                     lifetime::Cause::ObservationFailure | lifetime::Cause::Transport
@@ -1120,6 +1125,8 @@ fn frame_write_final(
         Ok(())
     })();
     if result.is_err() {
+        // Lifetime-free callers (including agent probes) have no outer
+        // RequestWait close_output; this is their only partial-final closure.
         let _closed = stream.shutdown(Shutdown::Write);
     } else if value["status"] == 125 {
         drain_refusal(stream);
@@ -1540,6 +1547,16 @@ enum Answer {
     ReadFailure(f64),
 }
 
+impl Answer {
+    const fn stopped(cause: lifetime::Cause, wall: f64) -> Self {
+        match cause {
+            lifetime::Cause::Deadline => Self::Deadline(wall),
+            lifetime::Cause::Disconnect => Self::Disconnect(wall),
+            _ => Self::ReadFailure(wall),
+        }
+    }
+}
+
 #[cfg(test)]
 type RequestReadiness = Box<dyn FnOnce(&str) -> io::Result<Instant> + Send>;
 
@@ -1567,15 +1584,16 @@ fn wait_answer_controlled(
     let mut interval = Duration::from_millis(10);
     loop {
         if let Some(stop) = control.and_then(|wait| wait.stop(base_deadline)) {
-            return match stop {
-                lifetime::Cause::Deadline => Answer::Deadline(queued.elapsed().as_secs_f64()),
-                lifetime::Cause::Disconnect => Answer::Disconnect(queued.elapsed().as_secs_f64()),
-                _ => Answer::ReadFailure(queued.elapsed().as_secs_f64()),
-            };
+            return Answer::stopped(stop, queued.elapsed().as_secs_f64());
         }
         let record = match store.waiting_request_until(id, base_deadline) {
             Ok(record) => record,
             Err(error) => {
+                // The peer or deadline may have stopped during the store read.
+                // Keep that typed first cause instead of inventing a read fault.
+                if let Some(stop) = control.and_then(|wait| wait.stop(base_deadline)) {
+                    return Answer::stopped(stop, queued.elapsed().as_secs_f64());
+                }
                 if crate::requests::store::is_lock_contention(&error) {
                     let deadline = store.request_deadline(base_deadline);
                     #[cfg(test)]
@@ -2814,8 +2832,8 @@ fn serve_request_with_agent_at(
                 reply["reason"] = json!("door-record-incomplete");
                 reply["request_record_error"] = json!(error.line());
             }
+            wait.report(&mut reply);
             if !disconnected {
-                wait.report(&mut reply);
                 wait.write_final(&reply, admission_deadline)?;
             }
             Ok((reply, Vec::new()))
@@ -5795,6 +5813,15 @@ mod tests {
                 line.contains("a repeat is admitted but may wait for that lock"),
                 "{line}"
             );
+            wait.ending.lock().expect("ending")["remote"]["bound_seconds"] = Value::Null;
+            wait.report(&mut reply);
+            let line = super::final_line(&["fixture".into(), "git-upload-pack".into()], &reply)
+                .expect("Git notice");
+            assert!(!line.contains("run lock"), "{line}");
+            assert!(
+                line.contains("a repeat is admitted but may duplicate remote work"),
+                "{line}"
+            );
         }
     }
 
@@ -6422,7 +6449,10 @@ mod tests {
                     "deadline"
                 };
                 if disconnected {
-                    assert!(result.is_err(), "closed final write: {result:?}");
+                    assert!(
+                        result.is_ok(),
+                        "observed close is a successful stop: {result:?}"
+                    );
                 } else {
                     let reply = peer.answer();
                     assert_eq!(reply["stop_cause"], cause, "{reply}");
@@ -6506,7 +6536,7 @@ mod tests {
                 0,
                 "stopped judgement must not run an effect"
             );
-            assert_eq!(result.is_err(), disconnected, "{result:?}");
+            assert!(result.is_ok(), "stopped judgement: {result:?}");
             let cause = if disconnected {
                 "disconnect"
             } else {
@@ -6525,6 +6555,16 @@ mod tests {
                 rows[0].value()["effect"]["ending"]["local_child"],
                 "not-started"
             );
+            if disconnected {
+                assert_eq!(
+                    rows[0].value()["effect"]["ending"]["final_write"],
+                    "unknown"
+                );
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!("DISCONNECT-STOPPED {}", rows[0].value());
+                }
+            }
         }
     }
 
@@ -7588,6 +7628,21 @@ mod tests {
             let store = fixture.store();
             let (runner, calls, _) = counting_runner(&fixture);
             let deadline_ms = 120_000;
+            let (waiting, entered) = std::sync::mpsc::channel();
+            let (release, proceed) = std::sync::mpsc::channel();
+            if answer == "disconnect" {
+                super::REQUEST_READY.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move |_| {
+                        crate::requests::store::BEFORE_READER_LOCK_ATTEMPT.with(|hook| {
+                            *hook.borrow_mut() = Some(Box::new(move |_| {
+                                waiting.send(()).expect("owner wait entered");
+                                proceed.recv_timeout(FIXTURE_HANG).expect("peer closed");
+                            }));
+                        });
+                        Ok(Instant::now() + FIXTURE_HANG)
+                    }));
+                });
+            }
             if answer == "deadline" {
                 let expired = Instant::now();
                 super::REQUEST_READY.with(|slot| {
@@ -7609,7 +7664,9 @@ mod tests {
                 label(&store, &id, "refuse");
             }
             if answer == "disconnect" {
+                entered.recv_timeout(FIXTURE_HANG).expect("owner wait read");
                 drop(client);
+                release.send(()).expect("observe close in owner wait");
             } else {
                 let reply = client.answer();
                 assert_eq!(
@@ -7623,7 +7680,22 @@ mod tests {
                 assert_eq!(reply["queue_state"], expected_state);
                 assert_eq!(reply["status"], 125);
             }
-            server.join().expect("service").expect("wait outcome");
+            let outcome = server.join().expect("service");
+            assert!(outcome.is_ok(), "owner wait {answer}: {outcome:?}");
+            if answer == "disconnect" {
+                let reply = outcome.expect("stopped owner wait");
+                assert_eq!(reply["queue_state"], "deadline", "{reply}");
+                assert!(reply["request_record_error"].is_string(), "{reply}");
+                let rows = store.list_run("R").expect("durable record");
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!("DISCONNECT-OWNER {}", rows[0].value());
+                }
+                assert_eq!(
+                    rows[0].value()["effect"]["ending"]["final_write"],
+                    "unknown"
+                );
+            }
             assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
             assert_incomplete(&fixture, &id);
         }

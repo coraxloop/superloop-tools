@@ -1367,15 +1367,23 @@ fn door_compute_queue_deadline_and_disconnect_have_no_effect() {
         super::WAIT_CREDIT_CAP.with(|slot| slot.set(Some(0)));
         super::REQUEST_READY.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |_| {
-                ready.send(()).expect("filed request");
-                proceed
-                    .recv_timeout(super::tests::FIXTURE_HANG)
-                    .expect("peer action");
-                Ok(if disconnect {
-                    Instant::now() + super::tests::FIXTURE_HANG
+                if disconnect {
+                    crate::requests::store::BEFORE_READER_LOCK_ATTEMPT.with(|hook| {
+                        *hook.borrow_mut() = Some(Box::new(move |_| {
+                            ready.send(()).expect("owner wait entered");
+                            proceed
+                                .recv_timeout(super::tests::FIXTURE_HANG)
+                                .expect("peer action");
+                        }));
+                    });
+                    Ok(Instant::now() + super::tests::FIXTURE_HANG)
                 } else {
-                    Instant::now()
-                })
+                    ready.send(()).expect("filed request");
+                    proceed
+                        .recv_timeout(super::tests::FIXTURE_HANG)
+                        .expect("peer action");
+                    Ok(Instant::now())
+                }
             }));
         });
         let (socket, calls, server) =
@@ -1384,7 +1392,7 @@ fn door_compute_queue_deadline_and_disconnect_have_no_effect() {
         client.send(&json!({"schema":2,"argv":[b"fixture".to_vec(), b"/opt/fixture/bin/report git diff".to_vec()],"deadline_ms":120_000})).expect("request");
         filed
             .recv_timeout(super::tests::FIXTURE_HANG)
-            .expect("request ready");
+            .expect("filed deadline or owner wait entered");
         assert_eq!(client.event("compute-deadline")["type"], "compute-deadline");
         let reason = if disconnect {
             drop(client);
@@ -1398,9 +1406,21 @@ fn door_compute_queue_deadline_and_disconnect_have_no_effect() {
         };
         let reply = server.join().expect("server").expect("service");
         assert_eq!(reply["reason"], reason);
+        assert_eq!(reply["queue_state"], "deadline", "{reply}");
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         let rows = fixture.store().list_run(run).expect("records");
         assert_eq!(rows.len(), 1);
+        if disconnect {
+            assert_eq!(rows[0].value()["effect"]["ending"]["cause"], "disconnect");
+            assert_eq!(
+                rows[0].value()["effect"]["ending"]["final_write"],
+                "unknown"
+            );
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("DISCONNECT-QUEUE {}", rows[0].value());
+            }
+        }
         assert_eq!(rows[0].value()["effect"]["reason"], reason);
         assert_eq!(
             rows[0].value()["effect"]["compute"]["checkout_commit"],
@@ -1535,11 +1555,15 @@ fn door_compute_running_deadline_keeps_remote_outcome_unmeasured() {
             assert!(reply["compute"]["wrapper_exit_status"].is_null());
         }
         let result = server.join().expect("server ends");
-        if !disconnect {
-            result.expect("service");
-        }
+        result.expect("stopped service succeeds");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         let rows = fixture.store().list_run(run).expect("record");
+        if disconnect {
+            assert_eq!(
+                rows[0].value()["effect"]["ending"]["final_write"],
+                "unknown"
+            );
+        }
         assert_eq!(rows.len(), 1);
         assert!(rows[0].value()["effect"]["compute"]["wrapper_exit_status"].is_null());
         assert_eq!(

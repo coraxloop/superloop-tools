@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- An observed full peer close now ends admission, owner wait and running compute alike: no final is attempted, the durable final-write observation remains `unknown`, and the service returns successfully. A close selected during a request-store read retains its typed disconnect cause instead of becoming a read failure. Compatibility: this changes the service result and removes a spurious broken-pipe diagnostic; the request-life wave still supplies the one refresh and restart, with no additional rewrite or operator step (``prob:door:a-door-requests-life-is-watched-stopped-bounded-and-recovered``).
+
 - The door gives final replies the remaining request lifetime instead of a separate two-second write window. A slow live peer can drain queued output and receive its final; a partial final closes the write half and cannot be followed by credit. The stopped-caller notice rounds the remote bound upward to whole seconds, explains its unobserved start and admits a repeat without asking the worker to await a loop response. Compatibility: the door and SSH stub receive these changes through the same coordinated rewrite, repin and restart wave; no second stop or new record shape is required (``prob:door:a-door-requests-life-is-watched-stopped-bounded-and-recovered``).
 
 ### Added
