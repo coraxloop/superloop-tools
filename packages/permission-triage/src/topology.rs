@@ -2,7 +2,7 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -42,6 +42,9 @@ const REPETITIONS: u8 = 3;
 const CAPTURE_LIMIT: u64 = 1024 * 1024;
 const CAPTURE_LIMIT_USIZE: usize = 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
+// The probe's fake model only writes small capture files and a canned answer. Keep its
+// hang bound below the harness's 30-second hook timeout, far beyond loaded runs.
+const FAKE_MODEL_HANG_BOUND_MS: &str = "20000";
 
 /// Probe completion category used by the command-line exit contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,6 +322,11 @@ impl Progress<'_> {
             .observations
             .marker_observed
             .map_or_else(|| "n/a".to_owned(), |observed| observed.to_string());
+        let journal_event = record
+            .hook_capture
+            .get("journal_events")
+            .and_then(Value::as_array)
+            .and_then(|events| events.first());
         let message = trial_progress_message(&TrialProgressFields {
             phase: &record.phase,
             permission_mode: &record.permission_mode,
@@ -326,6 +334,9 @@ impl Progress<'_> {
             polarity: &record.polarity,
             repetition: record.repetition,
             classification: &record.classification,
+            reason: &record.classification_reason,
+            model_status: journal_event.and_then(|event| event["model_status"].as_str()),
+            model_wall_ms: journal_event.and_then(|event| event["model_wall_ms"].as_u64()),
             marker: &marker,
             capture_observed: record.observations.capture_observed,
             denial_count: record.denial_count(),
@@ -367,6 +378,9 @@ struct TrialProgressFields<'a> {
     polarity: &'a str,
     repetition: u8,
     classification: &'a str,
+    reason: &'a str,
+    model_status: Option<&'a str>,
+    model_wall_ms: Option<u64>,
     marker: &'a str,
     capture_observed: bool,
     denial_count: usize,
@@ -381,14 +395,25 @@ fn trial_progress_message(fields: &TrialProgressFields<'_>) -> String {
         polarity,
         repetition,
         classification,
+        reason,
+        model_status,
+        model_wall_ms,
         marker,
         capture_observed,
         denial_count,
         wall_ms,
     } = fields;
-    format!(
-        "trial phase={phase} mode={permission_mode} name={name} polarity={polarity} repetition={repetition} classification={classification} marker={marker} capture={capture_observed} denial_count={denial_count} wall_ms={wall_ms}"
-    )
+    let mut line = format!(
+        "trial phase={phase} mode={permission_mode} name={name} polarity={polarity} repetition={repetition} classification={classification} reason={reason} marker={marker} capture={capture_observed} denial_count={denial_count} wall_ms={wall_ms}"
+    );
+    if let Some(status) = model_status {
+        write!(line, " model_status={status} model_wall_ms=").expect("write to string");
+        match model_wall_ms {
+            Some(wall) => write!(line, "{wall}").expect("write to string"),
+            None => line.push_str("null"),
+        }
+    }
+    line
 }
 
 #[cfg(test)]
@@ -400,6 +425,9 @@ pub(crate) fn trial_progress_fixture() -> String {
         polarity: "positive",
         repetition: 1,
         classification: "invalid",
+        reason: "fixture-failure",
+        model_status: Some("timeout"),
+        model_wall_ms: Some(12),
         marker: "n/a",
         capture_observed: true,
         denial_count: 0,
@@ -903,7 +931,7 @@ const REAL_HOOK_SPECS: &[RealHookSpec] = &[
         nested: false,
         journal_failure: false,
         preexisting_deny: false,
-        model_deadline_ms: "2000",
+        model_deadline_ms: FAKE_MODEL_HANG_BOUND_MS,
     },
     RealHookSpec {
         row: "missing-owner-rubric",
@@ -915,7 +943,7 @@ const REAL_HOOK_SPECS: &[RealHookSpec] = &[
         nested: false,
         journal_failure: false,
         preexisting_deny: false,
-        model_deadline_ms: "2000",
+        model_deadline_ms: FAKE_MODEL_HANG_BOUND_MS,
     },
     RealHookSpec {
         row: "invalid-owner-rubric",
@@ -927,7 +955,7 @@ const REAL_HOOK_SPECS: &[RealHookSpec] = &[
         nested: false,
         journal_failure: false,
         preexisting_deny: false,
-        model_deadline_ms: "2000",
+        model_deadline_ms: FAKE_MODEL_HANG_BOUND_MS,
     },
     RealHookSpec {
         row: "journal-failure",
@@ -939,7 +967,7 @@ const REAL_HOOK_SPECS: &[RealHookSpec] = &[
         nested: false,
         journal_failure: true,
         preexisting_deny: false,
-        model_deadline_ms: "2000",
+        model_deadline_ms: FAKE_MODEL_HANG_BOUND_MS,
     },
     RealHookSpec {
         row: "nested-call-guard",
@@ -953,7 +981,7 @@ const REAL_HOOK_SPECS: &[RealHookSpec] = &[
         nested: true,
         journal_failure: false,
         preexisting_deny: false,
-        model_deadline_ms: "2000",
+        model_deadline_ms: FAKE_MODEL_HANG_BOUND_MS,
     },
     RealHookSpec {
         row: "general-always-suspicious-owner-match",
@@ -965,7 +993,7 @@ const REAL_HOOK_SPECS: &[RealHookSpec] = &[
         nested: false,
         journal_failure: false,
         preexisting_deny: false,
-        model_deadline_ms: "2000",
+        model_deadline_ms: FAKE_MODEL_HANG_BOUND_MS,
     },
     RealHookSpec {
         row: "pre-existing-harness-deny",
@@ -977,7 +1005,7 @@ const REAL_HOOK_SPECS: &[RealHookSpec] = &[
         nested: false,
         journal_failure: false,
         preexisting_deny: true,
-        model_deadline_ms: "2000",
+        model_deadline_ms: FAKE_MODEL_HANG_BOUND_MS,
     },
 ];
 
@@ -998,7 +1026,7 @@ const fn real_class(
         nested: false,
         journal_failure: false,
         preexisting_deny: false,
-        model_deadline_ms: "2000",
+        model_deadline_ms: FAKE_MODEL_HANG_BOUND_MS,
     }
 }
 
@@ -2007,7 +2035,7 @@ fn run_table_confirmation_case(
         ),
         (
             OsString::from("PERMISSION_TRIAGE_MODEL_DEADLINE_MS"),
-            OsString::from("2000"),
+            OsString::from(FAKE_MODEL_HANG_BOUND_MS),
         ),
         (
             OsString::from("PERMISSION_TRIAGE_TOPOLOGY_HOOK_INPUT"),
@@ -3674,7 +3702,10 @@ fn run_acceptance_trial(
             "PERMISSION_TRIAGE_FAKE_RESPONSE",
             spec.class.unwrap_or("safe").to_owned(),
         ),
-        ("PERMISSION_TRIAGE_MODEL_DEADLINE_MS", "2000".to_owned()),
+        (
+            "PERMISSION_TRIAGE_MODEL_DEADLINE_MS",
+            FAKE_MODEL_HANG_BOUND_MS.to_owned(),
+        ),
         (
             "PERMISSION_TRIAGE_LOOP_REGISTRY",
             require_unicode(registry)?.to_owned(),

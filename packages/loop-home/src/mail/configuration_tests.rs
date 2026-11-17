@@ -470,7 +470,7 @@ fn mail_inventory_reports_skipped_loop_reason() {
         )
         .expect("bounded capture child");
         assert!(
-            output.status.success(),
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
             "capture child: {}; stdout={}; stderr={}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
