@@ -1597,7 +1597,7 @@ fn wait_answer_controlled(
                 // The peer or deadline may have stopped during the store read.
                 // Keep that typed first cause instead of inventing a read fault.
                 if let Some(stop) = control.and_then(|wait| wait.stop(base_deadline)) {
-                    let line = format!("door request wait: {}", error.line());
+                    let line = format!("door request stop during store read: {}", error.line());
                     #[cfg(test)]
                     let logged = writeln!(io::stderr().lock(), "{line}");
                     #[cfg(not(test))]
@@ -1931,7 +1931,7 @@ fn root_refusal_at(
             finish_preflight(
                 &reply,
                 (Some(owner_home), None, &registration.loop_name),
-                "unknown",
+                &json!("unknown"),
             );
             return Err(error);
         }
@@ -1947,7 +1947,7 @@ fn root_refusal_at(
 fn finish_preflight(
     reply: &Value,
     context: (Option<&Path>, Option<&Store>, &str),
-    final_write: &str,
+    final_write: &Value,
 ) {
     let Some(id) = reply["request_id"].as_str() else {
         return;
@@ -1970,7 +1970,7 @@ fn finish_preflight(
             .ok_or_else(|| LaneError::input("door-record-refusal", "store absent"))?
             .finish_request(id, None, &{
                 let mut ending = crate::requests::unobserved_ending();
-                ending["final_write"] = json!(final_write);
+                ending["final_write"] = final_write.clone();
                 ending
             })
     })();
@@ -1986,15 +1986,8 @@ fn write_preflight_final(
     deadline: Instant,
 ) -> io::Result<()> {
     let result = wait.write_final(reply, deadline);
-    finish_preflight(
-        reply,
-        context,
-        if result.is_ok() {
-            "succeeded-locally"
-        } else {
-            "failed"
-        },
-    );
+    let ending = wait.ending_snapshot();
+    finish_preflight(reply, context, &ending["final_write"]);
     result
 }
 
@@ -7744,7 +7737,7 @@ mod tests {
                     logged_fault
                         .recv_timeout(FIXTURE_HANG)
                         .expect("coincident store fault logged")
-                        .starts_with("door request wait: ")
+                        .starts_with("door request stop during store read: ")
                 );
                 let reply = outcome.expect("stopped owner wait");
                 assert_eq!(reply["queue_state"], "deadline", "{reply}");

@@ -252,6 +252,10 @@ fn door_preflight_readers_refuse_upload_evidence() {
     let original: Value = serde_json::from_slice(&original_bytes).expect("run record");
     let record = &original["requests"][0];
     assert_eq!(record["state"], "preflight-refused");
+    assert_eq!(
+        record["effect"]["ending"]["final_write"],
+        "succeeded-locally"
+    );
     assert!(record["effect"].get("bound").is_none());
     assert!(record["effect"].get("output_bytes").is_none());
     RequestRecord::decode(record.clone()).expect("ordinary preflight accepted");
