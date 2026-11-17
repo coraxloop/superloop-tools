@@ -159,7 +159,7 @@ impl FormatError {
     fn guard(rejection: GuardRejection, line: usize) -> Self {
         Self {
             message: format!(
-                "the file was not changed; formatting would change the document at line {line}, although the document is valid Markdown; reduce a copy to the smallest excerpt that still refuses; if you built this yourself, use that excerpt as a regression test for the formatter in packages/superloop-lint/src/fmt.rs; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; {rejection}"
+                "the file was not changed; formatting would change the document's meaning at line {line}, although the document is valid Markdown; reduce a copy to the smallest excerpt that still refuses; if you built this yourself, use that excerpt as a regression test for the formatter in packages/superloop-lint/src/fmt.rs; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; {rejection}"
             ),
             kind: FormatErrorKind::Guard(rejection),
         }
@@ -397,7 +397,7 @@ fn serialize_events(
             };
             FormatError {
                 message: format!(
-                    "the file was not changed; the block{location} could not be preserved ({error});{caveat} reduce a copy to the smallest excerpt that still refuses with the same writer detail; if you built this yourself, that excerpt is your test case for the Markdown writer in packages/pulldown-cmark-to-cmark; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; this package declares no public issue route"
+                    "the file was not changed; the block{location} could not be preserved ({error}), although the document is valid Markdown;{caveat} reduce a copy to the smallest excerpt that still refuses with the same error; if you built this yourself, that excerpt is your test case for the Markdown writer in packages/pulldown-cmark-to-cmark; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; this package declares no public issue route"
                 ),
                 kind: FormatErrorKind::Serialization(
                     state.pending_source_start().map(|start| first_byte + start),
@@ -1230,9 +1230,11 @@ mod tests {
                         rejection.cause
                     );
                     assert!(rejection.cause.contains("first differing input event in the preferred rendering: start of Emphasis"), "{}", rejection.cause);
-                    assert!(rejection.cause.contains(
-                        "smallest excerpt that still refuses with the same writer detail"
-                    ));
+                    assert!(
+                        rejection
+                            .cause
+                            .contains("smallest excerpt that still refuses with the same error")
+                    );
                     assert!(rejection.cause.contains(
                         "share only non-private content with the person who supplied this build"
                     ));

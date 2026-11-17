@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Formatter refusals now say that an integrity failure would change the document's meaning and describe a writer failure using the error shown in the same message. The writer refusal also confirms valid Markdown. Native build guidance tells deployers to record private merge and lock inputs separately (``rule:output:linter-findings-status``; ``reg:superlooplane:native-build-provenance``).
+
 ## [0.7.0] - 2026-11-17
 
 ### Fixed
