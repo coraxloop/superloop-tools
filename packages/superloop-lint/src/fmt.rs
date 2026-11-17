@@ -17,7 +17,8 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
-//! | [`serialization_refusals_name_the_buffered_block_line`] | fmt | A serialization refusal names the first line of its buffered block, both at the next block boundary and at end of input. |
+//! | [`writer_refusals_put_the_reader_first`] | fmt | Writer refusals put file safety and location first, name the failing event before recovery, and qualify the location only after a real list deferral. |
+//! | [`serialization_refusals_name_the_buffered_block_line`] | fmt | An injected empty-emphasis event stream proves serialization refusal diagnostics and original offsets, including across overlay slots. |
 //! | [`joins_a_hard_wrapped_paragraph`] | fmt | A soft break in a paragraph becomes one space, producing one running line without moving its words. |
 //! | [`formats_markdown_idempotently`] | fmt | The bytes emitted by one pass are the fixed point of the formatter, so checking the same document again reports no change. |
 //! | [`preserves_a_fenced_code_block_byte_for_byte`] | fmt | A safe three-backtick fence and every byte of its body survive while prose around it is independently formatted. |
@@ -155,9 +156,11 @@ impl FormatError {
         }
     }
 
-    fn guard(rejection: GuardRejection) -> Self {
+    fn guard(rejection: GuardRejection, line: usize) -> Self {
         Self {
-            message: rejection.to_string(),
+            message: format!(
+                "the file was not changed; formatting would change the document at line {line}, although the document is valid Markdown; reduce a copy to the smallest excerpt that still refuses; if you built this yourself, use that excerpt as a regression test for the formatter in packages/superloop-lint/src/fmt.rs; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; {rejection}"
+            ),
             kind: FormatErrorKind::Guard(rejection),
         }
     }
@@ -328,7 +331,7 @@ pub fn format_markdown(source: &str) -> Result<String, FormatError> {
     let mut rendered = if slots.is_empty() {
         serialize_markdown(source, 1, 0)?
     } else {
-        serialize_around_slots(source, &slots)?
+        serialize_around_slots(source, &slots, serialize_markdown)?
     };
 
     if source.ends_with('\n') && !rendered.ends_with('\n') {
@@ -364,7 +367,8 @@ fn serialize_events(
     first_byte: usize,
 ) -> Result<String, FormatError> {
     let mut rendered = String::new();
-    let mut state = State::new(parser_options(), serializer_options(fence_width));
+    let mut state =
+        State::new(parser_options(), serializer_options(fence_width)).with_footnote_context(source);
     state
         .process_with_source_range(
             events
@@ -383,11 +387,17 @@ fn serialize_events(
                             .bytes()
                             .filter(|byte| *byte == b'\n')
                             .count();
-                    format!(" starting at line {line}")
+                    format!(" at line {line}")
                 });
+            // This state always has footnote context, so only lists can defer it.
+            let caveat = if state.has_deferred_blocks() {
+                " a reference-dependent list retained later blocks, so this line may precede the failing block;"
+            } else {
+                ""
+            };
             FormatError {
                 message: format!(
-                    "Markdown writer could not preserve the block{location}: {error}; simplify the block or report this block with the formatter version; the file was not changed"
+                    "the file was not changed; the block{location} could not be preserved ({error});{caveat} reduce a copy to the smallest excerpt that still refuses with the same writer detail; if you built this yourself, that excerpt is your test case for the Markdown writer in packages/pulldown-cmark-to-cmark; otherwise share only non-private content with the person who supplied this build, together with its build record's source commit and binary SHA-256; this package declares no public issue route"
                 ),
                 kind: FormatErrorKind::Serialization(
                     state.pending_source_start().map(|start| first_byte + start),
@@ -458,9 +468,31 @@ fn validate_table_rows(
             .map(|(range, _)| range.start)
             .collect::<Vec<_>>()
     {
-        return Err(FormatError::new(
-            "table-code-pipe-header: masking changes header/delimiter table recognition",
-        ));
+        let start = original
+            .iter()
+            .chain(&masked)
+            .map(|(range, _)| range.start)
+            .filter(|start| {
+                original.iter().any(|(range, _)| range.start == *start)
+                    != masked.iter().any(|(range, _)| range.start == *start)
+            })
+            .min()
+            .unwrap_or(0);
+        let end = source[start..]
+            .find('\n')
+            .map_or(source.len(), |offset| start + offset);
+        let end = start + source[start..end].trim_end_matches('\r').len();
+        let line = first_line
+            + source[..start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count();
+        return Err(FormatError {
+            message: format!(
+                "the file was not changed; table-code-pipe-header: header at line {line} has ambiguous code-span pipes and delimiter columns; make the header and delimiter describe the same cells"
+            ),
+            kind: FormatErrorKind::Source(first_byte + start..first_byte + end),
+        });
     }
     for (range, columns) in masked {
         let mut start = range.start;
@@ -476,10 +508,11 @@ fn validate_table_rows(
                             .count();
                     return Err(FormatError {
                         message: format!(
-                            "table-code-pipe-row: row at line {line} has {count} cells for {columns} columns; make the row match the header's column count; the file was not changed"
+                            "the file was not changed; table-code-pipe-row: row at line {line} has {count} cells for {columns} columns; make the row match the header's column count"
                         ),
                         kind: FormatErrorKind::Source(
-                            first_byte + start..first_byte + start + raw.len(),
+                            first_byte + start
+                                ..first_byte + start + raw.trim_end_matches(['\r', '\n']).len(),
                         ),
                     });
                 }
@@ -505,7 +538,11 @@ fn table_cell_count(row: &str) -> usize {
         - usize::from(separators.last() == row.len().checked_sub(1).as_ref())
 }
 
-fn serialize_around_slots(source: &str, slots: &[Range<usize>]) -> Result<String, FormatError> {
+fn serialize_around_slots(
+    source: &str,
+    slots: &[Range<usize>],
+    serialize: fn(&str, usize, usize) -> Result<String, FormatError>,
+) -> Result<String, FormatError> {
     let mut rendered = String::new();
     let mut prose_start = 0usize;
     let mut prose_line = 1usize;
@@ -517,6 +554,7 @@ fn serialize_around_slots(source: &str, slots: &[Range<usize>]) -> Result<String
             true,
             prose_line,
             prose_start,
+            serialize,
         )?);
         rendered.push_str(&source[slot.clone()]);
         prose_line += source[prose_start..slot.end]
@@ -532,6 +570,7 @@ fn serialize_around_slots(source: &str, slots: &[Range<usize>]) -> Result<String
         false,
         prose_line,
         prose_start,
+        serialize,
     )?);
     Ok(rendered)
 }
@@ -542,6 +581,7 @@ fn serialize_slot_bounded_prose(
     preserve_trailing_breaks: bool,
     first_line: usize,
     first_byte: usize,
+    serialize: fn(&str, usize, usize) -> Result<String, FormatError>,
 ) -> Result<String, FormatError> {
     let is_break = |character: char| matches!(character, '\r' | '\n');
     let content_start = if preserve_leading_breaks {
@@ -565,7 +605,7 @@ fn serialize_slot_bounded_prose(
             .bytes()
             .filter(|byte| *byte == b'\n')
             .count();
-    rendered.push_str(&serialize_markdown(
+    rendered.push_str(&serialize(
         &source[content_start..content_end],
         first_line,
         first_byte + content_start,
@@ -814,7 +854,11 @@ fn ensure_equivalent(input: &str, output: &str) -> Result<(), FormatError> {
         input_range,
     };
 
-    Err(FormatError::guard(rejection))
+    let line = 1 + input[..rejection.input_range.start]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    Err(FormatError::guard(rejection, line))
 }
 
 fn guard_difference(input: Option<&GuardEvent>, output: Option<&GuardEvent>) -> String {
@@ -1051,19 +1095,25 @@ fn push_code_block_text(guarded: &mut Vec<GuardedEvent>, text: &str, range: Rang
 mod tests {
     use super::{bounded_value_preview, ensure_equivalent, format_markdown, serialize_events};
 
-    /// A serialization refusal names the first line of its buffered block,
-    /// both at the next block boundary and at end of input.
+    /// Writer refusals put file safety and location first, name the failing event
+    /// before recovery, and qualify the location only after a real list deferral.
     ///
     /// # Panics
-    /// Panics only if an unrepresentable event stream succeeds or loses its location.
+    /// Panics only if the injected impossible event stream is accepted or its
+    /// refusal loses the reader-facing order or conditional location caveat.
     ///
-    /// ´claim:fmt:serialization-refusals-name-the-buffered-block-line´
-    /// ´test:unit:serialization-refusals-name-the-buffered-block-line´
+    /// ´claim:fmt:writer-refusals-put-the-reader-first´
+    /// ´test:unit:writer-refusals-put-the-reader-first´
     #[test]
-    fn serialization_refusals_name_the_buffered_block_line() {
-        for suffix in ["", "\nAfter.\n"] {
-            let source = format!("Before.\n\n*x*\n{suffix}");
-            let events: Vec<_> = pulldown_cmark::Parser::new(&source)
+    fn writer_refusals_put_the_reader_first() {
+        let mut failures = Vec::new();
+        for (source, deferred) in [
+            ("Before.\n\n*x*\n", false),
+            ("*[^a]*\n\n[^a]: note\n\n*x*\n", false),
+            ("- item\n\n*x*\n", false),
+            ("- item\n\n  [hidden]: /target\n\n*x*\n", true),
+        ] {
+            let events: Vec<_> = pulldown_cmark::Parser::new_ext(source, super::parser_options())
                 .into_offset_iter()
                 .map(|(event, range)| {
                     let event = match event {
@@ -1075,18 +1125,137 @@ mod tests {
                     (event, range)
                 })
                 .collect();
-            for first_line in [1, 9] {
-                let error = serialize_events(&source, &events, 3, first_line, 0)
-                    .expect_err("empty emphasis cannot be represented");
-                assert_eq!(
-                    error.to_string(),
-                    format!(
-                        "Markdown writer could not preserve the block starting at line {}: Cannot preserve this event block with the supplied parser options; simplify the block or report this block with the formatter version; the file was not changed",
-                        first_line + 2
-                    )
-                );
+            let error = serialize_events(source, &events, 3, 1, 0)
+                .expect_err("empty emphasis cannot be spelled in Markdown");
+            let cause = error.to_string();
+            let start = if deferred {
+                0
+            } else {
+                source.find("*x*").expect("fixture")
+            };
+            let line = 1 + source[..start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count();
+            for (label, holds) in [
+                (
+                    "file safety first",
+                    cause.starts_with("the file was not changed;"),
+                ),
+                (
+                    "block line",
+                    cause.contains(&format!("the block at line {line}")),
+                ),
+                (
+                    "conditional list caveat",
+                    cause.contains("reference-dependent list") == deferred,
+                ),
+                (
+                    "clear action",
+                    !cause.contains("retain it locally")
+                        && cause
+                            .contains("reduce a copy to the smallest excerpt that still refuses")
+                        && cause.contains("your test case for the Markdown writer in packages/pulldown-cmark-to-cmark"),
+                ),
+                (
+                    "writer event before action",
+                    matches!((cause.find("reduce a copy"), cause.find("first differing input event")), (Some(action), Some(detail)) if detail < action),
+                ),
+            ] {
+                if !holds {
+                    failures.push(format!("{label}, deferred={deferred}: {cause}"));
+                }
             }
         }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// An injected empty-emphasis event stream proves serialization refusal
+    /// diagnostics and original offsets, including across overlay slots.
+    ///
+    /// # Panics
+    /// Panics only if an unrepresentable event stream succeeds or loses its location.
+    ///
+    /// ´claim:fmt:serialization-refusals-name-the-buffered-block-line´
+    /// ´test:unit:serialization-refusals-name-the-buffered-block-line´
+    #[test]
+    fn serialization_refusals_name_the_buffered_block_line() {
+        fn injected(source: &str, line: usize, byte: usize) -> Result<String, super::FormatError> {
+            let events: Vec<_> = pulldown_cmark::Parser::new_ext(source, super::parser_options())
+                .into_offset_iter()
+                .map(|(event, range)| {
+                    let event = match event {
+                        pulldown_cmark::Event::Text(text) if text.as_ref() == "x" => {
+                            pulldown_cmark::Event::Text("".into())
+                        }
+                        event => event,
+                    };
+                    (event, range)
+                })
+                .collect();
+            serialize_events(source, &events, 3, line, byte)
+        }
+        for prefix in [
+            "",
+            "Before.\n\n",
+            "*[^a]*\n\n[^a]: note\n\nLater.\n\n",
+            "Préface.\n{{overlay:body:test:first}}\n\n",
+            "{{overlay:body:test:first}}\nMiddle.\n{{overlay:body:test:second}}\n\n",
+        ] {
+            for suffix in ["", "\nAfter.\n", "\n{{overlay:body:test:last}}\nAfter.\n"] {
+                for newline in ["\n", "\r\n"] {
+                    let source = format!("{prefix}*x*\n{suffix}").replace('\n', newline);
+                    let start = source.find("*x*").expect("injected construct");
+                    let line = 1 + source[..start].bytes().filter(|b| *b == b'\n').count();
+                    let slots = super::overlay_slot_lines(&source);
+                    let result = if slots.is_empty() {
+                        injected(&source, 1, 0)
+                    } else {
+                        super::serialize_around_slots(&source, &slots, injected)
+                    };
+                    let error =
+                        result.expect_err("injected empty emphasis has no Markdown spelling");
+                    let rejection = error.into_rejection(
+                        std::path::Path::new("injected.md"),
+                        std::time::Duration::ZERO,
+                    );
+                    assert_eq!(rejection.kind, "serialization_failure");
+                    let range = rejection.input_range.expect("known buffered start");
+                    assert_eq!((range.start, range.end), (start, start));
+                    assert!(
+                        rejection
+                            .cause
+                            .contains(&format!("the block at line {line} could not be preserved")),
+                        "{}",
+                        rejection.cause
+                    );
+                    assert!(rejection.cause.contains("first differing input event in the preferred rendering: start of Emphasis"), "{}", rejection.cause);
+                    assert!(rejection.cause.contains(
+                        "smallest excerpt that still refuses with the same writer detail"
+                    ));
+                    assert!(rejection.cause.contains(
+                        "share only non-private content with the person who supplied this build"
+                    ));
+                    assert!(
+                        rejection
+                            .cause
+                            .contains("this package declares no public issue route")
+                    );
+                    assert!(
+                        rejection
+                            .cause
+                            .contains("build record's source commit and binary SHA-256")
+                    );
+                    assert!(!rejection.cause.contains("reference-dependent list"));
+                    assert!(rejection.cause.starts_with("the file was not changed;"));
+                }
+            }
+        }
+        let source = "*[^a]*\n\n[^a]: *x*\n";
+        assert!(
+            injected(source, 1, 0).is_err(),
+            "context cannot hide an impossible definition body"
+        );
     }
 
     fn formatted(source: &str) -> String {
@@ -1232,6 +1401,19 @@ mod tests {
         let result = ensure_equivalent("Text ``span``.\n", "Text `span`.\n");
         let message = result.expect_err("the guard rejects delimiter-width drift");
         let message = message.to_string();
+        assert!(
+            message.contains("the document is valid Markdown"),
+            "{message}"
+        );
+        assert!(message.contains("if you built this yourself"), "{message}");
+        assert!(
+            message.contains("packages/superloop-lint/src/fmt.rs"),
+            "{message}"
+        );
+        assert!(
+            message.contains("build record's source commit and binary SHA-256"),
+            "{message}"
+        );
 
         assert!(
             message.contains("delimiter width differs"),

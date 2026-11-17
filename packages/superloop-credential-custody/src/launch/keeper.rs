@@ -20,6 +20,7 @@ pub(super) struct Keeper<'a> {
     terminal: bool,
     holder_stopped: bool,
     holder_stop_attempted: bool,
+    holder_stop_failure: Option<&'static str>,
     execution: Option<(u64, String)>,
     control: Option<Control>,
     inventory: Option<release::Evidence>,
@@ -31,6 +32,8 @@ impl<'a> Keeper<'a> {
         index: usize,
         store: &'a mut Store,
     ) -> Result<Self> {
+        #[cfg(test)]
+        super::test_support::assert_owned();
         require(
             startup.owner() == nix::unistd::geteuid().as_raw(),
             "keeper-owner",
@@ -50,6 +53,7 @@ impl<'a> Keeper<'a> {
             terminal: false,
             holder_stopped: false,
             holder_stop_attempted: false,
+            holder_stop_failure: None,
             execution: None,
             control: None,
             inventory: None,
@@ -59,6 +63,9 @@ impl<'a> Keeper<'a> {
         require(!self.terminal, "keeper-terminal")?;
         self.session.store().advance(Phase::Submitted)?;
         if let Err(class) = self.manager.start(self.pipes.paths()) {
+            return Err(self.fail(class));
+        }
+        if let Err(class) = self.session.store().submission_acknowledged() {
             return Err(self.fail(class));
         }
         Ok(())
@@ -83,6 +90,7 @@ impl<'a> Keeper<'a> {
         )?;
         let result = (|| {
             let snapshot = self.manager.snapshot(self.invocation.as_deref())?;
+            self.session.store().retain_start(&snapshot)?;
             self.invocation = Some(snapshot.invocation.clone());
             require(
                 snapshot.active == "activating"
@@ -175,30 +183,128 @@ impl<'a> Keeper<'a> {
         }
         self.terminal = true;
         self.session.store().remember_cause(class);
-        let stopped = self.holder_stopped || self.stop_holder().is_ok();
-        if !stopped || self.session.store().phase() == Phase::Uncertain {
-            self.session
-                .quarantine(if self.invocation.is_some() && !stopped {
-                    "manager-stop"
-                } else {
-                    class
-                });
-            return class;
-        }
-        if let Some(control) = &self.control
-            && control.cleanup().is_err()
-        {
-            self.session.quarantine("control-binding");
-            return "keeper-control-custody";
-        }
-        let failure = self.session.fail(class);
-        // Captured pipes were already unlinked. Before capture, cleanup remains
-        // manifest-bound after the matched unit is stopped; failure quarantines.
-        if self.process.is_none() && self.pipes.cleanup().is_err() {
-            return "keeper-fifo-custody";
-        }
-        failure
+        self.recover(class)
     }
+    fn recover(&mut self, class: &'static str) -> &'static str {
+        use super::store::lifecycle::{Disposition as D, Recovery};
+        super::stop::recovering();
+        let intent = self.session.store().recovery_intent();
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(self.admission.policy().limits.case_ms);
+        let stop = self.recover_holder(deadline);
+        let holder = match &stop {
+            Ok(observation) => observation.clone(),
+            Err(error) if self.invocation.is_none() => D::Unbound { class: error },
+            Err(error) => D::Failed { class: error },
+        };
+        let mut socket = D::Retained;
+        let mut fifos = if self.pipes.was_unlinked() {
+            D::UnlinkedAtCapture
+        } else {
+            D::Retained
+        };
+        let uncertain = self.session.store().phase() == Phase::Uncertain;
+        if stop.is_err() || uncertain || intent.is_err() {
+            let _cancelled =
+                self.session
+                    .quarantine(if stop.is_err() { "manager-stop" } else { class });
+        } else {
+            let control = self.control.as_ref().map_or(Ok(()), Control::cleanup);
+            socket = match control {
+                Ok(()) if self.control.is_some() => D::UnlinkSucceeded,
+                Ok(()) => D::NotAttempted,
+                Err(error) => D::Failed { class: error },
+            };
+            if control.is_err() {
+                let _cancelled = self.session.quarantine(class);
+            } else {
+                let _cancelled = self.session.fail(class);
+            }
+            if !self.pipes.was_unlinked() {
+                fifos = match self.pipes.cleanup() {
+                    Ok(()) => D::UnlinkSucceeded,
+                    Err(error) => D::Failed { class: error },
+                };
+            }
+        }
+        let observed = Recovery {
+            holder,
+            sealer_exits: *self.session.exits(),
+            outputs: self.session.cleanup_evidence(),
+            fifos,
+            socket,
+            evidence: D::Retained,
+        };
+        if self.session.store().retain_recovery(&observed).is_err() || intent.is_err() {
+            return "lifecycle-publication-missing";
+        }
+        class
+    }
+
+    fn recover_holder(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> Result<super::store::lifecycle::Disposition> {
+        use super::store::lifecycle::Disposition as D;
+        if self.holder_stopped {
+            return Ok(D::StopJobCompleted {
+                invocation: self.invocation.clone().unwrap_or_default(),
+            });
+        }
+        // An interrupted client call says nothing about the holder's state.
+        // Recovery rechecks the same invocation before completing its stop.
+        if self.holder_stop_failure == Some("campaign-stopped") {
+            self.holder_stop_failure = None;
+            self.holder_stop_attempted = false;
+        }
+        if let Some(class) = self.holder_stop_failure {
+            return Err(class);
+        }
+        require(!self.holder_stop_attempted, "completion-stop-attempted")?;
+        if self.invocation.is_none() {
+            if self.session.store().failure_context().stage != Phase::Submitted {
+                return Ok(D::NotAttempted);
+            }
+            loop {
+                let snapshot = self.manager.starting_at(None, deadline)?;
+                if !snapshot.invocation.is_empty() {
+                    self.session.store().retain_start(&snapshot)?;
+                    self.invocation = Some(snapshot.invocation);
+                    break;
+                }
+                let timeout = super::sealer::remaining_timeout(
+                    std::time::Instant::now(),
+                    deadline,
+                    deadline,
+                )?
+                .min(
+                    i32::try_from(self.admission.policy().limits.poll_ms)
+                        .map_err(|_| "keeper-poll-bound")?,
+                );
+                super::channel::poll(&mut [], timeout)?;
+            }
+        }
+        if self.manager.unloaded_at(deadline)? {
+            return Ok(D::UnitUnloaded {
+                unit: self.admission.policy().cases[self.index]
+                    .generator_unit
+                    .clone(),
+            });
+        }
+        self.holder_stop_attempted = true;
+        if let Err(class) = self.manager.stop_at(
+            self.invocation.as_deref().ok_or("keeper-not-captured")?,
+            deadline,
+        ) {
+            self.holder_stop_failure = Some(class);
+            return Err(class);
+        }
+        self.holder_stopped = true;
+        Ok(D::StopJobCompleted {
+            invocation: self.invocation.clone().unwrap_or_default(),
+        })
+    }
+
     pub fn serve_status(&mut self, deadline: std::time::Instant) -> Result<()> {
         self.verify_capture()?;
         let phase = self.session.store().phase();
@@ -214,7 +320,10 @@ impl<'a> Keeper<'a> {
         require(!self.holder_stop_attempted, "completion-stop-attempted")?;
         let id = self.invocation.as_deref().ok_or("keeper-not-captured")?;
         self.holder_stop_attempted = true;
-        self.manager.stop(id)?;
+        if let Err(class) = self.manager.stop(id) {
+            self.holder_stop_failure = Some(class);
+            return Err(class);
+        }
         self.holder_stopped = true;
         Ok(())
     }

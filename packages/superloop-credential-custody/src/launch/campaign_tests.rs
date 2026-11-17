@@ -45,7 +45,7 @@ fn run_case(
     }
     keeper.submit()?;
     if fault == "submitted" {
-        return Err(keeper.fail("synthetic-submitted-failure"));
+        return keeper.release_result(Err("synthetic-submitted-failure"));
     }
     let writers = keeper
         .pipes
@@ -69,17 +69,21 @@ fn run_case(
         Control::test_bind,
     )?;
     drop(writers);
+    if fault == "stop" {
+        crate::launch::stop::tests::send(nix::sys::signal::Signal::SIGTERM);
+        return keeper.release_result(crate::launch::stop::check());
+    }
     if fault == "capture" {
-        return Err(keeper.fail("synthetic-capture-failure"));
+        return keeper.release_result(Err("synthetic-capture-failure"));
     }
     let digest = keeper.inventory()?;
     if fault == "inventory" {
-        return Err(keeper.fail("synthetic-inventory-failure"));
+        return keeper.release_result(Err("synthetic-inventory-failure"));
     }
     let exit = keeper.process.as_ref().unwrap().duplicate()?;
     keeper.release(&digest)?;
     if fault == "release" {
-        return Err(keeper.fail("synthetic-release-failure"));
+        return keeper.release_result(Err("synthetic-release-failure"));
     }
     let mut event = nix::libc::pollfd {
         fd: exit.as_raw_fd(),
@@ -104,12 +108,143 @@ fn run_case(
     fs::write(f.dir.path().join("manager-reply"), terminal).unwrap();
     assert!(keeper.capture_generator()?);
     if fault == "generator" {
-        return Err(keeper.fail("synthetic-generator-failure"));
+        return keeper.release_result(Err("synthetic-generator-failure"));
     }
     keeper.finish_completion()
 }
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(1200)
+}
+
+/// ´test:unit:campaign-stop-between-cases-does-not-claim-a-reservation´
+#[test]
+// Synthetic public record evidence stays inside libtest capture.
+#[allow(clippy::print_stderr)]
+fn campaign_stop_between_cases_does_not_claim_a_reservation() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    let result = campaign::run_with_checkpoint(
+        &admission,
+        deadline(),
+        |index, store, _| run_case(&f, &admission, index, store, "normal"),
+        |index| {
+            if index == 1 {
+                crate::launch::stop::tests::send(nix::sys::signal::Signal::SIGTERM);
+            }
+        },
+    );
+    assert_eq!(result.err(), Some("campaign-stopped"));
+    let failure: serde_json::Value = serde_json::from_slice(
+        &fs::read(f.dir.path().join("evidence/campaign-failure.json")).unwrap(),
+    )
+    .unwrap();
+    eprintln!("between-cases failure: {failure}");
+    assert_eq!(failure["failure"]["stage"], "between-cases");
+    assert!(failure["failure"]["case"].is_null());
+    assert_eq!(failure["failure"]["completed_count"], 1);
+    assert!(
+        f.dir
+            .path()
+            .join("evidence/sample/completion.json")
+            .exists()
+    );
+    for root in ["evidence", "sealed", "runtime"] {
+        assert!(!f.dir.path().join(root).join("second").exists());
+    }
+    listener.finish();
+}
+
+/// ´test:unit:campaign-cooperative-stop-retains-sender-and-recovery´
+#[test]
+fn campaign_cooperative_stop_retains_sender_and_recovery() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    let result = campaign::run(&admission, deadline(), |index, store, _| {
+        run_case(&f, &admission, index, store, "stop")
+    });
+    assert_eq!(result.err(), Some("campaign-stopped"));
+    let failure: serde_json::Value = serde_json::from_slice(
+        &fs::read(f.dir.path().join("evidence/campaign-failure.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(failure["outcome"], "stopped");
+    assert_eq!(failure["refusal_class"], "campaign-stopped");
+    assert_eq!(failure["stop_request"]["signal"], 15);
+    assert_eq!(
+        failure["stop_request"]["sender_pid"],
+        nix::unistd::getpid().as_raw()
+    );
+    assert_eq!(
+        failure["failure"]["retained"]["original_cause"],
+        "campaign-stopped"
+    );
+    let last = failure["failure"]["retained"]["last_lifecycle_receipt"]
+        .as_str()
+        .unwrap();
+    let recovery: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.dir.path().join("evidence/sample").join(last)).unwrap())
+            .unwrap();
+    assert_eq!(
+        recovery["event"]["observation"]["holder"]["evidence"],
+        "stop-job-completed"
+    );
+    assert_eq!(
+        recovery["event"]["observation"]["holder"]["invocation"],
+        format!("{:032x}", 1)
+    );
+    assert_eq!(recovery["phase"], "uncertain");
+    assert_eq!(
+        recovery["event"]["observation"]["outputs"]["evidence"],
+        "retained"
+    );
+    assert!(
+        recovery["event"]["observation"]["sealer_exits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| !v.is_null())
+    );
+    assert!(!f.dir.path().join("evidence/campaign.json").exists());
+    assert!(!f.dir.path().join("evidence/second").exists());
+    listener.finish();
+}
+
+/// ´test:unit:campaign-stop-after-child-completion-keeps-outputs-but-no-matrix´
+#[test]
+fn campaign_stop_after_child_completion_keeps_outputs_but_no_matrix() {
+    let _guard = crate::launch::test_support::case_guard();
+    let mut f = setup();
+    f.value["cases"].as_array_mut().unwrap().truncate(1);
+    let admission = f.admit();
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    let mut original = None;
+    let result = campaign::run(&admission, deadline(), |index, store, _| {
+        run_case(&f, &admission, index, store, "normal")?;
+        original = Some(store.completed_case()?);
+        crate::launch::stop::tests::send(nix::sys::signal::Signal::SIGINT);
+        Ok(())
+    });
+    assert_eq!(result.err(), Some("campaign-stopped"));
+    for output in original.unwrap().outputs {
+        let path = f.dir.path().join("sealed/sample").join(output.name);
+        assert_eq!(
+            crate::identity::hash(&fs::read(&path).unwrap()),
+            output.sha256
+        );
+        assert_eq!(fs::metadata(path).unwrap().mode() & 0o7777, 0o400);
+    }
+    assert!(
+        f.dir
+            .path()
+            .join("evidence/sample/completion.json")
+            .is_file()
+    );
+    assert!(!f.dir.path().join("evidence/campaign.json").exists());
+    listener.finish();
 }
 
 /// ´test:unit:campaign-runs-completed-pairs-in-order-and-publishes-one-matrix´
@@ -143,10 +278,41 @@ fn campaign_runs_completed_pairs_in_order_and_publishes_one_matrix() {
         value["rows"][1]["completed"]["case"]
     );
     assert_eq!(value["rows"][1]["completed"]["case"], "second");
-    assert_eq!(fs::metadata(path).unwrap().mode() & 0o7777, 0o400);
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o400);
     assert_eq!(
         campaign::run(&admission, deadline(), |_, _, _| panic!("rerun")).err(),
         Some("receipt-no-replace")
+    );
+    let listener = crate::launch::stop::Guard::install().unwrap();
+    crate::launch::stop::tests::send(nix::sys::signal::Signal::SIGTERM);
+    assert_eq!(crate::launch::stop::check(), Err("campaign-stopped"));
+    assert_eq!(
+        campaign::observation(&admission, &crate::identity::hash(&bytes))
+            .unwrap()
+            .rows
+            .len(),
+        2
+    );
+    assert_eq!(
+        fs::read(f.dir.path().join("evidence/campaign.json")).unwrap(),
+        bytes
+    );
+    listener.finish();
+    assert_eq!(
+        crate::launch::entry::Command::CalibrationRun.result_schema(),
+        2
+    );
+    let result = campaign::result(&admission, &matrix).unwrap();
+    assert_eq!(result["matrix_sha256"], crate::identity::hash(&bytes));
+    assert_eq!(result["matrix"], value);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut changed = bytes;
+    changed.push(b'\n');
+    fs::write(&path, changed).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+    assert_eq!(
+        campaign::result(&admission, &matrix).err(),
+        Some("campaign-result-binding")
     );
 }
 
@@ -204,6 +370,8 @@ fn campaign_refuses_repeated_invocations_and_final_publication_collisions() {
     }
 }
 
+// Synthetic public record evidence stays inside libtest capture.
+#[allow(clippy::print_stderr)]
 fn stops_after_failure(fault: &str) {
     let _guard = crate::launch::test_support::case_guard();
     let f = setup();
@@ -232,6 +400,50 @@ fn stops_after_failure(fault: &str) {
         &fs::read(f.dir.path().join("evidence/campaign-failure.json")).unwrap(),
     )
     .unwrap();
+    assert_eq!(failure["schema"], 4);
+    assert_eq!(failure["failure"]["index"], 0);
+    assert_eq!(failure["failure"]["case"], "sample");
+    assert_eq!(failure["failure"]["stage"], "case");
+    assert_eq!(
+        failure["failure"]["retained"]["original_cause"],
+        failure["refusal_class"]
+    );
+    assert_eq!(
+        failure["failure"]["retained"]["recovery_evidence_missing"],
+        false
+    );
+    let name = failure["failure"]["retained"]["last_lifecycle_receipt"]
+        .as_str()
+        .unwrap();
+    let recovery: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.dir.path().join("evidence/sample").join(name)).unwrap())
+            .unwrap();
+    assert_eq!(recovery["event"]["kind"], "recovery");
+    assert_eq!(recovery["schema"], 3);
+    if fault == "sealers" {
+        eprintln!("before-submission recovery: {recovery}");
+        assert_eq!(
+            recovery["event"]["observation"]["holder"]["evidence"],
+            "not-attempted"
+        );
+        assert_eq!(recovery["phase"], "failed");
+        assert_eq!(
+            recovery["event"]["observation"]["outputs"]["evidence"],
+            "unlink-succeeded"
+        );
+        assert!(!f.dir.path().join("manager-stopped").exists());
+    }
+    if fault == "generator" {
+        eprintln!("production failure summary: {failure}");
+        eprintln!("production failure recovery: {recovery}");
+        assert_eq!(recovery["phase"], "uncertain");
+        for resource in ["socket", "outputs"] {
+            assert_eq!(
+                recovery["event"]["observation"][resource]["evidence"],
+                "retained"
+            );
+        }
+    }
     assert_eq!(
         failure["completed_prefix"]["rows"]
             .as_array()
@@ -355,6 +567,10 @@ fn campaign_failure_publication_cannot_overwrite_or_accept() {
     );
     assert_eq!(visited, [0]);
     assert_eq!(fs::read(path).unwrap(), b"occupied");
+    let diagnostic = campaign::failure_message().unwrap();
+    assert_eq!(diagnostic["refusal_class"], "synthetic-failure");
+    assert_eq!(diagnostic["failure_receipt_published"], false);
+    assert_eq!(diagnostic["failure"]["case"], "sample");
     assert!(!f.dir.path().join("evidence/campaign.json").exists());
 }
 
@@ -496,13 +712,24 @@ fn campaign_handoff_producer_rechecks_objects_before_hashing() {
                 .join(&admission.policy().cases[0].streams[0].output);
             let bytes = fs::read(&path).unwrap();
             store
-                .completed_case_with(|| {
-                    fs::rename(&path, path.with_extension("retained")).unwrap();
-                    if replace {
-                        fs::write(&path, bytes).unwrap();
-                        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
-                    }
-                })
+                .completed_case_hooks(
+                    || {
+                        fs::rename(&path, path.with_extension("retained")).unwrap();
+                        if replace {
+                            fs::write(&path, bytes).unwrap();
+                            fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+                        }
+                    },
+                    || {
+                        // Restore before the final store-wide check. Without the
+                        // per-open identity check, byte-identical replacement now
+                        // reaches acceptance rather than another defensive refusal.
+                        if replace {
+                            fs::remove_file(&path).unwrap();
+                        }
+                        fs::rename(path.with_extension("retained"), &path).unwrap();
+                    },
+                )
                 .map(|_| ())
         });
         assert_eq!(
@@ -533,6 +760,22 @@ fn campaign_handoff_measures_completed_outputs_and_rejects_stale_evidence() {
     let digest = crate::identity::hash(&bytes);
     handoff_positive(&f, &admission, &matrix, &path, &bytes, &digest);
     handoff_records(&admission, &path, &bytes);
+    let mut swapped: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    swapped["rows"][0]["completed"]["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    swapped["rows"][0]["completed"]["sealed_bytes"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    let swapped = serde_json::to_vec(&swapped).unwrap();
+    replace_protected(&path, &swapped);
+    assert_eq!(
+        campaign::observation(&admission, &crate::identity::hash(&swapped)).err(),
+        Some("campaign-handoff-output")
+    );
+    replace_protected(&path, &bytes);
     handoff_files(&f, &admission, &path, &bytes, &digest);
     handoff_roots(&f, &admission, &path, &bytes, &digest);
 }
@@ -831,9 +1074,12 @@ fn handoff_roots(
             fs::rename(&root, &retained).unwrap();
             fs::create_dir(&root).unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            if directory == "evidence" {
+                copy_evidence(&retained, &root);
+            }
         });
         assert_eq!(result.err(), Some(class));
-        fs::remove_dir(&root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
         fs::rename(retained, root).unwrap();
     }
     assert_eq!(
@@ -847,4 +1093,146 @@ fn handoff_roots(
             .err(),
         Some("launch-artifact-changed")
     );
+}
+
+// Synthetic, bounded evidence copies only; no production custody walk is replaced.
+fn copy_evidence(from: &std::path::Path, to: &std::path::Path) {
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let destination = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            fs::create_dir(&destination).unwrap();
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o700)).unwrap();
+            copy_evidence(&entry.path(), &destination);
+        } else {
+            fs::copy(entry.path(), &destination).unwrap();
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o400)).unwrap();
+        }
+    }
+}
+
+/// ´test:unit:campaign-handoff-root-and-order-have-sole-refusal-controls´
+#[test]
+fn campaign_handoff_root_and_order_have_sole_refusal_controls() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    campaign::run(&admission, deadline(), |index, store, _| {
+        run_case(&f, &admission, index, store, "normal")
+    })
+    .unwrap();
+    let path = f.dir.path().join("evidence/campaign.json");
+    let bytes = fs::read(&path).unwrap();
+    let digest = crate::identity::hash(&bytes);
+    let mut swapped: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    swapped["rows"][0]["completed"]["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    swapped["rows"][0]["completed"]["sealed_bytes"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    let swapped = serde_json::to_vec(&swapped).unwrap();
+    replace_protected(&path, &swapped);
+    assert_eq!(
+        campaign::observation(&admission, &crate::identity::hash(&swapped)).err(),
+        Some("campaign-handoff-output")
+    );
+    replace_protected(&path, &bytes);
+    handoff_roots(&f, &admission, &path, &bytes, &digest);
+}
+
+/// ´test:unit:observation-boundary-checks-have-independent-core-controls´
+#[test]
+fn observation_boundary_checks_have_independent_core_controls() {
+    let _guard = crate::launch::test_support::case_guard();
+    let f = setup();
+    let admission = f.admit();
+    let _matrix = campaign::run(&admission, deadline(), |index, store, _| {
+        run_case(&f, &admission, index, store, "normal")
+    })
+    .unwrap();
+    for case in &admission.policy().cases {
+        fs::set_permissions(&case.record, fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    let policy = f.dir.path().join("policy.json");
+    fs::write(&policy, serde_json::to_vec(&f.value).unwrap()).unwrap();
+    fs::set_permissions(&policy, fs::Permissions::from_mode(0o400)).unwrap();
+    let mut files = serde_json::Map::new();
+    for (name, role) in [
+        ("sealer", ArtifactRole::Sealer),
+        ("library", ArtifactRole::Library),
+        ("interpreter", ArtifactRole::Interpreter),
+        ("parser", ArtifactRole::Parser),
+    ] {
+        let artifact = admission
+            .artifacts()
+            .iter()
+            .find(|a| a.role == role)
+            .unwrap();
+        let declared = admission
+            .policy()
+            .artifacts
+            .iter()
+            .find(|a| a.id == artifact.id)
+            .unwrap();
+        files.insert(
+            name.into(),
+            serde_json::json!({"path":declared.path,"sha256":artifact.sha256}),
+        );
+    }
+    let samples: Vec<_> = admission.policy().cases.iter().flat_map(|case| case.streams.iter().map(|stream| serde_json::json!({"case":case.id,"name":stream.name,"input_length":stream.length,"content":if stream.pattern.id()=="ascending" {"a"} else {"b"}}))).collect();
+    let record: crate::record::Parameters = serde_json::from_value(serde_json::json!({
+        "schema":3,"case":admission.policy().campaign,"campaign":{"policy":policy,"matrix_sha256":crate::identity::hash(&fs::read(f.dir.path().join("evidence/campaign.json")).unwrap())},
+        "sealed_root":f.dir.path().join("analysis"),"evidence_root":f.dir.path().join("observation"),
+        "payload":{"path":"/unused","sha256":"0".repeat(64),"repository":"/unused","source_commit":"0".repeat(40),"document":"unused"},
+        "limits":{"file_bytes":1024,"output_bytes":1024,"timeout_ms":600_000},
+        "identity":{"measure":"decoded-length","computation":"3*(N/4)-P","form":{"wrap":0,"final_lf":true},"files":files,"probes":[],"source_commit":"0".repeat(40)},
+        "probes":[],"names":[],"lengths":[],"contents":["a","b"],"comparisons":[],"samples":samples
+    })).unwrap();
+    // These core controls intentionally omit parser/identity/grid admission:
+    // each targeted boundary is the sole refusal. Built-command controls above
+    // them separately prove strict public admission and end-to-end refusals.
+    let binding = crate::launch::observation::bind(&record).unwrap();
+    let mut legacy = serde_json::to_value(&binding.evidence).unwrap();
+    let _removed = legacy.as_object_mut().unwrap().remove("admitted_owner_uid");
+    assert!(serde_json::from_value::<crate::launch::observation::Evidence>(legacy).is_err());
+    for (fault, class) in [
+        ("root", "observation-analysis-root"),
+        ("roster", "observation-roster"),
+        ("artifact", "observation-artifact"),
+        ("case", "observation-case"),
+        ("stream", "observation-stream"),
+        ("length", "observation-input"),
+        ("pattern", "observation-input"),
+        ("repeat", "observation-output-repeated"),
+    ] {
+        let mut changed = record.clone();
+        match fault {
+            "root" => changed.sealed_root = admission.policy().roots.sealed.clone(),
+            "roster" => {
+                let _removed = changed.samples.pop();
+            }
+            "artifact" => changed.identity.files.library.sha256 = "0".repeat(64),
+            "case" => changed.samples[0].case = "missing".into(),
+            "stream" => changed.samples[0].name = "missing".into(),
+            "length" => changed.samples[0].input_length += 1,
+            "pattern" => {
+                changed.samples[0].content = if changed.samples[0].content == "a" {
+                    "b"
+                } else {
+                    "a"
+                }
+                .into();
+            }
+            "repeat" => changed.samples[1] = changed.samples[0].clone(),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            crate::launch::observation::bind(&changed).err(),
+            Some(class),
+            "{fault}"
+        );
+    }
 }

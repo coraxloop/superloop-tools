@@ -146,7 +146,9 @@ impl Keeper<'_> {
             self.session.store().retain_generator(observation)?;
             // Retention is evidence, not acceptance. Even expiry after a valid
             // terminal observation must preserve it before matched-holder cleanup.
-            require(now() < deadline, "completion-deadline")?;
+            let decision_time = now();
+            super::super::stop::check()?;
+            require(decision_time < deadline, "completion-deadline")?;
             require(successful, "completion-generator-failed")?;
             Ok(true)
         })();
@@ -175,6 +177,7 @@ impl Keeper<'_> {
             self.session.store().retain_sealers(completed)?;
             self.session.store().sync_outputs()?;
             require(Instant::now() < deadline, "completion-deadline")?;
+            super::super::stop::check()?;
             self.session.store().advance(Phase::Complete)?;
             self.terminal = true;
             Ok(())

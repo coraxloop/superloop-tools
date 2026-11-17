@@ -277,6 +277,9 @@ fn invoke(case: &Case, convention: &str, raw: Option<&[u8]>, mode: u32, drain: b
         if convention == "broken" {
             drop(read_a.take());
         }
+        if convention == "stop" {
+            kill(pid, Signal::SIGTERM).unwrap();
+        }
         kill(pid, Signal::SIGCONT).unwrap();
     }
     let readers = [read_a, Some(read_b)].map(|fd| {
@@ -589,4 +592,14 @@ fn fixture_case_rejects_nonpublic_input() {
         &invoke(&Case::new(), "normal", None, 0o444, true),
         "parameter-custody",
     );
+}
+
+/// ´test:integration:fixture-manager-stop-at-barrier-emits-nothing´
+#[test]
+fn fixture_manager_stop_at_barrier_emits_nothing() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let observed = invoke(&Case::new(), "stop", None, 0o400, true);
+    assert!(observed.stopped);
+    assert_eq!(observed.output.status.signal(), Some(nix::libc::SIGTERM));
+    assert_eq!(observed.streams, [Vec::<u8>::new(), Vec::<u8>::new()]);
 }

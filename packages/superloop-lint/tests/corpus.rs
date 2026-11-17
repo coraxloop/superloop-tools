@@ -18,6 +18,9 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`runtime_fixture_has_an_isolated_writer`] | identity | Executable fixture descriptors belong to a separately reaped writer process. |
+//! | [`python_runtime_is_evidence_beside_stable_build_identity`] | identity | Build reports retain the reader process's runtime and change only that member when the same reader protocol reports another implementation version. |
+//! | [`mixed_python_readers_refuse_before_publication`] | identity | An invocation observing different Python readers refuses rather than publishing a verdict that attributes both readings to one interpreter. |
 //! | [`repository_programme_policy_is_deferred`] | cli | Explicit local ownership defers opaque rows and keeps their checker visible. |
 //! | [`unknown_policy_without_programme_still_refuses`] | cli | A bare unknown activation keeps the existing loader refusal. |
 //! | [`catalogued_policy_cannot_claim_programme`] | cli | A published policy cannot be claimed by a local checker. |
@@ -90,6 +93,7 @@
 //! | [`a_parsed_snapshot_that_disagrees_is_judged_rather_than_refused`] | cli | A snapshot whose declaration is complete but whose partition disagrees with the tree is judged rather than refused: the run happens, the object is complete, and the exit is the findings class with the unaccounted path named in the report. |
 //! | [`a_writing_mode_refuses_a_declaration_that_disagrees_with_the_tree`] | cli | Every writing mode refuses to mutate under a declaration that disagrees with the tree. That is stricter than the exit codes alone require and deliberately so: a writer that proceeded would record a conclusion drawn from a question the corpus had not answered, so it exits the failure class with an empty stdout instead. |
 //! | [`a_title_minting_the_departed_document_kind_fails_at_the_catalogue`] | head | cites (´claim:head:a-title-validates-on-every-kind-the-relation-rows-its-environment´) |
+//! | [`frozen_oracles_exclude_runtime_evidence`] | identity | Frozen semantic bytes exclude runtime evidence as well as build identity. |
 //! | [`characterizes_no_surface_bytes`] | harness | Every command class refuses with the same empty data streams when the required shape document is absent from an invented root. |
 //! | [`characterizes_check_bytes`] | harness | A check over this deliberately undeclared fixture refuses before findings can be ordered. |
 //! | [`the_check_reports_a_corpus_finding_once`] | cli | A corpus finding is reported once because reporting it twice doubles a failure count a reader acts on and names the same repair twice. |
@@ -194,6 +198,167 @@ fn python_fixture() -> tempfile::TempDir {
     );
     track(root.path());
     root
+}
+
+fn runtime_reader() -> tempfile::TempDir {
+    use std::io::Write as _;
+    let directory = tempfile::tempdir().expect("reader fixture");
+    let python = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
+        .map(|path| path.join("python3"))
+        .find(|path| path.is_file())
+        .expect("Python reader");
+    let program = format!("#!{}\n", python.display())
+        + r"
+import json, os, pathlib, subprocess, sys
+result = subprocess.run([sys.executable, *sys.argv[1:]], input=sys.stdin.buffer.read(), capture_output=True)
+if result.returncode:
+    sys.stderr.buffer.write(result.stderr)
+    sys.exit(result.returncode)
+record = json.loads(result.stdout)
+version = os.environ['FIXTURE_PYTHON_VERSION']
+if os.environ.get('FIXTURE_PYTHON_MIXED'):
+    counter = pathlib.Path(os.environ['FIXTURE_PYTHON_COUNTER'])
+    number = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(number + 1))
+    version = '9.8.7-final0' if number == 0 else '9.8.8-final0'
+record['runtime'] = dict(implementation='fixture', version=version)
+print(json.dumps(record))
+";
+    let path = directory.path().join("python3");
+    let mut writer = Command::new(&python)
+        .args(["-c", "import os, pathlib, sys; p = pathlib.Path(sys.argv[1]); p.write_bytes(sys.stdin.buffer.read()); p.chmod(0o755); p.with_name('writer-pid').write_text(str(os.getpid()))"])
+        .arg(&path)
+        .stdin(std::process::Stdio::piped())
+        .spawn().expect("reader writer process");
+    writer
+        .stdin
+        .take()
+        .expect("writer input")
+        .write_all(program.as_bytes())
+        .expect("reader bytes");
+    assert!(writer.wait().expect("reap executable writer").success());
+    directory
+}
+
+/// Executable fixture descriptors belong to a separately reaped writer process.
+///
+/// # Panics
+/// Panics only if fixture creation fails or this process wrote its executable.
+///
+/// ´claim:identity:runtime-fixture-has-an-isolated-writer´
+/// ´test:integration:runtime-fixture-has-an-isolated-writer´
+#[test]
+fn runtime_fixture_has_an_isolated_writer() {
+    let reader = runtime_reader();
+    let writer: u32 = fs::read_to_string(reader.path().join("writer-pid"))
+        .expect("writer witness")
+        .parse()
+        .expect("writer pid");
+    assert_ne!(writer, std::process::id());
+}
+
+fn runtime_command(root: &Path, reader: &Path, version: &str) -> Command {
+    let mut paths = vec![reader.to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH"),
+    ));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_superloop-lint"));
+    command
+        .env("PATH", std::env::join_paths(paths).expect("reader PATH"))
+        .env("FIXTURE_PYTHON_VERSION", version)
+        .args(["check", "--root"])
+        .arg(root);
+    command
+}
+
+/// Build reports retain the reader process's runtime and change only that
+/// member when the same reader protocol reports another implementation version.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the runtime publication contract changes.
+///
+/// ´claim:identity:python-runtime-is-evidence-beside-stable-build-identity´
+/// ´test:integration:python-runtime-is-evidence-beside-stable-build-identity´
+#[test]
+fn python_runtime_is_evidence_beside_stable_build_identity() {
+    let root = python_fixture();
+    let reader = runtime_reader();
+    let report = reader.path().join("report.json");
+    let stamp = reader.path().join("stamp");
+    let mut reports = Vec::new();
+    for version in ["9.8.7-final0", "9.8.7-final0", "9.8.8-final0"] {
+        let output = runtime_command(root.path(), reader.path(), version)
+            .arg("--write-report")
+            .arg(&report)
+            .arg("--write-stamp")
+            .arg(&stamp)
+            .output()
+            .expect("identified reader");
+        assert!(output.status.success(), "{output:?}");
+        let bytes = fs::read(&report).expect("report bytes");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("report");
+        assert_eq!(value["runtime"]["python"]["implementation"], "fixture");
+        assert_eq!(value["runtime"]["python"]["version"], version);
+        assert!(value.get("elapsed_micros").is_none());
+        reports.push(bytes);
+    }
+    assert_eq!(reports[0], reports[1]);
+    let mut before: serde_json::Value = serde_json::from_slice(&reports[0]).expect("before");
+    let mut after: serde_json::Value = serde_json::from_slice(&reports[2]).expect("after");
+    assert_ne!(before["runtime"], after["runtime"]);
+    before.as_object_mut().expect("object").remove("runtime");
+    after.as_object_mut().expect("object").remove("runtime");
+    assert_eq!(before, after);
+    fs::write(
+        root.path().join("ci/test_docstring_carrier.py"),
+        "def broken(:\n",
+    )
+    .expect("invalid Python");
+    let output = runtime_command(root.path(), reader.path(), "9.8.7-final0")
+        .output()
+        .expect("parse finding");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("finding");
+    assert_eq!(value["runtime"]["python"]["version"], "9.8.7-final0");
+}
+
+/// An invocation observing different Python readers refuses rather than
+/// publishing a verdict that attributes both readings to one interpreter.
+///
+/// # Panics
+/// Panics only if fixture IO fails or mixed readers publish a verdict.
+///
+/// ´claim:identity:mixed-python-readers-refuse-before-publication´
+/// ´test:integration:mixed-python-readers-refuse-before-publication´
+#[test]
+fn mixed_python_readers_refuse_before_publication() {
+    let root = python_fixture();
+    write(
+        root.path(),
+        "ci/test_second.py",
+        "\"\"\"Another source.\"\"\"\n",
+    );
+    track(root.path());
+    let reader = runtime_reader();
+    let report = reader.path().join("report.json");
+    let stamp = reader.path().join("stamp");
+    let output = runtime_command(root.path(), reader.path(), "9.8.7-final0")
+        .env("FIXTURE_PYTHON_MIXED", "1")
+        .env("FIXTURE_PYTHON_COUNTER", reader.path().join("counter"))
+        .arg("--write-report")
+        .arg(&report)
+        .arg("--write-stamp")
+        .arg(&stamp)
+        .output()
+        .expect("mixed readers");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.stdout, b"");
+    assert!(!report.exists());
+    assert!(!stamp.exists());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("mixed Python reader runtimes"),
+        "{output:?}"
+    );
 }
 
 fn check_carrier(root: &Path) -> (std::process::Output, serde_json::Value) {
@@ -4784,8 +4949,62 @@ fn byte_digest(bytes: &[u8]) -> String {
     digest
 }
 
+/// Frozen semantic bytes exclude runtime evidence as well as build identity.
+///
+/// # Panics
+/// Panics only if provenance changes the semantic byte oracle.
+///
+/// ´claim:identity:frozen-oracles-exclude-runtime-evidence´
+/// ´test:integration:frozen-oracles-exclude-runtime-evidence´
+#[test]
+fn frozen_oracles_exclude_runtime_evidence() {
+    let version = Command::new(env!("CARGO_BIN_EXE_superloop-lint"))
+        .arg("--version")
+        .output()
+        .expect("version");
+    let record: serde_json::Value = serde_json::from_slice(&version.stderr).expect("record");
+    let identity = serde_json::to_string(&record["identity"]).expect("identity");
+    let bytes = format!(
+        r#"{{"identity":{identity},"runtime":{{"python":{{"implementation":"fixture","version":"9.8.7-final0"}}}},"ok":true}}"#
+    );
+    let expected = br#"{"ok":true}"#;
+    frozen_bytes(
+        "runtime-oracle",
+        bytes.as_bytes(),
+        expected.len(),
+        &byte_digest(expected),
+    );
+}
+
 /// Capture base bytes while blessing, otherwise compare them with the frozen oracle.
 fn frozen_bytes(name: &str, bytes: &[u8], expected_len: usize, expected_digest: &str) {
+    let stripped;
+    let bytes = if bytes.starts_with(b"{\"identity\":") {
+        let value: serde_json::Value = serde_json::from_slice(bytes).expect("identified report");
+        assert_eq!(value["identity"]["schema"], 1);
+        assert_eq!(
+            value["identity"]["artifact_sha256"],
+            byte_digest(&fs::read(env!("CARGO_BIN_EXE_superloop-lint")).expect("binary bytes"))
+        );
+        // Consume only provenance values, retaining the semantic bytes verbatim.
+        // Runtime contains a nested object, so a first-brace search is not enough.
+        let mut remaining = &bytes[1..];
+        for key in [b"\"identity\":".as_slice(), b"\"runtime\":".as_slice()] {
+            if let Some(value) = remaining.strip_prefix(key) {
+                let mut stream =
+                    serde_json::Deserializer::from_slice(value).into_iter::<serde_json::Value>();
+                stream
+                    .next()
+                    .expect("provenance value")
+                    .expect("valid provenance");
+                remaining = &value[stream.byte_offset() + 1..];
+            }
+        }
+        stripped = [&b"{"[..], remaining].concat();
+        stripped.as_slice()
+    } else {
+        bytes
+    };
     if let Some(directory) = std::env::var_os("LINTER_CHARACTERIZATION_CAPTURE") {
         let directory = PathBuf::from(directory);
         fs::create_dir_all(&directory).expect("create the characterization capture directory");
@@ -5471,8 +5690,13 @@ fn citation_sites_preserve_resolved_addresses() {
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("protocol");
     assert_eq!(
+        report["identity"]["artifact_sha256"],
+        byte_digest(&fs::read(env!("CARGO_BIN_EXE_superloop-lint")).expect("binary bytes"))
+    );
+    assert_eq!(
         report,
         serde_json::json!({
+            "identity": report["identity"],
             "namespace":"class.linter.citation-sites", "version":[1,0,0],
             "sites":[{"citing_path":"adr/fixture.md", "target_path":"adr/fixture.md",
                       "surface":"document", "label":"sec:fixture:one", "owner":"PROJECTA", "path_class":null}]

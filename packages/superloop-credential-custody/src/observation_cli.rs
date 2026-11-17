@@ -86,7 +86,7 @@ pub fn main() -> ExitCode {
 fn diagnostic(class: &'static str, exit: CommandExit) -> ExitCode {
     let _ignored = emit_control_plane_record(&ControlPlaneRecord::diagnostic(
         PROGRAM,
-        &process::diagnostic_message(class),
+        &entry::failure_message(class),
     ));
     exit.exit_code()
 }
@@ -140,7 +140,7 @@ fn execute(command: &Command, start: Instant) -> Result<()> {
     if let Some((operation, parameters, case)) = launch {
         let evidence = entry::run(operation, parameters, case)?;
         let envelope = Envelope {
-            schema: 1,
+            schema: operation.result_schema(),
             command: operation.label(),
             case: case.into(),
             outcome: match operation {
@@ -238,7 +238,7 @@ fn publish(
     start: Instant,
 ) -> Result<()> {
     let envelope = Envelope {
-        schema: if label == "format-discover" { 1 } else { 2 },
+        schema: if label == "format-discover" { 1 } else { 3 },
         command: label,
         case: case.into(),
         outcome,

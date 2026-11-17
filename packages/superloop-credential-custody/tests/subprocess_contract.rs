@@ -288,7 +288,7 @@ fn known_lengths_and_identity() {
     let calibration = f.dir.path().join("evidence/calibration");
     let before = fs::read(&calibration).unwrap();
     let comparison = pass(&f.check());
-    assert_eq!(comparison["schema"], 2);
+    assert_eq!(comparison["schema"], 3);
     assert_eq!(comparison["evidence"]["matches"], true);
     assert_eq!(fs::read(calibration).unwrap(), before);
 }

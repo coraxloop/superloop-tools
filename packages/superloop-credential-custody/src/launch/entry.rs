@@ -30,6 +30,12 @@ impl Command {
             Self::BarrierRelease => "barrier-release",
         }
     }
+    pub const fn result_schema(self) -> u32 {
+        match self {
+            Self::CalibrationRun => 2,
+            _ => 1,
+        }
+    }
     const fn role(self) -> Role {
         match self {
             Self::CalibrationRun => Role::CalibrationRun,
@@ -71,13 +77,14 @@ pub fn run(command: Command, parameters: &Path, case: &str) -> Result<serde_json
                 "manager-artifact-roster",
             )?;
         }
+        let _stop = super::stop::Guard::install()?;
         let deadline =
             Instant::now() + Duration::from_millis(admission.policy().limits.campaign_ms);
         let matrix = campaign::run(&admission, deadline, |index, store, deadline| {
             let mut keeper = Keeper::prepare(startup.clone(), &admission, index, store)?;
             keeper.run(deadline)
         })?;
-        return serde_json::to_value(matrix).map_err(|_| "result-encoding");
+        return campaign::result(&admission, &matrix);
     }
     let index = admission
         .policy()
@@ -99,4 +106,11 @@ pub fn run(command: Command, parameters: &Path, case: &str) -> Result<serde_json
         }
         Command::CalibrationRun => Err("launch-command"),
     }
+}
+
+pub fn failure_message(class: &'static str) -> String {
+    campaign::failure_message().map_or_else(
+        || crate::process::diagnostic_message(class),
+        |failure| serde_json::json!({"class":class,"campaign_failure":failure,"kernel":crate::process::diagnostic_message(class)}).to_string(),
+    )
 }

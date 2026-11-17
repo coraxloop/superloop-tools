@@ -138,6 +138,7 @@ impl OutboxFixture {
             sink.configure(Some(&self.registry), &role),
             "worker configures"
         );
+        assert!(!sink.reader_is_estate_owner());
         sink
     }
 
@@ -158,6 +159,7 @@ impl OutboxFixture {
             sink.configure(Some(&self.registry), &role),
             "deployment configures"
         );
+        assert!(sink.reader_is_estate_owner());
         sink
     }
 }

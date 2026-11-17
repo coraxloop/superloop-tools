@@ -883,6 +883,12 @@ struct UnpublishedLabels {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CitationSites {
+    // The current citation protocol requires identity. A null artifact digest
+    // remains valid: this reader consumes citations, not an artifact pin.
+    #[serde(rename = "identity")]
+    _identity: superloop_cli_common::BuildIdentity,
+    #[serde(rename = "runtime")]
+    _runtime: Option<superloop_cli_common::RuntimeEvidence>,
     namespace: String,
     version: [u64; 3],
     sites: Vec<CitationSite>,
@@ -1723,4 +1729,27 @@ mod guard_tests {
         std::fs::copy(&path, &inside).expect("inside input");
         assert!(cut_burn_register(&root, Some(&inside)).is_err());
     }
+}
+
+/// Citation reports require identity even when the image digest is unavailable.
+///
+/// # Panics
+/// Panics only if the reader accepts a pre-identity report.
+///
+/// ´claim:identity:citation-sites-require-the-current-envelope´
+/// ´test:unit:citation-sites-require-the-current-envelope´
+#[cfg(test)]
+#[test]
+fn citation_sites_require_the_current_envelope() {
+    let old = r#"{"namespace":"class.linter.citation-sites","version":[1,0,0],"sites":[]}"#;
+    assert!(serde_json::from_str::<CitationSites>(old).is_err());
+    let mut record: serde_json::Value = serde_json::from_str(old).unwrap();
+    record["identity"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<CitationSites>(record.clone()).is_err());
+    record["identity"] = serde_json::json!({
+        "schema": 1, "repository": "superloop-tools", "version": "0.5.0",
+        "source_commit": null, "source_tree": null, "source_state": "unknown",
+        "release_tag": null, "artifact_sha256": null, "digest_absence": "unreadable",
+    });
+    assert!(serde_json::from_value::<CitationSites>(record).is_ok());
 }

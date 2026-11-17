@@ -456,7 +456,9 @@ impl Notifications {
 
 #[cfg(test)]
 mod tests {
+    use super::super::directory::bounded;
     use super::*;
+    use std::process::Command;
     /// ´claim:loophome:mail-notifications-wake-for-rename-without-a-scan´
     /// ´test:unit:mail-notifications-wake-for-rename-without-a-scan´
     #[test]
@@ -653,6 +655,30 @@ mod tests {
     /// ´test:unit:mail-fallback-drops-unrequested-paths-and-reports-bounded-reminders´
     #[test]
     fn mail_fallback_drops_unrequested_paths_and_reports_bounded_reminders() {
+        const CHILD: &str = "LOOP_HOME_NOTIFY_LOG_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = bounded::output(
+                Command::new(std::env::current_exe().expect("test image"))
+                    .args([
+                        "mail::notify::tests::mail_fallback_drops_unrequested_paths_and_reports_bounded_reminders",
+                        "--exact",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1"),
+                "mail notification capture",
+                Duration::from_secs(120),
+            )
+            .expect("bounded capture child");
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "capture child: {}; stdout={}; stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let root =
             std::env::temp_dir().join(format!("mail-notify-reminders-{}", std::process::id()));
         std::fs::create_dir(&root).expect("fixture");
@@ -697,12 +723,14 @@ mod tests {
         assert_eq!(
             text.matches("mail notifications remain unavailable")
                 .count(),
-            2
+            2,
+            "captured diagnostics: {text}"
         );
         assert_eq!(
             text.matches("mail uncovered path no longer requested")
                 .count(),
-            2
+            2,
+            "captured diagnostics: {text}"
         );
         assert!(text.contains("missing=true"), "{text}");
         std::fs::remove_dir_all(root).expect("cleanup");

@@ -33,6 +33,9 @@ pub(super) struct Pipes {
     uncertain: bool,
 }
 impl Pipes {
+    pub const fn was_unlinked(&self) -> bool {
+        self.released
+    }
     pub const fn directory(&self) -> &Directory {
         &self.directory
     }
@@ -74,12 +77,12 @@ impl Pipes {
             self.ends[0]
                 .reader
                 .try_clone()
-                .map_err(|_| "fifo-duplicate")?
+                .map_err(|error| crate::process::io_failure("fifo-duplicate", error))?
                 .into(),
             self.ends[1]
                 .reader
                 .try_clone()
-                .map_err(|_| "fifo-duplicate")?
+                .map_err(|error| crate::process::io_failure("fifo-duplicate", error))?
                 .into(),
         ])
     }

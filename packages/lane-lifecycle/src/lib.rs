@@ -2063,6 +2063,7 @@ fn execute_with_clock(
         start,
         starting_size,
         clock,
+        false,
     );
     let mut attempts = 1_u8;
     let mut attempt_start = starting_size;
@@ -2074,7 +2075,10 @@ fn execute_with_clock(
     let mut suspend_start = start;
     let mut suspend_log = String::new();
     loop {
-        clock.fixture_boundary("suspend-before-resume");
+        if let Err(error) = clock.fixture_boundary("suspend-before-resume") {
+            child_result = Err(error);
+            break;
+        }
         let resumed = resume_after_suspend(
             backend,
             &mut effective,
@@ -2091,15 +2095,30 @@ fn execute_with_clock(
                 suspend_start = now;
                 attempt_start = file_size(&events_path);
                 stderr_start = file_size(&stderr_path);
-                child_result = run_child(
-                    backend,
-                    &effective,
-                    &run_dir,
-                    &lock,
-                    start,
-                    attempt_start,
-                    clock,
-                );
+                child_result = clock
+                    .fixture_boundary("suspend-recorded-before-spawn")
+                    .and_then(|()| {
+                        run_child(
+                            backend,
+                            &effective,
+                            &run_dir,
+                            &lock,
+                            start,
+                            attempt_start,
+                            clock,
+                            true,
+                        )
+                    });
+                let outcome = suspend_attempt_outcome(&child_result);
+                if let Err(error) =
+                    close_suspend_attempt(&run_dir, effective.name(), &mut suspend_log, &outcome)
+                {
+                    child_result = Err(error);
+                    break;
+                }
+                if matches!(child_result, Err(_) | Ok(ChildResult::NotStarted(_))) {
+                    break;
+                }
                 continue;
             }
             Ok(None) => {}
@@ -2121,7 +2140,10 @@ fn execute_with_clock(
         }
         .clone_into(&mut capacity_end);
         if capacity {
-            clock.fixture_boundary("capacity-before-retry");
+            if let Err(error) = clock.fixture_boundary("capacity-before-retry") {
+                child_result = Err(error);
+                break;
+            }
             if attempts < CAPACITY_MAX_ATTEMPTS && forwarded_signal().is_some() {
                 capacity_end = "model-at-capacity; retry-stopped".into();
                 break;
@@ -2167,14 +2189,23 @@ fn execute_with_clock(
                 "{}: model at capacity; attempt {attempts}/{CAPACITY_MAX_ATTEMPTS}; retry in {delay}s",
                 backend.name()
             );
-            let waited = clock.wait(delay);
+            let waited = match clock.wait(delay) {
+                Ok(waited) => waited,
+                Err(error) => {
+                    child_result = Err(error);
+                    break;
+                }
+            };
             capacity_waits.push(waited);
             let _ignored = writeln!(&mut capacity_log, "attempt={attempts} waited={waited}s");
             let _ignored = atomic_write(
                 &run_dir.join(CAPACITY_ATTEMPTS_FILE),
                 capacity_log.as_bytes(),
             );
-            clock.fixture_boundary("capacity-wait-recorded");
+            if let Err(error) = clock.fixture_boundary("capacity-wait-recorded") {
+                child_result = Err(error);
+                break;
+            }
             let Ok(retry_start) = clock.sample() else {
                 capacity_end = "clock sample failed".into();
                 child_result = Err("clock sample failed".into());
@@ -2198,6 +2229,7 @@ fn execute_with_clock(
                 start,
                 attempt_start,
                 clock,
+                false,
             );
             continue;
         }
@@ -2294,7 +2326,9 @@ fn execute_with_clock(
                     )
                 })
         }
-        Ok(ChildResult::Terminated) => (1, Verdict::Failed, None, None),
+        Ok(ChildResult::Terminated | ChildResult::NotStarted(_)) => {
+            (1, Verdict::Failed, None, None)
+        }
         Err(cause) => {
             let mut diagnostic = runtime_diagnostic(backend.name());
             diagnostic.extend_from_slice(
@@ -2406,6 +2440,50 @@ fn annotate_suspend_resumes(report: &mut Vec<u8>, count: u8) {
         }
         let _ignored = writeln!(report, " suspend_resumes={count}");
     }
+}
+
+fn suspend_attempt_outcome(child: &Result<ChildResult, String>) -> String {
+    match child {
+        Ok(ChildResult::Natural(status)) => status.code().map_or_else(
+            || {
+                format!(
+                    "child-status:signal-{}",
+                    status.signal().unwrap_or_default()
+                )
+            },
+            |code| format!("child-status:exit-{code}"),
+        ),
+        Ok(ChildResult::Terminal(result)) => {
+            if result.is_error() {
+                "child-status:terminal-error".to_owned()
+            } else {
+                "child-status:terminal-ok".to_owned()
+            }
+        }
+        Ok(ChildResult::Terminated) => format!(
+            "started-stopped:{}",
+            forwarded_signal().unwrap_or("unknown")
+        ),
+        Ok(ChildResult::NotStarted(signal)) => format!("not-started:stopped:{signal}"),
+        Err(_) => "attempt-error".to_owned(),
+    }
+}
+
+fn close_suspend_attempt(
+    run_dir: &Path,
+    name: &str,
+    log: &mut String,
+    outcome: &str,
+) -> Result<(), String> {
+    if log.ends_with('\n') {
+        log.pop();
+    }
+    let _ignored = writeln!(log, " outcome={outcome}");
+    atomic_write(
+        &run_dir.join(format!("suspend-resumes-{name}.txt")),
+        log.as_bytes(),
+    )
+    .map_err(|error| format!("suspend resume outcome record: {error}"))
 }
 
 // Keep the step boundary and lock: this is another vendor invocation of the
@@ -2836,6 +2914,8 @@ enum ChildResult {
     /// A signal asked the driver to stop, and the driver stopped its child
     /// with it rather than leaving it producing under no supervision.
     Terminated,
+    /// A recorded stop prevented an accepted resume attempt from spawning.
+    NotStarted(&'static str),
 }
 
 /// The monitor's own readings at one awake-time poll.
@@ -3701,7 +3781,7 @@ fn context_record_line(context: ContextUse, turn: u64, event_end: u64, at: &str)
     )
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_child(
     backend: &dyn Backend,
     config: &Config,
@@ -3710,6 +3790,7 @@ fn run_child(
     start: ClockSample,
     starting_size: u64,
     clock: &mut Clock,
+    stop_before_spawn: bool,
 ) -> Result<ChildResult, String> {
     let events_path = run_dir.join("events.jsonl");
     let events = OpenOptions::new()
@@ -3744,6 +3825,9 @@ fn run_child(
     }
     let program = command.get_program().to_string_lossy().into_owned();
     let _watched = install_termination_watch();
+    if stop_before_spawn && let Some(signal) = forwarded_signal() {
+        return Ok(ChildResult::NotStarted(signal));
+    }
     let mut child = command
         .stdin(Stdio::from(input))
         .stdout(Stdio::from(events))
@@ -5006,28 +5090,51 @@ enum Clock {
 impl Clock {
     // Only a controlled clock can rendezvous with a subprocess fixture. Real
     // clocks never consult these inputs or block on this test channel.
-    fn fixture_boundary(&self, name: &str) {
+    fn fixture_boundary(&self, name: &str) -> Result<(), String> {
         #[cfg(debug_assertions)]
         use std::os::linux::net::SocketAddrExt as _;
         #[cfg(not(debug_assertions))]
-        let _ = name;
-        #[cfg(debug_assertions)]
-        if !matches!(self, Self::Real { .. })
-            && std::env::var("CODEX_LANE_TEST_BOUNDARY").as_deref() == Ok(name)
-            && let Some(path) = std::env::var_os("CODEX_LANE_TEST_BOUNDARY_SOCKET")
-            && let Ok(address) =
-                std::os::unix::net::SocketAddr::from_abstract_name(path.as_encoded_bytes())
-            && let Ok(mut channel) = std::os::unix::net::UnixStream::connect_addr(&address)
         {
-            let _ignored = channel.set_read_timeout(Some(Duration::from_secs(10)));
-            let _ignored = channel.write_all(b"ready");
+            let _ = name;
+            Ok(())
+        }
+        #[cfg(debug_assertions)]
+        {
+            if matches!(self, Self::Real { .. })
+                || std::env::var("CODEX_LANE_TEST_BOUNDARY").as_deref() != Ok(name)
+            {
+                return Ok(());
+            }
+            let refusal = |stage| format!("fixture-boundary: {name}: {stage}");
+            let path = std::env::var_os("CODEX_LANE_TEST_BOUNDARY_SOCKET")
+                .ok_or_else(|| refusal("socket-missing"))?;
+            let address =
+                std::os::unix::net::SocketAddr::from_abstract_name(path.as_encoded_bytes())
+                    .map_err(|_error| refusal("socket-invalid"))?;
+            let mut channel = std::os::unix::net::UnixStream::connect_addr(&address)
+                .map_err(|_error| refusal("connect-failed"))?;
+            channel
+                .set_read_timeout(Some(Duration::from_secs(120)))
+                .map_err(|_error| refusal("read-guard-failed"))?;
+            channel
+                .write_all(b"ready")
+                .map_err(|_error| refusal("ready-write-failed"))?;
             let mut release = [0];
-            if channel.read_exact(&mut release).is_ok() && release == *b"s" {
-                let deadline = Instant::now() + Duration::from_secs(5);
+            channel
+                .read_exact(&mut release)
+                .map_err(|_error| refusal("release-read-failed"))?;
+            if release == *b"s" {
+                let deadline = Instant::now() + Duration::from_secs(120);
                 while forwarded_signal().is_none() && Instant::now() < deadline {
                     std::thread::yield_now();
                 }
+                if forwarded_signal().is_none() {
+                    return Err(refusal("signal-not-recorded"));
+                }
+            } else if release != *b"r" {
+                return Err(refusal("invalid-release"));
             }
+            Ok(())
         }
     }
 
@@ -5103,9 +5210,9 @@ impl Clock {
         }
     }
 
-    fn wait(&mut self, seconds: u64) -> u64 {
-        self.fixture_boundary("capacity-waiting");
-        match self {
+    fn wait(&mut self, seconds: u64) -> Result<u64, String> {
+        self.fixture_boundary("capacity-waiting")?;
+        Ok(match self {
             Self::Real { .. } => {
                 let start = Instant::now();
                 let delay = Duration::from_secs(seconds);
@@ -5128,7 +5235,7 @@ impl Clock {
                 *waited = waited.saturating_add(elapsed);
                 elapsed
             }
-        }
+        })
     }
 }
 

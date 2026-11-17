@@ -256,6 +256,8 @@ def producer_fixture(root):
 import json, os
 from pathlib import Path
 root = Path.cwd()
+assert os.environ["SUPERLOOP_TOOLS_PUBLIC_COMMIT"] == "a" * 40
+assert os.environ["SUPERLOOP_TOOLS_RELEASE_TAG"] == "fixture-release"
 changing = (root / "change-config").exists()
 if changing:
     (Path(os.environ["CARGO_HOME"]) / "config.toml").write_text(
@@ -283,7 +285,8 @@ def test_release_producer_dependencies(builder, source):
                        if not builder.flag_name(name)}
         environment.update(HOME=str(root / "account"), CARGO_HOME=str(cargo_home))
         command = shlex.join([sys.executable, str(source / "packages/build-sync/workspace.py"),
-                              "build", str(workspace), str(record), str(cargo), "a" * 40])
+                              "build", str(workspace), str(record), str(cargo), "a" * 40,
+                              "fixture-release"])
         # Quote the shell command, then escape Ninja's own dollar expansion.
         target = str(record).replace("$", "$$").replace(" ", "$ ").replace(":", "$:")
         (output / "build.ninja").write_text(
@@ -311,7 +314,8 @@ def test_release_producer_dependencies(builder, source):
         original_artifact = artifact.read_bytes()
         (workspace / "change-config").touch()
         with patch.dict(os.environ, environment, clear=True):
-            refused(lambda: builder.build(workspace, record, str(cargo), "a" * 40),
+            refused(lambda: builder.build(workspace, record, str(cargo), "a" * 40,
+                                          "fixture-release"),
                     "Cargo configuration changed during release build")
         require(record.read_bytes() == original and artifact.read_bytes() == original_artifact,
                 "during-build config refusal must retain published bytes and record")

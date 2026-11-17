@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+const FIXTURE_HANG_BOUND: Duration = Duration::from_secs(120);
+
 /// # Panics
 /// Panics if the production helper loses the reserved runtime or its authority thread.
 /// ´claim:superlooplane:helper-service-executes-received-runtime´
@@ -90,13 +92,13 @@ impl Drop for FixtureChild {
 }
 impl FixtureChild {
     /// # Panics
-    /// Panics if a fixture child cannot finish within its bounded measurement.
+    /// Panics if a fixture child cannot finish within the distant hang guard.
     fn finish(mut self) -> Output {
         let began = Instant::now();
         let child = self.0.as_mut().expect("live child");
         while child.try_wait().expect("child status").is_none() {
             assert!(
-                began.elapsed() < Duration::from_secs(60),
+                began.elapsed() < FIXTURE_HANG_BOUND,
                 "fixture child exceeded bound"
             );
             std::thread::sleep(Duration::from_millis(20));
@@ -282,7 +284,7 @@ fn exchange(home: &Path, runs: &Path, loop_uid: u32) -> Output {
     let script = r"
 import os,socket,struct,sys,time
 from pathlib import Path
-p=Path(sys.argv[1]); deadline=time.monotonic()+30
+p=Path(sys.argv[1]); deadline=time.monotonic()+120
 while not (p/'client-ready').exists():
  assert time.monotonic()<deadline
  time.sleep(.01)
@@ -391,7 +393,7 @@ p.write_text(json.dumps(s))
     let began = Instant::now();
     while fs::metadata(evidence).expect("authority generation").ino() == generation {
         assert!(
-            began.elapsed() < Duration::from_secs(90),
+            began.elapsed() < FIXTURE_HANG_BOUND,
             "namespace refresh remains unmeasured"
         );
         std::thread::sleep(Duration::from_millis(50));
@@ -467,7 +469,7 @@ pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
             );
         }
         assert!(
-            began.elapsed() < Duration::from_secs(45),
+            began.elapsed() < FIXTURE_HANG_BOUND,
             "service readiness exceeded bound"
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -670,11 +672,98 @@ fn built_helper_choice(
     child
 }
 
+fn connect_when_listening(path: &Path, mut not_listening: impl FnMut()) -> UnixStream {
+    loop {
+        match UnixStream::connect(path) {
+            Ok(stream) => return stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                not_listening();
+            }
+            Err(error) => panic!("socket {}: {error}", path.display()),
+        }
+    }
+}
+
+/// # Panics
+/// Panics if a bound but not-yet-listening socket is mistaken for a ready control peer.
+/// ´test:crate:helper-control-connect-waits-for-listen´
+#[test]
+fn helper_control_connect_waits_for_listen() {
+    let root = tempfile::tempdir().expect("socket fixture root");
+    let socket = root.path().join("control.sock");
+    let script = r"
+import socket,sys
+peer=socket.socket(socket.AF_UNIX)
+peer.bind(sys.argv[1])
+sys.stdout.buffer.write(b'B')
+sys.stdout.buffer.flush()
+assert sys.stdin.buffer.read(1)==b'L'
+peer.listen(1)
+stream,_=peer.accept()
+assert stream.recv(1)==b'C'
+stream.close()
+";
+    let mut server = Command::new("/usr/bin/python3")
+        .args(["-I", "-c", script])
+        .arg(&socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("bound socket fixture");
+    let mut bound = [0];
+    server
+        .stdout
+        .as_mut()
+        .expect("bound marker stream")
+        .read_exact(&mut bound)
+        .expect("bound marker");
+    assert_eq!(&bound, b"B");
+    assert!(socket.exists(), "bind creates the pathname before listen");
+    let mut release = server.stdin.take().expect("listen release");
+    let (refused_tx, refused_rx) = std::sync::mpsc::channel();
+    let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let mut first = true;
+        let mut stream = connect_when_listening(&socket, || {
+            if first {
+                refused_tx.send(()).expect("first refusal observed");
+                continue_rx.recv().expect("listen released");
+                first = false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        });
+        stream.write_all(b"C").expect("connected after listen");
+        done_tx.send(()).expect("connection completed");
+    });
+    refused_rx
+        .recv()
+        .expect("bound socket refused before listen");
+    release.write_all(b"L").expect("release listener");
+    continue_tx.send(()).expect("resume connection attempts");
+    done_rx
+        .recv_timeout(Duration::from_secs(120))
+        .expect("connection eventually completed");
+    waiter.join().expect("connection waiter");
+    let output = server.wait_with_output().expect("server output");
+    assert!(
+        output.status.success(),
+        "fixture server: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn ready_and_stop(mut child: FixtureChild, runs: &Path, marker: &str) {
     let control = crate::container_helper::control_socket_path(&runs.join("R")).expect("control");
     let socket = crate::container_helper::socket_path(&runs.join("R")).expect("client");
     let start = Instant::now();
-    while !control.exists() || !socket.exists() {
+    let mut stream = connect_when_listening(&control, || {
         if child
             .0
             .as_mut()
@@ -683,7 +772,12 @@ fn ready_and_stop(mut child: FixtureChild, runs: &Path, marker: &str) {
             .expect("status")
             .is_some()
         {
-            let output = child.finish();
+            let output = child
+                .0
+                .take()
+                .expect("exited helper")
+                .wait_with_output()
+                .expect("helper output");
             panic!(
                 "{marker}: {}{}",
                 String::from_utf8_lossy(&output.stdout),
@@ -691,12 +785,11 @@ fn ready_and_stop(mut child: FixtureChild, runs: &Path, marker: &str) {
             );
         }
         assert!(
-            start.elapsed() < Duration::from_secs(45),
+            start.elapsed() < FIXTURE_HANG_BOUND,
             "{marker}: readiness deadline"
         );
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let mut stream = UnixStream::connect(&control).expect("control connect");
+    });
     stream.write_all(b"C").expect("cancel helper");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))

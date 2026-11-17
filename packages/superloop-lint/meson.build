@@ -1,4 +1,5 @@
 pkg_superloop_lint_rust = files(
+  'build.rs',
   'src/abnf.rs',
   'src/adoption.rs',
   'src/application.rs',
@@ -154,6 +155,7 @@ dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#26","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
 {"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#27","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
 {"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#28","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
+{"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#29","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
 {"kind":"call","site":"packages/superloop-lint/tests/fmt.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#12","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
 {"kind":"call","site":"packages/superloop-lint/tests/fmt.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#13","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
 ''']
@@ -210,11 +212,11 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
-{"kind":"meson-call","site":"packages/superloop-lint/meson.build:custom_target#1","sha256":"5d58c2a0c06db241bdc59317f8835ada6178fe82df36e415a7caf5c97866d81a","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"b09912c5f9d94f4a0d87daad99896b65d81ddef22e00322588ea06dbabf7897a"}
+{"kind":"meson-call","site":"packages/superloop-lint/meson.build:custom_target#1","sha256":"5d58c2a0c06db241bdc59317f8835ada6178fe82df36e415a7caf5c97866d81a","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"ea2c35a2b64c252b8c4c6ef2e8e9083f5ec3d24284b199478e6da130083a4e8e"}
 ''']
 
 dependency_ledger += ['''
-{"kind":"meson-call","site":"packages/superloop-lint/meson.build:find_program#1","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env to invoke the shared artifact staging helper","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"b09912c5f9d94f4a0d87daad99896b65d81ddef22e00322588ea06dbabf7897a"}
+{"kind":"meson-call","site":"packages/superloop-lint/meson.build:find_program#1","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env to invoke the shared artifact staging helper","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"ea2c35a2b64c252b8c4c6ef2e8e9083f5ec3d24284b199478e6da130083a4e8e"}
 ''']
 
 # Publication command dependencies.
@@ -224,14 +226,24 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
-{"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#30","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Verify explicit repository-programme deferral, loader refusals, independent verdicts and preservation of opaque lists through the built checker and burn writer","binding":"CARGO_BIN_EXE_superloop-lint"}
+{"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#31","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Verify explicit repository-programme deferral, loader refusals, independent verdicts and preservation of opaque lists through the built checker and burn writer","binding":"CARGO_BIN_EXE_superloop-lint"}
 ''']
 
 dependency_ledger += ['''
-{"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#29","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Assert the citation-sites executable protocol preserves resolved addresses without prose","binding":"CARGO_BIN_EXE_superloop-lint"}
+{"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#30","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Assert the citation-sites executable protocol preserves resolved addresses without prose","binding":"CARGO_BIN_EXE_superloop-lint"}
 ''']
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lint/tests/fmt.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#14","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
 {"kind":"call","site":"packages/superloop-lint/tests/fmt.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#15","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
+''']
+
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-lint/tests/fmt.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#16","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","contract":"Cargo supplies this workspace binary to its integration fixture; arguments and asserted streams/status belong to the named test","binding":"CARGO_BIN_EXE_superloop-lint"}
+''']
+
+# Identity evidence fixture process boundaries.
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:& python#1","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"& python","callee":"external:python3","lookup":"public-command","contract":"Create the runtime-reader executable in a separate reaped Python process so parallel tests cannot inherit its writable descriptor"}
+{"kind":"call","site":"packages/superloop-lint/tests/corpus.rs:env ! (\"CARGO_BIN_EXE_superloop-lint\")#32","caller":"superloop-lint","owner":"SUPERLOOPLINT","selector":"env ! (\"CARGO_BIN_EXE_superloop-lint\")","callee":"bin/superloop-lint","lookup":"test-executable","binding":"CARGO_BIN_EXE_superloop-lint","contract":"Check that the frozen semantic byte oracle excludes identity and runtime evidence"}
 ''']

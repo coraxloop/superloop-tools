@@ -59,7 +59,7 @@ fn failed_transport_kind(status: ExitStatus, limit: Duration) -> String {
             |signal| {
                 nix::sys::signal::Signal::try_from(signal).map_or_else(
                     |_| format!("failure=signal signal={signal}"),
-                    |name| format!("failure=signal signal={name:?}"),
+                    |name| format!("failure=signal signal={}", name.as_str()),
                 )
             },
         ),

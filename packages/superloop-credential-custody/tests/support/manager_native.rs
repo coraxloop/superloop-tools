@@ -13,6 +13,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("environment".into());
     }
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--signal-keeper") {
+        signal_keeper(&args)?;
+        std::io::stdout().write_all(b"sent\n")?;
+        return Ok(());
+    }
+    if args.first().is_some_and(|a| a == "--signal-mask") {
+        use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+        let mut mask = SigSet::empty();
+        pthread_sigmask(SigmaskHow::SIG_BLOCK, None, Some(&mut mask))?;
+        writeln!(
+            std::io::stdout(),
+            "{} {}",
+            mask.contains(Signal::SIGINT),
+            mask.contains(Signal::SIGTERM)
+        )?;
+        return Ok(());
+    }
     if args.first().is_some_and(|a| a == "emit") {
         return stopped_fixture(&args);
     }
@@ -53,6 +70,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::io::stdout().write_all(&fs::read(root.join("manager-reply"))?)?;
     }
     if args.iter().any(|a| a == "stop") {
+        let signal = root.join("manager-stop-signal");
+        if signal.exists() {
+            let tid = fs::read_to_string(&signal)?;
+            fs::remove_file(signal)?;
+            // The manager's queued stop survives interruption of its client.
+            // Publish the resulting unload before delivering that interruption.
+            fs::write(root.join("manager-stopped"), b"stop\n")?;
+            let unit = args.last().ok_or("missing unit")?;
+            fs::write(
+                root.join("manager-reply"),
+                format!("Id={unit}\nLoadState=not-found\nInvocationID=\nMainPID=0\n"),
+            )?;
+            signal_keeper(&["--signal-keeper".into(), tid])?;
+            return Ok(());
+        }
         if root.join("manager-require-retained").exists() {
             let retained: serde_json::Value =
                 serde_json::from_slice(&fs::read(root.join("evidence/sample/state-07.json"))?)?;
@@ -79,6 +111,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn unsafe_fd(fd: i32) -> bool {
     // SAFETY: scalar metadata query; the test peer never reads inherited bytes.
     unsafe { nix::libc::fcntl(fd, nix::libc::F_GETFD) >= 0 }
+}
+
+#[allow(unsafe_code)]
+fn signal_keeper(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.len() != 2 {
+        return Err("signal arguments".into());
+    }
+    let tid: i32 = args[1].parse()?;
+    // SAFETY: this native test peer targets only its own parent's explicitly
+    // named test thread, never another libtest worker or a node process.
+    if unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_tgkill,
+            nix::libc::getppid(),
+            tid,
+            nix::libc::SIGTERM,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
 #[allow(unsafe_code)]

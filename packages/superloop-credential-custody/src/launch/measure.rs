@@ -116,6 +116,8 @@ pub(super) fn observation_admission(path: &Path) -> Result<Admission> {
 // The owner parameter belongs to the private core, never a CLI or policy field.
 // The root adapter always passes zero. Ordinary-user tests exercise held files.
 fn admit_bytes(bytes: &[u8], owner: u32) -> Result<Admission> {
+    #[cfg(test)]
+    super::test_support::assert_owned();
     let policy = super::policy::parse(bytes)?;
     // Empty-environment native sealing uses this fixed host-key path. Compare
     // before touching artifacts; the test-only owner adapter uses synthetic keys.

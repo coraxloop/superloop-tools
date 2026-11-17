@@ -283,22 +283,77 @@ pub(crate) fn settlement_result(
     loop_name: &str,
     run: &str,
     step: &str,
+    record: &Value,
 ) -> Result<Value, LaneError> {
     match result {
         Ok(text) => super::settlement_document(text),
         Err(error) => {
-            let next = if error
-                .detail
-                .contains(super::steering::MISSING_REPLY_BINDING)
-            {
-                format!("bind-reply {loop_name} {run} --step {step} --delivery UTC_INSTANT")
+            let binding_allowed = super::steering::late_reply_allowed(record, step, true);
+            let settlement_allowed = super::settle::recovery_record_basis(record, step).is_ok();
+            let cause = record["rounds"]
+                .as_array()
+                .and_then(|rounds| rounds.last())
+                .and_then(|round| round["settlement_error"].as_str());
+            let next = if binding_allowed {
+                Some(format!(
+                    "bind-reply {loop_name} {run} --step {step} --delivery UTC_INSTANT"
+                ))
+            } else if settlement_allowed {
+                Some(format!("settle {loop_name} {run} --round {step} --dry-run"))
             } else {
-                format!("settle {loop_name} {run} --round {step} --dry-run")
+                None
+            };
+            let guidance = if binding_allowed {
+                let after_binding = if settlement_allowed {
+                    format!(
+                        "Then preview settlement with superloop-lane settle {loop_name} {run} --round {step} --dry-run."
+                    )
+                } else {
+                    "The saved state does not currently admit a settlement preview; inspect its observer and cleanup disposition before trying settle.".to_owned()
+                };
+                format!(
+                    "This refusal removed no letter from the loop inbox; any delivered reply remains unverified. Select this round's answer in the loop inbox: replace UTC_INSTANT in the report's next_command with the middle of its WORKER.UTC_INSTANT.letter name and run that action with superloop-lane. {after_binding} No reply is selected automatically."
+                )
+            } else if settlement_allowed {
+                format!(
+                    "The recorded state does not admit late reply binding. Inspect recorded_cause in the launch report, then preview settlement with superloop-lane settle {loop_name} {run} --round {step} --dry-run."
+                )
+            } else {
+                "The recorded state admits neither late reply binding nor a settlement preview. Inspect recorded_cause in the launch report; no recovery command is prescribed.".to_owned()
             };
             Ok(serde_json::json!({"state":"refused", "detail":error.line(),
-                "run_phase":"failed", "round_phase":"failed", "next_command":next}))
+                "run_phase":record["phase"], "round_phase":record["rounds"].as_array().and_then(|rows| rows.last()).map(|row| &row["phase"]),
+                "next_command":next, "recorded_cause":cause, "guidance":guidance}))
         }
     }
+}
+
+/// Add the already-published report and its advice to the original refusal.
+pub(crate) fn reported_refusal(
+    mut error: LaneError,
+    report: &Value,
+    root: &Path,
+    loop_name: &str,
+    run: &str,
+    step: Option<&str>,
+) -> LaneError {
+    if let Ok(name) = name(run, step) {
+        let _written = write!(
+            error.detail,
+            "; launch report: {}",
+            root.join(name).display()
+        );
+    }
+    if let Some(guidance) = report["settlement"]["guidance"].as_str() {
+        let _written = write!(error.detail, "; {guidance}");
+    }
+    let mut next = format!("superloop-lane read-launch-report {loop_name} {run}");
+    if let Some(step) = step {
+        let _written = write!(next, " --round {step}");
+    }
+    let quoted = Value::String(next);
+    let _written = write!(error.detail, "; next command: {quoted}");
+    error
 }
 
 fn has_exact_keys(value: &Value, expected: &[&str]) -> bool {

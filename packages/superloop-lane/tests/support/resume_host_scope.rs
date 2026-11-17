@@ -188,29 +188,7 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
         return next_round(&fixture, case == "after-failed");
     }
     if case == "late-reply" {
-        let error = fixture
-            .launch(false)
-            .expect_err("unbound reply refuses readback");
-        let driver_failed = fixture.home().join("driver-failed").exists();
-        assert_eq!(
-            error.kind,
-            if driver_failed {
-                "driver-launch"
-            } else {
-                "settle-evidence"
-            },
-            "{error}"
-        );
-        let saved: serde_json::Value =
-            serde_json::from_slice(&fixture.reservation()).expect("failed record");
-        assert!(
-            saved["rounds"][1]["settlement_error"]
-                .as_str()
-                .expect("readback refusal")
-                .contains("readback: reply has no verified mail binding"),
-            "{saved}"
-        );
-        return std::process::ExitCode::SUCCESS;
+        return late_reply_child(&fixture);
     }
     if case == "stop-race" {
         let error = fixture.launch(false).expect_err("real helper stop refuses");
@@ -440,6 +418,49 @@ pub(super) fn complete_stop_race(reply: bool) {
         .expect("next launch diagnostics");
 }
 
+fn late_reply_child(fixture: &host::Host) -> std::process::ExitCode {
+    let error = fixture
+        .launch(false)
+        .expect_err("unbound reply refuses readback");
+    let driver_failed = fixture.home().join("driver-failed").exists();
+    assert_eq!(
+        error.kind,
+        if driver_failed {
+            "driver-launch"
+        } else {
+            "settle-evidence"
+        },
+        "{error}"
+    );
+    assert!(
+        error.detail.contains("launch report:"),
+        "terminal names published report: {error}"
+    );
+    assert!(
+        error
+            .detail
+            .contains("This refusal removed no letter from the loop inbox"),
+        "terminal explains preserved reply: {error}"
+    );
+    assert!(
+        error
+            .detail
+            .contains("next command: \"superloop-lane read-launch-report alpha R --round review\""),
+        "terminal names executable next command: {error}"
+    );
+    writeln!(std::io::stdout().lock(), "READBACK-TERMINAL {error}").expect("terminal evidence");
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fixture.reservation()).expect("failed record");
+    assert!(
+        saved["rounds"][1]["settlement_error"]
+            .as_str()
+            .expect("readback refusal")
+            .contains("readback: reply has no verified mail binding"),
+        "{saved}"
+    );
+    std::process::ExitCode::SUCCESS
+}
+
 pub(super) fn late_reply(driver: &str) {
     let driver_failed = driver == "failed";
     let mut scope = Scope::new();
@@ -454,6 +475,12 @@ pub(super) fn late_reply(driver: &str) {
     let output = scope.execute("late-reply").expect("real readback refusal");
     scope.stop().expect("scope absent");
     assert!(output.status.success(), "{output:?}");
+    writeln!(
+        std::io::stdout().lock(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    )
+    .expect("terminal capture");
     let fixture = scope.fixture.as_ref().expect("retained fixture");
     let original = fixture.reservation();
     let failed: serde_json::Value = serde_json::from_slice(&original).expect("failed record");

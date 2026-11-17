@@ -4,8 +4,11 @@
 //!
 //! | Test | Area | Claim |
 //! |------|------|-------|
+//! | [`construct_fixtures_have_stable_bytes`] | fmt | Public Markdown constructs retain their expected bytes and are idempotent. |
+//! | [`build_identity_survives_versions_results_and_refusals`] | identity | Both version spellings, findings, clean reports and startup refusals identify the same executable bytes without consulting a sidecar. |
+//! | [`execute_only_linter_keeps_judging_with_named_digest_absence`] | identity | Execute-only installs retain version and formatter access while naming the unreadable image instead of taking either command away from their reader. |
 //! | [`code_span_pipes_preserve_every_cell`] | fmt | Code-span pipes are cell text, so formatting retains all four columns and both literal pipe spellings without rewriting their code spans. |
-//! | [`writer_refusals_name_a_location_and_recovery`] | fmt | A writer refusal identifies its category, source start and recovery action; an ambiguous table row names its line and retains the refused source. |
+//! | [`table_refusals_name_a_location_and_recovery`] | fmt | Ambiguous table refusals identify their category, source range and recovery action; an ambiguous table row names its line and retains the refused source. |
 //! | [`refusal_locations_cross_overlay_slots`] | fmt | Refusals after one or more overlay slots retain original lines and byte offsets, including CRLF padding and a multibyte prefix, in both modes. |
 //! | [`check_reports_an_unformatted_file_without_writing_it`] | fmt | Formatter check mode reports every path that would change, exits with the linter's findings status, and leaves the named file byte-for-byte alone. |
 //! | [`check_continues_after_a_guard_rejection`] | fmt | Formatter check mode records a guard rejection for one file and still reports a later file that would reflow, so one unsafe source does not hide the rest of the requested paths. |
@@ -20,6 +23,228 @@ use std::io::{self, Write as _};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
+
+/// Public Markdown constructs retain their expected bytes and are idempotent.
+///
+/// # Panics
+/// Panics only if fixture IO fails or the formatter changes the construct.
+///
+/// ´claim:fmt:construct-fixtures-have-stable-bytes´
+/// ´test:integration:construct-fixtures-have-stable-bytes´
+#[test]
+fn construct_fixtures_have_stable_bytes() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let path = root.path().join("construct.md");
+    for (source, expected) in [
+        "*[^a]*\n\n[^a]: note\n",
+        "**see [^a]**\n\n[^a]: note\n",
+        "[^a]: note\n\n*[^a]*\n",
+        "[^a]: note\n\nplain [^a] &copy;\n",
+        "*[^a]*\n\n[^a]: see [^b]\n\n[^b]: note\n",
+        "*[^a]*\n\n[^a]: *note*\n",
+        "[link][x]\n\n*[^a]*\n\n[^a]: [x]\n\n[x]: /target\n",
+        "Before.\n\n*[^a]*\n\nBetween.\n\n[^a]: note\n\nAfter.\n",
+        "|a|b|\n|-|-|\n|`\\|` *label*|x|\n",
+    ].into_iter().map(|source| (source, source)).chain([
+        (
+            "*[^a]*\n\n[^a]: note\n\n|a|b|\n|-|-|\n|stray ` tick|x|\n|`a|b` *label*|x|\n\nAn &copy; authored \\*literal\\* stays text.\n\nA ``code`` span.\n",
+            "*[^a]*\n\n[^a]: note\n\n|a|b|\n|-|-|\n|stray \\` tick|x|\n|`a|b` *label*|x|\n\nAn &copy; authored \\*literal\\* stays text.\n\nA ``code`` span.\n",
+        ),
+    ]) {
+        fs::write(&path, source).expect("write construct");
+        for (index, args) in [vec!["fmt"], vec!["fmt", "--check"]].into_iter().enumerate() {
+            let output = Command::new(env!("CARGO_BIN_EXE_superloop-lint"))
+                .args(args)
+                .arg(&path)
+                .output()
+                .expect("production formatter");
+            assert!(output.status.success(), "{output:?}");
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report");
+            assert_eq!(report["files_rejected"], 0, "{report}");
+            assert_eq!(report["files_changed"], usize::from(index == 0 && source != expected), "{report}");
+            assert_eq!(fs::read_to_string(&path).expect("read construct"), expected);
+        }
+    }
+}
+
+/// Both version spellings, findings, clean reports and startup refusals identify
+/// the same executable bytes without consulting a sidecar.
+///
+/// # Panics
+/// Panics only if fixture IO fails or a publication loses its measured identity.
+///
+/// ´claim:identity:build-identity-survives-versions-results-and-refusals´
+/// ´test:integration:build-identity-survives-versions-results-and-refusals´
+#[test]
+fn build_identity_survives_versions_results_and_refusals() {
+    use sha2::{Digest, Sha256};
+    let binary = env!("CARGO_BIN_EXE_superloop-lint");
+    let digest: String = Sha256::digest(fs::read(binary).expect("binary bytes"))
+        .iter()
+        .flat_map(|byte| {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 15)]),
+            ]
+        })
+        .collect();
+    let root = tempfile::tempdir().expect("fixture");
+    let path = root.path().join("clean.md");
+    fs::write(&path, "A paragraph.\n").expect("source");
+    let mut held = None;
+    for arguments in [
+        vec!["--version"],
+        vec!["-V"],
+        vec!["--help"],
+        vec!["--invalid"],
+        vec!["fmt", "--check", path.to_str().expect("path")],
+        vec!["check", "--root", root.path().to_str().expect("root")],
+    ] {
+        let output = Command::new(binary)
+            .env("PATH", root.path())
+            .args(&arguments)
+            .output()
+            .expect("linter");
+        if matches!(arguments[0], "--version" | "-V") {
+            assert!(
+                output.stderr.starts_with(b"{\"message\":"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let records = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .chain(output.stderr.split(|byte| *byte == b'\n'))
+            .filter(|line| !line.is_empty());
+        let mut count = 0;
+        for line in records {
+            let value: serde_json::Value = serde_json::from_slice(line).expect("JSON record");
+            let identity = &value["identity"];
+            assert!(identity.get("source_tree").is_some());
+            assert!(value.get("runtime").is_none());
+            assert_eq!(
+                identity["artifact_sha256"], digest,
+                "{arguments:?}: {value}"
+            );
+            assert_eq!(identity["digest_absence"], serde_json::Value::Null);
+            assert_eq!(identity["version"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(
+                identity["source_state"],
+                env!("SUPERLOOP_LINT_SOURCE_STATE")
+            );
+            let source = match env!("SUPERLOOP_LINT_SOURCE_COMMIT") {
+                "" => None,
+                value => Some(value),
+            };
+            let tag = match env!("SUPERLOOP_LINT_RELEASE_TAG") {
+                "" => None,
+                value => Some(value),
+            };
+            assert_eq!(identity["source_commit"], serde_json::json!(source));
+            assert_eq!(identity["release_tag"], serde_json::json!(tag));
+            if let Some(previous) = &held {
+                assert_eq!(identity, previous);
+            } else {
+                held = Some(identity.clone());
+            }
+            if arguments == ["--version"] || arguments == ["-V"] {
+                assert_eq!(value["fields"]["source_commit"], identity["source_commit"]);
+                assert_eq!(
+                    value["fields"]["version"],
+                    concat!("superloop-lint ", env!("CARGO_PKG_VERSION"))
+                );
+                assert!(
+                    value["message"]
+                        .as_str()
+                        .expect("message")
+                        .contains(&digest)
+                );
+                assert_eq!(output.stdout, b"");
+                assert!(output.status.success());
+            }
+            count += 1;
+        }
+        assert!(count > 0, "{arguments:?}");
+    }
+    fs::write(&path, "A paragraph that is\nhard wrapped.\n").expect("unformatted");
+    let output = Command::new(binary)
+        .args(["fmt", "--check"])
+        .arg(&path)
+        .output()
+        .expect("finding");
+    assert_eq!(output.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("finding report");
+    assert_eq!(Some(report["identity"].clone()), held);
+}
+
+/// Execute-only installs retain version and formatter access while naming the
+/// unreadable image instead of taking either command away from their reader.
+///
+/// # Panics
+/// Panics only if fixture IO fails or execute-only publication loses its identity.
+///
+/// ´claim:identity:execute-only-linter-keeps-judging-with-named-digest-absence´
+/// ´test:integration:execute-only-linter-keeps-judging-with-named-digest-absence´
+#[test]
+fn execute_only_linter_keeps_judging_with_named_digest_absence() {
+    const COPY: &str = "SUPERLOOP_IDENTITY_COPY_FIXTURE";
+    if let Some(path) = std::env::var_os(COPY) {
+        fs::copy(env!("CARGO_BIN_EXE_superloop-lint"), &path).expect("copy");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o111)).expect("execute only");
+        return;
+    }
+    let root = tempfile::tempdir().expect("fixture");
+    let binary = root.path().join("linter");
+    // A separate, reaped writer prevents parallel test spawns from inheriting
+    // a writable image descriptor and making the later exec fail with ETXTBSY.
+    let copied = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "execute_only_linter_keeps_judging_with_named_digest_absence",
+        ])
+        .env(COPY, &binary)
+        .output()
+        .expect("isolated copy writer");
+    assert!(copied.status.success(), "{copied:?}");
+    if fs::File::open(&binary).is_ok() {
+        return;
+    } // Privileged accounts can still read mode 0111.
+    let path = root.path().join("source.md");
+    fs::write(&path, "A paragraph.\n").expect("source");
+    for arguments in [
+        vec!["--version"],
+        vec!["-V"],
+        vec!["fmt", "--check", path.to_str().expect("path")],
+    ] {
+        let output = Command::new(&binary)
+            .args(arguments)
+            .output()
+            .expect("linter");
+        assert!(output.status.success(), "{output:?}");
+        let bytes = if output.stdout.is_empty() {
+            &output.stderr
+        } else {
+            &output.stdout
+        };
+        let record: serde_json::Value = serde_json::from_slice(bytes).expect("record");
+        assert_eq!(
+            record["identity"]["artifact_sha256"],
+            serde_json::Value::Null
+        );
+        assert_eq!(record["identity"]["digest_absence"], "unreadable");
+        if record["kind"] == "version" {
+            assert!(bytes.starts_with(b"{\"message\":"));
+            let message = record["message"].as_str().expect("version message");
+            assert!(
+                message.contains("artifact digest unavailable (unreadable)"),
+                "{message}"
+            );
+            assert!(!message.contains("sha256:unreadable"), "{message}");
+        }
+    }
+}
 
 /// Code-span pipes are cell text, so formatting retains all four columns and
 /// both literal pipe spellings without rewriting their code spans.
@@ -111,24 +336,24 @@ fn code_span_pipes_preserve_every_cell() {
     }
 }
 
-/// A writer refusal identifies its category, source start and recovery action;
+/// Ambiguous table refusals identify their category, source range and recovery action;
 /// an ambiguous table row names its line and retains the refused source.
 ///
 /// # Panics
 /// Panics only if fixture IO fails or the production formatter violates the contract.
 ///
-/// ´claim:fmt:writer-refusals-name-a-location-and-recovery´
-/// ´test:integration:writer-refusals-name-a-location-and-recovery´
+/// ´claim:fmt:table-refusals-name-a-location-and-recovery´
+/// ´test:integration:table-refusals-name-a-location-and-recovery´
 #[test]
-fn writer_refusals_name_a_location_and_recovery() {
+fn table_refusals_name_a_location_and_recovery() {
     let root = tempfile::tempdir().expect("temporary directory");
     let path = root.path().join("refused.md");
     for (source, kind, location, action) in [
         (
-            "Before.\n\n*[^a]*\n\n[^a]: note\n",
-            "serialization_failure",
-            "block starting at line 3",
-            "report this block with the formatter version",
+            "Before.\n\n|a|`b|c`|\n|-|-|-|\n|x|y|z|\n",
+            "source_parse_failure",
+            "header at line 3",
+            "make the header and delimiter describe the same cells",
         ),
         (
             "Before.\n\n|a|b|\n|-|-|\n|a|b|c|\n",
@@ -150,16 +375,21 @@ fn writer_refusals_name_a_location_and_recovery() {
             let rejection = &report["rejected"][0];
             assert_eq!(rejection["kind"], kind, "{report}");
             let cause = rejection["cause"].as_str().expect("cause");
+            assert!(cause.starts_with("the file was not changed;"), "{cause}");
             assert!(
                 cause.contains(location) && cause.contains(action),
                 "{cause}"
             );
-            if kind == "serialization_failure" {
-                assert_eq!(
-                    rejection["input_range"],
-                    serde_json::json!({"start":9,"end":9})
-                );
-            }
+            let row = if location.starts_with("header") {
+                "|a|`b|c`|\n"
+            } else {
+                "|a|b|c|\n"
+            };
+            let start = source.find(row).expect("refused row");
+            assert_eq!(
+                rejection["input_range"],
+                serde_json::json!({"start":start,"end":start + row.trim_end_matches('\n').len()})
+            );
             assert_eq!(fs::read_to_string(&path).expect("read fixture"), source);
         }
     }
@@ -178,6 +408,7 @@ fn refusal_locations_cross_overlay_slots() {
     let root = tempfile::tempdir().expect("temporary directory");
     let path = root.path().join("slots.md");
     for (prefix, first_line) in [
+        ("", 1),
         ("Préface.\n{{overlay:body:test:first}}\n\n", 4),
         (
             "Préface.\n{{overlay:body:test:first}}\n\nMiddle.\n{{overlay:body:test:second}}\n\n",
@@ -187,8 +418,9 @@ fn refusal_locations_cross_overlay_slots() {
         for suffix in ["", "\n{{overlay:body:test:last}}\nAfter.\n"] {
             for newline in ["\n", "\r\n"] {
                 let source =
-                    format!("{prefix}*[^a]*\n\n[^a]: note\n{suffix}").replace('\n', newline);
-                let start = prefix.replace('\n', newline).len();
+                    format!("{prefix}|a|b|\n|-|-|\n|a|b|c|\n{suffix}").replace('\n', newline);
+                let start = source.find("|a|b|c|").expect("refused row");
+                let end = start + 7;
                 fs::write(&path, &source).expect("write fixture");
                 for args in [vec!["fmt", "--check"], vec!["fmt"]] {
                     let output = Command::new(env!("CARGO_BIN_EXE_superloop-lint"))
@@ -201,17 +433,17 @@ fn refusal_locations_cross_overlay_slots() {
                     assert_eq!(output.status.code(), Some(3), "{report}");
                     assert_eq!(report["files_rejected"], 1, "{report}");
                     let rejection = &report["rejected"][0];
-                    assert_eq!(rejection["kind"], "serialization_failure", "{report}");
+                    assert_eq!(rejection["kind"], "source_parse_failure", "{report}");
                     assert!(
                         rejection["cause"]
                             .as_str()
                             .expect("cause")
-                            .contains(&format!("block starting at line {first_line}:")),
+                            .contains(&format!("row at line {} has", first_line + 2)),
                         "{report}"
                     );
                     assert_eq!(
                         rejection["input_range"],
-                        serde_json::json!({"start":start,"end":start})
+                        serde_json::json!({"start":start,"end":end})
                     );
                     assert_eq!(fs::read_to_string(&path).expect("read fixture"), source);
                 }
@@ -324,6 +556,13 @@ fn check_continues_after_a_guard_rejection() {
         rejected.to_string_lossy().as_ref()
     );
     assert_eq!(report["rejected"][0]["kind"], "integrity_guard");
+    let cause = report["rejected"][0]["cause"].as_str().expect("cause");
+    assert!(cause.starts_with("the file was not changed;"), "{cause}");
+    assert!(cause.contains("at line 1"), "{cause}");
+    assert!(
+        cause.contains("reduce a copy to the smallest excerpt that still refuses"),
+        "{cause}"
+    );
     assert_eq!(report["rejected"][0]["event_index"], 2);
     assert!(
         report["rejected"][0]["difference"]

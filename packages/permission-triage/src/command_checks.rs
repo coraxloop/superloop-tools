@@ -2,7 +2,7 @@
 use crate::request::{BashInput, PermissionRequest};
 pub use execute_command::checks::{
     FastLane, HYGIENE_RULE_COUNT, HYGIENE_RULES, HygieneRule, HygieneRuleId, READ_ONLY_TABLE,
-    ReadOnlyEntry, hygiene_rule, scope_words,
+    ReadOnlyEntry, hygiene_rule,
 };
 use execute_command::request::{
     Binding, Command as CommandIdentity, HygieneObservation, HygieneRequest,

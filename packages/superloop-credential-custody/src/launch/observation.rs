@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 #[serde(deny_unknown_fields)]
 pub struct Evidence {
     pub campaign: String,
+    pub admitted_owner_uid: u32,
     // The independently protected campaign matrix and calibration retain these
     // references. A supplier changing an analysis view or proposed parameters
     // cannot rewrite that retained evidence (sec:credentialcustody:campaign-operation).
@@ -30,13 +31,29 @@ pub fn bind(record: &Parameters) -> Result<Binding> {
     let admission = measure::observation_admission(&record.campaign.policy)?;
     let policy = admission.policy();
     require(policy.campaign == record.case, "observation-campaign")?;
+    separate_roots(record, &policy.roots)?;
+    bind_admitted(record, &admission)
+}
+
+fn separate_roots(record: &Parameters, roots: &super::policy::Roots) -> Result<()> {
     require(
-        policy.roots.paths().iter().all(|root| {
+        roots.paths().iter().all(|root| {
             !record.sealed_root.starts_with(root) && !root.starts_with(&record.sealed_root)
         }),
         "observation-analysis-root",
     )?;
-    let matrix = campaign::observation(&admission, &record.campaign.matrix_sha256)?;
+    require(
+        roots.paths().iter().all(|root| {
+            !record.evidence_root.starts_with(root) && !root.starts_with(&record.evidence_root)
+        }),
+        "observation-evidence-root",
+    )?;
+    Ok(())
+}
+
+fn bind_admitted(record: &Parameters, admission: &measure::Admission) -> Result<Binding> {
+    let policy = admission.policy();
+    let matrix = campaign::observation(admission, &record.campaign.matrix_sha256)?;
     for (role, file) in [
         (ArtifactRole::Sealer, &record.identity.files.sealer),
         (ArtifactRole::Parser, &record.identity.files.parser),
@@ -113,6 +130,7 @@ pub fn bind(record: &Parameters) -> Result<Binding> {
     Ok(Binding {
         evidence: Evidence {
             campaign: policy.campaign.clone(),
+            admitted_owner_uid: admission.owner(),
             matrix_sha256: record.campaign.matrix_sha256.clone(),
             policy_sha256: admission.policy_sha256().into(),
             code_sha256: admission.code_sha256().into(),

@@ -158,6 +158,8 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/loop-home/src/mail/configuration_tests.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Rootless inventory fixture enters the real test binary with the received configuration and storage descriptors, then drops to the reserved service identity"}
+{"kind":"call","site":"packages/loop-home/src/mail/configuration_tests.rs:std :: env :: current_exe () . expect (\"test image\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"test image\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Isolate inventory log capture from other tests' process-wide callsite interest"}
+{"kind":"call","site":"packages/loop-home/src/mail/notify.rs:std :: env :: current_exe () . expect (\"test image\")#1","caller":"loop-home","owner":"LOOPHOME","selector":"std :: env :: current_exe () . expect (\"test image\")","callee":"fixture:loop-home:self","lookup":"test-executable","binding":"current_exe","contract":"Isolate notification log capture from other tests' process-wide callsite interest"}
 {"kind":"call","site":"packages/loop-home/src/mail/service_runtime_tests.rs:\"/usr/bin/podman\"#1","caller":"loop-home","owner":"LOOPHOME","selector":"\"/usr/bin/podman\"","callee":"external:/usr/bin/podman","lookup":"configured-external","contract":"Rootless service fixture reenters this test binary, provisions only its marked temporary home, then drops to the reserved service identity"}
 ''']
 

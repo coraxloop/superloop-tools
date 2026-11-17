@@ -1409,9 +1409,9 @@ fn reaped_oversized_cleanup_preserves_kill_failure() {
     let directory = FixtureDirectory::new();
     let capture = directory.path().join("reaped-oversized-missing-kill");
     let missing_kill = directory.path().join("missing-kill").into_os_string();
-    // WAIT: the fixture confirms its oversized write before the model deadline starts. The
-    // explicit 20-second cleanup backstop stays below its 30-second descendant lifetime;
-    // ordinary completing fixtures receive 120 seconds.
+    // WAIT: the fixture confirms its oversized write before the model deadline starts.
+    // This test waits for its own 20-second cleanup deadline; the descendant remains alive for
+    // 300 seconds, so load cannot let natural exit satisfy the claim.
     let result = run_fixture_model_with_kill_program_after_marker(
         fake_cli().as_os_str(),
         &prompt(),

@@ -4,6 +4,8 @@
 
 It is infrastructure, not policy about any particular subject. It contains no repository knowledge: a helper binary receives its subjects as explicit arguments (ADR-014) and uses this crate only to parse argv, emit machine-readable records, publish outputs, and exit correctly.
 
+The source-identity module records the checked public commit and its tree independently of commit history. A private overlay needs an explicit public commit to qualify as its candidate; without one, it is unknown (or dirty with local changes). The source-identity module owns the existing installer release predicate and build-time validation of an explicit public commit against the closed private overlay. It does not inspect Git during command publication.
+
 ## The output contract · `sec:clicommon:the-output-contract`
 
 Three rules govern every binary that uses this crate.
@@ -117,6 +119,9 @@ The crate is a single flat module; `publication` is private and its published it
 - Constructors: `new`, `help`, `version`, `usage_error`, `tty_refusal`, `panic`, `status`, `diagnostic`. `usage_error` fixes its own message; the caller supplies only the clap error class.
 - `enum ControlPlaneRecordKind { Help, Version, UsageError, TtyRefusal, Panic, Status, Diagnostic }` and the matching `enum ControlPlaneFields` payloads; `enum StandardStream { Stdout, Stderr }`.
 - `emit_control_plane_record(&ControlPlaneRecord) -> io::Result<()>` — one JSON line on stderr under a process-wide write lock. Does not depend on `tracing`, so it is usable before a subscriber exists.
+- `register_build_identity(BuildIdentity) -> bool` — installs immutable process publication metadata once, before argument parsing. Opted-in commands carry it on control records, tracing diagnostics, direct and build results. The shared version constructor derives its readable message from that identity for both the sole `--version` route and clap's `-V` route. Version records put the readable message first and describe unavailable digests as an absence. Malformed tracing records produce an identified `diagnostic_serialization_failure` record; unclassified payload is omitted under the diagnostic-redaction contract. Commands that do not register identity retain their existing representation.
+- `publication_json(&report) -> serde_json::Result<Vec<u8>>` — encodes the same identity envelope for responses that must be published identically as a file and stdout. Identity precedes the report's fields, preserving a final elapsed-time member.
+- `observe_python_runtime(PythonRuntime) -> Result<(), String>` — records implementation and version from the actual reader in an identified invocation. A second, different observation refuses; result publishers also enforce this before stdout, report or stamp publication. Diagnostics retain the first observation and remain publishable. Library callers without registered process identity do not share observations.
 - `struct CliExit { record, exit }` — a record paired with the class to exit under; `new`, `exit_code`.
 
 ### Argument parsing · `sec:clicommon:argument-parsing`

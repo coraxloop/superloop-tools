@@ -1280,6 +1280,9 @@ pattern = "packages/superloop-cli-common/src/public_set.rs"
 pattern = "packages/superloop-cli-common/src/publication.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-cli-common/src/source_identity.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-cli-common/src/tests/mod.rs"
 
 [[include.rows]]
@@ -2738,6 +2741,9 @@ pattern = "packages/superloop-lint/docs/adrs.md"
 pattern = "packages/superloop-lint/meson-paths.in"
 
 [[include.rows]]
+pattern = "packages/superloop-lint/build.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lint/meson.build"
 
 [[include.rows]]
@@ -3784,3 +3790,9 @@ pattern = "packages/superloop-credential-custody/src/launch/observation.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-credential-custody/tests/support/campaign_evidence.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/lifecycle.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-credential-custody/src/launch/stop.rs"

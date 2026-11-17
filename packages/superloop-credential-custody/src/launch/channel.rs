@@ -71,10 +71,25 @@ fn classify(events: i16) -> Result<PipeState> {
     })
 }
 // Only readiness is exposed. No read/readv/splice/tee/ioctl path exists here.
+fn watched_items(items: &[nix::libc::pollfd]) -> Vec<nix::libc::pollfd> {
+    let mut watched = items.to_vec();
+    if let Some(fd) = super::stop::descriptor() {
+        watched.push(nix::libc::pollfd {
+            fd,
+            events: nix::libc::POLLIN,
+            revents: 0,
+        });
+    }
+    watched
+}
 #[allow(unsafe_code)]
 pub(super) fn poll(items: &mut [nix::libc::pollfd], timeout: i32) -> Result<bool> {
+    super::stop::check()?;
+    let mut watched = watched_items(items);
     // SAFETY: poll receives the live slice pointer/length, never owns descriptors.
-    let result = unsafe { nix::libc::poll(items.as_mut_ptr(), items.len() as _, timeout) };
+    let result = unsafe { nix::libc::poll(watched.as_mut_ptr(), watched.len() as _, timeout) };
+    super::stop::check()?;
+    items.copy_from_slice(&watched[..items.len()]);
     if result < 0 {
         if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
             return Ok(true); // Caller rechecks state/deadline, rather than restarting its budget.
@@ -87,6 +102,24 @@ pub(super) fn poll(items: &mut [nix::libc::pollfd], timeout: i32) -> Result<bool
 mod tests {
     use super::*;
     use std::io::Write as _;
+    /// ´test:unit:keeper-readiness-table-includes-the-live-signal-descriptor´
+    #[test]
+    #[allow(unsafe_code)]
+    fn keeper_readiness_table_includes_the_live_signal_descriptor() {
+        let listener = super::super::stop::Guard::install().unwrap();
+        let mut watched = watched_items(&[]);
+        assert_eq!(watched.len(), 1);
+        super::super::stop::tests::send(nix::sys::signal::Signal::SIGTERM);
+        // SAFETY: the table holds the listener's live descriptor. The signal is
+        // already queued; zero timeout observes readiness, not a speed verdict.
+        assert_eq!(
+            unsafe { nix::libc::poll(watched.as_mut_ptr(), watched.len() as _, 0) },
+            1
+        );
+        assert_ne!(watched[0].revents & nix::libc::POLLIN, 0);
+        assert_eq!(super::super::stop::check(), Err("campaign-stopped"));
+        listener.finish();
+    }
     fn wait_for_hangup(probe: &EofProbe) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
         loop {

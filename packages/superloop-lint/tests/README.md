@@ -4,6 +4,9 @@
 
 |Test|Area|Claim|
 |----|----|-----|
+|(`test:integration:runtime-fixture-has-an-isolated-writer`)|identity|Executable fixture descriptors belong to a separately reaped writer process.|
+|(`test:integration:python-runtime-is-evidence-beside-stable-build-identity`)|identity|Build reports retain the reader process's runtime and change only that member when the same reader protocol reports another implementation version.|
+|(`test:integration:mixed-python-readers-refuse-before-publication`)|identity|An invocation observing different Python readers refuses rather than publishing a verdict that attributes both readings to one interpreter.|
 |(`test:integration:repository-programme-policy-is-deferred`)|cli|Explicit local ownership defers opaque rows and keeps their checker visible.|
 |(`test:integration:unknown-policy-without-programme-still-refuses`)|cli|A bare unknown activation keeps the existing loader refusal.|
 |(`test:integration:catalogued-policy-cannot-claim-programme`)|cli|A published policy cannot be claimed by a local checker.|
@@ -76,6 +79,7 @@
 |(`test:integration:a-parsed-snapshot-that-disagrees-is-judged-rather-than-refused`)|cli|A snapshot whose declaration is complete but whose partition disagrees with the tree is judged rather than refused: the run happens, the object is complete, and the exit is the findings class with the unaccounted path named in the report.|
 |(`test:integration:a-writing-mode-refuses-a-declaration-that-disagrees-with-the-tree`)|cli|Every writing mode refuses to mutate under a declaration that disagrees with the tree. That is stricter than the exit codes alone require and deliberately so: a writer that proceeded would record a conclusion drawn from a question the corpus had not answered, so it exits the failure class with an empty stdout instead.|
 |(`test:integration:a-title-minting-the-departed-document-kind-fails-at-the-catalogue`)|head|cites (`claim:head:a-title-validates-on-every-kind-the-relation-rows-its-environment`)|
+|(`test:integration:frozen-oracles-exclude-runtime-evidence`)|identity|Frozen semantic bytes exclude runtime evidence as well as build identity.|
 |(`test:integration:characterizes-no-surface-bytes`)|harness|Every command class refuses with the same empty data streams when the required shape document is absent from an invented root.|
 |(`test:integration:characterizes-check-bytes`)|harness|A check over this deliberately undeclared fixture refuses before findings can be ordered.|
 |(`test:integration:the-check-reports-a-corpus-finding-once`)|cli|A corpus finding is reported once because reporting it twice doubles a failure count a reader acts on and names the same repair twice.|
@@ -97,8 +101,11 @@
 |(`test:integration:nondeferred-inline-owner-rewrite-is-valid`)|control|The shared envelope boundary rewrites inline owners without duplicating keys even without deferred policies, and malformed source is refused unchanged.|
 |(`test:integration:programme-outside-checkout-names-tracked-directory-requirement`)|cli|A programme outside Git names its row and its tracked-directory requirement.|
 |(`test:integration:the-repository-snapshot-loads-as-one-exact-surface`)|declarations|The repository exposes exactly the fixed and parameter declaration documents, while the imports directory belongs to the registry loader; every envelope parses independently, and the atomic loader accepts their joined snapshot with 36 partitions, 65 may-cite rows and three list rows. The declared environment relation is also the exact relation the imported generic snapshot publishes, with the generic title genres held as extensions.|
+|(`test:integration:construct-fixtures-have-stable-bytes`)|fmt|Public Markdown constructs retain their expected bytes and are idempotent.|
+|(`test:integration:build-identity-survives-versions-results-and-refusals`)|identity|Both version spellings, findings, clean reports and startup refusals identify the same executable bytes without consulting a sidecar.|
+|(`test:integration:execute-only-linter-keeps-judging-with-named-digest-absence`)|identity|Execute-only installs retain version and formatter access while naming the unreadable image instead of taking either command away from their reader.|
 |(`test:integration:code-span-pipes-preserve-every-cell`)|fmt|Code-span pipes are cell text, so formatting retains all four columns and both literal pipe spellings without rewriting their code spans.|
-|(`test:integration:writer-refusals-name-a-location-and-recovery`)|fmt|A writer refusal identifies its category, source start and recovery action; an ambiguous table row names its line and retains the refused source.|
+|(`test:integration:table-refusals-name-a-location-and-recovery`)|fmt|Ambiguous table refusals identify their category, source range and recovery action; an ambiguous table row names its line and retains the refused source.|
 |(`test:integration:refusal-locations-cross-overlay-slots`)|fmt|Refusals after one or more overlay slots retain original lines and byte offsets, including CRLF padding and a multibyte prefix, in both modes.|
 |(`test:integration:check-reports-an-unformatted-file-without-writing-it`)|fmt|Formatter check mode reports every path that would change, exits with the linter's findings status, and leaves the named file byte-for-byte alone.|
 |(`test:integration:check-continues-after-a-guard-rejection`)|fmt|Formatter check mode records a guard rejection for one file and still reports a later file that would reflow, so one unsafe source does not hide the rest of the requested paths.|

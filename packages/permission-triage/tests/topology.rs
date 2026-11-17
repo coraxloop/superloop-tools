@@ -1404,12 +1404,48 @@ fn assert_bypass_selected(verdict: &Value) {
         .iter()
         .filter(|trial| trial["timed_out"] == true)
         .collect::<Vec<_>>();
+    let failed = verdict["trials"]
+        .as_array()
+        .expect("trials")
+        .iter()
+        .filter(|trial| {
+            matches!(
+                trial["phase"].as_str(),
+                Some("audit" | "bypass" | "settings_deny_wins" | "infrastructure")
+            ) && trial["classification_reason"] != "acceptance-evidence-complete"
+        })
+        .map(|trial| {
+            let journal = trial["journal_events"]
+                .as_array()
+                .map(|events| {
+                    events
+                        .iter()
+                        .map(|event| {
+                            json!({
+                                "model_status": event["model_status"],
+                                "model_wall_ms": event["model_wall_ms"],
+                                "classification": event["classification"],
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            json!({
+                "id": trial["id"],
+                "classification_reason": trial["classification_reason"],
+                "hook_exit_code": trial["hook_exit_code"],
+                "hook_wall_ms": trial["hook_wall_ms"],
+                "journal_events": journal,
+            })
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         verdict["selected_topology"],
         "bypass",
-        "reasons={}\ntimed_out_trials={}",
+        "reasons={}\ntimed_out_trials={}\nfailed_trials={}",
         verdict["reasons"],
-        serde_json::to_string(&timed_out).expect("timed out trials serialize")
+        serde_json::to_string(&timed_out).expect("timed out trials serialize"),
+        serde_json::to_string(&failed).expect("failed trials serialize")
     );
 }
 

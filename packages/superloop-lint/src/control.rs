@@ -2204,7 +2204,7 @@ fn maintain_loaded(
             let anomalies: usize = audited.iter().map(|target| target.anomalies.len()).sum();
             let failures = anomalies + incoherent;
 
-            serde_json::to_vec(&AuditResponse {
+            superloop_cli_common::publication_json(&AuditResponse {
                 operation: operation.as_str(),
                 root: root.display().to_string(),
                 input: String::from("stdin"),
@@ -2243,7 +2243,7 @@ fn maintain_loaded(
 
             let failures: usize = targets.iter().map(|target| target.refused.len()).sum();
 
-            serde_json::to_vec(&AppendResponse {
+            superloop_cli_common::publication_json(&AppendResponse {
                 operation: operation.as_str(),
                 root: root.display().to_string(),
                 input: String::from("stdin"),

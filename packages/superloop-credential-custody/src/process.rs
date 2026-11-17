@@ -109,19 +109,26 @@ fn resource_failure(class: &'static str, errno: Option<i32>) -> KernelFailure {
 pub fn io_failure(class: &'static str, error: impl Into<std::io::Error>) -> &'static str {
     let failure = resource_failure(class, error.into().raw_os_error());
     #[cfg(test)]
-    let _diagnostic = superloop_cli_common::emit_control_plane_record(
-        &superloop_cli_common::ControlPlaneRecord::diagnostic(
-            "superloop-credential-custody-test",
-            &serde_json::to_string(&failure).unwrap_or_default(),
-        ),
-    );
+    test_diagnostic(&failure);
     KERNEL_FAILURE.with(|slot| *slot.borrow_mut() = Some(failure));
     class
+}
+
+#[cfg(test)]
+#[allow(clippy::print_stderr)]
+fn test_diagnostic(failure: &KernelFailure) {
+    // Rust's test capture owns this stream: successful tests stay quiet, and
+    // failures retain context before unwinding changes the descriptor table.
+    eprintln!(
+        "kernel={}",
+        serde_json::to_string(failure).unwrap_or_default()
+    );
 }
 
 pub fn diagnostic_message(class: &'static str) -> String {
     let failure = KERNEL_FAILURE.with(|slot| slot.borrow_mut().take());
     failure
+        .filter(|value| value.class == class)
         .and_then(|value| serde_json::to_string(&value).ok())
         .map_or_else(
             || class.into(),
@@ -194,6 +201,7 @@ pub fn pin_matching(
     };
     use std::os::unix::fs::MetadataExt as _;
     use std::path::{Path, PathBuf};
+    crate::launch::stop::configure_child(command);
     let requested = Path::new(command.get_program());
     // Only the fixed interpreter may be a vendor symlink. Its containing
     // directory is protected before resolution; operator exclusion covers
@@ -324,6 +332,7 @@ fn capture_inner(
         let mut output = Vec::new();
         let mut errors = Vec::new();
         loop {
+            crate::launch::stop::check()?;
             if start.elapsed() >= Duration::from_millis(limits.timeout_ms) {
                 return Err("child-timeout");
             }
@@ -348,6 +357,7 @@ fn capture_inner(
         }
         drop(stdin);
         loop {
+            crate::launch::stop::check()?;
             if start.elapsed() >= Duration::from_millis(limits.timeout_ms) {
                 return Err("child-timeout");
             }
@@ -362,6 +372,7 @@ fn capture_inner(
             )
             .map_err(|_| "child-wait")?;
             if !matches!(status, WaitStatus::StillAlive) && out_done && err_done {
+                crate::launch::stop::check()?;
                 return if matches!(status, WaitStatus::Exited(_, 0)) && errors.is_empty() {
                     Ok(output)
                 } else {
@@ -394,7 +405,7 @@ fn cancel_targets(
     send(pidfd);
 }
 #[allow(unsafe_code)]
-fn kill_pidfd(pidfd: std::os::fd::BorrowedFd<'_>) {
+pub fn kill_pidfd(pidfd: std::os::fd::BorrowedFd<'_>) {
     use std::os::fd::AsRawFd as _;
     // SAFETY: the caller retains this leader pidfd through wait; no PID fallback.
     let _ignored = unsafe {
@@ -478,6 +489,11 @@ mod tests {
                 .contains(missing.to_str().unwrap())
         );
         assert_eq!(diagnostic_message("another-refusal"), "another-refusal");
+        io_failure(
+            "handled-error",
+            std::io::Error::from_raw_os_error(nix::libc::EMFILE),
+        );
+        assert_eq!(diagnostic_message("later-refusal"), "later-refusal");
     }
 
     /// ´test:unit:descriptor-exhaustion-keeps-numeric-failure-evidence´

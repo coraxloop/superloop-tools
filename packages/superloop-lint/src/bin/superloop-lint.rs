@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Torrust project contributors
 
+//! # Test index
+//!
+//! | Test | Area | Claim |
+//! |------|------|-------|
+//! | [`panic_and_terminal_records_keep_identity`] | identity | Panic and terminal refusal records retain the process identity without exposing a panic payload. |
+//! | [`unavailable_running_image_is_named_without_refusing`] | identity | A missing running-image handle is a named absence, never an execution prerequisite. |
+
 //! Command-line entrypoint for the label-calculus linter.
 //!
 //! # Output contract
@@ -373,6 +380,8 @@ enum Profile {
 }
 
 fn main() -> ExitCode {
+    let _registered = cli::register_build_identity(build_identity());
+    cli::install_json_panic_hook(COMMAND);
     cli::version_or_exit("superloop-lint", env!("CARGO_PKG_VERSION"), None);
     let command_started = Instant::now();
     let args = cli::parse_args_or_exit::<Args>();
@@ -410,6 +419,84 @@ fn main() -> ExitCode {
     }
 
     run_corpus_command(args, command_started)
+}
+
+fn build_identity() -> cli::BuildIdentity {
+    let handle = if cfg!(target_os = "linux") {
+        Some(std::path::Path::new("/proc/self/exe"))
+    } else {
+        None
+    };
+    let (artifact_sha256, digest_absence) = running_image_digest(handle);
+    cli::BuildIdentity {
+        schema: 1,
+        repository: "superloop-tools".to_owned(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        source_commit: match env!("SUPERLOOP_LINT_SOURCE_COMMIT") {
+            "" => None,
+            value => Some(value.to_owned()),
+        },
+        source_tree: match env!("SUPERLOOP_LINT_SOURCE_TREE") {
+            "" => None,
+            value => Some(value.to_owned()),
+        },
+        source_state: env!("SUPERLOOP_LINT_SOURCE_STATE").to_owned(),
+        release_tag: match env!("SUPERLOOP_LINT_RELEASE_TAG") {
+            "" => None,
+            value => Some(value.to_owned()),
+        },
+        artifact_sha256,
+        digest_absence,
+    }
+}
+
+fn running_image_digest(handle: Option<&std::path::Path>) -> (Option<String>, Option<String>) {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+
+    let Some(handle) = handle else {
+        return (None, Some("no-running-image-handle".to_owned()));
+    };
+    let measured = (|| {
+        let mut image = std::fs::File::open(handle)?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = image.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+        // Full measurement permits comparison against an independently retained
+        // release artifact. It does not authenticate this executable's claims.
+        Ok::<_, std::io::Error>(
+            hash.finalize()
+                .iter()
+                .flat_map(|byte| {
+                    const HEX: &[u8; 16] = b"0123456789abcdef";
+                    [
+                        char::from(HEX[usize::from(byte >> 4)]),
+                        char::from(HEX[usize::from(byte & 15)]),
+                    ]
+                })
+                .collect::<String>(),
+        )
+    })();
+    match measured {
+        Ok(digest) => (Some(digest), None),
+        Err(error) => (
+            None,
+            Some(
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    "no-running-image-handle"
+                } else {
+                    "unreadable"
+                }
+                .to_owned(),
+            ),
+        ),
+    }
 }
 
 fn run_corpus_command(args: Args, command_started: Instant) -> ExitCode {
@@ -1196,5 +1283,67 @@ fn run_fix(plan: FixWritePlan<'_>, profile: Profile, write: bool, allow_dirty: b
         cli::CommandExit::Success.exit_code()
     } else {
         ExitCode::from(FINDINGS)
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    /// Panic and terminal refusal records retain the process identity without exposing a panic payload.
+    ///
+    /// # Panics
+    /// Panics only in the isolated child or when the tested publication violates its contract.
+    ///
+    /// ´claim:identity:panic-and-terminal-records-keep-identity´
+    /// ´test:unit:panic-and-terminal-records-keep-identity´
+    #[test]
+    fn panic_and_terminal_records_keep_identity() {
+        const CHILD: &str = "SUPERLOOP_IDENTITY_TEST_CHILD";
+        if let Ok(mode) = std::env::var(CHILD) {
+            let _registered = super::cli::register_build_identity(super::build_identity());
+            if mode == "panic" {
+                super::cli::install_json_panic_hook(super::COMMAND);
+                panic!("private fixture payload");
+            }
+            super::cli::emit_control_plane_record(&super::cli::ControlPlaneRecord::tty_refusal(
+                super::COMMAND,
+            ))
+            .unwrap();
+            return;
+        }
+        for kind in ["panic", "tty_refusal"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "identity_tests::panic_and_terminal_records_keep_identity",
+                ])
+                .env(CHILD, kind)
+                .output()
+                .unwrap();
+            let record: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(record["kind"], kind);
+            assert_eq!(record["identity"]["repository"], "superloop-tools");
+            assert!(record["identity"]["artifact_sha256"].is_string());
+            assert!(record["fields"].get("payload").is_none());
+        }
+    }
+
+    /// A missing running-image handle is a named absence, never an execution prerequisite.
+    ///
+    /// # Panics
+    /// Panics only if the fixture cannot be created or absence is misclassified.
+    ///
+    /// ´claim:identity:unavailable-running-image-is-named-without-refusing´
+    /// ´test:unit:unavailable-running-image-is-named-without-refusing´
+    #[test]
+    fn unavailable_running_image_is_named_without_refusing() {
+        assert_eq!(
+            super::running_image_digest(None),
+            (None, Some("no-running-image-handle".to_owned()))
+        );
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            super::running_image_digest(Some(&directory.path().join("absent"))),
+            (None, Some("no-running-image-handle".to_owned()))
+        );
     }
 }

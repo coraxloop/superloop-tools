@@ -389,6 +389,15 @@ enum ShellParse {
 }
 
 fn tokenize(input: &str) -> ShellParse {
+    tokenize_comments(input, CommentMode::Shell)
+}
+
+enum CommentMode {
+    Shell,
+    Literal,
+}
+
+fn tokenize_comments(input: &str, comments: CommentMode) -> ShellParse {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return ShellParse::PlainlyInvalid;
@@ -398,7 +407,7 @@ fn tokenize(input: &str) -> ShellParse {
         .map(str::trim_end)
         .filter(|command| !command.ends_with(';'))
         .unwrap_or(trimmed);
-    let mut parse = tokenize_normalized(normalized);
+    let mut parse = tokenize_normalized(normalized, comments);
     if let ShellParse::Parsed(shape) | ShellParse::Ambiguous(shape) = &mut parse {
         shape
             .arithmetic_substitutions
@@ -407,7 +416,7 @@ fn tokenize(input: &str) -> ShellParse {
     parse
 }
 
-fn tokenize_normalized(normalized: &str) -> ShellParse {
+fn tokenize_normalized(normalized: &str, comments: CommentMode) -> ShellParse {
     match heredoc_shape(normalized) {
         HeredocShape::Malformed => return ShellParse::PlainlyInvalid,
         HeredocShape::Present(offset) => return ambiguous_prefix(normalized, offset),
@@ -421,7 +430,7 @@ fn tokenize_normalized(normalized: &str) -> ShellParse {
     }
 
     let cs: Vec<_> = normalized.chars().collect();
-    let tokens = match scan_tokens(&cs) {
+    let tokens = match scan_tokens_comments(&cs, comments) {
         Ok(tokens) => tokens,
         Err(parse) => return parse,
     };
@@ -443,6 +452,7 @@ struct Tokenizer<'a> {
     substitution: bool,
     unquoted: bool,
     index: usize,
+    comments: CommentMode,
 }
 
 impl Tokenizer<'_> {
@@ -460,7 +470,7 @@ impl Tokenizer<'_> {
                 push_sequence(&mut self.tokens);
                 self.index += 1;
             }
-            '#' if !self.word_started => {
+            '#' if !self.word_started && matches!(self.comments, CommentMode::Shell) => {
                 self.push_word();
                 while self
                     .cs
@@ -631,6 +641,10 @@ impl Tokenizer<'_> {
 }
 
 fn scan_tokens(cs: &[char]) -> Result<Vec<Token>, ShellParse> {
+    scan_tokens_comments(cs, CommentMode::Shell)
+}
+
+fn scan_tokens_comments(cs: &[char], comments: CommentMode) -> Result<Vec<Token>, ShellParse> {
     let mut tokenizer = Tokenizer {
         cs,
         tokens: Vec::new(),
@@ -639,6 +653,7 @@ fn scan_tokens(cs: &[char]) -> Result<Vec<Token>, ShellParse> {
         substitution: false,
         unquoted: false,
         index: 0,
+        comments,
     };
     while tokenizer.index < cs.len() {
         tokenizer.scan_one()?;
@@ -2111,23 +2126,235 @@ fn collect_nested_shells(shape: &ShellShape, depth: usize, nested: &mut NestedSh
 }
 
 fn nested_shell_payload(command: &SimpleCommand) -> Option<String> {
-    let program = program_index(command)?;
-    match basename(&command.words.get(program)?.text) {
+    command_string_payload(command)
+        .ok()
+        .flatten()
+        .map(|(text, _)| text)
+}
+
+// Keep absence distinct from an executable string outside the modeled grammar.
+fn command_string_payload(
+    command: &SimpleCommand,
+) -> Result<Option<(String, std::ops::Range<usize>)>, ()> {
+    let program = program_index(command).ok_or(())?;
+    let name = basename(&command.words.get(program).ok_or(())?.text);
+    let range = match name {
         "ssh" => {
-            let destination = ssh_destination(command, program)?;
-            joined_words(command.words.get(destination.saturating_add(1)..)?)
+            let Some(destination) = ssh_destination(command, program) else {
+                return Ok(None);
+            };
+            let start = destination + 1;
+            // A client with no command retains the existing stdin boundary.
+            if start == command.words.len() {
+                return Ok(None);
+            }
+            start..command.words.len()
         }
-        "sh" | "bash" => {
-            let payload = shell_command_payload(command, program)?;
-            joined_words(command.words.get(payload..)?)
+        "sh" | "bash" | "dash" | "ksh" | "zsh" => {
+            let Some(index) = shell_command_payload(command, program)? else {
+                return Ok(None);
+            };
+            index..index + 1
         }
+        "env"
+            if command
+                .words
+                .get(program + 1)
+                .is_some_and(|word| matches!(word.text.as_str(), "--help" | "--version")) =>
+        {
+            return Ok(None);
+        }
+        "env" => return env_split_payload(command, program),
+        "flock" => return flock_payload(command, program),
         "xargs" => {
-            let payload = xargs_command_index(command, program)?;
-            joined_words(command.words.get(payload..)?)
+            let Some(start) = xargs_command_index(command, program) else {
+                return Ok(None);
+            };
+            start..command.words.len()
         }
-        "eval" => joined_words(command.words.get(program.saturating_add(1)..)?),
-        _ => None,
+        "eval" => program + 1..command.words.len(),
+        _ => return Ok(None),
+    };
+    Ok(Some((
+        joined_words(command.words.get(range.clone()).ok_or(())?).ok_or(())?,
+        range,
+    )))
+}
+
+fn env_split_payload(
+    command: &SimpleCommand,
+    program: usize,
+) -> Result<Option<(String, std::ops::Range<usize>)>, ()> {
+    let mut index = program + 1;
+    while let Some(word) = command.words.get(index) {
+        if matches!(word.text.as_str(), "--help" | "--version") {
+            return Ok(None);
+        }
+        let split = match word.text.as_str() {
+            "-S" | "--split-string" => {
+                index += 1;
+                Some(command.words.get(index).ok_or(())?.text.as_str())
+            }
+            value => value
+                .strip_prefix("--split-string=")
+                .or_else(|| value.strip_prefix("-S")),
+        };
+        if let Some(split) = split {
+            let mut argv = literal_env_argv(split)?;
+            argv.extend(
+                command
+                    .words
+                    .iter()
+                    .skip(index + 1)
+                    .map(|word| word.text.clone()),
+            );
+            return Ok(Some((quoted_argv(&argv), index..command.words.len())));
+        }
+        match word.text.as_str() {
+            "-i" | "--ignore-environment" | "-v" | "--debug" => index += 1,
+            "-u" | "--unset" | "-C" | "--chdir" | "-a" | "--argv0" => {
+                command.words.get(index + 1).ok_or(())?;
+                index += 2;
+            }
+            value
+                if ["-u", "-C", "-a", "--unset=", "--chdir=", "--argv0="]
+                    .iter()
+                    .any(|prefix| {
+                        value
+                            .strip_prefix(prefix)
+                            .is_some_and(|tail| !tail.is_empty())
+                    }) =>
+            {
+                index += 1;
+            }
+            _ => return Err(()),
+        }
     }
+    Err(())
+}
+
+// GNU env's literal split-string subset: ASCII separators and balanced quotes only.
+// Escapes, comments and expansion belong to env's grammar, never to shell evaluation here.
+fn literal_env_argv(text: &str) -> Result<Vec<String>, ()> {
+    let mut argv = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut present = false;
+    for current in text.chars() {
+        if matches!(current, '\\' | '$' | '`' | '#') {
+            return Err(());
+        }
+        if quote == Some(current) {
+            quote = None;
+        } else if quote.is_none() && matches!(current, '\'' | '"') {
+            quote = Some(current);
+            present = true;
+        } else if quote.is_none() && current.is_ascii_whitespace() {
+            if present {
+                argv.push(std::mem::take(&mut word));
+                present = false;
+            }
+        } else {
+            word.push(current);
+            present = true;
+        }
+    }
+    if quote.is_some() {
+        return Err(());
+    }
+    if present {
+        argv.push(word);
+    }
+    if argv
+        .first()
+        .is_none_or(|word| word.is_empty() || word.starts_with('-'))
+    {
+        return Err(());
+    }
+    Ok(argv)
+}
+
+fn quoted_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|word| format!("'{}'", word.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn flock_payload(
+    command: &SimpleCommand,
+    program: usize,
+) -> Result<Option<(String, std::ops::Range<usize>)>, ()> {
+    let mut index = program + 1;
+    while let Some(word) = command.words.get(index) {
+        match word.text.as_str() {
+            "--help" | "-h" | "--version" | "-V" => return Ok(None),
+            "--shared" | "--exclusive" | "--unlock" | "--nb" | "--nonblock" | "--nonblocking"
+            | "--close" | "--no-fork" | "--verbose" => index += 1,
+            "--wait" | "--timeout" | "--conflict-exit-code" => {
+                command.words.get(index + 1).ok_or(())?;
+                index += 2;
+            }
+            "--" => {
+                index += 1;
+                break;
+            }
+            value
+                if ["--wait=", "--timeout=", "--conflict-exit-code="]
+                    .iter()
+                    .any(|prefix| {
+                        value
+                            .strip_prefix(prefix)
+                            .is_some_and(|value| !value.is_empty())
+                    }) =>
+            {
+                index += 1;
+            }
+            value if value.starts_with('-') && !value.starts_with("--") => {
+                let options = &value[1..];
+                for (offset, option) in options.char_indices() {
+                    match option {
+                        's' | 'x' | 'e' | 'u' | 'n' | 'o' | 'F' => {}
+                        'h' | 'V' => return Ok(None),
+                        'w' | 'E' => {
+                            if offset + 1 == options.len() {
+                                command.words.get(index + 1).ok_or(())?;
+                                index += 1;
+                            }
+                            break;
+                        }
+                        _ => return Err(()),
+                    }
+                }
+                index += 1;
+            }
+            value if value.starts_with('-') => return Err(()),
+            _ => break,
+        }
+    }
+    // util-linux stops options at the lock operand; only exact -c/--command is special after it.
+    command.words.get(index).ok_or(())?;
+    index += 1;
+    if index == command.words.len() {
+        return Ok(None);
+    }
+    if matches!(
+        command.words.get(index).ok_or(())?.text.as_str(),
+        "-c" | "--command"
+    ) {
+        if index + 2 != command.words.len() {
+            return Err(());
+        }
+        let body = command.words.get(index + 1).ok_or(())?;
+        return Ok(Some((body.text.clone(), index + 1..index + 2)));
+    }
+    let argv = command
+        .words
+        .iter()
+        .skip(index)
+        .map(|word| word.text.clone())
+        .collect::<Vec<_>>();
+    Ok(Some((quoted_argv(&argv), index..command.words.len())))
 }
 
 fn joined_words(words: &[Word]) -> Option<String> {
@@ -2140,20 +2367,30 @@ fn joined_words(words: &[Word]) -> Option<String> {
     })
 }
 
-fn shell_command_payload(command: &SimpleCommand, program: usize) -> Option<usize> {
-    let bash = basename(&command.words.get(program)?.text) == "bash";
+fn shell_command_payload(command: &SimpleCommand, program: usize) -> Result<Option<usize>, ()> {
+    let name = basename(&command.words.get(program).ok_or(())?.text);
+    let bash = name == "bash";
     let mut index = program + 1;
+    let mut script = false;
     while let Some(word) = command.words.get(index) {
-        if word.text == "-c"
-            || word
-                .text
-                .strip_prefix('-')
-                .is_some_and(|options| !options.starts_with('-') && options.contains('c'))
+        if word.text == "--" || word.text == "-" {
+            return if script {
+                command
+                    .words
+                    .get(index + 1)
+                    .map(|_| Some(index + 1))
+                    .ok_or(())
+            } else {
+                Ok(None)
+            };
+        }
+        if matches!(name, "bash" | "zsh" | "ksh")
+            && matches!(word.text.as_str(), "--help" | "--version")
         {
-            return command.words.get(index + 1).map(|_| index + 1);
+            return Ok(None);
         }
         if bash && matches!(word.text.as_str(), "--rcfile" | "--init-file") {
-            command.words.get(index + 1)?;
+            command.words.get(index + 1).ok_or(())?;
             index += 2;
             continue;
         }
@@ -2165,12 +2402,47 @@ fn shell_command_payload(command: &SimpleCommand, program: usize) -> Option<usiz
             index += 1;
             continue;
         }
-        if !word.text.starts_with('-') {
-            return None;
+        if bash
+            && matches!(
+                word.text.as_str(),
+                "--noprofile" | "--norc" | "--posix" | "--login"
+            )
+        {
+            index += 1;
+            continue;
+        }
+        let Some(options) = word
+            .text
+            .strip_prefix('-')
+            .or_else(|| word.text.strip_prefix('+'))
+        else {
+            return Ok(script.then_some(index));
+        };
+        if options.is_empty() {
+            return Err(());
+        }
+        let mut valued = false;
+        for (offset, option) in options.char_indices() {
+            match option {
+                'o' | 'O' if offset + 1 == options.len() => valued = true,
+                'c' if word.text.starts_with('-') => script = true,
+                // zsh's b ends option processing, unlike the other shells' job notification flag.
+                'b' if name == "zsh" => return Err(()),
+                'a' | 'b' | 'e' | 'f' | 'h' | 'k' | 'm' | 'n' | 'p' | 't' | 'u' | 'v' | 'x'
+                | 'B' | 'C' | 'E' | 'H' | 'P' | 'T' | 'i' | 's' | 'l' | 'r' => {}
+                _ => return Err(()),
+            }
+        }
+        if valued {
+            let value = command.words.get(index + 1).ok_or(())?;
+            if value.text.is_empty() || value.text.starts_with(['-', '+']) {
+                return Err(());
+            }
+            index += 1;
         }
         index += 1;
     }
-    None
+    if script { Err(()) } else { Ok(None) }
 }
 
 fn xargs_command_index(command: &SimpleCommand, program: usize) -> Option<usize> {
@@ -2400,8 +2672,12 @@ fn redirect_mutates(redirect: &Redirect) -> bool {
 }
 
 fn program_index(command: &SimpleCommand) -> Option<usize> {
+    program_identity(command).map(|(index, _)| index)
+}
+
+fn program_identity(command: &SimpleCommand) -> Option<(usize, bool)> {
     if informational_command_query(command) {
-        return Some(0);
+        return Some((0, false));
     }
     program_index_from(command, 0)
 }
@@ -2439,93 +2715,338 @@ fn git_subcommand_index(command: &SimpleCommand, git: usize) -> Option<usize> {
     None
 }
 
-fn program_index_from(command: &SimpleCommand, start: usize) -> Option<usize> {
+fn program_index_from(command: &SimpleCommand, start: usize) -> Option<(usize, bool)> {
     let mut index = start;
+    let mut unrebound = true;
     while command
         .words
         .get(index)
         .is_some_and(|word| assignment_word(&word.text))
     {
+        unrebound = false;
         index += 1;
     }
     loop {
-        let program = basename(&command.words.get(index)?.text);
+        let spelling = &command.words.get(index)?.text;
+        let program = basename(spelling);
+        unrebound &= spelling == program;
+        if matches!(
+            program,
+            "time" | "nice" | "timeout" | "nohup" | "setsid" | "chrt" | "ionice"
+        ) && command
+            .words
+            .get(index + 1)
+            .is_some_and(|word| matches!(word.text.as_str(), "--help" | "--version"))
+        {
+            return Some((index, unrebound));
+        }
         match program {
             "env" => {
-                index += 1;
-                index = skip_options(command, index, &["-u", "--unset", "-C", "--chdir"]);
-                while command
-                    .words
-                    .get(index)
-                    .is_some_and(|word| assignment_word(&word.text))
-                {
-                    index += 1;
+                let (next, inherited) = env_program(command, index)?;
+                if next == index {
+                    return Some((index, false));
                 }
+                index = next;
+                unrebound &= inherited;
             }
-            "time" => {
-                index += 1;
-                index = skip_options(command, index, &["-f", "--format", "-o", "--output"]);
-            }
-            "nice" => {
-                index += 1;
-                index = skip_options(command, index, &["-n", "--adjustment"]);
-            }
-            "command" | "nohup" | "setsid" => {
-                index += 1;
-                index = skip_options(command, index, &[]);
-            }
-            "chrt" => {
-                index += 1;
-                index = skip_options(
-                    command,
-                    index,
-                    &[
-                        "-T",
-                        "--sched-runtime",
-                        "-P",
-                        "--sched-period",
-                        "-D",
-                        "--sched-deadline",
-                    ],
-                );
+            "stdbuf" => {
                 if command
                     .words
-                    .get(index)
-                    .is_some_and(|word| word.text.parse::<u64>().is_ok())
+                    .get(index + 1)
+                    .is_some_and(|word| matches!(word.text.as_str(), "--help" | "--version"))
                 {
-                    index += 1;
+                    return Some((index, unrebound));
                 }
+                let next = stdbuf_program(command, index)?;
+                if next == index {
+                    return Some((index, unrebound));
+                }
+                index = next;
             }
-            "ionice" => {
-                index += 1;
-                index = skip_options(
-                    command,
-                    index,
-                    &[
-                        "-c",
-                        "--class",
-                        "-n",
-                        "--classdata",
-                        "-p",
-                        "--pid",
-                        "-P",
-                        "--pgid",
-                        "-u",
-                        "--uid",
-                    ],
-                );
+            "time" | "nice" | "command" | "nohup" | "setsid" | "chrt" | "ionice" | "timeout"
+            | "sudo" | "doas" => {
+                index = launcher_program(command, index, program)?;
             }
-            "timeout" => {
-                index += 1;
-                index = skip_options(command, index, &["-k", "--kill-after", "-s", "--signal"]);
-                index += 1;
-            }
-            "sudo" | "doas" => {
-                index = privilege_command_index(command, index)?.0;
-            }
-            _ => return Some(index),
+            _ => return Some((index, unrebound)),
         }
     }
+}
+
+fn launcher_program(command: &SimpleCommand, mut index: usize, program: &str) -> Option<usize> {
+    match program {
+        "time" => {
+            index += 1;
+            index = launcher_options(
+                command,
+                index,
+                &["-f", "--format", "-o", "--output"],
+                &[
+                    "-p",
+                    "--portability",
+                    "-a",
+                    "--append",
+                    "-v",
+                    "--verbose",
+                    "-q",
+                    "--quiet",
+                ],
+            )?;
+        }
+        "nice" => {
+            index += 1;
+            index = launcher_options(command, index, &["-n", "--adjustment"], &[])?;
+        }
+        "command" | "nohup" | "setsid" => {
+            index += 1;
+            let flags: &[&str] = match program {
+                "command" => &["-p", "-v", "-V"],
+                "setsid" => &["-f", "--fork", "-w", "--wait", "-c", "--ctty"],
+                _ => &[],
+            };
+            index = launcher_options(command, index, &[], flags)?;
+        }
+        "chrt" | "ionice" => return scheduler_program(command, index, program),
+        "timeout" => {
+            index += 1;
+            index = launcher_options(
+                command,
+                index,
+                &["-k", "--kill-after", "-s", "--signal"],
+                &["--preserve-status", "--foreground", "-v", "--verbose"],
+            )?;
+            index += 1;
+        }
+        "sudo" | "doas" => {
+            index = privilege_command_index(command, index)?.0;
+        }
+        _ => return None,
+    }
+    Some(index)
+}
+
+fn scheduler_program(command: &SimpleCommand, mut index: usize, program: &str) -> Option<usize> {
+    match program {
+        "chrt" => {
+            index += 1;
+            index = launcher_options(
+                command,
+                index,
+                &[
+                    "-T",
+                    "--sched-runtime",
+                    "-P",
+                    "--sched-period",
+                    "-D",
+                    "--sched-deadline",
+                ],
+                &[
+                    "-a",
+                    "--all-tasks",
+                    "-b",
+                    "--batch",
+                    "-d",
+                    "--deadline",
+                    "-f",
+                    "--fifo",
+                    "-i",
+                    "--idle",
+                    "-o",
+                    "--other",
+                    "-r",
+                    "--rr",
+                    "-R",
+                    "--reset-on-fork",
+                    "-v",
+                    "--verbose",
+                ],
+            )?;
+            if command
+                .words
+                .get(index)
+                .is_some_and(|word| word.text.parse::<u64>().is_ok())
+            {
+                index += 1;
+            }
+        }
+        "ionice" => {
+            index += 1;
+            index = launcher_options(
+                command,
+                index,
+                &[
+                    "-c",
+                    "--class",
+                    "-n",
+                    "--classdata",
+                    "-p",
+                    "--pid",
+                    "-P",
+                    "--pgid",
+                    "-u",
+                    "--uid",
+                ],
+                &["-t", "--ignore"],
+            )?;
+        }
+        _ => return None,
+    }
+    Some(index)
+}
+
+fn env_program(command: &SimpleCommand, program: usize) -> Option<(usize, bool)> {
+    let mut index = program + 1;
+    let mut unrebound = true;
+    let valued = ["-u", "--unset", "-C", "--chdir", "-a", "--argv0"];
+    while let Some(word) = command.words.get(index) {
+        let value = word.text.as_str();
+        if matches!(value, "--help" | "--version") {
+            return Some((program, false));
+        }
+        if value == "--" || value == "-" {
+            unrebound &= value == "--";
+            index += 1;
+            break;
+        }
+        if !value.starts_with('-') {
+            break;
+        }
+        if valued.contains(&value) {
+            command.words.get(index + 1)?;
+            index += 2;
+        } else if valued.iter().any(|option| {
+            value.strip_prefix(option).is_some_and(|tail| {
+                if option.starts_with("--") {
+                    tail.starts_with('=')
+                } else {
+                    !tail.is_empty()
+                }
+            })
+        }) {
+            index += 1;
+        } else if (value.starts_with('-') && !value.starts_with("--") && value.contains('S'))
+            || value.split('=').next().is_some_and(|option| {
+                option.starts_with("--") && option.len() > 2 && "--split-string".starts_with(option)
+            })
+        {
+            return Some((program, false));
+        } else if matches!(
+            value,
+            "-" | "-i" | "--ignore-environment" | "-v" | "--debug" | "-0" | "--null"
+        ) {
+            index += 1;
+        } else {
+            return None;
+        }
+        unrebound = false;
+    }
+    while command
+        .words
+        .get(index)
+        .is_some_and(|word| assignment_word(&word.text))
+    {
+        unrebound = false;
+        index += 1;
+    }
+    Some((index, unrebound))
+}
+
+fn stdbuf_program(command: &SimpleCommand, program: usize) -> Option<usize> {
+    let mut index = program + 1;
+    while let Some(word) = command.words.get(index) {
+        if matches!(word.text.as_str(), "--help" | "--version") {
+            return Some(program);
+        }
+        if word.text == "--" {
+            return command.words.get(index + 1).map(|_| index + 1);
+        }
+        if !word.text.starts_with('-') {
+            return Some(index);
+        }
+        let mode = if matches!(
+            word.text.as_str(),
+            "-i" | "-o" | "-e" | "--input" | "--output" | "--error"
+        ) {
+            index += 1;
+            command.words.get(index)?.text.as_str()
+        } else {
+            ["--input=", "--output=", "--error=", "-i", "-o", "-e"]
+                .iter()
+                .find_map(|prefix| word.text.strip_prefix(prefix))?
+        };
+        if mode != "L" {
+            let digits = mode.bytes().take_while(u8::is_ascii_digit).count();
+            let suffix = mode.get(digits..)?.to_ascii_uppercase();
+            let mut unit = suffix.chars();
+            let sized = matches!(
+                unit.next(),
+                Some('K' | 'M' | 'G' | 'T' | 'P' | 'E' | 'Z' | 'Y' | 'R' | 'Q')
+            ) && matches!(unit.as_str(), "" | "B" | "IB");
+            if digits == 0 || !(suffix.is_empty() || suffix == "B" || sized) {
+                return None;
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+// Validate the modeled launcher argv slots; no guessing where an unknown option's value ends.
+fn launcher_options(
+    command: &SimpleCommand,
+    mut index: usize,
+    valued: &[&str],
+    flags: &[&str],
+) -> Option<usize> {
+    while let Some(word) = command.words.get(index) {
+        let value = word.text.as_str();
+        if matches!(value, "--help" | "--version") {
+            return Some(index);
+        }
+        if value == "--" {
+            return Some(index + 1);
+        }
+        if !value.starts_with('-') || value == "-" {
+            return Some(index);
+        }
+        if valued.contains(&value) {
+            command.words.get(index + 1)?;
+            index += 2;
+        } else if flags.contains(&value)
+            || valued.iter().any(|option| {
+                value.strip_prefix(option).is_some_and(|tail| {
+                    if option.starts_with("--") {
+                        tail.starts_with('=') && tail.len() > 1
+                    } else {
+                        !tail.is_empty()
+                    }
+                })
+            })
+        {
+            index += 1;
+        } else {
+            let options = value
+                .strip_prefix('-')
+                .filter(|_| !value.starts_with("--"))?;
+            for (offset, option) in options.char_indices() {
+                let is_short = |spelling: &&str| {
+                    spelling.len() == 2
+                        && spelling.as_bytes().get(1).copied() == u8::try_from(option).ok()
+                };
+                if valued.iter().any(is_short) {
+                    if offset + 1 == options.len() {
+                        command.words.get(index + 1)?;
+                        index += 1;
+                    }
+                    break;
+                }
+                if !flags.iter().any(is_short) {
+                    return None;
+                }
+            }
+            index += 1;
+        }
+    }
+    Some(index)
 }
 
 fn skip_options(command: &SimpleCommand, mut index: usize, valued: &[&str]) -> usize {
@@ -2969,50 +3490,297 @@ fn forbidden_git_read_option(option: &str) -> bool {
     })
 }
 
-/// Bounded shell tokens used by the hook's scope validator; no filesystem or environment access.
-#[must_use]
-pub fn scope_words(command: &str) -> Option<Vec<String>> {
-    scope_words_at_depth(command, 0)
+/// A scope word and whether it executes inside a recognized remote payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeWord {
+    /// Original token text, without consulting a filesystem or environment.
+    pub text: String,
+    /// True only for a remote payload, including its nested shells and redirects.
+    pub remote: bool,
 }
 
-fn scope_words_at_depth(command: &str, depth: u8) -> Option<Vec<String>> {
+/// Bounded shell tokens used by the hook's scope validator; no filesystem or environment access.
+#[must_use]
+pub fn scope_words(command: &str) -> Option<Vec<ScopeWord>> {
+    scope_projection(command).ok()
+}
+
+/// Why the bounded projection could not establish command operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeProjectionError {
+    /// Shell syntax, expansion or nesting exceeds the tokenizer.
+    Syntax,
+    /// Command-string or launcher arguments exceed the modeled grammar.
+    CommandString,
+}
+
+/// Project scope words while retaining the failure class for an actionable refusal.
+///
+/// # Errors
+/// Returns the unresolved grammar class without exposing command text.
+pub fn scope_projection(command: &str) -> Result<Vec<ScopeWord>, ScopeProjectionError> {
+    scope_projection_with_interpretation(command, Ok)
+}
+
+/// Join independent literal coverage with a recognizer's interpretation.
+///
+/// Even an empty or incorrectly selected interpretation cannot erase literal text.
+/// A replacement receives only a successful interpretation; existing unresolved grammar
+/// and decoder results remain a lower bound even when every selected word is replaced.
+///
+/// # Errors
+/// Returns an unresolved coverage or interpretation result, never a partial successful view.
+pub fn scope_projection_with_interpretation<F>(
+    command: &str,
+    interpretation: F,
+) -> Result<Vec<ScopeWord>, ScopeProjectionError>
+where
+    F: FnOnce(Vec<ScopeWord>) -> Result<Vec<ScopeWord>, ScopeProjectionError>,
+{
+    let covered = scope_literal_words(command, 0, false, true, false)?;
+    let prepared = scope_words_at_depth(command, 0, false, true)?;
+    let mut words = interpretation(prepared)?;
+    let mut seen = words
+        .iter()
+        .map(|word| (word.text.clone(), word.remote))
+        .collect::<std::collections::BTreeSet<_>>();
+    for word in covered {
+        if seen.insert((word.text.clone(), word.remote)) {
+            words.push(word);
+        }
+    }
+    Ok(words)
+}
+
+fn scope_literal_words(
+    text: &str,
+    depth: u8,
+    remote: bool,
+    attribute_remote: bool,
+    data: bool,
+) -> Result<Vec<ScopeWord>, ScopeProjectionError> {
     if depth >= 8 {
-        return None;
+        return Err(ScopeProjectionError::Syntax);
+    }
+    let comments = if data {
+        CommentMode::Literal
+    } else {
+        CommentMode::Shell
+    };
+    let shape = match tokenize_comments(text, comments) {
+        ShellParse::Parsed(shape)
+            if !shape.has_subshell && shape.arithmetic_substitutions.is_empty() =>
+        {
+            shape
+        }
+        _ if data => return Ok(scope_lexical_words(text, false)),
+        _ => return Err(ScopeProjectionError::Syntax),
+    };
+    let mut words = Vec::new();
+    for (position, simple) in shape.commands.into_iter().enumerate() {
+        let identity = program_identity(&simple);
+        let attributable = attribute_remote
+            && identity.is_some_and(|(program, unrebound)| {
+                unrebound && !scope_shell_startup(&simple, program)
+            })
+            && shape
+                .connectors
+                .iter()
+                .take(position)
+                .all(|c| *c == Connector::Pipe);
+        let remote_start = identity.and_then(|(program, _)| {
+            attributable
+                .then(|| scope_remote_payload_start(&simple, program))
+                .flatten()
+        });
+        for (index, word) in simple.words.into_iter().enumerate() {
+            let location = remote || remote_start.is_some_and(|start| index >= start);
+            scope_literal_word(&mut words, word.text, depth, location, attributable)?;
+        }
+        for redirect in simple.redirects {
+            scope_literal_word(&mut words, redirect.target.text, depth, remote, false)?;
+        }
+    }
+    Ok(words)
+}
+
+fn scope_literal_word(
+    words: &mut Vec<ScopeWord>,
+    text: String,
+    depth: u8,
+    remote: bool,
+    attribute_remote: bool,
+) -> Result<(), ScopeProjectionError> {
+    if text.contains(['$', '`', '*', '?', '{', '}']) {
+        return Err(ScopeProjectionError::Syntax);
+    }
+    if text
+        .chars()
+        .any(|c| c.is_whitespace() || "'\"\\;|&()<>".contains(c))
+    {
+        let nested = scope_literal_words(&text, depth + 1, remote, attribute_remote, true)?;
+        words.extend(nested);
+    }
+    words.push(ScopeWord { text, remote });
+    Ok(())
+}
+
+fn scope_lexical_words(text: &str, remote: bool) -> Vec<ScopeWord> {
+    let unquoted: String = text
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect();
+    unquoted
+        .split(|c: char| c.is_whitespace() || ";|&()<>".contains(c))
+        .filter(|part| !part.is_empty())
+        .map(|part| ScopeWord {
+            text: part.to_owned(),
+            remote,
+        })
+        .collect()
+}
+
+fn scope_words_at_depth(
+    command: &str,
+    depth: u8,
+    remote: bool,
+    attribute_remote: bool,
+) -> Result<Vec<ScopeWord>, ScopeProjectionError> {
+    if depth >= 8 {
+        return Err(ScopeProjectionError::Syntax);
     }
     let ShellParse::Parsed(shape) = tokenize(command) else {
-        return None;
+        return Err(ScopeProjectionError::Syntax);
     };
     if shape.has_subshell || !shape.arithmetic_substitutions.is_empty() {
-        return None;
+        return Err(ScopeProjectionError::Syntax);
     }
     let mut words = Vec::new();
-    for simple in shape.commands {
-        let program = program_index(&simple)?;
-        let emits_data = simple
-            .words
-            .get(program)
-            .is_some_and(|word| matches!(basename(&word.text), "printf" | "echo"));
-        let nested = nested_shell_payload(&simple);
+    let connectors = shape.connectors;
+    for (position, simple) in shape.commands.into_iter().enumerate() {
+        let (program, unrebound) =
+            program_identity(&simple).ok_or(ScopeProjectionError::CommandString)?;
+        let payload =
+            command_string_payload(&simple).map_err(|()| ScopeProjectionError::CommandString)?;
+        let nested = payload.as_ref().map(|(text, _)| text);
+        let consumed = payload.as_ref().map(|(_, range)| range);
+        let ssh = basename(
+            &simple
+                .words
+                .get(program)
+                .ok_or(ScopeProjectionError::Syntax)?
+                .text,
+        ) == "ssh";
+        // A command sequenced before this one in the same shell can rebind the client's name.
+        let attributable = attribute_remote
+            && unrebound
+            && !scope_shell_startup(&simple, program)
+            && connectors
+                .iter()
+                .take(position)
+                .all(|connector| *connector == Connector::Pipe);
+        let remote_start = attributable
+            .then(|| scope_remote_payload_start(&simple, program))
+            .flatten();
         if let Some(payload) = &nested {
-            words.extend(scope_words_at_depth(payload, depth + 1)?);
+            words.extend(scope_words_at_depth(
+                payload,
+                depth + 1,
+                remote || remote_start.is_some(),
+                attributable && (!ssh || remote_start.is_some()),
+            )?);
         }
         for (index, word) in simple.words.into_iter().enumerate() {
             if word.substitution || word.text.contains(['$', '`', '*', '?']) {
-                return None;
+                return Err(ScopeProjectionError::Syntax);
             }
-            if (emits_data && index > program)
-                || (nested.is_some() && word.text.contains(char::is_whitespace))
+            if consumed.is_some_and(|range| range.contains(&index))
+                && word.text.contains(char::is_whitespace)
             {
                 continue;
             }
-            words.push(word.text);
+            words.push(ScopeWord {
+                text: word.text,
+                remote: remote || remote_start.is_some_and(|start| index >= start),
+            });
         }
         for redirect in simple.redirects {
             if redirect.target.substitution || redirect.target.text.contains(['$', '`', '*', '?']) {
-                return None;
+                return Err(ScopeProjectionError::Syntax);
             }
-            words.push(redirect.target.text);
+            words.push(ScopeWord {
+                text: redirect.target.text,
+                remote,
+            });
         }
     }
-    Some(words)
+    Ok(words)
+}
+
+// Interactive/login shells and explicit startup files can rebind the client before -c runs.
+fn scope_shell_startup(command: &SimpleCommand, program: usize) -> bool {
+    if !command
+        .words
+        .get(program)
+        .is_some_and(|word| matches!(word.text.as_str(), "sh" | "bash" | "dash" | "ksh" | "zsh"))
+    {
+        return false;
+    }
+    let Ok(Some(payload)) = shell_command_payload(command, program) else {
+        return true;
+    };
+    command
+        .words
+        .iter()
+        .take(payload)
+        .skip(program + 1)
+        .any(|word| {
+            matches!(
+                word.text.as_str(),
+                "--login"
+                    | "--rcfile"
+                    | "--init-file"
+                    | "interactive"
+                    | "login"
+                    | "rcs"
+                    | "globalrcs"
+            ) || word.text.starts_with("--rcfile=")
+                || word.text.starts_with("--init-file=")
+                || (word.text.starts_with('-')
+                    && !word.text.starts_with("--")
+                    && word.text.contains(['i', 'l']))
+        })
+}
+
+// Attribution is narrower than token inspection: unknown SSH options retain the old local
+// judgment, including every recursively inspected word. OpenSSH also accepts local options
+// after the destination, so a leading dash there cannot begin an attributed payload. Only the
+// PATH-resolved client is attributed: a qualified program name, or an assignment before it,
+// can select a local executable named ssh.
+fn scope_remote_payload_start(command: &SimpleCommand, program: usize) -> Option<usize> {
+    let assigned = command
+        .words
+        .get(..program)?
+        .iter()
+        .any(|word| assignment_word(&word.text));
+    if assigned || command.words.get(program)?.text != "ssh" {
+        return None;
+    }
+    let destination = ssh_destination(command, program)?;
+    let mut index = program + 1;
+    while index < destination {
+        let option = &command.words.get(index)?.text;
+        if matches!(option.as_str(), "-o" | "-F" | "-i" | "-J" | "-l" | "-p") {
+            index += 2;
+        } else if matches!(
+            option.as_str(),
+            "-n" | "-T" | "-t" | "-q" | "-v" | "-4" | "-6"
+        ) {
+            index += 1;
+        } else {
+            return None;
+        }
+    }
+    let start = destination + 1;
+    (!command.words.get(start)?.text.starts_with('-')).then_some(start)
 }

@@ -109,7 +109,10 @@ impl<'a> Manager<'a> {
         self.deadline = self.deadline.min(deadline);
     }
     pub fn starting(&self, expected: Option<&str>) -> Result<Snapshot> {
-        let reply = self.query_reply(self.deadline)?;
+        self.starting_at(expected, self.deadline)
+    }
+    pub fn starting_at(&self, expected: Option<&str>, deadline: Instant) -> Result<Snapshot> {
+        let reply = self.query_reply(deadline)?;
         let snapshot = parse_starting(&reply, &self.expected(), expected)?;
         Ok(snapshot)
     }
@@ -252,6 +255,9 @@ impl<'a> Manager<'a> {
     pub fn stop(&self, invocation: &str) -> Result<()> {
         let deadline =
             Instant::now() + Duration::from_millis(self.admission.policy().limits.case_ms);
+        self.stop_at(invocation, deadline)
+    }
+    pub fn stop_at(&self, invocation: &str, deadline: Instant) -> Result<()> {
         self.snapshot_at(Some(invocation), deadline)?;
         let unit = &self.admission.policy().cases[self.index].generator_unit;
         let reply = self.call_at(
@@ -260,6 +266,23 @@ impl<'a> Manager<'a> {
             deadline,
         )?;
         require(reply.is_empty(), "manager-stop-output")
+    }
+    // Recovery fact only: never substitutes for an invocation or completion.
+    pub fn unloaded_at(&self, deadline: Instant) -> Result<bool> {
+        let bytes = self.query_reply(deadline)?;
+        let (values, openfiles) = reply_fields(&bytes)?;
+        let load = values.get("LoadState").ok_or("manager-reply-shape")?;
+        if *load != "not-found" {
+            return Ok(false);
+        }
+        require(
+            values.get("Id") == Some(&self.expected().unit)
+                && values.get("InvocationID") == Some(&"")
+                && values.get("MainPID") == Some(&"0")
+                && (openfiles.is_empty() || openfiles == [""]),
+            "manager-unloaded-binding",
+        )?;
+        Ok(true)
     }
     fn call(&self, artifact: &HeldArtifact, args: &[String]) -> Result<Vec<u8>> {
         self.call_at(artifact, args, self.deadline)
@@ -345,6 +368,13 @@ fn parse_mode(
     starting: bool,
 ) -> Result<Snapshot> {
     let unit = wire.unit;
+    let (values, openfiles) = reply_fields(bytes)?;
+    require(values.len() == FIELDS.len(), "manager-reply-shape")?;
+    parse_fields(bytes, wire, expected, starting, unit, &values, &openfiles)
+}
+
+type ReplyFields<'a> = (BTreeMap<&'a str, &'a str>, Vec<&'a str>);
+fn reply_fields(bytes: &[u8]) -> Result<ReplyFields<'_>> {
     require(bytes.len() <= 64 * 1024, "manager-reply-size")?;
     let text = std::str::from_utf8(bytes).map_err(|_| "manager-reply-shape")?;
     require(
@@ -365,7 +395,18 @@ fn parse_mode(
             "manager-reply-shape",
         )?;
     }
-    require(values.len() == FIELDS.len(), "manager-reply-shape")?;
+    Ok((values, openfiles))
+}
+
+fn parse_fields(
+    bytes: &[u8],
+    wire: &Expected<'_>,
+    expected: Option<&str>,
+    starting: bool,
+    unit: &str,
+    values: &BTreeMap<&str, &str>,
+    openfiles: &[&str],
+) -> Result<Snapshot> {
     require(
         openfiles.len() == 2 && openfiles.iter().zip(&wire.openfiles).all(|(a, b)| *a == b),
         "manager-open-files",
@@ -411,7 +452,7 @@ fn parse_mode(
         _ => Err("manager-condition"),
     };
     let number = |key| values[key].parse::<u64>().map_err(|_| "manager-execution");
-    let properties = properties(&values, wire)?;
+    let properties = properties(values, wire)?;
     let measured: BTreeMap<_, _> = FIELDS[14..]
         .iter()
         .map(|key| (*key, values[*key]))

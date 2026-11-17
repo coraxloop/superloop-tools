@@ -1,12 +1,26 @@
 //! Drive canonical sign-in derivation through the production lane command and entry protocol.
+// The fixture's lock must remain held through every child exit, not end at its last field use.
+#![allow(clippy::significant_drop_tightening)]
 
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+// A child forked by another test can retain an executable writer until its exec.
+// Keep this binary's writers and spawners in one fixture interval.
+static EXECUTABLE_FIXTURE: Mutex<()> = Mutex::new(());
+
+fn executable_fixture() -> MutexGuard<'static, ()> {
+    EXECUTABLE_FIXTURE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 struct Fixture {
+    _executable_interval: MutexGuard<'static, ()>,
     root: tempfile::TempDir,
     source: PathBuf,
     destination: PathBuf,
@@ -14,6 +28,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        let executable_interval = executable_fixture();
         let root = tempfile::TempDir::new_in("/tmp").expect("small protected executable fixture");
         let home = root.path();
         fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("protected root");
@@ -69,6 +84,7 @@ impl Fixture {
         let source = home.join(".config/loops/alpha/lanes/codex/auth.json");
         let destination = home.join(".var/loops/alpha/private/.codex/auth.json");
         Self {
+            _executable_interval: executable_interval,
             root,
             source,
             destination,
@@ -104,6 +120,17 @@ impl Fixture {
         }
         command.output().expect("production lane entry")
     }
+}
+
+/// ´test:integration:sign-in-fixture-holds-executable-interval´
+#[test]
+fn sign_in_fixture_holds_executable_interval() {
+    let fixture = Fixture::new();
+    assert!(
+        EXECUTABLE_FIXTURE.try_lock().is_err(),
+        "the executable writer and its later child must share one interval"
+    );
+    drop(fixture);
 }
 
 /// ´test:integration:door-sign-in-stale-digest-preserves-both-credentials´
@@ -198,7 +225,8 @@ fn door_sign_in_holds_canonical_refresh_lock_and_retains_source() {
     )
     .expect("lock-checking entry");
     for dry in [true, false] {
-        assert_eq!(report(&fixture.call("alpha", dry))["source_removed"], false);
+        let result = report(&fixture.call("alpha", dry));
+        assert_eq!(result["source_removed"], false, "{result}");
         assert_eq!(
             fs::metadata(&fixture.source).expect("source").ino(),
             before.ino()
@@ -254,11 +282,11 @@ fn door_sign_in_entry_previews_and_publishes_without_consuming_canonical_source(
         )
     };
     let refused = metadata(&fixture.root.path().join("entry"));
-    assert_eq!(refused["executable_status"]["usable"], true);
-    assert_eq!(refused["executable_status"]["admitted"], false);
+    assert_eq!(refused["executable_status"]["usable"], true, "{refused}");
+    assert_eq!(refused["executable_status"]["admitted"], false, "{refused}");
     assert_eq!(
-        refused["executable_status"]["refusal"]["check"],
-        "program-writable"
+        refused["executable_status"]["refusal"]["check"], "program-writable",
+        "{refused}"
     );
     let vendor_root = tempfile::tempdir().expect("vendor under supplied temporary root");
     let vendor = vendor_root.path().join("vendor");
@@ -268,31 +296,33 @@ fn door_sign_in_entry_previews_and_publishes_without_consuming_canonical_source(
     assert_eq!(before["executable_status"]["admitted"], true, "{before}");
     assert_eq!(before["sign_in"]["exists"], false, "{before}");
     let preview = report(&fixture.call("alpha", true));
-    assert_eq!(preview["destination"]["exists"], false);
-    assert_eq!(preview["source_removed"], false);
+    assert_eq!(preview["destination"]["exists"], false, "{preview}");
+    assert_eq!(preview["source_removed"], false, "{preview}");
     assert!(fixture.source.exists());
     assert!(!fixture.destination.parent().expect("parent").exists());
     let changed = report(&fixture.call_digest("alpha", false, preview["preview_sha256"].as_str()));
     assert_eq!(
-        changed["destination"]["sha256"],
-        preview["source"]["sha256"]
+        changed["destination"]["sha256"], preview["source"]["sha256"],
+        "changed: {changed}; preview: {preview}"
     );
     assert_eq!(
-        changed["destination"]["byte_count"],
-        preview["source"]["byte_count"]
+        changed["destination"]["byte_count"], preview["source"]["byte_count"],
+        "changed: {changed}; preview: {preview}"
     );
-    assert_eq!(changed["destination"]["published"], true);
-    assert_eq!(changed["destination"]["mode"], "0600");
+    assert_eq!(changed["destination"]["published"], true, "{changed}");
+    assert_eq!(changed["destination"]["mode"], "0600", "{changed}");
     assert_eq!(
         changed["destination"]["owner_uid"],
-        nix::unistd::Uid::effective().as_raw()
+        nix::unistd::Uid::effective().as_raw(),
+        "{changed}"
     );
-    assert_eq!(changed["source_removed"], false);
+    assert_eq!(changed["source_removed"], false, "{changed}");
     assert!(fixture.source.exists());
-    assert_eq!(metadata(&vendor)["sign_in"]["usable"], true);
-    assert_eq!(metadata(&vendor)["executable_status"]["usable"], true);
-    assert_eq!(metadata(&vendor)["executable_status"]["admitted"], true);
-    assert!(metadata(&vendor)["executable_status"]["refusal"].is_null());
+    let after = metadata(&vendor);
+    assert_eq!(after["sign_in"]["usable"], true, "{after}");
+    assert_eq!(after["executable_status"]["usable"], true, "{after}");
+    assert_eq!(after["executable_status"]["admitted"], true, "{after}");
+    assert!(after["executable_status"]["refusal"].is_null(), "{after}");
     assert_eq!(
         fs::read(&fixture.destination).expect("synthetic destination"),
         b"synthetic credential fixture only"
@@ -304,7 +334,7 @@ fn door_sign_in_entry_previews_and_publishes_without_consuming_canonical_source(
     fs::write(&fixture.source, b"synthetic replacement").expect("canonical replacement");
     fs::set_permissions(&fixture.source, fs::Permissions::from_mode(0o600)).expect("mode");
     let existing = report(&fixture.call("alpha", true));
-    assert_eq!(existing["destination"]["exists"], true);
+    assert_eq!(existing["destination"]["exists"], true, "{existing}");
     assert!(fixture.source.exists());
 }
 
@@ -339,23 +369,24 @@ fn door_sign_in_entry_traverses_search_only_destination_ancestor() {
     let preview = report(&preview);
     assert_eq!(
         preview["destination"]["path"],
-        fixture.destination.to_str().expect("path")
+        fixture.destination.to_str().expect("path"),
+        "{preview}"
     );
-    assert_eq!(preview["destination"]["exists"], true);
-    assert_eq!(preview["destination"]["mode"], "0600");
+    assert_eq!(preview["destination"]["exists"], true, "{preview}");
+    assert_eq!(preview["destination"]["mode"], "0600", "{preview}");
     let uid = nix::unistd::Uid::effective().as_raw();
-    assert_eq!(preview["destination"]["owner_uid"], uid);
-    assert_eq!(preview["destination"]["loop_uid"], uid);
-    assert_eq!(preview["destination"]["published"], false);
-    assert_eq!(preview["source_removed"], false);
+    assert_eq!(preview["destination"]["owner_uid"], uid, "{preview}");
+    assert_eq!(preview["destination"]["loop_uid"], uid, "{preview}");
+    assert_eq!(preview["destination"]["published"], false, "{preview}");
+    assert_eq!(preview["source_removed"], false, "{preview}");
     assert!(source_retained);
     assert_eq!(preview_bytes, b"previous synthetic credential");
     let changed = report(&changed);
-    assert_eq!(changed["destination"]["published"], true);
-    assert_eq!(changed["destination"]["mode"], "0600");
-    assert_eq!(changed["destination"]["owner_uid"], uid);
-    assert_eq!(changed["destination"]["loop_uid"], uid);
-    assert_eq!(changed["source_removed"], false);
+    assert_eq!(changed["destination"]["published"], true, "{changed}");
+    assert_eq!(changed["destination"]["mode"], "0600", "{changed}");
+    assert_eq!(changed["destination"]["owner_uid"], uid, "{changed}");
+    assert_eq!(changed["destination"]["loop_uid"], uid, "{changed}");
+    assert_eq!(changed["source_removed"], false, "{changed}");
     assert!(fixture.source.exists());
     assert_eq!(
         fs::read(&fixture.destination).expect("published destination"),
@@ -431,6 +462,7 @@ fn door_sign_in_entry_binds_source_and_retains_a_replacement() {
 /// ´test:integration:host-sign-in-walk-refuses-nobody´
 #[test]
 fn host_sign_in_walk_refuses_nobody() {
+    let _executable_interval = executable_fixture();
     let program = [
         loop_home::ancestor::PYTHON_ANCESTOR_OWNERS,
         include_str!("../src/door_sign_in_owner.py")
@@ -466,6 +498,7 @@ source_ancestor(SimpleNamespace(st_uid=0, st_mode=0o1777), owners)
 /// ´test:integration:door-sign-in-receiver-admits-only-private-home-traversal-acl´
 #[test]
 fn door_sign_in_receiver_admits_only_private_home_traversal_acl() {
+    let _executable_interval = executable_fixture();
     let root = tempfile::tempdir().expect("caller temporary root");
     let script = r"
 import json, os, pathlib, stat, struct, subprocess, sys
@@ -509,7 +542,7 @@ for name, entries, mode, default, allowed in cases:
     if allowed:
         assert result.returncode == 0, (name, result.stderr.decode())
         report = json.loads(result.stdout)
-        assert report['published'] is False and report['exists'] is False, name
+        assert report['published'] is False and report['exists'] is False, (name, report)
     else:
         assert result.returncode == 2, (name, 'unsafe home admitted', result.stdout.decode())
         assert 'door-sign-in-private-home-owner-mode' in result.stderr.decode(), name

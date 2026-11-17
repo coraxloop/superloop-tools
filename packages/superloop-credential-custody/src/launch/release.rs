@@ -185,6 +185,7 @@ impl Keeper<'_> {
             )?;
             self.session.store().advance(Phase::ReleaseIntent)?;
             require(std::time::Instant::now() < deadline, "release-deadline")?;
+            super::super::stop::check()?;
             signal(self.process.as_mut().ok_or("keeper-not-captured")?)?;
             self.session.store().advance(Phase::Released)
         })();

@@ -3,6 +3,7 @@ pkg_superloop_cli_common_rust = files(
   'src/lib.rs',
   'src/public_set.rs',
   'src/publication.rs',
+  'src/source_identity.rs',
   'src/tests/mod.rs',
   'tests/public_api.rs',
 )
@@ -31,4 +32,9 @@ dependency_ledger += ['''
 # Publication command dependencies.
 dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-cli-common/src/public_set.rs:\"git\"#1","caller":"superloop-cli-common","owner":"SUPERLOOPCLICOMMON","selector":"\"git\"","callee":"external:git","lookup":"public-command","contract":"Enumerate the complete tracked publication set without ignore-policy filtering"}
+''']
+
+# Compiled source evidence and the installer share the release predicate.
+dependency_ledger += ['''
+{"kind":"call","site":"packages/superloop-cli-common/src/source_identity.rs:\"git\"#1","caller":"superloop-cli-common","owner":"SUPERLOOPCLICOMMON","selector":"\"git\"","callee":"external:git","lookup":"public-command","contract":"Observe build source and apply the existing clean-HEAD release predicate; validate the explicitly handed-over public commit against the closed private overlay"}
 ''']

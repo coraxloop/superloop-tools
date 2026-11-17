@@ -50,7 +50,7 @@ impl Request {
 }
 pub(super) const MISSING_REPLY_BINDING: &str = "reply has no verified mail binding; bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT before settlement";
 
-fn late_reply_allowed(record: &Value, step: &str, reply: bool) -> bool {
+pub(super) fn late_reply_allowed(record: &Value, step: &str, reply: bool) -> bool {
     reply
         && record["phase"] == "failed"
         && record["active_round"] == step

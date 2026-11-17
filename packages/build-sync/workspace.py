@@ -109,9 +109,13 @@ def compiler_inputs(root, environment):
     return {"environment": values, "configurations": list(records.values())}, observed
 
 
-def build(root, output, cargo, commit):
+def build(root, output, cargo, commit, release_tag):
     started = time.monotonic()
     environment = dict(os.environ)
+    # Explicit public source is checked by the linter build owner against the
+    # closed private overlay; never infer it from either merge parent.
+    environment["SUPERLOOP_TOOLS_PUBLIC_COMMIT"] = commit
+    environment["SUPERLOOP_TOOLS_RELEASE_TAG"] = release_tag
     if not commit:
         commit = subprocess.check_output(
             ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
@@ -182,7 +186,7 @@ if __name__ == "__main__":
     if mode == "outputs":
         print("\n".join("cargo-" + name for name in binaries(root)))
     elif mode == "build":
-        output, cargo, commit = arguments
-        build(root, Path(output), cargo, commit)
+        output, cargo, commit, release_tag = arguments
+        build(root, Path(output), cargo, commit, release_tag)
     else:
         raise SystemExit("unknown workspace build operation")

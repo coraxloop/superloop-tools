@@ -2,6 +2,7 @@
 
 pub mod burn_match;
 pub mod public_set;
+pub mod source_identity;
 
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
@@ -9,7 +10,7 @@ use std::future::Future;
 use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
 
 use clap::{CommandFactory, Parser};
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,192 @@ static PANIC_REPORTED: AtomicBool = AtomicBool::new(false);
 // location but no payload.
 static PANIC_PAYLOAD_REPORTING_ENABLED: AtomicBool = AtomicBool::new(false);
 static STDERR_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Immutable source claim and measurement of the executable that ran.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BuildIdentity {
+    /// Identity protocol version.
+    pub schema: u32,
+    /// Public source repository name.
+    pub repository: String,
+    /// Package version compiled into the executable.
+    pub version: String,
+    /// Verified public source commit, when known.
+    /// The full Git object digest is compared with an independently reviewed
+    /// public revision. A source supplier cannot replace that reference; the
+    /// build checks the candidate's closed overlay against it. This source
+    /// claim does not authenticate a dishonest compiler or executable.
+    pub source_commit: Option<String>,
+    /// Full Git tree digest of the checked public commit for source comparison.
+    /// An independently retained reviewed public tree is the trusted reference:
+    /// a supplier controls candidate source but cannot replace that reference.
+    /// This names the committed public base, not dirty changes or private inputs;
+    /// it does not authenticate the builder. Compare it only within a repository.
+    pub source_tree: Option<String>,
+    /// Release, candidate, dirty, or unknown source state.
+    pub source_state: String,
+    /// Explicitly verified release tag, only for a release.
+    pub release_tag: Option<String>,
+    /// Full running-image digest for comparison with an independently held release
+    /// artifact or approved pin. A supplier controlling candidate installation
+    /// bytes cannot replace that trusted reference; comparison detects substitution.
+    /// This observation cannot authenticate a deliberately dishonest executable
+    /// (see ``spec:output:linter-build-identity`` in ``docs/spec/output.md``).
+    pub artifact_sha256: Option<String>,
+    /// Stable reason when the running image could not be measured.
+    pub digest_absence: Option<String>,
+}
+
+static BUILD_IDENTITY: OnceLock<BuildIdentity> = OnceLock::new();
+
+/// Interpreter reported by the process that actually read Python source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PythonRuntime {
+    /// Interpreter implementation name, without a filesystem path.
+    pub implementation: String,
+    /// Implementation version, including its release level and serial.
+    pub version: String,
+}
+
+/// Observed runtime evidence, separate from immutable executable identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeEvidence {
+    /// The Python reader used during this invocation.
+    pub python: PythonRuntime,
+}
+
+#[derive(Default)]
+struct RuntimeObservations {
+    first: Option<PythonRuntime>,
+    mixed: Option<String>,
+}
+
+static RUNTIME_OBSERVATIONS: Mutex<RuntimeObservations> = Mutex::new(RuntimeObservations {
+    first: None,
+    mixed: None,
+});
+
+/// Record the runtime reported by a reader in an identified invocation.
+/// Library callers without registered process identity do not share observations.
+///
+/// # Errors
+/// Refuses a second, different interpreter observation in the same invocation.
+pub fn observe_python_runtime(runtime: PythonRuntime) -> Result<(), String> {
+    if BUILD_IDENTITY.get().is_none() {
+        return Ok(());
+    }
+    let mut observations = RUNTIME_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(first) = &observations.first {
+        if first != &runtime {
+            let reason = format!(
+                "mixed Python reader runtimes: {} {} and {} {}",
+                first.implementation, first.version, runtime.implementation, runtime.version
+            );
+            observations.mixed = Some(reason.clone());
+            return Err(reason);
+        }
+    } else {
+        observations.first = Some(runtime);
+    }
+    drop(observations);
+    Ok(())
+}
+
+fn runtime_evidence() -> Option<RuntimeEvidence> {
+    RUNTIME_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .first
+        .clone()
+        .map(|python| RuntimeEvidence { python })
+}
+
+fn require_consistent_runtime() -> io::Result<()> {
+    if let Some(reason) = &RUNTIME_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .mixed
+    {
+        return Err(io::Error::other(format!(
+            "{reason}; refusing to publish a verdict"
+        )));
+    }
+    Ok(())
+}
+
+/// Register process-wide publication identity before parsing arguments.
+/// Returns false if an identity was already registered; it cannot be replaced.
+#[must_use]
+pub fn register_build_identity(identity: BuildIdentity) -> bool {
+    BUILD_IDENTITY.set(identity).is_ok()
+}
+
+struct Identified<'a, T> {
+    identity: Option<&'static BuildIdentity>,
+    report: &'a T,
+}
+
+impl<T: Serialize> Serialize for Identified<'_, T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Envelope<'a, T> {
+            identity: &'a BuildIdentity,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            runtime: Option<RuntimeEvidence>,
+            #[serde(flatten)]
+            report: &'a T,
+        }
+        match self.identity {
+            Some(identity) => Envelope {
+                identity,
+                runtime: runtime_evidence(),
+                report: self.report,
+            }
+            .serialize(serializer),
+            None => self.report.serialize(serializer),
+        }
+    }
+}
+
+fn identified<T>(report: &T) -> Identified<'_, T> {
+    Identified {
+        identity: BUILD_IDENTITY.get(),
+        report,
+    }
+}
+
+/// Encode a result with the registered build identity, preserving field order.
+/// Use this for a response published both as a file and as identical stdout.
+///
+/// # Errors
+/// Returns a serialization error if the report cannot be encoded as JSON.
+pub fn publication_json<T: Serialize>(report: &T) -> serde_json::Result<Vec<u8>> {
+    require_consistent_runtime().map_err(serde_json::Error::io)?;
+    serde_json::to_vec(&identified(report))
+}
+
+fn version_message(identity: &BuildIdentity, version: &str) -> String {
+    let source = identity.source_commit.as_deref().unwrap_or("unknown");
+    let tree = identity.source_tree.as_deref().unwrap_or("unknown");
+    let artifact = identity.artifact_sha256.as_deref().map_or_else(
+        || {
+            format!(
+                "artifact digest unavailable ({})",
+                identity.digest_absence.as_deref().unwrap_or("unreadable")
+            )
+        },
+        |digest| format!("sha256:{digest}"),
+    );
+    format!(
+        "{version} {} tree:{tree} commit:{source} {} {artifact}",
+        identity.repository, identity.source_state
+    )
+}
 
 /// Baseline exit-code classes shared by ADR-010 command-line tools.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,13 +352,27 @@ impl ControlPlaneRecord {
         command: &str,
         kind: ControlPlaneRecordKind,
         message: &str,
-        fields: Option<ControlPlaneFields>,
+        mut fields: Option<ControlPlaneFields>,
     ) -> Self {
+        if let (Some(identity), Some(ControlPlaneFields::Version { source_commit, .. })) =
+            (BUILD_IDENTITY.get(), &mut fields)
+        {
+            source_commit.clone_from(&identity.source_commit);
+        }
         Self {
             schema: CONTROL_PLANE_SCHEMA,
             command: command.to_string(),
             kind,
-            message: message.to_string(),
+            message: if kind == ControlPlaneRecordKind::Version {
+                match (BUILD_IDENTITY.get(), &fields) {
+                    (Some(identity), Some(ControlPlaneFields::Version { version, .. })) => {
+                        version_message(identity, version)
+                    }
+                    _ => message.to_string(),
+                }
+            } else {
+                message.to_string()
+            },
             fields,
         }
     }
@@ -770,7 +971,7 @@ fn debug_name_to_snake_case(name: &str) -> String {
 /// Returns an error if serialisation or writing to stderr fails.
 pub fn emit_control_plane_record(record: &ControlPlaneRecord) -> io::Result<()> {
     let mut writer = LockedStderrWriter::new();
-    write_json_line(&mut writer, record)
+    write_control_line(&mut writer, record)
 }
 
 fn try_emit_control_plane_record(record: &ControlPlaneRecord) -> io::Result<bool> {
@@ -778,8 +979,39 @@ fn try_emit_control_plane_record(record: &ControlPlaneRecord) -> io::Result<bool
         return Ok(false);
     };
 
-    write_json_line(&mut writer, record)?;
+    write_control_line(&mut writer, record)?;
     Ok(true)
+}
+
+fn write_control_line<W: Write>(writer: &mut W, record: &ControlPlaneRecord) -> io::Result<()> {
+    if record.kind == ControlPlaneRecordKind::Version
+        && let Some(identity) = BUILD_IDENTITY.get()
+    {
+        #[derive(Serialize)]
+        struct VersionLine<'a> {
+            message: &'a str,
+            identity: &'a BuildIdentity,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            runtime: Option<RuntimeEvidence>,
+            schema: u32,
+            command: &'a str,
+            kind: ControlPlaneRecordKind,
+            fields: &'a Option<ControlPlaneFields>,
+        }
+        return write_json_line(
+            writer,
+            &VersionLine {
+                message: &record.message,
+                identity,
+                runtime: runtime_evidence(),
+                schema: record.schema,
+                command: &record.command,
+                kind: record.kind,
+                fields: &record.fields,
+            },
+        );
+    }
+    write_json_line(writer, &identified(record))
 }
 
 fn write_json_line<W: Write, T: serde::Serialize>(writer: &mut W, value: &T) -> io::Result<()> {
@@ -906,7 +1138,7 @@ fn try_init_json_tracing_with_directive(filter_directive: &str) -> bool {
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(filter)
-        .with_writer(LockedStderr)
+        .with_writer(IdentifiedStderr)
         .try_init()
         .is_ok()
 }
@@ -917,9 +1149,10 @@ fn try_init_json_tracing_with_directive(filter_directive: &str) -> bool {
 ///
 /// Returns an error if serialisation or writing to stdout fails.
 pub fn emit<T: serde::Serialize>(value: &T) -> io::Result<()> {
+    require_consistent_runtime()?;
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    write_json_line(&mut out, value)
+    write_json_line(&mut out, &identified(value))
 }
 
 /// Run a stdout-producing single-JSON-object command.
@@ -1081,6 +1314,11 @@ where
         }
     };
 
+    if let Err(error) = require_consistent_runtime() {
+        tracing::error!(error = %error, "Python reader runtime refused");
+        return CommandExit::Failure.exit_code();
+    }
+
     let published = if outcome.clean {
         finish_check_command(command_name, output, &outcome.report)
     } else {
@@ -1110,13 +1348,53 @@ where
     }
 }
 
-struct LockedStderr;
+struct IdentifiedStderr;
 
-impl<'writer> MakeWriter<'writer> for LockedStderr {
-    type Writer = LockedStderrWriter;
+impl<'writer> MakeWriter<'writer> for IdentifiedStderr {
+    type Writer = IdentifiedDiagnostic;
 
     fn make_writer(&'writer self) -> Self::Writer {
-        LockedStderrWriter::new()
+        IdentifiedDiagnostic(Vec::new())
+    }
+}
+
+// Tracing may write a record in fragments. Buffer exactly this writer's event
+// before adding metadata, without rewriting or reparsing corpus result objects.
+struct IdentifiedDiagnostic(Vec<u8>);
+
+impl Write for IdentifiedDiagnostic {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn diagnostic_value(bytes: &[u8]) -> serde_json::Value {
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(value) if value.is_object() => value,
+        _ => serde_json::json!({
+            "level": "ERROR",
+            "fields": {
+                "code": "diagnostic_serialization_failure",
+                "message": "diagnostic could not be encoded as a JSON object; unclassified text was omitted",
+            },
+        }),
+    }
+}
+
+impl Drop for IdentifiedDiagnostic {
+    fn drop(&mut self) {
+        let mut writer = LockedStderrWriter::new();
+        if BUILD_IDENTITY.get().is_none() {
+            let _ignored = writer.write_all(&self.0);
+            return;
+        }
+        let value = diagnostic_value(&self.0);
+        let _ignored = write_json_line(&mut writer, &identified(&value));
     }
 }
 
@@ -1338,6 +1616,10 @@ pub fn ensure_distinct_outputs(roles: &[(&str, &std::path::Path)]) -> Result<(),
 /// Failure publishing a check result through [`finish_check_command`].
 #[derive(Debug, thiserror::Error)]
 pub enum CheckResultError {
+    /// Identified readers observed incompatible interpreter versions.
+    #[error("{0}")]
+    InconsistentRuntime(String),
+
     /// Direct mode refused because stdout is a terminal (exit class 2).
     #[error("stdout is a terminal; refusing to write result data")]
     TtyRefusal,
@@ -1372,12 +1654,15 @@ pub enum CheckResultError {
 ///
 /// Returns [`CheckResultError::TtyRefusal`] in direct mode when stdout is
 /// a terminal, [`CheckResultError::InvalidMode`] if only one build-mode
-/// path is set, or [`CheckResultError::Io`] on a write failure.
+/// path is set, [`CheckResultError::InconsistentRuntime`] for mixed readers,
+/// or [`CheckResultError::Io`] on a write failure.
 pub fn finish_check_command<T: serde::Serialize>(
     command_name: &str,
     output: &CheckOutputArgs,
     report: &T,
 ) -> Result<(), CheckResultError> {
+    require_consistent_runtime()
+        .map_err(|error| CheckResultError::InconsistentRuntime(error.to_string()))?;
     match (&output.report, &output.stamp) {
         (None, None) => {
             if let Some(record) = stdout_tty_refusal_record(command_name) {
@@ -1420,7 +1705,7 @@ fn write_json_report_if_changed<T: serde::Serialize>(
     path: &std::path::Path,
     value: &T,
 ) -> io::Result<PublicationChange> {
-    let mut bytes = serde_json::to_vec(value)?;
+    let mut bytes = publication_json(value)?;
     bytes.push(b'\n');
 
     match publication::inspect_destination(path, &bytes, publication::PublicationMode::Public) {
@@ -1449,4 +1734,94 @@ fn write_json_report_if_changed<T: serde::Serialize>(
         bytes_changed: true,
         mode_changed: false,
     })
+}
+
+/// Malformed diagnostics produce an identified failure instead of disappearing.
+///
+/// # Panics
+/// Panics only if a malformed diagnostic loses its failure class, exposes input,
+/// or rewrites a valid object.
+///
+/// ´claim:identity:malformed-diagnostics-are-retained´
+/// ´test:unit:malformed-diagnostics-are-retained´
+#[cfg(test)]
+#[test]
+fn malformed_diagnostics_are_retained() {
+    for bytes in [
+        b"lost diagnostic".as_slice(),
+        b"[1,2]".as_slice(),
+        b"{\"password\":\"private-value\"".as_slice(),
+        &[255, 0, 10],
+    ] {
+        let value = diagnostic_value(bytes);
+        assert_eq!(value["level"], "ERROR");
+        assert_eq!(value["fields"]["code"], "diagnostic_serialization_failure");
+        assert!(value["fields"].get("diagnostic").is_none());
+        assert!(value["fields"].get("diagnostic_bytes").is_none());
+        assert!(!value.to_string().contains("private-value"));
+    }
+    let value = serde_json::json!({"fields": {"message": "ordinary diagnostic"}});
+    assert_eq!(
+        diagnostic_value(&serde_json::to_vec(&value).unwrap()),
+        value
+    );
+}
+
+/// Unavailable measurement is named as an absence, never a digest value.
+///
+/// # Panics
+/// Panics only if the version text misrepresents the named absence.
+///
+/// ´claim:identity:version-names-an-unavailable-digest´
+/// ´test:unit:version-names-an-unavailable-digest´
+#[cfg(test)]
+#[test]
+fn version_names_an_unavailable_digest() {
+    let identity: BuildIdentity = serde_json::from_value(serde_json::json!({
+        "schema": 1, "repository": "superloop-tools", "version": "0.5.0",
+        "source_commit": null, "source_tree": null, "source_state": "unknown",
+        "release_tag": null, "artifact_sha256": null, "digest_absence": "unreadable",
+    }))
+    .unwrap();
+    let message = version_message(&identity, "superloop-lint 0.5.0");
+    assert!(
+        message.ends_with("artifact digest unavailable (unreadable)"),
+        "{message}"
+    );
+    assert!(!message.contains("sha256:unreadable"), "{message}");
+}
+
+/// The version sentence exposes the full public tree before commit history.
+///
+/// # Panics
+/// Panics only if equal public trees cannot be compared in the readable message.
+///
+/// ´claim:identity:version-names-public-tree´
+/// ´test:unit:version-names-public-tree´
+#[cfg(test)]
+#[test]
+fn version_names_public_tree() {
+    let mut identity: BuildIdentity = serde_json::from_value(serde_json::json!({
+        "schema": 1, "repository": "superloop-tools", "version": "0.5.0",
+        "source_commit": "1111111111111111111111111111111111111111",
+        "source_tree": "2222222222222222222222222222222222222222",
+        "source_state": "candidate", "release_tag": null,
+        "artifact_sha256": null, "digest_absence": "unreadable",
+    }))
+    .unwrap();
+    for commit in [
+        "1111111111111111111111111111111111111111",
+        "3333333333333333333333333333333333333333",
+    ] {
+        identity.source_commit = Some(commit.to_owned());
+        let message = version_message(&identity, "superloop-lint 0.5.0");
+        assert!(
+            message.contains(&format!(
+                "tree:2222222222222222222222222222222222222222 commit:{commit}"
+            )),
+            "{message}"
+        );
+    }
+    identity.source_tree = None;
+    assert!(version_message(&identity, "superloop-lint 0.5.0").contains("tree:unknown"));
 }

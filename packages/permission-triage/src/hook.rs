@@ -15,14 +15,15 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use execute_command::checks::{ScopeProjectionError, scope_projection};
 use execute_command::record::{HookRecordFailure, hook_record_failure};
 use loop_home::allocations::{Allocations, allocations_path};
 use serde_json::{Map, Value};
 
-use crate::command_checks::{
-    FastLane, MAX_MONITOR_TIMEOUT_MS, READ_ONLY_TABLE, classify_scoped, scope_words,
+use crate::command_checks::{FastLane, MAX_MONITOR_TIMEOUT_MS, READ_ONLY_TABLE, classify_scoped};
+use crate::journal::{
+    LOCK_BUDGET_FLOOR, LOCK_WAIT, journal_filename, request_digest, verdict_event_id,
 };
-use crate::journal::{request_digest, verdict_event_id};
 use crate::model::{Classification, ModelError, ModelResult, run_model_at_root};
 use crate::proc;
 use crate::request::{DecodeResult, PermissionRequest, Scope, decode_request};
@@ -53,6 +54,11 @@ const LOST_AUDIT_EVENT: &[u8] =
     b"permission-triage: lost audit event: journal publication failed\n";
 const CLASSIFIER_STATE_ROOT_FAILURE: &str = "infrastructure-failure: model runner failed: the classifier state root could not be established; no policy judgment was made";
 const ENFORCE_JOURNAL_FAILURE: &str = "infrastructure-failure: verdict journal failed: journal-degraded evidence could not be retained; the evidence journal is degraded, and the request must be sent to the superloop orchestrator agent for adjudication";
+const WORKER_LOCK_NEXT_STEP: &str = "retry this request later if still needed; if the lock remains held, report this refusal to your loop's orchestrator";
+const ESTATE_LOCK_NEXT_STEP: &str = "retry this request later if still needed; while the estate lock remains held, state this refusal in your current session; once the lock is free, report it to the superloop orchestrator";
+const SUPERLOOP_ESTATE_LOCK_NEXT_STEP: &str = "retry this request later if still needed; if the lock remains held, report this refusal to the owner of this hook";
+const NO_ESTATE_ROUTE_NEXT_STEP: &str = "retry this request later if still needed; if the lock remains held, state this refusal in your current session; when an estate reporting route is available, report it to the owner of this hook";
+const UNKNOWN_LOCK_NEXT_STEP: &str = "retry this request later if still needed; if the lock remains held, report this refusal to the owner of this hook";
 
 /// Closed operating mode selected by the private instance file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -367,6 +373,7 @@ pub struct HookOutcome {
     record: EscalationRecord,
     timing: HookTiming,
     published: bool,
+    approval_lock_wait: Option<Duration>,
 }
 
 /// Borrowed request facts used for one atomic approval lookup and consumption append.
@@ -532,6 +539,21 @@ pub trait EscalationSink {
     /// Specific infrastructure detail when a scoped verdict has no destination.
     fn record_failure_detail(&self, _scope: Scope) -> Option<&'static str> {
         None
+    }
+
+    /// Budget exhausted by the most recent approval lookup or verdict-record lock wait.
+    fn exhausted_lock_wait(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Whether the resolved main caller owns the configured estate journal.
+    fn reader_is_estate_owner(&self) -> bool {
+        false
+    }
+
+    /// Whether this reader is a dispatched worker rather than an in-session subagent.
+    fn reader_is_worker(&self) -> bool {
+        false
     }
 
     /// Consume one schema-2 verdict record.
@@ -1256,22 +1278,39 @@ fn consume_adjudicated_approval<S: EscalationSink + ?Sized>(
             Some(approved)
         }
         Ok(_) => None,
-        Err(_error) => Some(bind_rubric_digests(
-            outcome(
-                PermissionDecision::Deny,
-                infrastructure_reason(
-                    "adjudication journal",
-                    "approval lookup or consumption could not be completed safely",
-                ),
-                ReasonKind::Infrastructure("adjudication journal"),
-                Some(request),
-                HookTiming::new(started.elapsed().as_millis(), original.timing.model_wall_ms),
-                None,
-            )
-            .with_role_and_model(role, "journal-error", true)
-            .with_scope(Scope::Loop),
-            rubrics,
-        )),
+        Err(_error) => {
+            let approval_lock_wait = sink.exhausted_lock_wait();
+            let reason = approval_lock_wait.map_or_else(
+                || {
+                    infrastructure_reason(
+                        "adjudication journal",
+                        "approval lookup or consumption could not be completed safely",
+                    )
+                },
+                |budget| {
+                    approval_lock_refusal(
+                        budget,
+                        sink.reader_is_estate_owner(),
+                        sink.destination(Scope::Estate).is_some(),
+                    )
+                },
+            );
+            let mut denied = bind_rubric_digests(
+                outcome(
+                    PermissionDecision::Deny,
+                    reason,
+                    ReasonKind::Infrastructure("adjudication journal"),
+                    Some(request),
+                    HookTiming::new(started.elapsed().as_millis(), original.timing.model_wall_ms),
+                    None,
+                )
+                .with_role_and_model(role, "journal-error", true)
+                .with_scope(Scope::Loop),
+                rubrics,
+            );
+            denied.approval_lock_wait = approval_lock_wait;
+            Some(denied)
+        }
     }
 }
 
@@ -1350,9 +1389,14 @@ fn serialize_hook_outcome<S: EscalationSink + ?Sized>(
                 InvocationOutput::published_decision(&hook_outcome.response)
             }
             HookRecordFailure::Refuse => {
-                let reason = failure_detail.map_or_else(
-                    || ENFORCE_JOURNAL_FAILURE.to_owned(),
-                    |detail| infrastructure_reason("state routing", detail),
+                let reason = sink.exhausted_lock_wait().map_or_else(
+                    || {
+                        failure_detail.map_or_else(
+                            || ENFORCE_JOURNAL_FAILURE.to_owned(),
+                            |detail| infrastructure_reason("state routing", detail),
+                        )
+                    },
+                    |budget| journal_lock_refusal_for_outcome(budget, &hook_outcome, sink),
                 );
                 InvocationOutput::published_decision(&HookResponse {
                     decision: PermissionDecision::Deny,
@@ -1418,7 +1462,7 @@ fn adapt_hook_for_role(
     adapt_hook_for_domain(decoded, fast_lane, model, timing, role, None, peer_roots)
 }
 
-fn adapt_hook_for_domain(
+pub(crate) fn adapt_hook_for_domain(
     decoded: &DecodeResult,
     fast_lane: Option<&FastLane>,
     model: ModelStage<'_>,
@@ -1730,6 +1774,26 @@ fn adapt_service_failure(
     )
 }
 
+pub(crate) fn remote_root_remedy(
+    role: &CallerRole,
+    status: execute_command::request::VerdictStatus,
+    reason: &str,
+) -> Option<&'static str> {
+    if status != execute_command::request::VerdictStatus::InvalidOutput
+        || reason != "loop scope contradicts a protected target or unresolved identity/effect"
+    {
+        return None;
+    }
+    Some(match role {
+        CallerRole::OrchestratorSubagent(resolved) if resolved.worker() => {
+            "remote path outside the domain's declared roots; ask the loop to declare the remote root in its worker domain rubric"
+        }
+        _ => {
+            "remote path outside the domain's declared roots; ask the owner to declare the remote root in the loop's orchestrator domain rubric"
+        }
+    })
+}
+
 fn adapt_model_result(
     request: &PermissionRequest,
     result: &ModelResult,
@@ -1743,17 +1807,28 @@ fn adapt_model_result(
     let domain = rubrics.and_then(|rubrics| rubrics.domain().map(crate::rubric::OwnerRubric::text));
     let binding = crate::command_checks::binding(request, rubrics);
     let observed = RunnerOutcome::Output(serde_json::json!({"classification":result.classification().as_str(),"scope":result.scope().as_str(),"reason":result.reason()}).to_string().into_bytes());
-    let verdict = execute_command::triage::judge(
-        &binding,
-        Profile::HookSixClass,
-        &observed,
-        scope_floor_with_domain(request, role, domain, peer_roots),
-    );
+    let floor = assess_scope(request, role, domain, peer_roots);
+    let verdict =
+        execute_command::triage::judge(&binding, Profile::HookSixClass, &observed, floor.scope());
     if verdict.status != VerdictStatus::Valid {
         return (
             outcome(
                 PermissionDecision::Deny,
-                infrastructure_reason("scope validation", verdict.reason.as_str()),
+                infrastructure_reason(
+                    "scope validation",
+                    if matches!(floor, ScopeFloor::RemoteOutsideDomain) {
+                        remote_root_remedy(role, verdict.status, verdict.reason.as_str())
+                            .unwrap_or_else(|| verdict.reason.as_str())
+                    } else if matches!(floor, ScopeFloor::CommandString)
+                        && verdict.status == VerdictStatus::InvalidOutput
+                        && verdict.reason.as_str()
+                            == "loop scope contradicts a protected target or unresolved identity/effect"
+                    {
+                        "unresolved command-string or launcher syntax; use a supported literal body such as bash -c 'COMMAND', keeping required safety wrappers"
+                    } else {
+                        verdict.reason.as_str()
+                    },
+                ),
                 ReasonKind::Infrastructure("scope validation"),
                 Some(request),
                 timing,
@@ -1870,7 +1945,100 @@ fn outcome(
         },
         timing,
         published: false,
+        approval_lock_wait: None,
     }
+}
+
+fn lock_wait_basis(budget: Duration) -> String {
+    if budget == LOCK_BUDGET_FLOOR {
+        format!("the journal's {} ms minimum", LOCK_BUDGET_FLOOR.as_millis())
+    } else if budget == LOCK_WAIT {
+        format!("the journal's {} ms maximum", LOCK_WAIT.as_millis())
+    } else {
+        "half this hook's remaining time".to_owned()
+    }
+}
+
+fn journal_lock_next_step(
+    scope: Scope,
+    reader_role: &str,
+    estate_owner: bool,
+    estate_route: bool,
+) -> String {
+    match (scope, reader_role, estate_owner, estate_route) {
+        (_, "orchestrator-subagent", _, _) => WORKER_LOCK_NEXT_STEP.to_owned(),
+        (_, "orchestrator", _, false) => NO_ESTATE_ROUTE_NEXT_STEP.to_owned(),
+        (Scope::Loop, "orchestrator", owner, true) => format!(
+            "retry this request later if still needed; if the lock remains held, inspect {} in your loop's registered state root; if that read is refused, report this refusal to {}",
+            journal_filename(Scope::Loop),
+            if owner {
+                "the owner of this hook"
+            } else {
+                "the superloop orchestrator"
+            }
+        ),
+        (Scope::Estate, "orchestrator", true, true) => SUPERLOOP_ESTATE_LOCK_NEXT_STEP.to_owned(),
+        (Scope::Estate, "orchestrator", false, true) => ESTATE_LOCK_NEXT_STEP.to_owned(),
+        _ => UNKNOWN_LOCK_NEXT_STEP.to_owned(),
+    }
+}
+
+fn journal_lock_refusal_for_outcome<S: EscalationSink + ?Sized>(
+    budget: Duration,
+    hook_outcome: &HookOutcome,
+    sink: &S,
+) -> String {
+    journal_lock_refusal(
+        budget,
+        hook_outcome.approval_lock_wait,
+        hook_outcome.record.scope,
+        &hook_outcome.record.role,
+        sink.reader_is_worker(),
+        sink.reader_is_estate_owner(),
+        sink.destination(Scope::Estate).is_some(),
+    )
+}
+
+fn approval_lock_refusal(budget: Duration, estate_owner: bool, estate_route: bool) -> String {
+    let next_step = journal_lock_next_step(Scope::Loop, "orchestrator", estate_owner, estate_route);
+    format!(
+        "infrastructure-failure: adjudication journal failed: your loop's journal lock remained held through the {} ms approval lookup wait ({}); {next_step}",
+        budget.as_millis(),
+        lock_wait_basis(budget)
+    )
+}
+
+fn journal_lock_refusal(
+    record_budget: Duration,
+    approval_budget: Option<Duration>,
+    scope: Scope,
+    reader_role: &str,
+    worker: bool,
+    estate_owner: bool,
+    estate_route: bool,
+) -> String {
+    let cause = approval_budget.map_or_else(
+        || {
+            let journal = match scope {
+                Scope::Loop if worker => "this run's journal",
+                Scope::Loop => "your loop's journal",
+                Scope::Estate => "the estate journal",
+            };
+            format!(
+                "{journal} lock remained held through the {} ms verdict-recording wait ({})",
+                record_budget.as_millis(), lock_wait_basis(record_budget)
+            )
+        },
+        |lookup_budget| {
+            format!(
+                "your loop's journal lock remained held through two waits: {} ms for approval lookup ({}), then {} ms for verdict recording ({})",
+                lookup_budget.as_millis(), lock_wait_basis(lookup_budget),
+                record_budget.as_millis(), lock_wait_basis(record_budget)
+            )
+        },
+    );
+    let next_step = journal_lock_next_step(scope, reader_role, estate_owner, estate_route);
+    format!("infrastructure-failure: verdict journal failed: {cause}; {next_step}")
 }
 
 fn infrastructure_reason(component: &str, detail: &str) -> String {
@@ -2444,14 +2612,39 @@ struct ScopeContext<'a> {
     peer_roots: &'a [PathBuf],
 }
 
-fn scope_floor_with_domain(
+enum ScopeFloor {
+    Loop,
+    Estate,
+    RemoteOutsideDomain,
+    CommandString,
+}
+
+impl ScopeFloor {
+    const fn scope(&self) -> Scope {
+        match self {
+            Self::Loop => Scope::Loop,
+            Self::Estate | Self::RemoteOutsideDomain | Self::CommandString => Scope::Estate,
+        }
+    }
+}
+
+pub(crate) fn scope_floor_with_domain(
     request: &PermissionRequest,
     role: &CallerRole,
     domain: Option<&str>,
     peer_roots: &[PathBuf],
 ) -> Scope {
+    assess_scope(request, role, domain, peer_roots).scope()
+}
+
+fn assess_scope(
+    request: &PermissionRequest,
+    role: &CallerRole,
+    domain: Option<&str>,
+    peer_roots: &[PathBuf],
+) -> ScopeFloor {
     let Some(entry) = role.entry() else {
-        return Scope::Estate;
+        return ScopeFloor::Estate;
     };
     let mut protected = ["PERMISSION_TRIAGE_OWNER_RUBRIC", LOOP_REGISTRY_VARIABLE]
         .iter()
@@ -2482,39 +2675,107 @@ fn scope_floor_with_domain(
         "Glob" | "Grep" => &["path"],
         "Agent" | "Task" | "SendMessage" | "ScheduleWakeup" | "TaskOutput" | "ListAgents"
         | "TaskStop" | "AskUserQuestion" | "TodoWrite" | "EnterPlanMode" | "ExitPlanMode" => &[],
-        _ => return Scope::Estate,
+        _ => return ScopeFloor::Estate,
     };
     for field in fields {
         match request.tool_input().get(*field) {
             Some(Value::String(path)) if local_scope_path(path, &context) => {}
             None if matches!(request.tool_name(), "Glob" | "Grep") => {}
-            _ => return Scope::Estate,
+            _ => return ScopeFloor::Estate,
         }
     }
-    Scope::Loop
+    ScopeFloor::Loop
 }
 
-fn shell_scope(command: &str, context: &ScopeContext<'_>) -> Scope {
-    let Some(words) = scope_words(command) else {
-        return Scope::Estate;
+fn shell_scope(command: &str, context: &ScopeContext<'_>) -> ScopeFloor {
+    shell_scope_projection(scope_projection(command), context)
+}
+
+fn shell_scope_projection(
+    projection: Result<Vec<execute_command::checks::ScopeWord>, ScopeProjectionError>,
+    context: &ScopeContext<'_>,
+) -> ScopeFloor {
+    let scoped_words = match projection {
+        Ok(words) => words,
+        Err(ScopeProjectionError::CommandString) => return ScopeFloor::CommandString,
+        Err(ScopeProjectionError::Syntax) => return ScopeFloor::Estate,
     };
+    let words = scoped_words
+        .iter()
+        .map(|word| word.text.clone())
+        .collect::<Vec<_>>();
     if words.windows(2).any(|pair| {
         pair.first().is_some_and(|word| word == "git")
             && pair.get(1).is_some_and(|word| word == "config")
     }) {
-        return Scope::Estate;
+        return ScopeFloor::Estate;
     }
     if estate_operation(&words) {
-        return Scope::Estate;
+        return ScopeFloor::Estate;
     }
-    for word in &words {
-        if (!word.starts_with('-') || word.contains('=') || word.contains('/'))
-            && !local_scope_path(word, context)
-        {
-            return Scope::Estate;
+    let mut result = ScopeFloor::Loop;
+    for scoped in &scoped_words {
+        for word in scope_path_views(&scoped.text) {
+            if !word.starts_with('-') || word.contains('=') || word.contains('/') {
+                let floor = if scoped.remote {
+                    remote_scope_path(word, context)
+                } else if local_scope_path(word, context) {
+                    ScopeFloor::Loop
+                } else {
+                    ScopeFloor::Estate
+                };
+                match floor {
+                    ScopeFloor::Estate | ScopeFloor::CommandString => return ScopeFloor::Estate,
+                    ScopeFloor::RemoteOutsideDomain => result = floor,
+                    ScopeFloor::Loop => {}
+                }
+            }
         }
     }
-    Scope::Loop
+    result
+}
+
+fn scope_path_views(word: &str) -> Vec<&str> {
+    let mut views = vec![word];
+    for (index, character) in word.char_indices() {
+        if matches!(character, '=' | ':')
+            && let Some(value) = word.get(index + 1..).filter(|value| !value.is_empty())
+        {
+            views.push(value);
+        }
+    }
+    if word.starts_with('-') && !word.starts_with("--") {
+        for (index, character) in word.char_indices().skip(1) {
+            if !character.is_ascii_alphabetic() {
+                break;
+            }
+            if let Some(value) = word.get(index + 1..).filter(|value| !value.is_empty()) {
+                views.push(value);
+            }
+        }
+    }
+    views
+}
+
+#[cfg(test)]
+pub(crate) fn scope_with_interpretation_for_test(
+    command: &str,
+    checkout: &Path,
+    interpretation: Result<Vec<execute_command::checks::ScopeWord>, ScopeProjectionError>,
+) -> Scope {
+    let context = ScopeContext {
+        cwd: checkout,
+        checkout,
+        own_runs: None,
+        domain: None,
+        protected: Vec::new(),
+        peer_roots: &[],
+    };
+    shell_scope_projection(
+        execute_command::checks::scope_projection_with_interpretation(command, |_| interpretation),
+        &context,
+    )
+    .scope()
 }
 
 fn estate_operation(words: &[String]) -> bool {
@@ -2645,6 +2906,51 @@ fn estate_path(path: &Path) -> bool {
     .any(|root| path.starts_with(root))
 }
 
+fn remote_scope_path(value: &str, context: &ScopeContext<'_>) -> ScopeFloor {
+    let value = value.split_once('=').map_or(value, |(_, target)| target);
+    if matches!(
+        value,
+        "/dev/null" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr"
+    ) {
+        return ScopeFloor::Loop;
+    }
+    if value.is_empty() || value.contains(['$', '`', '*', '?', '~', '@']) || value.contains("://") {
+        return ScopeFloor::Estate;
+    }
+    let path = Path::new(value);
+    // Reject parent components before normalization or prefix matching, including relative words.
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return ScopeFloor::Estate;
+    }
+    if estate_path(path) || protected_name(path) {
+        return ScopeFloor::Estate;
+    }
+    if !path.is_absolute() {
+        // Operand roles are not known: ordinary relative words retain the existing approximation,
+        // without assigning them a caller-local base or exempting protected remote names.
+        return ScopeFloor::Loop;
+    }
+    if context
+        .protected
+        .iter()
+        .any(|protected| path.starts_with(protected))
+        || peer_owned_path(path, context)
+    {
+        return ScopeFloor::Estate;
+    }
+    if context
+        .domain
+        .is_some_and(|domain| domain_path_candidate(domain, path))
+    {
+        ScopeFloor::Loop
+    } else {
+        ScopeFloor::RemoteOutsideDomain
+    }
+}
+
 fn local_scope_path(value: &str, context: &ScopeContext<'_>) -> bool {
     let cwd = context.cwd;
     let checkout = context.checkout;
@@ -2757,6 +3063,10 @@ fn protected_name_outside_checkout(path: &Path, checkout: &Path) -> bool {
     if path.starts_with(checkout) {
         return false;
     }
+    protected_name(path)
+}
+
+fn protected_name(path: &Path) -> bool {
     let components = path
         .components()
         .map(|component| component.as_os_str().to_str())
@@ -2773,4 +3083,333 @@ fn protected_name_outside_checkout(path: &Path, checkout: &Path) -> bool {
 // grants an allow, and protected paths, peer roots and scope ambiguity still override the model.
 fn domain_path_candidate(domain: &str, path: &Path) -> bool {
     rubric_root_spans(domain).any(|root| rubric_root_matches(root, path, false))
+}
+
+#[cfg(test)]
+mod lock_denial_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    /// # Panics
+    /// Panics only if a lock denial names the wrong journal, bound, or next step.
+    /// ´test:unit:lock-denials-name-the-applied-budget-and-journal´
+    #[test]
+    fn lock_denials_name_the_applied_budget_and_journal() {
+        for (budget, basis) in [
+            (Duration::from_millis(10), "the journal's 10 ms minimum"),
+            (
+                Duration::from_millis(500),
+                "half this hook's remaining time",
+            ),
+            (Duration::from_millis(4000), "the journal's 4000 ms maximum"),
+        ] {
+            let approval = approval_lock_refusal(budget, false, true);
+            let loop_record = journal_lock_refusal(
+                budget,
+                None,
+                Scope::Loop,
+                "orchestrator",
+                false,
+                false,
+                true,
+            );
+            let estate_record = journal_lock_refusal(
+                budget,
+                None,
+                Scope::Estate,
+                "orchestrator",
+                false,
+                false,
+                true,
+            );
+            let both = journal_lock_refusal(
+                budget,
+                Some(budget),
+                Scope::Loop,
+                "orchestrator",
+                false,
+                false,
+                true,
+            );
+            for reason in [&approval, &loop_record, &estate_record, &both] {
+                assert!(reason.contains(basis), "{reason}");
+                assert!(reason.contains("retry this request later"), "{reason}");
+                assert!(!reason.contains("inspect the named journal"), "{reason}");
+                assert!(
+                    !reason.contains("allowed by this hook's remaining time limit"),
+                    "{reason}"
+                );
+            }
+            assert!(approval.contains("your loop's journal lock"), "{approval}");
+            assert!(
+                loop_record.contains("your loop's journal lock"),
+                "{loop_record}"
+            );
+            assert!(
+                estate_record.contains("estate journal lock"),
+                "{estate_record}"
+            );
+            assert_eq!(both.matches("your loop's journal lock").count(), 1);
+            assert_eq!(both.matches(basis).count(), 2);
+        }
+    }
+
+    struct RefusingRecordSink {
+        estate_owner: bool,
+        worker: bool,
+        estate_route: bool,
+    }
+
+    impl EscalationSink for RefusingRecordSink {
+        type Error = io::Error;
+
+        fn record(&mut self, _record: &EscalationRecord) -> Result<(), Self::Error> {
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        }
+
+        fn exhausted_lock_wait(&self) -> Option<Duration> {
+            Some(LOCK_BUDGET_FLOOR)
+        }
+
+        fn reader_is_estate_owner(&self) -> bool {
+            self.estate_owner
+        }
+
+        fn reader_is_worker(&self) -> bool {
+            self.worker
+        }
+
+        fn destination(&self, scope: Scope) -> Option<&'static str> {
+            (scope == Scope::Estate && self.estate_route).then_some("estate-journal")
+        }
+    }
+
+    /// # Panics
+    /// Panics only if a serialized lock refusal sends a reader to a route it cannot use.
+    /// ´test:unit:lock-refusal-next-steps-match-reader-and-journal´
+    #[allow(clippy::too_many_lines)] // Keep the reader, scope and exact denial matrix together.
+    #[test]
+    fn lock_refusal_next_steps_match_reader_and_journal() {
+        for (reader, role, scope, worker, estate_owner, estate_route, journal, next_step) in [
+            (
+                "worker-loop",
+                "orchestrator-subagent",
+                Scope::Loop,
+                true,
+                false,
+                true,
+                "this run's journal",
+                "retry this request later if still needed; if the lock remains held, report this refusal to your loop's orchestrator",
+            ),
+            (
+                "subagent-loop",
+                "orchestrator-subagent",
+                Scope::Loop,
+                false,
+                false,
+                true,
+                "your loop's journal",
+                "retry this request later if still needed; if the lock remains held, report this refusal to your loop's orchestrator",
+            ),
+            (
+                "subagent-estate",
+                "orchestrator-subagent",
+                Scope::Estate,
+                false,
+                false,
+                true,
+                "the estate journal",
+                "retry this request later if still needed; if the lock remains held, report this refusal to your loop's orchestrator",
+            ),
+            (
+                "loop-loop",
+                "orchestrator",
+                Scope::Loop,
+                false,
+                false,
+                true,
+                "your loop's journal",
+                "retry this request later if still needed; if the lock remains held, inspect escalations.jsonl in your loop's registered state root; if that read is refused, report this refusal to the superloop orchestrator",
+            ),
+            (
+                "loop-estate",
+                "orchestrator",
+                Scope::Estate,
+                false,
+                false,
+                true,
+                "the estate journal",
+                "retry this request later if still needed; while the estate lock remains held, state this refusal in your current session; once the lock is free, report it to the superloop orchestrator",
+            ),
+            (
+                "superloop-loop",
+                "orchestrator",
+                Scope::Loop,
+                false,
+                true,
+                true,
+                "your loop's journal",
+                "retry this request later if still needed; if the lock remains held, inspect escalations.jsonl in your loop's registered state root; if that read is refused, report this refusal to the owner of this hook",
+            ),
+            (
+                "superloop-estate",
+                "orchestrator",
+                Scope::Estate,
+                false,
+                true,
+                true,
+                "the estate journal",
+                "retry this request later if still needed; if the lock remains held, report this refusal to the owner of this hook",
+            ),
+            (
+                "orchestrator-no-estate-root",
+                "orchestrator",
+                Scope::Loop,
+                false,
+                false,
+                false,
+                "your loop's journal",
+                "retry this request later if still needed; if the lock remains held, state this refusal in your current session; when an estate reporting route is available, report it to the owner of this hook",
+            ),
+            (
+                "unknown-estate",
+                "unknown",
+                Scope::Estate,
+                false,
+                false,
+                true,
+                "the estate journal",
+                "retry this request later if still needed; if the lock remains held, report this refusal to the owner of this hook",
+            ),
+        ] {
+            let mut prepared = outcome(
+                PermissionDecision::Deny,
+                "fixture reason".to_owned(),
+                ReasonKind::Infrastructure("journal"),
+                None,
+                HookTiming::new(0, 0),
+                None,
+            );
+            role.clone_into(&mut prepared.record.role);
+            prepared.record.scope = scope;
+            let reply = serialize_hook_outcome(
+                Mode::Enforce,
+                prepared,
+                &mut RefusingRecordSink {
+                    estate_owner,
+                    worker,
+                    estate_route,
+                },
+                &Instant::now(),
+            );
+            let value: serde_json::Value = serde_json::from_slice(reply.stdout()).expect("reply");
+            let reason = value
+                .pointer("/hookSpecificOutput/permissionDecisionReason")
+                .and_then(serde_json::Value::as_str)
+                .expect("denial reason");
+            let expected = format!(
+                "infrastructure-failure: verdict journal failed: {journal} lock remained held through the 10 ms verdict-recording wait (the journal's 10 ms minimum); {next_step}"
+            );
+            assert_eq!(reason, expected, "{reader}");
+        }
+    }
+
+    #[derive(Default)]
+    struct LookupOnlySink {
+        looked_up: bool,
+        recorded: bool,
+    }
+
+    impl EscalationSink for LookupOnlySink {
+        type Error = io::Error;
+
+        fn destination(&self, scope: Scope) -> Option<&'static str> {
+            (scope == Scope::Estate).then_some("estate-journal")
+        }
+
+        fn record(&mut self, _record: &EscalationRecord) -> Result<(), Self::Error> {
+            self.recorded = true;
+            Ok(())
+        }
+
+        fn consume_approval(
+            &mut self,
+            _request: &ApprovalRequest<'_>,
+        ) -> Result<Option<String>, Self::Error> {
+            self.looked_up = true;
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        }
+
+        fn exhausted_lock_wait(&self) -> Option<Duration> {
+            self.looked_up.then_some(Duration::from_millis(10))
+        }
+    }
+
+    /// # Panics
+    /// Panics only if the fixture does not reach a lookup-only refusal or loses its exact reason.
+    /// ´test:unit:approval-lookup-only-lock-refusal-names-cause-and-next-step´
+    #[test]
+    fn approval_lookup_only_lock_refusal_names_cause_and_next_step() {
+        let entries = BTreeMap::from([(
+            "orchestration.env".to_owned(),
+            b"LOOP_NAME=orchestration\nLOOP_CWD=/workspace/project\nLOOP_SID=main\n".to_vec(),
+        )]);
+        let registry = crate::parse_registry(b"orchestration.env\n", &entries);
+        let role = crate::resolve_role(
+            Some(&registry),
+            4_000_000_000,
+            "main",
+            "/workspace/project",
+            None,
+            false,
+        );
+        assert!(role.is_orchestrator());
+        let input = json!({
+            "session_id": "main",
+            "cwd": "/workspace/project",
+            "permission_mode": "manual",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": "lookup-only",
+            "tool_input": { "command": "printf fixture" }
+        });
+        let request = match decode_request(&serde_json::to_vec(&input).expect("fixture JSON")) {
+            DecodeResult::Decoded(request) => *request,
+            DecodeResult::Unclassifiable { reason } => panic!("fixture request: {reason}"),
+        };
+        let rubrics = crate::rubric::load_rubrics_from_path(None).expect("empty optional rubrics");
+        let started = Instant::now();
+        let original = outcome(
+            PermissionDecision::Deny,
+            "escalation: fixture reason".to_owned(),
+            ReasonKind::Escalation(&role),
+            Some(&request),
+            HookTiming::new(0, 0),
+            None,
+        )
+        .with_role_and_model(&role, "model", true)
+        .with_scope(Scope::Loop);
+        let mut sink = LookupOnlySink::default();
+        let denied = consume_adjudicated_approval(
+            &mut sink,
+            &request,
+            &role,
+            &rubrics,
+            Mode::Enforce,
+            &original,
+            &started,
+        )
+        .expect("lookup failure produces a denial");
+        let reply = serialize_hook_outcome(Mode::Enforce, denied, &mut sink, &started);
+        assert!(sink.looked_up);
+        assert!(sink.recorded);
+        let value: serde_json::Value = serde_json::from_slice(reply.stdout()).expect("hook reply");
+        assert_eq!(
+            value
+                .pointer("/hookSpecificOutput/permissionDecisionReason")
+                .expect("denial reason"),
+            "infrastructure-failure: adjudication journal failed: your loop's journal lock remained held through the 10 ms approval lookup wait (the journal's 10 ms minimum); retry this request later if still needed; if the lock remains held, inspect escalations.jsonl in your loop's registered state root; if that read is refused, report this refusal to the superloop orchestrator"
+        );
+    }
 }

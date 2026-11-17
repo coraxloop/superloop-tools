@@ -454,6 +454,31 @@ fn mail_inventory_reports_skipped_loop_reason() {
         }
     }
 
+    const CHILD: &str = "LOOP_HOME_INVENTORY_LOG_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // A scoped subscriber cannot isolate the process-wide callsite interest cache.
+        let output = bounded::output(
+            std::process::Command::new(std::env::current_exe().expect("test image"))
+                .args([
+                    "mail::directory::tests::mail_inventory_reports_skipped_loop_reason",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1"),
+            "mail inventory log capture",
+            Duration::from_secs(120),
+        )
+        .expect("bounded capture child");
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "capture child: {}; stdout={}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let fixture = Fixture::new();
     let host = fixture.root.join(".config/loops");
     fs::create_dir_all(&host).expect("host config");
@@ -501,7 +526,11 @@ fn mail_inventory_reports_skipped_loop_reason() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON event"))
         .collect::<Vec<_>>();
-    assert_eq!(events.len(), 1, "routine refresh stays quiet at info");
+    assert_eq!(
+        events.len(),
+        1,
+        "routine refresh stays quiet at info; captured diagnostics: {lines}"
+    );
     assert_eq!(events[0]["level"], "WARN");
     assert_eq!(events[0]["fields"]["message"], "loop skipped");
     assert_eq!(events[0]["fields"]["loop_name"], "alpha");

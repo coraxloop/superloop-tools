@@ -3,6 +3,73 @@ use super::*;
 use std::fs;
 use std::net::Shutdown;
 use std::time::Duration;
+
+/// ´test:unit:control-accept-exhaustion-retains-kernel-context-in-test-capture´
+#[test]
+#[allow(unsafe_code)]
+fn control_accept_exhaustion_retains_kernel_context_in_test_capture() {
+    const CHILD: &str = "CUSTODY_ACCEPT_EXHAUSTION_CHILD";
+    if let Some(mode) = std::env::var_os(CHILD) {
+        let _guard = super::super::test_support::case_guard();
+        let (_fixture, control) = setup();
+        let _client = std::os::unix::net::UnixStream::connect(format!(
+            "/proc/self/fd/{}/control.sock",
+            control.directory.file().as_raw_fd()
+        ))
+        .unwrap();
+        let result = control.accept_with(Instant::now() + Duration::from_secs(600), || {
+            let limits = nix::libc::rlimit {
+                rlim_cur: 256,
+                rlim_max: 256,
+            };
+            // SAFETY: only this reexecuted, single-test process changes limits.
+            assert_eq!(
+                unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &raw const limits) },
+                0
+            );
+            let mut files = Vec::new();
+            while let Ok(file) = fs::File::open("/dev/null") {
+                files.push(file);
+            }
+            files
+        });
+        assert_eq!(result.err(), Some("control-accept"));
+        let message = crate::process::diagnostic_message("control-accept");
+        let (_, bytes) = message
+            .split_once("; kernel=")
+            .expect("accept retained kernel context");
+        let context: serde_json::Value = serde_json::from_str(bytes).unwrap();
+        assert_eq!(context["errno"], nix::libc::EMFILE);
+        assert_eq!(context["open_descriptors"], 256);
+        assert_eq!(context["nofile_soft"], 256);
+        assert_eq!(context["test_threads"], 1);
+        assert_ne!(mode, "fail", "deliberate captured failure");
+        return;
+    }
+    for mode in ["pass", "fail"] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", "launch::control::tests::control_accept_exhaustion_retains_kernel_context_in_test_capture", "--test-threads=1"]).env(CHILD, mode);
+        loop_home::CommandDescriptors::default()
+            .configure(&mut child)
+            .unwrap();
+        let output = child.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.success(),
+            mode == "pass",
+            "{stdout}\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("kernel="),
+            "test context bypassed capture: {stderr}"
+        );
+        assert_eq!(stdout.contains("kernel="), mode == "fail", "{stdout}");
+        if mode == "fail" {
+            assert!(stdout.contains("deliberate captured failure"), "{stdout}");
+        }
+    }
+}
 fn setup() -> (crate::launch::tests::Fixture, Control) {
     setup_with(None)
 }

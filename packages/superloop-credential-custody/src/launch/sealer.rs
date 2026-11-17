@@ -155,7 +155,7 @@ impl Drop for Running {
     }
 }
 #[allow(unsafe_code)]
-fn pidfd(pid: u32) -> Result<OwnedFd> {
+pub(super) fn pidfd(pid: u32) -> Result<OwnedFd> {
     // SAFETY: scalar syscall, positive return is a newly owned descriptor.
     let fd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid, 0) };
     let fd = i32::try_from(fd).map_err(|_| "sealer-pidfd")?;
@@ -211,6 +211,10 @@ fn command(
 }
 #[allow(unsafe_code)]
 fn child_limits(command: &mut Command, limit: u64) {
+    child_limits_parent(command, limit, nix::unistd::getpid().as_raw());
+}
+#[allow(unsafe_code)]
+fn child_limits_parent(command: &mut Command, limit: u64, parent: i32) {
     #[repr(C)]
     struct Header {
         version: u32,
@@ -262,15 +266,24 @@ fn child_limits(command: &mut Command, limit: u64) {
             {
                 return Err(std::io::Error::last_os_error());
             }
+            if nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if nix::libc::getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(nix::libc::ECHILD));
+            }
             Ok(())
         });
     }
 }
 
 pub(super) struct Session<'a> {
+    cleanup: super::store::lifecycle::Disposition,
     store: &'a mut Store,
     owner: u32,
     bounding: u64,
+    gids: [u32; 4],
+    groups: Vec<u32>,
     running: Vec<Running>,
     diagnostic_limit: u64,
     sealed_limit: u64,
@@ -294,6 +307,8 @@ impl<'a> Session<'a> {
         readers: [OwnedFd; 2],
         mut spawn: impl FnMut(Command, EofProbe, File) -> Result<Running>,
     ) -> Result<Self> {
+        #[cfg(test)]
+        super::test_support::assert_owned();
         let deadline = Instant::now() + Duration::from_millis(admission.policy().limits.case_ms);
         let own = super::child_status::ChildStatus::read(
             &File::open("/proc/self")
@@ -338,9 +353,12 @@ impl<'a> Session<'a> {
             ));
         }
         let mut session = Self {
+            cleanup: super::store::lifecycle::Disposition::Retained,
             store,
             owner: nix::unistd::geteuid().as_raw(),
             bounding: own.bounding,
+            gids: own.gids,
+            groups: own.groups,
             running: Vec::new(),
             diagnostic_limit,
             sealed_limit,
@@ -358,6 +376,17 @@ impl<'a> Session<'a> {
             return Err(session.fail(class));
         }
         Ok(session)
+    }
+    #[cfg(test)]
+    pub(super) fn test_group_mismatches(&mut self) {
+        self.gids[0] ^= 1;
+        assert_eq!(self.statuses().err(), Some("sealer-status-gids"));
+        self.gids[0] ^= 1;
+        let groups = self.groups.clone();
+        self.groups.push(u32::MAX);
+        assert_eq!(self.statuses().err(), Some("sealer-status-groups"));
+        self.groups = groups;
+        assert!(self.statuses().is_ok());
     }
     pub fn statuses(&self) -> Result<[super::child_status::ChildStatus; 2]> {
         require(
@@ -377,6 +406,7 @@ impl<'a> Session<'a> {
             let status = super::child_status::ChildStatus::read(&running.directory)?;
             require(status.birth == running.birth, "sealer-status-identity")?;
             status.verify(running.child.id(), self.owner, self.bounding)?;
+            status.verify_groups(&self.gids, &self.groups)?;
             channel::poll(std::slice::from_mut(&mut item), 0)?;
             require(item.revents == 0, "sealer-status-exited")?;
             statuses.push(status);
@@ -449,8 +479,15 @@ impl<'a> Session<'a> {
     pub const fn store(&mut self) -> &mut Store {
         self.store
     }
+    pub fn cleanup_evidence(&self) -> super::store::lifecycle::Disposition {
+        self.cleanup.clone()
+    }
     pub const fn exits(&self) -> &[Option<Exit>; 2] {
         &self.exits
+    }
+    #[cfg(test)]
+    pub fn test_pids(&self) -> Vec<u32> {
+        self.running.iter().map(|r| r.child.id()).collect()
     }
     #[cfg(test)]
     pub fn test_pidfds(&self) -> Vec<OwnedFd> {
@@ -490,13 +527,16 @@ impl<'a> Session<'a> {
         }
         self.running.clear(); // All owned groups are cancelled before output cleanup.
         self.finished = true;
-        if self
+        match self
             .store
             .fail(class)
             .and_then(|()| self.store.cleanup_outputs())
-            .is_err()
         {
-            return "sealer-failure-custody";
+            Ok(()) => self.cleanup = super::store::lifecycle::Disposition::UnlinkSucceeded,
+            Err(error) => {
+                self.cleanup = super::store::lifecycle::Disposition::Failed { class: error };
+                return "sealer-failure-custody";
+            }
         }
         class
     }
@@ -599,5 +639,31 @@ mod tests {
                 .count(),
             0
         );
+    }
+    /// ´test:unit:sealer-parent-change-refuses-before-exec´
+    #[test]
+    fn sealer_parent_change_refuses_before_exec() {
+        let _guard = crate::launch::test_support::case_guard();
+        let fixture = super::super::sealer_tests::make_fixture("normal");
+        let mut command = Command::new(fixture.dir.path().join("sealer"));
+        command
+            .args(["encrypt", "--with-key=host", "--name=normal", "-", "-"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        loop_home::CommandDescriptors::default()
+            .configure(&mut command)
+            .unwrap();
+        child_limits_parent(&mut command, 32768, -1);
+        let result = command.spawn();
+        let errno = match result {
+            Err(error) => error.raw_os_error(),
+            Ok(mut child) => {
+                let _status = child.wait();
+                None
+            }
+        };
+        assert_eq!(errno, Some(nix::libc::ECHILD));
     }
 }

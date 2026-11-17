@@ -450,9 +450,10 @@ fn topology_prefix_matching_rule(permissions: &Value) -> Option<&str> {
 /// ´test:crate:progress-identifies-mode-without-changing-the-start-contract´
 #[test]
 fn progress_identifies_mode_without_changing_the_start_contract() {
-    assert!(trial_progress_fixture().starts_with(
-        "trial phase=table-confirmation mode=auto name=native-get-web-fetch polarity=positive"
-    ));
+    assert_eq!(
+        trial_progress_fixture(),
+        "trial phase=table-confirmation mode=auto name=native-get-web-fetch polarity=positive repetition=1 classification=invalid reason=fixture-failure marker=n/a capture=true denial_count=0 wall_ms=12 model_status=timeout model_wall_ms=12"
+    );
     assert_eq!(planned_trial_count(), 345);
     assert_eq!(
         start_progress_fixture(),

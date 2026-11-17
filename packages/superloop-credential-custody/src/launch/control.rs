@@ -224,8 +224,16 @@ impl Control {
         }
     }
     pub(super) fn accept(&self, deadline: Instant) -> Result<actions::Transaction> {
+        self.accept_with(deadline, || ())
+    }
+    fn accept_with<H>(
+        &self,
+        deadline: Instant,
+        before_accept: impl FnOnce() -> H,
+    ) -> Result<actions::Transaction> {
         let deadline = deadline.min(self.deadline);
         self.verify()?;
+        let _held = before_accept();
         let (mut stream, _address) = loop {
             budget(deadline)?;
             match self.listener.accept() {
@@ -233,7 +241,7 @@ impl Control {
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     wait(self.listener.as_raw_fd(), nix::libc::POLLIN, deadline)?;
                 }
-                Err(_) => return Err("control-accept"),
+                Err(error) => return Err(crate::process::io_failure("control-accept", error)),
             }
         };
         stream.set_nonblocking(true).map_err(|_| "control-mode")?;
