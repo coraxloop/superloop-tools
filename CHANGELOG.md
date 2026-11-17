@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-17
+
 ### Fixed
 
 - Clarify the door record wave’s retained owner executable and step-4 path report, live triage admission holds, and failed-round repinning. The repin binds only the stub digest; the service verifies the compute SSH configuration per request. Compatibility: operators retain `changed` from the wave's first `pause`, resume only a pause introduced by the wave, and run the ordinary resume dry run after admission resumes. No program or record format changes (``alg:superlooplane:door-request-life-deploy``).
@@ -1057,7 +1059,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/coraxloop/superloop-tools/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/coraxloop/superloop-tools/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/coraxloop/superloop-tools/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/coraxloop/superloop-tools/compare/v0.4.1...v0.4.2
