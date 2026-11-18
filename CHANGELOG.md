@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Make the helper close test shut down its stop peer's receive half before checking a failed acknowledgement. Dropping one descriptor alone can leave another holder able to receive the byte. Compatibility: no program or record format changes (``test:unit:helper-close-answers-every-queued-control``).
+
 - Publish the scope-floor design reasoning, recorded vendor facts and open reliance choices without changing execution or activation (`rec:scopefloor:directory-and-expansion`).
 
 - Clarify that non-erasing command-text inspection does not establish runtime working-directory or filename-expansion containment (``rule:permissiontriage:command-string-scope-extraction``).

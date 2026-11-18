@@ -3196,7 +3196,8 @@ mod tests {
         }
         let (mut server, mut peer) = UnixStream::pair().expect("honoured stop pair");
         peer.write_all(b"C").expect("stop request");
-        drop(peer);
+        peer.shutdown(std::net::Shutdown::Read)
+            .expect("ack receive shut down");
         let cancelled = AtomicBool::new(false);
         let honoured = super::answer_control(&mut server, &cancelled, uid, &mut || {});
         assert!(cancelled.load(Ordering::Acquire), "request honoured");
