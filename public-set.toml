@@ -66,6 +66,9 @@ pattern = "ci/test_docstring_carrier.py"
 pattern = "docs/backlog.md"
 
 [[include.rows]]
+pattern = "docs/design/scope-floor-location-and-expansion.md"
+
+[[include.rows]]
 pattern = "docs/meson.build"
 
 # The pack adds this member after archiving the source tree.
