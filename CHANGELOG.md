@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-18
+
 ### Added
 
 - Before each door agent start, the owner publishes the current access-only Codex projection under the loop refresh lock, then releases that lock before the client runs. The entered receiver rejects renewable input and clears checked stale temporaries; the manual full-source `door-sign-in` command and its credential digests retire. Content-free expiry evidence and typed pre-start referrals distinguish owner authority from local publication failures. Compatibility: verify each door's accepted template client; drain and stop each door, remove its former renewable copy and leftover placement temporaries as the loop with `superloop enter LOOP -- /usr/bin/sh -c 'rm -f -- "$HOME/.codex/auth.json" "$HOME"/.codex/.door-auth-*'`, then run `install-door` and start the door; no per-renewal placement is due. `superloop command judge` misses use the door's last projection and refer once it has expired (``prob:door:door-credential-follows-the-canonical-sign-in``; ``proto:superlooplane:door-access-projection``).
@@ -1075,7 +1077,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/coraxloop/superloop-tools/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/coraxloop/superloop-tools/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/coraxloop/superloop-tools/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/coraxloop/superloop-tools/compare/v0.4.2...v0.5.0
