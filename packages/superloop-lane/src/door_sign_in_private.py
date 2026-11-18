@@ -1,7 +1,6 @@
 """Receive a bound canonical derivative as the entered loop UID, never emit it."""
 import errno
 import fcntl
-import hashlib
 import json
 import os
 import signal
@@ -65,63 +64,88 @@ def directory(path):
         raise
 
 
+def projection(data):
+    if not data or len(data) > 65536:
+        raise ValueError('door-projection-size')
+    try:
+        value = json.loads(data)
+    except (UnicodeError, json.JSONDecodeError):
+        raise ValueError('door-projection-shape') from None
+    if (not isinstance(value, dict)
+            or set(value) != {'auth_mode', 'OPENAI_API_KEY', 'tokens', 'last_refresh'}
+            or value['auth_mode'] != 'chatgptAuthTokens'
+            or value['OPENAI_API_KEY'] is not None
+            or not isinstance(value['last_refresh'], str)):
+        raise ValueError('door-projection-shape')
+    tokens = value['tokens']
+    if (not isinstance(tokens, dict)
+            or set(tokens) != {'id_token', 'access_token', 'refresh_token', 'account_id'}
+            or tokens['refresh_token'] != ''
+            or any(not isinstance(tokens[field], str) or not tokens[field]
+                   for field in ('id_token', 'access_token', 'account_id'))):
+        raise ValueError('door-projection-renewable-or-incomplete')
+    return data
+
+
+def remove_stale_temporaries(config):
+    removed = False
+    for name in os.listdir(config):
+        if not name.startswith('.door-auth-'):
+            continue
+        suffix = name[len('.door-auth-'):]
+        if len(suffix) != 32 or any(letter not in '0123456789abcdef' for letter in suffix):
+            continue
+        fd = os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=config)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                raise ValueError('door-projection-stale-temporary-custody')
+        finally:
+            os.close(fd)
+        os.unlink(name, dir_fd=config)
+        removed = True
+    if removed:
+        os.fsync(config)
+
+
 def main():
     def expired(_signum, _frame):
-        raise TimeoutError('door-sign-in-receiver-deadline')
+        raise TimeoutError('door-projection-receiver-deadline')
     signal.signal(signal.SIGALRM, expired)
-    signal.alarm(10)
-    uid, home, dry, binding_text = sys.argv[1:]
+    uid, home, remaining_ms = sys.argv[1:]
+    signal.setitimer(signal.ITIMER_REAL, min(int(remaining_ms) / 1000, 10))
     if os.geteuid() != int(uid) or os.environ.get('HOME') != home or not home.endswith('/private'):
-        raise ValueError('door-sign-in-entry-identity')
-    binding = json.loads(binding_text)
+        raise ValueError('door-projection-entry-identity')
     root = directory(home)
     path = home + '/.codex/auth.json'
     config = None
     temporary = None
     try:
+        data = projection(sys.stdin.buffer.read(65537))
         try:
             config = os.open('.codex', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
         except FileNotFoundError:
-            if dry == 'true':
-                print(json.dumps(dict(path=path, exists=False, owner_uid=None, mode=None,
-                                      loop_uid=os.geteuid(), published=False)))
-                return
             os.mkdir('.codex', 0o700, dir_fd=root)
             os.fsync(root)
             config = os.open('.codex', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
         info = os.fstat(config)
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
-            raise ValueError('door-sign-in-config-owner-mode')
+            raise ValueError('door-projection-config-owner-mode')
         fcntl.flock(config, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        remove_stale_temporaries(config)
         try:
             existing = os.open('auth.json', os.O_PATH | os.O_NOFOLLOW, dir_fd=config)
         except FileNotFoundError:
-            report = dict(path=path, exists=False, owner_uid=None, mode=None, loop_uid=os.geteuid())
+            pass
         else:
             try:
                 info = os.fstat(existing)
                 if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
                         or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
-                    raise ValueError('door-sign-in-destination-owner-mode-type')
-                report = metadata(existing, path)
+                    raise ValueError('door-projection-destination-owner-mode-type')
             finally:
                 os.close(existing)
-        if dry == 'true':
-            report['published'] = False
-            print(json.dumps(report))
-            return
-        before = os.fstat(0)
-        if (before.st_dev != binding['device'] or before.st_ino != binding['inode']
-                or before.st_size != binding['size'] or before.st_mtime_ns != binding['mtime_ns']
-                or not stat.S_ISREG(before.st_mode)):
-            raise ValueError('door-sign-in-source-binding')
-        data = sys.stdin.buffer.read(1048577)
-        after = os.fstat(0)
-        if (not data or len(data) > 1048576 or len(data) != before.st_size
-                or after.st_mtime_ns != before.st_mtime_ns or after.st_size != before.st_size
-                or after.st_ctime_ns != before.st_ctime_ns
-                or hashlib.sha256(data).hexdigest() != binding['sha256']):
-            raise ValueError('door-sign-in-source-changed-or-size')
         temporary = '.door-auth-' + uuid.uuid4().hex
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      0o600, dir_fd=config)
@@ -135,12 +159,14 @@ def main():
         temporary = None
         os.fsync(config)
         report['published'] = True
-        report['sha256'] = hashlib.sha256(data).hexdigest()
         report['byte_count'] = len(data)
         print(json.dumps(report))
     finally:
         if temporary is not None:
-            os.unlink(temporary, dir_fd=config)
+            try:
+                os.unlink(temporary, dir_fd=config)
+            except FileNotFoundError:
+                pass
         if config is not None:
             os.close(config)
         os.close(root)
@@ -148,6 +174,7 @@ def main():
 
 try:
     main()
-except (OSError, ValueError, KeyError) as error:
-    print('door-sign-in-private: ' + str(error), file=sys.stderr)
+except (OSError, ValueError, KeyError, TimeoutError) as error:
+    reason = str(error) if isinstance(error, (ValueError, TimeoutError)) else 'door-projection-io'
+    print('door-projection-private: ' + reason, file=sys.stderr)
     sys.exit(2)

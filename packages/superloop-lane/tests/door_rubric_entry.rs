@@ -66,6 +66,7 @@ fn vendor_mount(root: &Path) -> String {
 
 struct Fixture {
     root: tempfile::TempDir,
+    _owner_root: tempfile::TempDir,
     runner: CodexRunner,
     uid: u32,
     _process: MutexGuard<'static, ()>,
@@ -80,24 +81,38 @@ impl Fixture {
         Self::entered(Uid::effective().as_raw(), false)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn entered(uid: u32, mapped: bool) -> Self {
         let process = FIXTURE_PROCESS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().expect("parent-owned fixture under supplied temporary root");
         mode(root.path(), if mapped { 0o711 } else { 0o311 });
-        fs::create_dir_all(root.path().join(".config/loops/alpha/lanes/codex"))
+        let owner_root = tempfile::tempdir().expect("separate owner fixture");
+        let owner_home = owner_root.path().to_path_buf();
+        fs::create_dir_all(owner_home.join(".config/loops/alpha/lanes/codex"))
             .expect("canonical lock root");
         for relative in [
+            "",
             ".config",
             ".config/loops",
             ".config/loops/alpha",
             ".config/loops/alpha/lanes",
             ".config/loops/alpha/lanes/codex",
         ] {
-            mode(&root.path().join(relative), 0o700);
+            mode(&owner_home.join(relative), 0o700);
         }
-        let home = root.path().join("loop");
+        let token = "header.eyJleHAiOjQxMDAwMDAwMDB9.signature";
+        let authority = json!({"auth_mode":"chatgpt","OPENAI_API_KEY":null,
+            "tokens":{"id_token":token,"access_token":token,
+                "refresh_token":"fictional-fixture-refresh","account_id":"fictional-account"},
+            "last_refresh":"2026-10-05T00:00:00Z"});
+        file(
+            &owner_home.join(".config/loops/alpha/lanes/codex/auth.json"),
+            authority.to_string().as_bytes(),
+            0o600,
+        );
+        let home = root.path().join("loop/private");
         fs::create_dir_all(home.join(".codex")).expect("loop home");
         fs::create_dir(home.join("tmp")).expect("loop temporary root");
         file(
@@ -164,7 +179,8 @@ impl Fixture {
                 superloop_lane::door::agent::usage::DEFAULT_EXPECTED_TOKENS,
             )),
             entry,
-            owner_home: root.path().into(),
+            owner_home,
+            private_home: home,
             loop_name: "alpha".into(),
             loop_uid: Some(uid),
             executable,
@@ -175,6 +191,7 @@ impl Fixture {
         };
         Self {
             root,
+            _owner_root: owner_root,
             runner,
             uid,
             _process: process,

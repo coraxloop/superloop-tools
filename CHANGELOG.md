@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Before each door agent start, the owner publishes the current access-only Codex projection under the loop refresh lock, then releases that lock before the client runs. The entered receiver rejects renewable input and clears checked stale temporaries; the manual full-source `door-sign-in` command and its credential digests retire. Content-free expiry evidence and typed pre-start referrals distinguish owner authority from local publication failures. Compatibility: verify each door's accepted template client; drain and stop each door, remove its former renewable copy and leftover placement temporaries as the loop with `superloop enter LOOP -- /usr/bin/sh -c 'rm -f -- "$HOME/.codex/auth.json" "$HOME"/.codex/.door-auth-*'`, then run `install-door` and start the door; no per-renewal placement is due. `superloop command judge` misses use the door's last projection and refer once it has expired (``prob:door:door-credential-follows-the-canonical-sign-in``; ``proto:superlooplane:door-access-projection``).
+
 - A clean build configured with the workspace release tag installs a separate regular `superloop-lint-<tag>` and its build record beside `superloop-lint`. The command hook recognizes release-shaped tagged names, and the version smoke checker accepts the tagged installed name when invoked against it. Other valid build tags retain their existing install without a tagged copy. Compatibility: the plain command remains the linter installed by that build; build-sync's census reads the workspace version only when a build tag is configured, and refuses a tagged build whose workspace declares none (``prin:publictools:well-made-and-good-to-use``).
 
 ### Fixed

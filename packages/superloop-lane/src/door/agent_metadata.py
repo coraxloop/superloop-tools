@@ -65,8 +65,7 @@ def main():
     if os.geteuid() != int(expected_uid):
         raise ValueError('entry-loop-uid-mismatch')
     sign_in = inspect(os.path.join(os.environ['HOME'], '.codex', 'auth.json'))
-    sign_in['remedy'] = ('superloop-lane door-sign-in ' + loop
-                         if sign_in['exists'] is False else None)
+    sign_in['publication'] = 'before-agent-call'
     print(json.dumps(dict(sign_in=sign_in, executable_status=inspect(program, True))))
 
 

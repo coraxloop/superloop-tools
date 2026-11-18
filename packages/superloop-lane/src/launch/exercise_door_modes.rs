@@ -1458,7 +1458,7 @@ mod tests {
         let (fixture, executables) = protected_agent_fixture();
         let entry = executables.path().join("configured-entry");
         crate::fixture_exec::write_executable(&entry,
-            b"#!/bin/sh\nif [ \"$1\" = show ]; then printf '%s\\n' '{\"name\":\"alpha\",\"uid\":2001}'; exit 0; fi\nexit 7\n")
+            b"#!/bin/sh\nif [ \"$1\" = show ]; then printf '%s\\n' '{\"name\":\"alpha\",\"uid\":2001}'; exit 0; fi\nif [ \"$#\" -eq 10 ]; then cat >/dev/null; printf '{\"published\":true,\"path\":\"%s/.codex/auth.json\",\"loop_uid\":%s}\\n' \"$9\" \"$8\"; exit 0; fi\nexit 7\n")
             .expect("failing agent entry");
         let config = fixture.home.join(".config/loops/alpha");
         let settings = config.join("workers.toml");
@@ -1483,6 +1483,15 @@ mod tests {
                 fs::set_permissions(path, fs::Permissions::from_mode(0o700))
                     .expect("canonical directory mode");
             }
+            let token = "header.eyJleHAiOjQxMDAwMDAwMDB9.signature";
+            let source = json!({"auth_mode":"chatgpt","OPENAI_API_KEY":null,
+                "tokens":{"id_token":token,"access_token":token,
+                    "refresh_token":"fictional-fixture-refresh","account_id":"fictional-account"},
+                "last_refresh":"2026-10-05T00:00:00Z"});
+            let auth = root.join("auth.json");
+            fs::write(&auth, source.to_string()).expect("fictional canonical source");
+            fs::set_permissions(auth, fs::Permissions::from_mode(0o600))
+                .expect("canonical source mode");
             drop(crate::credential::try_lock(&fixture.home, "alpha").expect("canonical lock"));
         }
         (fixture, executables)

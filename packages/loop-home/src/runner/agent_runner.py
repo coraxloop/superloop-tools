@@ -301,7 +301,7 @@ def main():
     except (OSError, ValueError):
         own_sign_in = False
     if not own_sign_in:
-        emit({"service_status": "failure", "reason": "door-agent-sign-in-unavailable", "remedy": "superloop-lane door-sign-in " + loop_name, "rubric_digest": rubric_digest})
+        emit({"service_status": "failure", "reason": "door-agent-projection-unavailable", "rubric_digest": rubric_digest})
         return
     try:
         admit_program(program, expected_uid)

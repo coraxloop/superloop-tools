@@ -7,7 +7,7 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd as _, AsRawFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, Flock, FlockArg, OFlag, OpenHow, ResolveFlag, openat2, renameat};
@@ -125,20 +125,125 @@ fn credential_spawn_error(
     }
 }
 
+/// Drive an entered publication or refresh child through a bounded pipe.
+/// The caller owns the child until it is reaped, including on a selected stop.
+pub(crate) fn bounded_pipe(
+    command: &mut Command,
+    input: &[u8],
+    deadline: Instant,
+    stopped: &dyn Fn() -> bool,
+    output_limit: usize,
+) -> Result<std::process::Output, &'static str> {
+    use nix::fcntl::{FcntlArg, fcntl};
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+    use std::os::unix::process::CommandExt as _;
+
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = crate::fixture_exec::spawn(command).map_err(|_| "spawn")?;
+    let pid = i32::try_from(child.id()).unwrap_or(i32::MAX);
+    let result = (|| {
+        let stdin = child.stdin.take().ok_or("stdin")?;
+        let mut stdout = child.stdout.take().ok_or("stdout")?;
+        for pipe in [stdin.as_fd(), stdout.as_fd()] {
+            let flags = fcntl(pipe, FcntlArg::F_GETFL).map_err(|_| "pipe")?;
+            fcntl(
+                pipe,
+                FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
+            )
+            .map_err(|_| "pipe")?;
+        }
+        let mut stdin = if input.is_empty() { None } else { Some(stdin) };
+        let mut sent = 0;
+        let mut bytes = Vec::new();
+        let mut status = None;
+        let mut eof = false;
+        loop {
+            if stopped() {
+                return Err("cancelled");
+            }
+            if Instant::now() >= deadline {
+                return Err("deadline");
+            }
+            if let Some(pipe) = stdin.as_mut() {
+                match pipe.write(&input[sent..]) {
+                    Ok(0) => return Err("stdin"),
+                    Ok(count) => sent += count,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => return Err("stdin"),
+                }
+            }
+            if sent == input.len() {
+                stdin = None;
+            }
+            let mut buffer = [0; 8192];
+            match stdout.read(&mut buffer) {
+                Ok(0) => eof = true,
+                Ok(count) => {
+                    if bytes.len().saturating_add(count) > output_limit {
+                        return Err("output-limit");
+                    }
+                    bytes.extend_from_slice(&buffer[..count]);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return Err("stdout"),
+            }
+            if status.is_none() {
+                status = child.try_wait().map_err(|_| "wait")?;
+            }
+            if let Some(status) = status.filter(|_| eof && stdin.is_none()) {
+                return Ok(std::process::Output {
+                    status,
+                    stdout: bytes,
+                    stderr: Vec::new(),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    if result.is_err() {
+        let _killed = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+    }
+    let _reaped = child.wait();
+    result
+}
+
+#[cfg(test)]
 fn utc_timestamp() -> Result<String, LaneError> {
+    utc_timestamp_bound(None)
+}
+
+fn utc_timestamp_bound(bound: Option<(Instant, &dyn Fn() -> bool)>) -> Result<String, LaneError> {
     let program = Path::new("/usr/bin/date");
     let argv = ["-u".into(), "+%Y-%m-%dT%H:%M:%SZ".into()];
     let mut command = Command::new("/usr/bin/date");
     command.args(&argv);
     crate::container_entry::configure(&mut command, program, &argv, &std::env::vars().collect())?;
-    let output = command.output().map_err(|error| {
-        credential_spawn_error(
-            program,
-            "credential-clock",
-            "UTC date program could not start",
-            &error,
-        )
-    })?;
+    let output = if let Some((deadline, stopped)) = bound {
+        bounded_pipe(&mut command, b"", deadline, stopped, 128).map_err(|kind| {
+            failure(
+                if kind == "deadline" || kind == "cancelled" {
+                    "credential-door-timeout"
+                } else {
+                    "credential-clock"
+                },
+                kind,
+            )
+        })?
+    } else {
+        command.output().map_err(|error| {
+            credential_spawn_error(
+                program,
+                "credential-clock",
+                "UTC date program could not start",
+                &error,
+            )
+        })?
+    };
     if !output.status.success() {
         return Err(failure("credential-clock", "UTC date program failed"));
     }
@@ -936,19 +1041,36 @@ fn lock_with(dir: &OwnedFd, operation: FlockArg) -> Result<Flock<File>, LaneErro
     })
 }
 
+#[cfg(test)]
 fn refresh_request(source: &Source, endpoint: &str) -> Result<Source, LaneError> {
+    refresh_request_bound(source, endpoint, None)
+}
+
+fn refresh_request_bound(
+    source: &Source,
+    endpoint: &str,
+    bound: Option<(Instant, &dyn Fn() -> bool)>,
+) -> Result<Source, LaneError> {
     let body = json!({
         "client_id": CLIENT_ID,
         "grant_type": "refresh_token",
         "refresh_token": source.document["tokens"]["refresh_token"]
     });
     let program = Path::new("/usr/bin/curl");
+    let max_time = bound.map_or(20, |(deadline, _)| {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs()
+            .saturating_add(1)
+            .clamp(1, 20)
+    });
+    let max_time = max_time.to_string();
     let argv = [
         "--silent",
         "--show-error",
         "--fail-with-body",
         "--max-time",
-        "20",
+        &max_time,
         "--max-filesize",
         "65536",
         "--noproxy",
@@ -967,23 +1089,43 @@ fn refresh_request(source: &Source, endpoint: &str) -> Result<Source, LaneError>
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     crate::container_entry::configure(&mut command, program, &argv, &std::env::vars().collect())?;
-    let mut child = command.spawn().map_err(|error| {
-        credential_spawn_error(
-            program,
-            "credential-refresh",
-            "token client could not start",
-            &error,
+    let output = if let Some((deadline, stopped)) = bound {
+        bounded_pipe(
+            &mut command,
+            body.to_string().as_bytes(),
+            deadline,
+            stopped,
+            65_536,
         )
-    })?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| failure("credential-refresh", "token client input is absent"))?
-        .write_all(body.to_string().as_bytes())
-        .map_err(|_| failure("credential-refresh", "token request could not be sent"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|_| failure("credential-refresh", "token request could not complete"))?;
+        .map_err(|kind| {
+            failure(
+                if kind == "deadline" || kind == "cancelled" {
+                    "credential-door-timeout"
+                } else {
+                    "credential-refresh"
+                },
+                kind,
+            )
+        })?
+    } else {
+        let mut child = command.spawn().map_err(|error| {
+            credential_spawn_error(
+                program,
+                "credential-refresh",
+                "token client could not start",
+                &error,
+            )
+        })?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| failure("credential-refresh", "token client input is absent"))?
+            .write_all(body.to_string().as_bytes())
+            .map_err(|_| failure("credential-refresh", "token request could not be sent"))?;
+        child
+            .wait_with_output()
+            .map_err(|_| failure("credential-refresh", "token request could not complete"))?
+    };
     if !output.status.success() || output.stdout.len() > 65_536 {
         return Err(failure(
             "credential-refresh",
@@ -998,7 +1140,7 @@ fn refresh_request(source: &Source, endpoint: &str) -> Result<Source, LaneError>
             next["tokens"][field] = json!(value);
         }
     }
-    next["last_refresh"] = json!(utc_timestamp()?);
+    next["last_refresh"] = json!(utc_timestamp_bound(bound)?);
     Source::parse(next)
 }
 
@@ -1042,6 +1184,7 @@ struct CodexOwnerProvider<'a> {
     owner_home: &'a Path,
     loop_name: &'a str,
     endpoint: &'a str,
+    bound: Option<(Instant, &'a dyn Fn() -> bool)>,
 }
 
 impl OwnerProvider for CodexOwnerProvider<'_> {
@@ -1063,7 +1206,7 @@ impl OwnerProvider for CodexOwnerProvider<'_> {
     }
 
     fn refresh(&self, source: &Source) -> Result<Option<Source>, LaneError> {
-        refresh_request(source, self.endpoint).map(Some)
+        refresh_request_bound(source, self.endpoint, self.bound).map(Some)
     }
 
     fn publish(&self, next: &Source, expected: FileStamp) -> Result<bool, LaneError> {
@@ -1492,10 +1635,159 @@ fn refresh_if_due_with(
             owner_home,
             loop_name,
             endpoint,
+            bound: None,
         },
         now,
         before_publish,
     )
+}
+
+/// Access-only authority selected under the caller's loop refresh guard.
+pub(crate) struct DoorAuthority {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) expires_unix: u64,
+    pub(crate) refresh_due_unix: u64,
+    pub(crate) refreshed: bool,
+}
+
+/// Select and, when due, renew owner authority without taking a second lock.
+///
+/// # Errors
+/// Refuses an unusable source, failed renewal, stop, or insufficient access lifetime.
+pub(crate) fn door_authority_under_lock(
+    owner_home: &Path,
+    loop_name: &str,
+    endpoint: &str,
+    deadline: Instant,
+    stopped: &dyn Fn() -> bool,
+) -> Result<DoorAuthority, LaneError> {
+    if stopped() || Instant::now() >= deadline {
+        return Err(failure(
+            "credential-door-timeout",
+            "publication time exhausted",
+        ));
+    }
+    let now = now_seconds()?;
+    let provider = CodexOwnerProvider {
+        owner_home,
+        loop_name,
+        endpoint,
+        bound: Some((deadline, stopped)),
+    };
+    let before = provider.read()?;
+    let source = refresh_provider(&provider, now, || {})?;
+    door_lifetime(source.expires_at, deadline, stopped)?;
+    Ok(DoorAuthority {
+        bytes: source.worker_file(),
+        expires_unix: source.expires_at,
+        refresh_due_unix: source.refresh_due_unix(),
+        refreshed: before.stamp != source.stamp && before.needs_refresh(now),
+    })
+}
+
+fn door_lifetime(
+    expires_unix: u64,
+    deadline: Instant,
+    stopped: &dyn Fn() -> bool,
+) -> Result<(), LaneError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let margin = remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0) + 2;
+    if stopped() || remaining.is_zero() {
+        return Err(failure(
+            "credential-door-timeout",
+            "publication time exhausted",
+        ));
+    }
+    if expires_unix <= now_seconds()?.saturating_add(margin) {
+        return Err(failure(
+            "credential-door-lifetime",
+            "access authority ends before the admitted call",
+        ));
+    }
+    Ok(())
+}
+
+/// Publish one access-only projection through the registered loop entry.
+/// The caller holds the loop refresh guard and must drop it before vendor spawn.
+///
+/// # Errors
+/// Refuses missing authority, stop, insufficient lifetime, or unconfirmed publication.
+pub(crate) fn publish_door_under_lock(
+    owner_home: &Path,
+    loop_name: &str,
+    entry: &Path,
+    private_home: &Path,
+    loop_uid: u32,
+    deadline: Instant,
+    stopped: &dyn Fn() -> bool,
+) -> Result<Value, LaneError> {
+    let authority =
+        door_authority_under_lock(owner_home, loop_name, AUTH_ENDPOINT, deadline, stopped)?;
+    if authority.bytes.len() > 65_536 {
+        return Err(failure(
+            "credential-door-publication",
+            "projection exceeds limit",
+        ));
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() || stopped() {
+        return Err(failure(
+            "credential-door-timeout",
+            "publication time exhausted",
+        ));
+    }
+    crate::pinned::owner_executable(entry, Uid::effective().as_raw())?;
+    let mut command = Command::new(entry);
+    command
+        .args([
+            "enter",
+            loop_name,
+            "--",
+            "/usr/bin/python3",
+            "-I",
+            "-c",
+            include_str!("door_sign_in_private.py"),
+        ])
+        .arg(loop_uid.to_string())
+        .arg(private_home)
+        .arg(remaining.as_millis().to_string())
+        .env_clear()
+        .env("HOME", owner_home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("XDG_RUNTIME_DIR", format!("/run/user/{}", Uid::effective()))
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path=/run/user/{}/bus", Uid::effective()),
+        );
+    let output =
+        bounded_pipe(&mut command, &authority.bytes, deadline, stopped, 8192).map_err(|kind| {
+            failure(
+                if kind == "deadline" || kind == "cancelled" {
+                    "credential-door-timeout"
+                } else {
+                    "credential-door-publication"
+                },
+                kind,
+            )
+        })?;
+    if !output.status.success() {
+        return Err(failure("credential-door-publication", "receiver refused"));
+    }
+    let receipt: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| failure("credential-door-publication", "receiver report invalid"))?;
+    if receipt["published"] != true
+        || receipt["path"].as_str() != private_home.join(".codex/auth.json").to_str()
+        || receipt["loop_uid"] != loop_uid
+    {
+        return Err(failure(
+            "credential-door-publication",
+            "receiver report unconfirmed",
+        ));
+    }
+    door_lifetime(authority.expires_unix, deadline, stopped)?;
+    Ok(json!({"expires_unix":authority.expires_unix,
+        "refresh_due_unix":authority.refresh_due_unix,
+        "refreshed":authority.refreshed}))
 }
 
 /// Hold the loop-wide refresh lock through the initial run-home credential publication.
@@ -5667,6 +5959,107 @@ mod tests {
                 replacement
             );
         }
+    }
+
+    /// ´test:unit:owner-refresh-serializes-box-and-door-consumers´
+    #[test]
+    fn owner_refresh_serializes_box_and_door_consumers() {
+        let home = fixture_root();
+        let now = now_seconds().expect("fixture clock");
+        fixture_sign_in(home.path(), &source(now + 300, "due"));
+        let peer_home = home.path().to_path_buf();
+        let (endpoint, server) = fixture_endpoint_with(
+            "200 OK",
+            json!({"access_token":token(now + 3600),"refresh_token":"fixture-next"}),
+            move || {
+                let refused = try_lock(&peer_home, "alpha").expect_err("door holds lock");
+                assert_eq!(refused.kind, "credential-lock-busy");
+            },
+        );
+        let guard = try_lock(home.path(), "alpha").expect("door publication guard");
+        let selected = door_authority_under_lock(
+            home.path(),
+            "alpha",
+            &endpoint,
+            Instant::now() + Duration::from_secs(30),
+            &|| false,
+        )
+        .expect("renewed projection");
+        assert!(selected.refreshed);
+        assert_eq!(selected.expires_unix, now + 3600);
+        assert_eq!(
+            server.join().expect("one synthetic refresh")["refresh_token"],
+            "fixture-refresh-due"
+        );
+        drop(guard);
+        let box_source = refresh_if_due(home.path(), "alpha", "http://127.0.0.1:1/unused", now)
+            .expect("box adopts committed generation without another refresh");
+        assert_eq!(
+            box_source.document["tokens"]["refresh_token"],
+            "fixture-next"
+        );
+        assert_eq!(box_source.worker_file(), selected.bytes);
+    }
+
+    /// ´test:unit:door-refresh-cancellation-reaps-owned-child´
+    #[test]
+    fn door_refresh_cancellation_reaps_owned_child() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let home = fixture_root();
+        let now = now_seconds().expect("fixture clock");
+        fixture_sign_in(home.path(), &source(now + 300, "due"));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fixture endpoint");
+        let endpoint = format!("http://{}/token", listener.local_addr().expect("address"));
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (client, _) = listener.accept().expect("bounded refresh reached fixture");
+            accepted_tx.send(()).expect("accepted event");
+            release_rx.recv().expect("release fixture");
+            drop(client);
+        });
+        let stopped = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&stopped);
+        let stop_thread = std::thread::spawn(move || {
+            accepted_rx
+                .recv_timeout(Duration::from_secs(120))
+                .expect("refresh start event");
+            signal.store(true, Ordering::Release);
+        });
+        let guard = try_lock(home.path(), "alpha").expect("door guard");
+        let error = door_authority_under_lock(
+            home.path(),
+            "alpha",
+            &endpoint,
+            Instant::now() + Duration::from_secs(30),
+            &|| stopped.load(Ordering::Acquire),
+        )
+        .err()
+        .expect("controlled stop refuses refresh");
+        assert_eq!(error.kind, "credential-door-timeout");
+        stop_thread.join().expect("stop event delivered");
+        drop(guard);
+        let next = try_lock(home.path(), "alpha").expect("owned child reaped before release");
+        drop(next);
+        release_tx.send(()).expect("release peer");
+        server.join().expect("held peer exited");
+        assert_eq!(
+            read_source(home.path(), "alpha")
+                .expect("old source")
+                .document,
+            source(now + 300, "due")
+        );
+    }
+
+    /// ´test:unit:door-projection-refuses-insufficient-access-lifetime´
+    #[test]
+    fn door_projection_refuses_insufficient_access_lifetime() {
+        let now = now_seconds().expect("fixture clock");
+        let refused = door_lifetime(now + 10, Instant::now() + Duration::from_secs(30), &|| {
+            false
+        })
+        .expect_err("call could outlive access authority");
+        assert_eq!(refused.kind, "credential-door-lifetime");
     }
 
     /// ´test:unit:credential-one-refusing-run-does-not-starve-peer´

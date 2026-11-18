@@ -280,7 +280,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
     assert 'observed-model:observed-fixture' in judged['verdict']['evidence'], judged
     account(LOOP, {'action':'remove-sign-in'})
     refused=judge('sign-in-bound-to-loop',request('printf missing-sign-in'),'refer')
-    assert refused['verdict']['reason']=='door-agent-sign-in-unavailable', refused
+    assert refused['verdict']['reason']=='door-agent-projection-unavailable', refused
     assert counter()==before+1
     account(LOOP, {'action':'sign-in'})
     binding=judged['verdict']['binding']

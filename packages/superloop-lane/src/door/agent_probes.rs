@@ -14,6 +14,31 @@ const SEMANTIC_BUDGET_MS: u64 = 10_000;
 const TIMEOUT_BUDGET_MS: u64 = 2600;
 const TIMEOUT_CAP_MS: u64 = 3000;
 
+pub(super) fn fixture_owner_source(
+    owner_home: &std::path::Path,
+    loop_name: &str,
+) -> io::Result<()> {
+    let directory = owner_home
+        .join(".config/loops")
+        .join(loop_name)
+        .join("lanes/codex");
+    fs::create_dir_all(&directory)?;
+    let mut parent = owner_home.to_path_buf();
+    for component in [".config", "loops", loop_name, "lanes", "codex"] {
+        parent.push(component);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))?;
+    }
+    let token = "header.eyJleHAiOjQxMDAwMDAwMDB9.signature";
+    let source = json!({"auth_mode":"chatgpt","OPENAI_API_KEY":null,
+        "tokens":{"id_token":token,"access_token":token,
+            "refresh_token":"fictional-fixture-refresh","account_id":"fictional-account"},
+        "last_refresh":"2026-10-05T00:00:00Z"});
+    let path = directory.join("auth.json");
+    fs::write(&path, source.to_string())?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 struct Directory(PathBuf);
 struct NoEffect<'a>(&'a AtomicUsize);
 impl transport::Runner for NoEffect<'_> {
@@ -29,12 +54,16 @@ impl Drop for Directory {
 }
 
 fn fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
-    // Small executable fixtures use protected ancestors, as pinned executables
-    // require. Resolve the account home independently of ambient HOME and TMPDIR.
-    let parent = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
-        .map_err(io::Error::other)?
-        .ok_or_else(|| io::Error::other("probe account home is unavailable"))?
-        .dir;
+    // A private launch pins its owner home. Keep the probe beneath that anchor;
+    // standalone probes use the account home, independent of HOME and TMPDIR.
+    let parent = if let Some(home) = crate::home::private_home() {
+        home
+    } else {
+        nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("probe account home is unavailable"))?
+            .dir
+    };
     let path = parent.join(format!(
         "door-agent-probe-{}-{}",
         std::process::id(),
@@ -52,8 +81,10 @@ fn fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
     ] {
         fs::set_permissions(path.join(relative), fs::Permissions::from_mode(0o700))?;
     }
-    let home = path.join("loop");
+    fixture_owner_source(&path, "fixture")?;
+    let home = path.join("loop/private");
     fs::create_dir_all(home.join(".codex"))?;
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
     fs::create_dir(path.join("tmp"))?;
     fs::write(home.join(".codex/auth.json"), b"synthetic-fixture-only")?;
     fs::set_permissions(home.join(".codex"), fs::Permissions::from_mode(0o700))?;
@@ -84,6 +115,7 @@ fn fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
             )),
             entry,
             owner_home: path,
+            private_home: home,
             loop_name: "fixture".into(),
             loop_uid: Some(nix::unistd::Uid::effective().as_raw()),
             executable,
@@ -368,10 +400,10 @@ sys.argv[6] = str(_clock_wall + int(sys.argv[4]) / 1000)
 import os, sys
 os.environ['HOME'] = {}
 os.environ['TMPDIR'] = {}
-sys.argv[7] = {} + sys.argv[7]
+if len(sys.argv) > 11: sys.argv[7] = {} + sys.argv[7]
 os.execv(sys.argv[4], sys.argv[4:])
 ",
-            json!(root.0.join("loop")),
+            json!(root.0.join("loop/private")),
             json!(root.0.join("tmp")),
             json!(prefix)
         );

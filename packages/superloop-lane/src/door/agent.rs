@@ -277,9 +277,7 @@ impl RunnerOutcome {
             && self.wall_ms <= cap_ms
             && expected_digest.is_some()
             && self.rubric_digest.as_deref() == expected_digest;
-        let unavailable =
-            self.reason == "door-agent-sign-in-unavailable" && evidence["sign_in_absent"] == true;
-        let mut observation = json!({"status":if unavailable {"unmeasured"} else if isolated {"pass"} else {"fail"},
+        let mut observation = json!({"status":if isolated {"pass"} else {"fail"},
             "agent_status":self.status,"reason":self.reason,"remedy":evidence["remedy"],
             "agent_model":self.model,"wall_ms":self.wall_ms,"rubric_digest":self.rubric_digest,
             "observations":self.observations});
@@ -362,6 +360,7 @@ pub fn parse_verdict(text: &str) -> Result<Value, &'static str> {
 pub struct CodexRunner {
     pub entry: PathBuf,
     pub owner_home: PathBuf,
+    pub private_home: PathBuf,
     pub loop_name: String,
     /// None validates configuration only and cannot execute an entry.
     pub loop_uid: Option<u32>,
@@ -531,10 +530,9 @@ impl CodexRunner {
         let Some(loop_uid) = self.loop_uid else {
             return RunnerOutcome::referral("failure", "door-agent-loop-uid-unmeasured", started);
         };
-        // The entered CLI may rotate its private derivative. Hold the same owner
-        // lock as placement and box publication until the CLI and cleanup finish.
-        // Refuse contention immediately rather than spending the request budget waiting.
-        let _refresh_guard = match crate::credential::try_lock(&self.owner_home, &self.loop_name) {
+        // The owner refresh guard covers canonical selection and confirmed
+        // private publication. The entered vendor never holds that guard.
+        let refresh_guard = match crate::credential::try_lock(&self.owner_home, &self.loop_name) {
             Ok(guard) => guard,
             Err(error) => {
                 return RunnerOutcome::referral(
@@ -548,7 +546,52 @@ impl CodexRunner {
                 );
             }
         };
-        self.call(input, budget, started, now, loop_uid, stop)
+        let end = started + budget;
+        let publication = crate::credential::publish_door_under_lock(
+            &self.owner_home,
+            &self.loop_name,
+            &self.entry,
+            &self.private_home,
+            loop_uid,
+            end,
+            &stop,
+        );
+        drop(refresh_guard);
+        let publication = match publication {
+            Ok(value) => value,
+            Err(error) => {
+                let reason = match error.kind {
+                    "credential-door-timeout" => "door-agent-no-budget",
+                    "credential-door-publication" => "door-agent-credential-publication",
+                    _ => "door-agent-owner-credential-unavailable",
+                };
+                let mut result = RunnerOutcome::referral(
+                    if reason == "door-agent-no-budget" {
+                        "timeout"
+                    } else {
+                        "failure"
+                    },
+                    reason,
+                    started,
+                );
+                result.observations["credential_category"] = json!(error.kind);
+                if reason == "door-agent-owner-credential-unavailable" {
+                    result.observations["remedy"] = json!(
+                        "The owner credential could not be prepared; ask the owner to restore this loop's canonical sign-in using the login hand-over."
+                    );
+                }
+                return result;
+            }
+        };
+        if stop() || end.saturating_duration_since(now()) <= CLEANUP_RESERVE {
+            return RunnerOutcome::referral("timeout", "door-agent-no-budget", started);
+        }
+        let mut result = self.call(input, budget, started, now, loop_uid, stop);
+        if !result.observations.is_object() {
+            result.observations = json!({});
+        }
+        result.observations["credential"] = publication;
+        result
     }
 }
 
@@ -891,8 +934,8 @@ pub(super) mod tests {
             json!(release)
         );
         let entry = format!(
-            "#!/usr/bin/python3\nimport os, sys\nos.environ['HOME'] = {}\nos.environ['TMPDIR'] = {}\nsys.argv[7] = {} + sys.argv[7]\nos.execv(sys.argv[4], sys.argv[4:])\n",
-            json!(root.path().join("loop")),
+            "#!/usr/bin/python3\nimport os, sys\nos.environ['HOME'] = {}\nos.environ['TMPDIR'] = {}\nif len(sys.argv) > 11: sys.argv[7] = {} + sys.argv[7]\nos.execv(sys.argv[4], sys.argv[4:])\n",
+            json!(root.path().join("loop/private")),
             json!(root.path().join("tmp")),
             json!(prefix)
         );
@@ -1032,8 +1075,12 @@ pub(super) mod tests {
             )
             .expect("protected lock parent");
         }
-        let home = root.path().join("loop");
+        crate::door::agent_probes::fixture_owner_source(root.path(), "alpha")
+            .expect("fictional canonical authority");
+        let home = root.path().join("loop/private");
         std::fs::create_dir_all(home.join(".codex")).expect("loop home");
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))
+            .expect("private loop home");
         std::fs::create_dir_all(root.path().join("tmp")).expect("temporary root");
         std::fs::write(home.join(".codex/auth.json"), b"fixture-only")
             .expect("fake authentication");
@@ -1067,6 +1114,7 @@ pub(super) mod tests {
             )),
             entry,
             owner_home: root.path().into(),
+            private_home: home,
             loop_name: "alpha".into(),
             loop_uid: Some(nix::unistd::Uid::effective().as_raw()),
             executable,
@@ -1422,9 +1470,9 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
         drain_seam_case(false);
     }
 
-    /// ´test:unit:door-runner-holds-refresh-lock-through-cli-and-refuses-contention´
+    /// ´test:unit:door-runner-limits-refresh-lock-to-publication-and-refuses-contention´
     #[test]
-    fn door_runner_holds_refresh_lock_through_cli_and_refuses_contention() {
+    fn door_runner_limits_refresh_lock_to_publication_and_refuses_contention() {
         let (root, runner, input) =
             fixture("#!/usr/bin/python3\nraise SystemExit('must not run while busy')\n");
         let guard = crate::credential::lock(root.path(), "alpha").expect("box helper lock");
@@ -1438,7 +1486,7 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
             .path()
             .join(".config/loops/alpha/lanes/codex/.refresh.lock");
         let script = format!(
-            "#!/usr/bin/python3\nimport fcntl,json,sys\nf=open({},'r+')\ntry:\n fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError:\n pass\nelse:\n raise SystemExit('refresh lock absent during CLI')\njson.load(sys.stdin)\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':json.dumps({{'verdict':'refer','scope':'estate','reason':'locked'}})}}}}))\n",
+            "#!/usr/bin/python3\nimport fcntl,json,sys\nf=open({},'r+')\nfcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)\njson.load(sys.stdin)\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':json.dumps({{'verdict':'refer','scope':'estate','reason':'lock released'}})}}}}))\n",
             json!(lock)
         );
         crate::fixture_exec::write_executable(&runner.executable, script.as_bytes())
@@ -1448,6 +1496,7 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
             Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.status, "verdict", "{result:?}");
+        assert_eq!(result.reason, "lock released");
         let released_guard =
             crate::credential::try_lock(root.path(), "alpha").expect("released after CLI cleanup");
         drop(released_guard);
@@ -1458,6 +1507,250 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
             Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.reason, "door-agent-refresh-lock");
+    }
+
+    /// ´test:unit:door-agent-projects-current-owner-generation-before-spawn´
+    #[test]
+    fn door_agent_projects_current_owner_generation_before_spawn() {
+        let (root, runner, input) = fixture("#!/usr/bin/python3\nraise SystemExit('replaced')\n");
+        let canonical = root
+            .path()
+            .join(".config/loops/alpha/lanes/codex/auth.json");
+        let mut source: Value = serde_json::from_slice(&std::fs::read(&canonical).expect("source"))
+            .expect("fictional source");
+        source["tokens"]["access_token"] = json!("fresh.eyJleHAiOjQxMDAwMDAwMDB9.signature");
+        std::fs::write(&canonical, source.to_string()).expect("new owner generation");
+        std::fs::remove_file(runner.private_home.join(".codex/auth.json"))
+            .expect("first call has no preplaced copy");
+        let synced = root.path().join("projection-synced");
+        let release = root.path().join("release-receipt");
+        let held_entry = format!(
+            "#!/usr/bin/python3\nimport os,subprocess,sys,time\nos.environ['HOME']={}\nos.environ['TMPDIR']={}\nif len(sys.argv)==11:\n result=subprocess.run(sys.argv[4:],input=sys.stdin.buffer.read(),capture_output=True)\n if result.returncode: raise SystemExit(result.returncode)\n open({},'w').close()\n while not os.path.exists({}): time.sleep(.01)\n sys.stdout.buffer.write(result.stdout)\n raise SystemExit(0)\nos.execv(sys.argv[4],sys.argv[4:])\n",
+            json!(runner.private_home),
+            json!(root.path().join("tmp")),
+            json!(synced),
+            json!(release),
+        );
+        crate::fixture_exec::write_executable(&runner.entry, held_entry.as_bytes())
+            .expect("receipt event fixture");
+        let marker = root.path().join("vendor-started");
+        let script = format!(
+            "#!/usr/bin/python3\nimport json,os,sys\nauth=json.load(open(os.path.join(os.environ['CODEX_HOME'],'auth.json')))\nassert auth['tokens']['access_token'].startswith('fresh.')\nassert auth['tokens']['refresh_token']==''\nopen({},'w').close()\njson.load(sys.stdin)\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':json.dumps({{'verdict':'refer','scope':'estate','reason':'fresh projection'}})}}}}))\n",
+            json!(marker),
+        );
+        crate::fixture_exec::write_executable(&runner.executable, script.as_bytes())
+            .expect("stand-in client");
+        let bytes = input.encode().expect("input");
+        let result = std::thread::scope(|scope| {
+            let in_flight = scope.spawn(|| runner.judge(&bytes, Duration::from_secs(120)));
+            let guard = Instant::now() + Duration::from_millis(FIXTURE_HANG_MS);
+            while !synced.exists() && Instant::now() < guard {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                synced.exists(),
+                "entered receiver synced before receipt event"
+            );
+            assert!(!marker.exists(), "vendor has not started before receipt");
+            let projection: Value = serde_json::from_slice(
+                &std::fs::read(runner.private_home.join(".codex/auth.json"))
+                    .expect("synced projection"),
+            )
+            .expect("projection JSON");
+            assert!(
+                projection["tokens"]["access_token"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("fresh."))
+            );
+            assert_eq!(projection["tokens"]["refresh_token"], "");
+            std::fs::write(&release, b"release").expect("release receipt event");
+            in_flight.join().expect("agent call completed")
+        });
+        assert_eq!(result.status, "verdict", "{result:?}");
+        assert!(marker.exists());
+        assert_eq!(result.observations["credential"]["refreshed"], false);
+        assert_eq!(
+            result.observations["credential"]["expires_unix"],
+            4_100_000_000_u64
+        );
+        assert_eq!(
+            result.observations["credential"]["refresh_due_unix"],
+            4_099_999_400_u64
+        );
+    }
+
+    /// ´test:unit:door-agent-refers-before-spawn-when-owner-authority-unusable´
+    #[test]
+    fn door_agent_refers_before_spawn_when_owner_authority_unusable() {
+        let (root, runner, input) = fixture("#!/usr/bin/python3\nraise SystemExit('replaced')\n");
+        let marker = root.path().join("vendor-started");
+        let script = format!(
+            "#!/usr/bin/python3\nimport json,sys\nopen({},'w').close()\njson.load(sys.stdin)\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':json.dumps({{'verdict':'refer','scope':'estate','reason':'healthy'}})}}}}))\n",
+            json!(marker),
+        );
+        crate::fixture_exec::write_executable(&runner.executable, script.as_bytes())
+            .expect("stand-in client");
+        let canonical = root
+            .path()
+            .join(".config/loops/alpha/lanes/codex/auth.json");
+        std::fs::remove_file(&canonical).expect("absent authority");
+        let bytes = input.encode().expect("input");
+        let absent = runner.judge(&bytes, Duration::from_secs(120));
+        assert_eq!(absent.reason, "door-agent-owner-credential-unavailable");
+        assert!(!marker.exists());
+        std::fs::write(&canonical, b"{broken").expect("malformed authority");
+        let malformed = runner.judge(&bytes, Duration::from_secs(120));
+        assert_eq!(malformed.reason, "door-agent-owner-credential-unavailable");
+        assert!(!marker.exists());
+        crate::door::agent_probes::fixture_owner_source(root.path(), "alpha")
+            .expect("restore fictional authority");
+        let destination = runner.private_home.join(".codex/auth.json");
+        std::fs::remove_file(&destination).expect("remove stale copy");
+        std::os::unix::fs::symlink(&canonical, &destination).expect("unsafe destination");
+        let local = runner.judge(&bytes, Duration::from_secs(120));
+        assert_eq!(local.reason, "door-agent-credential-publication");
+        assert!(local.observations.get("remedy").is_none());
+        assert!(!marker.exists());
+        std::fs::remove_file(&destination).expect("clear unsafe destination");
+        let healthy = runner.judge(&bytes, Duration::from_secs(120));
+        assert_eq!(healthy.status, "verdict", "{healthy:?}");
+        assert!(marker.exists());
+    }
+
+    /// ´test:unit:door-projection-failure-retries-without-reusing-refresh-authority´
+    #[test]
+    fn door_projection_failure_retries_without_reusing_refresh_authority() {
+        let (root, runner, input) = fixture("#!/usr/bin/python3\nraise SystemExit('replaced')\n");
+        let write_fault = root.path().join("receiver-write-refused");
+        let sync_fault = root.path().join("receiver-sync-refused");
+        let started = root.path().join("vendor-started");
+        let entry = format!(
+            r#"#!/usr/bin/python3
+import os,subprocess,sys
+os.environ['HOME']={home}
+os.environ['TMPDIR']={tmp}
+if len(sys.argv)==11:
+ argv=sys.argv[4:]
+ stage=None
+ if not os.path.exists({write_fault}):
+  injection="import os\nreal=os.open\ndef fault(path,*args,**kwargs):\n if str(path).startswith('.door-auth-'): raise OSError(5,'fixture-write')\n return real(path,*args,**kwargs)\nos.open=fault\n"
+  stage={write_fault}
+ elif not os.path.exists({sync_fault}):
+  injection="import os,stat\nreal=os.fsync\ndef fault(fd):\n if stat.S_ISDIR(os.fstat(fd).st_mode): raise OSError(5,'fixture-sync')\n return real(fd)\nos.fsync=fault\n"
+  stage={sync_fault}
+ if stage is not None: argv=argv[:3]+[injection+argv[3]]+argv[4:]
+ result=subprocess.run(argv,input=sys.stdin.buffer.read(),capture_output=True)
+ if stage is not None:
+  open(stage,'w').close()
+  assert result.returncode==2,result.stderr
+  raise SystemExit(2)
+ if result.returncode: raise SystemExit(result.returncode)
+ sys.stdout.buffer.write(result.stdout)
+ raise SystemExit(0)
+os.execv(sys.argv[4],sys.argv[4:])
+"#,
+            home = json!(runner.private_home),
+            tmp = json!(root.path().join("tmp")),
+            write_fault = json!(write_fault),
+            sync_fault = json!(sync_fault),
+        );
+        crate::fixture_exec::write_executable(&runner.entry, entry.as_bytes())
+            .expect("receiver fault fixture");
+        let script = format!(
+            "#!/usr/bin/python3\nimport json,sys\nopen({},'w').close()\njson.load(sys.stdin)\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':json.dumps({{'verdict':'refer','scope':'estate','reason':'republished'}})}}}}))\n",
+            json!(started),
+        );
+        crate::fixture_exec::write_executable(&runner.executable, script.as_bytes())
+            .expect("stand-in client");
+        let bytes = input.encode().expect("input");
+        let first_result = runner.judge(&bytes, Duration::from_secs(120));
+        assert_eq!(first_result.reason, "door-agent-credential-publication");
+        assert!(write_fault.exists(), "receiver write fault was reached");
+        assert!(!started.exists(), "write failure cannot start client");
+        let uncertain = runner.judge(&bytes, Duration::from_secs(120));
+        assert_eq!(uncertain.reason, "door-agent-credential-publication");
+        assert!(sync_fault.exists(), "post-rename sync fault was reached");
+        assert!(!started.exists(), "uncertain sync cannot start client");
+        let recovered = runner.judge(&bytes, Duration::from_secs(120));
+        assert_eq!(recovered.status, "verdict", "{recovered:?}");
+        assert_eq!(recovered.reason, "republished");
+        assert_eq!(recovered.observations["credential"]["refreshed"], false);
+        assert!(started.exists());
+        let projection: Value = serde_json::from_slice(
+            &std::fs::read(runner.private_home.join(".codex/auth.json"))
+                .expect("republished projection"),
+        )
+        .expect("projection JSON");
+        assert_eq!(projection["tokens"]["refresh_token"], "");
+    }
+
+    /// ´test:unit:credential-login-handoff-drains-door-publication´
+    #[test]
+    fn credential_login_handoff_drains_door_publication() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (root, runner, input) = fixture("#!/usr/bin/python3\nraise SystemExit('replaced')\n");
+        let entered = root.path().join("receiver-entered");
+        let vendor = root.path().join("vendor-started");
+        let normal_entry = std::fs::read(&runner.entry).expect("entry fixture");
+        let held_entry = format!(
+            "#!/usr/bin/python3\nimport os,sys,time\nos.environ['HOME']={}\nos.environ['TMPDIR']={}\nif len(sys.argv)==11:\n open({},'w').close()\n while True: time.sleep(1)\nos.execv(sys.argv[4],sys.argv[4:])\n",
+            json!(runner.private_home),
+            json!(root.path().join("tmp")),
+            json!(entered),
+        );
+        crate::fixture_exec::write_executable(&runner.entry, held_entry.as_bytes())
+            .expect("held entered receiver");
+        let script = format!(
+            "#!/usr/bin/python3\nimport json,os,sys\nauth=json.load(open(os.path.join(os.environ['CODEX_HOME'],'auth.json')))\nassert auth['tokens']['access_token'].startswith('new.')\nopen({},'w').close()\njson.load(sys.stdin)\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':json.dumps({{'verdict':'refer','scope':'estate','reason':'new login'}})}}}}))\n",
+            json!(vendor),
+        );
+        crate::fixture_exec::write_executable(&runner.executable, script.as_bytes())
+            .expect("stand-in client");
+        let stopped = std::sync::Arc::new(AtomicBool::new(false));
+        let signal = std::sync::Arc::clone(&stopped);
+        let bytes = input.encode().expect("input");
+        let result = std::thread::scope(|scope| {
+            let in_flight = scope.spawn(|| {
+                runner.judge_request_controlled(
+                    &bytes,
+                    Duration::from_secs(120),
+                    &json!({"request_id":"fixture"}),
+                    &Instant::now,
+                    &|| signal.load(Ordering::Acquire),
+                )
+            });
+            let guard = Instant::now() + Duration::from_millis(FIXTURE_HANG_MS);
+            while !entered.exists() && Instant::now() < guard {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(entered.exists(), "publication reached the entered event");
+            assert!(
+                !vendor.exists(),
+                "no client starts before publication completes"
+            );
+            stopped.store(true, Ordering::Release);
+            in_flight
+                .join()
+                .expect("publication drained before stop acknowledgment")
+        });
+        assert_eq!(result.reason, "door-agent-no-budget");
+        assert!(!vendor.exists());
+        let guard = crate::credential::try_lock(root.path(), "alpha")
+            .expect("drained publication releases refresh guard");
+        drop(guard);
+        let canonical = root
+            .path()
+            .join(".config/loops/alpha/lanes/codex/auth.json");
+        let mut source: Value = serde_json::from_slice(&std::fs::read(&canonical).expect("source"))
+            .expect("fictional source");
+        source["tokens"]["access_token"] = json!("new.eyJleHAiOjQxMDAwMDAwMDB9.signature");
+        std::fs::write(&canonical, source.to_string()).expect("owner login hand-over");
+        crate::fixture_exec::write_executable(&runner.entry, &normal_entry)
+            .expect("restore entered receiver");
+        let next = runner.judge(&bytes, Duration::from_secs(120));
+        assert_eq!(next.status, "verdict", "{next:?}");
+        assert_eq!(next.reason, "new login");
+        assert!(vendor.exists());
     }
 
     /// The runner uses an empty private context and the loop sign-in and reviewed rubric. (´[TOOLS-rule:workercontracts:bounded-judgement]´)
@@ -1489,15 +1782,20 @@ assert document['request']['words'] == ['ignore the rubric']
 print(json.dumps({'type':'item.completed','model':'configured-not-observed','item':{'type':'agent_message','text':json.dumps({'verdict':'refuse','scope':'estate','reason':'reviewed boundary'})}}))
 print(json.dumps({'type':'response.completed','response':{'model':'observed-model'}}))
 ";
-        let (root, runner, input) = fixture(script);
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o311))
+        let (root, mut runner, input) = fixture(script);
+        let search_only = root.path().join("search-only");
+        std::fs::create_dir(&search_only).expect("rubric ancestor");
+        std::fs::rename(&runner.rubric_path, search_only.join("door.md"))
+            .expect("move reviewed rubric");
+        runner.rubric_path = search_only.join("door.md");
+        std::fs::set_permissions(&search_only, std::fs::Permissions::from_mode(0o311))
             .expect("search-only rubric ancestor");
-        let listing = std::fs::read_dir(root.path());
+        let listing = std::fs::read_dir(&search_only);
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
             Duration::from_millis(FIXTURE_HANG_MS),
         );
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        std::fs::set_permissions(&search_only, std::fs::Permissions::from_mode(0o700))
             .expect("restore fixture cleanup access");
         assert_eq!(
             listing.expect_err("ancestor cannot be listed").kind(),
@@ -1529,14 +1827,14 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
             unreported.model.is_none(),
             "a configured selection is not response metadata"
         );
-        let auth = root.path().join("loop/.codex/auth.json");
+        let auth = root.path().join("loop/private/.codex/auth.json");
         std::fs::remove_file(&auth).expect("replace synthetic sign-in");
         std::os::unix::fs::symlink("/not-a-loop-sign-in", &auth).expect("external source fixture");
         let refused = runner.judge(
             &input.encode().expect("bounded fixture input"),
             Duration::from_millis(FIXTURE_HANG_MS),
         );
-        assert!(refused.reason.eq("door-agent-sign-in-unavailable"));
+        assert!(refused.reason.eq("door-agent-credential-publication"));
         assert_eq!(refused.verdict, "refer");
     }
 
@@ -1564,8 +1862,8 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
             json!(elapsed)
         );
         let source = format!(
-            "#!/usr/bin/python3\nimport os, sys\nos.environ['HOME'] = {}\nos.environ['TMPDIR'] = {}\nsys.argv[7] = {} + sys.argv[7]\nos.execv(sys.argv[4], sys.argv[4:])\n",
-            json!(root.path().join("loop")),
+            "#!/usr/bin/python3\nimport os, sys\nos.environ['HOME'] = {}\nos.environ['TMPDIR'] = {}\nif len(sys.argv) > 11: sys.argv[7] = {} + sys.argv[7]\nos.execv(sys.argv[4], sys.argv[4:])\n",
+            json!(root.path().join("loop/private")),
             json!(root.path().join("tmp")),
             json!(prefix)
         );
@@ -1634,7 +1932,12 @@ print(json.dumps({'type':'response.completed','response':{'model':'observed-mode
         let (_root, mut runner, input) = fixture(script);
         runner.cap_ms = FIXTURE_HANG_MS;
         if outer {
-            crate::fixture_exec::write_executable(&runner.entry, script.as_bytes())
+            let body = script.split_once('\n').map_or("", |(_, body)| body);
+            let entry = format!(
+                "#!/usr/bin/python3\nimport os,sys\nif len(sys.argv) <= 11:\n os.environ['HOME'] = {}\n os.execv(sys.argv[4],sys.argv[4:])\n{body}",
+                json!(runner.private_home)
+            );
+            crate::fixture_exec::write_executable(&runner.entry, entry.as_bytes())
                 .expect("outer runner fixture");
         }
         let result = runner.judge(
@@ -1827,7 +2130,7 @@ sys.exit(7)
             let source = source.replace(
                 "os.execv(sys.argv[4], sys.argv[4:])",
                 &format!(
-                    "sys.argv[7] = {} + sys.argv[7]\nos.execv(sys.argv[4], sys.argv[4:])",
+                    "if len(sys.argv) > 11: sys.argv[7] = {} + sys.argv[7]\nos.execv(sys.argv[4], sys.argv[4:])",
                     json!(injection)
                 ),
             );
@@ -1925,7 +2228,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
             // mkdtemp and before any sign-in link exists. No production fault knob.
             let source = source.replace(
                 "os.execv(sys.argv[4], sys.argv[4:])",
-                &format!("assert sys.argv[7].count('os.mkdir(cwd, 0o700)') == 1\nsys.argv[7] = sys.argv[7].replace('os.mkdir(cwd, 0o700)', {})\nos.execv(sys.argv[4], sys.argv[4:])", json!(injected)),
+                &format!("if len(sys.argv) > 11:\n assert sys.argv[7].count('os.mkdir(cwd, 0o700)') == 1\n sys.argv[7] = sys.argv[7].replace('os.mkdir(cwd, 0o700)', {})\nos.execv(sys.argv[4], sys.argv[4:])", json!(injected)),
             );
             crate::fixture_exec::write_executable(&runner.entry, source.as_bytes())
                 .expect("injected entry");
@@ -1948,7 +2251,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
         let (root, runner, input) = fixture("#!/usr/bin/python3\nraise SystemExit(99)\n");
         assert_eq!(nix::unistd::Uid::effective().as_raw(), 0);
         nix::unistd::chown(
-            &root.path().join("loop/.codex/auth.json"),
+            &root.path().join("loop/private/.codex/auth.json"),
             Some(nix::unistd::Uid::from_raw(41001)),
             None,
         )
@@ -1957,7 +2260,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
             &input.encode().expect("bounded fixture input"),
             Duration::from_millis(FIXTURE_HANG_MS),
         );
-        assert!(result.reason.eq("door-agent-sign-in-unavailable"));
+        assert!(result.reason.eq("door-agent-credential-publication"));
         assert_eq!(result.observations["sign_in_absent"], false);
         assert_eq!(result.verdict, "refer");
     }
