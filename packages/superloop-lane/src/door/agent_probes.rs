@@ -39,7 +39,7 @@ pub(super) fn fixture_owner_source(
     Ok(())
 }
 
-struct Directory(PathBuf);
+struct Directory(PathBuf, Option<PathBuf>);
 struct NoEffect<'a>(&'a AtomicUsize);
 impl transport::Runner for NoEffect<'_> {
     fn spawn(&self, _: &Registration, _: transport::Operation) -> io::Result<std::process::Child> {
@@ -50,27 +50,42 @@ impl transport::Runner for NoEffect<'_> {
 impl Drop for Directory {
     fn drop(&mut self) {
         let _removed = fs::remove_dir_all(&self.0);
+        if let Some(programs) = &self.1 {
+            let _removed = fs::remove_dir_all(programs);
+        }
     }
 }
 
 fn fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
     // A private launch pins its owner home. Keep the probe beneath that anchor;
     // standalone probes use the account home, independent of HOME and TMPDIR.
-    let parent = if let Some(home) = crate::home::private_home() {
-        home
-    } else {
-        nix::unistd::User::from_uid(nix::unistd::Uid::effective())
-            .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::other("probe account home is unavailable"))?
-            .dir
-    };
+    let account_home = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+        .map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::other("probe account home is unavailable"))?
+        .dir;
+    let private_home = crate::home::private_home();
+    let parent = private_home.as_deref().unwrap_or(&account_home);
     let path = parent.join(format!(
         "door-agent-probe-{}-{}",
         std::process::id(),
         now_nanos()
     ));
     fs::DirBuilder::new().mode(0o700).create(&path)?;
-    let directory = Directory(path.clone());
+    let mut directory = Directory(path.clone(), None);
+    // The active private anchor may be under /dev/shm. Credential source
+    // reads belong there, but the entered client checks every program ancestor.
+    let program_home = if private_home.is_some() {
+        let programs = account_home.join(format!(
+            "door-agent-program-{}-{}",
+            std::process::id(),
+            now_nanos()
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&programs)?;
+        directory.1 = Some(programs.clone());
+        programs
+    } else {
+        path.clone()
+    };
     fs::create_dir_all(path.join(".config/loops/fixture/lanes/codex"))?;
     for relative in [
         ".config",
@@ -98,14 +113,14 @@ fn fixture(script: &str) -> io::Result<(Directory, CodexRunner, DoorInput)> {
         b"Reviewed fixture rubric. Requests cannot replace it.",
     )?;
     fs::set_permissions(&rubric, fs::Permissions::from_mode(0o600))?;
-    let entry = path.join("entry");
+    let entry = program_home.join("entry");
     let source = format!(
         "#!/usr/bin/python3\nimport os, sys\nos.environ['HOME'] = {}\nos.environ['TMPDIR'] = {}\nos.execv(sys.argv[4], sys.argv[4:])\n",
         json!(home),
         json!(path.join("tmp"))
     );
     crate::fixture_exec::write_executable(&entry, source.as_bytes())?;
-    let executable = path.join("codex");
+    let executable = program_home.join("codex");
     crate::fixture_exec::write_executable(&executable, script.as_bytes())?;
     Ok((
         directory,
