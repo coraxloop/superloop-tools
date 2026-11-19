@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-19
+
+### Changed
+
+- Link sign-in operations and permission-triage referrals to the generic owner-desk list (`[ORCHESTRATION-reg:oper:owner-desk-list]`), distinguishing an unmet command condition from a new owner decision without changing command or classifier behavior. CONTRIBUTING defines the citation form and routes to the existing invariant statements.
+
+### Fixed
+
+- Admit up to eight content-free client `error` notices completed before the door agent's turn, counted as `startup_notice_count` without their text, while retaining strict in-turn item refusals; a failed turn no longer supplies a verdict, even after a message. Drop the ignored `sandbox_permissions` override and keep read-only sandboxing and the disabled code-mode host. Compatibility: the runner travels in both `superloop-lane` and `superloop`; stop each door, install both programs, then restart the door before its next agent judgement; records gain the count and need no conversion (``prin:publictools:well-made-and-good-to-use``; ``test:unit:agent-startup-notices-are-content-free``; ``test:unit:agent-startup-notice-limit-names-overflow``; ``test:unit:agent-failed-turn-with-message-refuses``).
+
 ## [0.8.0] - 2026-11-19
 
 ### Added
@@ -1079,7 +1089,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/coraxloop/superloop-tools/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/coraxloop/superloop-tools/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/coraxloop/superloop-tools/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/coraxloop/superloop-tools/compare/v0.5.0...v0.6.0
