@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Make the door wait-error fixture assert the durable disconnect, skipped final write and incomplete attempt after closing its client at the read boundary, independent of which stop check observes the close. Product behavior and record formats are unchanged (``test:unit:door-wait-errors-send-final-and-record-incomplete``).
+
 ## [0.8.1] - 2026-11-19
 
 ### Changed

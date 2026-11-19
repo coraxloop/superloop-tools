@@ -7676,13 +7676,9 @@ mod tests {
             let deadline_ms = 120_000;
             let (waiting, entered) = std::sync::mpsc::channel();
             let (release, proceed) = std::sync::mpsc::channel();
-            let (fault_logged, logged_fault) = std::sync::mpsc::channel();
             if answer == "disconnect" {
                 super::REQUEST_READY.with(|slot| {
                     *slot.borrow_mut() = Some(Box::new(move |_| {
-                        super::AFTER_WAIT_STOP_FAULT_LOG.with(|slot| {
-                            *slot.borrow_mut() = Some(fault_logged);
-                        });
                         crate::requests::store::BEFORE_READER_LOCK_ATTEMPT.with(|hook| {
                             *hook.borrow_mut() = Some(Box::new(move |_| {
                                 waiting.send(()).expect("owner wait entered");
@@ -7715,6 +7711,8 @@ mod tests {
             }
             if answer == "disconnect" {
                 entered.recv_timeout(FIXTURE_HANG).expect("owner wait read");
+                // Close after the wait entered its read, then let either valid
+                // observation point report the same durable disconnect.
                 drop(client);
                 release.send(()).expect("observe close in owner wait");
             } else {
@@ -7733,20 +7731,15 @@ mod tests {
             let outcome = server.join().expect("service");
             assert!(outcome.is_ok(), "owner wait {answer}: {outcome:?}");
             if answer == "disconnect" {
-                assert!(
-                    logged_fault
-                        .recv_timeout(FIXTURE_HANG)
-                        .expect("coincident store fault logged")
-                        .starts_with("door request stop during store read: ")
-                );
                 let reply = outcome.expect("stopped owner wait");
                 assert_eq!(reply["queue_state"], "deadline", "{reply}");
                 assert!(reply["request_record_error"].is_string(), "{reply}");
                 let rows = store.list_run("R").expect("durable record");
-                #[allow(clippy::print_stderr)]
-                {
-                    eprintln!("DISCONNECT-OWNER {}", rows[0].value());
-                }
+                assert_eq!(
+                    rows[0].value()["effect"]["reason"],
+                    "door-disconnect-refusal"
+                );
+                assert_eq!(rows[0].value()["effect"]["ending"]["cause"], "disconnect");
                 assert_eq!(
                     rows[0].value()["effect"]["ending"]["final_write"],
                     "not-attempted"
