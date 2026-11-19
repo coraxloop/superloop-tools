@@ -121,6 +121,16 @@ def refusal_stderr(status, tail, eof, cut):
     return ("", "") if suppress else (tail.text(), tail.first_line())
 
 
+def observed_item_kind(value):
+    """Keep only a short ASCII item identifier, never a vendor text field."""
+    if (isinstance(value, str) and 1 <= len(value) <= 48
+            and 'a' <= value[0] <= 'z'
+            and all(('a' <= char <= 'z') or ('0' <= char <= '9') or char == '_'
+                    for char in value)):
+        return value
+    return "invalid-kind"
+
+
 def parse_answer(output, evidence):
     """Read Codex exec --json events; diagnostics contain no vendor text."""
     messages = []
@@ -130,7 +140,7 @@ def parse_answer(output, evidence):
     evidence["completed_turns"] = 0
     evidence["failed_turns"] = 0
     evidence["error_events"] = 0
-    for line in output.splitlines():
+    for event_index, line in enumerate(output.splitlines(), 1):
         evidence["parse_class"] = "malformed-jsonl"
         event = json.loads(line)
         evidence["parse_class"] = "non-object-event"
@@ -166,6 +176,13 @@ def parse_answer(output, evidence):
             evidence["message_count"] = len(messages)
         evidence["parse_class"] = "unexpected-item"
         if item and item.get("type") not in ("agent_message", "reasoning"):
+            event_type = event.get("type")
+            evidence["unexpected_item"] = {
+                "kind": observed_item_kind(item.get("type")),
+                "event": event_type if event_type in (
+                    "item.started", "item.updated", "item.completed") else "other",
+                "line": event_index,
+            }
             raise ValueError("unexpected tool event")
     evidence["parse_class"] = (
         ("empty" if not output else "no-message") if not messages else "multiple-messages")
@@ -301,7 +318,7 @@ def main():
     except (OSError, ValueError):
         own_sign_in = False
     if not own_sign_in:
-        emit({"service_status": "failure", "reason": "door-agent-sign-in-unavailable", "remedy": "superloop-lane door-sign-in " + loop_name, "rubric_digest": rubric_digest})
+        emit({"service_status": "failure", "reason": "door-agent-projection-unavailable", "rubric_digest": rubric_digest})
         return
     try:
         admit_program(program, expected_uid)

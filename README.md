@@ -22,11 +22,13 @@ Private helpers, including `build-sync`, `gateway-service`, `gateway-runner`, `w
 
 External users vendor the sources and merge changes as they prefer, maintaining their own lockfile. The public repository therefore carries no ``Cargo.lock`` and pins dependencies at the compatibility major only, certifying no dependency chain.
 
+Design records in ``docs/design/`` preserve reasoning and open choices without defining contracts or promising implementation; the scope-floor record explains directory and expansion limits (`rec:scopefloor:directory-and-expansion`).
+
 The contracts live in ``docs/spec/``; the contributing guide describes the build and verification workflow (`sec:contributing:verification`).
 
 ## Versioning · `sec:publictools:versioning`
 
-This is version 0.7.0; before 1.0 backwards compatibility is explicitly excluded, every release may change any interface, file format or command, and compatibility code (a reader that accepts an older form, a shim, a deprecated alias) is a defect to be reported, not a courtesy.
+This is version 0.8.0; before 1.0 backwards compatibility is explicitly excluded, every release may change any interface, file format or command, and compatibility code (a reader that accepts an older form, a shim, a deprecated alias) is a defect to be reported, not a courtesy.
 
 ## Public releases · `sec:publictools:public-releases`
 

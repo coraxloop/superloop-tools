@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-19
+
+### Added
+
+- Before each door agent start, the owner publishes the current access-only Codex projection under the loop refresh lock, then releases that lock before the client runs. The entered receiver rejects renewable input and clears checked stale temporaries; the manual full-source `door-sign-in` command and its credential digests retire. Content-free expiry evidence and typed pre-start referrals distinguish owner authority from local publication failures. Compatibility: verify each door's accepted template client; drain and stop each door, remove its former renewable copy and leftover placement temporaries as the loop with `superloop enter LOOP -- /usr/bin/sh -c 'rm -f -- "$HOME/.codex/auth.json" "$HOME"/.codex/.door-auth-*'`, then run `install-door` and start the door; no per-renewal placement is due. `superloop command judge` misses use the door's last projection and refer once it has expired (``prob:door:door-credential-follows-the-canonical-sign-in``; ``proto:superlooplane:door-access-projection``).
+
+- A clean build configured with the workspace release tag installs a separate regular `superloop-lint-<tag>` and its build record beside `superloop-lint`. The command hook recognizes release-shaped tagged names, and the version smoke checker accepts the tagged installed name when invoked against it. Other valid build tags retain their existing install without a tagged copy. Compatibility: the plain command remains the linter installed by that build; build-sync's census reads the workspace version only when a build tag is configured, and refuses a tagged build whose workspace declares none (``prin:publictools:well-made-and-good-to-use``).
+
+### Fixed
+
+- Make the helper close test shut down its stop peer's receive half before checking a failed acknowledgement. Dropping one descriptor alone can leave another holder able to receive the byte. Compatibility: no program or record format changes (``test:unit:helper-close-answers-every-queued-control``).
+
+- Publish the scope-floor design reasoning, recorded vendor facts and open reliance choices without changing execution or activation (`rec:scopefloor:directory-and-expansion`).
+
+- Clarify that non-erasing command-text inspection does not establish runtime working-directory or filename-expansion containment (``rule:permissiontriage:command-string-scope-extraction``).
+
+- Formatter refusals now say that an integrity failure would change the document's meaning and describe a writer failure using the error shown in the same message. The writer refusal also confirms valid Markdown. Native build guidance tells deployers to record private merge and lock inputs separately (``rule:output:linter-findings-status``; ``reg:superlooplane:native-build-provenance``).
+
+- Door agent invalid-output records now name the first refused item by a checked kind, item-event phase and one-based stream line, without retaining the item's text. Unknown, warning-shaped and tool items still refuse until an observed kind can justify a narrower rule. Compatibility: a door loop sees `agent_observations.answer.unexpected_item` on this refusal; verdict and tool-free admission rules do not change (``prin:publictools:well-made-and-good-to-use``; ``test:unit:agent-unexpected-items-name-kind-and-position-without-text``).
+
 ## [0.7.0] - 2026-11-17
 
 ### Fixed
@@ -1059,7 +1079,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/coraxloop/superloop-tools/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/coraxloop/superloop-tools/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/coraxloop/superloop-tools/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/coraxloop/superloop-tools/compare/v0.4.2...v0.5.0

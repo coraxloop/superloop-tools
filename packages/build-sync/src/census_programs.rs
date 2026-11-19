@@ -41,6 +41,32 @@ fn manifest(root: &Path, authority: &str) -> Result<Value> {
         .map_err(|error| error.to_string())
 }
 
+pub fn tagged_linter_copy(identity: &str, output: &str, package: &str, binary: &str) -> bool {
+    let Some(version) = identity.strip_prefix("bin/superloop-lint-v") else {
+        return false;
+    };
+    let parts: Vec<_> = version.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part.len() == 1 || !part.starts_with('0'))
+        })
+        && output == format!("packages/superloop-lint/superloop-lint-v{version}")
+        && package == "superloop-lint"
+        && binary == "superloop-lint"
+}
+
+fn tagged_linter_row(row: &Value) -> bool {
+    let text = |key| row[key].as_str().unwrap_or_default();
+    tagged_linter_copy(
+        text("identity"),
+        text("output"),
+        text("package"),
+        text("cargo_binary"),
+    )
+}
+
 pub fn manifest_version(root: &Path, document: &Value) -> Result<Value> {
     let version = &document["package"]["version"];
     if version.get("workspace").and_then(Value::as_bool) == Some(true) {
@@ -175,7 +201,8 @@ pub fn check(
     for row in ledger.iter().filter(|row| row["kind"] == "program") {
         let identity = row["identity"].as_str().ok_or("program identity missing")?;
         let output = row["output"].as_str().ok_or("program output missing")?;
-        if expected.remove(identity).as_deref() != Some(output) {
+        let tagged_copy = tagged_linter_row(row);
+        if !tagged_copy && expected.remove(identity).as_deref() != Some(output) {
             findings.push(format!("program differs from version roster: {identity}"));
         }
         let package = row["package"].as_str().ok_or("program package missing")?;
@@ -183,7 +210,7 @@ pub fn check(
             let binary = row["cargo_binary"]
                 .as_str()
                 .ok_or("program Cargo target missing")?;
-            if !binaries.remove(&(package.to_owned(), binary.to_owned())) {
+            if !tagged_copy && !binaries.remove(&(package.to_owned(), binary.to_owned())) {
                 findings.push(format!(
                     "program Cargo target missing or duplicated: {identity}"
                 ));

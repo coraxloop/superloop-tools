@@ -211,6 +211,7 @@ pub fn runner(
         usage_monitor: std::sync::Arc::new(super::agent::usage::Monitor::new(expected)),
         entry: path("entry")?,
         owner_home: owner_home.into(),
+        private_home: path("loop_home")?.join("private"),
         loop_name: loop_name.into(),
         loop_uid,
         executable: path("executable")?,

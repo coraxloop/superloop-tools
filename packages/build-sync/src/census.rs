@@ -58,6 +58,48 @@ fn rows(path: &Path) -> Result<Vec<Value>> {
     Ok(rows)
 }
 
+fn tagged_linter_rows(configured_ledger: &Path, workspace: &Value) -> Result<Vec<Value>> {
+    let options = configured_ledger
+        .parent()
+        .ok_or("configured ledger has no build directory")?
+        .join("meson-info/intro-buildoptions.json");
+    let Ok(options) = fs::read_to_string(options) else {
+        return Ok(Vec::new());
+    };
+    let options: Value = serde_json::from_str(&options).map_err(|error| error.to_string())?;
+    let Some(tag) = options
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["name"] == "release_tag"))
+        .and_then(|row| row["value"].as_str())
+    else {
+        return Ok(Vec::new());
+    };
+    if tag.is_empty() {
+        return Ok(Vec::new());
+    }
+    let workspace_version = workspace["workspace"]["package"]["version"]
+        .as_str()
+        .ok_or("workspace.package.version must be a string")?;
+    if tag != format!("v{workspace_version}") {
+        return Ok(Vec::new());
+    }
+    let name = format!("superloop-lint-{tag}");
+    let output = format!("packages/superloop-lint/{name}");
+    if !crate::census_programs::tagged_linter_copy(
+        &format!("bin/{name}"),
+        &output,
+        "superloop-lint",
+        "superloop-lint",
+    ) {
+        return Err("configured release_tag is not a public release name".into());
+    }
+    Ok(vec![
+        json!({"kind":"program","identity":format!("bin/{name}"),"output":output,"package":"superloop-lint","version_authority":"packages/superloop-lint/Cargo.toml","form":"rust","installation_class":"bin","cargo_binary":"superloop-lint","callers":[]}),
+        json!({"kind":"installation","route":"native","source":format!("build:{output}"),"destination":format!("@bindir@/{name}"),"owner":"superloop-lint"}),
+        json!({"kind":"installation","route":"native","source":format!("build:{output}.build.json"),"destination":format!("@datadir@/superloop/build-records/{name}.build.json"),"owner":"superloop-lint"}),
+    ])
+}
+
 fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value[key]
         .as_str()
@@ -181,6 +223,7 @@ fn measure(root: &Path, cargo: &Path, configured_ledger: &Path) -> Result<Value>
         let path = member.as_str().ok_or("workspace member must be a path")?;
         ledger.extend(rows(&root.join(path).join("meson.build"))?);
     }
+    ledger.extend(tagged_linter_rows(configured_ledger, &workspace)?);
     for row in &ledger {
         if let Some(path) = row.get("when_source_absent") {
             let path = path

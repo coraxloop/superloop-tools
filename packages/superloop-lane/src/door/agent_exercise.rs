@@ -547,29 +547,33 @@ mod tests {
         }
     }
 
-    /// ´test:unit:real-agent-absent-sign-in-is-unmeasured-from-runner´
+    /// ´test:unit:real-agent-missing-projection-is-published-before-runner´
     #[test]
-    fn real_agent_absent_sign_in_is_unmeasured_from_runner() {
+    fn real_agent_missing_projection_is_published_before_runner() {
         let (root, runner, input) = super::super::agent::tests::fixture("#!/bin/sh\nexit 99\n");
-        let auth = root.path().join("loop/.codex/auth.json");
+        let auth = root.path().join("loop/private/.codex/auth.json");
         std::fs::remove_file(&auth).expect("absent synthetic credential");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
             Duration::from_millis(agent::tests::FIXTURE_HANG_MS),
         );
-        assert_eq!(result.reason, "door-agent-sign-in-unavailable");
+        assert_eq!(result.reason, "door-agent-failure");
+        assert!(auth.exists());
+        assert!(result.observations["credential"]["expires_unix"].is_u64());
         let report = real_result(
             &result,
             agent::tests::FIXTURE_HANG_MS,
             result.rubric_digest.as_deref(),
         );
-        assert_eq!(report["status"], "unmeasured");
-        assert_eq!(report["remedy"], "superloop-lane door-sign-in alpha");
+        assert_eq!(report["status"], "fail");
+        assert!(report["remedy"].is_null());
+        std::fs::remove_file(&auth).expect("replace synthetic projection");
         std::os::unix::fs::symlink("/missing-credential", &auth).expect("unsafe credential");
         let result = runner.judge(
             &input.encode().expect("bounded fixture input"),
             Duration::from_millis(agent::tests::FIXTURE_HANG_MS),
         );
+        assert_eq!(result.reason, "door-agent-credential-publication");
         assert_eq!(
             real_result(
                 &result,

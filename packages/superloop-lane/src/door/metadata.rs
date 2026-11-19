@@ -21,7 +21,7 @@ pub fn inspect(entry: &Path, owner_home: &Path, loop_name: &str, executable: &Pa
         let mut unknown = json!({"path":null,"exists":null,"owner_uid":null,"mode":null,
             "loop_uid":null,"usable":null,"inspection_error":detail});
         let mut sign_in = unknown.clone();
-        sign_in["remedy"] = Value::Null;
+        sign_in["publication"] = Value::String("before-agent-call".into());
         unknown["admitted"] = Value::Null;
         unknown["refusal"] = Value::Null;
         json!({"sign_in":sign_in,"executable_status":unknown})
@@ -106,7 +106,7 @@ fn valid_metadata(value: &Value, sign_in: bool) -> bool {
         object.len() == KEYS.len() + if sign_in { 1 } else { 2 }
             && KEYS.iter().all(|key| object.contains_key(*key))
             && (if sign_in {
-                object.contains_key("remedy")
+                value["publication"] == "before-agent-call"
             } else {
                 object.get("admitted").is_some_and(Value::is_boolean)
                     && object.contains_key("refusal")
@@ -121,7 +121,6 @@ fn valid_metadata(value: &Value, sign_in: bool) -> bool {
             && ["owner_uid", "loop_uid"]
                 .iter()
                 .all(|key| value[key].is_null() || value[key].is_u64())
-            && (!sign_in || value["remedy"].is_null() || value["remedy"].is_string())
     })
 }
 
@@ -158,12 +157,8 @@ mod tests {
         assert!(!valid_metadata(&json!({}), true));
         assert!(absent["sign_in"]["owner_uid"].is_null());
         assert_eq!(absent["executable_status"]["usable"], true);
-        assert!(
-            absent["sign_in"]["remedy"]
-                .as_str()
-                .expect("remedy")
-                .contains("door-sign-in alpha")
-        );
+        assert_eq!(absent["sign_in"]["publication"], "before-agent-call");
+        assert!(absent["sign_in"].get("remedy").is_none());
         fs::create_dir(home.join(".codex")).expect("private config");
         fs::set_permissions(home.join(".codex"), fs::Permissions::from_mode(0o700)).expect("mode");
         fs::write(&auth, b"synthetic secret never emitted").expect("synthetic credential");
@@ -210,10 +205,10 @@ mod tests {
         );
         assert_eq!(program_admission(&unknown)["status"], "unmeasured");
         assert!(unknown["sign_in"]["usable"].is_null());
-        assert!(unknown["sign_in"]["remedy"].is_null());
+        assert_eq!(unknown["sign_in"]["publication"], "before-agent-call");
         assert!(valid_metadata(&unknown["sign_in"], true));
         let mut bad = unknown["sign_in"].clone();
-        bad.as_object_mut().expect("object").remove("remedy");
+        bad.as_object_mut().expect("object").remove("publication");
         assert!(!valid_metadata(&bad, true));
     }
 }

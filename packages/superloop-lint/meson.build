@@ -147,6 +147,20 @@ pkg_superloop_lint_sync_linter = custom_target(
 )
 pkg_superloop_lint_sync_outputs += pkg_superloop_lint_sync_linter
 
+if release_linter_tag
+  tagged_linter_name = 'superloop-lint-' + release_tag
+  dependency_ledger += ['{"kind":"program","identity":"bin/' + tagged_linter_name + '","output":"packages/superloop-lint/' + tagged_linter_name + '","package":"superloop-lint","version_authority":"packages/superloop-lint/Cargo.toml","form":"rust","installation_class":"bin","cargo_binary":"superloop-lint","callers":[]}']
+  pkg_superloop_lint_sync_tagged = custom_target(
+    'sync-tagged-linter',
+    output: [tagged_linter_name, tagged_linter_name + '.build.json'],
+    input: pkg_superloop_lint_sync_linter,
+    command: [find_program('env'), workspace_sync, '--artifact', '@INPUT0@', build_identity_args, '--domain', domain, cargo.full_path(), root_manifest, 'superloop-lint', 'superloop-lint', '@OUTPUT0@'],
+    build_by_default: true,
+    install: true,
+    install_dir: [get_option('bindir'), get_option('datadir') / 'superloop' / 'build-records'],
+  )
+endif
+
 # Machine-readable Meson ledger rows; build-sync checks their measured identities.
 dependency_ledger += ['''
 {"kind":"package","name":"superloop-lint","manifest":"packages/superloop-lint/Cargo.toml","tier":2,"release_group":"superloop-lint","version_authority":"packages/superloop-lint/Cargo.toml"}
@@ -212,11 +226,13 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
-{"kind":"meson-call","site":"packages/superloop-lint/meson.build:custom_target#1","sha256":"5d58c2a0c06db241bdc59317f8835ada6178fe82df36e415a7caf5c97866d81a","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"ea2c35a2b64c252b8c4c6ef2e8e9083f5ec3d24284b199478e6da130083a4e8e"}
+{"kind":"meson-call","site":"packages/superloop-lint/meson.build:custom_target#1","sha256":"5d58c2a0c06db241bdc59317f8835ada6178fe82df36e415a7caf5c97866d81a","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"2408b3e6f4356e17b0f815f2b52db2e86c299ab780b45752e1f08bab760f3eb8"}
+{"kind":"meson-call","site":"packages/superloop-lint/meson.build:custom_target#2","sha256":"71814269cf68d9111e5f2c4a7c3b227c4fa1f87c0842cf5a87f34510a96edfd3","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage a release-tagged regular copy and its own build record from the same compiled linter image","scope_sha256":"2408b3e6f4356e17b0f815f2b52db2e86c299ab780b45752e1f08bab760f3eb8"}
 ''']
 
 dependency_ledger += ['''
-{"kind":"meson-call","site":"packages/superloop-lint/meson.build:find_program#1","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env to invoke the shared artifact staging helper","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"ea2c35a2b64c252b8c4c6ef2e8e9083f5ec3d24284b199478e6da130083a4e8e"}
+{"kind":"meson-call","site":"packages/superloop-lint/meson.build:find_program#1","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env to invoke the shared artifact staging helper","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"2408b3e6f4356e17b0f815f2b52db2e86c299ab780b45752e1f08bab760f3eb8"}
+{"kind":"meson-call","site":"packages/superloop-lint/meson.build:find_program#2","caller":"meson:superloop-lint","owner":"superloop-lint","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env for the tagged copy's build-sync stage","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"2408b3e6f4356e17b0f815f2b52db2e86c299ab780b45752e1f08bab760f3eb8"}
 ''']
 
 # Publication command dependencies.

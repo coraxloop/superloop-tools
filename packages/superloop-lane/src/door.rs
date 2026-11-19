@@ -6246,7 +6246,7 @@ mod tests {
             ("invalid-output", "door-agent-invalid-output"),
             ("timeout", "door-agent-no-budget"),
             ("failure", "door-rubric-unavailable"),
-            ("failure", "door-agent-sign-in-unavailable"),
+            ("failure", "door-agent-projection-unavailable"),
         ];
         for induce_wait in [false, true] {
             for (mode, (status, reason)) in

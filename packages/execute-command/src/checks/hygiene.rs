@@ -2542,19 +2542,33 @@ fn gate_index(command: &SimpleCommand) -> Option<usize> {
         gate_subcommand(base, subcommand)
             && (base != "npm" || subcommand != "run" || following.is_some())
     });
-    let direct_gate = matches!(
-        base,
-        "cargo-fmt"
-            | "clippy"
-            | "pytest"
-            | "ninja"
-            | "make"
-            | "superloop-lint"
-            | "gradle"
-            | "mvn"
-            | "tsc"
-    );
+    let direct_gate = tagged_linter_name(base)
+        || matches!(
+            base,
+            "cargo-fmt"
+                | "clippy"
+                | "pytest"
+                | "ninja"
+                | "make"
+                | "superloop-lint"
+                | "gradle"
+                | "mvn"
+                | "tsc"
+        );
     (subcommand_gate || direct_gate).then_some(index)
+}
+
+fn tagged_linter_name(program: &str) -> bool {
+    let Some(version) = program.strip_prefix("superloop-lint-v") else {
+        return false;
+    };
+    let parts: Vec<_> = version.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part.len() == 1 || !part.starts_with('0'))
+        })
 }
 
 fn informational_gate_arguments(program: &str, arguments: &[Word]) -> bool {

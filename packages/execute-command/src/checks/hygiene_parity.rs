@@ -561,11 +561,23 @@ fn execution_timing_check_has_positive_and_negative_twins() {
         ("pip install widget", "/usr/bin/time pip install widget"),
         ("docker build .", "time docker build ."),
         ("ninja check", "time nice -n19 ninja check"),
+        (
+            "superloop-lint-v0.6.0 check --root .",
+            "time superloop-lint-v0.6.0 check --root .",
+        ),
     ];
     for (malformed, timed) in twins {
         assert_rule(&bash(malformed, None, None), HYGIENE_RULES[2].rule);
         assert_eq!(classify(&bash(timed, None, None)), FastLane::ToModel);
     }
+    assert_eq!(
+        classify(&bash(
+            "superloop-lint-v0.6.0-extra check --root .",
+            None,
+            None
+        )),
+        FastLane::ToModel
+    );
 }
 
 /// ´test:unit:one-objective-check-has-positive-and-negative-twins´
