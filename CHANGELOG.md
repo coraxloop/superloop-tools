@@ -6,11 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Fixed
-
-- Door agent invalid-output records now name the first refused item by a checked kind, item-event phase and one-based stream line, without retaining the item's text. Unknown, warning-shaped and tool items still refuse until an observed kind can justify a narrower rule. Compatibility: a door loop sees `agent_observations.answer.unexpected_item` on this refusal; verdict and tool-free admission rules do not change (``prin:publictools:well-made-and-good-to-use``; ``test:unit:agent-unexpected-items-name-kind-and-position-without-text``).
-
-## [0.8.0] - 2026-11-18
+## [0.8.0] - 2026-11-19
 
 ### Added
 
@@ -27,6 +23,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Clarify that non-erasing command-text inspection does not establish runtime working-directory or filename-expansion containment (``rule:permissiontriage:command-string-scope-extraction``).
 
 - Formatter refusals now say that an integrity failure would change the document's meaning and describe a writer failure using the error shown in the same message. The writer refusal also confirms valid Markdown. Native build guidance tells deployers to record private merge and lock inputs separately (``rule:output:linter-findings-status``; ``reg:superlooplane:native-build-provenance``).
+
+- Door agent invalid-output records now name the first refused item by a checked kind, item-event phase and one-based stream line, without retaining the item's text. Unknown, warning-shaped and tool items still refuse until an observed kind can justify a narrower rule. Compatibility: a door loop sees `agent_observations.answer.unexpected_item` on this refusal; verdict and tool-free admission rules do not change (``prin:publictools:well-made-and-good-to-use``; ``test:unit:agent-unexpected-items-name-kind-and-position-without-text``).
 
 ## [0.7.0] - 2026-11-17
 
