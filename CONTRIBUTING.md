@@ -20,6 +20,21 @@ Declare each new tracked file in the appropriate inventory reached from ``meson.
 
 Use Rust or Meson for implementation work under the repository's build decisions. Follow rustfmt and clippy; use ``fmt::Write`` when writing formatted fragments into a string, iterator idioms where appropriate, and document a new panic condition in the function's Panics section. Tests should exercise the production boundary and refusal behavior, including distinct identities when custody is the subject; a fixture that proves only a helper's own assumptions is not the acceptance evidence.
 
+The label form here is ``kind:area:slug``: kind names the statement's form, area its subject and slug its identity; the mint and citation notation is (`[ORCHESTRATION-ntn:environment:labels]`). An Invariant-kind statement uses kind ``inv``. A citation uses parentheses around a single-backtick label, or around the bracketed imported owner and label; a double-backtick mention names text without asserting a citation.
+
+## Invariants and their sources · `sec:contributing:invariants-and-their-sources`
+
+The adopted contract sources below carry the repository's Invariant-kind statements (`[ORCHESTRATION-rule:dispatch:briefs-cite-the-rules-they-state]`). Read the named statement and its argument before asserting it; a label mention alone supplies neither. New or moved ``inv`` mints remain reachable from this section in the same change. These routes preserve each source's scope and status, and generated copies are not additional mints. For these routes, invariant means a statement of kind ``inv``; a property cited under another kind, such as a rule, axiom or requirement, is written authority without an entry here, and its absence is neither a missing route nor an unwritten invariant. The reviewer judges the cited statement and its argument, not whether its kind is ``inv``. Any route to a proposal or plan is kept separately and does not adopt its claims.
+
+|Document|Place of the invariant mints|
+|--------|----------------------------|
+|``docs/spec/deployment.md``|(`sec:deployment:installation`)|
+|``docs/spec/linter-conformance.md``|(`sec:conformance:linter-frontier`)|
+|``docs/spec/output.md``|(`sec:output:agent-text-mode`)|
+|``packages/superloop-lane/README.md``|``inv:superlooplane:run-authority-separation``, ``sec:readme:commands``, ``sec:readme:settings``|
+
+The lane package is a separate label owner. Its row gives the document and its local mint and section labels as literal locators; search within that document. It does not invent a TOOLS-to-SUPERLOOPLANE citation edge. The package's Commands and Settings sections contain the remaining invariant heads.
+
 ## Verify on the named compute node · `sec:contributing:verification`
 
 Use only the node and route scoped by the working letter. Source its toolchain environment, use its disk-backed temporary root and lane-owned target directory, and retain one compile configuration across comparable runs. Do not build or run checks in a worker sandbox reserved for editing. If the letter supplies private build inputs, merge them only in the node verification checkout before Cargo or Meson; never publish that merge or its contents with the public lane branch.

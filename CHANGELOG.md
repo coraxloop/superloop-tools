@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+- Link sign-in operations and permission-triage referrals to the generic owner-desk list (`[ORCHESTRATION-reg:oper:owner-desk-list]`), distinguishing an unmet command condition from a new owner decision without changing command or classifier behavior. CONTRIBUTING defines the citation form and routes to the existing invariant statements.
+
 ## [0.8.0] - 2026-11-19
 
 ### Added
