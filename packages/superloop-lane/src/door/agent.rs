@@ -1237,6 +1237,54 @@ pub(super) mod tests {
         }
     }
 
+    /// Unknown, warning-shaped and tool items refuse with only checked kind metadata.
+    /// ´test:unit:agent-unexpected-items-name-kind-and-position-without-text´
+    #[test]
+    fn agent_unexpected_items_name_kind_and_position_without_text() {
+        let message = json!({"type":"item.completed","item":{"type":"agent_message",
+            "text":json!({"verdict":"refer","scope":"estate","reason":"private-answer"}).to_string()}});
+        for (name, event_type, item_type, observed_kind) in [
+            ("warning", "item.completed", "todo_list", "todo_list"),
+            (
+                "tool",
+                "item.completed",
+                "command_execution",
+                "command_execution",
+            ),
+            ("unknown", "item.updated", "fixture_note", "fixture_note"),
+            (
+                "invalid-kind",
+                "item.started",
+                "private-answer",
+                "invalid-kind",
+            ),
+        ] {
+            let item = json!({"type":event_type,"item":{"type":item_type,
+                "text":"private-answer","detail":{"secret":"private-answer"}}});
+            let output = format!("{{\"type\":\"thread.started\"}}\n{item}\n{message}\n");
+            let script = format!(
+                "#!/usr/bin/python3\nimport json,sys\njson.load(sys.stdin)\nsys.stdout.write({})\n",
+                json!(output)
+            );
+            let (_root, mut runner, input) = fixture(&script);
+            runner.cap_ms = 120_000;
+            let outcome = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+            assert_eq!(outcome.status, "invalid-output", "{name}");
+            let answer = &outcome.observations["answer"];
+            assert_eq!(answer["stdout_class"], "jsonl-agent-message", "{name}");
+            assert_eq!(answer["parse_class"], "unexpected-item", "{name}");
+            assert_eq!(answer["message_count"], 0, "{name}");
+            assert_eq!(answer["completed_turns"], 0, "{name}");
+            assert_eq!(
+                answer["unexpected_item"],
+                json!({"kind":observed_kind,
+                "event":event_type,"line":2}),
+                "{name}"
+            );
+            assert!(!format!("{outcome:?}").contains("private-answer"), "{name}");
+        }
+    }
+
     /// ´test:unit:agent-invalid-output-stderr-keeps-only-complete-plain-text´
     #[test]
     fn agent_invalid_output_stderr_keeps_only_complete_plain_text() {
