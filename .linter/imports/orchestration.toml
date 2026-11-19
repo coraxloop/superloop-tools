@@ -204,6 +204,7 @@ labels = [
   { label = "inv:profiles:test-injective", head = "Invariant (Test derivation is injective)", kind = "inv", file = "adr/015-test-label-profile.md" },
   { label = "inv:server:per-loop-isolation", head = "Invariant (Per-loop isolation)", kind = "inv", file = "docs/spec/server.md" },
   { label = "inv:signing:certify-key-absent-after-establishment", head = "Invariant (Certify key absent after establishment)", kind = "inv", file = "docs/commit-signing.md" },
+  { label = "inv:signing:worker-verifier-holds-only-its-loops-public-key", head = "Invariant (Worker verifier holds only its loop's public key)", kind = "inv", file = "docs/commit-signing.md" },
   { label = "inv:spec:layered-authority", head = "Invariant (Authority remains layered)", kind = "inv", file = "docs/proposals/spec-concept.md" },
   { label = "inv:spec:two-harnesses-one-evidence-path", head = "Invariant (Two harnesses, one evidence path)", kind = "inv", file = "docs/proposals/spec-concept.md" },
   { label = "judg:kinds:attestation", head = "Judgment (Attestation status)", kind = "judg", file = "adr/011-environment-kinds.md" },
@@ -278,6 +279,7 @@ labels = [
   { label = "prob:build:render-test-checks-survive-optimised-python", head = "Problem (The render test's checks survive optimised Python)", kind = "prob", file = "docs/backlog.md" },
   { label = "prob:dispatch:a-bar-on-a-tree-with-held-switches-is-run-again-on-the-landed-tree", head = "Problem (A worker's bar on a tree that carries held switches runs again on the landed tree before the next review stacks)", kind = "prob", file = "docs/backlog.md" },
   { label = "prob:docs:a-landing-that-changes-a-rule-of-the-specification-carries-its-changelog-line", head = "Problem (A landing that changes a rule of the specification carries its changelog line)", kind = "prob", file = "docs/backlog.md" },
+  { label = "prob:docs:the-owner-desk-list-says-that-it-is-the-operations-profiles-focus", head = "Problem (The owner-desk list says that it is the operations profile's focus)", kind = "prob", file = "docs/backlog.md" },
   { label = "prob:docs:the-timing-evidence-rule-takes-the-controlled-clock-reading", head = "Problem (The timing evidence rule takes the controlled-clock reading)", kind = "prob", file = "docs/backlog.md" },
   { label = "promise:orch:good-manners", head = "Promise (Good manners)", kind = "promise", file = "ORCHESTRATION.md" },
   { label = "proposal:doorselfheal:provider-door-self-healing", head = "Provider-door self-healing", kind = "proposal", file = "docs/proposals/door-self-heal.md" },
@@ -536,6 +538,7 @@ labels = [
   { label = "rule:server:server-green-is-advisory", head = "Rule (Server-green is advisory)", kind = "rule", file = "docs/spec/server.md" },
   { label = "rule:server:shared-toolchains-private-caches", head = "Rule (Shared toolchains, private caches)", kind = "rule", file = "docs/spec/server.md" },
   { label = "rule:server:verdicts-do-not-rest-on-wall-time", head = "Rule (A verdict does not rest on wall time)", kind = "rule", file = "docs/spec/server.md" },
+  { label = "rule:signing:loop-letters-signed-at-entry", head = "Rule (Loop letters signed at entry)", kind = "rule", file = "docs/commit-signing.md" },
   { label = "rule:signing:no-shared-keyring", head = "Rule (No shared keyring)", kind = "rule", file = "docs/commit-signing.md" },
   { label = "rule:signing:one-year-then-a-new-key", head = "Rule (One year, then a new key)", kind = "rule", file = "docs/commit-signing.md" },
   { label = "rule:signing:only-the-superloop-signs", head = "Rule (Only the superloop signs)", kind = "rule", file = "docs/commit-signing.md" },
@@ -852,6 +855,7 @@ labels = [
   { label = "sec:signing:conformance", head = "Conformance", kind = "sec", file = "docs/commit-signing.md" },
   { label = "sec:signing:generation-and-purge", head = "Generation, verification, revocation certificates, purge", kind = "sec", file = "docs/commit-signing.md" },
   { label = "sec:signing:key-shape", head = "Key shape", kind = "sec", file = "docs/commit-signing.md" },
+  { label = "sec:signing:letters-and-worker-verification", head = "Signed letters and worker verification", kind = "sec", file = "docs/commit-signing.md" },
   { label = "sec:signing:lifetime-and-rotation", head = "Lifetime and rotation", kind = "sec", file = "docs/commit-signing.md" },
   { label = "sec:signing:moving-off-a-shared-host-keyring", head = "Moving off a shared host keyring", kind = "sec", file = "docs/commit-signing.md" },
   { label = "sec:signing:one-keyring-per-superloop", head = "One keyring per superloop", kind = "sec", file = "docs/commit-signing.md" },
@@ -995,7 +999,7 @@ labels = [
 
 [source]
 owner = "ORCHESTRATION"
-commit = "86fc0bc8f0ad35ad8d17906e61c4b755721d818a"
+commit = "507b51975a51c4d188b22f46c6e67d83f888870b"
 
 [kinds]
 environments = [
