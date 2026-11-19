@@ -1,6 +1,6 @@
 # Contributing to superloop-tools · `guide:contributing:superloop-tools`
 
-This is the first reading for a slice worker in the tools repository. The public introduction (`guide:publictools:superloop-tools`) describes its purpose; the backlog (`plan:toolsbacklog:superloop-tools-backlog`) and priorities register (`reg:toolsbacklog:priorities`) order the open work. Read those records with the worker charter and the working letter, which supply the lane's scope, compute route, budget and exact gate. Generic dispatch rules are published by the orchestration repository; its import snapshot determines which of its labels this tree can cite.
+This is the first reading for contributors, workers and reviewers in the tools repository: it states how work is done, defines its label and citation form and routes its statements of kind ``inv``. The public introduction (`guide:publictools:superloop-tools`) describes its purpose; the backlog (`plan:toolsbacklog:superloop-tools-backlog`) and priorities register (`reg:toolsbacklog:priorities`) order the open work. Read those records with the worker charter and the working letter, which supply the lane's scope, compute route, budget and exact gate. Generic dispatch rules are published by the orchestration repository; its import snapshot determines which of its labels this tree can cite.
 
 ## Select and work a slice · `sec:contributing:slice-work`
 
