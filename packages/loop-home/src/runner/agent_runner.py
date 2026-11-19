@@ -18,6 +18,7 @@ RESULT = None
 EVIDENCE = {}
 STDERR_TAIL_BYTES = 4096
 STDERR_FIRST_LINE_BYTES = 1024
+STARTUP_NOTICE_LIMIT = 8
 
 
 class StderrTail:
@@ -140,17 +141,22 @@ def parse_answer(output, evidence):
     evidence["completed_turns"] = 0
     evidence["failed_turns"] = 0
     evidence["error_events"] = 0
+    evidence["startup_notice_count"] = 0
+    turn_started = False
     for event_index, line in enumerate(output.splitlines(), 1):
         evidence["parse_class"] = "malformed-jsonl"
         event = json.loads(line)
         evidence["parse_class"] = "non-object-event"
         if not isinstance(event, dict):
             raise ValueError("event object required")
-        if event.get("type") == "turn.completed":
+        event_type = event.get("type")
+        if event_type in ("turn.started", "turn.completed", "turn.failed"):
+            turn_started = True
+        if event_type == "turn.completed":
             evidence["completed_turns"] += 1
-        elif event.get("type") == "turn.failed":
+        elif event_type == "turn.failed":
             evidence["failed_turns"] += 1
-        elif event.get("type") == "error":
+        elif event_type == "error":
             evidence["error_events"] += 1
         # A configured model is not an observation; ordinary CLI events may
         # contain no response model, in which case it remains null.
@@ -171,19 +177,31 @@ def parse_answer(output, evidence):
         item = event.get("item", {})
         if not isinstance(item, dict):
             raise ValueError("item object required")
-        if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+        item_type = item.get("type")
+        startup_notice = (event_type == "item.completed" and item_type == "error"
+                          and not turn_started)
+        if item_type in ("agent_message", "reasoning"):
+            turn_started = True
+        if event_type == "item.completed" and item_type == "agent_message":
             messages.append(item.get("text"))
             evidence["message_count"] = len(messages)
         evidence["parse_class"] = "unexpected-item"
-        if item and item.get("type") not in ("agent_message", "reasoning"):
-            event_type = event.get("type")
+        if item and item_type not in ("agent_message", "reasoning"):
+            if startup_notice and evidence["startup_notice_count"] < STARTUP_NOTICE_LIMIT:
+                evidence["startup_notice_count"] += 1
+                continue
+            if startup_notice:
+                evidence["parse_class"] = "startup-notice-limit"
             evidence["unexpected_item"] = {
-                "kind": observed_item_kind(item.get("type")),
+                "kind": observed_item_kind(item_type),
                 "event": event_type if event_type in (
                     "item.started", "item.updated", "item.completed") else "other",
                 "line": event_index,
             }
             raise ValueError("unexpected tool event")
+    if evidence["failed_turns"] and messages:
+        evidence["parse_class"] = "failed-turn"
+        raise ValueError("failed turn cannot supply a verdict")
     evidence["parse_class"] = (
         ("empty" if not output else "no-message") if not messages else "multiple-messages")
     if len(messages) != 1:
@@ -363,7 +381,7 @@ def main():
                        'requires_openai_auth = true\nwire_api = "responses"\n'
                        'request_max_retries = 0\nstream_max_retries = 0\n')
         argv = [program, "exec", "--json", "--skip-git-repo-check", "-C", cwd,
-                "-s", "read-only", "-m", model, "-c", "sandbox_permissions=[]",
+                "-s", "read-only", "-m", model,
                 "-c", "project_doc_max_bytes=0", "-c", "model_reasoning_effort=" + effort]
         for feature in ["shell_tool", "unified_exec", "code_mode_host", "multi_agent",
                         "apps", "plugins", "browser_use", "browser_use_external",

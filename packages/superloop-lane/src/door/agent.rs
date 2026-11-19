@@ -1218,6 +1218,7 @@ pub(super) mod tests {
             assert_eq!(answer["completed_turns"], turns.0);
             assert_eq!(answer["failed_turns"], turns.1);
             assert_eq!(answer["error_events"], turns.2);
+            assert_eq!(answer["startup_notice_count"], 0);
             assert_eq!(
                 outcome.runner_exit.as_ref().map(RunnerExit::value),
                 Some(json!({"code":0}))
@@ -1237,6 +1238,27 @@ pub(super) mod tests {
         }
     }
 
+    /// A failed turn cannot provide the door's verdict even after a message.
+    /// ´test:unit:agent-failed-turn-with-message-refuses´
+    #[test]
+    fn agent_failed_turn_with_message_refuses() {
+        let message = json!({"type":"item.completed","item":{"type":"agent_message",
+            "text":json!({"verdict":"refer","scope":"estate","reason":"private-answer"}).to_string()}});
+        let output = format!(
+            "{{\"type\":\"thread.started\"}}\n{{\"type\":\"turn.started\"}}\n{message}\n{{\"type\":\"turn.failed\"}}\n"
+        );
+        let script = format!(
+            "#!/usr/bin/python3\nimport json,sys\njson.load(sys.stdin)\nsys.stdout.write({})\n",
+            json!(output)
+        );
+        let (_root, runner, input) = fixture(&script);
+        let outcome = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+        assert_eq!(outcome.status, "invalid-output", "{outcome:?}");
+        assert_eq!(outcome.observations["answer"]["parse_class"], "failed-turn");
+        assert_eq!(outcome.observations["answer"]["failed_turns"], 1);
+        assert!(!format!("{outcome:?}").contains("private-answer"));
+    }
+
     /// Unknown, warning-shaped and tool items refuse with only checked kind metadata.
     /// ´test:unit:agent-unexpected-items-name-kind-and-position-without-text´
     #[test]
@@ -1244,6 +1266,7 @@ pub(super) mod tests {
         let message = json!({"type":"item.completed","item":{"type":"agent_message",
             "text":json!({"verdict":"refer","scope":"estate","reason":"private-answer"}).to_string()}});
         for (name, event_type, item_type, observed_kind) in [
+            ("error-in-turn", "item.completed", "error", "error"),
             ("warning", "item.completed", "todo_list", "todo_list"),
             (
                 "tool",
@@ -1261,7 +1284,9 @@ pub(super) mod tests {
         ] {
             let item = json!({"type":event_type,"item":{"type":item_type,
                 "text":"private-answer","detail":{"secret":"private-answer"}}});
-            let output = format!("{{\"type\":\"thread.started\"}}\n{item}\n{message}\n");
+            let output = format!(
+                "{{\"type\":\"thread.started\"}}\n{{\"type\":\"turn.started\"}}\n{item}\n{message}\n"
+            );
             let script = format!(
                 "#!/usr/bin/python3\nimport json,sys\njson.load(sys.stdin)\nsys.stdout.write({})\n",
                 json!(output)
@@ -1278,11 +1303,68 @@ pub(super) mod tests {
             assert_eq!(
                 answer["unexpected_item"],
                 json!({"kind":observed_kind,
-                "event":event_type,"line":2}),
+                "event":event_type,"line":3}),
                 "{name}"
             );
             assert!(!format!("{outcome:?}").contains("private-answer"), "{name}");
         }
+    }
+
+    /// Completed error items before a turn are counted without their contents.
+    /// ´test:unit:agent-startup-notices-are-content-free´
+    #[test]
+    fn agent_startup_notices_are_content_free() {
+        let notice = json!({"type":"item.completed","item":{"type":"error",
+            "text":"private-answer","detail":{"secret":"private-answer"}}});
+        let message = json!({"type":"item.completed","item":{"type":"agent_message",
+            "text":json!({"verdict":"refer","scope":"estate","reason":"accepted"}).to_string()}});
+        let output = format!(
+            "{{\"type\":\"thread.started\"}}\n{notice}\n{notice}\n{notice}\n{{\"type\":\"turn.started\"}}\n{message}\n{{\"type\":\"turn.completed\"}}\n"
+        );
+        let script = format!(
+            "#!/usr/bin/python3\nimport json,sys\nassert 'sandbox_permissions=[]' not in sys.argv\nassert sys.argv[sys.argv.index('-s') + 1] == 'read-only'\nassert 'code_mode_host' in sys.argv\njson.load(sys.stdin)\nsys.stdout.write({})\n",
+            json!(output)
+        );
+        let (_root, runner, input) = fixture(&script);
+        let outcome = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+        assert_eq!(outcome.status, "verdict", "{outcome:?}");
+        let answer = &outcome.observations["answer"];
+        assert_eq!(answer["parse_class"], "message");
+        assert_eq!(answer["startup_notice_count"], 3);
+        assert_eq!(answer["message_count"], 1);
+        assert_eq!(answer["completed_turns"], 1);
+        assert!(answer["unexpected_item"].is_null());
+        assert!(!format!("{outcome:?}").contains("private-answer"));
+    }
+
+    /// A ninth completed error item before the turn is a named refusal.
+    /// ´test:unit:agent-startup-notice-limit-names-overflow´
+    #[test]
+    fn agent_startup_notice_limit_names_overflow() {
+        let notice = json!({"type":"item.completed","item":{"type":"error",
+            "text":"private-answer"}});
+        let mut output = String::from("{\"type\":\"thread.started\"}\n");
+        for _ in 0..9 {
+            use std::fmt::Write;
+            writeln!(output, "{notice}").expect("fixture output");
+        }
+        output.push_str("{\"type\":\"turn.started\"}\n");
+        let script = format!(
+            "#!/usr/bin/python3\nimport json,sys\njson.load(sys.stdin)\nsys.stdout.write({})\n",
+            json!(output)
+        );
+        let (_root, runner, input) = fixture(&script);
+        let outcome = runner.judge(&input.encode().expect("input"), Duration::from_secs(120));
+        assert_eq!(outcome.status, "invalid-output", "{outcome:?}");
+        let answer = &outcome.observations["answer"];
+        assert_eq!(answer["parse_class"], "startup-notice-limit");
+        assert_eq!(answer["startup_notice_count"], 8);
+        assert_eq!(
+            answer["unexpected_item"],
+            json!({"kind":"error",
+            "event":"item.completed","line":10})
+        );
+        assert!(!format!("{outcome:?}").contains("private-answer"));
     }
 
     /// ´test:unit:agent-invalid-output-stderr-keeps-only-complete-plain-text´
