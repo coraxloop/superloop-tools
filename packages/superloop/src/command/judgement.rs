@@ -92,7 +92,7 @@ pub(super) fn judge(policy: &PolicySnapshot, request: &Request) -> Result<Verdic
         {
             MatchEvaluation::Decided(verdict) => *verdict,
             MatchEvaluation::Undecided { .. } => {
-                super::agent::judge(policy, request, key.class.as_str(), &group["history"])?
+                super::agent::judge(policy, request, key.class.as_str())?
             }
         }
     };
@@ -165,6 +165,34 @@ mod tests {
                 json!({"groups":{}})
             }),
             rubric: source(json!({"agent":null})),
+        }
+    }
+
+    /// ´claim:command:direct-agent-input-excludes-learned-history´
+    /// ´test:unit:direct-judge-agent-input-excludes-learned-history´
+    #[test]
+    fn direct_judge_agent_input_excludes_learned_history() {
+        let request = request("printf current request");
+        let old_history = json!([{"id":"old-run:1","would_do":{"reason":"old-verdict-marker"},
+            "label":{"request_id":"old-run:1","reason":"old-label-marker"}}]);
+        assert!(old_history.to_string().contains("old-label-marker"));
+        let input: Value = serde_json::from_slice(
+            &super::agent::agent_input(&request, "command", "reviewed rubric".into())
+                .expect("direct agent input"),
+        )
+        .expect("JSON agent input");
+        assert_eq!(
+            input["request"],
+            serde_json::to_value(&request).expect("current request")
+        );
+        assert_eq!(input["capability_class"], "command");
+        assert_eq!(input["reviewed_rubric"], "reviewed rubric");
+        assert!(input.get("shape_record").is_none(), "{input}");
+        for prior in ["old-run", "old-verdict-marker", "old-label-marker"] {
+            assert!(
+                !input.to_string().contains(prior),
+                "prior history in direct input: {input}"
+            );
         }
     }
 

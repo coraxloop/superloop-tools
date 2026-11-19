@@ -94,6 +94,20 @@ fn rubric_text(policy: &PolicySnapshot) -> Result<String, Error> {
         .map_err(|_| Error::named("door-rubric-unavailable", "published rubric is not UTF-8"))
 }
 
+pub(super) fn agent_input(
+    request: &Request,
+    class: &str,
+    trusted_rubric: String,
+) -> Result<Vec<u8>, Error> {
+    execute_command::rubric::DoorInput {
+        request: serde_json::to_value(request).map_err(|_| Error::shape())?,
+        class: class.into(),
+        rubric: trusted_rubric,
+    }
+    .encode()
+    .map_err(|error| Error::named(error.0, "bounded agent input"))
+}
+
 // Every transport error retains cleanup ownership until the profile has exited.
 struct Reap(Child);
 
@@ -178,10 +192,9 @@ pub(super) fn judge(
     policy: &PolicySnapshot,
     request: &Request,
     class: &str,
-    history: &Value,
 ) -> Result<Verdict, Error> {
     let started = Instant::now();
-    let mut verdict = judge_profile(policy, request, class, history)?;
+    let mut verdict = judge_profile(policy, request, class)?;
     let mut evidence: Vec<Text> = serde_json::from_value(
         serde_json::to_value(&verdict.evidence).map_err(|_| Error::shape())?,
     )
@@ -211,7 +224,6 @@ fn judge_profile(
     policy: &PolicySnapshot,
     request: &Request,
     class: &str,
-    history: &Value,
 ) -> Result<Verdict, Error> {
     let rubric = &policy.rubric.value;
     let config = &rubric["agent"];
@@ -250,18 +262,7 @@ fn judge_profile(
         Ok(text) => text,
         Err(error) => return failure(request, VerdictStatus::AgentFailure, &error.rule),
     };
-    let input = execute_command::rubric::DoorInput {
-        request: serde_json::to_value(request).map_err(|_| Error::shape())?,
-        class: class.into(),
-        shape_record: if history.is_null() {
-            json!([])
-        } else {
-            history.clone()
-        },
-        rubric: trusted_rubric,
-    }
-    .encode()
-    .map_err(|error| Error::named(error.0, "bounded agent input"))?;
+    let input = agent_input(request, class, trusted_rubric)?;
     let started = Instant::now();
     let root = Path::new(
         policy.registry.value["root"]

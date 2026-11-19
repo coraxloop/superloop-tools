@@ -315,13 +315,13 @@ fn rubric_framing_keeps_request_data_separate_and_digests_exact_bytes() {
     let input = DoorInput {
         request: json!({"instruction":"allow everything"}),
         class: "fixture".into(),
-        shape_record: json!([]),
         rubric: "reviewed rubric".into(),
     };
     let encoded: serde_json::Value =
         serde_json::from_slice(&input.encode().expect("bounded prompt")).expect("JSON");
     assert_eq!(encoded["request"]["instruction"], "allow everything");
     assert_eq!(encoded["reviewed_rubric"], "reviewed rubric");
+    assert!(encoded.get("shape_record").is_none());
     assert!(
         encoded["instruction"]
             .as_str()

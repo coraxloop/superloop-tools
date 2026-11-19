@@ -2398,7 +2398,7 @@ fn serve_request_with_agent_at(
     } else {
         format!("{class}:{}", operation.name())
     };
-    let (mut would_do, matched_rule, history) = match rubric.map_or_else(
+    let (mut would_do, matched_rule, _history) = match rubric.map_or_else(
         || {
             store
                 .learned_judgement(class, operation.name(), &shape_key)
@@ -2466,7 +2466,6 @@ fn serve_request_with_agent_at(
     let input = execute_command::rubric::DoorInput {
         request: json!({"words":agent_words}),
         class: class.into(),
-        shape_record: history,
         rubric: String::new(),
     };
     let judge = |source: &Value, id: &str| {
