@@ -1687,12 +1687,11 @@ fn publish_claude_round_at(
     publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
 ) -> Result<Value, LaneError> {
     with_claude_authority(home, now, refresh_program, publication_time_ms, |source| {
-        claude_round_receipt(home, run_home, worker_uid, source)
+        claude_round_receipt(run_home, worker_uid, source)
     })
 }
 
 fn claude_round_receipt(
-    _home: &Path,
     run_home: &Path,
     worker_uid: u32,
     source: &ClaudeSource,
@@ -1967,7 +1966,7 @@ pub(crate) fn publish_round_admitted(
             now_seconds()?,
             || claude_refresh_program(&home, &expected_program),
             now_milliseconds,
-            |source| claude_round_receipt(&home, run_home, worker_uid, source),
+            |source| claude_round_receipt(run_home, worker_uid, source),
         );
     }
     let _guard = lock(owner_home, loop_name)?;

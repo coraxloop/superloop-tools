@@ -360,7 +360,60 @@ pub(crate) fn source_bytes(
     limit: u64,
     must_execute: bool,
 ) -> Result<Vec<u8>, LaneError> {
-    opened_source(path, name, limit, must_execute).map(|(_, bytes)| bytes)
+    let (_, bytes) = opened_source(path, name, limit, must_execute)?;
+    refuse_credential_image_input(path, &bytes)?;
+    Ok(bytes)
+}
+
+/// Refuse declared image inputs that are named or shaped as vendor credentials.
+/// Opaque executables and prose with unrecognized embedded values are not proved secret-free.
+pub(crate) fn refuse_credential_image_input(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {
+    let reserved_name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| ["auth.json", ".credentials.json", "credentials.json"].contains(&name));
+    let document = serde_json::from_slice::<Value>(bytes).ok();
+    let shaped = document
+        .as_ref()
+        .and_then(Value::as_object)
+        .is_some_and(|object| {
+            object
+                .get("claudeAiOauth")
+                .and_then(Value::as_object)
+                .is_some_and(|oauth| {
+                    oauth.contains_key("accessToken") || oauth.contains_key("refreshToken")
+                })
+                || object
+                    .get("tokens")
+                    .and_then(Value::as_object)
+                    .is_some_and(|tokens| {
+                        tokens.contains_key("access_token") || tokens.contains_key("refresh_token")
+                    })
+                || object.get("OPENAI_API_KEY").is_some_and(Value::is_string)
+        });
+    let text_input = path.file_name().is_some_and(|name| {
+        name == "Containerfile"
+            || name == "box-init"
+            || name.to_string_lossy().ends_with(".service.in")
+    });
+    let named_in_template = text_input
+        && std::str::from_utf8(bytes).is_ok_and(|text| {
+            text.contains("auth.json")
+                || text.contains(".credentials.json")
+                || crate::plan::VENDOR_CREDENTIAL_VARIABLES
+                    .iter()
+                    .any(|name| text.contains(&format!("{name}=")))
+        });
+    if reserved_name || shaped || named_in_template {
+        return Err(LaneError::input(
+            "credential-image-input",
+            format!(
+                "{} is named or shaped as vendor credential material",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn executable_snapshot(bytes: &[u8]) -> Result<fs::File, LaneError> {
@@ -2803,6 +2856,76 @@ done
                 .as_str()
                 .expect("template")
                 .contains(&request.base_image)
+        );
+        assert!(
+            !temp
+                .path()
+                .join(".config/loops/alpha/image-build.json")
+                .exists()
+        );
+    }
+
+    /// # Panics
+    /// Panics if a credential-naming template or shaped init reaches a build child.
+    /// ´test:unit:image-build-refuses-credential-template-and-shaped-input-before-build´
+    #[test]
+    fn image_build_refuses_credential_template_and_shaped_input_before_build() {
+        let (temp, mut request) = fixture();
+        let template = temp.path().join("template");
+        fs::create_dir(&template).expect("template directory");
+        for name in ["Containerfile", "box-init"] {
+            fs::copy(request.template_dir.join(name), template.join(name))
+                .expect("fixture template copy");
+        }
+        request.template_dir = template.clone();
+        let original = fs::read(template.join("Containerfile")).expect("original template");
+        let mut naming = original.clone();
+        naming.extend_from_slice(b"\nCOPY auth.json /root/auth.json\n");
+        fs::write(template.join("Containerfile"), naming).expect("credential name in template");
+        let error = run(temp.path(), &request).expect_err("credential-naming template");
+        assert_eq!(error.kind, "credential-image-input", "{error:?}");
+
+        let mut named_variable = original.clone();
+        named_variable.extend_from_slice(b"\nENV ANTHROPIC_API_KEY=synthetic-only\n");
+        fs::write(template.join("Containerfile"), named_variable)
+            .expect("credential variable in template");
+        let error = run(temp.path(), &request).expect_err("credential variable in template");
+        assert_eq!(error.kind, "credential-image-input", "{error:?}");
+
+        fs::write(template.join("Containerfile"), original).expect("restore template");
+        fs::write(
+            template.join("box-init"),
+            br#"{"claudeAiOauth":{"accessToken":"synthetic-token"}}"#,
+        )
+        .expect("shaped init");
+        let error = run(temp.path(), &request).expect_err("credential-shaped init");
+        assert_eq!(error.kind, "credential-image-input", "{error:?}");
+        assert!(
+            !temp.path().join("calls").exists(),
+            "no build child started"
+        );
+        assert!(
+            !temp
+                .path()
+                .join(".config/loops/alpha/image-build.json")
+                .exists()
+        );
+    }
+
+    /// # Panics
+    /// Panics if a credential-named program file reaches an image build child.
+    /// ´test:unit:image-build-refuses-credential-named-program-before-build´
+    #[test]
+    fn image_build_refuses_credential_named_program_before_build() {
+        let (temp, mut request) = fixture();
+        let named = temp.path().join("auth.json");
+        fs::copy(&request.codex_bin, &named).expect("renamed executable");
+        request.codex_bin = named;
+        let error = run(temp.path(), &request).expect_err("credential-named program");
+        assert_eq!(error.kind, "credential-image-input", "{error:?}");
+        assert!(
+            !temp.path().join("calls").exists(),
+            "no build child started"
         );
         assert!(
             !temp

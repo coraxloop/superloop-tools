@@ -850,6 +850,80 @@ fn claude_fixture_periodic_publication() {
 }
 
 /// # Panics
+/// Panics if the periodic production entry bypasses the closed Claude cutover gate.
+/// ´test:unit:claude-fixture-periodic-cutover-refuses-before-publication´
+#[test]
+fn claude_fixture_periodic_cutover_refuses_before_publication() {
+    periodic_case(
+        "claude_fixture_periodic_cutover_refuses_before_publication",
+        |enclosing| {
+            transaction_body(enclosing, |_, owner, runs, worker, record, admission, _| {
+                periodic_stage(owner, runs, record);
+                let home = claude_sign_in_dir(owner, "alpha");
+                let marker = home.join(".boxed-refresh-mode");
+                fs::write(&marker, b"refresh\n").expect("cutover request");
+                fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))
+                    .expect("marker mode");
+                fs::write(home.join(".fixture-refresh-sentinel-arm"), b"armed")
+                    .expect("sentinel arm");
+                let worker_file = worker.join(".claude/.credentials.json");
+                fs::write(&worker_file, b"prior worker authority").expect("prior file");
+                fs::set_permissions(&worker_file, fs::Permissions::from_mode(0o600))
+                    .expect("prior mode");
+                nix::unistd::chown(
+                    &worker_file,
+                    Some(Uid::from_raw(3000)),
+                    Some(Gid::from_raw(3000)),
+                )
+                .expect("prior owner");
+                let prior = fs::metadata(&worker_file).expect("prior inode").ino();
+                let reservation = fs::read(crate::launch::reservation_path(runs, "R"))
+                    .expect("prior reservation");
+                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let thread = crate::container_helper::spawn_credential_authority_admitted(
+                    owner.to_path_buf(),
+                    "alpha".into(),
+                    runs.to_path_buf(),
+                    runs.join("R"),
+                    BoxBackend::Claude,
+                    Arc::clone(&cancelled),
+                    admission,
+                )
+                .expect("production periodic spawner");
+                let mut thread = PeriodicThread::observe(cancelled, thread);
+                let evidence = runs.join(".launch-R/credential-refresh.json");
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while !evidence.exists() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "periodic evidence event"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                thread.finish().expect("clean authority cancellation");
+                let value: Value = serde_json::from_slice(&fs::read(evidence).expect("evidence"))
+                    .expect("evidence JSON");
+                assert_eq!(value["state"], "refused", "{value}");
+                assert_eq!(value["kind"], "credential-cutover-gate", "{value}");
+                assert_eq!(
+                    fs::read(&worker_file).expect("prior bytes"),
+                    b"prior worker authority"
+                );
+                assert_eq!(
+                    fs::metadata(&worker_file).expect("prior inode").ino(),
+                    prior
+                );
+                assert_eq!(
+                    fs::read(crate::launch::reservation_path(runs, "R")).expect("reservation"),
+                    reservation
+                );
+                assert!(!home.join(".fixture-refresh-sentinel").exists());
+            });
+        },
+    );
+}
+
+/// # Panics
 /// Panics if an evidence destination escaping the fixture permits a second envelope.
 /// ´test:unit:claude-fixture-periodic-evidence-escape´
 #[test]

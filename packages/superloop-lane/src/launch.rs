@@ -1913,6 +1913,18 @@ pub(crate) fn check_mount_roots(
             .as_str()
             .ok_or_else(|| LaneError::operation("plan-json", "mount source is absent"))?;
         let source = Path::new(source);
+        let loop_config = owner_home.join(".config/loops").join(loop_name);
+        let sign_ins = [loop_config.join("claude"), loop_config.join("lanes/codex")];
+        if source == owner_home
+            || sign_ins
+                .iter()
+                .any(|home| source.starts_with(home) || home.starts_with(source))
+        {
+            return Err(LaneError::input(
+                "credential-mount",
+                "owner home or loop sign-in source is not a worker bind",
+            ));
+        }
         if mount["target"] == "/mail" {
             let identity: loop_home::mail::birth::Identity =
                 serde_json::from_value(plan.document["mail"]["identity"].clone())
@@ -7291,8 +7303,8 @@ pub fn private_prepare_runtime(
     custody
         .verify_birth(owner_home, loop_name, &birth)
         .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
-    crate::plan::verify_box_attestation(&plan.document)?;
     check_mount_roots(&plan, &settings, owner_home)?;
+    crate::plan::verify_box_attestation(&plan.document)?;
     check_pins(&plan, &settings, owner_home, observed, true)?;
     if let Ok(stage) = std::env::var("SUPERLOOP_MATRIX_STAGE") {
         let evidence_path = protected_identity_dir(&driver_dir)?.join("launch-evidence.json");
@@ -7688,6 +7700,38 @@ mod tests {
             let error = result.expect_err("unsafe mail mount");
             assert_eq!(error.kind, "mail-mount");
             assert_eq!(error.detail, "mail source is not this worker's endpoint");
+        }
+    }
+
+    /// # Panics
+    /// Panics if launch preflight accepts an owner home or loop sign-in bind.
+    /// ´test:unit:box-launch-refuses-owner-credential-binds-before-start´
+    #[test]
+    fn box_launch_refuses_owner_credential_binds_before_start() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let owner = fixture.path();
+        let loop_root = owner.join(".var/loops/alpha");
+        let mut settings = crate::tests::fixture_settings(std::path::Path::new("/usr/bin/true"));
+        settings.image_digest = Some("sha256:abc".into());
+        settings.template_dir = Some(loop_root.join("runner-templates/codex/abc"));
+        settings.socket_dir = Some(loop_root.join("sockets"));
+        for source in [
+            owner.to_path_buf(),
+            owner.join(".config/loops/alpha/claude"),
+            owner.join(".config/loops/alpha/lanes/codex"),
+            owner.join(".config/loops/alpha"),
+        ] {
+            let plan = crate::plan::Plan {
+                home: loop_root.join("worker-homes/R"),
+                driver_dir: loop_root.join("runs/R"),
+                letter: owner.join("briefing"),
+                document: serde_json::json!({"loop":"alpha", "backend":"codex",
+                    "mounts":[{"kind":"bind", "source":source,
+                        "target":"/home/worker/exposed", "access":"ro"}]}),
+            };
+            let error = super::check_mount_roots(&plan, &settings, owner)
+                .expect_err("credential bind must refuse before launch");
+            assert_eq!(error.kind, "credential-mount", "{error:?}");
         }
     }
 

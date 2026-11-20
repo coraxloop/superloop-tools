@@ -788,8 +788,11 @@ fn source_text(path: &Path) -> Result<String, LaneError> {
             format!("{} is not a bounded regular file", path.display()),
         ));
     }
-    fs::read_to_string(path)
-        .map_err(|error| LaneError::input("install-source", format!("{}: {error}", path.display())))
+    let text = fs::read_to_string(path).map_err(|error| {
+        LaneError::input("install-source", format!("{}: {error}", path.display()))
+    })?;
+    crate::build::refuse_credential_image_input(path, text.as_bytes())?;
+    Ok(text)
 }
 
 fn unit_text(source: &Path, replacements: &[(&str, &Path)]) -> Result<Vec<u8>, LaneError> {
@@ -1491,6 +1494,28 @@ fn run_with_lane_bin_inner(
     }
     let request = &resolved;
     let payloads = crate::build::payload::install_payloads(&report, &settings)?;
+    crate::build::source_bytes(
+        &request.data_dir.join("box-init"),
+        "image init",
+        65_536,
+        false,
+    )?;
+    for payload in &payloads {
+        crate::build::source_bytes(
+            &payload.bin,
+            "vendor image program",
+            crate::build::MAX_CODEX_BYTES,
+            false,
+        )?;
+        if let Some((companion, _)) = &payload.companion {
+            crate::build::source_bytes(
+                companion,
+                "vendor companion program",
+                crate::build::MAX_CODEX_BYTES,
+                false,
+            )?;
+        }
+    }
     let primary = payloads
         .first()
         .ok_or_else(|| LaneError::input("missing-setting", "no configured vendor"))?;
@@ -2583,6 +2608,25 @@ mod tests {
         assert_eq!(
             super::default_proxy_bin(&lane, home).expect("absent sibling uses record"),
             std::path::Path::new("/recorded/proxy")
+        );
+    }
+
+    /// # Panics
+    /// Panics if an install template shaped as a credential is rendered for publication.
+    /// ´test:unit:install-template-refuses-credential-document-before-render´
+    #[test]
+    fn install_template_refuses_credential_document_before_render() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let source = fixture.path().join("vendor-proxy.service.in");
+        fs::write(&source, br#"{"tokens":{"refresh_token":"synthetic-only"}}"#)
+            .expect("shaped source");
+        let error = super::unit_text(&source, &[]).expect_err("credential source refuses");
+        assert_eq!(error.kind, "credential-image-input", "{error:?}");
+        assert_eq!(
+            fs::read_dir(fixture.path())
+                .expect("fixture entries")
+                .count(),
+            1
         );
     }
 

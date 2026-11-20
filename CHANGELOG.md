@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Default the boxed Claude helper's owner credential path to access-only reads and publication; due or expired authority refuses without invoking the vendor program. An owner-held cutover request remains refused until carrier exclusion can be proved (``inv:superlooplane:one-claude-source-refresher``). Compatibility: the production Claude gate remains closed, Codex boxes are unchanged, and Claude owner checks can now refuse as `credential-read-due`, `credential-read-expired`, `credential-mode` or `credential-cutover-gate`.
 
+- Refuse named vendor credential variables in a box plan, owner sign-in binds at launch, and recognized credential files in image and install inputs as `credential-environment`, `credential-mount` and `credential-image-input`; pin the Claude periodic cutover refusal at its production entry (``inv:superlooplane:box-inputs-exclude-recognized-credentials``). Compatibility: the production Claude gate remains closed; Codex plans, builds and installs now refuse the same recognized credential inputs, while ordinary Codex boxes and harvest keep their existing forms.
+
 ## [0.8.2] - 2026-11-20
 
 ### Fixed
