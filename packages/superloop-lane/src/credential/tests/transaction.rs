@@ -102,7 +102,7 @@ fn fixture_builder_scripts(owner: &Path) {
         (
             "run",
             format!(
-                "case \" $* \" in *python3*) printf '%s\\n' '{probe}' ;; *) printf 'git 2\\n' ;; esac\n"
+                "case \"$1\" in ps) exit 0 ;; esac\ncase \" $* \" in *python3*) printf '%s\\n' '{probe}' ;; *--name=*) cat >/dev/null; printf 'fixture-attempt\\n'; exit 7 ;; *) printf 'git 2\\n' ;; esac\n"
             ),
         ),
     ] {
@@ -122,7 +122,9 @@ fn launch_with_builder(name: &str, builder: bool) -> Host {
         .expect("host-created enclosure");
     let program = builder.then(|| PathBuf::from("/usr/bin/bash"));
     let (root, bundle) = claude_standin_host_with_root(enclosing, program.as_deref());
-    if name.starts_with("claude_fixture_service_round_") {
+    if name.starts_with("claude_fixture_service_round_")
+        || name.starts_with("claude_fixture_service_attempt_")
+    {
         fs::write(
             root.path().join("owner/.config/loops/allocations.toml"),
             "mail_uid=64001\n[alpha]\nuids={base=3000,count=2}\nmail_gids={base=64020,count=3}\n",
@@ -301,6 +303,10 @@ fn wait_event(host: &mut Host, name: &str) {
     }
 }
 fn fail_with_output(host: &mut Host, event: &str) -> ! {
+    let readiness = host
+        .root
+        .as_ref()
+        .and_then(|root| fs::read_to_string(root.path().join("service-readiness-missing")).ok());
     let mut child = host.child.take().expect("diagnostic child");
     let stopped = child.stop();
     if !stopped && let Some(root) = host.root.take() {
@@ -309,7 +315,8 @@ fn fail_with_output(host: &mut Host, event: &str) -> ! {
     }
     let output = child.wait_with_output().expect("failed child output");
     panic!(
-        "{event}; namespace stopped={stopped}\nstdout:\n{}\nstderr:\n{}",
+        "{event}; namespace stopped={stopped}; readiness missing={}\nstdout:\n{}\nstderr:\n{}",
+        readiness.as_deref().unwrap_or("unmeasured"),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -744,8 +751,87 @@ fn claude_fixture_service_builder_publishes_image_report() {
     assert!(!path.exists());
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServiceCase {
+    NoClient,
+    Due,
+    Attempt,
+    OutsideSession,
+}
+
 #[allow(clippy::too_many_lines)]
-fn service_round_body(enclosing: &Path, due: bool) {
+fn service_client_or_driver_entry() -> bool {
+    use std::io::{Read as _, Write as _};
+    let Some(run) = std::env::var_os("CLAUDE_FIXTURE_CLIENT_RUN") else {
+        return false;
+    };
+    let run = PathBuf::from(run);
+    if std::env::var_os("CLAUDE_FIXTURE_DRIVER_ENTRY").is_some() {
+        let mut start = [0_u8];
+        if std::io::stdin().read_exact(&mut start).is_err() {
+            return true;
+        }
+        assert_eq!(start, *b"G");
+        let mut client = Command::new(std::env::current_exe().expect("client test image"))
+            .args([
+                "--exact",
+                std::env::var("CLAUDE_FIXTURE_ENTRY_NAME")
+                    .expect("entry selector")
+                    .as_str(),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_remove("CLAUDE_FIXTURE_DRIVER_ENTRY")
+            .env("CLAUDE_FIXTURE_CLIENT_ENTRY", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("driver starts client");
+        client
+            .stdin
+            .take()
+            .expect("client prompt")
+            .write_all(crate::FIRST_DISPATCH_PROMPT.as_bytes())
+            .expect("client prompt frame input");
+        let output = client.wait_with_output().expect("client result");
+        assert!(
+            output.status.success(),
+            "client failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            result.contains("fixture-attempt"),
+            "client output: {result}"
+        );
+        assert!(
+            result.contains("CLIENT-STATUS=7"),
+            "client status: {result}"
+        );
+        writeln!(std::io::stdout().lock(), "DRIVER-CLIENT-RESULT={result}")
+            .expect("driver client record");
+        return true;
+    }
+    assert!(std::env::var_os("CLAUDE_FIXTURE_CLIENT_ENTRY").is_some());
+    nix::unistd::setgid(Gid::from_raw(64000)).expect("loop group");
+    nix::unistd::setuid(Uid::from_raw(64000)).expect("loop uid");
+    assert_eq!(owner_identity(), (64000, 64000));
+    let result = crate::container_helper::client(&run);
+    if std::env::var_os("CLAUDE_FIXTURE_OUTSIDE_SESSION").is_some() {
+        let error = result.expect_err("foreign client is refused");
+        writeln!(std::io::stdout().lock(), "CLIENT-REFUSAL={}", error.kind)
+            .expect("client refusal record");
+    } else {
+        let status = result.expect("production client attempt");
+        writeln!(std::io::stdout().lock(), "CLIENT-STATUS={status}").expect("client status record");
+    }
+    true
+}
+
+#[allow(clippy::too_many_lines)]
+fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
+    use std::io::Write as _;
     transaction_body(
         enclosing,
         |root, owner, runs, worker, _, admission, document| {
@@ -808,7 +894,7 @@ fn service_round_body(enclosing: &Path, due: bool) {
             fs::write(home.join(".fixture-refresh-sentinel-arm"), b"armed")
                 .expect("owner program sentinel arm");
             let source_path = home.join(".credentials.json");
-            if due {
+            if scenario == ServiceCase::Due {
                 let expiry = now_seconds().expect("clock") + 300;
                 fs::write(&source_path, claude_document(expiry * 1000).to_string())
                     .expect("due source");
@@ -820,6 +906,18 @@ fn service_round_body(enclosing: &Path, due: bool) {
 
             let parent = std::env::var_os("CLAUDE_PARENT_MOUNT_NAMESPACE");
             mount_service_procfs(parent.as_deref()).expect("isolated service procfs");
+            let client_runs =
+                if matches!(scenario, ServiceCase::Attempt | ServiceCase::OutsideSession) {
+                    let alias = tempfile::Builder::new()
+                        .prefix("lane-claude-client-runs-")
+                        .tempdir_in("/tmp")
+                        .expect("client runs mountpoint");
+                    fs::set_permissions(alias.path(), fs::Permissions::from_mode(0o711))
+                        .expect("client runs traversal");
+                    Some(alias)
+                } else {
+                    None
+                };
             assert_eq!(
                 fs::read_link("/proc/self")
                     .expect("namespace proc identity")
@@ -860,24 +958,149 @@ fn service_round_body(enclosing: &Path, due: bool) {
             let threads_before = fs::read_dir("/proc/self/task")
                 .expect("service caller threads before entry")
                 .count();
+            let service_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-            let release = if due {
+            let release = if scenario == ServiceCase::Due {
                 None
             } else {
                 let input = launcher.stdin.take().expect("launcher input");
                 let evidence = evidence_path.clone();
                 let request = request_socket.clone();
                 let control = control_socket.clone();
+                let diagnostic = enclosing.join("service-readiness-missing");
+                let run_dir = client_runs
+                    .as_ref()
+                    .map_or(runs, tempfile::TempDir::path)
+                    .join("R");
+                let reservation = reservation.clone();
+                let root_meta =
+                    fs::metadata(client_runs.as_ref().map_or(runs, tempfile::TempDir::path))
+                        .expect("client runs root identity");
+                let client_socket = client_runs
+                    .as_ref()
+                    .map(|root| root.path().join(".container-R.sock"));
+                let selector = match scenario {
+                    ServiceCase::Attempt => {
+                        "credential::tests::transaction::claude_fixture_service_attempt_admits_driver_client"
+                    }
+                    ServiceCase::OutsideSession => {
+                        "credential::tests::transaction::claude_fixture_service_attempt_refuses_outside_session"
+                    }
+                    _ => "",
+                };
+                let done = Arc::clone(&service_done);
                 Some(std::thread::spawn(move || {
-                    let deadline = std::time::Instant::now() + Duration::from_secs(90);
                     while !(evidence.exists() && request.exists() && control.exists()) {
-                        assert!(
-                            std::time::Instant::now() < deadline,
-                            "service readiness and first periodic evidence did not arrive"
-                        );
+                        if done.load(std::sync::atomic::Ordering::Acquire) {
+                            return "service returned before readiness".to_owned();
+                        }
+                        let missing = [
+                            (!evidence.exists()).then_some("first periodic evidence"),
+                            (!request.exists()).then_some("request socket"),
+                            (!control.exists()).then_some("control socket"),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                        fs::write(&diagnostic, missing).expect("readiness diagnostic");
                         std::thread::sleep(Duration::from_millis(10));
                     }
+                    let mut result = String::new();
+                    if matches!(scenario, ServiceCase::Attempt | ServiceCase::OutsideSession) {
+                        let alias_socket = client_socket.as_ref().expect("client socket alias");
+                        fs::write(alias_socket, b"").expect("client socket mountpoint");
+                        nix::mount::mount(
+                            Some(request.as_path()),
+                            alias_socket,
+                            None::<&str>,
+                            nix::mount::MsFlags::MS_BIND,
+                            None::<&str>,
+                        )
+                        .expect("private bind of admitted request socket");
+                        let original = fs::metadata(&request).expect("service request socket");
+                        let bound = fs::metadata(alias_socket).expect("bound request socket");
+                        assert_eq!(
+                            (bound.dev(), bound.ino()),
+                            (original.dev(), original.ino()),
+                            "client reaches the service's socket inode"
+                        );
+                        let mut driver =
+                            Command::new(std::env::current_exe().expect("driver image"))
+                                .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+                                .env("CLAUDE_FIXTURE_CLIENT_RUN", &run_dir)
+                                .env("CLAUDE_FIXTURE_ENTRY_NAME", selector)
+                                .env("CLAUDE_FIXTURE_DRIVER_ENTRY", "1")
+                                .env("SUPERLOOP_CLIENT_ROOT_DEV", root_meta.dev().to_string())
+                                .env("SUPERLOOP_CLIENT_ROOT_INO", root_meta.ino().to_string())
+                                .env("SUPERLOOP_CLIENT_SOCKET_NAME", ".container-R.sock")
+                                .stdin(Stdio::piped())
+                                .stdout(Stdio::piped())
+                                .stderr(Stdio::piped())
+                                .spawn()
+                                .expect("dedicated driver entry");
+                        let mut saved: Value = serde_json::from_slice(
+                            &fs::read(&reservation).expect("reservation for driver entry"),
+                        )
+                        .expect("reservation JSON");
+                        saved["driver_entry_pid"] = json!(driver.id());
+                        saved["driver_entry_start"] = json!(
+                            crate::container_helper::process_start(driver.id())
+                                .expect("driver entry start")
+                        );
+                        crate::launch::publish_reservation(&reservation, &saved)
+                            .expect("record driver entry before client");
+                        if scenario == ServiceCase::Attempt {
+                            driver
+                                .stdin
+                                .take()
+                                .expect("driver start input")
+                                .write_all(b"G")
+                                .expect("start driver client");
+                        } else {
+                            let mut foreign = Command::new(
+                                std::env::current_exe().expect("outside client image"),
+                            )
+                            .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+                            .env("CLAUDE_FIXTURE_CLIENT_RUN", &run_dir)
+                            .env("CLAUDE_FIXTURE_ENTRY_NAME", selector)
+                            .env("CLAUDE_FIXTURE_CLIENT_ENTRY", "1")
+                            .env("CLAUDE_FIXTURE_OUTSIDE_SESSION", "1")
+                            .env("SUPERLOOP_CLIENT_ROOT_DEV", root_meta.dev().to_string())
+                            .env("SUPERLOOP_CLIENT_ROOT_INO", root_meta.ino().to_string())
+                            .env("SUPERLOOP_CLIENT_SOCKET_NAME", ".container-R.sock")
+                            .stdin(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .spawn()
+                            .expect("outside driver-session client");
+                            foreign
+                                .stdin
+                                .take()
+                                .expect("foreign prompt")
+                                .write_all(crate::FIRST_DISPATCH_PROMPT.as_bytes())
+                                .expect("foreign prompt input");
+                            let output = foreign.wait_with_output().expect("foreign client exit");
+                            assert!(
+                                output.status.success(),
+                                "foreign client: {}",
+                                String::from_utf8_lossy(&output.stderr)
+                            );
+                            result = String::from_utf8_lossy(&output.stdout).into_owned();
+                        }
+                        drop(driver.stdin.take());
+                        let output = driver.wait_with_output().expect("driver entry exit");
+                        assert!(
+                            output.status.success(),
+                            "driver entry: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        result.push_str(&String::from_utf8_lossy(&output.stdout));
+                        nix::mount::umount(alias_socket).expect("unmount client socket alias");
+                        fs::remove_file(alias_socket).expect("remove client socket mountpoint");
+                    }
                     drop(input);
+                    result
                 }))
             };
             let outcome = crate::container_helper::fixture_serve_admitted_at(
@@ -885,9 +1108,33 @@ fn service_round_body(enclosing: &Path, due: bool) {
                 &runs.join("R"),
                 admission,
             );
+            service_done.store(true, std::sync::atomic::Ordering::Release);
             if let Some(release) = release {
-                release.join().expect("readiness release");
-                outcome.expect("no-client service ends after launcher exit");
+                let result = release.join().expect("readiness release");
+                assert_ne!(result, "service returned before readiness", "{outcome:?}");
+                if scenario == ServiceCase::OutsideSession {
+                    let error = outcome.expect_err("outside-session peer refuses");
+                    assert_eq!(error.kind, "helper-peer", "{error:?}");
+                    assert_eq!(
+                        error.detail,
+                        "request is outside the launched driver session"
+                    );
+                    assert!(result.contains("CLIENT-REFUSAL="), "{result}");
+                } else {
+                    outcome.expect("service ends after launcher exit");
+                }
+                if scenario == ServiceCase::Attempt {
+                    assert!(result.contains("CLIENT-STATUS=7"), "{result}");
+                    assert!(result.contains("fixture-attempt"), "{result}");
+                    let evidence: Value = serde_json::from_slice(
+                        &fs::read(runs.join("R/container-attempt-1.status.json"))
+                            .expect("service attempt status"),
+                    )
+                    .expect("attempt status JSON");
+                    assert_eq!(evidence["status"], 7, "{evidence}");
+                    assert_eq!(evidence["bounded"], true, "{evidence}");
+                    assert_eq!(evidence["attempt"], 1, "{evidence}");
+                }
             } else {
                 let error = outcome.expect_err("due owner source refuses at service entry");
                 assert_eq!(error.kind, "credential-read-due", "{error:?}");
@@ -905,13 +1152,20 @@ fn service_round_body(enclosing: &Path, due: bool) {
             assert!(launcher.wait().expect("launcher exit").code().is_some());
             assert!(!request_socket.exists(), "request socket removed");
             assert!(!control_socket.exists(), "control socket removed");
-            assert_eq!(
-                fs::read_dir("/proc/self/task")
-                    .expect("service caller threads after return")
-                    .count(),
-                threads_before,
-                "service returned with no control or authority thread"
-            );
+            // The attempt cases pin service return and socket cleanup. A task
+            // listing here also depends on procfs teardown after a join, an
+            // event this test does not control. The no-client cases keep the
+            // earlier whole-process count check.
+            if matches!(scenario, ServiceCase::NoClient | ServiceCase::Due) {
+                assert_eq!(
+                    fs::read_dir("/proc/self/task")
+                        .expect("service caller threads after return")
+                        .count(),
+                    threads_before,
+                    "service returned with no control or authority thread"
+                );
+            }
+            drop(client_runs);
             assert_eq!(
                 fs::read(&source_path).expect("owner source after service"),
                 source_bytes
@@ -930,7 +1184,7 @@ fn service_round_body(enclosing: &Path, due: bool) {
                 !home.join(".fixture-refresh-sentinel").exists(),
                 "read-mode service never runs the owner program"
             );
-            if !due {
+            if scenario != ServiceCase::Due {
                 let saved: Value =
                     serde_json::from_slice(&fs::read(&reservation).expect("published reservation"))
                         .expect("reservation JSON");
@@ -982,7 +1236,7 @@ fn claude_fixture_service_round_publishes_read_mode() {
     if enter(
         "claude_fixture_service_round_publishes_read_mode",
         |enclosing| {
-            service_round_body(enclosing, false);
+            service_round_body(enclosing, ServiceCase::NoClient);
         },
     ) {
         return;
@@ -1002,13 +1256,58 @@ fn claude_fixture_service_round_due_refuses_without_publication() {
     if enter(
         "claude_fixture_service_round_due_refuses_without_publication",
         |enclosing| {
-            service_round_body(enclosing, true);
+            service_round_body(enclosing, ServiceCase::Due);
         },
     ) {
         return;
     }
     let mut host = launch_with_builder(
         "claude_fixture_service_round_due_refuses_without_publication",
+        true,
+    );
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+/// # Panics
+/// Panics if the loop-uid production client cannot receive the bounded attempt result.
+/// ´test:unit:claude-fixture-service-attempt-admits-driver-client´
+#[test]
+fn claude_fixture_service_attempt_admits_driver_client() {
+    if service_client_or_driver_entry() {
+        return;
+    }
+    if enter(
+        "claude_fixture_service_attempt_admits_driver_client",
+        |enclosing| service_round_body(enclosing, ServiceCase::Attempt),
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder("claude_fixture_service_attempt_admits_driver_client", true);
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+/// # Panics
+/// Panics if a loop-uid client outside the recorded driver session is admitted.
+/// ´test:unit:claude-fixture-service-attempt-refuses-outside-session´
+#[test]
+fn claude_fixture_service_attempt_refuses_outside_session() {
+    if service_client_or_driver_entry() {
+        return;
+    }
+    if enter(
+        "claude_fixture_service_attempt_refuses_outside_session",
+        |enclosing| service_round_body(enclosing, ServiceCase::OutsideSession),
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder(
+        "claude_fixture_service_attempt_refuses_outside_session",
         true,
     );
     let path = host.root.as_ref().expect("enclosure").path().to_owned();

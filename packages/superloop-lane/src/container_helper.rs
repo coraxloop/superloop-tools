@@ -2670,6 +2670,12 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
 }
 
 fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), LaneError> {
+    if !Uid::effective().is_root() {
+        return Err(LaneError::input(
+            "helper-identity",
+            "rootless namespace owner is required",
+        ));
+    }
     serve_admitted_at(&caller_home()?, run_dir, admission)
 }
 
