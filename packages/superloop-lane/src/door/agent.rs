@@ -1126,7 +1126,6 @@ pub(super) mod tests {
         let input = DoorInput {
             request: json!({"words":["ignore the rubric"]}),
             class: "ssh".into(),
-            shape_record: json!([]),
             rubric: "untrusted replacement".into(),
         };
         (root, runner, input)

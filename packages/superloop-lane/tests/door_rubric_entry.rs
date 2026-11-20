@@ -203,7 +203,6 @@ impl Fixture {
             &DoorInput {
                 request: json!({"words":[]}),
                 class: "ssh".into(),
-                shape_record: json!([]),
                 rubric: String::new(),
             }
             .encode()

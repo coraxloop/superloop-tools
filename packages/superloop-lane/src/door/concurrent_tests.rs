@@ -412,9 +412,74 @@ fn history_call(fixture: &Fixture) -> HistoryCall {
     HistoryCall { client, input: input_rx, slot_released: slot_rx, release: release_tx, handler }
 }
 
-fn history_entry(input: &Value, id: &str) -> Value {
-    input["shape_record"].as_array().expect("history").iter()
+fn history_entry(history: &Value, id: &str) -> Value {
+    history.as_array().expect("history").iter()
         .find(|row| row["id"] == id).expect("earlier filed entry").clone()
+}
+
+/// # Panics
+/// Panics if a conflicted learned shape can put an older run's history in the agent input.
+/// ´test:unit:door-agent-sees-no-learned-history-on-cross-run-miss´
+#[test]
+fn door_agent_sees_no_learned_history_on_cross_run_miss() {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let store = fixture.store();
+    let setting = store.ensure_first_mode("ssh").expect("mode");
+    for (treatment, reason) in [
+        ("allow", "old-label-allow-marker"),
+        ("refuse", "old-label-refuse-marker"),
+    ] {
+        let registration = concurrent_registration(3000);
+        let row = super::request_record(
+            &registration, "ssh", Operation::GitReceive, &setting,
+            &json!({"decision":"undecided","reason":"old-verdict-marker"}), true, &[],
+        ).expect("old request");
+        let id = row.id().to_owned();
+        store.file(row).expect("old request filed");
+        store.triage("R", &[json!({"id":id,"action":"adjudicate",
+            "treatment":treatment,"reason":reason})], "fixture-loop", "2")
+            .expect("old request labelled");
+    }
+    let (decision, _, history) = store.learned_judgement("ssh", "git-receive", "ssh:git-receive")
+        .expect("conflicted group");
+    assert_eq!(decision["decision"], "undecided");
+    let old = history.to_string();
+    assert!(old.contains("R:"), "{old}");
+    assert!(old.contains("old-verdict-marker"), "{old}");
+    assert!(old.contains("old-label-allow-marker"), "{old}");
+    assert!(old.contains("old-label-refuse-marker"), "{old}");
+    assert!(history.as_array().expect("old rows").iter().all(|row|
+        row["label"]["request_id"].as_str().is_some_and(|id| id.starts_with("R:"))), "{old}");
+
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let agent = CapturedAdmissionAgent { input: input_tx, release: Mutex::new(release_rx) };
+    let (runner, _, _) = counting_runner(&fixture);
+    let route = route_for(&fixture.home);
+    let home = fixture.home.clone();
+    let new_store = fixture.store();
+    let registration = Registration::from_row(
+        &json!({"name":"alpha","uid":2001}), "alpha", "S", 3000, Scope::Work,
+    ).expect("new run");
+    let (client, mut server) = FixtureClient::pair().expect("new request pair");
+    client.shutdown(Shutdown::Write).expect("request input complete");
+    let handler = thread::spawn(move || super::serve_request_with_agent(
+        &mut server, &registration, 3000,
+        &json!({"schema":2,"argv":[b"fixture".to_vec(),
+            b"git-receive-pack '~/mirrors/S.git'".to_vec()],"deadline_ms":120_000}),
+        Some(&route), Some(&runner), Some(&home), None, Some(&new_store),
+        Some(&agent), None, Instant::now(),
+    ));
+    let input = input_rx.recv_timeout(FIXTURE_HANG).expect("new run agent input");
+    assert!(input["request"]["words"].to_string().contains("S.git"), "{input}");
+    let encoded = input.to_string();
+    for old_text in ["R:", "old-verdict-marker", "old-label-allow-marker", "old-label-refuse-marker"] {
+        assert!(!encoded.contains(old_text), "prior history reached agent: {encoded}");
+    }
+    assert!(input.get("shape_record").is_none(), "{input}");
+    release_tx.send(()).expect("release new run agent");
+    handler.join().expect("new run handler").expect("new run served");
 }
 
 /// # Panics
@@ -436,7 +501,10 @@ fn door_concurrent_allow_agent_publication_window() {
     let input = second.input.recv_timeout(FIXTURE_HANG).expect("same-worker second agent overlaps");
     let _measured = writeln!(io::stderr().lock(), "admission-history second_agent_wait_ms={}", began.elapsed().as_millis());
     assert_eq!(store.list_run("R").expect("both filed").len(), 2);
-    assert_eq!(history_entry(&input, &id)["would_do"]["decision"], "undecided");
+    assert!(input.get("shape_record").is_none(), "{input}");
+    let history = store.learned_judgement("ssh", "probe-echo", "ssh:probe-echo")
+        .expect("index while agent held").2;
+    assert_eq!(history_entry(&history, &id)["would_do"]["decision"], "undecided");
     assert_eq!(second.client.answer()["reason"], "door-complete");
     second.slot_released.recv_timeout(FIXTURE_HANG).expect("second slot released");
     first.release.send(()).expect("first advice released");
@@ -444,8 +512,11 @@ fn door_concurrent_allow_agent_publication_window() {
     assert_eq!(store.request(&id).expect("advice recorded").value()["would_do"]["decision"], "refuse");
     let mut third = history_call(&fixture);
     let input = third.input.recv_timeout(FIXTURE_HANG).expect("unlabelled advice remains a miss");
-    assert_eq!(history_entry(&input, &id)["would_do"]["decision"], "refuse");
-    assert!(history_entry(&input, &id)["label"].is_null());
+    assert!(input.get("shape_record").is_none(), "{input}");
+    let history = store.learned_judgement("ssh", "probe-echo", "ssh:probe-echo")
+        .expect("index after advice").2;
+    assert_eq!(history_entry(&history, &id)["would_do"]["decision"], "refuse");
+    assert!(history_entry(&history, &id)["label"].is_null());
     assert_eq!(third.client.answer()["reason"], "door-complete");
     for call in [second, third] {
         call.release.send(()).expect("release remaining agent");

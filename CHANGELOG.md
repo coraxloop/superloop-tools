@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-20
+
+### Fixed
+
+- Keep learned shape history in the door's fast lane and operator records, but send no earlier request text, identifiers, verdict reasons or adjudication reasons to the bounded agent on a miss (``inv:superlooplane:door-agent-input-has-no-learned-history``). Compatibility: the agent for both `superloop-lane` and `superloop command judge` now sees only the current request, capability class, fixed instruction and reviewed rubric, so its verdict on a miss can differ where an earlier verdict leaned on earlier reasons; a lesson a door loop means to outlast a run belongs in its reviewed rubric or in the agreeing labels the fast lane decides by. Stored records and the learned index need no rewrite or rebuild. Install `superloop-lane` and `superloop` together and restart each door.
+
+- Make the door wait-error fixture assert the durable disconnect, skipped final write and incomplete attempt after closing its client at the read boundary, independent of which stop check observes the close. Product behavior and record formats are unchanged (``test:unit:door-wait-errors-send-final-and-record-incomplete``).
+
 ## [0.8.1] - 2026-11-19
 
 ### Changed
@@ -1089,7 +1097,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/coraxloop/superloop-tools/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/coraxloop/superloop-tools/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/coraxloop/superloop-tools/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/coraxloop/superloop-tools/compare/v0.6.0...v0.7.0
