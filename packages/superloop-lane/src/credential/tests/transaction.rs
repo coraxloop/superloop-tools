@@ -156,6 +156,66 @@ fn enter(name: &str, body: fn(&Path)) -> bool {
     true
 }
 
+fn mount_service_procfs(parent: Option<&std::ffi::OsStr>) -> Result<(), LaneError> {
+    use nix::mount::{MsFlags, mount};
+    let parent = parent.ok_or_else(|| {
+        LaneError::input(
+            "fixture-mount-namespace",
+            "parent mount namespace is absent",
+        )
+    })?;
+    // SAFETY: the fixed mount-namespace flag contains no pointers. The mount
+    // below is unreachable unless this thread has entered its own namespace.
+    #[allow(unsafe_code)]
+    let unshare_result = unsafe { libc::unshare(libc::CLONE_NEWNS) };
+    if unshare_result != 0 {
+        return Err(LaneError::operation(
+            "fixture-mount-namespace",
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .map_err(|error| LaneError::operation("fixture-mount-propagation", error.to_string()))?;
+    let current = fs::read_link("/proc/self/ns/mnt")
+        .map_err(|error| LaneError::input("fixture-mount-namespace", error.to_string()))?;
+    if current == Path::new(parent) {
+        return Err(LaneError::input(
+            "fixture-mount-namespace",
+            "service fixture still shares its parent's mount namespace",
+        ));
+    }
+    mount(
+        Some("proc"),
+        "/proc",
+        Some("proc"),
+        MsFlags::empty(),
+        None::<&str>,
+    )
+    .map_err(|error| LaneError::operation("fixture-procfs", error.to_string()))?;
+    Ok(())
+}
+
+/// # Panics
+/// Panics if a missing parent identity reaches the namespace or mount calls.
+/// ´test:unit:claude-fixture-service-refuses-unproved-mount-namespace´
+#[test]
+fn claude_fixture_service_refuses_unproved_mount_namespace() {
+    let before = fs::read_link("/proc/self/ns/mnt").expect("current mount namespace");
+    let error = mount_service_procfs(None).expect_err("unproved namespace refuses");
+    assert_eq!(error.kind, "fixture-mount-namespace", "{error:?}");
+    assert_eq!(
+        fs::read_link("/proc/self/ns/mnt").expect("mount namespace after refusal"),
+        before,
+        "unproved fixture must not enter a mount namespace"
+    );
+}
+
 // The namespace init ignores a signal it sends itself; its exit ends every member. The
 // deadline follows the host's 180-second watchdog, so a living host reports first.
 #[allow(clippy::exit)]
@@ -318,6 +378,62 @@ fn claude_fixture_admitted_round() {
         return;
     }
     let mut host = launch("claude_fixture_admitted_round");
+    let path = host.root.as_ref().expect("E").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+fn service_procfs_body(enclosing: &Path) {
+    transaction_body(enclosing, |_, _, _, _, record, admission, _| {
+        let enclosing =
+            PathBuf::from(std::env::var_os("CLAUDE_TRANSACTION_ROOT").expect("enclosing root"));
+        let handed: Value = serde_json::from_slice(
+            &fs::read(enclosing.join("namespace-init")).expect("host-view identity handoff"),
+        )
+        .expect("host-view identity JSON");
+        assert_eq!(handed["pid"], record["helper_pid"]);
+        assert_eq!(handed["start"], record["helper_start"]);
+        let parent = std::env::var_os("CLAUDE_PARENT_MOUNT_NAMESPACE");
+        mount_service_procfs(parent.as_deref()).expect("isolated procfs mount");
+        let namespace_pid: u32 = fs::read_link("/proc/self")
+            .expect("namespace proc identity")
+            .to_str()
+            .expect("numeric proc identity")
+            .parse()
+            .expect("namespace PID");
+        assert_eq!(namespace_pid, std::process::id());
+        assert_ne!(
+            u64::from(namespace_pid),
+            handed["pid"].as_u64().expect("host PID")
+        );
+        let local_start = crate::container_helper::process_start(namespace_pid)
+            .expect("namespace-local start tick");
+        assert!(crate::container_helper::process_alive(
+            namespace_pid,
+            local_start
+        ));
+        let mut foreign = record.clone();
+        foreign["plan"]["run"] = json!("foreign");
+        let error = admission
+            .scope_record(&foreign)
+            .expect_err("foreign fixture run");
+        assert_eq!(error.kind, "fixture-scope", "{error:?}");
+    });
+}
+
+/// # Panics
+/// Panics if private procfs disagrees with the namespace or loses the host identity handoff.
+/// ´test:unit:claude-fixture-service-procfs-keeps-host-handoff´
+#[test]
+fn claude_fixture_service_procfs_keeps_host_handoff() {
+    if enter(
+        "claude_fixture_service_procfs_keeps_host_handoff",
+        service_procfs_body,
+    ) {
+        return;
+    }
+    let mut host = launch("claude_fixture_service_procfs_keeps_host_handoff");
     let path = host.root.as_ref().expect("E").path().to_owned();
     finish(&mut host, true);
     host.cleanup();

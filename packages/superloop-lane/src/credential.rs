@@ -3503,7 +3503,15 @@ mod tests {
     }
 
     fn claude_pid_namespace(name: &str) {
-        let status = Command::new("/usr/bin/unshare")
+        let mut command = Command::new("/usr/bin/unshare");
+        // Every PID fixture gets a private mount namespace, including a future
+        // mounting case outside the transaction tests.
+        command.args(["--mount", "--propagation", "private"]);
+        command.env(
+            "CLAUDE_PARENT_MOUNT_NAMESPACE",
+            fs::read_link("/proc/self/ns/mnt").expect("parent mount namespace"),
+        );
+        let status = command
             .args(["--pid", "--fork", "--kill-child"])
             .arg(std::env::current_exe().expect("test executable"))
             .args([
