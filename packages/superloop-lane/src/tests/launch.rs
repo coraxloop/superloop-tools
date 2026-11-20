@@ -932,14 +932,13 @@ fn boxed_backend_record_readers_do_not_use_launch_readiness() {
     fs::write(&path, "backend_argv = { claude = [\"/fixture/claude\"] }\n")
         .expect("Claude-only settings");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private settings");
-    for result in [
-        crate::load_plan(home, "alpha", "R", (0, 0)),
-        crate::load_plan_for_record(home, "alpha", "R", (0, 0)),
-    ] {
-        let error = result.expect_err("Codex reader requires its own configured program");
-        assert_eq!(error.kind, "missing-setting");
-        assert_eq!(error.detail, "backend_argv.codex is absent or empty");
-    }
+    let error = crate::load_plan(home, "alpha", "R", (0, 0))
+        .expect_err("operator preview reaches the absent registry");
+    assert_eq!(error.kind, "registry-row");
+    let error = crate::load_plan_for_record(home, "alpha", "R", (0, 0))
+        .expect_err("legacy reader keeps its missing Codex refusal");
+    assert_eq!(error.kind, "missing-setting");
+    assert_eq!(error.detail, "backend_argv.codex is absent or empty");
     let error = crate::load_launch_plan(home, "alpha", "R", (0, 0), None)
         .expect_err("new Claude launch remains gated before registry access");
     assert_eq!(error.kind, "backend-unavailable");

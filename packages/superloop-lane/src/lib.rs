@@ -333,8 +333,9 @@ fn load_plan_with_door(
     include_door: bool,
 ) -> Result<(Plan, Settings), LaneError> {
     let settings = read_plan_settings(home, loop_name, run)?;
-    // These legacy readers reconstruct the deployed Codex form, not a new launch.
-    let backend = settings.launch_backend(Some(settings::BoxBackend::Codex))?;
+    // Before a reservation exists, select the configured backend without
+    // opening production launch admission.
+    let backend = settings.launch_backend(None)?;
     load_plan_with_settings(
         home,
         loop_name,

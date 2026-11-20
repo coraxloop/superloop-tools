@@ -981,3 +981,61 @@ fn failed_dispatch_fixture_root_is_removed() {
         binary_root.display()
     );
 }
+
+/// # Panics
+/// Panics if the public plan selects a different backend or opens launch admission.
+/// ´test:integration:plan-previews-the-configured-boxed-backend´
+#[test]
+fn plan_previews_the_configured_boxed_backend() {
+    let fixture = fixture();
+    fs::remove_file(
+        fixture
+            .home
+            .join(".config/loops/alpha/door-install-generation.json"),
+    )
+    .expect("no Codex door in a Claude-only preview");
+    fs::remove_file(fixture.home.join(".config/loops/alpha/door-service"))
+        .expect("no registered Codex door service");
+    let path = fixture.home.join(".config/loops/alpha/workers.toml");
+    let original = fs::read_to_string(&path).expect("fixture settings");
+    let common = original
+        .lines()
+        .filter(|line| !line.starts_with("backend_argv = ") && !line.starts_with("vendor_hosts = "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (name, programs, hosts, selected) in [
+        (
+            "claude",
+            "claude = [\"/fixture/claude\"]",
+            "claude = [\"api.example.com\"]",
+            "claude",
+        ),
+        (
+            "codex",
+            "codex = [\"/fixture/codex\"]",
+            "codex = [\"api.example.com\"]",
+            "codex",
+        ),
+        (
+            "both",
+            "codex = [\"/fixture/codex\"], claude = [\"/fixture/claude\"]",
+            "codex = [\"api.example.com\"], claude = [\"api.example.com\"]",
+            "codex",
+        ),
+    ] {
+        fs::write(
+            &path,
+            format!("{common}\nbackend_argv = {{ {programs} }}\nvendor_hosts = {{ {hosts} }}\n"),
+        )
+        .expect("selected settings");
+        let output = fixture.invoke(&["plan", "alpha", "Preview"]);
+        assert!(
+            output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let plan: Value = serde_json::from_slice(&output.stdout).expect("plan JSON");
+        assert_eq!(plan["backend"], selected, "{name}");
+        assert!(!fixture.home.join(".var/loops/alpha/runs/Preview").exists());
+    }
+}
