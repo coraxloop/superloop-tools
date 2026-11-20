@@ -1012,6 +1012,44 @@ fn publish_generation(path: &Path, generation: &Value) -> Result<(), LaneError> 
         })
 }
 
+#[cfg(test)]
+pub(crate) fn fixture_publish_claude_generation(
+    path: &Path,
+    owner_home: &Path,
+    loop_name: &str,
+    payload: &crate::build::payload::InstallPayload,
+    image_digest: &str,
+    source_fingerprint: &str,
+    init_sha256: &str,
+) -> Result<Value, LaneError> {
+    let mut generation = json!({"schema":1,"phase":"preparing","image_digest":image_digest,
+        "tools_commit":"fixture","source_fingerprint":source_fingerprint,
+        "init_sha256":init_sha256});
+    let hash = image_digest.strip_prefix("sha256:").ok_or_else(|| {
+        LaneError::input(
+            "install-generation",
+            "fixture image digest has no algorithm",
+        )
+    })?;
+    vendor_generation_fields(
+        &mut generation,
+        std::slice::from_ref(payload),
+        &owner_home.join(".var/loops").join(loop_name),
+        hash,
+    )?;
+    publish_generation(path, &generation)?;
+    Ok(generation)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_complete_claude_generation(
+    path: &Path,
+    generation: &mut Value,
+) -> Result<(), LaneError> {
+    generation["phase"] = json!("complete");
+    publish_generation(path, generation)
+}
+
 fn private_report(spec: &ChildSpec, entry_bin: &Path, lane_bin: &Path) -> Result<Value, LaneError> {
     crate::pinned::owner_executable_word(entry_bin, nix::unistd::Uid::effective().as_raw())?;
     crate::pinned::owner_executable_word(lane_bin, nix::unistd::Uid::effective().as_raw())?;

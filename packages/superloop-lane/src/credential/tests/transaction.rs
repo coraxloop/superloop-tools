@@ -422,6 +422,140 @@ fn service_procfs_body(enclosing: &Path) {
     });
 }
 
+#[allow(clippy::too_many_lines)]
+fn install_service_template(root: &FixtureRoot, owner: &Path, digest: &str) -> PathBuf {
+    use crate::build::payload::{CLAUDE, CLAUDE_IMAGE_PROGRAM, InstallPayload};
+    let data = root.path().join("install-inputs");
+    fs::create_dir(&data).expect("install source directory");
+    for (name, bytes, mode) in [
+        ("claude-settings.json", b"{}\n".as_slice(), 0o600),
+        (
+            "worker-AGENTS.md",
+            b"synthetic fixture charter\n".as_slice(),
+            0o600,
+        ),
+        ("box-init", b"#!/bin/sh\nexit 0\n".as_slice(), 0o700),
+    ] {
+        let path = data.join(name);
+        fs::write(&path, bytes).expect("install source");
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("source mode");
+    }
+    let loop_root = owner.join(".var/loops/alpha");
+    fs::create_dir_all(&loop_root).expect("loop install root");
+    let image = format!("sha256:{}", "a".repeat(64));
+    let payload = InstallPayload {
+        vendor: CLAUDE,
+        bin: PathBuf::from("/usr/bin/true"),
+        sha256: digest.to_owned(),
+        image_program: CLAUDE_IMAGE_PROGRAM.into(),
+        companion: None,
+    };
+    let config = owner.join(".config/loops/alpha");
+    fs::remove_file(config.join("install-generation.json"))
+        .expect("replace staged transaction generation with installer generation");
+    let held = fs::File::open(&config).expect("install directory");
+    let guard = crate::install::InstallGuard::from_transferred(&config, held.into())
+        .expect("fixture install lock");
+    let payloads = std::slice::from_ref(&payload);
+    let preview = crate::install_private::run_payloads(
+        owner,
+        "alpha",
+        64000,
+        (0, 0),
+        &data,
+        payloads,
+        &image,
+        "fixture",
+        None,
+        true,
+        false,
+        &guard,
+    )
+    .expect("installer preview");
+    let source = preview["source_fingerprint"]
+        .as_str()
+        .expect("measured sources");
+    let init_digest = crate::build::sha256_bytes(
+        &fs::read(data.join("box-init")).expect("init source"),
+        &data,
+    )
+    .expect("init digest");
+    let generation_path = config.join("install-generation.json");
+    let mut generation = crate::install::fixture_publish_claude_generation(
+        &generation_path,
+        owner,
+        "alpha",
+        &payload,
+        &image,
+        source,
+        &init_digest,
+    )
+    .expect("installer pending generation");
+    crate::install_private::run_payloads(
+        owner,
+        "alpha",
+        64000,
+        (0, 0),
+        &data,
+        payloads,
+        &image,
+        "fixture",
+        Some(source),
+        false,
+        false,
+        &guard,
+    )
+    .expect("installer act");
+    crate::install::fixture_complete_claude_generation(&generation_path, &mut generation)
+        .expect("installer complete generation");
+    let template = payload.template(&loop_root, &"a".repeat(64));
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(template.join("manifest")).expect("installed manifest"))
+            .expect("manifest JSON");
+    assert_eq!(manifest["image_digest"], image);
+    assert_eq!(manifest["claude_sha256"], digest);
+    let generation: Value =
+        serde_json::from_slice(&fs::read(&generation_path).expect("complete generation"))
+            .expect("generation JSON");
+    assert_eq!(generation["phase"], "complete");
+    assert_eq!(
+        generation["claude_template_dir"],
+        template.display().to_string()
+    );
+    assert_eq!(generation["claude_sha256"], manifest["claude_sha256"]);
+    template
+}
+
+/// # Panics
+/// Panics if the private installer does not materialize the Claude template and measured manifest.
+/// ´test:unit:claude-fixture-service-installer-materializes-template´
+#[test]
+fn claude_fixture_service_installer_materializes_template() {
+    if enter(
+        "claude_fixture_service_installer_materializes_template",
+        |enclosing| {
+            transaction_body(enclosing, |root, owner, _, _, _, _, _| {
+                use sha2::{Digest as _, Sha256};
+                use std::fmt::Write as _;
+                let mut digest = String::new();
+                for byte in Sha256::digest(fs::read("/usr/bin/true").expect("stand-in bytes")) {
+                    write!(&mut digest, "{byte:02x}").expect("digest");
+                }
+                let template = install_service_template(root, owner, &digest);
+                assert!(template.join("bin/claude").is_file());
+                assert!(template.join("libexec/box-init").is_file());
+            });
+        },
+    ) {
+        return;
+    }
+    let mut host = launch("claude_fixture_service_installer_materializes_template");
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
 /// # Panics
 /// Panics if private procfs disagrees with the namespace or loses the host identity handoff.
 /// ´test:unit:claude-fixture-service-procfs-keeps-host-handoff´
