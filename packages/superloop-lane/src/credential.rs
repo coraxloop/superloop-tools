@@ -3648,11 +3648,12 @@ mod tests {
     }
 
     fn claude_standin_host() -> (tempfile::TempDir, crate::container_entry::Bundle) {
-        claude_standin_host_with_root(claude_fixture_root())
+        claude_standin_host_with_root(claude_fixture_root(), None)
     }
 
     fn claude_standin_host_with_root(
         root: tempfile::TempDir,
+        podman: Option<&Path>,
     ) -> (tempfile::TempDir, crate::container_entry::Bundle) {
         let owner = root.path().join("owner");
         let runs = root.path().join("runs");
@@ -3684,7 +3685,14 @@ mod tests {
             fs::set_permissions(config.join(name), fs::Permissions::from_mode(0o600))
                 .expect("private configuration");
         }
-        let bundle = crate::container_entry::fixture_claude_helper_bundle(&owner, &runs);
+        let bundle = podman.map_or_else(
+            || crate::container_entry::fixture_claude_helper_bundle(&owner, &runs),
+            |program| {
+                crate::container_entry::fixture_claude_helper_bundle_with_podman(
+                    &owner, &runs, program,
+                )
+            },
+        );
         (root, bundle)
     }
 

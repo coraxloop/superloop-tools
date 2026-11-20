@@ -73,13 +73,58 @@ impl Drop for Host {
     }
 }
 
+fn fixture_builder_scripts(owner: &Path) {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let mut digest = String::new();
+    for byte in Sha256::digest(fs::read("/usr/bin/true").expect("stand-in bytes")) {
+        write!(&mut digest, "{byte:02x}").expect("digest");
+    }
+    let mut help = String::new();
+    for option in crate::build::payload::CLAUDE_EXEC_OPTIONS {
+        writeln!(&mut help, "  {option}").expect("synthetic help");
+    }
+    help.push_str("  stream-json bypassPermissions acceptEdits plan\n");
+    let probe = json!({
+        "sha256":digest,"version":"0.1.0 (Claude Code)","help":help,
+        "interpreter":{"path":"/usr/bin/node","sha256":"a".repeat(64)},
+        "libraries":[{"path":"/usr/lib/libc.so","sha256":"a".repeat(64)}]
+    });
+    for (name, source) in [
+        ("build", "exit 0\n".to_owned()),
+        (
+            "image",
+            format!(
+                "case \"$1\" in exists) exit 0 ;; inspect) printf '%s\\n' '{}' ;; *) exit 99 ;; esac\n",
+                "b".repeat(64)
+            ),
+        ),
+        (
+            "run",
+            format!(
+                "case \" $* \" in *python3*) printf '%s\\n' '{probe}' ;; *) printf 'git 2\\n' ;; esac\n"
+            ),
+        ),
+    ] {
+        fs::write(owner.join(name), source).expect("builder command source");
+    }
+}
+
 fn launch(name: &str) -> Host {
+    launch_with_builder(name, false)
+}
+
+fn launch_with_builder(name: &str, builder: bool) -> Host {
     use std::os::unix::process::CommandExt as _;
     let enclosing = tempfile::Builder::new()
         .prefix("lane-claude-transaction-")
         .tempdir()
         .expect("host-created enclosure");
-    let (root, bundle) = claude_standin_host_with_root(enclosing);
+    let program = builder.then(|| PathBuf::from("/usr/bin/bash"));
+    let (root, bundle) = claude_standin_host_with_root(enclosing, program.as_deref());
+    if builder {
+        fixture_builder_scripts(&root.path().join("owner"));
+    }
     fs::create_dir(root.path().join("live")).expect("modeled live runs");
     let held = fs::OpenOptions::new()
         .read(true)
@@ -118,6 +163,7 @@ fn launch(name: &str) -> Host {
         .env("CLAUDE_TRANSACTION_ROOT", enclosing)
         .env("CLAUDE_TRANSACTION_ACCOUNT", account.dir)
         .env("CLAUDE_STANDIN_MANIFEST", &bundle.manifest)
+        .envs(program.iter().map(|path| ("CLAUDE_FIXTURE_BUILDER", path)))
         .env(
             "CLAUDE_NAMESPACE_IDENTITY",
             enclosing.join("namespace-init"),
@@ -423,8 +469,12 @@ fn service_procfs_body(enclosing: &Path) {
 }
 
 #[allow(clippy::too_many_lines)]
-fn install_service_template(root: &FixtureRoot, owner: &Path, digest: &str) -> PathBuf {
-    use crate::build::payload::{CLAUDE, CLAUDE_IMAGE_PROGRAM, InstallPayload};
+fn install_service_template(
+    root: &FixtureRoot,
+    owner: &Path,
+    payload: &crate::build::payload::InstallPayload,
+    image: &str,
+) -> PathBuf {
     let data = root.path().join("install-inputs");
     fs::create_dir(&data).expect("install source directory");
     for (name, bytes, mode) in [
@@ -440,23 +490,20 @@ fn install_service_template(root: &FixtureRoot, owner: &Path, digest: &str) -> P
         fs::write(&path, bytes).expect("install source");
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("source mode");
     }
+    fs::copy(
+        crate::build::default_template_dir().join("box-init"),
+        data.join("box-init"),
+    )
+    .expect("production init source");
     let loop_root = owner.join(".var/loops/alpha");
     fs::create_dir_all(&loop_root).expect("loop install root");
-    let image = format!("sha256:{}", "a".repeat(64));
-    let payload = InstallPayload {
-        vendor: CLAUDE,
-        bin: PathBuf::from("/usr/bin/true"),
-        sha256: digest.to_owned(),
-        image_program: CLAUDE_IMAGE_PROGRAM.into(),
-        companion: None,
-    };
     let config = owner.join(".config/loops/alpha");
     fs::remove_file(config.join("install-generation.json"))
         .expect("replace staged transaction generation with installer generation");
     let held = fs::File::open(&config).expect("install directory");
     let guard = crate::install::InstallGuard::from_transferred(&config, held.into())
         .expect("fixture install lock");
-    let payloads = std::slice::from_ref(&payload);
+    let payloads = std::slice::from_ref(payload);
     let preview = crate::install_private::run_payloads(
         owner,
         "alpha",
@@ -464,7 +511,7 @@ fn install_service_template(root: &FixtureRoot, owner: &Path, digest: &str) -> P
         (0, 0),
         &data,
         payloads,
-        &image,
+        image,
         "fixture",
         None,
         true,
@@ -485,8 +532,8 @@ fn install_service_template(root: &FixtureRoot, owner: &Path, digest: &str) -> P
         &generation_path,
         owner,
         "alpha",
-        &payload,
-        &image,
+        payload,
+        image,
         source,
         &init_digest,
     )
@@ -498,7 +545,7 @@ fn install_service_template(root: &FixtureRoot, owner: &Path, digest: &str) -> P
         (0, 0),
         &data,
         payloads,
-        &image,
+        image,
         "fixture",
         Some(source),
         false,
@@ -508,12 +555,13 @@ fn install_service_template(root: &FixtureRoot, owner: &Path, digest: &str) -> P
     .expect("installer act");
     crate::install::fixture_complete_claude_generation(&generation_path, &mut generation)
         .expect("installer complete generation");
-    let template = payload.template(&loop_root, &"a".repeat(64));
+    let image_hash = image.strip_prefix("sha256:").expect("image digest");
+    let template = payload.template(&loop_root, image_hash);
     let manifest: Value =
         serde_json::from_slice(&fs::read(template.join("manifest")).expect("installed manifest"))
             .expect("manifest JSON");
     assert_eq!(manifest["image_digest"], image);
-    assert_eq!(manifest["claude_sha256"], digest);
+    assert_eq!(manifest["claude_sha256"], payload.sha256);
     let generation: Value =
         serde_json::from_slice(&fs::read(&generation_path).expect("complete generation"))
             .expect("generation JSON");
@@ -541,7 +589,15 @@ fn claude_fixture_service_installer_materializes_template() {
                 for byte in Sha256::digest(fs::read("/usr/bin/true").expect("stand-in bytes")) {
                     write!(&mut digest, "{byte:02x}").expect("digest");
                 }
-                let template = install_service_template(root, owner, &digest);
+                let payload = crate::build::payload::InstallPayload {
+                    vendor: crate::build::payload::CLAUDE,
+                    bin: PathBuf::from("/usr/bin/true"),
+                    sha256: digest,
+                    image_program: crate::build::payload::CLAUDE_IMAGE_PROGRAM.into(),
+                    companion: None,
+                };
+                let image = format!("sha256:{}", "a".repeat(64));
+                let template = install_service_template(root, owner, &payload, &image);
                 assert!(template.join("bin/claude").is_file());
                 assert!(template.join("libexec/box-init").is_file());
             });
@@ -550,6 +606,103 @@ fn claude_fixture_service_installer_materializes_template() {
         return;
     }
     let mut host = launch("claude_fixture_service_installer_materializes_template");
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+/// # Panics
+/// Panics if the held builder cannot publish the selected image report.
+/// ´test:unit:claude-fixture-service-builder-publishes-image-report´
+#[test]
+fn claude_fixture_service_builder_publishes_image_report() {
+    if enter(
+        "claude_fixture_service_builder_publishes_image_report",
+        |enclosing| {
+            transaction_body(enclosing, |root, owner, _, _, _, _, _| {
+                use sha2::{Digest as _, Sha256};
+                use std::fmt::Write as _;
+                let mut digest = String::new();
+                for byte in Sha256::digest(fs::read("/usr/bin/true").expect("stand-in bytes")) {
+                    write!(&mut digest, "{byte:02x}").expect("digest");
+                }
+                let settings = owner.join(".config/loops/alpha/workers.toml");
+                let mut source = fs::read_to_string(&settings).expect("settings");
+                source.push_str("backend_argv = { claude = ['/usr/libexec/superloop/claude'] }\n");
+                fs::write(&settings, source).expect("configured Claude");
+                let request = crate::build::BuildRequest {
+                    loop_name: "alpha".into(),
+                    claude: Some(crate::build::payload::ProgramInput {
+                        bin: PathBuf::from("/usr/bin/true"),
+                        version: "0.1.0".into(),
+                        sha256: digest.clone(),
+                        source: "https://example.invalid/claude".into(),
+                    }),
+                    base_image: format!("registry.invalid/base@sha256:{}", "a".repeat(64)),
+                    codex_bin: PathBuf::new(),
+                    codex_host_bin: PathBuf::new(),
+                    codex_version: String::new(),
+                    codex_sha256: String::new(),
+                    codex_host_sha256: String::new(),
+                    codex_source: String::new(),
+                    podman_bin: PathBuf::from(
+                        std::env::var_os("CLAUDE_FIXTURE_BUILDER").expect("held builder path"),
+                    ),
+                    template_dir: crate::build::default_template_dir(),
+                    dry_run: false,
+                };
+                let result = crate::build::run(owner, &request).expect("production image build");
+                let report: Value = serde_json::from_slice(
+                    &fs::read(owner.join(".config/loops/alpha/image-build.json"))
+                        .expect("image report"),
+                )
+                .expect("image report JSON");
+                assert_eq!(result["image_digest"], format!("sha256:{}", "b".repeat(64)));
+                assert_eq!(report["image_digest"], result["image_digest"]);
+                assert_eq!(report["claude_sha256"], digest);
+                assert_eq!(
+                    report["claude_image_program"],
+                    "/usr/libexec/superloop/claude"
+                );
+                let installed =
+                    crate::settings::Settings::read(&settings).expect("builder-updated settings");
+                let payloads = crate::build::payload::install_payloads(&report, &installed)
+                    .expect("builder-produced install payload");
+                assert_eq!(payloads.len(), 1);
+                let template = install_service_template(
+                    root,
+                    owner,
+                    &payloads[0],
+                    result["image_digest"].as_str().expect("built image"),
+                );
+                let manifest: Value = serde_json::from_slice(
+                    &fs::read(template.join("manifest")).expect("installed manifest"),
+                )
+                .expect("manifest JSON");
+                let generation: Value = serde_json::from_slice(
+                    &fs::read(owner.join(".config/loops/alpha/install-generation.json"))
+                        .expect("installed generation"),
+                )
+                .expect("generation JSON");
+                crate::launch::check_backend_pin_records(
+                    BoxBackend::Claude,
+                    &manifest,
+                    &report,
+                    &generation,
+                    &template,
+                )
+                .expect("selected build and install pins agree");
+                assert_eq!(generation["init_sha256"], report["init_sha256"]);
+            });
+        },
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder(
+        "claude_fixture_service_builder_publishes_image_report",
+        true,
+    );
     let path = host.root.as_ref().expect("enclosure").path().to_owned();
     finish(&mut host, true);
     host.cleanup();
@@ -700,9 +853,12 @@ fn transaction_body(enclosing: &Path, action: TransactionAction) {
         anchors.pop().expect("configuration"),
     )
     .expect("moved configuration");
-    let (_runtime, programs) =
+    let (runtime, mut programs) =
         crate::container_entry::take_support_programs(&mut anchors, BoxBackend::Claude)
             .expect("program roles");
+    if let Some(program) = std::env::var_os("CLAUDE_FIXTURE_BUILDER") {
+        programs.insert(PathBuf::from(program), Arc::new(runtime));
+    }
     let _home =
         crate::home::activate_private_launch(&owner, &anchors[0], &runs, &anchors[1], None, 0)
             .expect("moved anchors");
