@@ -1,6 +1,8 @@
 use crate::runtime_admission::RuntimeAdmission::Gate;
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -12,6 +14,53 @@ use crate::launch::{
     run_with_host_root_and_proxy, select_free_uid,
 };
 use crate::settings::BoxBackend;
+
+// These fixtures install mode-0550 template directories; close must restore write access.
+struct ProtectedRoot(Option<TempDir>);
+
+impl ProtectedRoot {
+    fn short_socket_root() -> Self {
+        // No full-path socket bind is shown here; a TMPDIR run decides whether this root can move.
+        Self(Some(
+            TempDir::new_in("/tmp").expect("short socket fixture root"),
+        ))
+    }
+
+    fn declared_root() -> Self {
+        Self(Some(tempfile::tempdir().expect("declared temporary root")))
+    }
+
+    fn path(&self) -> &Path {
+        self.0.as_ref().expect("fixture root").path()
+    }
+}
+
+impl Drop for ProtectedRoot {
+    fn drop(&mut self) {
+        if let Some(root) = self.0.take() {
+            let path = root.path().to_path_buf();
+            let template = path
+                .join("home/.var/loops/alpha/runner-templates/codex")
+                .join("a".repeat(64));
+            for directory in [template.join("bin"), template.join("libexec"), template] {
+                if fs::symlink_metadata(&directory).is_ok_and(|entry| entry.file_type().is_dir()) {
+                    drop(fs::set_permissions(
+                        &directory,
+                        fs::Permissions::from_mode(0o700),
+                    ));
+                }
+            }
+            if let Err(error) = root.close() {
+                drop(writeln!(
+                    std::io::stderr(),
+                    "cannot remove fixture home {}: {error}",
+                    path.display()
+                ));
+                assert!(std::thread::panicking(), "fixture home cleanup failed");
+            }
+        }
+    }
+}
 
 fn backend_settings(vendors: &[&str]) -> crate::settings::Settings {
     let mut settings = super::fixture_settings(std::path::Path::new("/fixture/entry"));
@@ -1361,7 +1410,7 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
 #[test]
 #[allow(clippy::too_many_lines)]
 fn public_preview_reads_dead_preparation_with_unreadable_driver() {
-    let fixture = TempDir::new_in("/tmp").expect("fixture");
+    let fixture = ProtectedRoot::short_socket_root();
     fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
         .expect("host ancestor mode");
     let home_dir = fixture.path().join("home");
@@ -2324,9 +2373,9 @@ fn proxy_refresh_preserves_live_helper_pins() {
         return;
     }
     let fixture = if std::env::var_os("SUPERLOOP_ROUND_PROOF").is_some() {
-        tempfile::tempdir().expect("supplied temporary root")
+        ProtectedRoot::declared_root()
     } else {
-        tempfile::TempDir::new_in("/tmp").expect("fixture")
+        ProtectedRoot::short_socket_root()
     };
     fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
         .expect("host ancestor mode");

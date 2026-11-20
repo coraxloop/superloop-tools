@@ -13,6 +13,7 @@ mod registry_fixture;
 
 use serde_json::{Value, json};
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -25,7 +26,8 @@ fn executable(path: &Path, source: &str) {
 }
 
 struct Fixture {
-    _root: TempDir,
+    root_guard: FixtureRoot,
+    binary_guard: FixtureRoot,
     home: PathBuf,
     binary: PathBuf,
     letter: PathBuf,
@@ -33,9 +35,59 @@ struct Fixture {
     reservation: PathBuf,
 }
 
+// The fixture installs mode-0550 template directories; close must report any residue.
+struct FixtureRoot(Option<TempDir>);
+
+impl FixtureRoot {
+    fn new() -> Self {
+        // Vendor socket binds 48 bytes below this root; a TMPDIR over 48 bytes exceeds sun_path.
+        Self(Some(
+            TempDir::new_in("/tmp").expect("short socket fixture root"),
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        self.0.as_ref().expect("fixture root").path()
+    }
+
+    fn declared_root() -> Self {
+        Self(Some(
+            tempfile::tempdir().expect("binary under declared TMPDIR"),
+        ))
+    }
+}
+
+impl Drop for FixtureRoot {
+    fn drop(&mut self) {
+        if let Some(root) = self.0.take() {
+            let path = root.path().to_path_buf();
+            let template = path
+                .join("home/.var/loops/alpha/runner-templates/codex")
+                .join("a".repeat(64));
+            for directory in [template.join("bin"), template.join("libexec"), template] {
+                if fs::symlink_metadata(&directory).is_ok_and(|entry| entry.file_type().is_dir()) {
+                    drop(fs::set_permissions(
+                        &directory,
+                        fs::Permissions::from_mode(0o700),
+                    ));
+                }
+            }
+            if let Err(error) = root.close() {
+                drop(writeln!(
+                    std::io::stderr(),
+                    "cannot remove fixture home {}: {error}",
+                    path.display()
+                ));
+                assert!(std::thread::panicking(), "fixture home cleanup failed");
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn fixture() -> Fixture {
-    let fixture = TempDir::new_in("/tmp").expect("fixture");
+    let fixture = FixtureRoot::new();
+    let binary_root = FixtureRoot::declared_root();
     fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
         .expect("host ancestor mode");
     let home_dir = fixture.path().join("home");
@@ -59,7 +111,7 @@ fn fixture() -> Fixture {
     let entry = home.join("entry-fixture");
     let podman = home.join("container-fixture");
     let driver = home.join("driver-fixture");
-    let lane_bin = home.join("lane-fixture");
+    let lane_bin = binary_root.path().join("lane-fixture");
     let scratchpad = home.join("scratchpad");
     fs::create_dir(&scratchpad).expect("letter scratchpad");
     fs::set_permissions(&scratchpad, fs::Permissions::from_mode(0o700)).expect("scratchpad mode");
@@ -86,8 +138,25 @@ fn fixture() -> Fixture {
         &driver,
         "#!/bin/sh\nif [ \"$5\" = --runtime-contract ]; then printf 'boxed-runtime 1\\n'; fi\nexit 0\n",
     );
-    fs::copy(env!("CARGO_BIN_EXE_superloop-lane"), &lane_bin).expect("production binary");
-    fs::set_permissions(&lane_bin, fs::Permissions::from_mode(0o700)).expect("binary mode");
+    let source = Path::new(env!("CARGO_BIN_EXE_superloop-lane"));
+    let source_mode = fs::metadata(source)
+        .expect("production binary mode")
+        .permissions()
+        .mode();
+    let linked = source_mode & 0o022 == 0 && fs::hard_link(source, &lane_bin).is_ok();
+    if !linked {
+        let reflinked = Command::new("/usr/bin/cp")
+            .args(["--reflink=always", "--"])
+            .arg(source)
+            .arg(&lane_bin)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !reflinked {
+            fs::copy(source, &lane_bin).expect("production binary copy fallback");
+        }
+        fs::set_permissions(&lane_bin, fs::Permissions::from_mode(0o700)).expect("binary mode");
+    }
     executable(&home.join("proxy-fixture"), "#!/bin/sh\nexit 0\n");
     fs::create_dir_all(&runs).expect("runs root");
     for path in [
@@ -232,7 +301,8 @@ fn fixture() -> Fixture {
     fs::write(&mailbox, b"").expect("retained mailbox lock");
     fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o600)).expect("mailbox mode");
     Fixture {
-        _root: fixture,
+        root_guard: fixture,
+        binary_guard: binary_root,
         home: home_dir,
         binary: lane_bin,
         letter,
@@ -872,5 +942,42 @@ fn resumed_launch_validates_before_reconciliation() {
     assert_eq!(
         fs::read(&fixture.reservation).expect("after refusal"),
         before
+    );
+}
+
+/// The fixture leaves no home after its last production entry has finished.
+/// # Panics
+/// Panics only if fixture setup or cleanup fails.
+/// ´test:integration:failed-dispatch-fixture-root-is-removed´
+#[test]
+fn failed_dispatch_fixture_root_is_removed() {
+    let passing = fixture();
+    let root = passing.root_guard.path().to_path_buf();
+    let binary_root = passing.binary_guard.path().to_path_buf();
+    drop(passing);
+    assert!(!root.exists(), "fixture root remains: {}", root.display());
+    assert!(
+        !binary_root.exists(),
+        "binary root remains: {}",
+        binary_root.display()
+    );
+
+    let fixture = fixture();
+    let root = fixture.root_guard.path().to_path_buf();
+    let binary_root = fixture.binary_guard.path().to_path_buf();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _fixture = fixture;
+        panic!("synthetic fixture body failure");
+    }));
+    assert!(failed.is_err());
+    assert!(
+        !root.exists(),
+        "failed fixture root remains: {}",
+        root.display()
+    );
+    assert!(
+        !binary_root.exists(),
+        "failed binary root remains: {}",
+        binary_root.display()
     );
 }
