@@ -343,6 +343,98 @@ fn round_body(enclosing: &Path) {
     );
 }
 
+/// # Panics
+/// Panics if a mapped round bypasses the closed cutover gate or changes its prior worker file.
+/// ´test:unit:claude-fixture-cutover-refuses-at-round-entry´
+#[test]
+fn claude_fixture_cutover_refuses_at_round_entry() {
+    if enter(
+        "claude_fixture_cutover_refuses_at_round_entry",
+        |enclosing| {
+            transaction_body(enclosing, |_, owner, _, worker, record, admission, _| {
+                let home = claude_sign_in_dir(owner, "alpha");
+                let marker = home.join(".boxed-refresh-mode");
+                fs::write(&marker, b"refresh\n").expect("cutover request");
+                fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))
+                    .expect("marker mode");
+                assert_round_refusal_preserves_worker(
+                    owner,
+                    worker,
+                    record,
+                    admission,
+                    "credential-cutover-gate",
+                );
+            });
+        },
+    ) {
+        return;
+    }
+    let mut host = launch("claude_fixture_cutover_refuses_at_round_entry");
+    finish(&mut host, true);
+    host.cleanup();
+}
+
+/// # Panics
+/// Panics if due authority reaches a mapped worker or invokes the owner program.
+/// ´test:unit:claude-fixture-due-refuses-at-round-entry´
+#[test]
+fn claude_fixture_due_refuses_at_round_entry() {
+    if enter("claude_fixture_due_refuses_at_round_entry", |enclosing| {
+        transaction_body(enclosing, |_, owner, _, worker, record, admission, _| {
+            let home = claude_sign_in_dir(owner, "alpha");
+            let expiry = now_seconds().expect("clock") + 300;
+            let source = home.join(".credentials.json");
+            fs::write(&source, claude_document(expiry * 1000).to_string()).expect("due source");
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).expect("source mode");
+            assert_round_refusal_preserves_worker(
+                owner,
+                worker,
+                record,
+                admission,
+                "credential-read-due",
+            );
+        });
+    }) {
+        return;
+    }
+    let mut host = launch("claude_fixture_due_refuses_at_round_entry");
+    finish(&mut host, true);
+    host.cleanup();
+}
+
+fn assert_round_refusal_preserves_worker(
+    owner: &Path,
+    worker: &Path,
+    record: &mut Value,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+    expected: &str,
+) {
+    let home = claude_sign_in_dir(owner, "alpha");
+    fs::write(home.join(".fixture-refresh-sentinel-arm"), b"armed").expect("fixture program arm");
+    let path = worker.join(".claude/.credentials.json");
+    fs::write(&path, b"prior synthetic projection").expect("prior worker file");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("prior mode");
+    nix::unistd::chown(&path, Some(Uid::from_raw(3000)), Some(Gid::from_raw(3000)))
+        .expect("prior worker ownership");
+    let prior = fs::metadata(&path).expect("prior inode").ino();
+    let before = record.clone();
+    let error = crate::container_helper::publish_round_credential_admitted(
+        owner, "alpha", record, admission,
+    )
+    .expect_err("round must refuse");
+    assert_eq!(error.kind, expected, "{error:?}");
+    assert_eq!(*record, before, "reservation remains unchanged");
+    assert_eq!(
+        fs::read(&path).expect("prior bytes"),
+        b"prior synthetic projection"
+    );
+    assert_eq!(fs::metadata(&path).expect("prior metadata").ino(), prior);
+    assert!(
+        !home.join(".fixture-refresh-sentinel").exists(),
+        "owner program entered"
+    );
+}
+
 fn transaction_body(enclosing: &Path, action: TransactionAction) {
     use sha2::{Digest as _, Sha256};
     use std::fmt::Write as _;
@@ -374,7 +466,9 @@ fn transaction_body(enclosing: &Path, action: TransactionAction) {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_secs();
-    let document = claude_document((now + 590) * 1000);
+    // The mapped transaction exercises publication and custody, not refresh.
+    // Keep its source outside the default reader's 600-second due margin.
+    let document = claude_document((now + 900) * 1000);
     fixture_claude(&owner, &document);
     let install = owner.join(".config/loops/alpha/install-generation.json");
     fs::write(
@@ -487,6 +581,14 @@ fn round_contract(
     crate::container_helper::publish_round_credential_admitted(owner, "alpha", record, admission)
         .expect("admitted round bound program pin");
     assert!(record["rounds"][0]["credential_publication"].is_object());
+    assert_eq!(
+        record["rounds"][0]["credential_publication"]
+            .as_object()
+            .expect("round receipt")
+            .len(),
+        2,
+        "launch report accepts only the two receipt keys"
+    );
     let path = worker.join(".claude/.credentials.json");
     let metadata = fs::metadata(&path).expect("published worker");
     assert_ne!(metadata.ino(), prior.ino(), "publication replaces the leaf");

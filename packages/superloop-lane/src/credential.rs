@@ -1361,6 +1361,40 @@ pub(crate) fn claude_sign_in_dir(owner_home: &Path, loop_name: &str) -> PathBuf 
         .join("claude")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaudeMode {
+    Read,
+    Refresh,
+}
+
+// The owner holds this 0600 file in the unmounted Claude home. An absent file
+// selects read-only publication. A requested cutover cannot activate until the
+// carrier gate covers other UIDs, unreadable environments and host-client starts.
+fn claude_mode(home: &Path) -> Result<ClaudeMode, LaneError> {
+    let path = home.join(".boxed-refresh-mode");
+    let anchor = home
+        .parent()
+        .ok_or_else(|| failure("credential-mode", "Claude home has no parent"))?;
+    let bytes = crate::pinned::read_private_optional(anchor, &path, owner_identity().0, 0o600, 16)
+        .map_err(|_| failure("credential-mode", "Claude mode custody is unsafe"))?;
+    match bytes.as_deref() {
+        None => Ok(ClaudeMode::Read),
+        Some(b"refresh\n") => Ok(ClaudeMode::Refresh),
+        Some(_) => Err(failure("credential-mode", "Claude mode is invalid")),
+    }
+}
+
+fn admitted_claude_mode(home: &Path) -> Result<ClaudeMode, LaneError> {
+    let mode = claude_mode(home)?;
+    if mode == ClaudeMode::Refresh {
+        return Err(failure(
+            "credential-cutover-gate",
+            "Claude refresh cannot start until all home carriers can be excluded",
+        ));
+    }
+    Ok(mode)
+}
+
 fn read_claude_source(home: &Path) -> Result<ClaudeSource, LaneError> {
     let (document, stamp) = read_owner_document(home, ".credentials.json")?;
     let mut source = ClaudeSource::parse(&document)?;
@@ -1402,6 +1436,11 @@ impl<F: Fn() -> Result<(), LaneError>> OwnerProvider for ClaudeOwnerProvider<'_,
 
 fn claude_refresh_program(home: &Path, expected_program: &str) -> Result<(), LaneError> {
     use std::os::unix::process::CommandExt as _;
+    #[cfg(test)]
+    if home.join(".fixture-refresh-sentinel-arm").exists() {
+        fs::write(home.join(".fixture-refresh-sentinel"), b"entered")
+            .map_err(|_| failure("credential-refresh", "fixture sentinel write failed"))?;
+    }
     let program = Path::new("/usr/bin/claude");
     // Never fall back to an ambient program from the namespace/helper thread.
     crate::container_entry::check(program).ok_or_else(|| {
@@ -1504,18 +1543,20 @@ fn prepare_claude_run(
     worker_uid: u32,
     now: u64,
 ) -> Result<(), LaneError> {
-    let expected_program = claude_program_pin(owner_home, loop_name)?;
     let home = claude_sign_in_dir(owner_home, loop_name);
-    prepare_claude_run_at(
+    let expected_program = claude_program_pin(owner_home, loop_name)?;
+    let mode = admitted_claude_mode(&home)?;
+    with_claude_authority_mode(
+        mode,
         &home,
-        run_home,
-        worker_uid,
         now,
         || claude_refresh_program(&home, &expected_program),
         now_milliseconds,
+        |source| write_claude_run(run_home, worker_uid, source),
     )
 }
 
+#[cfg(test)]
 fn prepare_claude_run_at(
     home: &Path,
     run_home: &Path,
@@ -1529,6 +1570,7 @@ fn prepare_claude_run_at(
     })
 }
 
+#[cfg(test)]
 fn with_claude_authority<T>(
     home: &Path,
     now: u64,
@@ -1536,26 +1578,106 @@ fn with_claude_authority<T>(
     publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
     action: impl FnOnce(&ClaudeSource) -> Result<T, LaneError>,
 ) -> Result<T, LaneError> {
+    with_claude_authority_mode(
+        ClaudeMode::Refresh,
+        home,
+        now,
+        refresh_program,
+        publication_time_ms,
+        action,
+    )
+}
+
+fn with_claude_authority_mode<T>(
+    mode: ClaudeMode,
+    home: &Path,
+    now: u64,
+    refresh_program: impl Fn() -> Result<(), LaneError>,
+    publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
+    action: impl FnOnce(&ClaudeSource) -> Result<T, LaneError>,
+) -> Result<T, LaneError> {
+    with_claude_authority_mode_observed(
+        mode,
+        home,
+        now,
+        refresh_program,
+        publication_time_ms,
+        |_| {},
+        action,
+    )
+}
+
+fn with_claude_authority_mode_observed<T>(
+    mode: ClaudeMode,
+    home: &Path,
+    now: u64,
+    refresh_program: impl Fn() -> Result<(), LaneError>,
+    publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
+    observed: impl FnOnce(&ClaudeSource),
+    action: impl FnOnce(&ClaudeSource) -> Result<T, LaneError>,
+) -> Result<T, LaneError> {
     let owner = owner_identity().0;
     let directory = open_dir(home, owner, owner, 0o700)?;
     let _guard = lock_with(&directory, FlockArg::LockExclusive)?;
-    let source = refresh_provider(
-        &ClaudeOwnerProvider {
-            home,
-            refresh_program,
-        },
-        now,
-        || {},
-    )?;
-    if source.expires_ms <= publication_time_ms()? {
+    let source = match mode {
+        ClaudeMode::Read => {
+            let source = read_claude_source(home)?;
+            observed(&source);
+            if source.expires_ms <= now.saturating_mul(1000) {
+                return Err(failure(
+                    "credential-read-expired",
+                    "Claude access authority expired",
+                ));
+            }
+            if source.needs_refresh(now) {
+                return Err(failure(
+                    "credential-read-due",
+                    "Claude access authority is due",
+                ));
+            }
+            source
+        }
+        ClaudeMode::Refresh => refresh_provider(
+            &ClaudeOwnerProvider {
+                home,
+                refresh_program,
+            },
+            now,
+            || {},
+        )?,
+    };
+    let publication_time = publication_time_ms()?;
+    if mode == ClaudeMode::Read
+        && source.expires_ms
+            <= publication_time.saturating_add(REFRESH_AHEAD.as_secs().saturating_mul(1000))
+    {
         return Err(failure(
-            "credential-refresh",
-            "Claude owner program left expired access authority",
+            if source.expires_ms <= publication_time {
+                "credential-read-expired"
+            } else {
+                "credential-read-due"
+            },
+            "Claude access authority became due before publication",
+        ));
+    }
+    if source.expires_ms <= publication_time {
+        return Err(failure(
+            if mode == ClaudeMode::Read {
+                "credential-read-expired"
+            } else {
+                "credential-refresh"
+            },
+            if mode == ClaudeMode::Read {
+                "Claude access authority expired before publication"
+            } else {
+                "Claude owner program left expired access authority"
+            },
         ));
     }
     action(&source)
 }
 
+#[cfg(test)]
 fn publish_claude_round_at(
     home: &Path,
     run_home: &Path,
@@ -1565,12 +1687,21 @@ fn publish_claude_round_at(
     publication_time_ms: impl FnOnce() -> Result<u64, LaneError>,
 ) -> Result<Value, LaneError> {
     with_claude_authority(home, now, refresh_program, publication_time_ms, |source| {
-        let stamp = source
-            .stamp
-            .ok_or_else(|| failure("credential-publish", "Claude source inode is absent"))?;
-        write_claude_run(run_home, worker_uid, source)?;
-        publication_receipt(stamp)
+        claude_round_receipt(home, run_home, worker_uid, source)
     })
+}
+
+fn claude_round_receipt(
+    _home: &Path,
+    run_home: &Path,
+    worker_uid: u32,
+    source: &ClaudeSource,
+) -> Result<Value, LaneError> {
+    let stamp = source
+        .stamp
+        .ok_or_else(|| failure("credential-publish", "Claude source inode is absent"))?;
+    write_claude_run(run_home, worker_uid, source)?;
+    publication_receipt(stamp)
 }
 
 fn write_claude_run(home: &Path, worker_uid: u32, source: &ClaudeSource) -> Result<(), LaneError> {
@@ -1827,15 +1958,16 @@ pub(crate) fn publish_round_admitted(
     admission.check(backend)?;
     let binding = admission.round_binding(owner_home, loop_name, run_home, worker_uid)?;
     if backend == BoxBackend::Claude {
-        let expected_program = claude_program_pin_bound(owner_home, loop_name, binding)?;
         let home = claude_sign_in_dir(owner_home, loop_name);
-        return publish_claude_round_at(
+        let expected_program = claude_program_pin_bound(owner_home, loop_name, binding)?;
+        let mode = admitted_claude_mode(&home)?;
+        return with_claude_authority_mode(
+            mode,
             &home,
-            run_home,
-            worker_uid,
             now_seconds()?,
             || claude_refresh_program(&home, &expected_program),
             now_milliseconds,
+            |source| claude_round_receipt(&home, run_home, worker_uid, source),
         );
     }
     let _guard = lock(owner_home, loop_name)?;
@@ -1866,9 +1998,11 @@ fn publication_receipt(stamp: FileStamp) -> Result<Value, LaneError> {
 pub fn preflight(owner_home: &Path, loop_name: &str, backend: BoxBackend) -> Result<(), LaneError> {
     backend.require_runtime()?;
     if backend == BoxBackend::Claude {
-        let expected_program = claude_program_pin(owner_home, loop_name)?;
         let home = claude_sign_in_dir(owner_home, loop_name);
-        return with_claude_authority(
+        let expected_program = claude_program_pin(owner_home, loop_name)?;
+        let mode = admitted_claude_mode(&home)?;
+        return with_claude_authority_mode(
+            mode,
             &home,
             now_seconds()?,
             || claude_refresh_program(&home, &expected_program),
@@ -2000,8 +2134,9 @@ pub(crate) fn refresh_live_admitted(
     admission.check(backend)?;
     let binding = admission.periodic_binding(owner_home, loop_name, runs_root)?;
     if backend == BoxBackend::Claude {
-        let expected_program = claude_program_pin_bound(owner_home, loop_name, binding)?;
         let home = claude_sign_in_dir(owner_home, loop_name);
+        let expected_program = claude_program_pin_bound(owner_home, loop_name, binding)?;
+        let mode = admitted_claude_mode(&home)?;
         return refresh_claude_live_admitted_at(
             &home,
             loop_name,
@@ -2009,6 +2144,7 @@ pub(crate) fn refresh_live_admitted(
             now_seconds()?,
             published,
             (
+                mode,
                 || claude_refresh_program(&home, &expected_program),
                 now_milliseconds,
                 admission,
@@ -2082,6 +2218,7 @@ fn refresh_claude_live_at(
         now,
         published,
         (
+            ClaudeMode::Refresh,
             refresh_program,
             publication_time_ms,
             &crate::runtime_admission::RuntimeAdmission::Gate,
@@ -2096,29 +2233,57 @@ fn refresh_claude_live_admitted_at(
     now: u64,
     published: &mut BTreeMap<PathBuf, Vec<u8>>,
     provider: (
+        ClaudeMode,
         impl Fn() -> Result<(), LaneError>,
         impl FnOnce() -> Result<u64, LaneError>,
         &crate::runtime_admission::RuntimeAdmission,
     ),
 ) -> Result<RefreshReport, LaneError> {
-    let (refresh_program, publication_time_ms, admission) = provider;
+    let (mode, refresh_program, publication_time_ms, admission) = provider;
     #[cfg(not(test))]
     let _ = admission;
-    with_claude_authority(home, now, refresh_program, publication_time_ms, |source| {
-        publish_live_snapshot(
-            runs_root,
-            loop_name,
-            BoxBackend::Claude,
-            published,
-            &source.worker_file(),
-            source.expires_ms / 1000,
-            |home, uid| {
-                #[cfg(test)]
-                admission.scope_recipient(home)?;
-                write_claude_run(home, uid, source)
-            },
-        )
-    })
+    let mut measured_expiry = None;
+    let result = with_claude_authority_mode_observed(
+        mode,
+        home,
+        now,
+        refresh_program,
+        publication_time_ms,
+        |source| measured_expiry = Some(source.expires_ms / 1000),
+        |source| {
+            publish_live_snapshot(
+                runs_root,
+                loop_name,
+                BoxBackend::Claude,
+                published,
+                &source.worker_file(),
+                source.expires_ms / 1000,
+                |home, uid| {
+                    #[cfg(test)]
+                    admission.scope_recipient(home)?;
+                    write_claude_run(home, uid, source)
+                },
+            )
+        },
+    );
+    match (result, measured_expiry) {
+        (Err(error), Some(expires_unix))
+            if matches!(
+                error.kind,
+                "credential-read-due" | "credential-read-expired"
+            ) =>
+        {
+            Ok(RefreshReport {
+                changed: false,
+                refusals: Vec::new(),
+                refusals_omitted: 0,
+                expires_unix,
+                refresh_due_unix: expires_unix.saturating_sub(REFRESH_AHEAD.as_secs()),
+                authority_failure: Some(error),
+            })
+        }
+        (result, _) => result,
+    }
 }
 
 fn publish_live_snapshot(
@@ -3810,6 +3975,134 @@ mod tests {
         fs::write(&path, document.to_string()).expect("synthetic Claude source");
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private source");
         dir
+    }
+
+    /// # Panics
+    /// Panics only if read mode starts the synthetic program or fails to publish current access authority.
+    /// ´test:unit:claude-reader-mode-never-spawns-the-program´
+    #[test]
+    fn claude_reader_mode_never_spawns_the_program() {
+        let fixture = claude_fixture_root();
+        let home = fixture_claude(fixture.path(), &claude_document(1_800_000_000_000));
+        let run = fixture.path().join("reader-run");
+        fs::create_dir_all(run.join(".claude")).expect("worker state");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).expect("run mode");
+        fs::set_permissions(run.join(".claude"), fs::Permissions::from_mode(0o700))
+            .expect("state mode");
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            admitted_claude_mode(&home).expect("default read mode"),
+            ClaudeMode::Read
+        );
+        with_claude_authority_mode(
+            ClaudeMode::Read,
+            &home,
+            1_700_000_000,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+            || Ok(1_700_000_000_000),
+            |source| write_claude_run(&run, owner_identity().0, source),
+        )
+        .expect("read-only publication");
+        assert_eq!(calls.get(), 0);
+        assert!(run.join(".claude/.credentials.json").is_file());
+    }
+
+    /// # Panics
+    /// Panics only if due or expired access authority reaches publication or starts a refresher.
+    /// ´test:unit:claude-reader-refuses-due-and-expired-authority´
+    #[test]
+    fn claude_reader_refuses_due_and_expired_authority() {
+        let fixture = claude_fixture_root();
+        let home = fixture_claude(fixture.path(), &claude_document(1_800_000_000_000));
+        for (now, expected) in [
+            (1_799_999_500, "credential-read-due"),
+            (1_800_000_000, "credential-read-expired"),
+        ] {
+            let error = with_claude_authority_mode(
+                ClaudeMode::Read,
+                &home,
+                now,
+                || panic!("reader must not start vendor program"),
+                || Ok(now * 1000),
+                |_| -> Result<(), LaneError> { panic!("reader must not publish due authority") },
+            )
+            .expect_err("read refusal");
+            assert_eq!(error.kind, expected);
+        }
+        let crossing = with_claude_authority_mode(
+            ClaudeMode::Read,
+            &home,
+            1_799_999_399,
+            || panic!("reader must not start vendor program"),
+            || Ok(1_799_999_400_000),
+            |_| -> Result<(), LaneError> { panic!("due authority must not publish") },
+        )
+        .expect_err("publication crossed the due boundary");
+        assert_eq!(crossing.kind, "credential-read-due");
+    }
+
+    /// # Panics
+    /// Panics if a refused Claude read loses expiry already measured from the source.
+    /// ´test:unit:claude-read-refusal-evidence-keeps-measured-expiry´
+    #[test]
+    fn claude_read_refusal_evidence_keeps_measured_expiry() {
+        let fixture = claude_fixture_root();
+        let expires = 1_800_000_000_u64;
+        let home = fixture_claude(fixture.path(), &claude_document(expires * 1000));
+        let mut published = BTreeMap::new();
+        for (now, kind) in [
+            (expires - 300, "credential-read-due"),
+            (expires, "credential-read-expired"),
+        ] {
+            let result = refresh_claude_live_admitted_at(
+                &home,
+                "alpha",
+                &fixture.path().join("runs"),
+                now,
+                &mut published,
+                (
+                    ClaudeMode::Read,
+                    || panic!("reader must not start the program"),
+                    || Ok(now * 1000),
+                    &Gate,
+                ),
+            );
+            let report = result.as_ref().expect("measured refusal report");
+            assert_eq!(
+                report.authority_failure.as_ref().expect("refusal").kind,
+                kind
+            );
+            let evidence =
+                evidence_for_check(&result, true, BoxBackend::Claude).expect("periodic evidence");
+            assert_eq!(evidence["expires_unix"], expires);
+            assert_eq!(evidence["refresh_due_unix"], expires - 600);
+            assert_eq!(evidence["kind"], kind);
+        }
+    }
+
+    /// # Panics
+    /// Panics only if an owner cutover request can reach refresh before the carrier gate exists.
+    /// ´test:unit:claude-cutover-mark-refuses-before-carrier-gate´
+    #[test]
+    fn claude_cutover_mark_refuses_before_carrier_gate() {
+        let fixture = claude_fixture_root();
+        let home = fixture_claude(fixture.path(), &claude_document(1_800_000_000_000));
+        let path = home.join(".boxed-refresh-mode");
+        fs::write(&path, b"refresh\n").expect("owner cutover mark");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("marker mode");
+        assert_eq!(
+            claude_mode(&home).expect("parsed mark"),
+            ClaudeMode::Refresh
+        );
+        assert_eq!(
+            admitted_claude_mode(&home)
+                .expect_err("carrier gate absent")
+                .kind,
+            "credential-cutover-gate"
+        );
     }
 
     /// # Panics

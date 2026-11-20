@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Default the boxed Claude helper's owner credential path to access-only reads and publication; due or expired authority refuses without invoking the vendor program. An owner-held cutover request remains refused until carrier exclusion can be proved (``inv:superlooplane:one-claude-source-refresher``). Compatibility: the production Claude gate remains closed, Codex boxes are unchanged, and Claude owner checks can now refuse as `credential-read-due`, `credential-read-expired`, `credential-mode` or `credential-cutover-gate`.
+
 ## [0.8.2] - 2026-11-20
 
 ### Fixed
