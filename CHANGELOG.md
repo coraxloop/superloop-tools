@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Keep learned shape history in the door's fast lane and operator records, but send no earlier request text, identifiers, verdict reasons or adjudication reasons to the bounded agent on a miss (``inv:superlooplane:door-agent-input-has-no-learned-history``). Compatibility: the agent for both `superloop-lane` and `superloop command judge` now sees only the current request, capability class, fixed instruction and reviewed rubric; stored records and the learned index need no rewrite or rebuild. Install `superloop-lane` and `superloop` together and restart each door.
+- Keep learned shape history in the door's fast lane and operator records, but send no earlier request text, identifiers, verdict reasons or adjudication reasons to the bounded agent on a miss (``inv:superlooplane:door-agent-input-has-no-learned-history``). Compatibility: the agent for both `superloop-lane` and `superloop command judge` now sees only the current request, capability class, fixed instruction and reviewed rubric, so its verdict on a miss can differ where an earlier verdict leaned on earlier reasons; a lesson a door loop means to outlast a run belongs in its reviewed rubric or in the agreeing labels the fast lane decides by. Stored records and the learned index need no rewrite or rebuild. Install `superloop-lane` and `superloop` together and restart each door.
 
 - Make the door wait-error fixture assert the durable disconnect, skipped final write and incomplete attempt after closing its client at the read boundary, independent of which stop check observes the close. Product behavior and record formats are unchanged (``test:unit:door-wait-errors-send-final-and-record-incomplete``).
 
